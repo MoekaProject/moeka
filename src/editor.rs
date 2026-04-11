@@ -1734,6 +1734,94 @@ impl EditorView {
         self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
     }
 
+    // ── Visual wrap-line cursor movement helpers ─────────────────────
+
+    fn disp_to_buffer_offset(&self, info: &LineDisplayInfo, line: usize, disp_idx: usize) -> usize {
+        let mut dc = disp_idx.min(info.display_text.len());
+        while dc > 0 && !info.display_text.is_char_boundary(dc) {
+            dc -= 1;
+        }
+        let buffer_col = if dc < info.display_to_buffer.len() {
+            info.display_to_buffer[dc]
+        } else if let Some(&last) = info.display_to_buffer.last() {
+            last + 1
+        } else {
+            0
+        };
+        self.buffer.line_start(line) + buffer_col
+    }
+
+    fn offset_for_visual_up(&self, current_offset: usize) -> Option<usize> {
+        let (line, col) = self.buffer.offset_to_line_col(current_offset);
+        let info = self.line_display_info.get(line)?.as_ref()?;
+        let disp_col = buffer_to_display_offset(&info.buffer_to_display, col);
+        let pos = info
+            .wrapped_line
+            .position_for_index(disp_col, px(info.line_height))
+            .unwrap_or_default();
+        let cur_visual = (f32::from(pos.y) / info.line_height) as usize;
+        let cur_x = pos.x;
+
+        if cur_visual > 0 {
+            let target_y = px((cur_visual as f32 - 0.5) * info.line_height);
+            let new_disp = match info
+                .wrapped_line
+                .closest_index_for_position(point(cur_x, target_y), px(info.line_height))
+            {
+                Ok(idx) | Err(idx) => idx,
+            };
+            Some(self.disp_to_buffer_offset(info, line, new_disp))
+        } else if line > 0 {
+            let prev_info = self.line_display_info.get(line - 1)?.as_ref()?;
+            let last_visual = prev_info.visual_line_count.saturating_sub(1);
+            let target_y = px((last_visual as f32 + 0.5) * prev_info.line_height);
+            let new_disp = match prev_info
+                .wrapped_line
+                .closest_index_for_position(point(cur_x, target_y), px(prev_info.line_height))
+            {
+                Ok(idx) | Err(idx) => idx,
+            };
+            Some(self.disp_to_buffer_offset(prev_info, line - 1, new_disp))
+        } else {
+            Some(0)
+        }
+    }
+
+    fn offset_for_visual_down(&self, current_offset: usize) -> Option<usize> {
+        let (line, col) = self.buffer.offset_to_line_col(current_offset);
+        let info = self.line_display_info.get(line)?.as_ref()?;
+        let disp_col = buffer_to_display_offset(&info.buffer_to_display, col);
+        let pos = info
+            .wrapped_line
+            .position_for_index(disp_col, px(info.line_height))
+            .unwrap_or_default();
+        let cur_visual = (f32::from(pos.y) / info.line_height) as usize;
+        let cur_x = pos.x;
+
+        if cur_visual + 1 < info.visual_line_count {
+            let target_y = px((cur_visual as f32 + 1.5) * info.line_height);
+            let new_disp = match info
+                .wrapped_line
+                .closest_index_for_position(point(cur_x, target_y), px(info.line_height))
+            {
+                Ok(idx) | Err(idx) => idx,
+            };
+            Some(self.disp_to_buffer_offset(info, line, new_disp))
+        } else if line + 1 < self.buffer.line_count() {
+            let next_info = self.line_display_info.get(line + 1)?.as_ref()?;
+            let target_y = px(0.5 * next_info.line_height);
+            let new_disp = match next_info
+                .wrapped_line
+                .closest_index_for_position(point(cur_x, target_y), px(next_info.line_height))
+            {
+                Ok(idx) | Err(idx) => idx,
+            };
+            Some(self.disp_to_buffer_offset(next_info, line + 1, new_disp))
+        } else {
+            Some(self.buffer.len())
+        }
+    }
+
     // ── Action handlers ─────────────────────────────────────────────
 
     fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -1795,13 +1883,21 @@ impl EditorView {
     }
 
     fn on_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
-        self.cursor.move_up(&self.buffer);
+        if let Some(offset) = self.offset_for_visual_up(self.cursor.offset) {
+            self.cursor.move_to(offset, &self.buffer);
+        } else {
+            self.cursor.move_up(&self.buffer);
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
     fn on_down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
-        self.cursor.move_down(&self.buffer);
+        if let Some(offset) = self.offset_for_visual_down(self.cursor.offset) {
+            self.cursor.move_to(offset, &self.buffer);
+        } else {
+            self.cursor.move_down(&self.buffer);
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -1819,13 +1915,21 @@ impl EditorView {
     }
 
     fn on_select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.cursor.select_up(&self.buffer);
+        if let Some(offset) = self.offset_for_visual_up(self.cursor.offset) {
+            self.cursor.select_to(offset, &self.buffer);
+        } else {
+            self.cursor.select_up(&self.buffer);
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
     fn on_select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.cursor.select_down(&self.buffer);
+        if let Some(offset) = self.offset_for_visual_down(self.cursor.offset) {
+            self.cursor.select_to(offset, &self.buffer);
+        } else {
+            self.cursor.select_down(&self.buffer);
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -1865,10 +1969,134 @@ impl EditorView {
             return;
         }
         self.checkpoint();
+
+        let cursor_line = self.cursor_line();
+        let line_start = self.buffer.line_start(cursor_line);
+        let line_end = self.buffer.line_end(cursor_line);
+        let line_content = self.buffer.line_content(cursor_line).to_string();
+        let block_type = self
+            .decorations
+            .get(cursor_line)
+            .map(|d| d.block_type.clone())
+            .unwrap_or(BlockType::Normal);
+
+        let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+        let trimmed = &line_content[leading_ws..];
+        let ws_str = " ".repeat(leading_ws);
+
+        match block_type {
+            BlockType::UnorderedList => {
+                let marker_len = if trimmed.starts_with("- ")
+                    || trimmed.starts_with("* ")
+                    || trimmed.starts_with("+ ")
+                {
+                    2
+                } else {
+                    0
+                };
+                if marker_len > 0 && self.cursor.offset >= line_start + leading_ws + marker_len {
+                    let text_after_marker = &line_content[leading_ws + marker_len..];
+                    if text_after_marker.trim().is_empty() {
+                        // Empty list item — remove prefix, exit list
+                        self.buffer.replace(line_start..line_end, "");
+                        self.cursor.move_to(line_start, &self.buffer);
+                        self.cursor.insert(&mut self.buffer, "\n");
+                    } else {
+                        let marker = &trimmed[..marker_len];
+                        let continuation = format!("\n{}{}", ws_str, marker);
+                        self.cursor.insert(&mut self.buffer, &continuation);
+                    }
+                    self.reparse();
+                    self.scroll_to_cursor();
+                    self.pause_blinking(cx);
+                    return;
+                }
+            }
+            BlockType::TaskList(_) => {
+                let prefix_len = task_prefix_len(trimmed);
+                if prefix_len > 0 && self.cursor.offset >= line_start + leading_ws + prefix_len {
+                    let text_after_marker = &line_content[leading_ws + prefix_len..];
+                    if text_after_marker.trim().is_empty() {
+                        self.buffer.replace(line_start..line_end, "");
+                        self.cursor.move_to(line_start, &self.buffer);
+                        self.cursor.insert(&mut self.buffer, "\n");
+                    } else {
+                        let bullet = if trimmed.starts_with("- ") {
+                            "- "
+                        } else if trimmed.starts_with("* ") {
+                            "* "
+                        } else {
+                            "+ "
+                        };
+                        let continuation = format!("\n{}{}[ ] ", ws_str, bullet);
+                        self.cursor.insert(&mut self.buffer, &continuation);
+                    }
+                    self.reparse();
+                    self.scroll_to_cursor();
+                    self.pause_blinking(cx);
+                    return;
+                }
+            }
+            BlockType::OrderedList => {
+                let prefix_len = markdown::ordered_list_prefix_len(trimmed);
+                if prefix_len > 0 && self.cursor.offset >= line_start + leading_ws + prefix_len {
+                    let number: u32 = trimmed[..prefix_len.saturating_sub(2)].parse().unwrap_or(1);
+                    let text_after_marker = &line_content[leading_ws + prefix_len..];
+                    if text_after_marker.trim().is_empty() {
+                        self.buffer.replace(line_start..line_end, "");
+                        self.cursor.move_to(line_start, &self.buffer);
+                        self.cursor.insert(&mut self.buffer, "\n");
+                    } else {
+                        let continuation = format!("\n{}{}. ", ws_str, number + 1);
+                        self.cursor.insert(&mut self.buffer, &continuation);
+                        self.renumber_ordered_list_after(cursor_line + 2, number + 2, leading_ws);
+                    }
+                    self.reparse();
+                    self.scroll_to_cursor();
+                    self.pause_blinking(cx);
+                    return;
+                }
+            }
+            _ => {}
+        }
+
         self.cursor.insert(&mut self.buffer, "\n");
         self.reparse();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
+    }
+
+    fn renumber_ordered_list_after(&mut self, start_line: usize, next_number: u32, indent: usize) {
+        let mut items: Vec<(usize, usize, u32)> = Vec::new(); // (num_start, num_end, new_number)
+        let mut number = next_number;
+        for line in start_line.. {
+            if line >= self.buffer.line_count() {
+                break;
+            }
+            let lc = self.buffer.line_content(line).to_string();
+            let lws = lc.len() - lc.trim_start_matches([' ', '\t']).len();
+            if lws != indent {
+                break;
+            }
+            let trimmed = &lc[lws..];
+            let plen = markdown::ordered_list_prefix_len(trimmed);
+            if plen < 2 {
+                break;
+            }
+            let current_str = &trimmed[..plen - 2];
+            if current_str.parse::<u32>().is_err() {
+                break;
+            }
+            let num_start = self.buffer.line_start(line) + lws;
+            let num_end = num_start + current_str.len();
+            items.push((num_start, num_end, number));
+            number += 1;
+        }
+        // Renumber bottom-to-top to preserve offsets
+        for (num_start, num_end, new_num) in items.into_iter().rev() {
+            self.buffer
+                .replace(num_start..num_end, &new_num.to_string());
+        }
     }
 
     fn on_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
@@ -2104,7 +2332,7 @@ impl EditorView {
     // ── Mouse handlers ──────────────────────────────────────────────
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // Check image preview clicks — select full image syntax
+        // Check image preview clicks — select full image syntax `![alt](url)`
         if let Some(line_idx) = self
             .image_click_areas
             .iter()
@@ -2118,8 +2346,18 @@ impl EditorView {
                     .find(|s| s.kind == crate::markdown::InlineKind::Image)
                 {
                     let line_start = self.buffer.line_start(line_idx);
-                    self.cursor.anchor = line_start + span.range.start;
-                    self.cursor.offset = line_start + span.range.end;
+                    // span.range covers only the alt text; the full syntax `![alt](url)`
+                    // starts 2 bytes before (the `![` prefix) and ends at the closing `)`.
+                    let full_start = span.range.start.saturating_sub(2);
+                    let full_end = dec
+                        .syntax_ranges
+                        .iter()
+                        .filter(|sr| sr.range.start >= span.range.end)
+                        .map(|sr| sr.range.end)
+                        .max()
+                        .unwrap_or(span.range.end);
+                    self.cursor.anchor = line_start + full_start;
+                    self.cursor.offset = line_start + full_end;
                     cx.notify();
                     return;
                 }
@@ -2402,8 +2640,18 @@ impl EntityInputHandler for EditorView {
         let new_offset = new_selected_range_utf16
             .as_ref()
             .map(|r| {
-                let r = self.range_from_utf16(r);
-                mark_start + r.end
+                // new_selected_range_utf16 is an offset within the newly inserted text.
+                // Convert from UTF-16 units within new_text to UTF-8 byte offset.
+                let mut utf8_pos = 0usize;
+                let mut utf16_count = 0usize;
+                for ch in new_text.chars() {
+                    if utf16_count >= r.end {
+                        break;
+                    }
+                    utf16_count += ch.len_utf16();
+                    utf8_pos += ch.len_utf8();
+                }
+                mark_start + utf8_pos.min(new_text.len())
             })
             .unwrap_or(mark_end);
         self.cursor.move_to(new_offset, &self.buffer);
@@ -2421,7 +2669,8 @@ impl EntityInputHandler for EditorView {
     ) -> Option<Bounds<Pixels>> {
         let range = self.range_from_utf16(&range_utf16);
         let (line, col) = self.buffer.offset_to_line_col(range.start);
-        let line_top_y = self.line_y_offset(line) - self.scroll_offset;
+        let origin_y: f32 = self.content_origin.y.into();
+        let line_top_y = origin_y + self.line_y_offset(line) - self.scroll_offset;
 
         if let Some(Some(info)) = self.line_display_info.get(line) {
             let disp_col = buffer_to_display_offset(&info.buffer_to_display, col);
@@ -2431,6 +2680,7 @@ impl EntityInputHandler for EditorView {
                 .unwrap_or_default();
             let indent_adjust = indent_for_y(info.indent_px, pos.y, info.line_height);
             let x = info.content_x + indent_adjust + f32::from(pos.x);
+            // Return the rect of the character at the cursor; macOS positions IME below it
             let y = line_top_y + f32::from(pos.y);
             Some(Bounds::new(
                 point(px(x), px(y)),
@@ -3221,13 +3471,28 @@ impl Element for EditorElement {
             if prefix_collapsed {
                 if let BlockType::TaskList(checked) = block_type {
                     let cb_size = font_size * TODO_CHECKBOX_SIZE_FACTOR;
-                    // Align checkbox with editor content left, indented by leading whitespace
-                    let leading_ws_chars = display_text
+                    let buf_leading_ws = line_content
                         .chars()
                         .take_while(|c| *c == ' ' || *c == '\t')
                         .count();
-                    let cb_x =
-                        editor_left + PADDING_LEFT + leading_ws_chars as f32 * base_char_width;
+                    // Sub-level checkboxes align their LEFT edge with the parent's text content
+                    // start (= parent_buf_leading_ws * cw + placeholder_width).
+                    // Top-level checkboxes align flush with content_x.
+                    let cb_x = if buf_leading_ws > 0 {
+                        // Find the nearest ancestor with less indentation
+                        let parent_ws = (0..line_idx)
+                            .rev()
+                            .map(|l| {
+                                let lc = buffer.line_content(l);
+                                lc.len() - lc.trim_start_matches([' ', '\t']).len()
+                            })
+                            .find(|&lws| lws < buf_leading_ws)
+                            .unwrap_or(0);
+                        // Parent text starts after its indentation + 3-char placeholder
+                        content_x + (parent_ws as f32 + 3.0) * base_char_width
+                    } else {
+                        content_x
+                    };
                     let cb_y = line_top + (line_height - cb_size) / 2.0;
                     let cb_bounds =
                         Bounds::new(point(px(cb_x), px(cb_y)), size(px(cb_size), px(cb_size)));
@@ -3671,7 +3936,7 @@ fn build_display_text(
         BlockType::TaskList(_) => {
             let prefix_len = task_prefix_len(trimmed);
             (prefix_len > 0 && prefix_is_folded(leading_ws, prefix_len, cursor_col))
-                .then_some((leading_ws..leading_ws + prefix_len, "    ".to_string()))
+                .then_some((leading_ws..leading_ws + prefix_len, "   ".to_string()))
         }
         _ => None,
     };
@@ -4038,7 +4303,7 @@ fn compute_display_prefix_bytes(
         }
         BlockType::TaskList(_) => {
             if prefix_collapsed {
-                leading_ws + "    ".len()
+                leading_ws + "   ".len()
             } else {
                 trimmed.find("] ").map(|p| leading_ws + p + 2).unwrap_or(0)
             }
@@ -4160,10 +4425,17 @@ fn apply_code_block_highlighting(
         for (style, piece) in ranges {
             let end = (byte_pos + piece.len()).min(colors.len());
             let mut color = syntect_color_to_hsla(style.foreground);
-            // Ensure code text is bright enough against the dark code block background
+            // Plain text (low saturation): shift to warm yellow; other tokens: brighten
             if color.a > 0.05 {
-                color.l = (color.l * 1.15 + 0.05).min(1.0);
                 color.a = color.a.max(0.9);
+                if color.s < 0.15 {
+                    // Near-neutral color → warm golden/yellow (#e5c07b-ish)
+                    color.h = 0.11; // hue ≈ 40° (yellow-orange)
+                    color.s = 0.65;
+                    color.l = (color.l * 1.1 + 0.05).clamp(0.55, 0.82);
+                } else {
+                    color.l = (color.l * 1.15 + 0.05).min(1.0);
+                }
             }
             for idx in byte_pos..end {
                 colors[idx] = color;
@@ -4399,7 +4671,7 @@ fn build_text_runs_for_display(
                 }
             }
             BlockType::TaskList(_) => {
-                let placeholder_len = "    ".len();
+                let placeholder_len = "   ".len();
                 for i in 0..placeholder_len.min(disp_len) {
                     colors[i] = gpui::transparent_black();
                     use_line_font[i] = false;
