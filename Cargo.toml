@@ -1,0 +1,21 @@
+[workspace]
+
+[package]
+name = "markdown-editor"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "markdown-editor"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+gpui = "0.2.2"
+pulldown-cmark = { version = "0.13.0", default-features = false }
+unicode-segmentation = "1.10"
+image = "0.25"
+smallvec = "1.6"
+syntect = { version = "5.2", default-features = false, features = [
+  "default-fancy",
+] }
