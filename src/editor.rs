@@ -58,6 +58,14 @@ const FILETREE_FOLD_SVG_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/icons/filetree/fold.svg"
 );
+const FILETREE_EXPAND_SVG_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/icons/filetree/expand.svg"
+);
+const SIDEBAR_TOGGLE_SVG_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/sidebar-toggle.svg");
+const EDITOR_ALIGN_LEFT_SVG_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/editor-align-left.svg");
 const FOLDER_OPEN_SVG_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/icons/filetree/folder-open.svg"
@@ -113,6 +121,7 @@ struct ContextMenu {
 enum ContextMenuKind {
     Sidebar { path: PathBuf, is_dir: bool },
     Format,
+    Tab { tab_id: String },
 }
 
 #[derive(Clone, Copy)]
@@ -227,6 +236,9 @@ pub struct EditorView {
     /// Custom sidebar width set by drag-resize (in logical pixels, pre-scaled).
     sidebar_custom_width: Option<f32>,
     sidebar_resizing: bool,
+    sidebar_visible: bool,
+    editor_left_aligned: bool,
+    tab_dragging_id: Option<String>,
 }
 
 /// Display info for a single buffer line.
@@ -325,6 +337,9 @@ impl EditorView {
             hovering_fold_line: None,
             sidebar_custom_width: None,
             sidebar_resizing: false,
+            sidebar_visible: true,
+            editor_left_aligned: false,
+            tab_dragging_id: None,
         };
         this.start_blinking(cx);
 
@@ -375,6 +390,19 @@ impl EditorView {
     fn sidebar_width(&self) -> f32 {
         self.sidebar_custom_width
             .unwrap_or_else(|| self.scaled(SIDEBAR_WIDTH))
+    }
+
+    fn toggle_sidebar_visibility(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        if !self.sidebar_visible {
+            self.sidebar_resizing = false;
+        }
+        cx.notify();
+    }
+
+    fn toggle_editor_alignment(&mut self, cx: &mut Context<Self>) {
+        self.editor_left_aligned = !self.editor_left_aligned;
+        cx.notify();
     }
 
     fn tab_bar_height(&self) -> f32 {
@@ -523,6 +551,69 @@ impl EditorView {
         } else {
             cx.notify();
         }
+    }
+
+    fn close_other_tabs(&mut self, current_tab_id: &str, cx: &mut Context<Self>) {
+        self.tabs.retain(|tab| tab.id == current_tab_id);
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id == current_tab_id) {
+            self.activate_tab_by_index(index, cx);
+        }
+        cx.notify();
+    }
+
+    fn close_right_tabs(&mut self, from_tab_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == from_tab_id) else {
+            return;
+        };
+        self.tabs.truncate(index + 1);
+        if self.tabs.is_empty() {
+            self.create_scratch_tab(cx);
+            return;
+        }
+        if self
+            .active_tab_id
+            .as_deref()
+            .is_none_or(|id| !self.tabs.iter().any(|t| t.id == id))
+        {
+            self.activate_tab_by_index(index.min(self.tabs.len().saturating_sub(1)), cx);
+        }
+        cx.notify();
+    }
+
+    fn close_saved_tabs(&mut self, cx: &mut Context<Self>) {
+        let active_id = self.active_tab_id.clone();
+        self.tabs
+            .retain(|tab| tab.is_dirty || active_id.as_deref() == Some(tab.id.as_str()));
+        if self.tabs.is_empty() {
+            self.create_scratch_tab(cx);
+            return;
+        }
+        if self
+            .active_tab_id
+            .as_deref()
+            .is_none_or(|id| !self.tabs.iter().any(|t| t.id == id))
+        {
+            self.activate_tab_by_index(0, cx);
+        }
+        cx.notify();
+    }
+
+    fn reorder_tab_before(&mut self, from_id: &str, to_id: &str, cx: &mut Context<Self>) {
+        if from_id == to_id {
+            return;
+        }
+        let Some(from_idx) = self.tabs.iter().position(|tab| tab.id == from_id) else {
+            return;
+        };
+        let Some(mut to_idx) = self.tabs.iter().position(|tab| tab.id == to_id) else {
+            return;
+        };
+        let moved = self.tabs.remove(from_idx);
+        if from_idx < to_idx {
+            to_idx = to_idx.saturating_sub(1);
+        }
+        self.tabs.insert(to_idx, moved);
+        cx.notify();
     }
 
     fn mark_active_tab_dirty(&mut self) {
@@ -691,6 +782,20 @@ impl EditorView {
         self.context_menu = Some(ContextMenu {
             position,
             kind: ContextMenuKind::Format,
+        });
+        self.sidebar_edit = None;
+        cx.notify();
+    }
+
+    fn open_tab_context_menu(
+        &mut self,
+        tab_id: String,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = Some(ContextMenu {
+            position,
+            kind: ContextMenuKind::Tab { tab_id },
         });
         self.sidebar_edit = None;
         cx.notify();
@@ -1524,6 +1629,52 @@ impl EditorView {
                 self.render_format_context_menu(cx),
                 self.scaled(FORMAT_MENU_WIDTH),
             ),
+            ContextMenuKind::Tab { tab_id } => {
+                let mut items = Vec::new();
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
+                        "Close",
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_tab(&id, cx);
+                        },
+                    ));
+                }
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
+                        "Close Others",
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_other_tabs(&id, cx);
+                        },
+                    ));
+                }
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
+                        "Close Right",
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_right_tabs(&id, cx);
+                        },
+                    ));
+                }
+                items.push(self.render_context_menu_separator());
+                items.push(self.render_context_menu_item(
+                    "Close Saved",
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.close_saved_tabs(cx);
+                    },
+                ));
+                (items, self.scaled(180.0))
+            }
         };
 
         div()
@@ -1924,6 +2075,8 @@ impl EditorView {
         let is_active = self.active_tab_id.as_deref() == Some(tab.id.as_str());
         let tab_id = tab.id.clone();
         let close_id = tab.id.clone();
+        let context_tab_id = tab.id.clone();
+        let drop_target_id = tab.id.clone();
         let title = if tab.is_dirty {
             format!("{} •", tab.title)
         } else {
@@ -2002,7 +2155,23 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
+                    this.tab_dragging_id = Some(tab_id.clone());
                     this.switch_to_tab(&tab_id, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    if let Some(from_id) = this.tab_dragging_id.clone() {
+                        this.reorder_tab_before(&from_id, &drop_target_id, cx);
+                    }
+                    this.tab_dragging_id = None;
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.open_tab_context_menu(context_tab_id.clone(), event.position, cx);
                 }),
             )
             .into_any_element()
@@ -2014,6 +2183,17 @@ impl EditorView {
             .iter()
             .map(|tab| self.render_tab(tab, cx))
             .collect();
+
+        if !self.sidebar_visible {
+            tab_items.insert(
+                0,
+                div()
+                    .h(px(self.tab_bar_height()))
+                    .w(px(self.scaled(84.0)))
+                    .flex_none()
+                    .into_any_element(),
+            );
+        }
 
         // New-tab button
         tab_items.push(
@@ -3082,6 +3262,19 @@ impl EditorView {
         self.set_ui_scale(1.0, cx);
     }
 
+    fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_sidebar_visibility(cx);
+    }
+
+    fn on_toggle_editor_left_align(
+        &mut self,
+        _: &ToggleEditorLeftAlign,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_editor_alignment(cx);
+    }
+
     fn apply_wrap(&mut self, prefix: &str, suffix: &str) {
         let range = self.cursor.selection_range();
         let (new_text, new_start, new_end) =
@@ -3177,6 +3370,14 @@ impl EditorView {
             return;
         }
 
+        if event.button == MouseButton::Left && event.click_count >= 2 {
+            let offset = self.offset_for_position(event.position);
+            self.select_word_at_offset(offset);
+            self.is_selecting = false;
+            cx.notify();
+            return;
+        }
+
         self.is_selecting = true;
         let prev_offset = self.cursor.offset;
         let offset = self.offset_for_position(event.position);
@@ -3261,6 +3462,71 @@ impl EditorView {
             self.cursor.move_to(offset, &self.buffer);
         }
         self.open_format_context_menu(event.position, cx);
+    }
+
+    fn select_word_at_offset(&mut self, offset: usize) {
+        let (line, col) = self.buffer.offset_to_line_col(offset);
+        let line_start = self.buffer.line_start(line);
+        let line_content = self.buffer.line_content(line);
+        if line_content.is_empty() {
+            self.cursor.move_to(line_start, &self.buffer);
+            return;
+        }
+
+        let mut probe = col.min(line_content.len());
+        while probe > 0 && !line_content.is_char_boundary(probe) {
+            probe -= 1;
+        }
+        if probe == line_content.len() {
+            probe = line_content
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+        }
+
+        let Some(ch) = line_content[probe..].chars().next() else {
+            self.cursor.move_to(line_start + probe, &self.buffer);
+            return;
+        };
+        let class = classify_word_char(ch);
+        if matches!(class, WordCharClass::Whitespace | WordCharClass::Other) {
+            self.cursor.move_to(line_start + probe, &self.buffer);
+            return;
+        }
+
+        let mut start = probe;
+        while start > 0 {
+            let prev = line_content[..start]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let Some(prev_ch) = line_content[prev..].chars().next() else {
+                break;
+            };
+            if classify_word_char(prev_ch) != class {
+                break;
+            }
+            start = prev;
+            if start == 0 {
+                break;
+            }
+        }
+
+        let mut end = probe + ch.len_utf8();
+        while end < line_content.len() {
+            let Some(next_ch) = line_content[end..].chars().next() else {
+                break;
+            };
+            if classify_word_char(next_ch) != class {
+                break;
+            }
+            end += next_ch.len_utf8();
+        }
+
+        self.cursor.anchor = line_start + start;
+        self.cursor.offset = line_start + end;
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _cx: &mut Context<Self>) {
@@ -3615,6 +3881,7 @@ impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _has_context_menu = self.context_menu.is_some();
         let resizing = self.sidebar_resizing;
+        let show_editor_toolbar = self.tabs.len() > 0 && self.scroll_offset <= self.scaled(18.0);
         div()
             .id("editor-root")
             .key_context("MarkdownEditor")
@@ -3690,54 +3957,57 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_zoom_in))
             .on_action(cx.listener(Self::on_zoom_out))
             .on_action(cx.listener(Self::on_zoom_reset))
+            .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_toggle_editor_left_align))
             .on_action(cx.listener(Self::on_escape))
-            .child(self.render_sidebar(cx))
-            // Drag handle / border between sidebar and editor
-            .child({
-                let border_color = if self.sidebar_resizing {
-                    self.theme.accent
-                } else {
-                    self.theme.panel_border
-                };
-                let border_w = if self.sidebar_resizing { 3.0 } else { 1.0 };
-                div()
-                    .id("sidebar-resize-handle")
-                    .w(px(border_w))
-                    .h_full()
-                    .flex_none()
-                    .bg(border_color)
-                    .cursor(CursorStyle::ResizeLeftRight)
-                    .hover(|s| s.w(px(3.0)).bg(self.theme.accent))
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                        if this.sidebar_resizing {
-                            let new_width = f32::from(event.position.x);
-                            let min_w = this.scaled(140.0);
-                            let max_w = this.scaled(600.0);
-                            this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
-                            cx.notify();
-                        }
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            this.sidebar_resizing = true;
-                            cx.notify();
-                        }),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.sidebar_resizing = false;
-                            cx.notify();
-                        }),
-                    )
-                    .on_mouse_up_out(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.sidebar_resizing = false;
-                            cx.notify();
-                        }),
-                    )
+            .when(self.sidebar_visible, |this| {
+                this.child(self.render_sidebar(cx)).child({
+                    let indicator_color = if self.sidebar_resizing {
+                        self.theme.accent
+                    } else {
+                        self.theme.panel_border
+                    };
+                    div()
+                        .id("sidebar-resize-handle")
+                        .w(px(5.0))
+                        .h_full()
+                        .flex_none()
+                        .bg(gpui::transparent_black())
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .flex()
+                        .justify_center()
+                        .child(div().w(px(3.0)).h_full().bg(indicator_color))
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                            if this.sidebar_resizing {
+                                let new_width = f32::from(event.position.x);
+                                let min_w = this.scaled(140.0);
+                                let max_w = this.scaled(600.0);
+                                this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
+                                cx.notify();
+                            }
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                this.sidebar_resizing = true;
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.sidebar_resizing = false;
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.sidebar_resizing = false;
+                                cx.notify();
+                            }),
+                        )
+                })
             })
             .child(
                 div()
@@ -3769,6 +4039,82 @@ impl Render for EditorView {
                             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                             .on_mouse_move(cx.listener(Self::on_mouse_move))
                             .on_scroll_wheel(cx.listener(Self::on_scroll))
+                            .when(show_editor_toolbar, |this| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(self.scaled(12.0)))
+                                        .top(px(self.scaled(10.0)))
+                                        .flex()
+                                        .gap(px(self.scaled(8.0)))
+                                        .child(
+                                            div()
+                                                .w(px(self.scaled(28.0)))
+                                                .h(px(self.scaled(28.0)))
+                                                .rounded(px(self.scaled(8.0)))
+                                                .border_1()
+                                                .border_color(self.theme.tab_border)
+                                                .bg(if self.sidebar_visible {
+                                                    self.theme.panel_surface
+                                                } else {
+                                                    self.theme.tab_active_bg
+                                                })
+                                                .hover(|style| style.bg(self.theme.panel_hover))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(
+                                                    svg()
+                                                        .path(SIDEBAR_TOGGLE_SVG_PATH)
+                                                        .size(px(self.scaled(14.0)))
+                                                        .text_color(if self.sidebar_visible {
+                                                            self.theme.panel_muted
+                                                        } else {
+                                                            self.theme.accent
+                                                        }),
+                                                )
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.toggle_sidebar_visibility(cx);
+                                                    }),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .w(px(self.scaled(28.0)))
+                                                .h(px(self.scaled(28.0)))
+                                                .rounded(px(self.scaled(8.0)))
+                                                .border_1()
+                                                .border_color(self.theme.tab_border)
+                                                .bg(if self.editor_left_aligned {
+                                                    self.theme.tab_active_bg
+                                                } else {
+                                                    self.theme.panel_surface
+                                                })
+                                                .hover(|style| style.bg(self.theme.panel_hover))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(
+                                                    svg()
+                                                        .path(EDITOR_ALIGN_LEFT_SVG_PATH)
+                                                        .size(px(self.scaled(14.0)))
+                                                        .text_color(if self.editor_left_aligned {
+                                                            self.theme.accent
+                                                        } else {
+                                                            self.theme.panel_muted
+                                                        }),
+                                                )
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.toggle_editor_alignment(cx);
+                                                    }),
+                                                ),
+                                        ),
+                                )
+                            })
                             .child(EditorElement {
                                 editor: cx.entity().clone(),
                             }),
@@ -3798,6 +4144,35 @@ impl Render for EditorView {
                         .child(self.render_context_menu(cx)),
                 )
             })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WordCharClass {
+    AsciiWord,
+    Cjk,
+    Whitespace,
+    Other,
+}
+
+fn classify_word_char(ch: char) -> WordCharClass {
+    if ch.is_whitespace() {
+        return WordCharClass::Whitespace;
+    }
+    if ch.is_ascii_alphanumeric() || ch == '_' {
+        return WordCharClass::AsciiWord;
+    }
+    let code = ch as u32;
+    let is_cjk = (0x3400..=0x4DBF).contains(&code)
+        || (0x4E00..=0x9FFF).contains(&code)
+        || (0x3040..=0x309F).contains(&code)
+        || (0x30A0..=0x30FF).contains(&code)
+        || (0xAC00..=0xD7AF).contains(&code)
+        || matches!(ch, '々' | '〆' | '〇' | 'ー');
+    if is_cjk {
+        WordCharClass::Cjk
+    } else {
+        WordCharClass::Other
     }
 }
 
@@ -3908,7 +4283,16 @@ impl Element for EditorElement {
         let origin_x: f32 = bounds.origin.x.into();
         let origin_y: f32 = bounds.origin.y.into();
         let editor_width = viewport_width.min(editor.max_editor_width());
-        let editor_left = origin_x + ((viewport_width - editor_width) / 2.0).max(0.0);
+        let centered_left = origin_x + ((viewport_width - editor_width) / 2.0).max(0.0);
+        let mut editor_left = if editor.editor_left_aligned {
+            origin_x + editor.scaled(24.0)
+        } else {
+            centered_left
+        };
+        let right_limit = origin_x + viewport_width - editor_width;
+        if editor_left > right_limit {
+            editor_left = right_limit.max(origin_x);
+        }
         let text_width = (editor_width - editor.padding_left() - editor.padding_right())
             .max(editor.scaled(120.0));
         let wrap_width = text_width;

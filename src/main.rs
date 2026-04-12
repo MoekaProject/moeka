@@ -85,7 +85,10 @@ fn main() {
             KeyBinding::new("cmd-=", ZoomIn, Some("MarkdownEditor")),
             KeyBinding::new("cmd-shift-=", ZoomIn, Some("MarkdownEditor")),
             KeyBinding::new("cmd-minus", ZoomOut, Some("MarkdownEditor")),
+            KeyBinding::new("cmd--", ZoomOut, Some("MarkdownEditor")),
             KeyBinding::new("cmd-0", ZoomReset, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-\\", ToggleSidebar, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-shift-l", ToggleEditorLeftAlign, Some("MarkdownEditor")),
             KeyBinding::new("cmd-q", Quit, Some("MarkdownEditor")),
             KeyBinding::new("escape", Escape, Some("MarkdownEditor")),
         ]);
@@ -101,7 +104,7 @@ fn main() {
                 ))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Markdown Editor".into()),
-                    appears_transparent: false,
+                    appears_transparent: true,
                     traffic_light_position: None,
                 }),
                 window_background: WindowBackgroundAppearance::Opaque,

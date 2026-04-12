@@ -50,6 +50,8 @@ actions!(
         ZoomIn,
         ZoomOut,
         ZoomReset,
+        ToggleSidebar,
+        ToggleEditorLeftAlign,
         Quit,
         Escape,
     ]
