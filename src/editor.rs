@@ -19,24 +19,26 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SyntectColor, Theme as SyntectTheme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
-use crate::actions::*;
 use crate::buffer::Buffer;
 use crate::cursor::Cursor;
 use crate::markdown::{self, BlockType, InlineKind, LineDecoration, TableLineInfo};
 use crate::theme::Theme;
+use crate::{actions::*, theme};
 
 const LINE_HEIGHT_FACTOR: f32 = 1.6;
 const BASE_FONT_SIZE: f32 = 15.0;
 const PADDING_LEFT: f32 = 40.0;
-const PADDING_TOP: f32 = 20.0;
+const PADDING_TOP: f32 = 50.0;
 const PADDING_RIGHT: f32 = 40.0;
 const PADDING_BOTTOM: f32 = 200.0;
 const MAX_EDITOR_WIDTH: f32 = 750.0;
 const SIDEBAR_WIDTH: f32 = 280.0;
 const KNOWLEDGE_BASE_ROOT: &str = "/Users/imeoer/code/我的知识库";
 
-const CURSOR_BLINK_TICK: Duration = Duration::from_millis(16);
-const CURSOR_BLINK_PAUSE_DELAY: Duration = Duration::from_millis(500);
+const CURSOR_BLINK_TICK: Duration = Duration::from_millis(5);
+const CURSOR_BLINK_PAUSE_DELAY: Duration = Duration::from_millis(300);
+const CURSOR_BLINK_VISIBLE_DURATION: Duration = Duration::from_millis(200);
+const CURSOR_BLINK_TRANSPARENT_DURATION: Duration = Duration::from_millis(300);
 const CURSOR_MIN_OPACITY: f32 = 0.0;
 const CURSOR_MAX_OPACITY: f32 = 1.0;
 const CURSOR_OPACITY_STEP: f32 = 0.03;
@@ -44,6 +46,7 @@ const CODE_BLOCK_TEXT_LEFT: f32 = 10.0;
 const TODO_CHECKBOX_SIZE_FACTOR: f32 = 1.2;
 const TODO_CHECKBOX_TEXT_GAP: f32 = 24.0;
 const TODO_CHECKBOX_CORNER_RADIUS: f32 = 5.0;
+const TODO_CHILD_CHECKBOX_EXTRA_OFFSET: f32 = 10.0;
 const TODO_CHECK_ICON_SCALE: f32 = 0.52;
 const TABLE_CELL_TEXT_PADDING_PX: f32 = 5.0;
 const GUTTER_FOLD_ICON_SIZE: f32 = 10.0;
@@ -62,10 +65,14 @@ const FILETREE_EXPAND_SVG_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/icons/filetree/expand.svg"
 );
-const SIDEBAR_TOGGLE_SVG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/sidebar-toggle.svg");
-const EDITOR_ALIGN_LEFT_SVG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/editor-align-left.svg");
+const SIDEBAR_TOGGLE_SVG_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/icons/sidebar-toggle.svg"
+);
+const EDITOR_ALIGN_LEFT_SVG_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/icons/editor-align-left.svg"
+);
 const FOLDER_OPEN_SVG_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/icons/filetree/folder-open.svg"
@@ -236,6 +243,14 @@ pub struct EditorView {
     /// Custom sidebar width set by drag-resize (in logical pixels, pre-scaled).
     sidebar_custom_width: Option<f32>,
     sidebar_resizing: bool,
+    /// Whether H1-H6 heading submenu is expanded in format menu.
+    heading_submenu_open: bool,
+    /// Buffer offset where `/` was typed to open the slash menu (None if not active).
+    slash_menu_start: Option<usize>,
+    /// Current filter text typed after `/` for the slash menu.
+    slash_filter: String,
+    /// Currently selected item index in the slash/format menu.
+    menu_selected_index: usize,
     sidebar_visible: bool,
     editor_left_aligned: bool,
     tab_dragging_id: Option<String>,
@@ -337,6 +352,10 @@ impl EditorView {
             hovering_fold_line: None,
             sidebar_custom_width: None,
             sidebar_resizing: false,
+            heading_submenu_open: false,
+            menu_selected_index: 0,
+            slash_menu_start: None,
+            slash_filter: String::new(),
             sidebar_visible: true,
             editor_left_aligned: false,
             tab_dragging_id: None,
@@ -433,11 +452,30 @@ impl EditorView {
                     if this.cursor_opacity <= CURSOR_MIN_OPACITY {
                         this.cursor_opacity = CURSOR_MIN_OPACITY;
                         this.cursor_opacity_direction = 1.0;
+                        cx.notify();
+                        this.schedule_blink_pause(epoch, CURSOR_BLINK_TRANSPARENT_DURATION, cx);
+                        return;
                     } else if this.cursor_opacity >= CURSOR_MAX_OPACITY {
                         this.cursor_opacity = CURSOR_MAX_OPACITY;
                         this.cursor_opacity_direction = -1.0;
+                        cx.notify();
+                        this.schedule_blink_pause(epoch, CURSOR_BLINK_VISIBLE_DURATION, cx);
+                        return;
                     }
                     cx.notify();
+                    this.schedule_blink(epoch, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn schedule_blink_pause(&self, epoch: usize, duration: Duration, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(duration).await;
+            this.update(cx, |this, cx| {
+                if this.blink_epoch == epoch {
                     this.schedule_blink(epoch, cx);
                 }
             })
@@ -787,6 +825,54 @@ impl EditorView {
         cx.notify();
     }
 
+    fn cursor_screen_position(&self) -> Point<Pixels> {
+        let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
+        let origin_y: f32 = self.content_origin.y.into();
+        let y = origin_y + self.line_y_offset(line) - self.scroll_offset;
+        let line_height = self.visual_height_for_line(line);
+        let x = if let Some(Some(info)) = self.line_display_info.get(line) {
+            let disp_col = buffer_to_display_offset(&info.buffer_to_display, col);
+            let pos = info
+                .wrapped_line
+                .position_for_index(disp_col, px(info.line_height))
+                .unwrap_or_default();
+            info.content_x + f32::from(pos.x)
+        } else {
+            self.last_content_left + col as f32 * self.base_font_size() * 0.6
+        };
+        point(px(x), px(y + line_height))
+    }
+
+    fn open_slash_menu(&mut self, cx: &mut Context<Self>) {
+        self.slash_menu_start = Some(self.cursor.offset - 1);
+        self.slash_filter = String::new();
+        self.menu_selected_index = 0;
+        self.heading_submenu_open = false;
+        let pos = self.cursor_screen_position();
+        self.open_format_context_menu(pos, cx);
+    }
+
+    fn update_slash_filter(&mut self, cx: &mut Context<Self>) {
+        if let Some(start) = self.slash_menu_start {
+            self.menu_selected_index = 0;
+            let end = self.cursor.offset;
+            if end > start + 1 {
+                let text = self.buffer.text();
+                let filter_start = start + 1; // skip the '/'
+                if filter_start <= end && end <= text.len() {
+                    self.slash_filter = text[filter_start..end].to_string();
+                }
+            } else {
+                self.slash_filter.clear();
+            }
+            let pos = self.cursor_screen_position();
+            if let Some(menu) = &mut self.context_menu {
+                menu.position = pos;
+            }
+            cx.notify();
+        }
+    }
+
     fn open_tab_context_menu(
         &mut self,
         tab_id: String,
@@ -803,6 +889,16 @@ impl EditorView {
 
     fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu.take().is_some() {
+            // If closing while slash menu is active, remove the typed slash + filter text
+            if let Some(start) = self.slash_menu_start.take() {
+                let end = self.cursor.offset;
+                if end > start {
+                    self.buffer.replace(start..end, "");
+                    self.cursor.move_to(start, &self.buffer);
+                    self.reparse();
+                }
+                self.slash_filter.clear();
+            }
             cx.notify();
         }
     }
@@ -1244,6 +1340,17 @@ impl EditorView {
     }
 
     fn execute_format_menu_action(&mut self, action: FormatMenuAction, cx: &mut Context<Self>) {
+        // If invoked from slash menu, remove the `/` + filter text first
+        if let Some(start) = self.slash_menu_start.take() {
+            let end = self.cursor.offset;
+            if end > start {
+                self.buffer.replace(start..end, "");
+                self.cursor.move_to(start, &self.buffer);
+                self.reparse();
+            }
+            self.slash_filter.clear();
+        }
+        self.context_menu = None;
         match action {
             FormatMenuAction::Cut => self.cut_selection_to_clipboard(cx),
             FormatMenuAction::Copy => self.copy_selection_to_clipboard(cx),
@@ -1251,6 +1358,7 @@ impl EditorView {
             FormatMenuAction::Paragraph => {
                 self.checkpoint();
                 self.set_heading_level(0);
+                self.strip_block_prefix();
                 self.pause_blinking(cx);
             }
             FormatMenuAction::Heading(level) => {
@@ -1322,6 +1430,61 @@ impl EditorView {
         self.close_context_menu(cx);
     }
 
+    /// Returns the list of FormatMenuActions currently matching the slash filter.
+    fn slash_menu_matched_actions(&self) -> Vec<FormatMenuAction> {
+        let filter = self.slash_filter.to_lowercase();
+        let matches_filter = |label: &str, filter_text: &str| -> bool {
+            if filter.is_empty() {
+                return true;
+            }
+            label.to_lowercase().contains(&filter) || filter_text.to_lowercase().contains(&filter)
+        };
+
+        let mut actions = Vec::new();
+        let all_items: &[(&str, &str, FormatMenuAction)] = &[
+            ("粗体", "bold", FormatMenuAction::Bold),
+            ("斜体", "italic", FormatMenuAction::Italic),
+            ("删除线", "strikethrough", FormatMenuAction::Strikethrough),
+            ("行内代码", "inline code", FormatMenuAction::InlineCode),
+            ("代码块", "code block", FormatMenuAction::CodeBlock),
+            (
+                "分割线",
+                "horizontal rule divider",
+                FormatMenuAction::HorizontalRule,
+            ),
+            ("引用", "quote blockquote", FormatMenuAction::Quote),
+            (
+                "无序列表",
+                "unordered list bullet",
+                FormatMenuAction::UnorderedList,
+            ),
+            (
+                "有序列表",
+                "ordered list numbered",
+                FormatMenuAction::OrderedList,
+            ),
+            ("待办事项", "todo task checkbox", FormatMenuAction::Todo),
+            ("链接", "link url", FormatMenuAction::Link),
+            ("图片", "image photo", FormatMenuAction::Image),
+        ];
+        for &(label, ft, action) in all_items {
+            if matches_filter(label, ft) {
+                actions.push(action);
+            }
+        }
+        actions
+    }
+
+    fn execute_slash_menu_selected(&mut self, cx: &mut Context<Self>) {
+        let actions = self.slash_menu_matched_actions();
+        let index = self
+            .menu_selected_index
+            .min(actions.len().saturating_sub(1));
+        if let Some(&action) = actions.get(index) {
+            self.execute_format_menu_action(action, cx);
+        }
+    }
+
     // ── Sidebar input field key handling ───────────────────────────
 
     fn sidebar_edit_append(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -1380,12 +1543,19 @@ impl EditorView {
         &self,
         label: &str,
         shortcut: Option<&str>,
+        is_selected: bool,
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
+        let bg = if is_selected {
+            self.theme.panel_hover
+        } else {
+            gpui::transparent_black()
+        };
         div()
             .w_full()
             .h(px(self.scaled(28.0)))
+            .bg(bg)
             .px(px(self.scaled(12.0)))
             .flex()
             .items_center()
@@ -1517,97 +1687,140 @@ impl EditorView {
 
     fn render_format_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut items: Vec<AnyElement> = Vec::new();
+        let is_slash_menu = self.slash_menu_start.is_some();
+        let filter = self.slash_filter.to_lowercase();
+        let selected_index = self.menu_selected_index;
+        // Counter for actionable items (excluding separators and clipboard items)
+        let mut actionable_index: usize = 0;
 
-        let menu_items = [
-            ("Cut", Some("Cmd+X"), Some(FormatMenuAction::Cut)),
-            ("Copy", Some("Cmd+C"), Some(FormatMenuAction::Copy)),
-            ("Paste", Some("Cmd+V"), Some(FormatMenuAction::Paste)),
-            ("", None, None),
-            ("Paragraph", None, Some(FormatMenuAction::Paragraph)),
+        let matches_filter = |label: &str, filter_text: &str| -> bool {
+            if filter.is_empty() {
+                return true;
+            }
+            label.to_lowercase().contains(&filter) || filter_text.to_lowercase().contains(&filter)
+        };
+
+        // Cut/Copy/Paste only shown in regular (non-slash) mode
+        if !is_slash_menu {
+            let clipboard_items: &[(&str, &str, Option<&str>, FormatMenuAction)] = &[
+                ("剪切", "cut", Some("⌘X"), FormatMenuAction::Cut),
+                ("复制", "copy", Some("⌘C"), FormatMenuAction::Copy),
+                ("粘贴", "paste", Some("⌘V"), FormatMenuAction::Paste),
+            ];
+            let mut clip_matched = Vec::new();
+            for &(label, ft, shortcut, action) in clipboard_items {
+                if matches_filter(label, ft) {
+                    clip_matched.push(self.render_format_context_menu_item(
+                        label,
+                        shortcut,
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.execute_format_menu_action(action, cx);
+                        },
+                    ));
+                }
+            }
+            if !clip_matched.is_empty() {
+                items.extend(clip_matched);
+            }
+        }
+
+        let all_menu_items: &[(&str, &str, Option<&str>, FormatMenuAction)] = &[
+            ("粗体", "bold", Some("⌘B"), FormatMenuAction::Bold),
+            ("斜体", "italic", Some("⌘I"), FormatMenuAction::Italic),
             (
-                "Heading 1",
-                Some("Cmd+1"),
-                Some(FormatMenuAction::Heading(1)),
+                "删除线",
+                "strikethrough",
+                Some("⌘⇧S"),
+                FormatMenuAction::Strikethrough,
             ),
             (
-                "Heading 2",
-                Some("Cmd+2"),
-                Some(FormatMenuAction::Heading(2)),
+                "行内代码",
+                "inline code",
+                Some("⌘E"),
+                FormatMenuAction::InlineCode,
             ),
             (
-                "Heading 3",
-                Some("Cmd+3"),
-                Some(FormatMenuAction::Heading(3)),
+                "代码块",
+                "code block",
+                Some("⌘⌥C"),
+                FormatMenuAction::CodeBlock,
             ),
             (
-                "Heading 4",
-                Some("Cmd+4"),
-                Some(FormatMenuAction::Heading(4)),
+                "分割线",
+                "horizontal rule divider",
+                Some("---"),
+                FormatMenuAction::HorizontalRule,
             ),
             (
-                "Heading 5",
-                Some("Cmd+5"),
-                Some(FormatMenuAction::Heading(5)),
+                "引用",
+                "quote blockquote",
+                Some("⌘⌥Q"),
+                FormatMenuAction::Quote,
             ),
             (
-                "Heading 6",
-                Some("Cmd+6"),
-                Some(FormatMenuAction::Heading(6)),
-            ),
-            ("", None, None),
-            ("Bold", Some("Cmd+B"), Some(FormatMenuAction::Bold)),
-            ("Italic", Some("Cmd+I"), Some(FormatMenuAction::Italic)),
-            (
-                "Strikethrough",
-                Some("Cmd+Shift+S"),
-                Some(FormatMenuAction::Strikethrough),
+                "无序列表",
+                "unordered list bullet",
+                Some("⌘⌥U"),
+                FormatMenuAction::UnorderedList,
             ),
             (
-                "Inline Code",
-                Some("Cmd+E"),
-                Some(FormatMenuAction::InlineCode),
-            ),
-            ("", None, None),
-            (
-                "Code Block",
-                Some("Cmd+Alt+C"),
-                Some(FormatMenuAction::CodeBlock),
+                "有序列表",
+                "ordered list numbered",
+                Some("⌘⌥O"),
+                FormatMenuAction::OrderedList,
             ),
             (
-                "Horizontal Rule",
-                Some("Cmd+Alt+H"),
-                Some(FormatMenuAction::HorizontalRule),
+                "待办事项",
+                "todo task checkbox",
+                Some("⌘⌥T"),
+                FormatMenuAction::Todo,
             ),
-            ("Quote", Some("Cmd+Alt+Q"), Some(FormatMenuAction::Quote)),
-            (
-                "Unordered List",
-                Some("Cmd+Alt+U"),
-                Some(FormatMenuAction::UnorderedList),
-            ),
-            (
-                "Ordered List",
-                Some("Cmd+Alt+O"),
-                Some(FormatMenuAction::OrderedList),
-            ),
-            ("Todo", Some("Cmd+Alt+T"), Some(FormatMenuAction::Todo)),
-            ("", None, None),
-            ("Link", Some("Cmd+K"), Some(FormatMenuAction::Link)),
-            ("Image", Some("Cmd+Shift+I"), Some(FormatMenuAction::Image)),
+            ("链接", "link url", Some("⌘K"), FormatMenuAction::Link),
+            ("图片", "image photo", Some("⌘⇧I"), FormatMenuAction::Image),
         ];
 
-        for (label, shortcut, action) in menu_items {
-            if let Some(action) = action {
-                items.push(self.render_format_context_menu_item(
-                    label,
-                    shortcut,
-                    cx,
-                    move |this, _, cx| {
-                        this.execute_format_menu_action(action, cx);
-                    },
-                ));
-            } else {
+        // Group boundaries for separators: inline(0..4), block(4..10), link(10..12)
+        let group_boundaries = [0usize, 4, 10, 12];
+        let mut group_start_flags = [false; 3]; // whether group has any matched items
+
+        // First pass: determine which groups have matches
+        for (idx, &(label, ft, _, _)) in all_menu_items.iter().enumerate() {
+            if matches_filter(label, ft) {
+                for g in 0..3 {
+                    if idx >= group_boundaries[g] && idx < group_boundaries[g + 1] {
+                        group_start_flags[g] = true;
+                    }
+                }
+            }
+        }
+
+        let mut prev_group_had_items = !items.is_empty(); // true if clipboard items were added
+        for g in 0..3 {
+            if !group_start_flags[g] {
+                continue;
+            }
+            if prev_group_had_items {
                 items.push(self.render_context_menu_separator());
             }
+            for idx in group_boundaries[g]..group_boundaries[g + 1] {
+                let (label, ft, shortcut, action) = all_menu_items[idx];
+                if matches_filter(label, ft) {
+                    let is_selected = is_slash_menu && actionable_index == selected_index;
+                    items.push(self.render_format_context_menu_item(
+                        label,
+                        shortcut,
+                        is_selected,
+                        cx,
+                        move |this, _, cx| {
+                            this.execute_format_menu_action(action, cx);
+                        },
+                    ));
+                    actionable_index += 1;
+                }
+            }
+            prev_group_had_items = true;
         }
 
         items
@@ -1677,16 +1890,25 @@ impl EditorView {
             }
         };
 
+        let max_menu_height = if self.last_viewport_height > 0.0 {
+            (self.last_viewport_height - pos_y - self.scaled(20.0)).max(self.scaled(100.0))
+        } else {
+            self.scaled(400.0)
+        };
+
         div()
+            .id("context-menu")
             .absolute()
             .left(px(pos_x))
             .top(px(pos_y))
             .w(px(width))
+            .max_h(px(max_menu_height))
+            .overflow_y_scroll()
             .py(px(self.scaled(4.0)))
             .bg(self.theme.panel_surface)
             .border_1()
             .border_color(self.theme.panel_border)
-            .rounded(px(self.scaled(6.0)))
+            .rounded(px(self.scaled(10.0)))
             .shadow_md()
             .children(items)
             .cursor(CursorStyle::Arrow)
@@ -2289,6 +2511,46 @@ impl EditorView {
         self.scroll_to_cursor();
     }
 
+    /// Strip any block-level prefix (list, quote, todo) from the current line.
+    fn strip_block_prefix(&mut self) {
+        let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
+        let line_start = self.buffer.line_start(line);
+        let line_end = self.buffer.line_end(line);
+        let line_text = self.buffer.line_content(line).to_string();
+        let trimmed = line_text.trim_start();
+        let leading_ws = line_text.len() - trimmed.len();
+        let block_prefixes: &[&str] = &[
+            "- [x] ", "- [ ] ", "* [x] ", "* [ ] ", "+ [x] ", "+ [ ] ", "> ", "- ", "* ", "+ ",
+        ];
+        for pfx in block_prefixes {
+            if trimmed.starts_with(pfx) {
+                let mut new_line = String::with_capacity(line_text.len());
+                new_line.push_str(&line_text[..leading_ws]);
+                new_line.push_str(&trimmed[pfx.len()..]);
+                self.buffer.replace(line_start..line_end, &new_line);
+                let new_offset = self.cursor.offset.saturating_sub(pfx.len());
+                self.cursor
+                    .move_to(new_offset.min(self.buffer.len()), &self.buffer);
+                self.reparse();
+                return;
+            }
+        }
+        // Check ordered list prefix: "1. ", "2. ", etc.
+        if let Some(dot_pos) = trimmed.find(". ") {
+            if trimmed[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
+                let pfx_len = dot_pos + 2;
+                let mut new_line = String::with_capacity(line_text.len());
+                new_line.push_str(&line_text[..leading_ws]);
+                new_line.push_str(&trimmed[pfx_len..]);
+                self.buffer.replace(line_start..line_end, &new_line);
+                let new_offset = self.cursor.offset.saturating_sub(pfx_len);
+                self.cursor
+                    .move_to(new_offset.min(self.buffer.len()), &self.buffer);
+                self.reparse();
+            }
+        }
+    }
+
     fn indent_current_lines(&mut self, spaces: &str) {
         let selection = self.cursor.selection_range();
         let (start_line, _) = self.buffer.offset_to_line_col(selection.start);
@@ -2321,14 +2583,17 @@ impl EditorView {
             format!("{}{}{}", prefix, selected, suffix)
         };
         self.buffer.replace(range.clone(), &replacement);
-        let anchor = range.start + prefix.len();
-        let offset = if selected.is_empty() {
-            anchor + placeholder.len()
+        // Position cursor to select the URL part inside ](...)
+        let desc_end = if selected.is_empty() {
+            range.start + prefix.len() + placeholder.len()
         } else {
-            anchor + selected.len()
+            range.start + prefix.len() + selected.len()
         };
-        self.cursor.anchor = anchor;
-        self.cursor.offset = offset;
+        // suffix is like "](https://)" or "](image.png)" — URL is between "](" and ")"
+        let url_start = desc_end + 2; // skip "]("
+        let url_end = desc_end + suffix.len() - 1; // before ")"
+        self.cursor.anchor = url_start;
+        self.cursor.offset = url_end;
         self.reparse();
         self.scroll_to_cursor();
     }
@@ -2752,6 +3017,18 @@ impl EditorView {
         self.reparse();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
+
+        // Slash menu: if cursor moved before or onto the `/`, close the menu
+        if let Some(start) = self.slash_menu_start {
+            if self.cursor.offset <= start {
+                self.slash_menu_start = None;
+                self.slash_filter.clear();
+                self.context_menu = None;
+                cx.notify();
+            } else {
+                self.update_slash_filter(cx);
+            }
+        }
     }
 
     fn on_delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
@@ -2831,6 +3108,13 @@ impl EditorView {
     }
 
     fn on_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.slash_menu_start.is_some() {
+            if self.menu_selected_index > 0 {
+                self.menu_selected_index -= 1;
+            }
+            cx.notify();
+            return;
+        }
         let prev_offset = self.cursor.offset;
         if let Some(offset) = self.offset_for_visual_up(self.cursor.offset) {
             self.cursor.move_to(offset, &self.buffer);
@@ -2843,6 +3127,14 @@ impl EditorView {
     }
 
     fn on_down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.slash_menu_start.is_some() {
+            let max_index = self.slash_menu_matched_actions().len().saturating_sub(1);
+            if self.menu_selected_index < max_index {
+                self.menu_selected_index += 1;
+            }
+            cx.notify();
+            return;
+        }
         let prev_offset = self.cursor.offset;
         if let Some(offset) = self.offset_for_visual_down(self.cursor.offset) {
             self.cursor.move_to(offset, &self.buffer);
@@ -2916,6 +3208,10 @@ impl EditorView {
     }
 
     fn on_enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
+        if self.slash_menu_start.is_some() {
+            self.execute_slash_menu_selected(cx);
+            return;
+        }
         if self.sidebar_edit.is_some() {
             self.commit_sidebar_edit(cx);
             return;
@@ -3276,6 +3572,51 @@ impl EditorView {
     }
 
     fn apply_wrap(&mut self, prefix: &str, suffix: &str) {
+        // If cursor is inside an existing inline syntax with matching markers, strip them
+        if !self.cursor.has_selection() {
+            let offset = self.cursor.offset;
+            let (line, col) = self.buffer.offset_to_line_col(offset);
+            let line_content = self.buffer.line_content(line).to_string();
+            if let Some(dec) = self.decorations.get(line).cloned() {
+                for span in &dec.inline_spans {
+                    let kind_prefix = match span.kind {
+                        crate::markdown::InlineKind::Bold => "**",
+                        crate::markdown::InlineKind::Italic => "*",
+                        crate::markdown::InlineKind::Strikethrough => "~~",
+                        crate::markdown::InlineKind::InlineCode => "`",
+                        _ => continue,
+                    };
+                    let kind_suffix = kind_prefix;
+                    if kind_prefix != prefix || kind_suffix != suffix {
+                        continue;
+                    }
+                    // span.range is the inner text (without markers)
+                    // The full syntax with markers: marker_start..marker_end
+                    let marker_start = span.range.start.saturating_sub(prefix.len());
+                    let marker_end = (span.range.end + suffix.len()).min(line_content.len());
+                    // Verify the markers are actually there
+                    if marker_start + prefix.len() <= line_content.len()
+                        && line_content[marker_start..].starts_with(prefix)
+                        && marker_end >= suffix.len()
+                        && line_content[marker_end - suffix.len()..marker_end].ends_with(suffix)
+                        && col >= marker_start
+                        && col <= marker_end
+                    {
+                        let line_start = self.buffer.line_start(line);
+                        let sel_start = line_start + marker_start;
+                        let sel_end = line_start + marker_end;
+                        let (new_text, new_start, new_end) =
+                            toggle_wrap(self.buffer.text(), sel_start, sel_end, prefix, suffix);
+                        self.buffer = Buffer::from_text(&new_text);
+                        self.cursor.anchor = new_start;
+                        self.cursor.offset = new_end;
+                        self.reparse();
+                        self.scroll_to_cursor();
+                        return;
+                    }
+                }
+            }
+        }
         let range = self.cursor.selection_range();
         let (new_text, new_start, new_end) =
             toggle_wrap(self.buffer.text(), range.start, range.end, prefix, suffix);
@@ -3301,6 +3642,10 @@ impl EditorView {
     // ── Mouse handlers ──────────────────────────────────────────────
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.context_menu.is_some() {
+            eprintln!("[menu-debug] on_mouse_down called with menu open at ({:.0}, {:.0})", f32::from(event.position.x), f32::from(event.position.y));
+            return;
+        }
         // Check gutter fold icon clicks.
         if let Some(&(_, line_idx, is_image_fold)) = self
             .gutter_fold_areas
@@ -3325,7 +3670,7 @@ impl EditorView {
             return;
         }
 
-        // Check image preview clicks — select full image syntax `![alt](url)`
+        // Check image preview clicks — expand image syntax and select full syntax
         if let Some(line_idx) = self
             .image_click_areas
             .iter()
@@ -3339,16 +3684,22 @@ impl EditorView {
                     .find(|s| s.kind == crate::markdown::InlineKind::Image)
                 {
                     let line_start = self.buffer.line_start(line_idx);
-                    let full_start = span.range.start.saturating_sub(2);
+                    let line_content = self.buffer.line_content(line_idx);
+                    // Image prefix is "!" before the span's "[" syntax range
+                    let full_start = span.range.start.saturating_sub(2); // "!["
+                    // Find the end of the URL part "](url)" using syntax_ranges
                     let full_end = dec
                         .syntax_ranges
                         .iter()
                         .filter(|sr| sr.range.start >= span.range.end)
                         .map(|sr| sr.range.end)
                         .max()
-                        .unwrap_or(span.range.end);
-                    self.cursor.anchor = line_start + full_start;
-                    self.cursor.offset = line_start + full_end;
+                        .unwrap_or(span.range.end)
+                        .min(line_content.len());
+                    // Set offset (cursor position) to start so syntax stays expanded
+                    // (cursor_col falls within the trigger range)
+                    self.cursor.offset = line_start + full_start;
+                    self.cursor.anchor = line_start + full_end;
                     cx.notify();
                     return;
                 }
@@ -3404,17 +3755,21 @@ impl EditorView {
                     continue;
                 }
                 let prefix_len = if span.kind == InlineKind::Image { 2 } else { 1 };
-                let full_link_start = line_start + span.range.start.saturating_sub(prefix_len);
+                let _full_link_start = line_start + span.range.start.saturating_sub(prefix_len);
                 let url_sr = syntax_ranges.iter().find(|sr| {
                     sr.range.start == span.range.end && sr.range.end > sr.range.start + 1
                 });
-                let full_link_end = url_sr
+                let _full_link_end = url_sr
                     .map(|sr| line_start + sr.range.end)
                     .unwrap_or(line_start + span.range.end);
 
-                // Skip if cursor was already inside the link/image range.
-                if prev_offset >= full_link_start && prev_offset <= full_link_end {
-                    continue;
+                // Skip if cursor was already inside the URL zone.
+                if let Some(url_sr) = &url_sr {
+                    let url_abs_start = line_start + url_sr.range.start + 2;
+                    let url_abs_end = line_start + url_sr.range.end.saturating_sub(1);
+                    if prev_offset >= url_abs_start && prev_offset <= url_abs_end {
+                        continue;
+                    }
                 }
 
                 // Cursor entered URL part?
@@ -3453,6 +3808,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.context_menu.is_some() {
+            return;
+        }
         self.is_selecting = false;
         let offset = self.offset_for_position(event.position);
         let selection = self.cursor.selection_range();
@@ -3534,6 +3892,10 @@ impl EditorView {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.context_menu.is_some() {
+            eprintln!("[menu-debug] on_mouse_move called with menu open at ({:.0}, {:.0})", f32::from(event.position.x), f32::from(event.position.y));
+            return;
+        }
         let hovering_checkbox = self
             .checkbox_areas
             .iter()
@@ -3590,6 +3952,10 @@ impl EditorView {
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.context_menu.is_some() {
+            eprintln!("[menu-debug] on_scroll called with menu open");
+            return;
+        }
         let delta_y: f32 = event
             .delta
             .pixel_delta(px(self.base_font_size() * LINE_HEIGHT_FACTOR))
@@ -3767,6 +4133,18 @@ impl EntityInputHandler for EditorView {
         self.reparse();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
+
+        // Slash menu: `/` on empty line opens format menu
+        if self.slash_menu_start.is_some() {
+            self.update_slash_filter(cx);
+        } else if new_text == "/" {
+            let (line, col) = self.buffer.offset_to_line_col(new_offset);
+            let line_content = self.buffer.line_content(line);
+            let trimmed = line_content.trim();
+            if trimmed == "/" && col == line_content.len() {
+                self.open_slash_menu(cx);
+            }
+        }
     }
 
     fn replace_and_mark_text_in_range(
@@ -4025,11 +4403,14 @@ impl Render for EditorView {
                             .relative()
                             .flex_1()
                             .overflow_hidden()
-                            .cursor(if self.hovering_checkbox {
-                                CursorStyle::Arrow
-                            } else {
-                                CursorStyle::IBeam
-                            })
+                            .cursor(
+                                if self.hovering_checkbox || self.hovering_image_edit_line.is_some()
+                                {
+                                    CursorStyle::Arrow
+                                } else {
+                                    CursorStyle::IBeam
+                                },
+                            )
                             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                             .on_mouse_down(
                                 MouseButton::Right,
@@ -4048,30 +4429,22 @@ impl Render for EditorView {
                                         .flex()
                                         .gap(px(self.scaled(8.0)))
                                         .child(
+                                            // Sidebar toggle: circular red button, white icon
                                             div()
-                                                .w(px(self.scaled(28.0)))
-                                                .h(px(self.scaled(28.0)))
-                                                .rounded(px(self.scaled(8.0)))
-                                                .border_1()
-                                                .border_color(self.theme.tab_border)
-                                                .bg(if self.sidebar_visible {
-                                                    self.theme.panel_surface
-                                                } else {
-                                                    self.theme.tab_active_bg
-                                                })
-                                                .hover(|style| style.bg(self.theme.panel_hover))
+                                                .w(px(self.scaled(34.0)))
+                                                .h(px(self.scaled(34.0)))
+                                                .rounded_full()
+                                                .bg(theme::hsla_hex(0x910913, 1.0))
+                                                .shadow_md()
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
+                                                .cursor(CursorStyle::Arrow)
                                                 .child(
                                                     svg()
                                                         .path(SIDEBAR_TOGGLE_SVG_PATH)
                                                         .size(px(self.scaled(14.0)))
-                                                        .text_color(if self.sidebar_visible {
-                                                            self.theme.panel_muted
-                                                        } else {
-                                                            self.theme.accent
-                                                        }),
+                                                        .text_color(gpui::white()),
                                                 )
                                                 .on_mouse_down(
                                                     MouseButton::Left,
@@ -4081,30 +4454,22 @@ impl Render for EditorView {
                                                 ),
                                         )
                                         .child(
+                                            // Alignment toggle: circular dark button, white icon
                                             div()
-                                                .w(px(self.scaled(28.0)))
-                                                .h(px(self.scaled(28.0)))
-                                                .rounded(px(self.scaled(8.0)))
-                                                .border_1()
-                                                .border_color(self.theme.tab_border)
-                                                .bg(if self.editor_left_aligned {
-                                                    self.theme.tab_active_bg
-                                                } else {
-                                                    self.theme.panel_surface
-                                                })
-                                                .hover(|style| style.bg(self.theme.panel_hover))
+                                                .w(px(self.scaled(34.0)))
+                                                .h(px(self.scaled(34.0)))
+                                                .rounded_full()
+                                                .bg(gpui::hsla(0.61, 0.12, 0.25, 0.85))
+                                                .shadow_md()
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
+                                                .cursor(CursorStyle::Arrow)
                                                 .child(
                                                     svg()
                                                         .path(EDITOR_ALIGN_LEFT_SVG_PATH)
                                                         .size(px(self.scaled(14.0)))
-                                                        .text_color(if self.editor_left_aligned {
-                                                            self.theme.accent
-                                                        } else {
-                                                            self.theme.panel_muted
-                                                        }),
+                                                        .text_color(gpui::white()),
                                                 )
                                                 .on_mouse_down(
                                                     MouseButton::Left,
@@ -4133,6 +4498,7 @@ impl Render for EditorView {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| {
+                                eprintln!("[menu-debug] backdrop left click");
                                 this.close_context_menu(cx);
                             }),
                         )
@@ -4153,6 +4519,33 @@ enum WordCharClass {
     Cjk,
     Whitespace,
     Other,
+}
+
+/// Calculate the display width of a string, counting CJK characters as 2 columns.
+fn display_width(s: &str) -> usize {
+    s.chars().map(|ch| char_display_width(ch)).sum()
+}
+
+fn char_display_width(ch: char) -> usize {
+    let code = ch as u32;
+    if (0x1100..=0x115F).contains(&code)  // Hangul Jamo
+        || (0x2E80..=0x303E).contains(&code)  // CJK Radicals, Kangxi, CJK Symbols
+        || (0x3040..=0x33BF).contains(&code)  // Hiragana, Katakana, Bopomofo, CJK Compat
+        || (0x3400..=0x4DBF).contains(&code)  // CJK Unified Ext A
+        || (0x4E00..=0x9FFF).contains(&code)  // CJK Unified
+        || (0xA000..=0xA4CF).contains(&code)  // Yi
+        || (0xAC00..=0xD7AF).contains(&code)  // Hangul Syllables
+        || (0xF900..=0xFAFF).contains(&code)  // CJK Compat Ideographs
+        || (0xFE30..=0xFE6F).contains(&code)  // CJK Compat Forms
+        || (0xFF01..=0xFF60).contains(&code)  // Fullwidth Forms
+        || (0xFFE0..=0xFFE6).contains(&code)  // Fullwidth Signs
+        || (0x20000..=0x2FA1F).contains(&code)
+    // CJK Ext B-F, Compat Supplement
+    {
+        2
+    } else {
+        1
+    }
 }
 
 fn classify_word_char(ch: char) -> WordCharClass {
@@ -4469,7 +4862,47 @@ impl Element for EditorElement {
             let ime_active_on_line = editor.marked_range.as_ref().is_some_and(|marked| {
                 marked.start < line_end_offset && marked.end >= line_start_offset
             });
-            let cursor_col = if ime_active_on_line {
+            let cursor_col = if editor.is_selecting && editor.cursor.has_selection() {
+                // When dragging a selection: if selection is within a syntax span on this
+                // line, expand so the user can see what they're selecting.
+                let sel = editor.cursor.selection_range();
+                if sel.start >= line_start_offset && sel.end <= line_end_offset {
+                    let sel_start_col = sel.start - line_start_offset;
+                    let sel_end_col = sel.end - line_start_offset;
+                    let within_syntax = decoration.inline_spans.iter().any(|span| {
+                        let prefix_len = match span.kind {
+                            crate::markdown::InlineKind::Bold => 2,
+                            crate::markdown::InlineKind::Italic => 1,
+                            crate::markdown::InlineKind::Strikethrough => 2,
+                            crate::markdown::InlineKind::InlineCode => 1,
+                            crate::markdown::InlineKind::Link
+                            | crate::markdown::InlineKind::Image => {
+                                if span.kind == crate::markdown::InlineKind::Image {
+                                    2
+                                } else {
+                                    1
+                                }
+                            }
+                        };
+                        let full_start = span.range.start.saturating_sub(prefix_len);
+                        let full_end = decoration
+                            .syntax_ranges
+                            .iter()
+                            .filter(|sr| sr.range.end > span.range.end)
+                            .map(|sr| sr.range.end)
+                            .max()
+                            .unwrap_or(span.range.end);
+                        sel_start_col >= full_start && sel_end_col <= full_end
+                    });
+                    if within_syntax {
+                        Some(cursor.offset.saturating_sub(line_start_offset))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else if ime_active_on_line {
                 Some(line_content.len())
             } else if is_cursor_line {
                 Some(cursor.offset.saturating_sub(line_start_offset))
@@ -4704,12 +5137,13 @@ impl Element for EditorElement {
                     && (line_idx == 0 || !is_code_block_type(line_idx - 1));
                 let is_end_fence = matches!(block_type, BlockType::CodeBlockFence)
                     && (line_idx + 1 >= line_count || !is_code_block_type(line_idx + 1));
-                let clip_top = if !cursor_in_this_block && is_start_fence {
+                let cursor_on_this_line = cursor_line == line_idx;
+                let clip_top = if !cursor_on_this_line && is_start_fence {
                     15.0
                 } else {
                     0.0
                 };
-                let clip_bottom = if !cursor_in_this_block && is_end_fence {
+                let clip_bottom = if !cursor_on_this_line && is_end_fence {
                     15.0
                 } else {
                     0.0
@@ -4796,7 +5230,7 @@ impl Element for EditorElement {
                         let render_col_widths = ti.column_widths.clone();
                         let mut col_x_offset = 0;
                         for (ci, cell) in ti.cells.iter().enumerate() {
-                            let cell_chars = cell.trim().chars().count();
+                            let cell_chars = display_width(cell.trim());
                             let col_w = render_col_widths
                                 .get(ci)
                                 .copied()
@@ -4805,7 +5239,7 @@ impl Element for EditorElement {
                             col_x_offset += col_w + table_cell_padding_chars * 2;
                             if ci + 1 < ti.cells.len() {
                                 let sep_x =
-                                    table_left + border_w + col_x_offset as f32 * base_char_width;
+                                    table_left + col_x_offset as f32 * base_char_width;
                                 table_borders.push(fill(
                                     Bounds::new(
                                         point(px(sep_x), px(line_top)),
@@ -4866,7 +5300,7 @@ impl Element for EditorElement {
                 BlockType::Heading(level) => {
                     let prefix_len = (*level as usize) + 1;
                     let heading_prefix_folded = cursor_col
-                        .map(|col| prefix_is_folded(0, prefix_len, Some(col)))
+                        .map(|col| prefix_is_folded(0, prefix_len + 1, Some(col)))
                         .unwrap_or(false);
                     // Show hash icons when cursor on heading line AND fold icon not hovered.
                     let fold_hovered_this_line = editor.hovering_fold_line == Some(line_idx);
@@ -4918,20 +5352,13 @@ impl Element for EditorElement {
             if prefix_collapsed {
                 if let BlockType::TaskList(checked) = block_type {
                     let cb_size = font_size * TODO_CHECKBOX_SIZE_FACTOR;
-                    // Level-1 todo (no indent): checkbox flush with editor content left edge.
-                    // Indented (child) todos: checkbox aligned to parent's content indent.
                     let line_content_str = buffer.line_content(line_idx);
                     let leading_ws_bytes = line_content_str.len()
                         - line_content_str.trim_start_matches([' ', '\t']).len();
                     let cb_x = if leading_ws_bytes == 0 {
-                        // Level-1: align to content_x (editor content left edge)
                         content_x
                     } else {
-                        // Child: align to the text-start of the PARENT's indent level.
-                        // Parent indent = half of current indent (2-space indent per level).
-                        let parent_indent_bytes =
-                            (leading_ws_bytes / 2).min(leading_ws_bytes.saturating_sub(2));
-                        content_x + parent_indent_bytes as f32 * base_char_width
+                        content_x + (leading_ws_bytes as f32 + 1.0) * base_char_width
                     };
                     let cb_y = line_top + (line_height - cb_size) / 2.0;
                     let cb_bounds =
@@ -5074,8 +5501,12 @@ impl Element for EditorElement {
             // Image URL-edit icon (visible when image syntax is expanded).
             if image_active {
                 let ie_size = editor.scaled(13.0);
-                // Position immediately to the right of the rendered syntax
-                let ie_x = editor_left + editor.padding_left() + text_width + editor.scaled(4.0);
+                // Position inline right after the syntax text (10px gap)
+                let syntax_end_x = wrapped
+                    .position_for_index(display_text.len(), px(line_height))
+                    .map(|pos| f32::from(pos.x))
+                    .unwrap_or(0.0);
+                let ie_x = content_x + syntax_end_x + editor.scaled(10.0);
                 let ie_y = line_top + (line_height - ie_size) / 2.0;
                 let ie_bounds =
                     Bounds::new(point(px(ie_x), px(ie_y)), size(px(ie_size), px(ie_size)));
@@ -5529,7 +5960,6 @@ fn build_display_text(
             } else {
                 0
             };
-            // Expand when cursor is within `- ` (positions 0..fold_len); collapse otherwise.
             (fold_len > 0 && prefix_is_folded(leading_ws, fold_len, cursor_col))
                 .then_some((leading_ws..leading_ws + fold_len, "• ".to_string()))
         }
@@ -5543,8 +5973,9 @@ fn build_display_text(
         BlockType::TaskList(_) => {
             let fold_len = task_prefix_len(trimmed);
             let trigger_len = task_syntax_len(trimmed);
+            let replacement = if leading_ws > 0 { "    " } else { "   " };
             (fold_len > 0 && prefix_is_folded(leading_ws, trigger_len, cursor_col))
-                .then_some((leading_ws..leading_ws + fold_len, "   ".to_string()))
+                .then_some((leading_ws..leading_ws + fold_len, replacement.to_string()))
         }
         _ => None,
     };
@@ -5661,9 +6092,20 @@ fn build_table_display_text(
             .into_iter()
             .next()
             .unwrap_or_default();
-        let (folded_cell, cell_d2b, cell_b2d, _) =
+        let (folded_cell_raw, cell_d2b_raw, cell_b2d_raw, _) =
             build_display_text(cell, &cell_decoration, None, None, 0);
-        let cell_content_chars = folded_cell.chars().count();
+        // Trim leading/trailing spaces from cell display text so all columns align left
+        let trimmed_start = folded_cell_raw.len() - folded_cell_raw.trim_start().len();
+        let trimmed_end = folded_cell_raw.len() - folded_cell_raw.trim_end().len();
+        let folded_cell =
+            folded_cell_raw[trimmed_start..folded_cell_raw.len() - trimmed_end].to_string();
+        let cell_d2b: Vec<usize> =
+            cell_d2b_raw[trimmed_start..cell_d2b_raw.len() - trimmed_end].to_vec();
+        let cell_b2d: Vec<usize> = cell_b2d_raw
+            .iter()
+            .map(|&d| d.saturating_sub(trimmed_start))
+            .collect();
+        let cell_content_chars = display_width(&folded_cell);
         let width = balanced_col_widths
             .get(ci)
             .copied()
@@ -6248,21 +6690,25 @@ fn build_text_runs_for_display(
         }
     }
 
-    // Syntax markers on cursor line: show expanded ones dimmed
+    // Syntax markers on cursor line: show expanded ones dimmed.
+    // Skip for Table lines -- their syntax_range covers the entire line for hide/show
+    // purposes only; applying syntax_marker color would dim all cell text.
     if let Some(col) = cursor_col {
-        for sr in &decoration.syntax_ranges {
-            if col >= sr.trigger_range.start && col < sr.trigger_range.end {
-                let start = sr.range.start.min(buf_len);
-                let end = sr.range.end.min(buf_len);
-                let syntax_color = match decoration.block_type {
-                    BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_) => {
-                        theme.list_marker
+        if !matches!(decoration.block_type, BlockType::Table) {
+            for sr in &decoration.syntax_ranges {
+                if col >= sr.trigger_range.start && col < sr.trigger_range.end {
+                    let start = sr.range.start.min(buf_len);
+                    let end = sr.range.end.min(buf_len);
+                    let syntax_color = match decoration.block_type {
+                        BlockType::UnorderedList
+                        | BlockType::OrderedList
+                        | BlockType::TaskList(_) => theme.list_marker,
+                        _ => theme.syntax_marker,
+                    };
+                    for i in start..end {
+                        buf_colors[i] = syntax_color;
+                        buf_use_line_font[i] = false;
                     }
-                    _ => theme.syntax_marker,
-                };
-                for i in start..end {
-                    buf_colors[i] = syntax_color;
-                    buf_use_line_font[i] = false;
                 }
             }
         }
@@ -6302,8 +6748,12 @@ fn build_text_runs_for_display(
                 }
             }
             BlockType::TaskList(_) => {
-                let placeholder_len = "   ".len();
-                for i in 0..placeholder_len.min(disp_len) {
+                let leading_ws = line_content.len()
+                    - line_content.trim_start_matches([' ', '\t']).len();
+                let replacement_len = if leading_ws > 0 { 4 } else { 3 };
+                let start = leading_ws;
+                let end = (start + replacement_len).min(disp_len);
+                for i in start..end {
                     colors[i] = gpui::transparent_black();
                     use_line_font[i] = false;
                 }

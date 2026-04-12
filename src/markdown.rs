@@ -1,6 +1,29 @@
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 
+fn cell_display_width(s: &str) -> usize {
+    s.chars()
+        .map(|ch| {
+            let code = ch as u32;
+            if (0x1100..=0x115F).contains(&code)
+                || (0x2E80..=0x33BF).contains(&code)
+                || (0x3040..=0x9FFF).contains(&code)
+                || (0xA000..=0xA4CF).contains(&code)
+                || (0xAC00..=0xD7AF).contains(&code)
+                || (0xF900..=0xFAFF).contains(&code)
+                || (0xFE30..=0xFE6F).contains(&code)
+                || (0xFF01..=0xFF60).contains(&code)
+                || (0xFFE0..=0xFFE6).contains(&code)
+                || (0x20000..=0x2FA1F).contains(&code)
+            {
+                2
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockType {
     Normal,
@@ -129,19 +152,20 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                 if line < decorations.len() {
                     decorations[line].block_type = BlockType::Heading(lvl);
                     let prefix_len = (lvl as usize) + 1;
-                    let line_len = {
-                        let start = line_starts[line];
-                        let end = if line + 1 < line_starts.len() {
-                            line_starts[line + 1].min(text.len())
-                        } else {
-                            text.len()
-                        };
-                        end - start
-                    };
-                    if prefix_len <= line_len {
+                    let line_content =
+                        get_line_content(text, &line_starts, line, decorations.len());
+                    let line_len = line_content.len();
+                    // Only fold heading syntax when there's a space after the last '#'
+                    let has_space = line_content
+                        .as_bytes()
+                        .get(lvl as usize)
+                        .is_some_and(|&b| b == b' ');
+                    if prefix_len <= line_len && has_space {
+                        // Extend trigger_range by 1 so cursor at first text char still expands
+                        let trigger_end = (prefix_len + 1).min(line_len);
                         decorations[line].syntax_ranges.push(SyntaxRange {
                             range: 0..prefix_len,
-                            trigger_range: 0..prefix_len,
+                            trigger_range: 0..trigger_end,
                         });
                     }
                 }
@@ -671,7 +695,7 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
                     }
                     for (ci, cell) in row.iter().enumerate() {
                         if ci < max_cols {
-                            col_widths[ci] = col_widths[ci].max(cell.len());
+                            col_widths[ci] = col_widths[ci].max(cell_display_width(cell));
                         }
                     }
                 }

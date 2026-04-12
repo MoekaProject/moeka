@@ -60,7 +60,7 @@ impl Theme {
             tab_border: hsla_hex(0x191d23, 1.0),
             accent: hsla_hex(0x61afef, 1.0),
             danger: hsla_hex(0xe06c75, 1.0),
-            line_highlight: hsla_hex(0x2c313a, 1.0),
+            line_highlight: hsla_hex(0x3e4451, 0.5),
             cursor: hsla_hex(0x528bff, 1.0),
             selection: hsla_hex(0x3e4451, 0.6),
             heading: hsla_hex(0xe06c75, 1.0),
@@ -81,7 +81,7 @@ impl Theme {
     }
 }
 
-fn hsla_hex(hex: u32, alpha: f32) -> Hsla {
+pub fn hsla_hex(hex: u32, alpha: f32) -> Hsla {
     let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
     let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
     let b = (hex & 0xFF) as f32 / 255.0;
