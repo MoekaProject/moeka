@@ -416,14 +416,16 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                     let line_content = &text[line_start..line_end_offset];
                     let leading_ws =
                         line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
-                    let col_start = source_range.start.saturating_sub(line_start);
                     let mut col_end = source_range.end.saturating_sub(line_start);
                     // Include trailing space after ] if present
                     if col_end < line_content.len() && line_content.as_bytes()[col_end] == b' ' {
                         col_end += 1;
                     }
+                    decorations[line]
+                        .syntax_ranges
+                        .retain(|sr| sr.range != (leading_ws..leading_ws + 2));
                     decorations[line].syntax_ranges.push(SyntaxRange {
-                        range: col_start..col_end,
+                        range: leading_ws..col_end,
                         trigger_range: leading_ws..col_end,
                     });
                 }

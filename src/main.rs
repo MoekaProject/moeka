@@ -73,13 +73,19 @@ fn main() {
             KeyBinding::new("cmd-alt-t", ToggleTodo, Some("MarkdownEditor")),
             KeyBinding::new("cmd-alt-u", ToggleUnorderedList, Some("MarkdownEditor")),
             KeyBinding::new("cmd-alt-o", ToggleOrderedList, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-alt-c", InsertCodeBlock, Some("MarkdownEditor")),
             KeyBinding::new("cmd-shift-c", InsertCodeBlock, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-alt-h", InsertHorizontalRule, Some("MarkdownEditor")),
             KeyBinding::new("cmd-1", InsertHeading1, Some("MarkdownEditor")),
             KeyBinding::new("cmd-2", InsertHeading2, Some("MarkdownEditor")),
             KeyBinding::new("cmd-3", InsertHeading3, Some("MarkdownEditor")),
             KeyBinding::new("cmd-4", InsertHeading4, Some("MarkdownEditor")),
             KeyBinding::new("cmd-5", InsertHeading5, Some("MarkdownEditor")),
             KeyBinding::new("cmd-6", InsertHeading6, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-=", ZoomIn, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-shift-=", ZoomIn, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-minus", ZoomOut, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-0", ZoomReset, Some("MarkdownEditor")),
             KeyBinding::new("cmd-q", Quit, Some("MarkdownEditor")),
             KeyBinding::new("escape", Escape, Some("MarkdownEditor")),
         ]);
@@ -95,11 +101,8 @@ fn main() {
                 ))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Markdown Editor".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(gpui::Point {
-                        x: px(12.0),
-                        y: px(16.0),
-                    }),
+                    appears_transparent: false,
+                    traffic_light_position: None,
                 }),
                 window_background: WindowBackgroundAppearance::Opaque,
                 ..Default::default()

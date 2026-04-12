@@ -32,14 +32,14 @@ impl Buffer {
     }
 
     pub fn insert(&mut self, offset: usize, text: &str) {
-        let offset = offset.min(self.text.len());
+        let offset = snap_char_start(&self.text, offset.min(self.text.len()));
         self.text.insert_str(offset, text);
         self.rebuild_line_starts();
     }
 
     pub fn delete(&mut self, range: std::ops::Range<usize>) {
-        let start = range.start.min(self.text.len());
-        let end = range.end.min(self.text.len());
+        let start = snap_char_start(&self.text, range.start.min(self.text.len()));
+        let end = snap_char_start(&self.text, range.end.min(self.text.len()));
         if start < end {
             self.text.drain(start..end);
             self.rebuild_line_starts();
@@ -47,10 +47,12 @@ impl Buffer {
     }
 
     pub fn replace(&mut self, range: std::ops::Range<usize>, text: &str) {
-        let start = range.start.min(self.text.len());
-        let end = range.end.min(self.text.len());
-        self.text.replace_range(start..end, text);
-        self.rebuild_line_starts();
+        let start = snap_char_start(&self.text, range.start.min(self.text.len()));
+        let end = snap_char_start(&self.text, range.end.min(self.text.len()));
+        if start <= end {
+            self.text.replace_range(start..end, text);
+            self.rebuild_line_starts();
+        }
     }
 
     pub fn line_count(&self) -> usize {
@@ -120,4 +122,13 @@ impl Buffer {
             }
         }
     }
+}
+
+/// Snap `offset` backward to the nearest UTF-8 char boundary.
+fn snap_char_start(text: &str, offset: usize) -> usize {
+    let mut o = offset.min(text.len());
+    while o > 0 && !text.is_char_boundary(o) {
+        o -= 1;
+    }
+    o
 }

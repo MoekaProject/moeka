@@ -10,9 +10,9 @@ use gpui::{
     ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, Font, FontStyle,
     FontWeight, GlobalElementId, Hsla, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PaintQuad, Pixels, Point, RenderImage, ScrollWheelEvent, ShapedLine,
-    SharedString, StrikethroughStyle, Style, TextAlign, TextRun, TransformationMatrix,
-    UTF16Selection, Window, WrappedLine, div, fill, point, prelude::*, px, quad, relative, size,
-    svg,
+    SharedString, StrikethroughStyle, Style, TextAlign, TextRun, Transformation,
+    TransformationMatrix, UTF16Selection, Window, WrappedLine, div, fill, img, point, prelude::*,
+    px, quad, radians, relative, size, svg,
 };
 use image::Frame;
 use syntect::easy::HighlightLines;
@@ -31,21 +31,32 @@ const PADDING_LEFT: f32 = 40.0;
 const PADDING_TOP: f32 = 20.0;
 const PADDING_RIGHT: f32 = 40.0;
 const PADDING_BOTTOM: f32 = 200.0;
-const MAX_EDITOR_WIDTH: f32 = 700.0;
+const MAX_EDITOR_WIDTH: f32 = 750.0;
 const SIDEBAR_WIDTH: f32 = 280.0;
 const KNOWLEDGE_BASE_ROOT: &str = "/Users/imeoer/code/我的知识库";
 
-const BLINK_INTERVAL: Duration = Duration::from_millis(500);
-const BLINK_PAUSE_DELAY: Duration = Duration::from_millis(500);
+const CURSOR_BLINK_TICK: Duration = Duration::from_millis(16);
+const CURSOR_BLINK_PAUSE_DELAY: Duration = Duration::from_millis(500);
+const CURSOR_MIN_OPACITY: f32 = 0.0;
+const CURSOR_MAX_OPACITY: f32 = 1.0;
+const CURSOR_OPACITY_STEP: f32 = 0.03;
 const CODE_BLOCK_TEXT_LEFT: f32 = 10.0;
 const TODO_CHECKBOX_SIZE_FACTOR: f32 = 1.2;
+const TODO_CHECKBOX_TEXT_GAP: f32 = 24.0;
+const TODO_CHECKBOX_CORNER_RADIUS: f32 = 5.0;
+const TODO_CHECK_ICON_SCALE: f32 = 0.52;
+const TABLE_CELL_TEXT_PADDING_PX: f32 = 5.0;
+const GUTTER_FOLD_ICON_SIZE: f32 = 10.0;
 const HASH_SVG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/hash.svg");
 const COMMENT_SVG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/comment.svg");
 const CHECK_SVG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/check.svg");
+const FOLD_SVG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/fold.svg");
+const OPEN_SVG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/open.svg");
+const LOGO_SVG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/logo.svg");
 const ROOT_SVG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/filetree/all.svg");
-const EXPAND_SVG_PATH: &str = concat!(
+const FILETREE_FOLD_SVG_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/assets/icons/filetree/expand.svg"
+    "/assets/icons/filetree/fold.svg"
 );
 const FOLDER_OPEN_SVG_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -62,6 +73,10 @@ const MARKDOWN_SVG_PATH: &str = concat!(
 const TAB_BAR_HEIGHT: f32 = 38.0;
 const TAB_CLOSE_BUTTON_SIZE: f32 = 18.0;
 const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
+const FORMAT_MENU_WIDTH: f32 = 250.0;
+const UI_SCALE_STEP: f32 = 0.1;
+const MIN_UI_SCALE: f32 = 0.8;
+const MAX_UI_SCALE: f32 = 1.6;
 
 #[derive(Clone)]
 struct EditorSnapshot {
@@ -91,8 +106,34 @@ struct SidebarItem {
 #[derive(Clone)]
 struct ContextMenu {
     position: Point<Pixels>,
-    path: PathBuf,
-    is_dir: bool,
+    kind: ContextMenuKind,
+}
+
+#[derive(Clone)]
+enum ContextMenuKind {
+    Sidebar { path: PathBuf, is_dir: bool },
+    Format,
+}
+
+#[derive(Clone, Copy)]
+enum FormatMenuAction {
+    Cut,
+    Copy,
+    Paste,
+    Paragraph,
+    Heading(u8),
+    Bold,
+    Italic,
+    Strikethrough,
+    InlineCode,
+    CodeBlock,
+    HorizontalRule,
+    Quote,
+    UnorderedList,
+    OrderedList,
+    Todo,
+    Link,
+    Image,
 }
 
 #[derive(Clone)]
@@ -139,7 +180,8 @@ pub struct EditorView {
     last_viewport_height: f32,
     last_viewport_width: f32,
     // Cursor blink state
-    blink_visible: bool,
+    cursor_opacity: f32,
+    cursor_opacity_direction: f32,
     blink_epoch: usize,
     // IME preedit state
     marked_range: Option<Range<usize>>,
@@ -169,6 +211,22 @@ pub struct EditorView {
     context_menu: Option<ContextMenu>,
     sidebar_edit: Option<SidebarEditMode>,
     file_clipboard: Option<FileClipboard>,
+    ui_scale: f32,
+    /// Lines (section starters) that are currently folded.
+    folded_sections: HashSet<usize>,
+    /// Image lines whose rendered preview is hidden.
+    folded_image_previews: HashSet<usize>,
+    /// Gutter fold icon hit areas: (bounds, line_idx, is_image_fold)
+    gutter_fold_areas: Vec<(Bounds<Pixels>, usize, bool)>,
+    /// Image URL-edit icon hit areas: (bounds, line_idx)
+    image_edit_areas: Vec<(Bounds<Pixels>, usize)>,
+    /// Which image-edit icon line is currently hovered (if any).
+    hovering_image_edit_line: Option<usize>,
+    /// Which gutter fold-icon line is currently hovered (if any).
+    hovering_fold_line: Option<usize>,
+    /// Custom sidebar width set by drag-resize (in logical pixels, pre-scaled).
+    sidebar_custom_width: Option<f32>,
+    sidebar_resizing: bool,
 }
 
 /// Display info for a single buffer line.
@@ -226,7 +284,8 @@ impl EditorView {
             line_display_info: Vec::new(),
             last_viewport_height: 600.0,
             last_viewport_width: MAX_EDITOR_WIDTH,
-            blink_visible: true,
+            cursor_opacity: CURSOR_MAX_OPACITY,
+            cursor_opacity_direction: -1.0,
             blink_epoch: 0,
             marked_range: None,
             checkbox_areas: Vec::new(),
@@ -257,6 +316,15 @@ impl EditorView {
             context_menu: None,
             sidebar_edit: None,
             file_clipboard: None,
+            ui_scale: 1.0,
+            folded_sections: HashSet::new(),
+            folded_image_previews: HashSet::new(),
+            gutter_fold_areas: Vec::new(),
+            image_edit_areas: Vec::new(),
+            hovering_image_edit_line: None,
+            hovering_fold_line: None,
+            sidebar_custom_width: None,
+            sidebar_resizing: false,
         };
         this.start_blinking(cx);
 
@@ -276,18 +344,71 @@ impl EditorView {
         self.blink_epoch
     }
 
+    fn scaled(&self, value: f32) -> f32 {
+        value * self.ui_scale
+    }
+
+    fn base_font_size(&self) -> f32 {
+        self.scaled(BASE_FONT_SIZE)
+    }
+
+    fn padding_left(&self) -> f32 {
+        self.scaled(PADDING_LEFT)
+    }
+
+    fn padding_top(&self) -> f32 {
+        self.scaled(PADDING_TOP)
+    }
+
+    fn padding_right(&self) -> f32 {
+        self.scaled(PADDING_RIGHT)
+    }
+
+    fn padding_bottom(&self) -> f32 {
+        self.scaled(PADDING_BOTTOM)
+    }
+
+    fn max_editor_width(&self) -> f32 {
+        self.scaled(MAX_EDITOR_WIDTH)
+    }
+
+    fn sidebar_width(&self) -> f32 {
+        self.sidebar_custom_width
+            .unwrap_or_else(|| self.scaled(SIDEBAR_WIDTH))
+    }
+
+    fn tab_bar_height(&self) -> f32 {
+        self.scaled(TAB_BAR_HEIGHT)
+    }
+
+    fn tab_close_button_size(&self) -> f32 {
+        self.scaled(TAB_CLOSE_BUTTON_SIZE)
+    }
+
+    fn sidebar_row_height(&self) -> f32 {
+        self.scaled(SIDEBAR_ROW_HEIGHT)
+    }
+
     fn start_blinking(&mut self, cx: &mut Context<Self>) {
-        self.blink_visible = true;
+        self.cursor_opacity = CURSOR_MAX_OPACITY;
+        self.cursor_opacity_direction = -1.0;
         let epoch = self.next_blink_epoch();
         self.schedule_blink(epoch, cx);
     }
 
     fn schedule_blink(&self, epoch: usize, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(BLINK_INTERVAL).await;
+            cx.background_executor().timer(CURSOR_BLINK_TICK).await;
             this.update(cx, |this, cx| {
                 if this.blink_epoch == epoch {
-                    this.blink_visible = !this.blink_visible;
+                    this.cursor_opacity += CURSOR_OPACITY_STEP * this.cursor_opacity_direction;
+                    if this.cursor_opacity <= CURSOR_MIN_OPACITY {
+                        this.cursor_opacity = CURSOR_MIN_OPACITY;
+                        this.cursor_opacity_direction = 1.0;
+                    } else if this.cursor_opacity >= CURSOR_MAX_OPACITY {
+                        this.cursor_opacity = CURSOR_MAX_OPACITY;
+                        this.cursor_opacity_direction = -1.0;
+                    }
                     cx.notify();
                     this.schedule_blink(epoch, cx);
                 }
@@ -298,13 +419,16 @@ impl EditorView {
     }
 
     fn pause_blinking(&mut self, cx: &mut Context<Self>) {
-        self.blink_visible = true;
+        self.cursor_opacity = CURSOR_MAX_OPACITY;
+        self.cursor_opacity_direction = -1.0;
         let epoch = self.next_blink_epoch();
         self.persist_active_tab_state();
         cx.notify();
         // Resume blinking after a delay
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(BLINK_PAUSE_DELAY).await;
+            cx.background_executor()
+                .timer(CURSOR_BLINK_PAUSE_DELAY)
+                .await;
             this.update(cx, |this, cx| {
                 if this.blink_epoch == epoch {
                     this.schedule_blink(epoch, cx);
@@ -548,7 +672,7 @@ impl EditorView {
 
     // ── Context menu & file operations ─────────────────────────────
 
-    fn open_context_menu(
+    fn open_sidebar_context_menu(
         &mut self,
         path: PathBuf,
         is_dir: bool,
@@ -557,8 +681,16 @@ impl EditorView {
     ) {
         self.context_menu = Some(ContextMenu {
             position,
-            path,
-            is_dir,
+            kind: ContextMenuKind::Sidebar { path, is_dir },
+        });
+        self.sidebar_edit = None;
+        cx.notify();
+    }
+
+    fn open_format_context_menu(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.context_menu = Some(ContextMenu {
+            position,
+            kind: ContextMenuKind::Format,
         });
         self.sidebar_edit = None;
         cx.notify();
@@ -763,6 +895,328 @@ impl EditorView {
             .spawn();
     }
 
+    fn copy_selection_to_clipboard(&self, cx: &mut Context<Self>) {
+        if self.cursor.has_selection() {
+            let range = self.cursor.selection_range();
+            let text = self.buffer.text()[range].to_string();
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn cut_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        if self.cursor.has_selection() {
+            self.checkpoint();
+            let range = self.cursor.selection_range();
+            let text = self.buffer.text()[range.clone()].to_string();
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.buffer.delete(range.clone());
+            self.cursor.move_to(range.start, &self.buffer);
+            self.reparse();
+            self.pause_blinking(cx);
+        }
+    }
+
+    fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.checkpoint();
+            self.cursor.insert(&mut self.buffer, &text);
+            self.reparse();
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+        }
+    }
+
+    fn set_heading_level(&mut self, level: u8) {
+        let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
+        let line_start = self.buffer.line_start(line);
+        let line_end = self.buffer.line_end(line);
+        let line_text = self.buffer.line_content(line).to_string();
+        let stripped = line_text.trim_start_matches('#');
+        let existing_hashes = line_text.len() - stripped.len();
+        let content = if existing_hashes > 0 {
+            stripped.strip_prefix(' ').unwrap_or(stripped)
+        } else {
+            line_text.as_str()
+        };
+        let replacement = if level == 0 {
+            content.to_string()
+        } else {
+            format!("{} {}", "#".repeat(level as usize), content)
+        };
+        self.buffer.replace(line_start..line_end, &replacement);
+        let new_cursor = (line_start + replacement.len()).min(self.buffer.len());
+        self.cursor.move_to(new_cursor, &self.buffer);
+        self.reparse();
+        self.scroll_to_cursor();
+    }
+
+    fn toggle_horizontal_rule_at_cursor(&mut self) {
+        let line = self.cursor_line();
+        let line_start = self.buffer.line_start(line);
+        let line_end = self.buffer.line_end(line);
+        let line_text = self.buffer.line_content(line).to_string();
+        let trimmed = line_text.trim();
+        let replacement = if matches!(trimmed, "---" | "***" | "___") {
+            String::new()
+        } else {
+            "---".to_string()
+        };
+        self.buffer.replace(line_start..line_end, &replacement);
+        self.cursor.move_to(
+            (line_start + replacement.len()).min(self.buffer.len()),
+            &self.buffer,
+        );
+        self.reparse();
+        self.scroll_to_cursor();
+    }
+
+    fn set_ui_scale(&mut self, new_scale: f32, cx: &mut Context<Self>) {
+        let clamped = new_scale.clamp(MIN_UI_SCALE, MAX_UI_SCALE);
+        if (clamped - self.ui_scale).abs() < f32::EPSILON {
+            return;
+        }
+        // Scale custom sidebar width proportionally
+        if let Some(ref mut w) = self.sidebar_custom_width {
+            *w = *w * (clamped / self.ui_scale);
+        }
+        self.ui_scale = clamped;
+        self.clamp_scroll();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+        cx.notify();
+    }
+
+    // ── Fold/collapse logic ────────────────────────────────────────
+
+    /// Returns the range of buffer lines hidden when `line` is folded, or
+    /// `None` if the line does not start a foldable section.
+    fn fold_range_for_line(&self, line: usize) -> Option<Range<usize>> {
+        let decoration = self.decorations.get(line)?;
+        let line_count = self.buffer.line_count();
+        match &decoration.block_type {
+            BlockType::Heading(level) => {
+                let lv = *level;
+                let start = line + 1;
+                let end = (start..line_count)
+                    .find(|&l| {
+                        matches!(
+                            self.decorations.get(l).map(|d| &d.block_type),
+                            Some(BlockType::Heading(h)) if *h <= lv
+                        )
+                    })
+                    .unwrap_or(line_count);
+                if end > start { Some(start..end) } else { None }
+            }
+            BlockType::CodeBlockFence => {
+                // Only foldable on the opening fence.
+                if line > 0
+                    && matches!(
+                        self.decorations.get(line - 1).map(|d| &d.block_type),
+                        Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
+                    )
+                {
+                    return None; // This is the closing fence.
+                }
+                let start = line + 1;
+                let end = (start..line_count)
+                    .find(|&l| {
+                        matches!(
+                            self.decorations.get(l).map(|d| &d.block_type),
+                            Some(BlockType::CodeBlockFence)
+                        )
+                    })
+                    .map(|l| l + 1)
+                    .unwrap_or(line_count);
+                if end > start { Some(start..end) } else { None }
+            }
+            BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_) => {
+                let content = self.buffer.line_content(line);
+                let indent = content.len() - content.trim_start_matches([' ', '\t']).len();
+                if line + 1 >= line_count {
+                    return None;
+                }
+                let next_content = self.buffer.line_content(line + 1);
+                let next_indent =
+                    next_content.len() - next_content.trim_start_matches([' ', '\t']).len();
+                if next_indent <= indent {
+                    return None;
+                }
+                let start = line + 1;
+                let end = (start..line_count)
+                    .find(|&l| {
+                        let lc = self.buffer.line_content(l);
+                        let li = lc.len() - lc.trim_start_matches([' ', '\t']).len();
+                        !lc.trim().is_empty() && li <= indent
+                    })
+                    .unwrap_or(line_count);
+                if end > start { Some(start..end) } else { None }
+            }
+            _ => None,
+        }
+    }
+
+    fn toggle_fold(&mut self, line: usize, cx: &mut Context<Self>) {
+        if self.folded_sections.contains(&line) {
+            self.folded_sections.remove(&line);
+        } else if let Some(range) = self.fold_range_for_line(line) {
+            self.folded_sections.insert(line);
+            // Move cursor out of the folded range.
+            let cursor_line = self.cursor_line();
+            if range.contains(&cursor_line) {
+                let new_offset = self.buffer.line_end(line);
+                self.cursor.move_to(new_offset, &self.buffer);
+            }
+        }
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    fn toggle_image_fold(&mut self, line: usize, cx: &mut Context<Self>) {
+        if !self.folded_image_previews.remove(&line) {
+            self.folded_image_previews.insert(line);
+        }
+        cx.notify();
+    }
+
+    fn pick_image_for_line(&self, line: usize, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let maybe_path = cx
+                .background_executor()
+                .spawn(async move { pick_image_file_blocking() })
+                .await;
+            if let Some(path) = maybe_path {
+                this.update(cx, |editor, cx| {
+                    editor.replace_image_url_on_line(line, &path, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn pick_workspace_folder(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let maybe_path = cx
+                .background_executor()
+                .spawn(async move { pick_folder_blocking() })
+                .await;
+            if let Some(path) = maybe_path {
+                this.update(cx, |editor, cx| {
+                    editor.sidebar_root = path.clone();
+                    editor.expanded_dirs.clear();
+                    editor.expanded_dirs.insert(path.clone());
+                    editor.sidebar_error = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn replace_image_url_on_line(
+        &mut self,
+        line: usize,
+        new_path: &PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let line_content = self.buffer.line_content(line).to_string();
+        let line_start = self.buffer.line_start(line);
+        if let Some(bracket_pos) = line_content.find("](") {
+            let url_start = bracket_pos + 2;
+            if let Some(close_pos) = line_content[url_start..].find(')') {
+                let url_end = url_start + close_pos;
+                let old_url = line_content[url_start..url_end].to_string();
+                let new_url = new_path.to_string_lossy().to_string();
+                self.checkpoint();
+                self.buffer
+                    .replace(line_start + url_start..line_start + url_end, &new_url);
+                self.image_cache.remove(&old_url);
+                self.reparse();
+                self.pause_blinking(cx);
+            }
+        }
+    }
+
+    fn execute_format_menu_action(&mut self, action: FormatMenuAction, cx: &mut Context<Self>) {
+        match action {
+            FormatMenuAction::Cut => self.cut_selection_to_clipboard(cx),
+            FormatMenuAction::Copy => self.copy_selection_to_clipboard(cx),
+            FormatMenuAction::Paste => self.paste_from_clipboard(cx),
+            FormatMenuAction::Paragraph => {
+                self.checkpoint();
+                self.set_heading_level(0);
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Heading(level) => {
+                self.checkpoint();
+                self.set_heading_level(level);
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Bold => {
+                self.checkpoint();
+                self.apply_wrap("**", "**");
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Italic => {
+                self.checkpoint();
+                self.apply_wrap("*", "*");
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Strikethrough => {
+                self.checkpoint();
+                self.apply_wrap("~~", "~~");
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::InlineCode => {
+                self.checkpoint();
+                self.apply_wrap("`", "`");
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::CodeBlock => {
+                self.checkpoint();
+                self.apply_wrap("```\n", "\n```");
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::HorizontalRule => {
+                self.checkpoint();
+                self.toggle_horizontal_rule_at_cursor();
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Quote => {
+                self.checkpoint();
+                self.toggle_current_line_prefix("> ");
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::UnorderedList => {
+                self.checkpoint();
+                self.toggle_current_line_prefix("- ");
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::OrderedList => {
+                self.checkpoint();
+                self.toggle_current_line_prefix("1. ");
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Todo => {
+                self.checkpoint();
+                self.toggle_current_line_prefix("- [ ] ");
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Link => {
+                self.checkpoint();
+                self.insert_link_or_image("[", "](https://)", "title");
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Image => {
+                self.checkpoint();
+                self.insert_link_or_image("![", "](image.png)", "alt");
+                self.pause_blinking(cx);
+            }
+        }
+        self.close_context_menu(cx);
+    }
+
     // ── Sidebar input field key handling ───────────────────────────
 
     fn sidebar_edit_append(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -817,6 +1271,42 @@ impl EditorView {
             .into_any_element()
     }
 
+    fn render_format_context_menu_item(
+        &self,
+        label: &str,
+        shortcut: Option<&str>,
+        cx: &mut Context<Self>,
+        handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        div()
+            .w_full()
+            .h(px(self.scaled(28.0)))
+            .px(px(self.scaled(12.0)))
+            .flex()
+            .items_center()
+            .justify_between()
+            .text_size(px(self.scaled(13.0)))
+            .text_color(self.theme.foreground)
+            .hover(|s| s.bg(self.theme.panel_hover))
+            .cursor(CursorStyle::Arrow)
+            .child(label.to_string())
+            .when_some(shortcut, |this, shortcut| {
+                this.child(
+                    div()
+                        .text_size(px(self.scaled(11.5)))
+                        .text_color(self.theme.panel_muted)
+                        .child(shortcut.to_string()),
+                )
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, window, cx| {
+                    handler(this, window, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
     fn render_context_menu_separator(&self) -> AnyElement {
         div()
             .w_full()
@@ -826,15 +1316,12 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn render_context_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(menu) = &self.context_menu else {
-            return div().into_any_element();
-        };
-        let is_dir = menu.is_dir;
-        let path = menu.path.clone();
-        let pos_x: f32 = menu.position.x.into();
-        let pos_y: f32 = menu.position.y.into();
-
+    fn render_sidebar_context_menu(
+        &self,
+        path: PathBuf,
+        is_dir: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let has_clipboard = self.file_clipboard.is_some();
         let parent_dir = if is_dir {
             path.clone()
@@ -846,7 +1333,6 @@ impl EditorView {
 
         let mut items: Vec<AnyElement> = Vec::new();
 
-        // New File
         {
             let pd = parent_dir.clone();
             items.push(
@@ -855,7 +1341,6 @@ impl EditorView {
                 }),
             );
         }
-        // New Folder
         {
             let pd = parent_dir.clone();
             items.push(self.render_context_menu_item(
@@ -868,7 +1353,6 @@ impl EditorView {
             ));
         }
         items.push(self.render_context_menu_separator());
-        // Rename
         {
             let p = path.clone();
             items.push(
@@ -877,7 +1361,6 @@ impl EditorView {
                 }),
             );
         }
-        // Delete
         {
             let p = path.clone();
             items.push(
@@ -887,7 +1370,6 @@ impl EditorView {
             );
         }
         items.push(self.render_context_menu_separator());
-        // Cut
         {
             let p = path.clone();
             items.push(
@@ -896,7 +1378,6 @@ impl EditorView {
                 }),
             );
         }
-        // Copy
         {
             let p = path.clone();
             items.push(
@@ -905,7 +1386,6 @@ impl EditorView {
                 }),
             );
         }
-        // Paste (only if clipboard has content and target is dir or has parent)
         if has_clipboard {
             let pd = parent_dir.clone();
             items.push(
@@ -915,7 +1395,6 @@ impl EditorView {
             );
         }
         items.push(self.render_context_menu_separator());
-        // Reveal in Finder
         {
             let p = path.clone();
             items.push(self.render_context_menu_item(
@@ -928,16 +1407,135 @@ impl EditorView {
             ));
         }
 
+        items
+    }
+
+    fn render_format_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut items: Vec<AnyElement> = Vec::new();
+
+        let menu_items = [
+            ("Cut", Some("Cmd+X"), Some(FormatMenuAction::Cut)),
+            ("Copy", Some("Cmd+C"), Some(FormatMenuAction::Copy)),
+            ("Paste", Some("Cmd+V"), Some(FormatMenuAction::Paste)),
+            ("", None, None),
+            ("Paragraph", None, Some(FormatMenuAction::Paragraph)),
+            (
+                "Heading 1",
+                Some("Cmd+1"),
+                Some(FormatMenuAction::Heading(1)),
+            ),
+            (
+                "Heading 2",
+                Some("Cmd+2"),
+                Some(FormatMenuAction::Heading(2)),
+            ),
+            (
+                "Heading 3",
+                Some("Cmd+3"),
+                Some(FormatMenuAction::Heading(3)),
+            ),
+            (
+                "Heading 4",
+                Some("Cmd+4"),
+                Some(FormatMenuAction::Heading(4)),
+            ),
+            (
+                "Heading 5",
+                Some("Cmd+5"),
+                Some(FormatMenuAction::Heading(5)),
+            ),
+            (
+                "Heading 6",
+                Some("Cmd+6"),
+                Some(FormatMenuAction::Heading(6)),
+            ),
+            ("", None, None),
+            ("Bold", Some("Cmd+B"), Some(FormatMenuAction::Bold)),
+            ("Italic", Some("Cmd+I"), Some(FormatMenuAction::Italic)),
+            (
+                "Strikethrough",
+                Some("Cmd+Shift+S"),
+                Some(FormatMenuAction::Strikethrough),
+            ),
+            (
+                "Inline Code",
+                Some("Cmd+E"),
+                Some(FormatMenuAction::InlineCode),
+            ),
+            ("", None, None),
+            (
+                "Code Block",
+                Some("Cmd+Alt+C"),
+                Some(FormatMenuAction::CodeBlock),
+            ),
+            (
+                "Horizontal Rule",
+                Some("Cmd+Alt+H"),
+                Some(FormatMenuAction::HorizontalRule),
+            ),
+            ("Quote", Some("Cmd+Alt+Q"), Some(FormatMenuAction::Quote)),
+            (
+                "Unordered List",
+                Some("Cmd+Alt+U"),
+                Some(FormatMenuAction::UnorderedList),
+            ),
+            (
+                "Ordered List",
+                Some("Cmd+Alt+O"),
+                Some(FormatMenuAction::OrderedList),
+            ),
+            ("Todo", Some("Cmd+Alt+T"), Some(FormatMenuAction::Todo)),
+            ("", None, None),
+            ("Link", Some("Cmd+K"), Some(FormatMenuAction::Link)),
+            ("Image", Some("Cmd+Shift+I"), Some(FormatMenuAction::Image)),
+        ];
+
+        for (label, shortcut, action) in menu_items {
+            if let Some(action) = action {
+                items.push(self.render_format_context_menu_item(
+                    label,
+                    shortcut,
+                    cx,
+                    move |this, _, cx| {
+                        this.execute_format_menu_action(action, cx);
+                    },
+                ));
+            } else {
+                items.push(self.render_context_menu_separator());
+            }
+        }
+
+        items
+    }
+
+    fn render_context_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(menu) = &self.context_menu else {
+            return div().into_any_element();
+        };
+        let pos_x: f32 = menu.position.x.into();
+        let pos_y: f32 = menu.position.y.into();
+
+        let (items, width) = match &menu.kind {
+            ContextMenuKind::Sidebar { path, is_dir } => (
+                self.render_sidebar_context_menu(path.clone(), *is_dir, cx),
+                self.scaled(180.0),
+            ),
+            ContextMenuKind::Format => (
+                self.render_format_context_menu(cx),
+                self.scaled(FORMAT_MENU_WIDTH),
+            ),
+        };
+
         div()
             .absolute()
             .left(px(pos_x))
             .top(px(pos_y))
-            .w(px(180.0))
-            .py(px(4.0))
+            .w(px(width))
+            .py(px(self.scaled(4.0)))
             .bg(self.theme.panel_surface)
             .border_1()
             .border_color(self.theme.panel_border)
-            .rounded(px(6.0))
+            .rounded(px(self.scaled(6.0)))
             .shadow_md()
             .children(items)
             .cursor(CursorStyle::Arrow)
@@ -958,12 +1556,12 @@ impl EditorView {
         depth: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let left_padding = 12.0 + depth as f32 * 14.0 + 10.0 + 6.0 + 13.0 + 6.0; // mirror item layout
+        let left_padding = self.scaled(12.0 + depth as f32 * 14.0 + 10.0 + 6.0 + 13.0 + 6.0); // mirror item layout
         div()
             .w_full()
-            .h(px(SIDEBAR_ROW_HEIGHT))
-            .pl(px(8.0))
-            .pr(px(10.0))
+            .h(px(self.sidebar_row_height()))
+            .pl(px(self.scaled(8.0)))
+            .pr(px(self.scaled(10.0)))
             .flex()
             .items_center()
             .bg(self.theme.panel_selected)
@@ -971,7 +1569,7 @@ impl EditorView {
                 div()
                     .flex_1()
                     .pl(px(left_padding))
-                    .pr(px(2.0))
+                    .pr(px(self.scaled(2.0)))
                     .h_full()
                     .flex()
                     .items_center()
@@ -1030,7 +1628,7 @@ impl EditorView {
             .is_some_and(|current| current == &item.path);
         let path = item.path.clone();
         let is_dir = item.is_dir;
-        let left_padding = 12.0 + item.depth as f32 * 14.0;
+        let left_padding = self.scaled(12.0 + item.depth as f32 * 14.0);
         let row_bg = if is_selected {
             self.theme.panel_selected
         } else {
@@ -1038,8 +1636,6 @@ impl EditorView {
         };
         let icon_color = if is_selected {
             self.theme.tab_active_text
-        } else if item.is_dir {
-            self.theme.accent
         } else {
             self.theme.panel_muted
         };
@@ -1057,9 +1653,7 @@ impl EditorView {
         div()
             .id(SharedString::from(format!("sidebar-{}", path.display())))
             .w_full()
-            .h(px(SIDEBAR_ROW_HEIGHT))
-            .pl(px(8.0))
-            .pr(px(10.0))
+            .h(px(self.scaled(26.0)))
             .flex()
             .items_center()
             .bg(row_bg)
@@ -1069,20 +1663,32 @@ impl EditorView {
                     .w_full()
                     .h_full()
                     .pl(px(left_padding))
-                    .pr(px(2.0))
+                    .pr(px(self.scaled(8.0)))
                     .flex()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(self.scaled(4.0)))
                     .child(
+                        // Chevron arrow — fold.svg (right-pointing), rotated 90° when expanded
                         div()
-                            .w(px(10.0))
+                            .w(px(self.scaled(16.0)))
+                            .h(px(self.scaled(18.0)))
+                            .flex()
                             .flex_none()
-                            .text_size(px(11.0))
-                            .text_color(self.theme.panel_muted)
+                            .items_center()
+                            .justify_center()
                             .child(if item.is_dir {
-                                if item.is_expanded { "⌄" } else { "›" }
+                                svg()
+                                    .path(FILETREE_FOLD_SVG_PATH)
+                                    .size(px(self.scaled(10.0)))
+                                    .text_color(self.theme.panel_muted)
+                                    .when(item.is_expanded, |s| {
+                                        s.with_transformation(Transformation::rotate(radians(
+                                            std::f32::consts::FRAC_PI_2,
+                                        )))
+                                    })
+                                    .into_any_element()
                             } else {
-                                ""
+                                div().w(px(self.scaled(10.0))).into_any_element()
                             }),
                     )
                     .child(
@@ -1092,22 +1698,25 @@ impl EditorView {
                             } else {
                                 MARKDOWN_SVG_PATH
                             })
-                            .size(px(13.0))
+                            .size(px(self.scaled(14.0)))
                             .text_color(icon_color),
                     )
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(13.0))
+                            .min_w(px(0.0))
+                            .text_size(px(self.scaled(13.0)))
                             .text_color(label_color)
+                            .truncate()
                             .child(item.name),
                     )
                     .when(is_active_file, |this| {
                         this.child(
                             div()
-                                .w(px(6.0))
-                                .h(px(6.0))
+                                .w(px(self.scaled(5.0)))
+                                .h(px(self.scaled(5.0)))
                                 .rounded_full()
+                                .flex_none()
                                 .bg(self.theme.accent),
                         )
                     }),
@@ -1125,73 +1734,129 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.open_context_menu(path.clone(), is_dir, event.position, cx);
+                    this.open_sidebar_context_menu(path.clone(), is_dir, event.position, cx);
                 }),
             )
             .into_any_element()
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut rows: Vec<AnyElement> = Vec::new();
-        rows.push(
+        let has_root = self.sidebar_root.exists() && self.sidebar_error.is_none();
+        let mut content: Vec<AnyElement> = Vec::new();
+
+        // ── 30px top spacer ────────────────────────────────────────────────
+        content.push(
             div()
                 .w_full()
-                .px(px(14.0))
-                .pt(px(14.0))
-                .pb(px(12.0))
-                .border_b_1()
-                .border_color(self.theme.tab_border)
-                .bg(self.theme.panel_header_bg)
+                .h(px(self.scaled(30.0)))
+                .flex_none()
+                .into_any_element(),
+        );
+
+        // ── Logo ───────────────────────────────────────────────────────────
+        content.push(
+            div()
+                .w_full()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .py(px(self.scaled(12.0)))
                 .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    svg()
-                                        .path(ROOT_SVG_PATH)
-                                        .size(px(14.0))
-                                        .text_color(self.theme.panel_muted),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(self.theme.panel_muted)
-                                        .child("EXPLORER"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(self.theme.tab_active_text)
-                                .child(self.sidebar_root_name().to_uppercase()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(self.theme.panel_muted)
-                                .child(self.sidebar_root.display().to_string()),
-                        ),
+                    img(PathBuf::from(LOGO_SVG_PATH))
+                        .w(px(self.scaled(55.0)))
+                        .h(px(self.scaled(55.0))),
                 )
                 .into_any_element(),
         );
 
+        // ── Workspace header row ────────────────────────────────────────────
+        let root_name = self.sidebar_root_name().to_uppercase();
+        let header = div()
+            .w_full()
+            .h(px(self.scaled(28.0)))
+            .px(px(self.scaled(4.0)))
+            .pl(px(self.scaled(14.0)))
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(6.0)))
+            .flex_none()
+            .hover(|s| s.bg(self.theme.panel_hover))
+            .child(
+                svg()
+                    .path(ROOT_SVG_PATH)
+                    .size(px(self.scaled(14.0)))
+                    .text_color(self.theme.panel_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(self.scaled(12.0)))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(self.theme.tab_active_text)
+                    .overflow_hidden()
+                    .child(root_name),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.pick_workspace_folder(cx);
+                }),
+            )
+            .into_any_element();
+        content.push(header);
+
         if let Some(error) = &self.sidebar_error {
-            rows.push(
+            // Error state
+            content.push(
                 div()
                     .w_full()
-                    .px(px(14.0))
-                    .py(px(12.0))
-                    .text_size(px(12.0))
+                    .px(px(self.scaled(14.0)))
+                    .py(px(self.scaled(12.0)))
+                    .text_size(px(self.scaled(12.0)))
                     .text_color(self.theme.danger)
                     .child(error.clone())
+                    .into_any_element(),
+            );
+        } else if !has_root {
+            // Empty / no-workspace state: hint + open-directory button
+            content.push(
+                div()
+                    .w_full()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(self.scaled(12.0)))
+                    .px(px(self.scaled(16.0)))
+                    .child(
+                        div()
+                            .text_size(px(self.scaled(12.0)))
+                            .text_color(self.theme.panel_muted)
+                            .text_align(gpui::TextAlign::Center)
+                            .child("单击或右键\n打开目录"),
+                    )
+                    .child(
+                        div()
+                            .px(px(self.scaled(16.0)))
+                            .py(px(self.scaled(5.0)))
+                            .rounded_full()
+                            .border(px(1.5))
+                            .border_dashed()
+                            .border_color(self.theme.panel_border)
+                            .text_size(px(self.scaled(12.0)))
+                            .text_color(self.theme.panel_muted)
+                            .hover(|s| s.bg(self.theme.panel_hover))
+                            .cursor(CursorStyle::Arrow)
+                            .child("打开目录")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.pick_workspace_folder(cx);
+                                }),
+                            ),
+                    )
                     .into_any_element(),
             );
         } else {
@@ -1215,38 +1880,43 @@ impl EditorView {
             let items = self.sidebar_items();
             let mut injected = false;
             for item in items {
-                rows.push(self.render_sidebar_item(item.clone(), cx));
-                // Inject create row directly after its parent directory
+                content.push(self.render_sidebar_item(item.clone(), cx));
                 if let Some(ref parent) = create_parent {
                     if !injected && item.is_dir && &item.path == parent {
                         let depth = create_depth.unwrap_or(1);
                         let value = create_value.unwrap_or("");
-                        rows.push(self.render_sidebar_edit_row(value, depth, cx));
+                        content.push(self.render_sidebar_edit_row(value, depth, cx));
                         injected = true;
                     }
                 }
             }
-            // If parent not seen (e.g. root level), append at end
             if !injected {
                 if let Some(depth) = create_depth {
                     let value = create_value.unwrap_or("");
-                    rows.push(self.render_sidebar_edit_row(value, depth, cx));
+                    content.push(self.render_sidebar_edit_row(value, depth, cx));
                 }
             }
         }
 
+        // ── 30px bottom spacer ─────────────────────────────────────────────
+        content.push(
+            div()
+                .w_full()
+                .h(px(self.scaled(30.0)))
+                .flex_none()
+                .into_any_element(),
+        );
+
         div()
             .id("sidebar")
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(self.sidebar_width()))
             .h_full()
             .flex_none()
             .flex()
             .flex_col()
             .bg(self.theme.panel_bg)
-            .border_r_1()
-            .border_color(self.theme.panel_border)
             .overflow_y_scroll()
-            .children(rows)
+            .children(content)
             .into_any_element()
     }
 
@@ -1262,39 +1932,45 @@ impl EditorView {
 
         div()
             .id(SharedString::from(format!("tab-{}", tab.id)))
-            .h(px(TAB_BAR_HEIGHT - 6.0))
-            .min_w(px(128.0))
-            .max_w(px(240.0))
-            .px(px(12.0))
+            .h(px(self.tab_bar_height()))
+            .min_w(px(self.scaled(60.0)))
+            .max_w(px(self.scaled(180.0)))
+            .pl(px(self.scaled(12.0)))
+            .pr(px(self.scaled(8.0)))
             .flex()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(self.scaled(6.0)))
+            .flex_none()
             .bg(if is_active {
                 self.theme.tab_active_bg
             } else {
-                self.theme.tab_bg
+                gpui::transparent_black()
             })
-            .border_1()
-            .border_color(if is_active {
-                self.theme.panel_active
-            } else {
-                self.theme.tab_border
-            })
-            .hover(|style| style.bg(self.theme.tab_hover))
+            .border_r_1()
+            .border_color(self.theme.tab_border)
+            .hover(|style| style.bg(self.theme.tab_active_bg))
             .child(
                 svg()
                     .path(MARKDOWN_SVG_PATH)
-                    .size(px(12.0))
+                    .size(px(self.scaled(14.0)))
                     .text_color(if is_active {
-                        self.theme.tab_active_text
+                        self.theme.panel_muted
                     } else {
                         self.theme.panel_muted
-                    }),
+                    })
+                    .opacity(if is_active { 0.6 } else { 0.4 }),
             )
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(12.5))
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .text_size(px(self.scaled(12.0)))
+                    .font_weight(if is_active {
+                        FontWeight::MEDIUM
+                    } else {
+                        FontWeight::NORMAL
+                    })
                     .text_color(if is_active {
                         self.theme.tab_active_text
                     } else {
@@ -1304,20 +1980,18 @@ impl EditorView {
             )
             .child(
                 div()
-                    .w(px(TAB_CLOSE_BUTTON_SIZE))
-                    .h(px(TAB_CLOSE_BUTTON_SIZE))
-                    .rounded(px(4.0))
+                    .w(px(self.scaled(16.0)))
+                    .h(px(self.scaled(16.0)))
+                    .rounded_full()
                     .flex()
+                    .flex_none()
                     .justify_center()
                     .items_center()
-                    .text_size(px(11.0))
-                    .text_color(self.theme.panel_muted)
-                    .hover(|style| {
-                        style
-                            .bg(self.theme.panel_hover)
-                            .text_color(self.theme.tab_active_text)
-                    })
-                    .child("x")
+                    .text_size(px(self.scaled(10.0)))
+                    .text_color(self.theme.foreground)
+                    .opacity(if is_active || tab.is_dirty { 1.0 } else { 0.0 })
+                    .hover(|style| style.bg(self.theme.panel_hover))
+                    .child(if tab.is_dirty { "●" } else { "✕" })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
@@ -1341,22 +2015,18 @@ impl EditorView {
             .map(|tab| self.render_tab(tab, cx))
             .collect();
 
+        // New-tab button
         tab_items.push(
             div()
-                .h(px(TAB_BAR_HEIGHT - 6.0))
-                .w(px(TAB_BAR_HEIGHT - 6.0))
+                .h(px(self.tab_bar_height()))
+                .w(px(self.scaled(36.0)))
                 .flex_none()
-                .rounded(px(8.0))
                 .flex()
                 .justify_center()
                 .items_center()
-                .text_size(px(16.0))
+                .text_size(px(self.scaled(16.0)))
                 .text_color(self.theme.panel_muted)
-                .hover(|style| {
-                    style
-                        .bg(self.theme.tab_hover)
-                        .text_color(self.theme.tab_active_text)
-                })
+                .hover(|style| style.text_color(self.theme.tab_active_text))
                 .child("+")
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1368,17 +2038,15 @@ impl EditorView {
         );
 
         div()
+            .id("tab-bar")
             .w_full()
-            .h(px(TAB_BAR_HEIGHT))
-            .px(px(10.0))
-            .py(px(3.0))
+            .h(px(self.tab_bar_height()))
             .flex()
             .items_center()
-            .gap(px(6.0))
             .bg(self.theme.tab_bar_bg)
             .border_b_1()
             .border_color(self.theme.tab_border)
-            .overflow_hidden()
+            .overflow_x_scroll()
             .children(tab_items)
             .into_any_element()
     }
@@ -1660,14 +2328,15 @@ impl EditorView {
     }
 
     fn font_size_for_block(&self, block_type: &BlockType) -> f32 {
+        let base = self.base_font_size();
         match block_type {
-            BlockType::Heading(1) => BASE_FONT_SIZE * 1.8,
-            BlockType::Heading(2) => BASE_FONT_SIZE * 1.5,
-            BlockType::Heading(3) => BASE_FONT_SIZE * 1.3,
-            BlockType::Heading(4) => BASE_FONT_SIZE * 1.15,
-            BlockType::Heading(5) => BASE_FONT_SIZE * 1.05,
-            BlockType::Heading(6) => BASE_FONT_SIZE * 1.0,
-            _ => BASE_FONT_SIZE,
+            BlockType::Heading(1) => base * 1.8,
+            BlockType::Heading(2) => base * 1.5,
+            BlockType::Heading(3) => base * 1.3,
+            BlockType::Heading(4) => base * 1.15,
+            BlockType::Heading(5) => base * 1.05,
+            BlockType::Heading(6) => base * 1.0,
+            _ => base,
         }
     }
 
@@ -1690,7 +2359,7 @@ impl EditorView {
     }
 
     fn line_y_offset(&self, target_line: usize) -> f32 {
-        let mut y = PADDING_TOP;
+        let mut y = self.padding_top();
         for line in 0..target_line.min(self.buffer.line_count()) {
             y += self.visual_height_for_line(line);
         }
@@ -1698,11 +2367,11 @@ impl EditorView {
     }
 
     fn total_content_height(&self) -> f32 {
-        self.line_y_offset(self.buffer.line_count()) + PADDING_BOTTOM
+        self.line_y_offset(self.buffer.line_count()) + self.padding_bottom()
     }
 
     fn line_at_y(&self, y: f32) -> usize {
-        let mut current_y = PADDING_TOP;
+        let mut current_y = self.padding_top();
         for line in 0..self.buffer.line_count() {
             let lh = self.visual_height_for_line(line);
             if y < current_y + lh {
@@ -1718,14 +2387,14 @@ impl EditorView {
         let cursor_y = self.line_y_offset(cursor_line);
         let cursor_line_height = self.visual_height_for_line(cursor_line);
 
-        if cursor_y < self.scroll_offset + PADDING_TOP {
-            self.scroll_offset = (cursor_y - PADDING_TOP).max(0.0);
+        if cursor_y < self.scroll_offset + self.padding_top() {
+            self.scroll_offset = (cursor_y - self.padding_top()).max(0.0);
         }
         if cursor_y + cursor_line_height
-            > self.scroll_offset + self.last_viewport_height - PADDING_TOP
+            > self.scroll_offset + self.last_viewport_height - self.padding_top()
         {
             self.scroll_offset =
-                cursor_y + cursor_line_height - self.last_viewport_height + PADDING_TOP;
+                cursor_y + cursor_line_height - self.last_viewport_height + self.padding_top();
         }
     }
 
@@ -1856,6 +2525,49 @@ impl EditorView {
             return;
         }
         self.checkpoint();
+        // Special: cursor immediately after a list/quote prefix → delete entire prefix.
+        if !self.cursor.has_selection() {
+            let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
+            let line_start = self.buffer.line_start(line);
+            let line_content = self.buffer.line_content(line).to_string();
+            let leading_ws =
+                line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+            let trimmed = &line_content[leading_ws..];
+            let prefix_len = match self.decorations.get(line).map(|d| d.block_type.clone()) {
+                Some(BlockType::UnorderedList) => {
+                    if trimmed.starts_with("- ")
+                        || trimmed.starts_with("* ")
+                        || trimmed.starts_with("+ ")
+                    {
+                        2
+                    } else {
+                        0
+                    }
+                }
+                Some(BlockType::OrderedList) => markdown::ordered_list_prefix_len(trimmed),
+                Some(BlockType::TaskList(_)) => task_prefix_len(trimmed),
+                Some(BlockType::Blockquote) => {
+                    if trimmed.starts_with("> ") {
+                        2
+                    } else if trimmed.starts_with('>') {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                _ => 0,
+            };
+            if prefix_len > 0 && col == leading_ws + prefix_len {
+                let del_start = line_start + leading_ws;
+                let del_end = line_start + leading_ws + prefix_len;
+                self.buffer.replace(del_start..del_end, "");
+                self.cursor.move_to(del_start, &self.buffer);
+                self.reparse();
+                self.scroll_to_cursor();
+                self.pause_blinking(cx);
+                return;
+            }
+        }
         self.cursor.backspace(&mut self.buffer);
         self.reparse();
         self.scroll_to_cursor();
@@ -1871,33 +2583,93 @@ impl EditorView {
     }
 
     fn on_left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        let prev_offset = self.cursor.offset;
+        let (line, _col) = self.buffer.offset_to_line_col(self.cursor.offset);
+        let cell_ranges = self
+            .decorations
+            .get(line)
+            .and_then(|d| d.table_info.as_ref())
+            .filter(|ti| !ti.is_separator)
+            .map(|ti| ti.cell_ranges.clone());
         self.cursor.move_left(&self.buffer);
+        // Table navigation: skip inter-cell gaps (trailing-space + '|' + leading-space).
+        if let Some(cell_ranges) = cell_ranges {
+            let (_, new_col) = self.buffer.offset_to_line_col(self.cursor.offset);
+            // Check internal gaps: cell[i].end+1 .. cell[i+1].start
+            let mut jumped = false;
+            for i in 0..cell_ranges.len().saturating_sub(1) {
+                let gap_start = cell_ranges[i].end.saturating_add(1);
+                let gap_end = cell_ranges[i + 1].start;
+                if new_col >= gap_start && new_col < gap_end {
+                    let line_start = self.buffer.line_start(line);
+                    self.cursor
+                        .move_to(line_start + cell_ranges[i].end, &self.buffer);
+                    jumped = true;
+                    break;
+                }
+            }
+            // Leading zone: before first cell start → jump to first cell start
+            if !jumped && !cell_ranges.is_empty() && new_col < cell_ranges[0].start {
+                let line_start = self.buffer.line_start(line);
+                self.cursor
+                    .move_to(line_start + cell_ranges[0].start, &self.buffer);
+            }
+        }
+        self.maybe_auto_select_link_url(prev_offset, false);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
     fn on_right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        let prev_offset = self.cursor.offset;
+        let (line, _col) = self.buffer.offset_to_line_col(self.cursor.offset);
+        let cell_ranges = self
+            .decorations
+            .get(line)
+            .and_then(|d| d.table_info.as_ref())
+            .filter(|ti| !ti.is_separator)
+            .map(|ti| ti.cell_ranges.clone());
         self.cursor.move_right(&self.buffer);
+        // Table navigation: skip inter-cell gaps.
+        if let Some(cell_ranges) = cell_ranges {
+            let (_, new_col) = self.buffer.offset_to_line_col(self.cursor.offset);
+            // Check internal gaps: cell[i].end+1 .. cell[i+1].start
+            for i in 0..cell_ranges.len().saturating_sub(1) {
+                let gap_start = cell_ranges[i].end.saturating_add(1);
+                let gap_end = cell_ranges[i + 1].start;
+                if new_col >= gap_start && new_col < gap_end {
+                    let line_start = self.buffer.line_start(line);
+                    self.cursor
+                        .move_to(line_start + cell_ranges[i + 1].start, &self.buffer);
+                    break;
+                }
+            }
+        }
+        self.maybe_auto_select_link_url(prev_offset, false);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
     fn on_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        let prev_offset = self.cursor.offset;
         if let Some(offset) = self.offset_for_visual_up(self.cursor.offset) {
             self.cursor.move_to(offset, &self.buffer);
         } else {
             self.cursor.move_up(&self.buffer);
         }
+        self.maybe_auto_select_link_url(prev_offset, false);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
     fn on_down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        let prev_offset = self.cursor.offset;
         if let Some(offset) = self.offset_for_visual_down(self.cursor.offset) {
             self.cursor.move_to(offset, &self.buffer);
         } else {
             self.cursor.move_down(&self.buffer);
         }
+        self.maybe_auto_select_link_url(prev_offset, false);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -2118,34 +2890,15 @@ impl EditorView {
     }
 
     fn on_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if self.cursor.has_selection() {
-            let range = self.cursor.selection_range();
-            let text = self.buffer.text()[range].to_string();
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-        }
+        self.copy_selection_to_clipboard(cx);
     }
 
     fn on_cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        if self.cursor.has_selection() {
-            self.checkpoint();
-            let range = self.cursor.selection_range();
-            let text = self.buffer.text()[range.clone()].to_string();
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.buffer.delete(range.clone());
-            self.cursor.move_to(range.start, &self.buffer);
-            self.reparse();
-            self.pause_blinking(cx);
-        }
+        self.cut_selection_to_clipboard(cx);
     }
 
     fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.checkpoint();
-            self.cursor.insert(&mut self.buffer, &text);
-            self.reparse();
-            self.scroll_to_cursor();
-            self.pause_blinking(cx);
-        }
+        self.paste_from_clipboard(cx);
     }
 
     fn on_show_character_palette(
@@ -2270,6 +3023,17 @@ impl EditorView {
         self.pause_blinking(cx);
     }
 
+    fn on_insert_horizontal_rule(
+        &mut self,
+        _: &InsertHorizontalRule,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.checkpoint();
+        self.toggle_horizontal_rule_at_cursor();
+        self.pause_blinking(cx);
+    }
+
     fn on_insert_heading1(&mut self, _: &InsertHeading1, _: &mut Window, cx: &mut Context<Self>) {
         self.checkpoint();
         self.apply_heading(1);
@@ -2306,6 +3070,18 @@ impl EditorView {
         self.pause_blinking(cx);
     }
 
+    fn on_zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_ui_scale(self.ui_scale + UI_SCALE_STEP, cx);
+    }
+
+    fn on_zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_ui_scale(self.ui_scale - UI_SCALE_STEP, cx);
+    }
+
+    fn on_zoom_reset(&mut self, _: &ZoomReset, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_ui_scale(1.0, cx);
+    }
+
     fn apply_wrap(&mut self, prefix: &str, suffix: &str) {
         let range = self.cursor.selection_range();
         let (new_text, new_start, new_end) =
@@ -2332,6 +3108,30 @@ impl EditorView {
     // ── Mouse handlers ──────────────────────────────────────────────
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // Check gutter fold icon clicks.
+        if let Some(&(_, line_idx, is_image_fold)) = self
+            .gutter_fold_areas
+            .iter()
+            .find(|(bounds, _, _)| bounds.contains(&event.position))
+        {
+            if is_image_fold {
+                self.toggle_image_fold(line_idx, cx);
+            } else {
+                self.toggle_fold(line_idx, cx);
+            }
+            return;
+        }
+
+        // Check image URL-edit icon clicks.
+        if let Some(&(_, line_idx)) = self
+            .image_edit_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+        {
+            self.pick_image_for_line(line_idx, cx);
+            return;
+        }
+
         // Check image preview clicks — select full image syntax `![alt](url)`
         if let Some(line_idx) = self
             .image_click_areas
@@ -2346,8 +3146,6 @@ impl EditorView {
                     .find(|s| s.kind == crate::markdown::InlineKind::Image)
                 {
                     let line_start = self.buffer.line_start(line_idx);
-                    // span.range covers only the alt text; the full syntax `![alt](url)`
-                    // starts 2 bytes before (the `![` prefix) and ends at the closing `)`.
                     let full_start = span.range.start.saturating_sub(2);
                     let full_end = dec
                         .syntax_ranges
@@ -2380,13 +3178,89 @@ impl EditorView {
         }
 
         self.is_selecting = true;
+        let prev_offset = self.cursor.offset;
         let offset = self.offset_for_position(event.position);
         if event.modifiers.shift {
             self.cursor.select_to(offset, &self.buffer);
         } else {
             self.cursor.move_to(offset, &self.buffer);
+            self.maybe_auto_select_link_url(prev_offset, true);
         }
         cx.notify();
+    }
+
+    /// Auto-select the description or URL text when cursor enters an image/link range from outside.
+    /// `also_select_desc` controls whether the description text zone also triggers selection.
+    fn maybe_auto_select_link_url(&mut self, prev_offset: usize, also_select_desc: bool) {
+        let new_offset = self.cursor.offset;
+        let (line, _) = self.buffer.offset_to_line_col(new_offset);
+        let line_start = self.buffer.line_start(line);
+        if let Some(dec) = self.decorations.get(line) {
+            let spans: Vec<_> = dec.inline_spans.clone();
+            let syntax_ranges: Vec<_> = dec.syntax_ranges.clone();
+            'link_check: for span in &spans {
+                if !matches!(span.kind, InlineKind::Link | InlineKind::Image) {
+                    continue;
+                }
+                let prefix_len = if span.kind == InlineKind::Image { 2 } else { 1 };
+                let full_link_start = line_start + span.range.start.saturating_sub(prefix_len);
+                let url_sr = syntax_ranges.iter().find(|sr| {
+                    sr.range.start == span.range.end && sr.range.end > sr.range.start + 1
+                });
+                let full_link_end = url_sr
+                    .map(|sr| line_start + sr.range.end)
+                    .unwrap_or(line_start + span.range.end);
+
+                // Skip if cursor was already inside the link/image range.
+                if prev_offset >= full_link_start && prev_offset <= full_link_end {
+                    continue;
+                }
+
+                // Cursor entered URL part?
+                if let Some(url_sr) = url_sr {
+                    let url_abs_start = line_start + url_sr.range.start + 2;
+                    let url_abs_end = line_start + url_sr.range.end.saturating_sub(1);
+                    if url_abs_start < url_abs_end
+                        && new_offset >= url_abs_start
+                        && new_offset <= url_abs_end
+                    {
+                        self.cursor.anchor = url_abs_start;
+                        self.cursor.offset = url_abs_end;
+                        self.is_selecting = false;
+                        break 'link_check;
+                    }
+                }
+
+                // Cursor entered description text?
+                if also_select_desc {
+                    let desc_abs_start = line_start + span.range.start;
+                    let desc_abs_end = line_start + span.range.end;
+                    if new_offset >= desc_abs_start && new_offset <= desc_abs_end {
+                        self.cursor.anchor = desc_abs_start;
+                        self.cursor.offset = desc_abs_end;
+                        self.is_selecting = false;
+                        break 'link_check;
+                    }
+                }
+            }
+        }
+    }
+
+    fn on_editor_context_menu(
+        &mut self,
+        event: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.is_selecting = false;
+        let offset = self.offset_for_position(event.position);
+        let selection = self.cursor.selection_range();
+        let clicked_selected_text =
+            self.cursor.has_selection() && offset >= selection.start && offset <= selection.end;
+        if !clicked_selected_text {
+            self.cursor.move_to(offset, &self.buffer);
+        }
+        self.open_format_context_menu(event.position, cx);
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _cx: &mut Context<Self>) {
@@ -2400,6 +3274,26 @@ impl EditorView {
             .any(|(bounds, _)| bounds.contains(&event.position));
         if hovering_checkbox != self.hovering_checkbox {
             self.hovering_checkbox = hovering_checkbox;
+            cx.notify();
+        }
+
+        let hovering_image_edit = self
+            .image_edit_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(_, line)| *line);
+        if hovering_image_edit != self.hovering_image_edit_line {
+            self.hovering_image_edit_line = hovering_image_edit;
+            cx.notify();
+        }
+
+        let hovering_fold = self
+            .gutter_fold_areas
+            .iter()
+            .find(|(bounds, _, _)| bounds.contains(&event.position))
+            .map(|(_, line, _)| *line);
+        if hovering_fold != self.hovering_fold_line {
+            self.hovering_fold_line = hovering_fold;
             cx.notify();
         }
 
@@ -2432,7 +3326,7 @@ impl EditorView {
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let delta_y: f32 = event
             .delta
-            .pixel_delta(px(BASE_FONT_SIZE * LINE_HEIGHT_FACTOR))
+            .pixel_delta(px(self.base_font_size() * LINE_HEIGHT_FACTOR))
             .y
             .into();
         self.scroll_offset -= delta_y;
@@ -2496,7 +3390,7 @@ impl EditorView {
         }
 
         let x = (pos_x - self.last_content_left).max(0.0);
-        let approx_char_width = BASE_FONT_SIZE * 0.6;
+        let approx_char_width = self.base_font_size() * 0.6;
         let col = (x / approx_char_width) as usize;
         self.buffer.line_col_to_offset(line, col)
     }
@@ -2693,10 +3587,10 @@ impl EntityInputHandler for EditorView {
                 &BlockType::Normal
             };
             let lh = self.line_height_for_block(block_type);
-            let x = self.last_content_left + col as f32 * BASE_FONT_SIZE * 0.6;
+            let x = self.last_content_left + col as f32 * self.base_font_size() * 0.6;
             Some(Bounds::new(
                 point(px(x), px(line_top_y)),
-                size(px(BASE_FONT_SIZE * 0.6), px(lh)),
+                size(px(self.base_font_size() * 0.6), px(lh)),
             ))
         }
     }
@@ -2719,7 +3613,8 @@ impl Focusable for EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_context_menu = self.context_menu.is_some();
+        let _has_context_menu = self.context_menu.is_some();
+        let resizing = self.sidebar_resizing;
         div()
             .id("editor-root")
             .key_context("MarkdownEditor")
@@ -2729,6 +3624,25 @@ impl Render for EditorView {
             .flex_row()
             .overflow_hidden()
             .bg(self.theme.background)
+            .when(resizing, |this| {
+                this.cursor(CursorStyle::ResizeLeftRight)
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                        if this.sidebar_resizing {
+                            let new_width = f32::from(event.position.x);
+                            let min_w = this.scaled(140.0);
+                            let max_w = this.scaled(600.0);
+                            this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.sidebar_resizing = false;
+                            cx.notify();
+                        }),
+                    )
+            })
             .on_action(cx.listener(Self::on_undo))
             .on_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::on_backspace))
@@ -2766,23 +3680,65 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_toggle_unordered_list))
             .on_action(cx.listener(Self::on_toggle_ordered_list))
             .on_action(cx.listener(Self::on_insert_code_block))
+            .on_action(cx.listener(Self::on_insert_horizontal_rule))
             .on_action(cx.listener(Self::on_insert_heading1))
             .on_action(cx.listener(Self::on_insert_heading2))
             .on_action(cx.listener(Self::on_insert_heading3))
             .on_action(cx.listener(Self::on_insert_heading4))
             .on_action(cx.listener(Self::on_insert_heading5))
             .on_action(cx.listener(Self::on_insert_heading6))
+            .on_action(cx.listener(Self::on_zoom_in))
+            .on_action(cx.listener(Self::on_zoom_out))
+            .on_action(cx.listener(Self::on_zoom_reset))
             .on_action(cx.listener(Self::on_escape))
-            // Dismiss context menu when clicking outside of it
-            .when(has_context_menu, |this| {
-                this.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.close_context_menu(cx);
-                    }),
-                )
-            })
             .child(self.render_sidebar(cx))
+            // Drag handle / border between sidebar and editor
+            .child({
+                let border_color = if self.sidebar_resizing {
+                    self.theme.accent
+                } else {
+                    self.theme.panel_border
+                };
+                let border_w = if self.sidebar_resizing { 3.0 } else { 1.0 };
+                div()
+                    .id("sidebar-resize-handle")
+                    .w(px(border_w))
+                    .h_full()
+                    .flex_none()
+                    .bg(border_color)
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .hover(|s| s.w(px(3.0)).bg(self.theme.accent))
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                        if this.sidebar_resizing {
+                            let new_width = f32::from(event.position.x);
+                            let min_w = this.scaled(140.0);
+                            let max_w = this.scaled(600.0);
+                            this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            this.sidebar_resizing = true;
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.sidebar_resizing = false;
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.sidebar_resizing = false;
+                            cx.notify();
+                        }),
+                    )
+            })
             .child(
                 div()
                     .id("workspace-pane")
@@ -2805,6 +3761,10 @@ impl Render for EditorView {
                                 CursorStyle::IBeam
                             })
                             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(Self::on_editor_context_menu),
+                            )
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -2814,9 +3774,29 @@ impl Render for EditorView {
                             }),
                     ),
             )
-            // Context menu overlay (rendered last so it appears on top)
+            // Full-screen backdrop swallows all events; context menu is a child of the backdrop.
             .when(self.context_menu.is_some(), |this| {
-                this.child(self.render_context_menu(cx))
+                this.child(
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .top(px(0.0))
+                        .w_full()
+                        .h_full()
+                        .cursor(CursorStyle::Arrow)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.close_context_menu(cx);
+                            }),
+                        )
+                        .on_mouse_up(MouseButton::Left, cx.listener(|_, _, _, _| {}))
+                        .on_mouse_up(MouseButton::Right, cx.listener(|_, _, _, _| {}))
+                        .on_mouse_down(MouseButton::Right, cx.listener(|_, _, _, _| {}))
+                        .on_mouse_move(cx.listener(|_, _, _, _| {}))
+                        .on_scroll_wheel(cx.listener(|_, _, _, _| {}))
+                        .child(self.render_context_menu(cx)),
+                )
             })
     }
 }
@@ -2846,7 +3826,8 @@ pub struct EditorPrepaintState {
     marked_underlines: Vec<PaintQuad>,
     gutter_quads: Vec<PaintQuad>,
     gutter_labels: Vec<(ShapedLine, Point<Pixels>, Pixels)>,
-    gutter_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
+    /// (bounds, svg_path, color, rotation_degrees)
+    gutter_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla, f32)>,
     checkbox_hit_areas: Vec<(Bounds<Pixels>, usize)>,
     /// Image preview click areas: (bounds in screen space, buffer line index)
     image_hit_areas: Vec<(Bounds<Pixels>, usize)>,
@@ -2858,6 +3839,8 @@ pub struct EditorPrepaintState {
     /// Table cell borders and backgrounds
     table_borders: Vec<PaintQuad>,
     table_bgs: Vec<PaintQuad>,
+    /// Image URL-edit icons: (bounds, line_idx, alpha)
+    image_edit_icons: Vec<(Bounds<Pixels>, usize, f32)>,
 }
 
 struct PrepaintLine {
@@ -2924,9 +3907,10 @@ impl Element for EditorElement {
         let viewport_width: f32 = bounds.size.width.into();
         let origin_x: f32 = bounds.origin.x.into();
         let origin_y: f32 = bounds.origin.y.into();
-        let editor_width = viewport_width.min(MAX_EDITOR_WIDTH);
+        let editor_width = viewport_width.min(editor.max_editor_width());
         let editor_left = origin_x + ((viewport_width - editor_width) / 2.0).max(0.0);
-        let text_width = (editor_width - PADDING_LEFT - PADDING_RIGHT).max(120.0);
+        let text_width = (editor_width - editor.padding_left() - editor.padding_right())
+            .max(editor.scaled(120.0));
         let wrap_width = text_width;
 
         let mut lines = Vec::new();
@@ -2936,7 +3920,7 @@ impl Element for EditorElement {
         let mut cursor_quad = None;
         let mut marked_underlines = Vec::new();
 
-        let mut y = origin_y + PADDING_TOP;
+        let mut y = origin_y + editor.padding_top();
         let line_count = buffer.line_count();
 
         let sel_range = cursor.selection_range();
@@ -2944,15 +3928,34 @@ impl Element for EditorElement {
 
         let mut gutter_quads = Vec::new();
         let mut gutter_labels: Vec<(ShapedLine, Point<Pixels>, Pixels)> = Vec::new();
-        let mut gutter_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
+        let mut gutter_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla, f32)> = Vec::new();
         let mut checkbox_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut image_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut display_info_cache: Vec<Option<LineDisplayInfo>> = Vec::with_capacity(line_count);
+        // Cache reuse: if line_count and viewport width match, reuse off-screen line layouts
+        let has_valid_cache = editor.line_display_info.len() == line_count
+            && (editor.last_viewport_width - viewport_width).abs() < 0.5;
         let mut hr_lines: Vec<(f32, f32, f32)> = Vec::new();
         let mut image_previews: Vec<(Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
         let mut image_borders: Vec<PaintQuad> = Vec::new();
         let mut table_borders: Vec<PaintQuad> = Vec::new();
         let mut table_bgs: Vec<PaintQuad> = Vec::new();
+        let mut image_edit_icons: Vec<(Bounds<Pixels>, usize, f32)> = Vec::new();
+        let mut image_edit_hit_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
+        let mut gutter_fold_hit_areas_local: Vec<(Bounds<Pixels>, usize, bool)> = Vec::new();
+
+        // Compute lines hidden by folded sections.
+        let hidden_lines: HashSet<usize> = {
+            let mut set = HashSet::new();
+            for &fold_line in &editor.folded_sections {
+                if let Some(range) = editor.fold_range_for_line(fold_line) {
+                    for l in range {
+                        set.insert(l);
+                    }
+                }
+            }
+            set
+        };
 
         let text_style = window.text_style();
         let mut base_font = text_style.font();
@@ -2972,18 +3975,24 @@ impl Element for EditorElement {
             };
             if let Ok(test_lines) = window.text_system().shape_text(
                 "x".into(),
-                px(BASE_FONT_SIZE),
+                px(editor.base_font_size()),
                 &[test_run],
                 None,
                 None,
             ) {
                 f32::from(test_lines[0].width())
             } else {
-                BASE_FONT_SIZE * 0.6
+                editor.base_font_size() * 0.6
             }
         };
 
         let image_cache = &editor.image_cache;
+        let table_cell_padding_px = editor.scaled(TABLE_CELL_TEXT_PADDING_PX);
+        let table_cell_padding_chars = if table_cell_padding_px <= 0.0 {
+            0
+        } else {
+            (table_cell_padding_px / base_char_width).ceil().max(1.0) as usize
+        };
 
         let is_code_block_type = |i: usize| {
             matches!(
@@ -3007,10 +4016,59 @@ impl Element for EditorElement {
             };
 
         for line_idx in 0..line_count {
+            // Early fast-path: reuse cached display info for off-screen, non-cursor lines
+            let is_cursor_line_early = line_idx == cursor_line;
+            if has_valid_cache && !is_cursor_line_early {
+                if let Some(Some(cached)) = editor.line_display_info.get(line_idx) {
+                    let cached_h =
+                        cached.line_height * cached.visual_line_count as f32 + cached.extra_height;
+                    let est_top = y - scroll_offset;
+                    let est_bottom = est_top + cached_h;
+                    if est_bottom < origin_y || est_top > origin_y + viewport_height {
+                        display_info_cache.push(Some(cached.clone()));
+                        y += cached_h;
+                        continue;
+                    }
+                }
+            }
+
             let decoration = decorations.get(line_idx).cloned().unwrap_or_default();
             let block_type = &decoration.block_type;
             let font_size = editor.font_size_for_block(block_type);
             let line_height = font_size * LINE_HEIGHT_FACTOR;
+
+            // Skip lines that are inside a folded section (zero-height placeholder).
+            if hidden_lines.contains(&line_idx) {
+                let line_content = buffer.line_content(line_idx);
+                let blank_run = TextRun {
+                    len: 1,
+                    font: base_font.clone(),
+                    color: gpui::transparent_black(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let wrapped_line = window
+                    .text_system()
+                    .shape_text(" ".into(), px(font_size), &[blank_run], None, None)
+                    .ok()
+                    .and_then(|ls| ls.into_iter().next());
+                display_info_cache.push(wrapped_line.map(|wl| LineDisplayInfo {
+                    display_text: String::new(),
+                    display_to_buffer: Vec::new(),
+                    buffer_to_display: vec![0; line_content.len()],
+                    font_size,
+                    line_height: 0.0,
+                    visual_line_count: 0,
+                    wrapped_line: wl,
+                    extra_height: 0.0,
+                    indent_px: 0.0,
+                    content_x: editor_left + editor.padding_left(),
+                    editor_left,
+                    editor_width,
+                }));
+                continue;
+            }
             let is_cursor_line = line_idx == cursor_line;
 
             let line_content = buffer.line_content(line_idx);
@@ -3038,7 +4096,6 @@ impl Element for EditorElement {
             };
 
             let hide_table_separator = matches!(block_type, BlockType::Table)
-                && !cursor_in_table
                 && decoration
                     .table_info
                     .as_ref()
@@ -3067,7 +4124,7 @@ impl Element for EditorElement {
                     wrapped_line,
                     extra_height: 0.0,
                     indent_px: 0.0,
-                    content_x: editor_left + PADDING_LEFT,
+                    content_x: editor_left + editor.padding_left(),
                     editor_left,
                     editor_width,
                 }));
@@ -3075,13 +4132,19 @@ impl Element for EditorElement {
             }
 
             // Build display text: fold syntax ranges not containing cursor
-            let table_width_chars = if *block_type == BlockType::Table && !cursor_in_table {
+            let table_width_chars = if *block_type == BlockType::Table {
                 Some((text_width / base_char_width) as usize)
             } else {
                 None
             };
             let (display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
-                build_display_text(line_content, &decoration, cursor_col, table_width_chars);
+                build_display_text(
+                    line_content,
+                    &decoration,
+                    cursor_col,
+                    table_width_chars,
+                    table_cell_padding_chars,
+                );
 
             // Build text runs for the display text
             let runs = build_text_runs_for_display(
@@ -3158,7 +4221,9 @@ impl Element for EditorElement {
 
             // Compute extra height for image preview below this line
             let extra_height = if let Some(ref path) = decoration.image_path {
-                if let Some(Some(img_data)) = image_cache.get(path) {
+                if editor.folded_image_previews.contains(&line_idx) {
+                    0.0 // image preview folded/hidden
+                } else if let Some(Some(img_data)) = image_cache.get(path) {
                     let img_size = img_data.size(0);
                     let img_w = img_size.width.0 as f32;
                     let img_h = img_size.height.0 as f32;
@@ -3181,9 +4246,9 @@ impl Element for EditorElement {
             let line_bottom = line_top + total_line_height;
             let content_x =
                 if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
-                    editor_left + PADDING_LEFT + CODE_BLOCK_TEXT_LEFT
+                    editor_left + editor.padding_left() + editor.scaled(CODE_BLOCK_TEXT_LEFT)
                 } else {
-                    editor_left + PADDING_LEFT
+                    editor_left + editor.padding_left()
                 };
 
             // Store display info for all lines (needed for scroll calculations)
@@ -3246,7 +4311,7 @@ impl Element for EditorElement {
 
             let origin = point(px(content_x), px(line_top));
 
-            // Code block background (clipped 10px top/bottom at fence lines when cursor not in block)
+            // Code block background (clipped 15px top/bottom at fence lines when cursor not in block)
             if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
                 let cursor_in_this_block = active_code_block_range
                     .as_ref()
@@ -3256,12 +4321,12 @@ impl Element for EditorElement {
                 let is_end_fence = matches!(block_type, BlockType::CodeBlockFence)
                     && (line_idx + 1 >= line_count || !is_code_block_type(line_idx + 1));
                 let clip_top = if !cursor_in_this_block && is_start_fence {
-                    10.0
+                    15.0
                 } else {
                     0.0
                 };
                 let clip_bottom = if !cursor_in_this_block && is_end_fence {
-                    10.0
+                    15.0
                 } else {
                     0.0
                 };
@@ -3269,7 +4334,10 @@ impl Element for EditorElement {
                 if bg_height > 0.0 {
                     code_block_bgs.push(fill(
                         Bounds::new(
-                            point(px(editor_left + PADDING_LEFT), px(line_top + clip_top)),
+                            point(
+                                px(editor_left + editor.padding_left()),
+                                px(line_top + clip_top),
+                            ),
                             size(px(text_width), px(bg_height)),
                         ),
                         theme.code_block_bg,
@@ -3278,12 +4346,12 @@ impl Element for EditorElement {
             }
 
             // Table rendering: draw borders and background when folded (cursor NOT in table)
-            if *block_type == BlockType::Table && !cursor_in_table {
+            if *block_type == BlockType::Table {
                 if let Some(ref ti) = decoration.table_info {
                     let border_color = theme.blockquote_border;
                     let border_w = 1.0_f32;
-                    let table_left = editor_left + PADDING_LEFT;
-                    let table_right = editor_left + PADDING_LEFT + text_width;
+                    let table_left = editor_left + editor.padding_left();
+                    let table_right = editor_left + editor.padding_left() + text_width;
                     let table_width = table_right - table_left;
 
                     if ti.is_separator {
@@ -3340,20 +4408,8 @@ impl Element for EditorElement {
                             border_color,
                         ));
 
-                        // Inner vertical column borders (matching no-left-padding layout)
-                        let n_tcols = ti.column_widths.len();
-                        let render_col_widths: Vec<usize> = if n_tcols > 0 {
-                            let avail = (text_width / base_char_width) as usize;
-                            let sep_overhead = (n_tcols.saturating_sub(1)) * 2;
-                            let usable = avail.saturating_sub(sep_overhead);
-                            let equal_per_col = (usable / n_tcols).max(3);
-                            ti.column_widths
-                                .iter()
-                                .map(|&cw| cw.max(equal_per_col))
-                                .collect()
-                        } else {
-                            ti.column_widths.clone()
-                        };
+                        // Inner vertical column borders (use same content-adaptive widths as text)
+                        let render_col_widths = ti.column_widths.clone();
                         let mut col_x_offset = 0;
                         for (ci, cell) in ti.cells.iter().enumerate() {
                             let cell_chars = cell.trim().chars().count();
@@ -3362,9 +4418,8 @@ impl Element for EditorElement {
                                 .copied()
                                 .unwrap_or(cell_chars)
                                 .max(cell_chars);
-                            col_x_offset += col_w;
+                            col_x_offset += col_w + table_cell_padding_chars * 2;
                             if ci + 1 < ti.cells.len() {
-                                // separator "  " = 2 chars
                                 let sep_x =
                                     table_left + border_w + col_x_offset as f32 * base_char_width;
                                 table_borders.push(fill(
@@ -3374,7 +4429,6 @@ impl Element for EditorElement {
                                     ),
                                     border_color,
                                 ));
-                                col_x_offset += 2; // "  " = 2 chars gap
                             }
                         }
                     }
@@ -3384,36 +4438,39 @@ impl Element for EditorElement {
             // HR dashed line when folded (cursor not on line)
             if *block_type == BlockType::HorizontalRule && !is_cursor_line {
                 let hr_y = line_top + text_line_height / 2.0;
-                hr_lines.push((hr_y, editor_left + PADDING_LEFT, text_width));
+                hr_lines.push((hr_y, editor_left + editor.padding_left(), text_width));
             }
 
-            // Image preview below the line
-            if let Some(ref path) = decoration.image_path {
-                if let Some(Some(img_data)) = image_cache.get(path) {
-                    let img_size = img_data.size(0);
-                    let img_w = img_size.width.0 as f32;
-                    let img_h = img_size.height.0 as f32;
-                    if img_w > 0.0 && img_h > 0.0 {
-                        let (display_w, display_h) =
-                            compute_image_preview_size(img_w, img_h, text_width);
-                        let img_top = line_top + text_line_height + 4.0;
-                        let img_left =
-                            editor_left + PADDING_LEFT + ((text_width - display_w) / 2.0).max(0.0);
-                        let img_bounds = Bounds::new(
-                            point(px(img_left), px(img_top)),
-                            size(px(display_w), px(display_h)),
-                        );
-                        image_previews.push((img_bounds, img_data.clone()));
-                        image_hit_areas.push((img_bounds, line_idx));
-                        if image_active {
-                            image_borders.push(quad(
-                                img_bounds,
-                                Corners::all(px(6.0)),
-                                gpui::transparent_black(),
-                                px(2.0),
-                                theme.cursor,
-                                BorderStyle::default(),
-                            ));
+            // Image preview below the line (skipped if folded).
+            if !editor.folded_image_previews.contains(&line_idx) {
+                if let Some(ref path) = decoration.image_path {
+                    if let Some(Some(img_data)) = image_cache.get(path) {
+                        let img_size = img_data.size(0);
+                        let img_w = img_size.width.0 as f32;
+                        let img_h = img_size.height.0 as f32;
+                        if img_w > 0.0 && img_h > 0.0 {
+                            let (display_w, display_h) =
+                                compute_image_preview_size(img_w, img_h, text_width);
+                            let img_top = line_top + text_line_height + 4.0;
+                            let img_left = editor_left
+                                + editor.padding_left()
+                                + ((text_width - display_w) / 2.0).max(0.0);
+                            let img_bounds = Bounds::new(
+                                point(px(img_left), px(img_top)),
+                                size(px(display_w), px(display_h)),
+                            );
+                            image_previews.push((img_bounds, img_data.clone()));
+                            image_hit_areas.push((img_bounds, line_idx));
+                            if image_active {
+                                image_borders.push(quad(
+                                    img_bounds,
+                                    Corners::all(px(6.0)),
+                                    gpui::transparent_black(),
+                                    px(2.0),
+                                    theme.cursor,
+                                    BorderStyle::default(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -3427,7 +4484,9 @@ impl Element for EditorElement {
                     let heading_prefix_folded = cursor_col
                         .map(|col| prefix_is_folded(0, prefix_len, Some(col)))
                         .unwrap_or(false);
-                    if is_cursor_line && heading_prefix_folded {
+                    // Show hash icons when cursor on heading line AND fold icon not hovered.
+                    let fold_hovered_this_line = editor.hovering_fold_line == Some(line_idx);
+                    if is_cursor_line && heading_prefix_folded && !fold_hovered_this_line {
                         let icon_size = match *level {
                             1 => 28.0,
                             2 => 22.0,
@@ -3436,7 +4495,8 @@ impl Element for EditorElement {
                         };
                         let gap = 3.0;
                         let total_width = *level as f32 * icon_size + (*level as f32 - 1.0) * gap;
-                        let start_x = editor_left + PADDING_LEFT - total_width - 10.0;
+                        let start_x =
+                            editor_left + editor.padding_left() - total_width - editor.scaled(10.0);
                         for icon_index in 0..*level {
                             let icon_x = start_x + icon_index as f32 * (icon_size + gap);
                             let icon_y = gutter_center_y - icon_size / 2.0;
@@ -3447,13 +4507,15 @@ impl Element for EditorElement {
                                 ),
                                 HASH_SVG_PATH,
                                 theme.gutter_heading,
+                                0.0_f32,
                             ));
                         }
                     }
                 }
                 BlockType::Blockquote => {
-                    let icon_size = 14.0_f32;
-                    let icon_x = editor_left + PADDING_LEFT - icon_size - 10.0;
+                    let icon_size = 16.0_f32;
+                    let icon_x =
+                        editor_left + editor.padding_left() - icon_size - editor.scaled(10.0);
                     let icon_y = gutter_center_y - icon_size / 2.0;
                     gutter_svgs.push((
                         Bounds::new(
@@ -3462,6 +4524,7 @@ impl Element for EditorElement {
                         ),
                         COMMENT_SVG_PATH,
                         theme.blockquote_border,
+                        0.0_f32,
                     ));
                 }
                 _ => {}
@@ -3471,32 +4534,25 @@ impl Element for EditorElement {
             if prefix_collapsed {
                 if let BlockType::TaskList(checked) = block_type {
                     let cb_size = font_size * TODO_CHECKBOX_SIZE_FACTOR;
-                    let buf_leading_ws = line_content
-                        .chars()
-                        .take_while(|c| *c == ' ' || *c == '\t')
-                        .count();
-                    // Sub-level checkboxes align their LEFT edge with the parent's text content
-                    // start (= parent_buf_leading_ws * cw + placeholder_width).
-                    // Top-level checkboxes align flush with content_x.
-                    let cb_x = if buf_leading_ws > 0 {
-                        // Find the nearest ancestor with less indentation
-                        let parent_ws = (0..line_idx)
-                            .rev()
-                            .map(|l| {
-                                let lc = buffer.line_content(l);
-                                lc.len() - lc.trim_start_matches([' ', '\t']).len()
-                            })
-                            .find(|&lws| lws < buf_leading_ws)
-                            .unwrap_or(0);
-                        // Parent text starts after its indentation + 3-char placeholder
-                        content_x + (parent_ws as f32 + 3.0) * base_char_width
-                    } else {
+                    // Level-1 todo (no indent): checkbox flush with editor content left edge.
+                    // Indented (child) todos: checkbox aligned to parent's content indent.
+                    let line_content_str = buffer.line_content(line_idx);
+                    let leading_ws_bytes = line_content_str.len()
+                        - line_content_str.trim_start_matches([' ', '\t']).len();
+                    let cb_x = if leading_ws_bytes == 0 {
+                        // Level-1: align to content_x (editor content left edge)
                         content_x
+                    } else {
+                        // Child: align to the text-start of the PARENT's indent level.
+                        // Parent indent = half of current indent (2-space indent per level).
+                        let parent_indent_bytes =
+                            (leading_ws_bytes / 2).min(leading_ws_bytes.saturating_sub(2));
+                        content_x + parent_indent_bytes as f32 * base_char_width
                     };
                     let cb_y = line_top + (line_height - cb_size) / 2.0;
                     let cb_bounds =
                         Bounds::new(point(px(cb_x), px(cb_y)), size(px(cb_size), px(cb_size)));
-                    let corner_r = px(3.0);
+                    let corner_r = px(editor.scaled(TODO_CHECKBOX_CORNER_RADIUS));
                     if *checked {
                         gutter_quads.push(quad(
                             cb_bounds,
@@ -3506,18 +4562,16 @@ impl Element for EditorElement {
                             gpui::transparent_black(),
                             BorderStyle::default(),
                         ));
-                        // Check icon at half size inside the checkbox
-                        let icon_padding = cb_size * 0.25;
+                        let icon_size = cb_size * TODO_CHECK_ICON_SCALE;
+                        let icon_offset = (cb_size - icon_size) / 2.0;
                         gutter_svgs.push((
                             Bounds::new(
-                                point(px(cb_x + icon_padding), px(cb_y + icon_padding)),
-                                size(
-                                    px(cb_size - icon_padding * 2.0),
-                                    px(cb_size - icon_padding * 2.0),
-                                ),
+                                point(px(cb_x + icon_offset), px(cb_y + icon_offset)),
+                                size(px(icon_size), px(icon_size)),
                             ),
                             CHECK_SVG_PATH,
                             gpui::white(),
+                            0.0_f32,
                         ));
                     } else {
                         gutter_quads.push(quad(
@@ -3529,12 +4583,122 @@ impl Element for EditorElement {
                             BorderStyle::default(),
                         ));
                     }
+                    let hit_padding = editor.scaled(2.0);
                     let hit_bounds = Bounds::new(
-                        point(px(cb_x - 2.0), px(line_top)),
-                        size(px(cb_size + 4.0), px(total_line_height)),
+                        point(px(cb_x - hit_padding), px(line_top)),
+                        size(px(cb_size + hit_padding * 2.0), px(total_line_height)),
                     );
                     checkbox_hit_areas.push((hit_bounds, line_idx));
                 }
+            }
+
+            // Gutter fold icon for foldable lines.
+            if !hidden_lines.contains(&line_idx) {
+                let fi_size = editor.scaled(GUTTER_FOLD_ICON_SIZE);
+                let fi_x = content_x - fi_size - editor.scaled(5.0);
+
+                if let Some(_) = editor.fold_range_for_line(line_idx) {
+                    let is_folded = editor.folded_sections.contains(&line_idx);
+                    let is_hovered = editor.hovering_fold_line == Some(line_idx);
+                    // For CodeBlockFence: align fold icon with the first code line (one line below fence)
+                    let fi_y = if *block_type == BlockType::CodeBlockFence && !is_folded {
+                        line_top + line_height + (line_height - fi_size) / 2.0
+                    } else {
+                        line_top + (line_height - fi_size) / 2.0
+                    };
+                    // Only visible when hovered (or already folded for feedback).
+                    let fi_alpha = if is_folded {
+                        0.75_f32
+                    } else if is_hovered {
+                        0.7_f32
+                    } else {
+                        0.0_f32 // invisible when not hovered
+                    };
+                    if fi_alpha > 0.0 {
+                        // Rotation: expanded = 90° CW (pointing down), folded = 0° (pointing right)
+                        let rotation_deg = if is_folded { 0.0_f32 } else { 90.0_f32 };
+                        let mut fi_color = if is_folded {
+                            theme.accent
+                        } else {
+                            theme.panel_muted
+                        };
+                        fi_color.a = fi_alpha;
+                        gutter_svgs.push((
+                            Bounds::new(point(px(fi_x), px(fi_y)), size(px(fi_size), px(fi_size))),
+                            FOLD_SVG_PATH,
+                            fi_color,
+                            rotation_deg,
+                        ));
+                    }
+                    gutter_fold_hit_areas_local.push((
+                        Bounds::new(
+                            point(px(fi_x - 3.0), px(line_top)),
+                            size(px(fi_size + 6.0), px(line_height)),
+                        ),
+                        line_idx,
+                        false, // not image fold
+                    ));
+                }
+
+                // Image preview fold icon (when image preview is visible/loaded).
+                if decoration.image_path.is_some()
+                    && image_cache
+                        .get(decoration.image_path.as_ref().unwrap())
+                        .is_some_and(|v| v.is_some())
+                {
+                    let is_img_folded = editor.folded_image_previews.contains(&line_idx);
+                    let is_hovered = editor.hovering_fold_line == Some(line_idx);
+                    let preview_center_y = if is_img_folded {
+                        line_top + line_height / 2.0
+                    } else {
+                        line_top + text_line_height + extra_height / 2.0
+                    };
+                    let fi_y = preview_center_y - fi_size / 2.0;
+                    let fi_alpha = if is_img_folded {
+                        0.75_f32
+                    } else if is_hovered {
+                        0.7_f32
+                    } else {
+                        0.0_f32
+                    };
+                    if fi_alpha > 0.0 {
+                        let rotation_deg = if is_img_folded { 0.0_f32 } else { 90.0_f32 };
+                        let mut fi_color = if is_img_folded {
+                            theme.accent
+                        } else {
+                            theme.panel_muted
+                        };
+                        fi_color.a = fi_alpha;
+                        gutter_svgs.push((
+                            Bounds::new(point(px(fi_x), px(fi_y)), size(px(fi_size), px(fi_size))),
+                            FOLD_SVG_PATH,
+                            fi_color,
+                            rotation_deg,
+                        ));
+                    }
+                    gutter_fold_hit_areas_local.push((
+                        Bounds::new(
+                            point(px(fi_x - 3.0), px(fi_y - 2.0)),
+                            size(px(fi_size + 6.0), px(fi_size + 4.0)),
+                        ),
+                        line_idx,
+                        true, // is_image_fold
+                    ));
+                }
+            }
+
+            // Image URL-edit icon (visible when image syntax is expanded).
+            if image_active {
+                let ie_size = editor.scaled(13.0);
+                // Position immediately to the right of the rendered syntax
+                let ie_x = editor_left + editor.padding_left() + text_width + editor.scaled(4.0);
+                let ie_y = line_top + (line_height - ie_size) / 2.0;
+                let ie_bounds =
+                    Bounds::new(point(px(ie_x), px(ie_y)), size(px(ie_size), px(ie_size)));
+                let is_hovered = editor.hovering_image_edit_line == Some(line_idx);
+                let alpha = if is_hovered { 0.55 } else { 0.7 };
+                image_edit_icons.push((ie_bounds, line_idx, alpha));
+                image_edit_hit_areas_local.push((ie_bounds, line_idx));
             }
 
             // Line highlight for cursor line — spans full viewport width
@@ -3587,7 +4751,9 @@ impl Element for EditorElement {
                                 px(line_top) + pos_end.y,
                             ),
                             point(
-                                px(content_x + indent_end) + pos_end.x + px(BASE_FONT_SIZE * 0.4),
+                                px(content_x + indent_end)
+                                    + pos_end.x
+                                    + px(editor.base_font_size() * 0.4),
                                 px(line_top) + pos_end.y + px(line_height),
                             ),
                         ),
@@ -3600,11 +4766,16 @@ impl Element for EditorElement {
             // Show cursor when focused and (blink visible OR actively selecting/typing)
             if is_cursor_line
                 && editor.focus_handle.is_focused(window)
-                && (editor.blink_visible || editor.is_selecting)
+                && (editor.cursor_opacity > 0.0 || editor.is_selecting)
             {
                 let buf_cursor_col = cursor.offset.saturating_sub(line_start_offset);
                 let buf_cursor_col = buf_cursor_col.min(line_content.len());
-                let disp_cursor_col = buffer_to_display_offset(&buffer_to_display, buf_cursor_col);
+                // When cursor is at or past the end of the buffer line, use end of display text.
+                let disp_cursor_col = if buf_cursor_col >= line_content.len() {
+                    display_text.len()
+                } else {
+                    buffer_to_display_offset(&buffer_to_display, buf_cursor_col)
+                };
 
                 let cursor_pos = wrapped
                     .position_for_index(disp_cursor_col, px(line_height))
@@ -3612,12 +4783,18 @@ impl Element for EditorElement {
 
                 let cursor_indent = indent_for_y(indent_px, cursor_pos.y, line_height);
                 let cursor_top = line_top + f32::from(cursor_pos.y);
+                let mut cursor_color = theme.cursor;
+                cursor_color.a *= if editor.is_selecting {
+                    CURSOR_MAX_OPACITY
+                } else {
+                    editor.cursor_opacity
+                };
                 cursor_quad = Some(fill(
                     Bounds::new(
                         point(px(content_x + cursor_indent) + cursor_pos.x, px(cursor_top)),
                         size(px(2.0), px(line_height)),
                     ),
-                    theme.cursor,
+                    cursor_color,
                 ));
             }
 
@@ -3668,9 +4845,11 @@ impl Element for EditorElement {
             editor.last_viewport_width = viewport_width;
             editor.checkbox_areas = checkbox_hit_areas.clone();
             editor.image_click_areas = image_hit_areas.clone();
+            editor.gutter_fold_areas = gutter_fold_hit_areas_local.clone();
+            editor.image_edit_areas = image_edit_hit_areas_local.clone();
             editor.last_editor_left = editor_left;
             editor.last_editor_width = editor_width;
-            editor.last_content_left = editor_left + PADDING_LEFT;
+            editor.last_content_left = editor_left + editor.padding_left();
             editor.last_text_width = text_width;
             editor.content_origin = bounds.origin;
         });
@@ -3715,6 +4894,7 @@ impl Element for EditorElement {
             image_borders,
             table_borders,
             table_bgs,
+            image_edit_icons,
         }
     }
 
@@ -3756,14 +4936,28 @@ impl Element for EditorElement {
         for quad in prepaint.gutter_quads.drain(..) {
             window.paint_quad(quad);
         }
-        for (icon_bounds, icon_path, color) in &prepaint.gutter_svgs {
-            let _ = window.paint_svg(
-                *icon_bounds,
-                (*icon_path).into(),
-                TransformationMatrix::default(),
-                *color,
-                cx,
-            );
+        for (icon_bounds, icon_path, color, rotation_deg) in &prepaint.gutter_svgs {
+            let transform = if *rotation_deg != 0.0 {
+                // Rotate around the center of the icon bounds.
+                let cx_f: f32 = icon_bounds.origin.x.into();
+                let cy_f: f32 = icon_bounds.origin.y.into();
+                let w_f: f32 = icon_bounds.size.width.into();
+                let h_f: f32 = icon_bounds.size.height.into();
+                let angle = gpui::Radians(rotation_deg.to_radians());
+                TransformationMatrix::unit()
+                    .translate(gpui::point(
+                        gpui::ScaledPixels::from(cx_f + w_f * 0.5),
+                        gpui::ScaledPixels::from(cy_f + h_f * 0.5),
+                    ))
+                    .rotate(angle)
+                    .translate(gpui::point(
+                        gpui::ScaledPixels::from(-w_f * 0.5),
+                        gpui::ScaledPixels::from(-h_f * 0.5),
+                    ))
+            } else {
+                TransformationMatrix::default()
+            };
+            let _ = window.paint_svg(*icon_bounds, (*icon_path).into(), transform, *color, cx);
         }
         for (shaped, origin, line_height) in &prepaint.gutter_labels {
             shaped.paint(*origin, *line_height, window, cx).ok();
@@ -3821,6 +5015,20 @@ impl Element for EditorElement {
             window.paint_quad(quad);
         }
 
+        // Image URL-edit icons
+        for (icon_bounds, _line, alpha) in &prepaint.image_edit_icons {
+            let theme = &self.editor.read(cx).theme;
+            let mut color = theme.panel_muted;
+            color.a = *alpha;
+            let _ = window.paint_svg(
+                *icon_bounds,
+                OPEN_SVG_PATH.into(),
+                TransformationMatrix::default(),
+                color,
+                cx,
+            );
+        }
+
         if let Some(cursor) = prepaint.cursor_quad.take() {
             window.paint_quad(cursor);
         }
@@ -3839,6 +5047,7 @@ fn build_display_text(
     decoration: &LineDecoration,
     cursor_col: Option<usize>,
     table_width_chars: Option<usize>,
+    table_cell_padding_chars: usize,
 ) -> (String, Vec<usize>, Vec<usize>, bool) {
     let len = line_content.len();
 
@@ -3850,6 +5059,7 @@ fn build_display_text(
                 table_info,
                 cursor_col,
                 table_width_chars,
+                table_cell_padding_chars,
             );
         }
     }
@@ -3881,7 +5091,19 @@ fn build_display_text(
         .iter()
         .map(|sr| {
             cursor_col.map_or(true, |col| {
-                col < sr.trigger_range.start || col > sr.trigger_range.end
+                let at_eol = col >= len;
+                if at_eol {
+                    // At EOL: only keep syntax VISIBLE for block-level constructs where
+                    // the entire line is syntax (HR, code-fence). For inline markup on
+                    // normal/heading lines the per-range rule still applies so that
+                    // moving to EOL doesn't expand every marker on the line.
+                    !matches!(
+                        decoration.block_type,
+                        BlockType::HorizontalRule | BlockType::CodeBlockFence
+                    )
+                } else {
+                    col < sr.trigger_range.start || col >= sr.trigger_range.end
+                }
             })
         })
         .collect();
@@ -3915,7 +5137,7 @@ fn build_display_text(
 
     let prefix_range_and_replacement = match decoration.block_type {
         BlockType::UnorderedList => {
-            let prefix_len = if trimmed.starts_with("- ")
+            let fold_len = if trimmed.starts_with("- ")
                 || trimmed.starts_with("* ")
                 || trimmed.starts_with("+ ")
             {
@@ -3923,8 +5145,9 @@ fn build_display_text(
             } else {
                 0
             };
-            (prefix_len > 0 && prefix_is_folded(leading_ws, prefix_len, cursor_col))
-                .then_some((leading_ws..leading_ws + prefix_len, "• ".to_string()))
+            // Expand when cursor is within `- ` (positions 0..fold_len); collapse otherwise.
+            (fold_len > 0 && prefix_is_folded(leading_ws, fold_len, cursor_col))
+                .then_some((leading_ws..leading_ws + fold_len, "• ".to_string()))
         }
         BlockType::OrderedList => {
             let prefix_len = markdown::ordered_list_prefix_len(trimmed);
@@ -3934,9 +5157,10 @@ fn build_display_text(
             ))
         }
         BlockType::TaskList(_) => {
-            let prefix_len = task_prefix_len(trimmed);
-            (prefix_len > 0 && prefix_is_folded(leading_ws, prefix_len, cursor_col))
-                .then_some((leading_ws..leading_ws + prefix_len, "   ".to_string()))
+            let fold_len = task_prefix_len(trimmed);
+            let trigger_len = task_syntax_len(trimmed);
+            (fold_len > 0 && prefix_is_folded(leading_ws, trigger_len, cursor_col))
+                .then_some((leading_ws..leading_ws + fold_len, "   ".to_string()))
         }
         _ => None,
     };
@@ -4009,36 +5233,23 @@ fn build_display_text(
 fn build_table_display_text(
     line_content: &str,
     info: &TableLineInfo,
-    cursor_col: Option<usize>,
-    available_chars: Option<usize>,
+    _cursor_col: Option<usize>,
+    _available_chars: Option<usize>,
+    table_cell_padding_chars: usize,
 ) -> (String, Vec<usize>, Vec<usize>, bool) {
     let len = line_content.len();
-    let cell_padding = 2; // spaces of padding per cell
+    let cell_padding = table_cell_padding_chars;
 
-    // Compute balanced per-column character width when available space is known.
-    // Ensure each column is at least as wide as its content (no text wrapping).
-    let n_cols = info.column_widths.len();
-    let balanced_col_widths: Vec<usize> = if let (Some(avail), true) = (available_chars, n_cols > 0)
-    {
-        let sep_overhead = (n_cols.saturating_sub(1)) * 2;
-        let usable = avail.saturating_sub(sep_overhead);
-        let equal_per_col = (usable / n_cols).max(3).saturating_sub(cell_padding);
-        // Use at least the content width so text doesn't get wrapped
-        info.column_widths
-            .iter()
-            .map(|&content_w| content_w.max(equal_per_col))
-            .collect()
-    } else {
-        info.column_widths.clone()
-    };
+    // Use each column's natural content width for adaptive sizing.
+    // This avoids forced equal distribution that causes unnecessary padding or wrapping.
+    let balanced_col_widths = info.column_widths.clone();
 
     if info.is_separator {
         // Separator row stays visually empty; borders are painted separately.
         let total_chars: usize = balanced_col_widths
             .iter()
-            .map(|w| w + cell_padding)
-            .sum::<usize>()
-            + (balanced_col_widths.len().saturating_sub(1)) * 2;
+            .map(|w| w + cell_padding * 2)
+            .sum::<usize>();
         let display = " ".repeat(total_chars.max(1));
         let d2b = vec![0; display.len()];
         let b2d = vec![0; len];
@@ -4062,43 +5273,28 @@ fn build_table_display_text(
             b2d[buf_i] = display_pos;
         }
 
-        if ci > 0 {
-            let sep = "  ";
-            let anchor = cell_range
-                .start
-                .saturating_sub(1)
-                .min(len.saturating_sub(1));
-            for _ in 0..sep.len() {
-                d2b.push(anchor);
-            }
-            display.push_str(sep);
-            display_pos += sep.len();
-        }
-
-        let local_cursor_col = cursor_col.and_then(|col| {
-            if col >= cell_range.start && col <= cell_range.end {
-                Some(col.saturating_sub(cell_range.start))
-            } else {
-                None
-            }
-        });
         let cell_decoration = markdown::parse_decorations(cell)
             .into_iter()
             .next()
             .unwrap_or_default();
         let (folded_cell, cell_d2b, cell_b2d, _) =
-            build_display_text(cell, &cell_decoration, local_cursor_col, None);
+            build_display_text(cell, &cell_decoration, None, None, 0);
         let cell_content_chars = folded_cell.chars().count();
         let width = balanced_col_widths
             .get(ci)
             .copied()
             .unwrap_or(cell_content_chars)
             .max(cell_content_chars);
-        let right_padding_len = width.saturating_sub(cell_content_chars);
+        let left_padding = " ".repeat(cell_padding);
+        let right_padding_len = width.saturating_sub(cell_content_chars) + cell_padding;
         let right_padding = " ".repeat(right_padding_len);
         let cell_anchor = cell_range.start.min(len.saturating_sub(1));
 
-        // No left padding — text is left-aligned, starts immediately
+        display.push_str(&left_padding);
+        for _ in 0..left_padding.len() {
+            d2b.push(cell_anchor);
+        }
+        display_pos += left_padding.len();
 
         display.push_str(&folded_cell);
         for &local_buf in &cell_d2b {
@@ -4113,7 +5309,9 @@ fn build_table_display_text(
         display_pos += folded_cell.len();
 
         display.push_str(&right_padding);
-        let right_anchor = cell_range.end.saturating_sub(1).min(len.saturating_sub(1));
+        // Map right-padding display positions to cell_range.end (the trailing space before '|'),
+        // so clicking in the right-padding area places the cursor _after_ the last cell char.
+        let right_anchor = cell_range.end.min(len.saturating_sub(1));
         for _ in 0..right_padding.len() {
             d2b.push(right_anchor);
         }
@@ -4323,7 +5521,7 @@ fn compute_display_prefix_bytes(
 }
 
 fn prefix_is_folded(leading_ws: usize, prefix_len: usize, cursor_col: Option<usize>) -> bool {
-    cursor_col.is_none_or(|col| col < leading_ws || col > leading_ws + prefix_len)
+    cursor_col.is_none_or(|col| col < leading_ws || col >= leading_ws + prefix_len)
 }
 
 fn task_prefix_len(trimmed: &str) -> usize {
@@ -4333,6 +5531,11 @@ fn task_prefix_len(trimmed: &str) -> usize {
         }
     }
     0
+}
+
+fn task_syntax_len(trimmed: &str) -> usize {
+    // Include the trailing space so the cursor *on* the space keeps the prefix expanded.
+    task_prefix_len(trimmed)
 }
 
 fn trimmed_ordered_prefix_len(display_text: &str) -> usize {
@@ -4489,6 +5692,38 @@ fn load_render_image_from_path(path: &PathBuf) -> anyhow::Result<RenderImage> {
     Ok(RenderImage::new([frame]))
 }
 
+/// Show a native macOS file picker (via osascript) and return the chosen path.
+fn pick_image_file_blocking() -> Option<PathBuf> {
+    let script =
+        r#"POSIX path of (choose file of type {"public.image"} with prompt "Choose Image")"#;
+    let output = std::process::Command::new("osascript")
+        .args(["-e", script])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(PathBuf::from(s));
+        }
+    }
+    None
+}
+
+fn pick_folder_blocking() -> Option<PathBuf> {
+    let script = r#"POSIX path of (choose folder with prompt "Choose Workspace Folder")"#;
+    let output = std::process::Command::new("osascript")
+        .args(["-e", script])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(PathBuf::from(s));
+        }
+    }
+    None
+}
+
 /// Map a buffer byte offset (within line) to display byte offset.
 fn buffer_to_display_offset(buffer_to_display: &[usize], buf_offset: usize) -> usize {
     if buf_offset >= buffer_to_display.len() {
@@ -4559,6 +5794,18 @@ fn build_text_runs_for_display(
                 *c = theme.syntax_marker;
             }
         }
+        BlockType::Table => {
+            // Bold text in table header rows.
+            if decoration
+                .table_info
+                .as_ref()
+                .is_some_and(|ti| ti.is_header)
+            {
+                for w in buf_weights.iter_mut() {
+                    *w = FontWeight::BOLD;
+                }
+            }
+        }
         _ => {}
     }
 
@@ -4620,7 +5867,7 @@ fn build_text_runs_for_display(
     // Syntax markers on cursor line: show expanded ones dimmed
     if let Some(col) = cursor_col {
         for sr in &decoration.syntax_ranges {
-            if col >= sr.trigger_range.start && col <= sr.trigger_range.end {
+            if col >= sr.trigger_range.start && col < sr.trigger_range.end {
                 let start = sr.range.start.min(buf_len);
                 let end = sr.range.end.min(buf_len);
                 let syntax_color = match decoration.block_type {
