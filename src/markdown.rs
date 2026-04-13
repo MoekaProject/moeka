@@ -139,7 +139,6 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
 
     let mut in_code_block = false;
     let mut current_code_language: Option<String> = None;
-    let mut in_heading: Option<u8> = None;
     let mut in_blockquote = false;
     let mut inline_stack: Vec<(InlineKind, usize, Option<String>)> = Vec::new();
 
@@ -148,7 +147,6 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
             Event::Start(Tag::Heading { level, .. }) => {
                 let line = offset_to_line(source_range.start);
                 let lvl = level as u8;
-                in_heading = Some(lvl);
                 if line < decorations.len() {
                     decorations[line].block_type = BlockType::Heading(lvl);
                     let prefix_len = (lvl as usize) + 1;
@@ -170,9 +168,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                     }
                 }
             }
-            Event::End(TagEnd::Heading(_)) => {
-                in_heading = None;
-            }
+            Event::End(TagEnd::Heading(_)) => {}
             Event::Start(Tag::CodeBlock(kind)) => {
                 let line = offset_to_line(source_range.start);
                 in_code_block = true;
@@ -566,7 +562,7 @@ fn get_line_content<'a>(
     text: &'a str,
     line_starts: &[usize],
     line: usize,
-    line_count: usize,
+    _line_count: usize,
 ) -> &'a str {
     let start = line_starts[line];
     let end = if line + 1 < line_starts.len() {

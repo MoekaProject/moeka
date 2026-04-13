@@ -3,6 +3,7 @@ mod buffer;
 mod cursor;
 mod editor;
 mod markdown;
+mod style;
 mod theme;
 
 use std::borrow::Cow;

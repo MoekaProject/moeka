@@ -112,7 +112,7 @@ impl Buffer {
         }
         o
     }
-
+ 
     fn rebuild_line_starts(&mut self) {
         self.line_starts.clear();
         self.line_starts.push(0);
@@ -121,6 +121,12 @@ impl Buffer {
                 self.line_starts.push(i + 1);
             }
         }
+    }
+}
+
+impl Default for Buffer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

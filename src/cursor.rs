@@ -208,7 +208,6 @@ fn prev_word_boundary(text: &str, offset: usize) -> usize {
     if trimmed.is_empty() {
         return 0;
     }
-    let end = trimmed.len();
     for (idx, ch) in trimmed.char_indices().rev() {
         if ch.is_whitespace() || ch.is_ascii_punctuation() {
             return idx + ch.len_utf8();

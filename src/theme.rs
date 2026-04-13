@@ -1,40 +1,55 @@
 use gpui::Hsla;
 
-/// One Dark Pro inspired color palette
+#[macro_export]
+macro_rules! hex_hsla {
+    ($hex:literal) => {{
+        const VALUE: ::gpui::Hsla = $crate::theme::hex_to_hsla($hex);
+        VALUE
+    }};
+}
+
+/// One Dark Pro inspired color palette, organized by category.
 pub struct Theme {
-    pub background: Hsla,
-    pub foreground: Hsla,
-    pub panel_bg: Hsla,
-    pub panel_surface: Hsla,
-    pub panel_header_bg: Hsla,
-    pub panel_hover: Hsla,
-    pub panel_selected: Hsla,
-    pub panel_active: Hsla,
-    pub panel_border: Hsla,
-    pub panel_muted: Hsla,
-    pub tab_bar_bg: Hsla,
-    pub tab_bg: Hsla,
-    pub tab_hover: Hsla,
-    pub tab_active_bg: Hsla,
-    pub tab_active_text: Hsla,
-    pub tab_border: Hsla,
-    pub accent: Hsla,
-    pub danger: Hsla,
-    pub line_highlight: Hsla,
+    // ── Text colors ─────────────────────────────────────────────
+    pub foreground: Hsla,      // primary text
+    pub panel_muted: Hsla,     // secondary/muted text
+    pub tab_active_text: Hsla, // active/bright text
+    pub accent: Hsla,          // accent text/links
+    pub danger: Hsla,          // danger/error text
+
+    // ── Background colors ───────────────────────────────────────
+    pub background: Hsla,      // primary editor bg
+    pub panel_bg: Hsla,        // secondary panel bg
+    pub panel_surface: Hsla,   // elevated surface
+    pub panel_header_bg: Hsla, // panel header
+    pub panel_hover: Hsla,     // hover state
+    pub panel_selected: Hsla,  // selected state
+    pub panel_active: Hsla,    // active state
+    pub tab_bar_bg: Hsla,      // tab bar bg
+    pub tab_bg: Hsla,          // inactive tab bg
+    pub tab_hover: Hsla,       // tab hover bg
+    pub tab_active_bg: Hsla,   // active tab bg
+    pub code_block_bg: Hsla,   // code block bg
+    pub inline_code_bg: Hsla,  // inline code bg
+
+    // ── Border colors ───────────────────────────────────────────
+    pub panel_border: Hsla,      // primary border
+    pub tab_border: Hsla,        // tab border
+    pub checkbox_border: Hsla,   // checkbox border
+    pub blockquote_border: Hsla, // decorative border
+
+    // ── Editor/Markdown colors ──────────────────────────────────
     pub cursor: Hsla,
     pub selection: Hsla,
+    pub line_highlight: Hsla,
     pub heading: Hsla,
     pub bold: Hsla,
     pub italic: Hsla,
     pub strikethrough: Hsla,
     pub inline_code: Hsla,
-    pub inline_code_bg: Hsla,
-    pub code_block_bg: Hsla,
     pub link: Hsla,
     pub syntax_marker: Hsla,
-    pub blockquote_border: Hsla,
     pub list_marker: Hsla,
-    pub checkbox_border: Hsla,
     pub checkbox_checked: Hsla,
     pub gutter_heading: Hsla,
 }
@@ -42,58 +57,125 @@ pub struct Theme {
 impl Theme {
     pub fn one_dark() -> Self {
         Self {
-            background: hsla_hex(0x282c34, 1.0),
-            foreground: hsla_hex(0xabb2bf, 1.0),
-            panel_bg: hsla_hex(0x21252b, 1.0),
-            panel_surface: hsla_hex(0x252a31, 1.0),
-            panel_header_bg: hsla_hex(0x1d2127, 1.0),
-            panel_hover: hsla_hex(0x313842, 1.0),
-            panel_selected: hsla_hex(0x2f3742, 1.0),
-            panel_active: hsla_hex(0x528bff, 0.95),
-            panel_border: hsla_hex(0x181b20, 1.0),
-            panel_muted: hsla_hex(0x7f8793, 1.0),
-            tab_bar_bg: hsla_hex(0x23272e, 1.0),
-            tab_bg: hsla_hex(0x2b313a, 1.0),
-            tab_hover: hsla_hex(0x353c47, 1.0),
-            tab_active_bg: hsla_hex(0x1f2329, 1.0),
-            tab_active_text: hsla_hex(0xd7dae0, 1.0),
-            tab_border: hsla_hex(0x191d23, 1.0),
-            accent: hsla_hex(0x61afef, 1.0),
-            danger: hsla_hex(0xe06c75, 1.0),
-            line_highlight: hsla_hex(0x3e4451, 0.5),
-            cursor: hsla_hex(0x528bff, 1.0),
-            selection: hsla_hex(0x3e4451, 0.6),
-            heading: hsla_hex(0xe06c75, 1.0),
-            bold: hsla_hex(0xd19a66, 1.0),
-            italic: hsla_hex(0xc678dd, 1.0),
-            strikethrough: hsla_hex(0x636d83, 1.0),
-            inline_code: hsla_hex(0x98c379, 1.0),
-            inline_code_bg: hsla_hex(0x2c313a, 1.0),
-            code_block_bg: hsla_hex(0x21252b, 1.0),
-            link: hsla_hex(0x61afef, 1.0),
-            syntax_marker: hsla_hex(0x636d83, 0.7),
-            blockquote_border: hsla_hex(0x636d83, 0.5),
-            list_marker: hsla_hex(0xe06c75, 1.0),
-            checkbox_border: hsla_hex(0x3e4452, 1.0),
-            checkbox_checked: hsla_hex(0x3778ae, 1.0),
-            gutter_heading: hsla_hex(0xabb2bf, 0.18),
+            // Text
+            foreground: crate::hex_hsla!("#abb2bf"),
+            panel_muted: crate::hex_hsla!("#7f8793"),
+            tab_active_text: crate::hex_hsla!("#d7dae0"),
+            accent: crate::hex_hsla!("#61afef"),
+            danger: crate::hex_hsla!("#e06c75"),
+            // Background
+            background: crate::hex_hsla!("#282c34"),
+            panel_bg: crate::hex_hsla!("#21252b"),
+            panel_surface: crate::hex_hsla!("#252a31"),
+            panel_header_bg: crate::hex_hsla!("#1d2127"),
+            panel_hover: crate::hex_hsla!("#313842"),
+            panel_selected: crate::hex_hsla!("#2f3742"),
+            panel_active: with_alpha(crate::hex_hsla!("#528bff"), 0.95),
+            tab_bar_bg: crate::hex_hsla!("#23272e"),
+            tab_bg: crate::hex_hsla!("#2b313a"),
+            tab_hover: crate::hex_hsla!("#353c47"),
+            tab_active_bg: crate::hex_hsla!("#353c47"),
+            code_block_bg: crate::hex_hsla!("#21252b"),
+            inline_code_bg: crate::hex_hsla!("#2c313a"),
+            // Border
+            panel_border: crate::hex_hsla!("#181b20"),
+            tab_border: crate::hex_hsla!("#191d23"),
+            checkbox_border: crate::hex_hsla!("#3e4452"),
+            blockquote_border: with_alpha(crate::hex_hsla!("#636d83"), 0.5),
+            // Editor/Markdown
+            cursor: crate::hex_hsla!("#528bff"),
+            selection: with_alpha(crate::hex_hsla!("#3e4451"), 0.6),
+            line_highlight: with_alpha(crate::hex_hsla!("#3e4451"), 0.5),
+            heading: crate::hex_hsla!("#e06c75"),
+            bold: crate::hex_hsla!("#d19a66"),
+            italic: crate::hex_hsla!("#c678dd"),
+            strikethrough: crate::hex_hsla!("#636d83"),
+            inline_code: crate::hex_hsla!("#98c379"),
+            link: crate::hex_hsla!("#61afef"),
+            syntax_marker: with_alpha(crate::hex_hsla!("#636d83"), 0.7),
+            list_marker: crate::hex_hsla!("#e06c75"),
+            checkbox_checked: crate::hex_hsla!("#3778ae"),
+            gutter_heading: with_alpha(crate::hex_hsla!("#abb2bf"), 0.18),
         }
     }
 }
 
-pub fn hsla_hex(hex: u32, alpha: f32) -> Hsla {
-    let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
-    let b = (hex & 0xFF) as f32 / 255.0;
-    rgb_to_hsla(r, g, b, alpha)
+/// Convert a CSS-style hex color string (e.g. "#ffffff", "#FF0000", "#abc") to Hsla.
+/// Supports 3-digit (#RGB), 6-digit (#RRGGBB), and 8-digit (#RRGGBBAA) forms.
+/// The leading '#' is optional.
+pub const fn hex_to_hsla(hex_str: &str) -> Hsla {
+    let bytes = hex_str.as_bytes();
+    let start = if !bytes.is_empty() && bytes[0] == b'#' {
+        1
+    } else {
+        0
+    };
+    let len = bytes.len() - start;
+
+    let (r, g, b, a) = match len {
+        3 => {
+            let r = parse_hex_nibble(bytes[start]);
+            let g = parse_hex_nibble(bytes[start + 1]);
+            let b = parse_hex_nibble(bytes[start + 2]);
+            (r * 17, g * 17, b * 17, 255)
+        }
+        6 => {
+            let r = parse_hex_byte(bytes[start], bytes[start + 1]);
+            let g = parse_hex_byte(bytes[start + 2], bytes[start + 3]);
+            let b = parse_hex_byte(bytes[start + 4], bytes[start + 5]);
+            (r, g, b, 255)
+        }
+        8 => {
+            let r = parse_hex_byte(bytes[start], bytes[start + 1]);
+            let g = parse_hex_byte(bytes[start + 2], bytes[start + 3]);
+            let b = parse_hex_byte(bytes[start + 4], bytes[start + 5]);
+            let a = parse_hex_byte(bytes[start + 6], bytes[start + 7]);
+            (r, g, b, a)
+        }
+        _ => panic!("invalid hex color literal"),
+    };
+
+    rgb_to_hsla(
+        r as f32 / 255.0,
+        g as f32 / 255.0,
+        b as f32 / 255.0,
+        a as f32 / 255.0,
+    )
 }
 
-fn rgb_to_hsla(r: f32, g: f32, b: f32, a: f32) -> Hsla {
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
+const fn parse_hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => panic!("invalid hex digit"),
+    }
+}
+
+const fn parse_hex_byte(high: u8, low: u8) -> u8 {
+    (parse_hex_nibble(high) << 4) | parse_hex_nibble(low)
+}
+
+const fn max3(a: f32, b: f32, c: f32) -> f32 {
+    let ab = if a > b { a } else { b };
+    if ab > c { ab } else { c }
+}
+
+const fn min3(a: f32, b: f32, c: f32) -> f32 {
+    let ab = if a < b { a } else { b };
+    if ab < c { ab } else { c }
+}
+
+pub const fn with_alpha(color: Hsla, alpha: f32) -> Hsla {
+    Hsla { a: alpha, ..color }
+}
+
+const fn rgb_to_hsla(r: f32, g: f32, b: f32, a: f32) -> Hsla {
+    let max = max3(r, g, b);
+    let min = min3(r, g, b);
     let l = (max + min) / 2.0;
 
-    if (max - min).abs() < f32::EPSILON {
+    if max == min {
         return Hsla {
             h: 0.0,
             s: 0.0,
@@ -109,9 +191,9 @@ fn rgb_to_hsla(r: f32, g: f32, b: f32, a: f32) -> Hsla {
         d / (max + min)
     };
 
-    let h = if (max - r).abs() < f32::EPSILON {
+    let h = if max == r {
         (g - b) / d + if g < b { 6.0 } else { 0.0 }
-    } else if (max - g).abs() < f32::EPSILON {
+    } else if max == g {
         (b - r) / d + 2.0
     } else {
         (r - g) / d + 4.0
