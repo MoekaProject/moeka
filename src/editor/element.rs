@@ -4,8 +4,8 @@ use std::sync::Arc;
 use gpui::{
     App, BorderStyle, Bounds, Corners, Element, ElementId, ElementInputHandler, Entity,
     GlobalElementId, Hsla, IntoElement, LayoutId, PaintQuad, Pixels, Point, ShapedLine, Style,
-    TextAlign, TextRun, TransformationMatrix, Window, WrappedLine, fill, point, px,
-    quad, relative, size,
+    TextAlign, TextRun, TransformationMatrix, Window, WrappedLine, fill, point, px, quad, relative,
+    size,
 };
 
 use crate::markdown::BlockType;
@@ -101,17 +101,17 @@ impl Element for EditorElement {
         let viewport_width: f32 = bounds.size.width.into();
         let origin_x: f32 = bounds.origin.x.into();
         let origin_y: f32 = bounds.origin.y.into();
-        let editor_width = viewport_width.min(editor.max_editor_width());
+        let editor_width = if editor.editor_left_aligned {
+            viewport_width
+        } else {
+            viewport_width.min(editor.max_editor_width())
+        };
         let centered_left = origin_x + ((viewport_width - editor_width) / 2.0).max(0.0);
-        let mut editor_left = if editor.editor_left_aligned {
-            origin_x + editor.scaled(24.0)
+        let editor_left = if editor.editor_left_aligned {
+            origin_x
         } else {
             centered_left
         };
-        let right_limit = origin_x + viewport_width - editor_width;
-        if editor_left > right_limit {
-            editor_left = right_limit.max(origin_x);
-        }
         let text_width = (editor_width - editor.padding_left() - editor.padding_right())
             .max(editor.scaled(120.0));
         let wrap_width = text_width;
@@ -385,8 +385,11 @@ impl Element for EditorElement {
                 BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_)
             );
             let indent_px = if is_list_type {
-                let prefix_bytes =
-                    helpers::compute_display_prefix_bytes(&display_text, block_type, prefix_collapsed);
+                let prefix_bytes = helpers::compute_display_prefix_bytes(
+                    &display_text,
+                    block_type,
+                    prefix_collapsed,
+                );
                 if prefix_bytes > 0 && prefix_bytes <= display_text.len() {
                     let prefix_chars = display_text
                         .char_indices()
@@ -439,7 +442,8 @@ impl Element for EditorElement {
                     let img_w = img_size.width.0 as f32;
                     let img_h = img_size.height.0 as f32;
                     if img_w > 0.0 && img_h > 0.0 {
-                        let (_, display_h) = helpers::compute_image_preview_size(img_w, img_h, text_width);
+                        let (_, display_h) =
+                            helpers::compute_image_preview_size(img_w, img_h, text_width);
                         display_h + 8.0
                     } else {
                         0.0
@@ -618,8 +622,7 @@ impl Element for EditorElement {
                                 .max(cell_chars);
                             col_x_offset += col_w + table_cell_padding_chars * 2;
                             if ci + 1 < ti.cells.len() {
-                                let sep_x =
-                                    table_left + col_x_offset as f32 * base_char_width;
+                                let sep_x = table_left + col_x_offset as f32 * base_char_width;
                                 table_borders.push(fill(
                                     Bounds::new(
                                         point(px(sep_x), px(line_top)),
@@ -910,8 +913,10 @@ impl Element for EditorElement {
                 if sel_start_on_line < sel_end_on_line {
                     let buf_start_col = sel_start_on_line - line_start_offset;
                     let buf_end_col = sel_end_on_line - line_start_offset;
-                    let disp_start = helpers::buffer_to_display_offset(&buffer_to_display, buf_start_col);
-                    let disp_end = helpers::buffer_to_display_offset(&buffer_to_display, buf_end_col);
+                    let disp_start =
+                        helpers::buffer_to_display_offset(&buffer_to_display, buf_start_col);
+                    let disp_end =
+                        helpers::buffer_to_display_offset(&buffer_to_display, buf_end_col);
                     selection_quads.extend(helpers::build_selection_quads(
                         &display_text,
                         &runs,
@@ -992,7 +997,8 @@ impl Element for EditorElement {
                 if mark_start_on_line < mark_end_on_line {
                     let buf_start = mark_start_on_line - line_start_offset;
                     let buf_end = mark_end_on_line - line_start_offset;
-                    let disp_start = helpers::buffer_to_display_offset(&buffer_to_display, buf_start);
+                    let disp_start =
+                        helpers::buffer_to_display_offset(&buffer_to_display, buf_start);
                     let disp_end = helpers::buffer_to_display_offset(&buffer_to_display, buf_end);
                     let pos_start = wrapped
                         .position_for_index(disp_start, px(line_height))

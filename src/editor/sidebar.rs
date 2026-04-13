@@ -70,9 +70,7 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn sorted_dir_entries(
-        path: &Path,
-    ) -> std::io::Result<Vec<std::fs::DirEntry>> {
+    pub(crate) fn sorted_dir_entries(path: &Path) -> std::io::Result<Vec<std::fs::DirEntry>> {
         let mut entries: Vec<_> = std::fs::read_dir(path)?.filter_map(Result::ok).collect();
         entries.sort_by(|left, right| {
             let left_is_dir = left.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
@@ -465,7 +463,9 @@ impl EditorView {
             .flex()
             .items_center()
             .bg(row_bg)
-            .hover(|style| style.bg(self.theme.panel_hover))
+            .when(!self.sidebar_resizing, |this| {
+                this.hover(|style| style.bg(self.theme.panel_hover))
+            })
             .child(
                 div()
                     .w_full()
@@ -554,7 +554,7 @@ impl EditorView {
         content.push(
             div()
                 .w_full()
-                .h(px(self.scaled(30.0)))
+                .h(px(self.scaled(40.0)))
                 .flex_none()
                 .into_any_element(),
         );
@@ -569,8 +569,8 @@ impl EditorView {
                 .py(px(self.scaled(12.0)))
                 .child(
                     img(PathBuf::from(LOGO_SVG_PATH))
-                        .w(px(self.scaled(55.0)))
-                        .h(px(self.scaled(55.0))),
+                        .w(px(self.scaled(50.0)))
+                        .h(px(self.scaled(50.0))),
                 )
                 .into_any_element(),
         );

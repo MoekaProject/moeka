@@ -24,7 +24,7 @@ use crate::actions::*;
 use crate::buffer::Buffer;
 use crate::cursor::Cursor;
 use crate::markdown::{self, BlockType, LineDecoration};
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeKind};
 
 // ── Layout constants ────────────────────────────────────────────────
 
@@ -85,6 +85,8 @@ pub(crate) const EDITOR_ALIGN_LEFT_SVG_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/icons/editor-align-left.svg"
 );
+pub(crate) const THEME_TOGGLE_SVG_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/theme-toggle.svg");
 pub(crate) const FOLDER_OPEN_SVG_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/icons/filetree/folder-open.svg"
@@ -218,7 +220,9 @@ pub struct EditorView {
     pub buffer: Buffer,
     pub cursor: Cursor,
     pub(crate) focus_handle: FocusHandle,
+    pub(crate) theme_kind: ThemeKind,
     pub(crate) theme: Theme,
+    pub(crate) styles: crate::style::Styles,
     pub(crate) decorations: Vec<LineDecoration>,
     pub(crate) scroll_offset: f32,
     pub(crate) is_selecting: bool,
@@ -286,11 +290,16 @@ impl EditorView {
             cursor_offset: 0,
             cursor_anchor: 0,
         };
+        let theme_kind = ThemeKind::OneDark;
+        let theme = theme_kind.build();
+        let styles = crate::style::Styles::from_theme(&theme);
         let mut this = Self {
             buffer,
             cursor: Cursor::new(),
             focus_handle: cx.focus_handle(),
-            theme: Theme::one_dark(),
+            theme_kind,
+            theme,
+            styles,
             decorations,
             scroll_offset: 0.0,
             is_selecting: false,
@@ -355,6 +364,15 @@ impl EditorView {
         }
 
         this
+    }
+
+    // ── Theme toggle ─────────────────────────────────────────────
+
+    pub(crate) fn toggle_theme(&mut self, cx: &mut Context<Self>) {
+        self.theme_kind = self.theme_kind.toggle();
+        self.theme = self.theme_kind.build();
+        self.styles = crate::style::Styles::from_theme(&self.theme);
+        cx.notify();
     }
 
     // ── Cursor blink ────────────────────────────────────────────────

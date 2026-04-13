@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, SharedString, div, prelude::*,
-    px, svg,
+    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, SharedString, Window, div,
+    prelude::*, px, svg,
 };
 
 use super::*;
@@ -236,7 +236,7 @@ impl EditorView {
                     } else {
                         self.theme.panel_muted
                     })
-                    .opacity(if is_active { 0.6 } else { 0.4 }),
+                    .opacity(if is_active { 1.0 } else { 0.4 }),
             )
             .child(
                 div()
@@ -351,6 +351,14 @@ impl EditorView {
             .border_b_1()
             .border_color(self.theme.tab_border)
             .overflow_x_scroll()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
+                    if event.click_count >= 2 {
+                        window.zoom_window();
+                    }
+                }),
+            )
             .children(tab_items)
             .into_any_element()
     }

@@ -18,7 +18,7 @@ impl EditorView {
     }
 
     pub(crate) fn padding_top(&self) -> f32 {
-        self.scaled(PADDING_TOP)
+        self.scaled(self.styles.editor.padding_top)
     }
 
     pub(crate) fn padding_right(&self) -> f32 {

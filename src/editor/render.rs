@@ -1,6 +1,6 @@
 use gpui::{
-    CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Render, Window, div, prelude::*, px,
-    svg,
+    CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Render, Window, div, img, prelude::*,
+    px, svg,
 };
 
 use super::*;
@@ -13,11 +13,15 @@ impl Render for EditorView {
             .id("editor-root")
             .key_context("MarkdownEditor")
             .track_focus(&self.focus_handle(cx))
+            .relative()
             .size_full()
             .flex()
             .flex_row()
             .overflow_hidden()
             .bg(self.theme.background)
+            .border_1()
+            .border_color(self.theme.panel_border)
+            .rounded(px(16.0))
             .when(resizing, |this| {
                 this.cursor(CursorStyle::ResizeLeftRight)
                     .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
@@ -88,22 +92,28 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_toggle_editor_left_align))
             .on_action(cx.listener(Self::on_escape))
             .when(self.sidebar_visible, |this| {
-                this.child(self.render_sidebar(cx)).child({
-                    let indicator_color = if self.sidebar_resizing {
-                        self.theme.accent
-                    } else {
-                        self.theme.panel_border
-                    };
+                let sidebar_w = self.sidebar_width();
+                let indicator_color = if self.sidebar_resizing {
+                    self.theme.accent
+                } else {
+                    self.theme.panel_border
+                };
+                let indicator_width = if self.sidebar_resizing { 3.0 } else { 1.0 };
+                this.child(
+                    self.render_sidebar(cx),
+                )
+                .child(
                     div()
                         .id("sidebar-resize-handle")
+                        .absolute()
+                        .left(px(sidebar_w - 1.0))
+                        .top_0()
                         .w(px(5.0))
                         .h_full()
-                        .flex_none()
-                        .bg(gpui::transparent_black())
                         .cursor(CursorStyle::ResizeLeftRight)
                         .flex()
-                        .justify_center()
-                        .child(div().w(px(3.0)).h_full().bg(indicator_color))
+                        .items_start()
+                        .child(div().w(px(indicator_width)).h_full().bg(indicator_color))
                         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                             if this.sidebar_resizing {
                                 let new_width = f32::from(event.position.x);
@@ -133,8 +143,8 @@ impl Render for EditorView {
                                 this.sidebar_resizing = false;
                                 cx.notify();
                             }),
-                        )
-                })
+                        ),
+                )
             })
             .child(
                 div()
@@ -170,29 +180,29 @@ impl Render for EditorView {
                             .on_mouse_move(cx.listener(Self::on_mouse_move))
                             .on_scroll_wheel(cx.listener(Self::on_scroll))
                             .when(show_editor_toolbar, |this| {
+                                let tb = &self.styles.toolbar;
                                 this.child(
                                     div()
                                         .absolute()
-                                        .left(px(self.scaled(12.0)))
-                                        .top(px(self.scaled(10.0)))
+                                        .left(px(self.scaled(tb.left_offset)))
+                                        .top(px(self.scaled(tb.top_offset)))
                                         .flex()
-                                        .gap(px(self.scaled(8.0)))
+                                        .items_center()
+                                        .gap(px(self.scaled(tb.button_gap)))
                                         .child(
                                             div()
-                                                .w(px(self.scaled(34.0)))
-                                                .h(px(self.scaled(34.0)))
-                                                .rounded_full()
-                                                .bg(crate::hex_hsla!("#910913"))
-                                                .shadow_md()
+                                                .id("toolbar-sidebar-toggle")
+                                                .w(px(self.scaled(tb.primary_button_size)))
+                                                .h(px(self.scaled(tb.primary_button_size)))
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
                                                 .cursor(CursorStyle::Arrow)
+                                                .hover(|style| style.opacity(0.9))
                                                 .child(
-                                                    svg()
-                                                        .path(SIDEBAR_TOGGLE_SVG_PATH)
-                                                        .size(px(self.scaled(14.0)))
-                                                        .text_color(gpui::white()),
+                                                    img(PathBuf::from(SIDEBAR_TOGGLE_SVG_PATH))
+                                                        .w(px(self.scaled(tb.primary_icon_size)))
+                                                        .h(px(self.scaled(tb.primary_icon_size))),
                                                 )
                                                 .on_mouse_down(
                                                     MouseButton::Left,
@@ -203,25 +213,53 @@ impl Render for EditorView {
                                         )
                                         .child(
                                             div()
-                                                .w(px(self.scaled(34.0)))
-                                                .h(px(self.scaled(34.0)))
-                                                .rounded_full()
-                                                .bg(self.theme.panel_active)
-                                                .shadow_md()
+                                                .id("toolbar-align-toggle")
+                                                .w(px(self.scaled(tb.secondary_button_size)))
+                                                .h(px(self.scaled(tb.secondary_button_size)))
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
                                                 .cursor(CursorStyle::Arrow)
+                                                .hover(|style| style.opacity(0.8))
                                                 .child(
-                                                    svg()
-                                                        .path(EDITOR_ALIGN_LEFT_SVG_PATH)
-                                                        .size(px(self.scaled(14.0)))
-                                                        .text_color(gpui::white()),
+                                                    img(PathBuf::from(EDITOR_ALIGN_LEFT_SVG_PATH))
+                                                        .w(px(self.scaled(tb.secondary_icon_size)))
+                                                        .h(px(self.scaled(tb.secondary_icon_size))),
                                                 )
                                                 .on_mouse_down(
                                                     MouseButton::Left,
                                                     cx.listener(|this, _, _, cx| {
                                                         this.toggle_editor_alignment(cx);
+                                                    }),
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .right(px(self.scaled(tb.left_offset)))
+                                        .top(px(self.scaled(tb.top_offset)))
+                                        .flex()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .id("toolbar-theme-toggle")
+                                                .w(px(self.scaled(tb.secondary_button_size)))
+                                                .h(px(self.scaled(tb.secondary_button_size)))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor(CursorStyle::Arrow)
+                                                .hover(|style| style.opacity(0.8))
+                                                .child(
+                                                    img(PathBuf::from(THEME_TOGGLE_SVG_PATH))
+                                                        .w(px(self.scaled(tb.secondary_icon_size)))
+                                                        .h(px(self.scaled(tb.secondary_icon_size))),
+                                                )
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.toggle_theme(cx);
                                                     }),
                                                 ),
                                         ),

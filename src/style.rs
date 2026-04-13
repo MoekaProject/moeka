@@ -95,10 +95,13 @@ pub struct ContextMenuStyles {
 }
 
 pub struct ToolbarStyles {
-    pub button_size: f32,
+    pub left_offset: f32,
+    pub top_offset: f32,
     pub button_gap: f32,
-    pub sidebar_toggle_bg: Hsla,
-    pub align_toggle_bg: Hsla,
+    pub primary_button_size: f32,
+    pub secondary_button_size: f32,
+    pub primary_icon_size: f32,
+    pub secondary_icon_size: f32,
 }
 
 impl Styles {
@@ -108,7 +111,7 @@ impl Styles {
                 base_font_size: 15.0,
                 line_height_factor: 1.6,
                 padding_left: 40.0,
-                padding_top: 50.0,
+                padding_top: 80.0,
                 padding_right: 40.0,
                 padding_bottom: 200.0,
                 max_width: 750.0,
@@ -134,7 +137,7 @@ impl Styles {
                 tab_active_bg: theme.tab_active_bg,
                 tab_active_text: theme.tab_active_text,
                 tab_border: theme.tab_border,
-                close_button_size: 18.0,
+                close_button_size: 14.0,
             },
             cursor: CursorStyles {
                 color: theme.cursor,
@@ -170,10 +173,13 @@ impl Styles {
                 format_menu_width: 250.0,
             },
             toolbar: ToolbarStyles {
-                button_size: 34.0,
-                button_gap: 8.0,
-                sidebar_toggle_bg: crate::hex_hsla!("#910913"),
-                align_toggle_bg: gpui::hsla(0.61, 0.12, 0.25, 0.85),
+                left_offset: 15.0,
+                top_offset: 15.0,
+                button_gap: 12.0,
+                primary_button_size: 48.0,
+                secondary_button_size: 32.0,
+                primary_icon_size: 48.0,
+                secondary_icon_size: 32.0,
             },
         }
     }

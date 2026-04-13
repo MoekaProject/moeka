@@ -20,6 +20,10 @@ syntect = { version = "5.2", default-features = false, features = [
   "default-fancy",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+raw-window-handle = "0.6"
+
 # Optimize all dependencies in dev mode for better performance
 # while keeping the app itself at opt-level 1 for faster compile times
 [profile.dev]

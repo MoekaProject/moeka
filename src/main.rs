@@ -106,13 +106,43 @@ fn main() {
                 titlebar: Some(TitlebarOptions {
                     title: Some("Markdown Editor".into()),
                     appears_transparent: true,
-                    traffic_light_position: None,
+                    traffic_light_position: Some(point(px(15.0), px(13.0))),
                 }),
-                window_background: WindowBackgroundAppearance::Opaque,
+                window_background: WindowBackgroundAppearance::Transparent,
                 ..Default::default()
             },
             |window, cx| {
-                window.set_background_appearance(WindowBackgroundAppearance::Opaque);
+                window.set_background_appearance(WindowBackgroundAppearance::Transparent);
+                #[cfg(target_os = "macos")]
+                {
+                    use objc::{class, msg_send, sel, sel_impl};
+                    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                    if let Ok(handle) = window.window_handle() {
+                        if let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
+                            unsafe {
+                                let ns_view =
+                                    appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
+                                let ns_window: *mut objc::runtime::Object =
+                                    msg_send![ns_view, window];
+                                // NSTitlebarSeparatorStyleNone = 0
+                                let () = msg_send![ns_window, setTitlebarSeparatorStyle: 0i64];
+                                // Use fully clear background (like Clipboarder's
+                                // transparent(true)) and re-enable shadow manually.
+                                let clear_color: *mut objc::runtime::Object =
+                                    msg_send![class!(NSColor), clearColor];
+                                let () = msg_send![ns_window, setBackgroundColor: clear_color];
+                                let () = msg_send![ns_window, setHasShadow: true];
+                                let content_view: *mut objc::runtime::Object =
+                                    msg_send![ns_window, contentView];
+                                let () = msg_send![content_view, setWantsLayer: true];
+                                let layer: *mut objc::runtime::Object =
+                                    msg_send![content_view, layer];
+                                let () = msg_send![layer, setCornerRadius: 15.0_f64];
+                                let () = msg_send![layer, setMasksToBounds: true];
+                            }
+                        }
+                    }
+                }
                 cx.new(|cx| {
                     let view = EditorView::new(cx);
                     window.focus(&view.focus_handle(cx));
