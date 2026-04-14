@@ -72,32 +72,84 @@ Per-line parse output:
 
 ## Theme System (`theme.rs`)
 
-Colors organized in 4 categories:
+Pure color palette — **no functional descriptions** in field names. Only `{category}_{depth}`.
 
-- **Text** (5): foreground, panel_muted, tab_active_text, accent, danger
-- **Background** (13): background, panel_bg, panel_surface, ..., inline_code_bg
-- **Border** (4): panel_border, tab_border, checkbox_border, blockquote_border
-- **Editor** (13): cursor, selection, heading, bold, italic, ..., gutter_heading
+### Naming Convention: `{category}_{depth}`
+
+| Category  | Depth examples                                                                                                                              |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `text_`   | `primary`, `secondary`, `bright`, `accent`, `danger`                                                                                        |
+| `bg_`     | `primary`, `secondary`, `elevated`, `sunken`, `hover`, `selected`, `active`, `bar`, `tab`, `tab_hover`, `tab_active`, `code`, `code_inline` |
+| `border_` | `primary`, `secondary`, `tertiary`, `decorative`                                                                                            |
+
+**Editor semantic colors** (cursor, selection, heading, bold, italic, link, list_marker, syntax_marker, strikethrough, inline_code, gutter_heading) are kept as-is — they describe editor-specific rendering semantics, not UI-layer colors.
 
 ### Color Functions
 
 - `hsla_hex(0xRRGGBB, alpha)` — u32 hex literal → Hsla
 - `hex_to_hsla("#ffffff")` — CSS hex string → Hsla (supports #RGB, #RRGGBB, #RRGGBBAA)
 
+### Adding a theme color
+
+1. Add field to `Theme` following the `{category}_{depth}` naming convention
+2. Set value in `one_dark()` and `milky()` constructors
+3. Update corresponding style fields in `Styles::from_theme()` if needed
+
 ## Style System (`style.rs`)
 
-`Styles::from_theme(&theme)` produces per-component style configs:
+`Styles::from_theme(&theme)` produces per-component style configs with **all** visual properties extracted as configurable fields.
 
-- `EditorStyles` — padding, max_width, font sizes, UI scale limits
-- `SidebarStyles` — width, row_height, colors
-- `TabBarStyles` — height, colors, close button size
-- `CursorStyles` — color, blink timings
-- `CodeBlockStyles` — bg, text padding
-- `CheckboxStyles` — size, corner radius, colors
-- `TableStyles` — cell padding, border color
-- `GutterStyles` — fold icon size, heading color
-- `ContextMenuStyles` — menu width
-- `ToolbarStyles` — button size, gap, toggle button colors
+### Naming Convention: `功能_位置_状态_样式_单位`
+
+Field names follow this pattern (omit segments that don't apply):
+
+- **功能 (function)**: what component/element — e.g. `editor`, `sidebar`, `tab`, `toolbar`, `cursor`, `menu`
+- **位置 (position)**: where — e.g. `left`, `right`, `top`, `bottom`, `header`, `item`, `container`
+- **状态 (state)**: when — e.g. `hover`, `active`, `selected`, `dirty`, `error`
+- **样式 (style)**: what visual property — e.g. `bg`, `text`, `border`, `font_size`, `padding`, `margin`, `width`, `height`, `opacity`, `radius`, `shadow`, `gap`, `brightness`
+- **单位 (unit)**: `px`, `factor`, `ms`, `max`, `min` (omit for colors and dimensionless values)
+
+Examples:
+
+```
+sidebar_item_hover_bg           // 功能=sidebar, 位置=item, 状态=hover, 样式=bg
+editor_padding_left_px          // 功能=editor, 位置=left, 样式=padding, 单位=px
+tab_close_hover_opacity         // 功能=tab, 位置=close, 状态=hover, 样式=opacity
+cursor_blink_interval_ms        // 功能=cursor, 样式=blink_interval, 单位=ms
+toolbar_primary_btn_size_px     // 功能=toolbar, 位置=primary_btn, 样式=size, 单位=px
+```
+
+### State styles
+
+Each component that has interactive states (hover/active/selected) has its states represented as separate fields with the state name in the field:
+
+```rust
+// Example: sidebar item states
+sidebar_item_bg: Hsla,
+sidebar_item_hover_bg: Hsla,
+sidebar_item_selected_bg: Hsla,
+sidebar_item_active_bg: Hsla,
+```
+
+### Style structs
+
+| Struct               | Scope                                                                              |
+| -------------------- | ---------------------------------------------------------------------------------- |
+| `WindowStyles`       | Window-level bg                                                                    |
+| `EditorStyles`       | Main editor pane: padding, max-width, font sizes, scale                            |
+| `SidebarStyles`      | File tree: logo, header, items, edit row, error, empty, resize handle (~40 fields) |
+| `TabBarStyles`       | Tab bar: container, items, icons, labels, close btn, new-tab btn (~30 fields)      |
+| `ToolbarStyles`      | Toolbar buttons: sizes, gap, offset, opacity, colors                               |
+| `CursorStyles`       | Cursor: color, width, blink timing, opacity                                        |
+| `CodeBlockStyles`    | Code block bg, text padding                                                        |
+| `SelectionStyles`    | Selection highlight bg                                                             |
+| `CheckboxStyles`     | Checkbox size, radius, colors                                                      |
+| `TableStyles`        | Table cell padding, border                                                         |
+| `GutterStyles`       | Fold icon, heading hash sizes (h1–h4), blockquote marker                           |
+| `ImagePreviewStyles` | Inline image max-height factor                                                     |
+| `HrStyles`           | Horizontal rule height, color                                                      |
+| `ImeStyles`          | IME composition underline                                                          |
+| `ContextMenuStyles`  | Menu container, items, separator, shortcut labels, per-kind widths                 |
 
 ## Rendering Pipeline
 
@@ -127,7 +179,7 @@ For each line:
 - All editor submodule files use `use super::*;` for shared imports from mod.rs
 - Cross-module helper calls: `helpers::build_display_text()`, `helpers::pick_folder_blocking()`
 - EditorView fields are `pub(crate)` for cross-module access within the editor crate
-- Constants in `editor/mod.rs` are `pub(crate)` (e.g., `LINE_HEIGHT_FACTOR`, `HASH_SVG_PATH`)
+- Constants in `editor/mod.rs` are `pub(crate)` — only SVG paths and `KNOWLEDGE_BASE_ROOT` remain; all numeric style constants live in `style.rs`
 - Font: "Menlo" monospace throughout; syntect "OneHalfDark" theme for code blocks
 - Image loading: `resolve_local_image_path()` → `load_render_image_from_path()` → cached in `image_cache: HashMap<String, Option<Arc<RenderImage>>>`
 - File/folder pickers: `osascript` commands (macOS-specific)
@@ -144,11 +196,12 @@ For each line:
 
 ### New theme color
 
-1. Add field to `Theme` in `theme.rs` under the right category
-2. Set value in `one_dark()` constructor
-3. Use as `self.theme.new_color` or `theme.new_color`
+1. Add field to `Theme` in `theme.rs` following `{category}_{depth}` naming (e.g. `bg_tooltip`, `text_muted`)
+2. Set value in `one_dark()` and `milky()` constructors
+3. Wire into the relevant style struct in `Styles::from_theme()`
 
 ### New component style
 
-1. Add fields to the relevant struct in `style.rs` (or create a new struct)
-2. Initialize in `Styles::from_theme()`
+1. Add fields to the relevant struct in `style.rs` following `功能_位置_状态_样式_单位` naming
+2. Initialize in `Styles::from_theme()` from theme colors and/or numeric defaults
+3. Reference via `self.styles.{component}.{field}` in rendering code

@@ -258,20 +258,22 @@ impl EditorView {
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
+        let ms = &self.styles.context_menu;
         let text_color = if is_destructive {
-            self.theme.danger
+            ms.menu_item_danger_text_color
         } else {
-            self.theme.foreground
+            ms.menu_item_text_color
         };
+        let hover_bg = ms.menu_item_hover_bg;
         div()
             .w_full()
-            .h(px(28.0))
-            .px(px(12.0))
+            .h(px(ms.menu_item_height_px))
+            .px(px(ms.menu_item_padding_x_px))
             .flex()
             .items_center()
-            .text_size(px(13.0))
+            .text_size(px(ms.menu_item_font_size_px))
             .text_color(text_color)
-            .hover(|s| s.bg(self.theme.panel_hover))
+            .hover(move |s| s.bg(hover_bg))
             .cursor(CursorStyle::Arrow)
             .child(label.to_string())
             .on_mouse_down(
@@ -291,29 +293,31 @@ impl EditorView {
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
+        let ms = &self.styles.context_menu;
         let bg = if is_selected {
-            self.theme.panel_hover
+            ms.menu_item_selected_bg
         } else {
             gpui::transparent_black()
         };
+        let hover_bg = ms.menu_item_hover_bg;
         div()
             .w_full()
-            .h(px(self.scaled(28.0)))
+            .h(px(self.scaled(ms.menu_item_height_px)))
             .bg(bg)
-            .px(px(self.scaled(12.0)))
+            .px(px(self.scaled(ms.menu_item_padding_x_px)))
             .flex()
             .items_center()
             .justify_between()
-            .text_size(px(self.scaled(13.0)))
-            .text_color(self.theme.foreground)
-            .hover(|s| s.bg(self.theme.panel_hover))
+            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
+            .text_color(ms.menu_item_text_color)
+            .hover(move |s| s.bg(hover_bg))
             .cursor(CursorStyle::Arrow)
             .child(label.to_string())
             .when_some(shortcut, |this, shortcut| {
                 this.child(
                     div()
-                        .text_size(px(self.scaled(11.5)))
-                        .text_color(self.theme.panel_muted)
+                        .text_size(px(self.scaled(ms.menu_shortcut_font_size_px)))
+                        .text_color(ms.menu_shortcut_text_color)
                         .child(shortcut.to_string()),
                 )
             })
@@ -327,11 +331,12 @@ impl EditorView {
     }
 
     fn render_context_menu_separator(&self) -> AnyElement {
+        let ms = &self.styles.context_menu;
         div()
             .w_full()
-            .h(px(1.0))
-            .my(px(3.0))
-            .bg(self.theme.panel_border)
+            .h(px(ms.menu_separator_height_px))
+            .my(px(ms.menu_separator_margin_y_px))
+            .bg(ms.menu_separator_color)
             .into_any_element()
     }
 
@@ -576,11 +581,11 @@ impl EditorView {
         let (items, width) = match &menu.kind {
             ContextMenuKind::Sidebar { path, is_dir } => (
                 self.render_sidebar_context_menu(path.clone(), *is_dir, cx),
-                self.scaled(180.0),
+                self.scaled(self.styles.context_menu.menu_sidebar_width_px),
             ),
             ContextMenuKind::Format => (
                 self.render_format_context_menu(cx),
-                self.scaled(FORMAT_MENU_WIDTH),
+                self.scaled(self.styles.context_menu.menu_format_width_px),
             ),
             ContextMenuKind::Tab { tab_id } => {
                 let mut items = Vec::new();
@@ -626,17 +631,18 @@ impl EditorView {
                         this.close_saved_tabs(cx);
                     },
                 ));
-                (items, self.scaled(180.0))
+                (items, self.scaled(self.styles.context_menu.menu_tab_width_px))
             }
         };
 
+        let ms = &self.styles.context_menu;
         let max_menu_height = if self.last_viewport_height > 0.0 {
-            (self.last_viewport_height - pos_y - self.scaled(20.0)).max(self.scaled(100.0))
+            (self.last_viewport_height - pos_y - self.scaled(ms.menu_max_height_margin_px)).max(self.scaled(100.0))
         } else {
             self.scaled(400.0)
         };
 
-        div()
+        let mut menu_div = div()
             .id("context-menu")
             .absolute()
             .left(px(pos_x))
@@ -644,12 +650,15 @@ impl EditorView {
             .w(px(width))
             .max_h(px(max_menu_height))
             .overflow_y_scroll()
-            .py(px(self.scaled(4.0)))
-            .bg(self.theme.panel_surface)
-            .border_1()
-            .border_color(self.theme.panel_border)
-            .rounded(px(self.scaled(10.0)))
-            .shadow_md()
+            .py(px(self.scaled(ms.menu_padding_y_px)))
+            .bg(ms.menu_bg)
+            .border(px(ms.menu_border_width_px))
+            .border_color(ms.menu_border_color)
+            .rounded(px(self.scaled(ms.menu_radius_px)));
+        if ms.menu_shadow {
+            menu_div = menu_div.shadow_md();
+        }
+        menu_div
             .children(items)
             .cursor(CursorStyle::Arrow)
             .on_mouse_down(

@@ -10,40 +10,40 @@ impl EditorView {
     }
 
     pub(crate) fn base_font_size(&self) -> f32 {
-        self.scaled(BASE_FONT_SIZE)
+        self.scaled(self.styles.editor.editor_font_size_px)
     }
 
     pub(crate) fn padding_left(&self) -> f32 {
-        self.scaled(PADDING_LEFT)
+        self.scaled(self.styles.editor.editor_padding_left_px)
     }
 
     pub(crate) fn padding_top(&self) -> f32 {
-        self.scaled(self.styles.editor.padding_top)
+        self.scaled(self.styles.editor.editor_padding_top_px)
     }
 
     pub(crate) fn padding_right(&self) -> f32 {
-        self.scaled(PADDING_RIGHT)
+        self.scaled(self.styles.editor.editor_padding_right_px)
     }
 
     pub(crate) fn padding_bottom(&self) -> f32 {
-        self.scaled(PADDING_BOTTOM)
+        self.scaled(self.styles.editor.editor_padding_bottom_px)
     }
 
     pub(crate) fn max_editor_width(&self) -> f32 {
-        self.scaled(MAX_EDITOR_WIDTH)
+        self.scaled(self.styles.editor.editor_max_width_px)
     }
 
     pub(crate) fn sidebar_width(&self) -> f32 {
         self.sidebar_custom_width
-            .unwrap_or_else(|| self.scaled(SIDEBAR_WIDTH))
+            .unwrap_or_else(|| self.scaled(self.styles.sidebar.sidebar_width_px))
     }
 
     pub(crate) fn tab_bar_height(&self) -> f32 {
-        self.scaled(TAB_BAR_HEIGHT)
+        self.scaled(self.styles.tab_bar.tab_bar_height_px)
     }
 
     pub(crate) fn sidebar_row_height(&self) -> f32 {
-        self.scaled(SIDEBAR_ROW_HEIGHT)
+        self.scaled(self.styles.sidebar.sidebar_header_height_px)
     }
 
     pub(crate) fn font_size_for_block(&self, block_type: &BlockType) -> f32 {
@@ -60,7 +60,7 @@ impl EditorView {
     }
 
     pub(crate) fn line_height_for_block(&self, block_type: &BlockType) -> f32 {
-        self.font_size_for_block(block_type) * LINE_HEIGHT_FACTOR
+        self.font_size_for_block(block_type) * self.styles.editor.editor_line_height_factor
     }
 
     pub(crate) fn visual_height_for_line(&self, line: usize) -> f32 {

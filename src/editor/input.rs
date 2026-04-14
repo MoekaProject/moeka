@@ -337,7 +337,7 @@ impl EditorView {
         }
         let delta_y: f32 = event
             .delta
-            .pixel_delta(px(self.base_font_size() * LINE_HEIGHT_FACTOR))
+            .pixel_delta(px(self.base_font_size() * self.styles.editor.editor_line_height_factor))
             .y
             .into();
         self.scroll_offset -= delta_y;

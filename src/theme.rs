@@ -30,37 +30,43 @@ macro_rules! hex_hsla {
     }};
 }
 
-/// One Dark Pro inspired color palette, organized by category.
+/// Color palette organized by visual category: text, background, border, editor.
+///
+/// Naming convention: `{category}_{depth}` — no functional descriptions.
+///   category = text | bg | border  (editor/markdown semantics keep their own names)
+///   depth    = primary, secondary, tertiary, bright, accent, danger,
+///              elevated, sunken, hover, selected, active, bar, tab,
+///              tab_hover, tab_active, code, code_inline, decorative …
 pub struct Theme {
     // ── Text colors ─────────────────────────────────────────────
-    pub foreground: Hsla,      // primary text
-    pub panel_muted: Hsla,     // secondary/muted text
-    pub tab_active_text: Hsla, // active/bright text
-    pub accent: Hsla,          // accent text/links
-    pub danger: Hsla,          // danger/error text
+    pub text_primary: Hsla,
+    pub text_secondary: Hsla,
+    pub text_bright: Hsla,
+    pub text_accent: Hsla,
+    pub text_danger: Hsla,
 
     // ── Background colors ───────────────────────────────────────
-    pub background: Hsla,      // primary editor bg
-    pub panel_bg: Hsla,        // secondary panel bg
-    pub panel_surface: Hsla,   // elevated surface
-    pub panel_header_bg: Hsla, // panel header
-    pub panel_hover: Hsla,     // hover state
-    pub panel_selected: Hsla,  // selected state
-    pub panel_active: Hsla,    // active state
-    pub tab_bar_bg: Hsla,      // tab bar bg
-    pub tab_bg: Hsla,          // inactive tab bg
-    pub tab_hover: Hsla,       // tab hover bg
-    pub tab_active_bg: Hsla,   // active tab bg
-    pub code_block_bg: Hsla,   // code block bg
-    pub inline_code_bg: Hsla,  // inline code bg
+    pub bg_primary: Hsla,
+    pub bg_secondary: Hsla,
+    pub bg_elevated: Hsla,
+    pub bg_sunken: Hsla,
+    pub bg_hover: Hsla,
+    pub bg_selected: Hsla,
+    pub bg_active: Hsla,
+    pub bg_bar: Hsla,
+    pub bg_tab: Hsla,
+    pub bg_tab_hover: Hsla,
+    pub bg_tab_active: Hsla,
+    pub bg_code: Hsla,
+    pub bg_code_inline: Hsla,
 
     // ── Border colors ───────────────────────────────────────────
-    pub panel_border: Hsla,      // primary border
-    pub tab_border: Hsla,        // tab border
-    pub checkbox_border: Hsla,   // checkbox border
-    pub blockquote_border: Hsla, // decorative border
+    pub border_primary: Hsla,
+    pub border_secondary: Hsla,
+    pub border_tertiary: Hsla,
+    pub border_decorative: Hsla,
 
-    // ── Editor/Markdown colors ──────────────────────────────────
+    // ── Editor / Markdown semantic colors ────────────────────────
     pub cursor: Hsla,
     pub selection: Hsla,
     pub line_highlight: Hsla,
@@ -80,30 +86,30 @@ impl Theme {
     pub fn one_dark() -> Self {
         Self {
             // Text
-            foreground: crate::hex_hsla!("#abb2bf"),
-            panel_muted: crate::hex_hsla!("#7f8793"),
-            tab_active_text: crate::hex_hsla!("#ffffff"),
-            accent: crate::hex_hsla!("#61afef"),
-            danger: crate::hex_hsla!("#e06c75"),
+            text_primary: crate::hex_hsla!("#abb2bf"),
+            text_secondary: crate::hex_hsla!("#7f8793"),
+            text_bright: crate::hex_hsla!("#ffffff"),
+            text_accent: crate::hex_hsla!("#61afef"),
+            text_danger: crate::hex_hsla!("#e06c75"),
             // Background
-            background: crate::hex_hsla!("#282c34"),
-            panel_bg: crate::hex_hsla!("#21252b"),
-            panel_surface: crate::hex_hsla!("#252a31"),
-            panel_header_bg: crate::hex_hsla!("#1d2127"),
-            panel_hover: crate::hex_hsla!("#313842"),
-            panel_selected: crate::hex_hsla!("#2f3742"),
-            panel_active: with_alpha(crate::hex_hsla!("#528bff"), 0.95),
-            tab_bar_bg: crate::hex_hsla!("#22262d"),
-            tab_bg: crate::hex_hsla!("#22262d"),
-            tab_hover: crate::hex_hsla!("#282c34"),
-            tab_active_bg: crate::hex_hsla!("#282c34"),
-            code_block_bg: crate::hex_hsla!("#21252b"),
-            inline_code_bg: crate::hex_hsla!("#2c313a"),
+            bg_primary: crate::hex_hsla!("#282c34"),
+            bg_secondary: crate::hex_hsla!("#21252b"),
+            bg_elevated: crate::hex_hsla!("#252a31"),
+            bg_sunken: crate::hex_hsla!("#1d2127"),
+            bg_hover: crate::hex_hsla!("#313842"),
+            bg_selected: crate::hex_hsla!("#2f3742"),
+            bg_active: with_alpha(crate::hex_hsla!("#528bff"), 0.95),
+            bg_bar: crate::hex_hsla!("#22262d"),
+            bg_tab: crate::hex_hsla!("#22262d"),
+            bg_tab_hover: crate::hex_hsla!("#282c34"),
+            bg_tab_active: crate::hex_hsla!("#282c34"),
+            bg_code: crate::hex_hsla!("#21252b"),
+            bg_code_inline: crate::hex_hsla!("#2c313a"),
             // Border
-            panel_border: crate::hex_hsla!("#67718633"),
-            tab_border: crate::hex_hsla!("#67718633"),
-            checkbox_border: crate::hex_hsla!("#3e4452"),
-            blockquote_border: with_alpha(crate::hex_hsla!("#636d83"), 0.5),
+            border_primary: crate::hex_hsla!("#67718633"),
+            border_secondary: crate::hex_hsla!("#67718633"),
+            border_tertiary: crate::hex_hsla!("#3e4452"),
+            border_decorative: with_alpha(crate::hex_hsla!("#636d83"), 0.5),
             // Editor/Markdown
             cursor: crate::hex_hsla!("#528bff"),
             selection: with_alpha(crate::hex_hsla!("#3e4451"), 0.6),
@@ -124,30 +130,30 @@ impl Theme {
     pub fn milky() -> Self {
         Self {
             // Text
-            foreground: crate::hex_hsla!("#37352f"),
-            panel_muted: crate::hex_hsla!("#9b9a97"),
-            tab_active_text: crate::hex_hsla!("#1a1a1a"),
-            accent: crate::hex_hsla!("#2383e2"),
-            danger: crate::hex_hsla!("#eb5757"),
+            text_primary: crate::hex_hsla!("#37352f"),
+            text_secondary: crate::hex_hsla!("#9b9a97"),
+            text_bright: crate::hex_hsla!("#1a1a1a"),
+            text_accent: crate::hex_hsla!("#2383e2"),
+            text_danger: crate::hex_hsla!("#eb5757"),
             // Background
-            background: crate::hex_hsla!("#faf8f5"),
-            panel_bg: crate::hex_hsla!("#f3f0eb"),
-            panel_surface: crate::hex_hsla!("#f5f2ed"),
-            panel_header_bg: crate::hex_hsla!("#edeae5"),
-            panel_hover: crate::hex_hsla!("#e8e5e0"),
-            panel_selected: crate::hex_hsla!("#e3e0db"),
-            panel_active: with_alpha(crate::hex_hsla!("#2383e2"), 0.9),
-            tab_bar_bg: crate::hex_hsla!("#f3f0eb"),
-            tab_bg: crate::hex_hsla!("#f3f0eb"),
-            tab_hover: crate::hex_hsla!("#faf8f5"),
-            tab_active_bg: crate::hex_hsla!("#faf8f5"),
-            code_block_bg: crate::hex_hsla!("#efecea"),
-            inline_code_bg: crate::hex_hsla!("#f0ece8"),
+            bg_primary: crate::hex_hsla!("#faf8f5"),
+            bg_secondary: crate::hex_hsla!("#f3f0eb"),
+            bg_elevated: crate::hex_hsla!("#f5f2ed"),
+            bg_sunken: crate::hex_hsla!("#edeae5"),
+            bg_hover: crate::hex_hsla!("#e8e5e0"),
+            bg_selected: crate::hex_hsla!("#e3e0db"),
+            bg_active: with_alpha(crate::hex_hsla!("#2383e2"), 0.9),
+            bg_bar: crate::hex_hsla!("#f3f0eb"),
+            bg_tab: crate::hex_hsla!("#f3f0eb"),
+            bg_tab_hover: crate::hex_hsla!("#faf8f5"),
+            bg_tab_active: crate::hex_hsla!("#faf8f5"),
+            bg_code: crate::hex_hsla!("#efecea"),
+            bg_code_inline: crate::hex_hsla!("#f0ece8"),
             // Border
-            panel_border: crate::hex_hsla!("#d6d3ce55"),
-            tab_border: crate::hex_hsla!("#d6d3ce55"),
-            checkbox_border: crate::hex_hsla!("#c8c5c0"),
-            blockquote_border: with_alpha(crate::hex_hsla!("#9b9a97"), 0.4),
+            border_primary: crate::hex_hsla!("#d6d3ce55"),
+            border_secondary: crate::hex_hsla!("#d6d3ce55"),
+            border_tertiary: crate::hex_hsla!("#c8c5c0"),
+            border_decorative: with_alpha(crate::hex_hsla!("#9b9a97"), 0.4),
             // Editor/Markdown
             cursor: crate::hex_hsla!("#37352f"),
             selection: with_alpha(crate::hex_hsla!("#2383e2"), 0.15),

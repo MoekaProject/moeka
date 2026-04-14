@@ -767,7 +767,7 @@ pub(crate) fn build_text_runs_for_display(
         return vec![TextRun {
             len: 1,
             font: line_font.clone(),
-            color: theme.foreground,
+            color: theme.text_primary,
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -777,7 +777,7 @@ pub(crate) fn build_text_runs_for_display(
     let buf_len = line_content.len();
     let disp_len = display_text.len();
 
-    let mut buf_colors: Vec<Hsla> = vec![theme.foreground; buf_len];
+    let mut buf_colors: Vec<Hsla> = vec![theme.text_primary; buf_len];
     let mut buf_weights: Vec<FontWeight> = vec![FontWeight::NORMAL; buf_len];
     let mut buf_font_styles: Vec<FontStyle> = vec![FontStyle::Normal; buf_len];
     let mut buf_bg_colors: Vec<Option<Hsla>> = vec![None; buf_len];
@@ -855,7 +855,7 @@ pub(crate) fn build_text_runs_for_display(
                 }
                 InlineKind::InlineCode => {
                     buf_colors[i] = theme.inline_code;
-                    buf_bg_colors[i] = Some(theme.inline_code_bg);
+                    buf_bg_colors[i] = Some(theme.bg_code_inline);
                 }
                 InlineKind::Link => {
                     buf_colors[i] = theme.link;

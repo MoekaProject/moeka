@@ -27,35 +27,16 @@ use crate::markdown::{self, BlockType, LineDecoration};
 use crate::theme::{Theme, ThemeKind};
 
 // ── Layout constants ────────────────────────────────────────────────
+// NOTE: Numeric layout/style constants are now in style.rs (Styles struct).
+// Only non-style constants remain here.
 
-pub(crate) const LINE_HEIGHT_FACTOR: f32 = 1.6;
-pub(crate) const BASE_FONT_SIZE: f32 = 15.0;
-pub(crate) const PADDING_LEFT: f32 = 40.0;
-pub(crate) const PADDING_TOP: f32 = 50.0;
-pub(crate) const PADDING_RIGHT: f32 = 40.0;
-pub(crate) const PADDING_BOTTOM: f32 = 200.0;
-pub(crate) const MAX_EDITOR_WIDTH: f32 = 750.0;
-pub(crate) const SIDEBAR_WIDTH: f32 = 280.0;
 pub(crate) const KNOWLEDGE_BASE_ROOT: &str = "/Users/imeoer/code/我的知识库";
 
 // ── Cursor blink constants ──────────────────────────────────────────
-
-pub(crate) const CURSOR_BLINK_TICK: Duration = Duration::from_millis(5);
-pub(crate) const CURSOR_BLINK_PAUSE_DELAY: Duration = Duration::from_millis(300);
-pub(crate) const CURSOR_BLINK_VISIBLE_DURATION: Duration = Duration::from_millis(200);
-pub(crate) const CURSOR_BLINK_TRANSPARENT_DURATION: Duration = Duration::from_millis(300);
-pub(crate) const CURSOR_MIN_OPACITY: f32 = 0.0;
-pub(crate) const CURSOR_MAX_OPACITY: f32 = 1.0;
-pub(crate) const CURSOR_OPACITY_STEP: f32 = 0.03;
+// NOTE: Cursor timing is now in style.rs (CursorStyles).
 
 // ── Editor element constants ────────────────────────────────────────
-
-pub(crate) const CODE_BLOCK_TEXT_LEFT: f32 = 10.0;
-pub(crate) const TODO_CHECKBOX_SIZE_FACTOR: f32 = 1.2;
-pub(crate) const TODO_CHECKBOX_CORNER_RADIUS: f32 = 5.0;
-pub(crate) const TODO_CHECK_ICON_SCALE: f32 = 0.52;
-pub(crate) const TABLE_CELL_TEXT_PADDING_PX: f32 = 5.0;
-pub(crate) const GUTTER_FOLD_ICON_SIZE: f32 = 10.0;
+// NOTE: Element layout constants are now in style.rs.
 
 // ── SVG asset paths ─────────────────────────────────────────────────
 
@@ -101,13 +82,7 @@ pub(crate) const MARKDOWN_SVG_PATH: &str = concat!(
 );
 
 // ── UI constants ────────────────────────────────────────────────────
-
-pub(crate) const TAB_BAR_HEIGHT: f32 = 38.0;
-pub(crate) const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
-pub(crate) const FORMAT_MENU_WIDTH: f32 = 250.0;
-pub(crate) const UI_SCALE_STEP: f32 = 0.1;
-pub(crate) const MIN_UI_SCALE: f32 = 0.8;
-pub(crate) const MAX_UI_SCALE: f32 = 1.6;
+// NOTE: UI dimension constants are now in style.rs.
 
 // ── Data types ──────────────────────────────────────────────────────
 
@@ -293,6 +268,10 @@ impl EditorView {
         let theme_kind = ThemeKind::OneDark;
         let theme = theme_kind.build();
         let styles = crate::style::Styles::from_theme(&theme);
+        let init_max_width = styles.editor.editor_max_width_px;
+        let init_padding_left = styles.editor.editor_padding_left_px;
+        let init_padding_right = styles.editor.editor_padding_right_px;
+        let init_cursor_opacity = styles.cursor.cursor_opacity_max;
         let mut this = Self {
             buffer,
             cursor: Cursor::new(),
@@ -305,8 +284,8 @@ impl EditorView {
             is_selecting: false,
             line_display_info: Vec::new(),
             last_viewport_height: 600.0,
-            last_viewport_width: MAX_EDITOR_WIDTH,
-            cursor_opacity: CURSOR_MAX_OPACITY,
+            last_viewport_width: init_max_width,
+            cursor_opacity: init_cursor_opacity,
             cursor_opacity_direction: -1.0,
             blink_epoch: 0,
             marked_range: None,
@@ -331,9 +310,9 @@ impl EditorView {
             active_tab_id: Some("welcome-1".to_string()),
             next_tab_id: 2,
             last_editor_left: 0.0,
-            last_editor_width: MAX_EDITOR_WIDTH,
-            last_content_left: PADDING_LEFT,
-            last_text_width: MAX_EDITOR_WIDTH - PADDING_LEFT - PADDING_RIGHT,
+            last_editor_width: init_max_width,
+            last_content_left: init_padding_left,
+            last_text_width: init_max_width - init_padding_left - init_padding_right,
             content_origin: Point::default(),
             context_menu: None,
             sidebar_edit: None,
@@ -383,29 +362,35 @@ impl EditorView {
     }
 
     pub(crate) fn start_blinking(&mut self, cx: &mut Context<Self>) {
-        self.cursor_opacity = CURSOR_MAX_OPACITY;
+        self.cursor_opacity = self.styles.cursor.cursor_opacity_max;
         self.cursor_opacity_direction = -1.0;
         let epoch = self.next_blink_epoch();
         self.schedule_blink(epoch, cx);
     }
 
     pub(crate) fn schedule_blink(&self, epoch: usize, cx: &mut Context<Self>) {
+        let tick = self.styles.cursor.blink_tick();
+        let opacity_step = self.styles.cursor.cursor_opacity_step;
+        let min_opacity = self.styles.cursor.cursor_opacity_min;
+        let max_opacity = self.styles.cursor.cursor_opacity_max;
+        let transparent_dur = self.styles.cursor.blink_transparent_duration();
+        let visible_dur = self.styles.cursor.blink_visible_duration();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(CURSOR_BLINK_TICK).await;
+            cx.background_executor().timer(tick).await;
             this.update(cx, |this, cx| {
                 if this.blink_epoch == epoch {
-                    this.cursor_opacity += CURSOR_OPACITY_STEP * this.cursor_opacity_direction;
-                    if this.cursor_opacity <= CURSOR_MIN_OPACITY {
-                        this.cursor_opacity = CURSOR_MIN_OPACITY;
+                    this.cursor_opacity += opacity_step * this.cursor_opacity_direction;
+                    if this.cursor_opacity <= min_opacity {
+                        this.cursor_opacity = min_opacity;
                         this.cursor_opacity_direction = 1.0;
                         cx.notify();
-                        this.schedule_blink_pause(epoch, CURSOR_BLINK_TRANSPARENT_DURATION, cx);
+                        this.schedule_blink_pause(epoch, transparent_dur, cx);
                         return;
-                    } else if this.cursor_opacity >= CURSOR_MAX_OPACITY {
-                        this.cursor_opacity = CURSOR_MAX_OPACITY;
+                    } else if this.cursor_opacity >= max_opacity {
+                        this.cursor_opacity = max_opacity;
                         this.cursor_opacity_direction = -1.0;
                         cx.notify();
-                        this.schedule_blink_pause(epoch, CURSOR_BLINK_VISIBLE_DURATION, cx);
+                        this.schedule_blink_pause(epoch, visible_dur, cx);
                         return;
                     }
                     cx.notify();
@@ -431,15 +416,14 @@ impl EditorView {
     }
 
     pub(crate) fn pause_blinking(&mut self, cx: &mut Context<Self>) {
-        self.cursor_opacity = CURSOR_MAX_OPACITY;
+        self.cursor_opacity = self.styles.cursor.cursor_opacity_max;
         self.cursor_opacity_direction = -1.0;
         let epoch = self.next_blink_epoch();
         self.persist_active_tab_state();
         cx.notify();
+        let pause_delay = self.styles.cursor.blink_pause_delay();
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(CURSOR_BLINK_PAUSE_DELAY)
-                .await;
+            cx.background_executor().timer(pause_delay).await;
             this.update(cx, |this, cx| {
                 if this.blink_epoch == epoch {
                     this.schedule_blink(epoch, cx);
@@ -571,7 +555,10 @@ impl EditorView {
     }
 
     pub(crate) fn set_ui_scale(&mut self, new_scale: f32, cx: &mut Context<Self>) {
-        let clamped = new_scale.clamp(MIN_UI_SCALE, MAX_UI_SCALE);
+        let clamped = new_scale.clamp(
+            self.styles.editor.editor_scale_min,
+            self.styles.editor.editor_scale_max,
+        );
         if (clamped - self.ui_scale).abs() < f32::EPSILON {
             return;
         }

@@ -207,68 +207,67 @@ impl EditorView {
         } else {
             tab.title.clone()
         };
+        let ts = &self.styles.tab_bar;
+        let tab_hover_bg = ts.tab_item_hover_bg;
+        let close_hover_bg = ts.tab_item_close_hover_bg;
 
         div()
             .id(SharedString::from(format!("tab-{}", tab.id)))
             .h(px(self.tab_bar_height()))
-            .min_w(px(self.scaled(60.0)))
-            .max_w(px(self.scaled(180.0)))
-            .pl(px(self.scaled(12.0)))
-            .pr(px(self.scaled(8.0)))
+            .min_w(px(self.scaled(ts.tab_item_min_width_px)))
+            .max_w(px(self.scaled(ts.tab_item_max_width_px)))
+            .pl(px(self.scaled(ts.tab_item_padding_left_px)))
+            .pr(px(self.scaled(ts.tab_item_padding_right_px)))
             .flex()
             .items_center()
-            .gap(px(self.scaled(6.0)))
+            .gap(px(self.scaled(ts.tab_item_gap_px)))
             .flex_none()
             .bg(if is_active {
-                self.theme.tab_active_bg
+                ts.tab_item_active_bg
             } else {
-                self.theme.tab_bg
+                ts.tab_item_bg
             })
-            .border_r_1()
-            .border_color(self.theme.tab_border)
-            .hover(|style| style.bg(self.theme.tab_hover))
+            .border_r(px(ts.tab_item_border_width_px))
+            .border_color(ts.tab_item_border_color)
+            .hover(move |style| style.bg(tab_hover_bg))
             .child(
                 svg()
                     .path(MARKDOWN_SVG_PATH)
-                    .size(px(self.scaled(14.0)))
-                    .text_color(if is_active {
-                        self.theme.panel_muted
-                    } else {
-                        self.theme.panel_muted
-                    })
-                    .opacity(if is_active { 1.0 } else { 0.4 }),
+                    .size(px(self.scaled(ts.tab_item_icon_size_px)))
+                    .text_color(ts.tab_item_icon_color)
+                    .opacity(if is_active { ts.tab_item_icon_active_opacity } else { ts.tab_item_icon_inactive_opacity }),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
                     .overflow_hidden()
-                    .text_size(px(self.scaled(12.0)))
+                    .text_size(px(self.scaled(ts.tab_item_font_size_px)))
                     .font_weight(if is_active {
                         FontWeight::MEDIUM
                     } else {
                         FontWeight::NORMAL
                     })
                     .text_color(if is_active {
-                        self.theme.tab_active_text
+                        ts.tab_item_active_text_color
                     } else {
-                        self.theme.foreground
+                        ts.tab_item_text_color
                     })
                     .child(title),
             )
             .child(
                 div()
-                    .w(px(self.scaled(16.0)))
-                    .h(px(self.scaled(16.0)))
+                    .w(px(self.scaled(ts.tab_item_close_size_px)))
+                    .h(px(self.scaled(ts.tab_item_close_size_px)))
                     .rounded_full()
                     .flex()
                     .flex_none()
                     .justify_center()
                     .items_center()
-                    .text_size(px(self.scaled(10.0)))
-                    .text_color(self.theme.foreground)
-                    .opacity(if is_active || tab.is_dirty { 1.0 } else { 0.0 })
-                    .hover(|style| style.bg(self.theme.panel_hover))
+                    .text_size(px(self.scaled(ts.tab_item_close_font_size_px)))
+                    .text_color(ts.tab_item_close_text_color)
+                    .opacity(if is_active || tab.is_dirty { ts.tab_item_close_active_opacity } else { ts.tab_item_close_inactive_opacity })
+                    .hover(move |style| style.bg(close_hover_bg))
                     .child(if tab.is_dirty { "●" } else { "✕" })
                     .on_mouse_down(
                         MouseButton::Left,
@@ -303,6 +302,7 @@ impl EditorView {
     }
 
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ts = &self.styles.tab_bar;
         let mut tab_items: Vec<AnyElement> = self
             .tabs
             .iter()
@@ -314,23 +314,24 @@ impl EditorView {
                 0,
                 div()
                     .h(px(self.tab_bar_height()))
-                    .w(px(self.scaled(84.0)))
+                    .w(px(self.scaled(ts.tab_spacer_width_px)))
                     .flex_none()
                     .into_any_element(),
             );
         }
 
+        let new_hover_color = ts.tab_new_hover_text_color;
         tab_items.push(
             div()
                 .h(px(self.tab_bar_height()))
-                .w(px(self.scaled(36.0)))
+                .w(px(self.scaled(ts.tab_new_width_px)))
                 .flex_none()
                 .flex()
                 .justify_center()
                 .items_center()
-                .text_size(px(self.scaled(16.0)))
-                .text_color(self.theme.panel_muted)
-                .hover(|style| style.text_color(self.theme.tab_active_text))
+                .text_size(px(self.scaled(ts.tab_new_font_size_px)))
+                .text_color(ts.tab_new_text_color)
+                .hover(move |style| style.text_color(new_hover_color))
                 .child("+")
                 .on_mouse_down(
                     MouseButton::Left,
@@ -347,9 +348,9 @@ impl EditorView {
             .h(px(self.tab_bar_height()))
             .flex()
             .items_center()
-            .bg(self.theme.tab_bar_bg)
-            .border_b_1()
-            .border_color(self.theme.tab_border)
+            .bg(ts.tab_bar_bg)
+            .border_b(px(ts.tab_bar_border_width_px))
+            .border_color(ts.tab_bar_border_color)
             .overflow_x_scroll()
             .on_mouse_down(
                 MouseButton::Left,

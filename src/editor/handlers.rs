@@ -529,10 +529,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_ui_scale(self.ui_scale + UI_SCALE_STEP, cx);
+        self.set_ui_scale(self.ui_scale + self.styles.editor.editor_scale_step, cx);
     }
     pub(crate) fn on_zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_ui_scale(self.ui_scale - UI_SCALE_STEP, cx);
+        self.set_ui_scale(self.ui_scale - self.styles.editor.editor_scale_step, cx);
     }
     pub(crate) fn on_zoom_reset(&mut self, _: &ZoomReset, _: &mut Window, cx: &mut Context<Self>) {
         self.set_ui_scale(1.0, cx);

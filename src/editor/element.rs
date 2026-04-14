@@ -187,7 +187,7 @@ impl Element for EditorElement {
         };
 
         let image_cache = &editor.image_cache;
-        let table_cell_padding_px = editor.scaled(TABLE_CELL_TEXT_PADDING_PX);
+        let table_cell_padding_px = editor.scaled(editor.styles.table.table_cell_padding_px);
         let table_cell_padding_chars = if table_cell_padding_px <= 0.0 {
             0
         } else {
@@ -220,7 +220,7 @@ impl Element for EditorElement {
             let decoration = decorations.get(line_idx).cloned().unwrap_or_default();
             let block_type = &decoration.block_type;
             let font_size = editor.font_size_for_block(block_type);
-            let line_height = font_size * LINE_HEIGHT_FACTOR;
+            let line_height = font_size * editor.styles.editor.editor_line_height_factor;
 
             if hidden_lines.contains(&line_idx) {
                 let line_content = buffer.line_content(line_idx);
@@ -461,7 +461,7 @@ impl Element for EditorElement {
             let line_bottom = line_top + total_line_height;
             let content_x =
                 if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
-                    editor_left + editor.padding_left() + editor.scaled(CODE_BLOCK_TEXT_LEFT)
+                    editor_left + editor.padding_left() + editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
                 } else {
                     editor_left + editor.padding_left()
                 };
@@ -549,7 +549,7 @@ impl Element for EditorElement {
                             ),
                             size(px(text_width), px(bg_height)),
                         ),
-                        theme.code_block_bg,
+                        theme.bg_code,
                     ));
                 }
             }
@@ -557,7 +557,7 @@ impl Element for EditorElement {
             // Table rendering
             if *block_type == BlockType::Table {
                 if let Some(ref ti) = decoration.table_info {
-                    let border_color = theme.blockquote_border;
+                    let border_color = theme.border_decorative;
                     let border_w = 1.0_f32;
                     let table_left = editor_left + editor.padding_left();
                     let table_right = editor_left + editor.padding_left() + text_width;
@@ -578,7 +578,7 @@ impl Element for EditorElement {
                                     point(px(table_left), px(line_top)),
                                     size(px(table_width), px(text_line_height)),
                                 ),
-                                theme.code_block_bg,
+                                theme.bg_code,
                             ));
                         }
 
@@ -723,7 +723,7 @@ impl Element for EditorElement {
                             size(px(icon_size), px(icon_size)),
                         ),
                         COMMENT_SVG_PATH,
-                        theme.blockquote_border,
+                        theme.border_decorative,
                         0.0_f32,
                     ));
                 }
@@ -733,7 +733,7 @@ impl Element for EditorElement {
             // Checkbox painting
             if prefix_collapsed {
                 if let BlockType::TaskList(checked) = block_type {
-                    let cb_size = font_size * TODO_CHECKBOX_SIZE_FACTOR;
+                    let cb_size = font_size * editor.styles.checkbox.checkbox_size_factor;
                     let line_content_str = buffer.line_content(line_idx);
                     let leading_ws_bytes = line_content_str.len()
                         - line_content_str.trim_start_matches([' ', '\t']).len();
@@ -745,7 +745,7 @@ impl Element for EditorElement {
                     let cb_y = line_top + (line_height - cb_size) / 2.0;
                     let cb_bounds =
                         Bounds::new(point(px(cb_x), px(cb_y)), size(px(cb_size), px(cb_size)));
-                    let corner_r = px(editor.scaled(TODO_CHECKBOX_CORNER_RADIUS));
+                    let corner_r = px(editor.scaled(editor.styles.checkbox.checkbox_radius_px));
                     if *checked {
                         gutter_quads.push(quad(
                             cb_bounds,
@@ -755,7 +755,7 @@ impl Element for EditorElement {
                             gpui::transparent_black(),
                             BorderStyle::default(),
                         ));
-                        let icon_size = cb_size * TODO_CHECK_ICON_SCALE;
+                        let icon_size = cb_size * editor.styles.checkbox.checkbox_check_icon_scale;
                         let icon_offset = (cb_size - icon_size) / 2.0;
                         gutter_svgs.push((
                             Bounds::new(
@@ -772,7 +772,7 @@ impl Element for EditorElement {
                             Corners::all(corner_r),
                             gpui::transparent_black(),
                             px(1.5),
-                            theme.checkbox_border,
+                            theme.border_tertiary,
                             BorderStyle::default(),
                         ));
                     }
@@ -787,7 +787,7 @@ impl Element for EditorElement {
 
             // Gutter fold icon
             if !hidden_lines.contains(&line_idx) {
-                let fi_size = editor.scaled(GUTTER_FOLD_ICON_SIZE);
+                let fi_size = editor.scaled(editor.styles.gutter.gutter_fold_icon_size_px);
                 let fi_x = content_x - fi_size - editor.scaled(5.0);
 
                 if let Some(_) = editor.fold_range_for_line(line_idx) {
@@ -808,9 +808,9 @@ impl Element for EditorElement {
                     if fi_alpha > 0.0 {
                         let rotation_deg = if is_folded { 0.0_f32 } else { 90.0_f32 };
                         let mut fi_color = if is_folded {
-                            theme.accent
+                            theme.text_accent
                         } else {
-                            theme.panel_muted
+                            theme.text_secondary
                         };
                         fi_color.a = fi_alpha;
                         gutter_svgs.push((
@@ -854,9 +854,9 @@ impl Element for EditorElement {
                     if fi_alpha > 0.0 {
                         let rotation_deg = if is_img_folded { 0.0_f32 } else { 90.0_f32 };
                         let mut fi_color = if is_img_folded {
-                            theme.accent
+                            theme.text_accent
                         } else {
-                            theme.panel_muted
+                            theme.text_secondary
                         };
                         fi_color.a = fi_alpha;
                         gutter_svgs.push((
@@ -977,14 +977,14 @@ impl Element for EditorElement {
                 let cursor_top = line_top + f32::from(cursor_pos.y);
                 let mut cursor_color = theme.cursor;
                 cursor_color.a *= if editor.is_selecting {
-                    CURSOR_MAX_OPACITY
+                    editor.styles.cursor.cursor_opacity_max
                 } else {
                     editor.cursor_opacity
                 };
                 cursor_quad = Some(fill(
                     Bounds::new(
                         point(px(content_x + cursor_indent) + cursor_pos.x, px(cursor_top)),
-                        size(px(2.0), px(line_height)),
+                        size(px(editor.styles.cursor.cursor_width_px), px(line_height)),
                     ),
                     cursor_color,
                 ));
@@ -1016,7 +1016,7 @@ impl Element for EditorElement {
                                 px(underline_y + 1.0),
                             ),
                         ),
-                        theme.foreground,
+                        theme.text_primary,
                     ));
                 }
             }
@@ -1165,7 +1165,7 @@ impl Element for EditorElement {
                 let seg_end = (x + dash_len).min(end_x);
                 window.paint_quad(fill(
                     Bounds::new(point(px(x), px(*hr_y)), size(px(seg_end - x), px(1.0))),
-                    theme.blockquote_border,
+                    theme.border_decorative,
                 ));
                 x = seg_end + gap_len;
             }
@@ -1204,7 +1204,7 @@ impl Element for EditorElement {
         // Image URL-edit icons
         for (icon_bounds, _line, alpha) in &prepaint.image_edit_icons {
             let theme = &self.editor.read(cx).theme;
-            let mut color = theme.panel_muted;
+            let mut color = theme.text_secondary;
             color.a = *alpha;
             let _ = window.paint_svg(
                 *icon_bounds,

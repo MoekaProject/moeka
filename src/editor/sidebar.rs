@@ -361,7 +361,8 @@ impl EditorView {
         depth: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let left_padding = self.scaled(12.0 + depth as f32 * 14.0 + 10.0 + 6.0 + 13.0 + 6.0);
+        let ss = &self.styles.sidebar;
+        let left_padding = self.scaled(ss.sidebar_item_indent_base_px + depth as f32 * ss.sidebar_item_indent_step_px + 10.0 + 6.0 + 13.0 + 6.0);
         div()
             .w_full()
             .h(px(self.sidebar_row_height()))
@@ -369,7 +370,7 @@ impl EditorView {
             .pr(px(self.scaled(10.0)))
             .flex()
             .items_center()
-            .bg(self.theme.panel_selected)
+            .bg(ss.sidebar_item_selected_bg)
             .child(
                 div()
                     .flex_1()
@@ -381,18 +382,18 @@ impl EditorView {
                     .child(
                         div()
                             .flex_1()
-                            .h(px(20.0))
-                            .px(px(6.0))
+                            .h(px(ss.sidebar_edit_input_height_px))
+                            .px(px(ss.sidebar_edit_input_padding_x_px))
                             .flex()
                             .items_center()
-                            .bg(self.theme.background)
-                            .border_1()
-                            .border_color(self.theme.accent)
-                            .rounded(px(3.0))
-                            .text_size(px(13.0))
-                            .text_color(self.theme.tab_active_text)
+                            .bg(ss.sidebar_edit_input_bg)
+                            .border(px(ss.sidebar_edit_input_border_width_px))
+                            .border_color(ss.sidebar_edit_input_border_color)
+                            .rounded(px(ss.sidebar_edit_input_radius_px))
+                            .text_size(px(ss.sidebar_edit_input_font_size_px))
+                            .text_color(ss.sidebar_edit_input_text_color)
                             .child(div().flex_1().text_ellipsis().child(if value.is_empty() {
-                                div().text_color(self.theme.panel_muted).child("Name…")
+                                div().text_color(ss.sidebar_edit_input_placeholder_color).child("Name…")
                             } else {
                                 div().child(format!("{value}|"))
                             })),
@@ -434,51 +435,53 @@ impl EditorView {
             .is_some_and(|current| current == &item.path);
         let path = item.path.clone();
         let is_dir = item.is_dir;
-        let left_padding = self.scaled(12.0 + item.depth as f32 * 14.0);
+        let ss = &self.styles.sidebar;
+        let left_padding = self.scaled(ss.sidebar_item_indent_base_px + item.depth as f32 * ss.sidebar_item_indent_step_px);
         let row_bg = if is_selected {
-            self.theme.panel_selected
+            ss.sidebar_item_selected_bg
         } else {
             gpui::transparent_black()
         };
         let icon_color = if is_selected {
-            self.theme.tab_active_text
+            ss.sidebar_item_selected_icon_color
         } else {
-            self.theme.panel_muted
+            ss.sidebar_item_icon_color
         };
         let label_color = if is_selected {
-            self.theme.tab_active_text
+            ss.sidebar_item_selected_text_color
         } else {
-            self.theme.foreground
+            ss.sidebar_item_text_color
         };
         let folder_icon = if item.is_expanded {
             FOLDER_OPEN_SVG_PATH
         } else {
             FOLDER_CLOSED_SVG_PATH
         };
+        let item_hover_bg = ss.sidebar_item_hover_bg;
 
         div()
             .id(SharedString::from(format!("sidebar-{}", path.display())))
             .w_full()
-            .h(px(self.scaled(26.0)))
+            .h(px(self.scaled(ss.sidebar_item_height_px)))
             .flex()
             .items_center()
             .bg(row_bg)
             .when(!self.sidebar_resizing, |this| {
-                this.hover(|style| style.bg(self.theme.panel_hover))
+                this.hover(move |style| style.bg(item_hover_bg))
             })
             .child(
                 div()
                     .w_full()
                     .h_full()
                     .pl(px(left_padding))
-                    .pr(px(self.scaled(8.0)))
+                    .pr(px(self.scaled(ss.sidebar_item_padding_right_px)))
                     .flex()
                     .items_center()
-                    .gap(px(self.scaled(4.0)))
+                    .gap(px(self.scaled(ss.sidebar_item_gap_px)))
                     .child(
                         div()
-                            .w(px(self.scaled(16.0)))
-                            .h(px(self.scaled(18.0)))
+                            .w(px(self.scaled(ss.sidebar_item_fold_container_width_px)))
+                            .h(px(self.scaled(ss.sidebar_item_fold_container_height_px)))
                             .flex()
                             .flex_none()
                             .items_center()
@@ -486,8 +489,8 @@ impl EditorView {
                             .child(if item.is_dir {
                                 svg()
                                     .path(FILETREE_FOLD_SVG_PATH)
-                                    .size(px(self.scaled(10.0)))
-                                    .text_color(self.theme.panel_muted)
+                                    .size(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))
+                                    .text_color(ss.sidebar_item_fold_icon_color)
                                     .when(item.is_expanded, |s| {
                                         s.with_transformation(Transformation::rotate(radians(
                                             std::f32::consts::FRAC_PI_2,
@@ -495,7 +498,7 @@ impl EditorView {
                                     })
                                     .into_any_element()
                             } else {
-                                div().w(px(self.scaled(10.0))).into_any_element()
+                                div().w(px(self.scaled(ss.sidebar_item_fold_icon_size_px))).into_any_element()
                             }),
                     )
                     .child(
@@ -505,14 +508,14 @@ impl EditorView {
                             } else {
                                 MARKDOWN_SVG_PATH
                             })
-                            .size(px(self.scaled(14.0)))
+                            .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
                             .text_color(icon_color),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.0))
-                            .text_size(px(self.scaled(13.0)))
+                            .text_size(px(self.scaled(ss.sidebar_item_font_size_px)))
                             .text_color(label_color)
                             .truncate()
                             .child(item.name),
@@ -520,11 +523,11 @@ impl EditorView {
                     .when(is_active_file, |this| {
                         this.child(
                             div()
-                                .w(px(self.scaled(5.0)))
-                                .h(px(self.scaled(5.0)))
+                                .w(px(self.scaled(ss.sidebar_item_active_dot_size_px)))
+                                .h(px(self.scaled(ss.sidebar_item_active_dot_size_px)))
                                 .rounded_full()
                                 .flex_none()
-                                .bg(self.theme.accent),
+                                .bg(ss.sidebar_item_active_dot_color),
                         )
                     }),
             )
@@ -549,12 +552,13 @@ impl EditorView {
 
     pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let has_root = self.sidebar_root.exists() && self.sidebar_error.is_none();
+        let ss = &self.styles.sidebar;
         let mut content: Vec<AnyElement> = Vec::new();
 
         content.push(
             div()
                 .w_full()
-                .h(px(self.scaled(40.0)))
+                .h(px(self.scaled(ss.sidebar_top_spacer_height_px)))
                 .flex_none()
                 .into_any_element(),
         );
@@ -566,39 +570,40 @@ impl EditorView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .py(px(self.scaled(12.0)))
+                .py(px(self.scaled(ss.sidebar_logo_padding_y_px)))
                 .child(
                     img(PathBuf::from(LOGO_SVG_PATH))
-                        .w(px(self.scaled(50.0)))
-                        .h(px(self.scaled(50.0))),
+                        .w(px(self.scaled(ss.sidebar_logo_size_px)))
+                        .h(px(self.scaled(ss.sidebar_logo_size_px))),
                 )
                 .into_any_element(),
         );
 
         let root_name = self.sidebar_root_name().to_uppercase();
+        let header_hover_bg = ss.sidebar_header_hover_bg;
         let header = div()
             .w_full()
-            .h(px(self.scaled(28.0)))
-            .bg(self.theme.panel_header_bg)
-            .px(px(self.scaled(4.0)))
-            .pl(px(self.scaled(14.0)))
+            .h(px(self.scaled(ss.sidebar_header_height_px)))
+            .bg(ss.sidebar_header_bg)
+            .px(px(self.scaled(ss.sidebar_header_padding_right_px)))
+            .pl(px(self.scaled(ss.sidebar_header_padding_left_px)))
             .flex()
             .items_center()
-            .gap(px(self.scaled(6.0)))
+            .gap(px(self.scaled(ss.sidebar_header_gap_px)))
             .flex_none()
-            .hover(|s| s.bg(self.theme.panel_hover))
+            .hover(move |s| s.bg(header_hover_bg))
             .child(
                 svg()
                     .path(ROOT_SVG_PATH)
-                    .size(px(self.scaled(14.0)))
-                    .text_color(self.theme.panel_muted),
+                    .size(px(self.scaled(ss.sidebar_header_icon_size_px)))
+                    .text_color(ss.sidebar_header_icon_color),
             )
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(self.scaled(12.0)))
+                    .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(self.theme.tab_active_text)
+                    .text_color(ss.sidebar_header_text_color)
                     .overflow_hidden()
                     .child(root_name),
             )
@@ -615,14 +620,15 @@ impl EditorView {
             content.push(
                 div()
                     .w_full()
-                    .px(px(self.scaled(14.0)))
-                    .py(px(self.scaled(12.0)))
-                    .text_size(px(self.scaled(12.0)))
-                    .text_color(self.theme.danger)
+                    .px(px(self.scaled(ss.sidebar_error_padding_x_px)))
+                    .py(px(self.scaled(ss.sidebar_error_padding_y_px)))
+                    .text_size(px(self.scaled(ss.sidebar_error_font_size_px)))
+                    .text_color(ss.sidebar_error_text_color)
                     .child(error.clone())
                     .into_any_element(),
             );
         } else if !has_root {
+            let empty_hover_bg = ss.sidebar_empty_btn_hover_bg;
             content.push(
                 div()
                     .w_full()
@@ -631,26 +637,26 @@ impl EditorView {
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap(px(self.scaled(12.0)))
-                    .px(px(self.scaled(16.0)))
+                    .gap(px(self.scaled(ss.sidebar_empty_gap_px)))
+                    .px(px(self.scaled(ss.sidebar_empty_padding_x_px)))
                     .child(
                         div()
-                            .text_size(px(self.scaled(12.0)))
-                            .text_color(self.theme.panel_muted)
+                            .text_size(px(self.scaled(ss.sidebar_empty_font_size_px)))
+                            .text_color(ss.sidebar_empty_text_color)
                             .text_align(gpui::TextAlign::Center)
                             .child("单击或右键\n打开目录"),
                     )
                     .child(
                         div()
-                            .px(px(self.scaled(16.0)))
-                            .py(px(self.scaled(5.0)))
+                            .px(px(self.scaled(ss.sidebar_empty_btn_padding_x_px)))
+                            .py(px(self.scaled(ss.sidebar_empty_btn_padding_y_px)))
                             .rounded_full()
-                            .border(px(1.5))
+                            .border(px(ss.sidebar_empty_btn_border_width_px))
                             .border_dashed()
-                            .border_color(self.theme.panel_border)
-                            .text_size(px(self.scaled(12.0)))
-                            .text_color(self.theme.panel_muted)
-                            .hover(|s| s.bg(self.theme.panel_hover))
+                            .border_color(ss.sidebar_empty_btn_border_color)
+                            .text_size(px(self.scaled(ss.sidebar_empty_btn_font_size_px)))
+                            .text_color(ss.sidebar_empty_btn_text_color)
+                            .hover(move |s| s.bg(empty_hover_bg))
                             .cursor(CursorStyle::Arrow)
                             .child("打开目录")
                             .on_mouse_down(
@@ -703,7 +709,7 @@ impl EditorView {
         content.push(
             div()
                 .w_full()
-                .h(px(self.scaled(30.0)))
+                .h(px(self.scaled(ss.sidebar_bottom_spacer_height_px)))
                 .flex_none()
                 .into_any_element(),
         );
@@ -715,7 +721,7 @@ impl EditorView {
             .flex_none()
             .flex()
             .flex_col()
-            .bg(self.theme.panel_bg)
+            .bg(ss.sidebar_bg)
             .overflow_y_scroll()
             .children(content)
             .into_any_element()

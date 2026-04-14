@@ -9,6 +9,8 @@ impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let resizing = self.sidebar_resizing;
         let show_editor_toolbar = self.tabs.len() > 0 && self.scroll_offset <= self.scaled(18.0);
+        let ws = &self.styles.window;
+        let ss = &self.styles.sidebar;
         div()
             .id("editor-root")
             .key_context("MarkdownEditor")
@@ -18,17 +20,17 @@ impl Render for EditorView {
             .flex()
             .flex_row()
             .overflow_hidden()
-            .bg(self.theme.background)
-            .border_1()
-            .border_color(self.theme.panel_border)
-            .rounded(px(16.0))
+            .bg(ws.window_bg)
+            .border(px(ws.window_border_width_px))
+            .border_color(ws.window_border_color)
+            .rounded(px(ws.window_radius_px))
             .when(resizing, |this| {
                 this.cursor(CursorStyle::ResizeLeftRight)
                     .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                         if this.sidebar_resizing {
                             let new_width = f32::from(event.position.x);
-                            let min_w = this.scaled(140.0);
-                            let max_w = this.scaled(600.0);
+                            let min_w = this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
+                            let max_w = this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
                             this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
                             cx.notify();
                         }
@@ -93,12 +95,17 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_escape))
             .when(self.sidebar_visible, |this| {
                 let sidebar_w = self.sidebar_width();
+                let ss = &self.styles.sidebar;
                 let indicator_color = if self.sidebar_resizing {
-                    self.theme.accent
+                    ss.sidebar_resize_active_indicator_color
                 } else {
-                    self.theme.panel_border
+                    ss.sidebar_resize_indicator_color
                 };
-                let indicator_width = if self.sidebar_resizing { 3.0 } else { 1.0 };
+                let indicator_width = if self.sidebar_resizing {
+                    ss.sidebar_resize_active_indicator_width_px
+                } else {
+                    ss.sidebar_resize_indicator_width_px
+                };
                 this.child(
                     self.render_sidebar(cx),
                 )
@@ -108,7 +115,7 @@ impl Render for EditorView {
                         .absolute()
                         .left(px(sidebar_w - 1.0))
                         .top_0()
-                        .w(px(5.0))
+                        .w(px(ss.sidebar_resize_handle_width_px))
                         .h_full()
                         .cursor(CursorStyle::ResizeLeftRight)
                         .flex()
@@ -117,8 +124,8 @@ impl Render for EditorView {
                         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                             if this.sidebar_resizing {
                                 let new_width = f32::from(event.position.x);
-                                let min_w = this.scaled(140.0);
-                                let max_w = this.scaled(600.0);
+                                let min_w = this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
+                                let max_w = this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
                                 this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
                                 cx.notify();
                             }
@@ -154,7 +161,7 @@ impl Render for EditorView {
                     .overflow_hidden()
                     .flex()
                     .flex_col()
-                    .bg(self.theme.background)
+                    .bg(self.styles.editor.editor_bg)
                     .child(self.render_tab_bar(cx))
                     .child(
                         div()
@@ -181,28 +188,30 @@ impl Render for EditorView {
                             .on_scroll_wheel(cx.listener(Self::on_scroll))
                             .when(show_editor_toolbar, |this| {
                                 let tb = &self.styles.toolbar;
+                                let primary_hover = tb.toolbar_primary_hover_opacity;
+                                let secondary_hover = tb.toolbar_secondary_hover_opacity;
                                 this.child(
                                     div()
                                         .absolute()
-                                        .left(px(self.scaled(tb.left_offset)))
-                                        .top(px(self.scaled(tb.top_offset)))
+                                        .left(px(self.scaled(tb.toolbar_offset_left_px)))
+                                        .top(px(self.scaled(tb.toolbar_offset_top_px)))
                                         .flex()
                                         .items_center()
-                                        .gap(px(self.scaled(tb.button_gap)))
+                                        .gap(px(self.scaled(tb.toolbar_gap_px)))
                                         .child(
                                             div()
                                                 .id("toolbar-sidebar-toggle")
-                                                .w(px(self.scaled(tb.primary_button_size)))
-                                                .h(px(self.scaled(tb.primary_button_size)))
+                                                .w(px(self.scaled(tb.toolbar_primary_btn_size_px)))
+                                                .h(px(self.scaled(tb.toolbar_primary_btn_size_px)))
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
                                                 .cursor(CursorStyle::Arrow)
-                                                .hover(|style| style.opacity(0.9))
+                                                .hover(move |style| style.opacity(primary_hover))
                                                 .child(
                                                     img(PathBuf::from(SIDEBAR_TOGGLE_SVG_PATH))
-                                                        .w(px(self.scaled(tb.primary_icon_size)))
-                                                        .h(px(self.scaled(tb.primary_icon_size))),
+                                                        .w(px(self.scaled(tb.toolbar_primary_icon_size_px)))
+                                                        .h(px(self.scaled(tb.toolbar_primary_icon_size_px))),
                                                 )
                                                 .on_mouse_down(
                                                     MouseButton::Left,
@@ -214,17 +223,17 @@ impl Render for EditorView {
                                         .child(
                                             div()
                                                 .id("toolbar-align-toggle")
-                                                .w(px(self.scaled(tb.secondary_button_size)))
-                                                .h(px(self.scaled(tb.secondary_button_size)))
+                                                .w(px(self.scaled(tb.toolbar_secondary_btn_size_px)))
+                                                .h(px(self.scaled(tb.toolbar_secondary_btn_size_px)))
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
                                                 .cursor(CursorStyle::Arrow)
-                                                .hover(|style| style.opacity(0.8))
+                                                .hover(move |style| style.opacity(secondary_hover))
                                                 .child(
                                                     img(PathBuf::from(EDITOR_ALIGN_LEFT_SVG_PATH))
-                                                        .w(px(self.scaled(tb.secondary_icon_size)))
-                                                        .h(px(self.scaled(tb.secondary_icon_size))),
+                                                        .w(px(self.scaled(tb.toolbar_secondary_icon_size_px)))
+                                                        .h(px(self.scaled(tb.toolbar_secondary_icon_size_px))),
                                                 )
                                                 .on_mouse_down(
                                                     MouseButton::Left,
@@ -237,24 +246,24 @@ impl Render for EditorView {
                                 .child(
                                     div()
                                         .absolute()
-                                        .right(px(self.scaled(tb.left_offset)))
-                                        .top(px(self.scaled(tb.top_offset)))
+                                        .right(px(self.scaled(tb.toolbar_offset_left_px)))
+                                        .top(px(self.scaled(tb.toolbar_offset_top_px)))
                                         .flex()
                                         .items_center()
                                         .child(
                                             div()
                                                 .id("toolbar-theme-toggle")
-                                                .w(px(self.scaled(tb.secondary_button_size)))
-                                                .h(px(self.scaled(tb.secondary_button_size)))
+                                                .w(px(self.scaled(tb.toolbar_secondary_btn_size_px)))
+                                                .h(px(self.scaled(tb.toolbar_secondary_btn_size_px)))
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
                                                 .cursor(CursorStyle::Arrow)
-                                                .hover(|style| style.opacity(0.8))
+                                                .hover(move |style| style.opacity(secondary_hover))
                                                 .child(
                                                     img(PathBuf::from(THEME_TOGGLE_SVG_PATH))
-                                                        .w(px(self.scaled(tb.secondary_icon_size)))
-                                                        .h(px(self.scaled(tb.secondary_icon_size))),
+                                                        .w(px(self.scaled(tb.toolbar_secondary_icon_size_px)))
+                                                        .h(px(self.scaled(tb.toolbar_secondary_icon_size_px))),
                                                 )
                                                 .on_mouse_down(
                                                     MouseButton::Left,
