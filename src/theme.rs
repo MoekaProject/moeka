@@ -150,7 +150,7 @@ impl Theme {
             bg_code: crate::hex_hsla!("#efecea"),
             bg_code_inline: crate::hex_hsla!("#f0ece8"),
             // Border
-            border_primary: crate::hex_hsla!("#d6d3ce55"),
+            border_primary: crate::hex_hsla!("#d6d3ce9e"),
             border_secondary: crate::hex_hsla!("#d6d3ce55"),
             border_tertiary: crate::hex_hsla!("#c8c5c0"),
             border_decorative: with_alpha(crate::hex_hsla!("#9b9a97"), 0.4),
@@ -164,7 +164,7 @@ impl Theme {
             strikethrough: crate::hex_hsla!("#9b9a97"),
             inline_code: crate::hex_hsla!("#518a3c"),
             link: crate::hex_hsla!("#2383e2"),
-            syntax_marker: with_alpha(crate::hex_hsla!("#9b9a97"), 0.6),
+            syntax_marker: with_alpha(crate::hex_hsla!("#808080"), 1.0),
             list_marker: crate::hex_hsla!("#c74440"),
             checkbox_checked: crate::hex_hsla!("#2383e2"),
             gutter_heading: with_alpha(crate::hex_hsla!("#37352f"), 0.12),

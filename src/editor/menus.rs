@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
-use gpui::{
-    AnyElement, Context, CursorStyle, MouseButton, Pixels, Point, div, prelude::*, px,
-};
+use gpui::{AnyElement, Context, CursorStyle, MouseButton, Pixels, Point, div, prelude::*, px};
 
 use super::*;
 
@@ -631,13 +629,17 @@ impl EditorView {
                         this.close_saved_tabs(cx);
                     },
                 ));
-                (items, self.scaled(self.styles.context_menu.menu_tab_width_px))
+                (
+                    items,
+                    self.scaled(self.styles.context_menu.menu_tab_width_px),
+                )
             }
         };
 
         let ms = &self.styles.context_menu;
         let max_menu_height = if self.last_viewport_height > 0.0 {
-            (self.last_viewport_height - pos_y - self.scaled(ms.menu_max_height_margin_px)).max(self.scaled(100.0))
+            (self.last_viewport_height - pos_y - self.scaled(ms.menu_max_height_margin_px))
+                .max(self.scaled(100.0))
         } else {
             self.scaled(400.0)
         };
@@ -656,7 +658,7 @@ impl EditorView {
             .border_color(ms.menu_border_color)
             .rounded(px(self.scaled(ms.menu_radius_px)));
         if ms.menu_shadow {
-            menu_div = menu_div.shadow_md();
+            menu_div = menu_div.shadow_xs();
         }
         menu_div
             .children(items)
