@@ -90,6 +90,15 @@ fn main() {
             KeyBinding::new("cmd-0", ZoomReset, Some("MarkdownEditor")),
             KeyBinding::new("cmd-\\", ToggleSidebar, Some("MarkdownEditor")),
             KeyBinding::new("cmd-shift-l", ToggleEditorLeftAlign, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-l", SelectLine, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-enter", InsertLineBelow, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-shift-enter", InsertLineAbove, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-shift-d", DuplicateLine, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-shift-k", DeleteLine, Some("MarkdownEditor")),
+            KeyBinding::new("alt-up", MoveLineUp, Some("MarkdownEditor")),
+            KeyBinding::new("alt-down", MoveLineDown, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-s", Save, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-n", NewTab, Some("MarkdownEditor")),
             KeyBinding::new("cmd-q", Quit, Some("MarkdownEditor")),
             KeyBinding::new("escape", Escape, Some("MarkdownEditor")),
         ]);
@@ -132,6 +141,8 @@ fn main() {
                                     msg_send![class!(NSColor), clearColor];
                                 let () = msg_send![ns_window, setBackgroundColor: clear_color];
                                 let () = msg_send![ns_window, setHasShadow: true];
+                                // Prevent titlebar from starting window drag on mouse down
+                                let () = msg_send![ns_window, setMovableByWindowBackground: false];
                                 let content_view: *mut objc::runtime::Object =
                                     msg_send![ns_window, contentView];
                                 let () = msg_send![content_view, setWantsLayer: true];

@@ -63,21 +63,8 @@ impl EditorView {
         let was_active = self.active_tab_id.as_deref() == Some(tab_id);
         self.tabs.remove(index);
         if self.tabs.is_empty() {
-            let id = self.next_tab_identity();
-            let text = default_document_text().to_string();
-            self.tabs.push(OpenTab {
-                id: id.clone(),
-                title: "Welcome".to_string(),
-                path: None,
-                snapshot: EditorSnapshot {
-                    text,
-                    cursor_offset: 0,
-                    cursor_anchor: 0,
-                },
-                is_dirty: false,
-            });
-            self.active_tab_id = Some(id);
-            self.activate_tab_by_index(0, cx);
+            self.active_tab_id = None;
+            cx.notify();
             return;
         }
         if was_active {
@@ -181,6 +168,7 @@ impl EditorView {
                 cursor_anchor: 0,
             },
             is_dirty: false,
+            is_deleted: false,
         };
         self.tabs.push(tab);
         if let Some(index) = self.tabs.len().checked_sub(1) {
@@ -198,15 +186,14 @@ impl EditorView {
 
     pub(crate) fn render_tab(&self, tab: &OpenTab, cx: &mut Context<Self>) -> AnyElement {
         let is_active = self.active_tab_id.as_deref() == Some(tab.id.as_str());
+        let is_dirty = tab.is_dirty;
+        let is_deleted = tab.is_deleted;
         let tab_id = tab.id.clone();
         let close_id = tab.id.clone();
+        let middle_close_id = tab.id.clone();
         let context_tab_id = tab.id.clone();
         let drop_target_id = tab.id.clone();
-        let title = if tab.is_dirty {
-            format!("{} •", tab.title)
-        } else {
-            tab.title.clone()
-        };
+        let title = tab.title.clone();
         let ts = &self.styles.tab_bar;
         let tab_hover_bg = ts.tab_item_hover_bg;
         let close_hover_bg = ts.tab_item_close_hover_bg;
@@ -235,7 +222,11 @@ impl EditorView {
                     .path(MARKDOWN_SVG_PATH)
                     .size(px(self.scaled(ts.tab_item_icon_size_px)))
                     .text_color(ts.tab_item_icon_color)
-                    .opacity(if is_active { ts.tab_item_icon_active_opacity } else { ts.tab_item_icon_inactive_opacity }),
+                    .opacity(if is_active {
+                        ts.tab_item_icon_active_opacity
+                    } else {
+                        ts.tab_item_icon_inactive_opacity
+                    }),
             )
             .child(
                 div()
@@ -248,15 +239,19 @@ impl EditorView {
                     } else {
                         FontWeight::NORMAL
                     })
-                    .text_color(if is_active {
+                    .text_color(if is_deleted {
+                        ts.tab_item_deleted_text_color
+                    } else if is_active {
                         ts.tab_item_active_text_color
                     } else {
                         ts.tab_item_text_color
                     })
+                    .when(is_deleted, |this| this.line_through())
                     .child(title),
             )
             .child(
                 div()
+                    .id(SharedString::from(format!("close-{}", tab.id)))
                     .w(px(self.scaled(ts.tab_item_close_size_px)))
                     .h(px(self.scaled(ts.tab_item_close_size_px)))
                     .rounded_full()
@@ -264,14 +259,59 @@ impl EditorView {
                     .flex_none()
                     .justify_center()
                     .items_center()
-                    .text_size(px(self.scaled(ts.tab_item_close_font_size_px)))
-                    .text_color(ts.tab_item_close_text_color)
-                    .opacity(if is_active || tab.is_dirty { ts.tab_item_close_active_opacity } else { ts.tab_item_close_inactive_opacity })
-                    .hover(move |style| style.bg(close_hover_bg))
-                    .child(if tab.is_dirty { "●" } else { "✕" })
+                    .when(is_dirty, |this| {
+                        this.child(
+                            div()
+                                .w(px(self.scaled(ts.tab_item_dirty_dot_size_px)))
+                                .h(px(self.scaled(ts.tab_item_dirty_dot_size_px)))
+                                .rounded_full()
+                                .bg(ts.tab_item_dirty_dot_color),
+                        )
+                    })
+                    .when(!is_dirty, |this| {
+                        this.text_size(px(self.scaled(ts.tab_item_close_font_size_px)))
+                            .text_color(ts.tab_item_close_text_color)
+                            .opacity(if is_active {
+                                ts.tab_item_close_active_opacity
+                            } else {
+                                ts.tab_item_close_inactive_opacity
+                            })
+                            .hover(move |style| {
+                                style
+                                    .bg(close_hover_bg)
+                                    .opacity(ts.tab_item_close_active_opacity)
+                            })
+                            .child("✕")
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
+                            if let Some(tab) = this.tabs.iter().find(|t| t.id == close_id) {
+                                if tab.is_dirty {
+                                    this.show_dialog(
+                                        super::Dialog {
+                                            title: "未保存的更改".to_string(),
+                                            message: format!(
+                                                "\"{}\" 中有未保存的更改。关闭后将丢失这些更改。",
+                                                tab.title
+                                            ),
+                                            save_label: if tab.path.is_some() {
+                                                Some("保存".to_string())
+                                            } else {
+                                                None
+                                            },
+                                            confirm_label: "不保存".to_string(),
+                                            cancel_label: "取消".to_string(),
+                                            is_danger: true,
+                                            action: super::DialogAction::CloseTabUnsaved {
+                                                tab_id: close_id.clone(),
+                                            },
+                                        },
+                                        cx,
+                                    );
+                                    return;
+                                }
+                            }
                             this.close_tab(&close_id, cx);
                         }),
                     ),
@@ -298,6 +338,12 @@ impl EditorView {
                     this.open_tab_context_menu(context_tab_id.clone(), event.position, cx);
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _, _, cx| {
+                    this.close_tab(&middle_close_id, cx);
+                }),
+            )
             .into_any_element()
     }
 
@@ -321,6 +367,7 @@ impl EditorView {
         }
 
         let new_hover_color = ts.tab_new_hover_text_color;
+        let new_hover_bg = ts.tab_item_hover_bg;
         tab_items.push(
             div()
                 .h(px(self.tab_bar_height()))
@@ -331,7 +378,7 @@ impl EditorView {
                 .items_center()
                 .text_size(px(self.scaled(ts.tab_new_font_size_px)))
                 .text_color(ts.tab_new_text_color)
-                .hover(move |style| style.text_color(new_hover_color))
+                .hover(move |style| style.text_color(new_hover_color).bg(new_hover_bg))
                 .child("+")
                 .on_mouse_down(
                     MouseButton::Left,
@@ -357,6 +404,8 @@ impl EditorView {
                 cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
                     if event.click_count >= 2 {
                         window.zoom_window();
+                    } else {
+                        super::perform_window_drag(window);
                     }
                 }),
             )

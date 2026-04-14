@@ -10,7 +10,6 @@ impl Render for EditorView {
         let resizing = self.sidebar_resizing;
         let show_editor_toolbar = self.tabs.len() > 0 && self.scroll_offset <= self.scaled(18.0);
         let ws = &self.styles.window;
-        let ss = &self.styles.sidebar;
         div()
             .id("editor-root")
             .key_context("MarkdownEditor")
@@ -29,8 +28,10 @@ impl Render for EditorView {
                     .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                         if this.sidebar_resizing {
                             let new_width = f32::from(event.position.x);
-                            let min_w = this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
-                            let max_w = this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
+                            let min_w =
+                                this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
+                            let max_w =
+                                this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
                             this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
                             cx.notify();
                         }
@@ -92,6 +93,15 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_zoom_reset))
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_editor_left_align))
+            .on_action(cx.listener(Self::on_select_line))
+            .on_action(cx.listener(Self::on_insert_line_below))
+            .on_action(cx.listener(Self::on_insert_line_above))
+            .on_action(cx.listener(Self::on_duplicate_line))
+            .on_action(cx.listener(Self::on_delete_line))
+            .on_action(cx.listener(Self::on_move_line_up))
+            .on_action(cx.listener(Self::on_move_line_down))
+            .on_action(cx.listener(Self::on_save))
+            .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_escape))
             .when(self.sidebar_visible, |this| {
                 let sidebar_w = self.sidebar_width();
@@ -106,26 +116,39 @@ impl Render for EditorView {
                 } else {
                     ss.sidebar_resize_indicator_width_px
                 };
-                this.child(
-                    self.render_sidebar(cx),
+                let hover_indicator_color = ss.sidebar_resize_active_indicator_color;
+                let hover_indicator_width = ss.sidebar_resize_active_indicator_width_px;
+                this.child(self.render_sidebar(cx))
+                // Visible border indicator (1px or 3px based on resizing state)
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(sidebar_w - 1.0))
+                        .top_0()
+                        .w(px(indicator_width))
+                        .h_full()
+                        .bg(indicator_color),
                 )
+                // Sensing area for resize (wider, overlaps indicator)
                 .child(
                     div()
                         .id("sidebar-resize-handle")
                         .absolute()
-                        .left(px(sidebar_w - 1.0))
+                        .left(px(sidebar_w - 3.0))
                         .top_0()
-                        .w(px(ss.sidebar_resize_handle_width_px))
+                        .w(px(ss.sidebar_resize_handle_width_px + 2.0))
                         .h_full()
                         .cursor(CursorStyle::ResizeLeftRight)
-                        .flex()
-                        .items_start()
-                        .child(div().w(px(indicator_width)).h_full().bg(indicator_color))
+                        .hover(move |style| {
+                            style.bg(hover_indicator_color)
+                        })
                         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                             if this.sidebar_resizing {
                                 let new_width = f32::from(event.position.x);
-                                let min_w = this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
-                                let max_w = this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
+                                let min_w =
+                                    this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
+                                let max_w =
+                                    this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
                                 this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
                                 cx.notify();
                             }
@@ -163,7 +186,52 @@ impl Render for EditorView {
                     .flex_col()
                     .bg(self.styles.editor.editor_bg)
                     .child(self.render_tab_bar(cx))
-                    .child(
+                    .when(self.tabs.is_empty(), |this| {
+                        // Empty state: no tabs open
+                        let bg_hover = self.styles.sidebar.sidebar_item_hover_bg;
+                        let btn_color = self.styles.sidebar.sidebar_empty_btn_text_color;
+                        let border_color = self.styles.sidebar.sidebar_empty_btn_border_color;
+                        this.child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                        if event.click_count >= 2 {
+                                            this.create_scratch_tab(cx);
+                                        }
+                                    }),
+                                )
+                                .child(
+                                    div()
+                                        .id("empty-workspace-btn")
+                                        .px(px(20.0))
+                                        .py(px(8.0))
+                                        .border(px(1.5))
+                                        .border_dashed()
+                                        .border_color(border_color)
+                                        .rounded_full()
+                                        .text_size(px(13.0))
+                                        .text_color(btn_color)
+                                        .cursor(CursorStyle::Arrow)
+                                        .hover(move |s| s.bg(bg_hover))
+                                        .child("双击新建文件")
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                                if event.click_count >= 2 {
+                                                    this.create_scratch_tab(cx);
+                                                }
+                                            }),
+                                        ),
+                                ),
+                        )
+                    })
+                    .when(!self.tabs.is_empty(), |this| this.child(
                         div()
                             .id("editor-pane")
                             .relative()
@@ -177,7 +245,10 @@ impl Render for EditorView {
                                     CursorStyle::IBeam
                                 },
                             )
-                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, event, window, cx| {
+                                this.focused_sidebar_path = None;
+                                this.on_mouse_down(event, window, cx);
+                            }))
                             .on_mouse_down(
                                 MouseButton::Right,
                                 cx.listener(Self::on_editor_context_menu),
@@ -210,8 +281,12 @@ impl Render for EditorView {
                                                 .hover(move |style| style.opacity(primary_hover))
                                                 .child(
                                                     img(PathBuf::from(SIDEBAR_TOGGLE_SVG_PATH))
-                                                        .w(px(self.scaled(tb.toolbar_primary_icon_size_px)))
-                                                        .h(px(self.scaled(tb.toolbar_primary_icon_size_px))),
+                                                        .w(px(self.scaled(
+                                                            tb.toolbar_primary_icon_size_px,
+                                                        )))
+                                                        .h(px(self.scaled(
+                                                            tb.toolbar_primary_icon_size_px,
+                                                        ))),
                                                 )
                                                 .on_mouse_down(
                                                     MouseButton::Left,
@@ -223,8 +298,14 @@ impl Render for EditorView {
                                         .child(
                                             div()
                                                 .id("toolbar-align-toggle")
-                                                .w(px(self.scaled(tb.toolbar_secondary_btn_size_px)))
-                                                .h(px(self.scaled(tb.toolbar_secondary_btn_size_px)))
+                                                .w(
+                                                    px(self
+                                                        .scaled(tb.toolbar_secondary_btn_size_px)),
+                                                )
+                                                .h(
+                                                    px(self
+                                                        .scaled(tb.toolbar_secondary_btn_size_px)),
+                                                )
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
@@ -232,8 +313,12 @@ impl Render for EditorView {
                                                 .hover(move |style| style.opacity(secondary_hover))
                                                 .child(
                                                     img(PathBuf::from(EDITOR_ALIGN_LEFT_SVG_PATH))
-                                                        .w(px(self.scaled(tb.toolbar_secondary_icon_size_px)))
-                                                        .h(px(self.scaled(tb.toolbar_secondary_icon_size_px))),
+                                                        .w(px(self.scaled(
+                                                            tb.toolbar_secondary_icon_size_px,
+                                                        )))
+                                                        .h(px(self.scaled(
+                                                            tb.toolbar_secondary_icon_size_px,
+                                                        ))),
                                                 )
                                                 .on_mouse_down(
                                                     MouseButton::Left,
@@ -253,17 +338,33 @@ impl Render for EditorView {
                                         .child(
                                             div()
                                                 .id("toolbar-theme-toggle")
-                                                .w(px(self.scaled(tb.toolbar_secondary_btn_size_px)))
-                                                .h(px(self.scaled(tb.toolbar_secondary_btn_size_px)))
+                                                .w(
+                                                    px(self
+                                                        .scaled(tb.toolbar_secondary_btn_size_px)),
+                                                )
+                                                .h(
+                                                    px(self
+                                                        .scaled(tb.toolbar_secondary_btn_size_px)),
+                                                )
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
                                                 .cursor(CursorStyle::Arrow)
                                                 .hover(move |style| style.opacity(secondary_hover))
                                                 .child(
-                                                    img(PathBuf::from(THEME_TOGGLE_SVG_PATH))
-                                                        .w(px(self.scaled(tb.toolbar_secondary_icon_size_px)))
-                                                        .h(px(self.scaled(tb.toolbar_secondary_icon_size_px))),
+                                                    img(PathBuf::from(
+                                                        if matches!(self.theme_kind, crate::theme::ThemeKind::OneDark) {
+                                                            THEME_DARK_SVG_PATH
+                                                        } else {
+                                                            THEME_LIGHT_SVG_PATH
+                                                        },
+                                                    ))
+                                                        .w(px(self.scaled(
+                                                            tb.toolbar_secondary_icon_size_px,
+                                                        )))
+                                                        .h(px(self.scaled(
+                                                            tb.toolbar_secondary_icon_size_px,
+                                                        ))),
                                                 )
                                                 .on_mouse_down(
                                                     MouseButton::Left,
@@ -277,7 +378,7 @@ impl Render for EditorView {
                             .child(element::EditorElement {
                                 editor: cx.entity().clone(),
                             }),
-                    ),
+                    ))
             )
             .when(self.context_menu.is_some(), |this| {
                 this.child(
@@ -302,6 +403,9 @@ impl Render for EditorView {
                         .on_scroll_wheel(cx.listener(|_, _, _, _| {}))
                         .child(self.render_context_menu(cx)),
                 )
+            })
+            .when(self.dialog.is_some(), |this| {
+                this.child(self.render_dialog(cx))
             })
     }
 }

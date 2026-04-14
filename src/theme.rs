@@ -137,7 +137,7 @@ impl Theme {
             text_danger: crate::hex_hsla!("#eb5757"),
             // Background
             bg_primary: crate::hex_hsla!("#faf8f5"),
-            bg_secondary: crate::hex_hsla!("#f3f0eb"),
+            bg_secondary: crate::hex_hsla!("#f6eee0"),
             bg_elevated: crate::hex_hsla!("#f5f2ed"),
             bg_sunken: crate::hex_hsla!("#edeae5"),
             bg_hover: crate::hex_hsla!("#e8e5e0"),
@@ -155,7 +155,7 @@ impl Theme {
             border_tertiary: crate::hex_hsla!("#c8c5c0"),
             border_decorative: with_alpha(crate::hex_hsla!("#9b9a97"), 0.4),
             // Editor/Markdown
-            cursor: crate::hex_hsla!("#37352f"),
+            cursor: crate::hex_hsla!("#528bff"),
             selection: with_alpha(crate::hex_hsla!("#2383e2"), 0.15),
             line_highlight: with_alpha(crate::hex_hsla!("#d6d3ce"), 0.3),
             heading: crate::hex_hsla!("#c74440"),

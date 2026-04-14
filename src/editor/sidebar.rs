@@ -16,6 +16,22 @@ impl EditorView {
         cx.notify();
     }
 
+    fn is_sidebar_item_selected(&self, item_path: &Path) -> bool {
+        if let Some(ref selected) = self.selected_sidebar_path {
+            if selected == item_path {
+                return true;
+            }
+        }
+        if self.selected_sidebar_path.is_none() {
+            if let Some(ref current) = self.current_file_path {
+                if current == item_path {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub(crate) fn open_sidebar_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !is_markdown_file(&path) {
             self.selected_sidebar_path = Some(path);
@@ -53,6 +69,7 @@ impl EditorView {
                         cursor_anchor: 0,
                     },
                     is_dirty: false,
+                    is_deleted: false,
                 };
                 self.persist_active_tab_state();
                 self.tabs.push(tab);
@@ -328,6 +345,7 @@ impl EditorView {
                     editor.expanded_dirs.clear();
                     editor.expanded_dirs.insert(path.clone());
                     editor.sidebar_error = None;
+                    editor.start_watching(cx);
                     cx.notify();
                 })
                 .ok();
@@ -353,50 +371,200 @@ impl EditorView {
         }
     }
 
-    // ── Sidebar rendering ───────────────────────────────────────────
+    // ── Sidebar keyboard navigation ─────────────────────────────────
+
+    pub(crate) fn sidebar_nav_up(&mut self, cx: &mut Context<Self>) {
+        let items = self.sidebar_items();
+        if items.is_empty() {
+            return;
+        }
+        let new_path = if let Some(ref path) = self.focused_sidebar_path {
+            if let Some(idx) = items.iter().position(|i| &i.path == path) {
+                if idx > 0 {
+                    Some(items[idx - 1].path.clone())
+                } else {
+                    Some(items[0].path.clone())
+                }
+            } else {
+                Some(items[0].path.clone())
+            }
+        } else {
+            items.last().map(|i| i.path.clone())
+        };
+        self.focused_sidebar_path = new_path;
+        cx.notify();
+    }
+
+    pub(crate) fn sidebar_nav_down(&mut self, cx: &mut Context<Self>) {
+        let items = self.sidebar_items();
+        if items.is_empty() {
+            return;
+        }
+        let new_path = if let Some(ref path) = self.focused_sidebar_path {
+            if let Some(idx) = items.iter().position(|i| &i.path == path) {
+                Some(items[(idx + 1).min(items.len() - 1)].path.clone())
+            } else {
+                Some(items[0].path.clone())
+            }
+        } else {
+            Some(items[0].path.clone())
+        };
+        self.focused_sidebar_path = new_path;
+        cx.notify();
+    }
+
+    pub(crate) fn sidebar_nav_left(&mut self, cx: &mut Context<Self>) {
+        let path = match self.focused_sidebar_path.clone() {
+            Some(p) => p,
+            None => return,
+        };
+        if path.is_dir() && self.expanded_dirs.contains(&path) {
+            self.expanded_dirs.remove(&path);
+            cx.notify();
+        } else if let Some(parent) = path.parent() {
+            if parent != self.sidebar_root && parent.starts_with(&self.sidebar_root) {
+                self.focused_sidebar_path = Some(parent.to_path_buf());
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn sidebar_nav_right(&mut self, cx: &mut Context<Self>) {
+        let path = match self.focused_sidebar_path.clone() {
+            Some(p) => p,
+            None => return,
+        };
+        if path.is_dir() {
+            if !self.expanded_dirs.contains(&path) {
+                self.expanded_dirs.insert(path.clone());
+                cx.notify();
+            } else {
+                // Already expanded: move focus to first child
+                let items = self.sidebar_items();
+                if let Some(child) = items.iter().find(|i| i.path.parent() == Some(&path)) {
+                    self.focused_sidebar_path = Some(child.path.clone());
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn sidebar_confirm_focused(&mut self, cx: &mut Context<Self>) {
+        let path = match self.focused_sidebar_path.clone() {
+            Some(p) => p,
+            None => return,
+        };
+        if self.sidebar_edit.is_some() {
+            self.commit_sidebar_edit(cx);
+        } else if path.is_dir() {
+            self.toggle_sidebar_directory(path, cx);
+        } else {
+            self.open_sidebar_file(path, cx);
+        }
+    }
+
+    pub(crate) fn sidebar_delete_focused(&mut self, cx: &mut Context<Self>) {
+        let path = match self.focused_sidebar_path.clone() {
+            Some(p) => p,
+            None => return,
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.show_dialog(
+            Dialog {
+                title: "删除".to_string(),
+                message: format!("确定要删除 \"{}\" 吗？此操作不可撤销。", name),
+                save_label: None,
+                confirm_label: "删除".to_string(),
+                cancel_label: "取消".to_string(),
+                is_danger: true,
+                action: DialogAction::DeletePath { path },
+            },
+            cx,
+        );
+    }
 
     pub(crate) fn render_sidebar_edit_row(
         &self,
         value: &str,
         depth: usize,
+        is_dir: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ss = &self.styles.sidebar;
-        let left_padding = self.scaled(ss.sidebar_item_indent_base_px + depth as f32 * ss.sidebar_item_indent_step_px + 10.0 + 6.0 + 13.0 + 6.0);
+        let shift = ss.sidebar_item_left_shift_px;
+        let left_padding = self.scaled(
+            (ss.sidebar_item_indent_base_px + depth as f32 * ss.sidebar_item_indent_step_px
+                - shift)
+                .max(0.0),
+        );
+        let text_color = if value.is_empty() {
+            ss.sidebar_edit_input_placeholder_color
+        } else {
+            ss.sidebar_edit_input_text_color
+        };
+        let icon_path = if is_dir {
+            FOLDER_CLOSED_SVG_PATH
+        } else {
+            MARKDOWN_SVG_PATH
+        };
+
         div()
             .w_full()
-            .h(px(self.sidebar_row_height()))
-            .pl(px(self.scaled(8.0)))
-            .pr(px(self.scaled(10.0)))
+            .h(px(self.scaled(ss.sidebar_item_height_px)))
+            .flex_none()
             .flex()
             .items_center()
             .bg(ss.sidebar_item_selected_bg)
             .child(
                 div()
-                    .flex_1()
-                    .pl(px(left_padding))
-                    .pr(px(self.scaled(2.0)))
+                    .w_full()
                     .h_full()
+                    .pl(px(left_padding))
+                    .pr(px(self.scaled(ss.sidebar_item_padding_right_px)))
                     .flex()
                     .items_center()
+                    .gap(px(self.scaled(ss.sidebar_item_gap_px)))
+                    .child(
+                        div()
+                            .w(px(self.scaled(ss.sidebar_item_fold_container_width_px)))
+                            .h(px(self.scaled(ss.sidebar_item_fold_container_height_px)))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .child(if is_dir {
+                                svg()
+                                    .path(FILETREE_FOLD_SVG_PATH)
+                                    .size(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))
+                                    .text_color(ss.sidebar_item_fold_icon_color)
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .w(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))
+                                    .into_any_element()
+                            }),
+                    )
+                    .child(
+                        svg()
+                            .path(icon_path)
+                            .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
+                            .text_color(ss.sidebar_item_selected_icon_color),
+                    )
                     .child(
                         div()
                             .flex_1()
-                            .h(px(ss.sidebar_edit_input_height_px))
-                            .px(px(ss.sidebar_edit_input_padding_x_px))
-                            .flex()
-                            .items_center()
-                            .bg(ss.sidebar_edit_input_bg)
-                            .border(px(ss.sidebar_edit_input_border_width_px))
-                            .border_color(ss.sidebar_edit_input_border_color)
-                            .rounded(px(ss.sidebar_edit_input_radius_px))
-                            .text_size(px(ss.sidebar_edit_input_font_size_px))
-                            .text_color(ss.sidebar_edit_input_text_color)
-                            .child(div().flex_1().text_ellipsis().child(if value.is_empty() {
-                                div().text_color(ss.sidebar_edit_input_placeholder_color).child("Name…")
+                            .min_w(px(0.0))
+                            .text_size(px(self.scaled(ss.sidebar_item_font_size_px)))
+                            .text_color(text_color)
+                            .truncate()
+                            .child(if value.is_empty() {
+                                SharedString::from("Name…")
                             } else {
-                                div().child(format!("{value}|"))
-                            })),
+                                SharedString::from(format!("{value}|"))
+                            }),
                     ),
             )
             .on_mouse_down(
@@ -417,26 +585,20 @@ impl EditorView {
         }) = self.sidebar_edit
         {
             if *rp == item.path {
-                return self.render_sidebar_edit_row(value, item.depth, cx);
+                return self.render_sidebar_edit_row(value, item.depth, item.is_dir, cx);
             }
         }
 
-        let is_selected = self
-            .selected_sidebar_path
-            .as_ref()
-            .is_some_and(|selected| selected == &item.path)
-            || self
-                .current_file_path
-                .as_ref()
-                .is_some_and(|current| current == &item.path);
-        let is_active_file = self
-            .current_file_path
-            .as_ref()
-            .is_some_and(|current| current == &item.path);
+        let is_selected = self.is_sidebar_item_selected(&item.path);
         let path = item.path.clone();
         let is_dir = item.is_dir;
         let ss = &self.styles.sidebar;
-        let left_padding = self.scaled(ss.sidebar_item_indent_base_px + item.depth as f32 * ss.sidebar_item_indent_step_px);
+        let shift = ss.sidebar_item_left_shift_px;
+        let left_padding = self.scaled(
+            (ss.sidebar_item_indent_base_px + item.depth as f32 * ss.sidebar_item_indent_step_px
+                - shift)
+                .max(0.0),
+        );
         let row_bg = if is_selected {
             ss.sidebar_item_selected_bg
         } else {
@@ -457,18 +619,49 @@ impl EditorView {
         } else {
             FOLDER_CLOSED_SVG_PATH
         };
+        let is_focused = self.focused_sidebar_path.as_deref() == Some(path.as_path());
+        let focus_border_color = ss.sidebar_item_focus_border_color;
         let item_hover_bg = ss.sidebar_item_hover_bg;
+
+        // Build indent guide lines (thin vertical strips for each ancestor level)
+        let guide_color = ss.sidebar_indent_guide_color;
+        let indent_base = ss.sidebar_item_indent_base_px;
+        let indent_step = ss.sidebar_item_indent_step_px;
+        let item_height = self.scaled(ss.sidebar_item_height_px);
+        let fold_w = self.scaled(ss.sidebar_item_fold_container_width_px);
+        let guides: Vec<gpui::AnyElement> = (1..item.depth)
+            .map(|level| {
+                let guide_x = self
+                    .scaled((indent_base + level as f32 * indent_step - shift).max(0.0))
+                    + fold_w / 2.0
+                    - 0.5;
+                div()
+                    .absolute()
+                    .left(px(guide_x))
+                    .top(px(0.0))
+                    .w(px(1.0))
+                    .h(px(item_height))
+                    .bg(guide_color)
+                    .into_any_element()
+            })
+            .collect();
 
         div()
             .id(SharedString::from(format!("sidebar-{}", path.display())))
             .w_full()
-            .h(px(self.scaled(ss.sidebar_item_height_px)))
+            .h(px(item_height))
+            .flex_none()
+            .relative()
             .flex()
             .items_center()
             .bg(row_bg)
+            .when(is_focused, move |this| {
+                this.border_1().border_color(focus_border_color)
+            })
             .when(!self.sidebar_resizing, |this| {
                 this.hover(move |style| style.bg(item_hover_bg))
             })
+            .children(guides)
             .child(
                 div()
                     .w_full()
@@ -498,7 +691,9 @@ impl EditorView {
                                     })
                                     .into_any_element()
                             } else {
-                                div().w(px(self.scaled(ss.sidebar_item_fold_icon_size_px))).into_any_element()
+                                div()
+                                    .w(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))
+                                    .into_any_element()
                             }),
                     )
                     .child(
@@ -519,21 +714,12 @@ impl EditorView {
                             .text_color(label_color)
                             .truncate()
                             .child(item.name),
-                    )
-                    .when(is_active_file, |this| {
-                        this.child(
-                            div()
-                                .w(px(self.scaled(ss.sidebar_item_active_dot_size_px)))
-                                .h(px(self.scaled(ss.sidebar_item_active_dot_size_px)))
-                                .rounded_full()
-                                .flex_none()
-                                .bg(ss.sidebar_item_active_dot_color),
-                        )
-                    }),
+                    ),
             )
             .on_click({
                 let path = path.clone();
                 cx.listener(move |this, _, _, cx| {
+                    this.focused_sidebar_path = Some(path.clone());
                     if path.is_dir() {
                         this.toggle_sidebar_directory(path.clone(), cx);
                     } else {
@@ -544,6 +730,7 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.focused_sidebar_path = Some(path.clone());
                     this.open_sidebar_context_menu(path.clone(), is_dir, event.position, cx);
                 }),
             )
@@ -553,31 +740,23 @@ impl EditorView {
     pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let has_root = self.sidebar_root.exists() && self.sidebar_error.is_none();
         let ss = &self.styles.sidebar;
-        let mut content: Vec<AnyElement> = Vec::new();
 
-        content.push(
-            div()
-                .w_full()
-                .h(px(self.scaled(ss.sidebar_top_spacer_height_px)))
-                .flex_none()
-                .into_any_element(),
-        );
-
-        content.push(
-            div()
-                .w_full()
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .py(px(self.scaled(ss.sidebar_logo_padding_y_px)))
-                .child(
-                    img(PathBuf::from(LOGO_SVG_PATH))
-                        .w(px(self.scaled(ss.sidebar_logo_size_px)))
-                        .h(px(self.scaled(ss.sidebar_logo_size_px))),
-                )
-                .into_any_element(),
-        );
+        // Fixed header section (spacer + logo + root name)
+        let top_spacer = div()
+            .id("sidebar-top-spacer")
+            .w_full()
+            .h(px(self.scaled(ss.sidebar_top_spacer_height_px)))
+            .flex_none()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
+                    if event.click_count >= 2 {
+                        window.zoom_window();
+                    } else {
+                        super::perform_window_drag(window);
+                    }
+                }),
+            );
 
         let root_name = self.sidebar_root_name().to_uppercase();
         let header_hover_bg = ss.sidebar_header_hover_bg;
@@ -602,7 +781,6 @@ impl EditorView {
                 div()
                     .flex_1()
                     .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
-                    .font_weight(FontWeight::BOLD)
                     .text_color(ss.sidebar_header_text_color)
                     .overflow_hidden()
                     .child(root_name),
@@ -612,12 +790,13 @@ impl EditorView {
                 cx.listener(|this, _, _, cx| {
                     this.pick_workspace_folder(cx);
                 }),
-            )
-            .into_any_element();
-        content.push(header);
+            );
+
+        // Scrollable content section
+        let mut tree_items: Vec<AnyElement> = Vec::new();
 
         if let Some(error) = &self.sidebar_error {
-            content.push(
+            tree_items.push(
                 div()
                     .w_full()
                     .px(px(self.scaled(ss.sidebar_error_padding_x_px)))
@@ -629,7 +808,7 @@ impl EditorView {
             );
         } else if !has_root {
             let empty_hover_bg = ss.sidebar_empty_btn_hover_bg;
-            content.push(
+            tree_items.push(
                 div()
                     .w_full()
                     .flex_1()
@@ -637,15 +816,7 @@ impl EditorView {
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap(px(self.scaled(ss.sidebar_empty_gap_px)))
                     .px(px(self.scaled(ss.sidebar_empty_padding_x_px)))
-                    .child(
-                        div()
-                            .text_size(px(self.scaled(ss.sidebar_empty_font_size_px)))
-                            .text_color(ss.sidebar_empty_text_color)
-                            .text_align(gpui::TextAlign::Center)
-                            .child("单击或右键\n打开目录"),
-                    )
                     .child(
                         div()
                             .px(px(self.scaled(ss.sidebar_empty_btn_padding_x_px)))
@@ -658,7 +829,7 @@ impl EditorView {
                             .text_color(ss.sidebar_empty_btn_text_color)
                             .hover(move |s| s.bg(empty_hover_bg))
                             .cursor(CursorStyle::Arrow)
-                            .child("打开目录")
+                            .child("打开目录...")
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
@@ -684,16 +855,23 @@ impl EditorView {
                 | Some(SidebarEditMode::CreateDir { value, .. }) => Some(value.as_str()),
                 _ => None,
             };
+            let create_is_dir =
+                matches!(&self.sidebar_edit, Some(SidebarEditMode::CreateDir { .. }));
 
             let items = self.sidebar_items();
             let mut injected = false;
             for item in items {
-                content.push(self.render_sidebar_item(item.clone(), cx));
+                tree_items.push(self.render_sidebar_item(item.clone(), cx));
                 if let Some(ref parent) = create_parent {
                     if !injected && item.is_dir && &item.path == parent {
                         let depth = create_depth.unwrap_or(1);
                         let value = create_value.unwrap_or("");
-                        content.push(self.render_sidebar_edit_row(value, depth, cx));
+                        tree_items.push(self.render_sidebar_edit_row(
+                            value,
+                            depth,
+                            create_is_dir,
+                            cx,
+                        ));
                         injected = true;
                     }
                 }
@@ -701,12 +879,30 @@ impl EditorView {
             if !injected {
                 if let Some(depth) = create_depth {
                     let value = create_value.unwrap_or("");
-                    content.push(self.render_sidebar_edit_row(value, depth, cx));
+                    tree_items.push(self.render_sidebar_edit_row(value, depth, create_is_dir, cx));
                 }
             }
         }
 
-        content.push(
+        // Logo goes inside scrollable area so it scrolls away
+        tree_items.insert(
+            0,
+            div()
+                .w_full()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .py(px(self.scaled(ss.sidebar_logo_padding_y_px)))
+                .child(
+                    img(PathBuf::from(LOGO_SVG_PATH))
+                        .w(px(self.scaled(ss.sidebar_logo_size_px)))
+                        .h(px(self.scaled(ss.sidebar_logo_size_px))),
+                )
+                .into_any_element(),
+        );
+
+        tree_items.push(
             div()
                 .w_full()
                 .h(px(self.scaled(ss.sidebar_bottom_spacer_height_px)))
@@ -722,8 +918,15 @@ impl EditorView {
             .flex()
             .flex_col()
             .bg(ss.sidebar_bg)
-            .overflow_y_scroll()
-            .children(content)
+            .child(top_spacer)
+            .child(header)
+            .child(
+                div()
+                    .id("sidebar-tree")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .children(tree_items),
+            )
             .into_any_element()
     }
 }

@@ -718,18 +718,17 @@ pub(crate) fn pick_image_file_blocking() -> Option<PathBuf> {
 }
 
 pub(crate) fn pick_folder_blocking() -> Option<PathBuf> {
-    let script = r#"POSIX path of (choose folder with prompt "Choose Workspace Folder")"#;
-    let output = std::process::Command::new("osascript")
-        .args(["-e", script])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !s.is_empty() {
-            return Some(PathBuf::from(s));
-        }
-    }
-    None
+    rfd::FileDialog::new()
+        .set_title("选择工作区目录")
+        .pick_folder()
+}
+
+pub(crate) fn save_file_blocking(default_name: &str) -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("保存文件")
+        .set_file_name(default_name)
+        .add_filter("Markdown", &["md", "markdown"])
+        .save_file()
 }
 
 /// Map a buffer byte offset (within line) to display byte offset.
@@ -920,8 +919,8 @@ pub(crate) fn build_text_runs_for_display(
                 }
             }
             BlockType::TaskList(_) => {
-                let leading_ws = line_content.len()
-                    - line_content.trim_start_matches([' ', '\t']).len();
+                let leading_ws =
+                    line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
                 let replacement_len = if leading_ws > 0 { 4 } else { 3 };
                 let start = leading_ws;
                 let end = (start + replacement_len).min(disp_len);

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point, RenderImage, SharedString,
+    ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point, RenderImage, SharedString, Task,
     WrappedLine,
 };
 
@@ -25,6 +25,29 @@ use crate::buffer::Buffer;
 use crate::cursor::Cursor;
 use crate::markdown::{self, BlockType, LineDecoration};
 use crate::theme::{Theme, ThemeKind};
+
+// ── Platform helpers ────────────────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+pub(crate) fn perform_window_drag(window: &gpui::Window) {
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(handle) = HasWindowHandle::window_handle(window) {
+        if let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
+            unsafe {
+                let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
+                let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
+                let current_event: *mut objc::runtime::Object = msg_send![ns_window, currentEvent];
+                if !current_event.is_null() {
+                    let () = msg_send![ns_window, performWindowDragWithEvent: current_event];
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn perform_window_drag(_window: &gpui::Window) {}
 
 // ── Layout constants ────────────────────────────────────────────────
 // NOTE: Numeric layout/style constants are now in style.rs (Styles struct).
@@ -68,6 +91,10 @@ pub(crate) const EDITOR_ALIGN_LEFT_SVG_PATH: &str = concat!(
 );
 pub(crate) const THEME_TOGGLE_SVG_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/theme-toggle.svg");
+pub(crate) const THEME_LIGHT_SVG_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/theme-light.svg");
+pub(crate) const THEME_DARK_SVG_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/theme-dark.svg");
 pub(crate) const FOLDER_OPEN_SVG_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/icons/filetree/folder-open.svg"
@@ -100,6 +127,7 @@ pub(crate) struct OpenTab {
     pub path: Option<PathBuf>,
     pub snapshot: EditorSnapshot,
     pub is_dirty: bool,
+    pub is_deleted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -164,6 +192,24 @@ impl SidebarEditMode {
 pub(crate) struct FileClipboard {
     pub paths: Vec<PathBuf>,
     pub is_cut: bool,
+}
+
+#[derive(Clone)]
+pub(crate) enum DialogAction {
+    CloseTabUnsaved { tab_id: String },
+    SaveAndCloseTab { tab_id: String },
+    DeletePath { path: PathBuf },
+}
+
+#[derive(Clone)]
+pub(crate) struct Dialog {
+    pub title: String,
+    pub message: String,
+    pub save_label: Option<String>,
+    pub confirm_label: String,
+    pub cancel_label: String,
+    pub is_danger: bool,
+    pub action: DialogAction,
 }
 
 /// Display info for a single buffer line.
@@ -248,6 +294,9 @@ pub struct EditorView {
     pub(crate) sidebar_visible: bool,
     pub(crate) editor_left_aligned: bool,
     pub(crate) tab_dragging_id: Option<String>,
+    pub(crate) dialog: Option<Dialog>,
+    pub(crate) focused_sidebar_path: Option<PathBuf>,
+    pub(crate) _watcher_task: Option<Task<()>>,
 }
 
 impl EditorView {
@@ -306,6 +355,7 @@ impl EditorView {
                 path: None,
                 snapshot: initial_snapshot,
                 is_dirty: false,
+                is_deleted: false,
             }],
             active_tab_id: Some("welcome-1".to_string()),
             next_tab_id: 2,
@@ -333,8 +383,12 @@ impl EditorView {
             sidebar_visible: true,
             editor_left_aligned: false,
             tab_dragging_id: None,
+            dialog: None,
+            focused_sidebar_path: None,
+            _watcher_task: None,
         };
         this.start_blinking(cx);
+        this.start_watching(cx);
 
         // Open EDITOR.md on startup if it exists
         let editor_md = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/EDITOR.md"));
@@ -352,6 +406,333 @@ impl EditorView {
         self.theme = self.theme_kind.build();
         self.styles = crate::style::Styles::from_theme(&self.theme);
         cx.notify();
+    }
+
+    // ── File system watcher ─────────────────────────────────────
+
+    pub(crate) fn start_watching(&mut self, cx: &mut Context<Self>) {
+        use notify::{RecursiveMode, Watcher};
+
+        let root = self.sidebar_root.clone();
+        if !root.exists() {
+            self._watcher_task = None;
+            return;
+        }
+
+        let pending = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let pending_writer = pending.clone();
+
+        let mut watcher = match notify::recommended_watcher(
+            move |result: Result<notify::Event, notify::Error>| {
+                if let Ok(event) = result {
+                    if !event.paths.is_empty() {
+                        if let Ok(mut guard) = pending_writer.lock() {
+                            guard.extend(event.paths);
+                        }
+                    }
+                }
+            },
+        ) {
+            Ok(w) => w,
+            Err(_) => return,
+        };
+
+        if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
+            return;
+        }
+
+        self._watcher_task = Some(cx.spawn(async move |this, cx| {
+            // Keep the watcher alive for the lifetime of the task
+            let _watcher = watcher;
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+
+                let changed_paths: Vec<PathBuf> = {
+                    let mut guard = match pending.lock() {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
+                    std::mem::take(&mut *guard)
+                };
+
+                if changed_paths.is_empty() {
+                    continue;
+                }
+
+                let result = this.update(cx, |editor, cx| {
+                    editor.handle_fs_events(&changed_paths, cx);
+                });
+                if result.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    pub(crate) fn handle_fs_events(&mut self, changed_paths: &[PathBuf], cx: &mut Context<Self>) {
+        let mut needs_notify = false;
+
+        for tab in &mut self.tabs {
+            if let Some(ref tab_path) = tab.path {
+                if changed_paths
+                    .iter()
+                    .any(|p| p == tab_path || tab_path.starts_with(p))
+                {
+                    if !tab_path.exists() {
+                        if !tab.is_deleted {
+                            tab.is_deleted = true;
+                            needs_notify = true;
+                        }
+                    } else {
+                        if tab.is_deleted {
+                            tab.is_deleted = false;
+                            needs_notify = true;
+                        }
+                        if !tab.is_dirty {
+                            if let Ok(bytes) = std::fs::read(tab_path) {
+                                let new_text = String::from_utf8_lossy(&bytes).into_owned();
+                                if new_text != tab.snapshot.text {
+                                    tab.snapshot.text = new_text.clone();
+                                    tab.snapshot.cursor_offset =
+                                        tab.snapshot.cursor_offset.min(new_text.len());
+                                    tab.snapshot.cursor_anchor =
+                                        tab.snapshot.cursor_anchor.min(new_text.len());
+                                    needs_notify = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reload the active tab's buffer if it was externally modified
+        if needs_notify {
+            if let Some(ref active_id) = self.active_tab_id {
+                if let Some(tab) = self.tabs.iter().find(|t| &t.id == active_id) {
+                    if !tab.is_dirty && !tab.is_deleted {
+                        let snapshot = tab.snapshot.clone();
+                        self.buffer = crate::buffer::Buffer::from_text(&snapshot.text);
+                        self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
+                        self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());
+                        self.reparse();
+                    }
+                }
+            }
+            cx.notify();
+        }
+    }
+
+    // ── Dialog ──────────────────────────────────────────────────────
+
+    pub(crate) fn show_dialog(&mut self, dialog: Dialog, cx: &mut Context<Self>) {
+        self.dialog = Some(dialog);
+        cx.notify();
+    }
+
+    pub(crate) fn dismiss_dialog(&mut self, cx: &mut Context<Self>) {
+        self.dialog = None;
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.dialog.take() else {
+            return;
+        };
+        match dialog.action {
+            DialogAction::CloseTabUnsaved { tab_id } => {
+                if let Some(index) = self.tabs.iter().position(|t| t.id == tab_id) {
+                    self.tabs[index].is_dirty = false;
+                    self.close_tab(&tab_id, cx);
+                }
+            }
+            DialogAction::SaveAndCloseTab { .. } => {
+                // Save action is handled separately via save_dialog
+            }
+            DialogAction::DeletePath { path } => {
+                self.delete_path(path, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn save_and_close_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.dialog.take() else {
+            return;
+        };
+        match dialog.action {
+            DialogAction::CloseTabUnsaved { ref tab_id }
+            | DialogAction::SaveAndCloseTab { ref tab_id } => {
+                let tab_id = tab_id.clone();
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                    if let Some(ref path) = tab.path {
+                        if std::fs::write(path, &tab.snapshot.text).is_ok() {
+                            tab.is_dirty = false;
+                        }
+                    }
+                }
+                self.close_tab(&tab_id, cx);
+            }
+            DialogAction::DeletePath { .. } => {
+                // No save action for delete
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn render_dialog(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use gpui::{CursorStyle, FontWeight, MouseButton, SharedString, div, prelude::*, px};
+
+        let ds = &self.styles.dialog;
+        let backdrop_color = ds.dialog_backdrop_color;
+        let btn_hover_opacity = ds.dialog_btn_hover_opacity;
+
+        let Some(ref dialog) = self.dialog else {
+            return div().into_any_element();
+        };
+
+        let is_danger = dialog.is_danger;
+        let btn_bg = if is_danger {
+            ds.dialog_btn_danger_bg
+        } else {
+            ds.dialog_btn_primary_bg
+        };
+        let btn_text = if is_danger {
+            ds.dialog_btn_danger_text_color
+        } else {
+            ds.dialog_btn_primary_text_color
+        };
+        let confirm_label = SharedString::from(dialog.confirm_label.clone());
+        let cancel_label = SharedString::from(dialog.cancel_label.clone());
+        let save_label = dialog
+            .save_label
+            .as_ref()
+            .map(|s| SharedString::from(s.clone()));
+        let has_save = save_label.is_some();
+        let save_btn_bg = ds.dialog_btn_primary_bg;
+        let save_btn_text = ds.dialog_btn_primary_text_color;
+        let secondary_bg = ds.dialog_btn_secondary_bg;
+        let secondary_text = ds.dialog_btn_secondary_text_color;
+
+        div()
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .w_full()
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(backdrop_color)
+            .cursor(CursorStyle::Arrow)
+            .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, _| {}))
+            .on_mouse_up(MouseButton::Left, cx.listener(|_, _, _, _| {}))
+            .on_mouse_down(MouseButton::Right, cx.listener(|_, _, _, _| {}))
+            .on_mouse_move(cx.listener(|_, _, _, _| {}))
+            .on_scroll_wheel(cx.listener(|_, _, _, _| {}))
+            .child(
+                div()
+                    .w(px(self.scaled(ds.dialog_width_px)))
+                    .bg(ds.dialog_bg)
+                    .border(px(ds.dialog_border_width_px))
+                    .border_color(ds.dialog_border_color)
+                    .rounded(px(ds.dialog_radius_px))
+                    .px(px(self.scaled(ds.dialog_padding_x_px)))
+                    .py(px(self.scaled(ds.dialog_padding_y_px)))
+                    .flex()
+                    .flex_col()
+                    .gap(px(self.scaled(ds.dialog_gap_px)))
+                    .child(
+                        div()
+                            .text_size(px(self.scaled(ds.dialog_title_font_size_px)))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(ds.dialog_title_text_color)
+                            .child(SharedString::from(dialog.title.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(self.scaled(ds.dialog_message_font_size_px)))
+                            .text_color(ds.dialog_message_text_color)
+                            .child(SharedString::from(dialog.message.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(self.scaled(ds.dialog_btn_gap_px)))
+                            .child(
+                                div()
+                                    .id("dialog-cancel")
+                                    .h(px(self.scaled(ds.dialog_btn_height_px)))
+                                    .px(px(self.scaled(ds.dialog_btn_padding_x_px)))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(secondary_bg)
+                                    .text_color(secondary_text)
+                                    .text_size(px(self.scaled(ds.dialog_btn_font_size_px)))
+                                    .rounded(px(ds.dialog_btn_radius_px))
+                                    .cursor(CursorStyle::Arrow)
+                                    .hover(move |s| s.opacity(btn_hover_opacity))
+                                    .child(cancel_label)
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.dismiss_dialog(cx);
+                                        }),
+                                    ),
+                            )
+                            .when(has_save, |this| {
+                                this.child(
+                                    div()
+                                        .id("dialog-save")
+                                        .h(px(self.scaled(ds.dialog_btn_height_px)))
+                                        .px(px(self.scaled(ds.dialog_btn_padding_x_px)))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(save_btn_bg)
+                                        .text_color(save_btn_text)
+                                        .text_size(px(self.scaled(ds.dialog_btn_font_size_px)))
+                                        .rounded(px(ds.dialog_btn_radius_px))
+                                        .cursor(CursorStyle::Arrow)
+                                        .hover(move |s| s.opacity(btn_hover_opacity))
+                                        .child(save_label.unwrap_or_default())
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.save_and_close_dialog(cx);
+                                            }),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id("dialog-confirm")
+                                    .h(px(self.scaled(ds.dialog_btn_height_px)))
+                                    .px(px(self.scaled(ds.dialog_btn_padding_x_px)))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(btn_bg)
+                                    .text_color(btn_text)
+                                    .text_size(px(self.scaled(ds.dialog_btn_font_size_px)))
+                                    .rounded(px(ds.dialog_btn_radius_px))
+                                    .cursor(CursorStyle::Arrow)
+                                    .hover(move |s| s.opacity(btn_hover_opacity))
+                                    .child(confirm_label)
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.confirm_dialog(cx);
+                                        }),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     // ── Cursor blink ────────────────────────────────────────────────

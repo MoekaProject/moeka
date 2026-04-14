@@ -17,6 +17,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_some() {
+            self.dismiss_dialog(cx);
+            return;
+        }
         if self.sidebar_edit.is_some() {
             self.cancel_sidebar_edit(cx);
             return;
@@ -34,7 +38,12 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn on_backspace(&mut self, _: &Backspace, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_backspace(
+        &mut self,
+        _: &Backspace,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.sidebar_edit.is_some() {
             self.sidebar_edit_backspace(cx);
             return;
@@ -100,6 +109,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.focused_sidebar_path.is_some() {
+            self.sidebar_delete_focused(cx);
+            return;
+        }
         self.checkpoint();
         self.cursor.delete(&mut self.buffer);
         self.reparse();
@@ -108,6 +121,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        if self.focused_sidebar_path.is_some() {
+            self.sidebar_nav_left(cx);
+            return;
+        }
         let prev_offset = self.cursor.offset;
         let (line, _col) = self.buffer.offset_to_line_col(self.cursor.offset);
         let cell_ranges = self
@@ -143,6 +160,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        if self.focused_sidebar_path.is_some() {
+            self.sidebar_nav_right(cx);
+            return;
+        }
         let prev_offset = self.cursor.offset;
         let (line, _col) = self.buffer.offset_to_line_col(self.cursor.offset);
         let cell_ranges = self
@@ -171,6 +192,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.focused_sidebar_path.is_some() {
+            self.sidebar_nav_up(cx);
+            return;
+        }
         if self.slash_menu_start.is_some() {
             if self.menu_selected_index > 0 {
                 self.menu_selected_index -= 1;
@@ -190,6 +215,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.focused_sidebar_path.is_some() {
+            self.sidebar_nav_down(cx);
+            return;
+        }
         if self.slash_menu_start.is_some() {
             let max_index = self.slash_menu_matched_actions().len().saturating_sub(1);
             if self.menu_selected_index < max_index {
@@ -209,13 +238,23 @@ impl EditorView {
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_select_left(
+        &mut self,
+        _: &SelectLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.cursor.select_left(&self.buffer);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_select_right(
+        &mut self,
+        _: &SelectRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.cursor.select_right(&self.buffer);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -231,7 +270,12 @@ impl EditorView {
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_select_down(
+        &mut self,
+        _: &SelectDown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(offset) = self.offset_for_visual_down(self.cursor.offset) {
             self.cursor.select_to(offset, &self.buffer);
         } else {
@@ -258,7 +302,12 @@ impl EditorView {
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_select_home(
+        &mut self,
+        _: &SelectHome,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.cursor.select_to_line_start(&self.buffer);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -271,6 +320,14 @@ impl EditorView {
     }
 
     pub(crate) fn on_enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
+        if self.focused_sidebar_path.is_some() {
+            if self.sidebar_edit.is_some() {
+                self.commit_sidebar_edit(cx);
+            } else {
+                self.sidebar_confirm_focused(cx);
+            }
+            return;
+        }
         if self.slash_menu_start.is_some() {
             self.execute_slash_menu_selected(cx);
             return;
@@ -415,19 +472,34 @@ impl EditorView {
         window.show_character_palette();
     }
 
-    pub(crate) fn on_move_word_left(&mut self, _: &MoveWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_move_word_left(
+        &mut self,
+        _: &MoveWordLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.cursor.move_word_left(&self.buffer);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_move_word_right(&mut self, _: &MoveWordRight, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_move_word_right(
+        &mut self,
+        _: &MoveWordRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.cursor.move_word_right(&self.buffer);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_delete_word_left(&mut self, _: &DeleteWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_delete_word_left(
+        &mut self,
+        _: &DeleteWordLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.checkpoint();
         self.cursor.delete_word_left(&mut self.buffer);
         self.reparse();
@@ -437,95 +509,197 @@ impl EditorView {
 
     // ── Format actions ──────────────────────────────────────────────
 
-    pub(crate) fn on_toggle_bold(&mut self, _: &ToggleBold, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_toggle_bold(
+        &mut self,
+        _: &ToggleBold,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.checkpoint();
         self.apply_wrap("**", "**");
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_toggle_italic(&mut self, _: &ToggleItalic, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_toggle_italic(
+        &mut self,
+        _: &ToggleItalic,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.checkpoint();
         self.apply_wrap("*", "*");
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_toggle_strikethrough(&mut self, _: &ToggleStrikethrough, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_toggle_strikethrough(
+        &mut self,
+        _: &ToggleStrikethrough,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.checkpoint();
         self.apply_wrap("~~", "~~");
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_toggle_inline_code(&mut self, _: &ToggleInlineCode, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_toggle_inline_code(
+        &mut self,
+        _: &ToggleInlineCode,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.checkpoint();
         self.apply_wrap("`", "`");
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_toggle_link(&mut self, _: &ToggleLink, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_toggle_link(
+        &mut self,
+        _: &ToggleLink,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.checkpoint();
         self.insert_link_or_image("[", "](https://)", "title");
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_toggle_image(&mut self, _: &ToggleImage, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_toggle_image(
+        &mut self,
+        _: &ToggleImage,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.checkpoint();
         self.insert_link_or_image("![", "](image.png)", "alt");
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_toggle_quote(&mut self, _: &ToggleQuote, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_toggle_quote(
+        &mut self,
+        _: &ToggleQuote,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.checkpoint();
         self.toggle_current_line_prefix("> ");
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_toggle_todo(&mut self, _: &ToggleTodo, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_toggle_todo(
+        &mut self,
+        _: &ToggleTodo,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.checkpoint();
         self.toggle_current_line_prefix("- [ ] ");
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_toggle_unordered_list(&mut self, _: &ToggleUnorderedList, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_toggle_unordered_list(
+        &mut self,
+        _: &ToggleUnorderedList,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.checkpoint();
         self.toggle_current_line_prefix("- ");
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_toggle_ordered_list(&mut self, _: &ToggleOrderedList, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_toggle_ordered_list(
+        &mut self,
+        _: &ToggleOrderedList,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.checkpoint();
         self.toggle_current_line_prefix("1. ");
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_insert_code_block(&mut self, _: &InsertCodeBlock, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_insert_code_block(
+        &mut self,
+        _: &InsertCodeBlock,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.checkpoint();
         self.apply_wrap("```\n", "\n```");
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_insert_horizontal_rule(&mut self, _: &InsertHorizontalRule, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_insert_horizontal_rule(
+        &mut self,
+        _: &InsertHorizontalRule,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.checkpoint();
         self.toggle_horizontal_rule_at_cursor();
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_insert_heading1(&mut self, _: &InsertHeading1, _: &mut Window, cx: &mut Context<Self>) {
-        self.checkpoint(); self.apply_heading(1); self.pause_blinking(cx);
+    pub(crate) fn on_insert_heading1(
+        &mut self,
+        _: &InsertHeading1,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.checkpoint();
+        self.apply_heading(1);
+        self.pause_blinking(cx);
     }
-    pub(crate) fn on_insert_heading2(&mut self, _: &InsertHeading2, _: &mut Window, cx: &mut Context<Self>) {
-        self.checkpoint(); self.apply_heading(2); self.pause_blinking(cx);
+    pub(crate) fn on_insert_heading2(
+        &mut self,
+        _: &InsertHeading2,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.checkpoint();
+        self.apply_heading(2);
+        self.pause_blinking(cx);
     }
-    pub(crate) fn on_insert_heading3(&mut self, _: &InsertHeading3, _: &mut Window, cx: &mut Context<Self>) {
-        self.checkpoint(); self.apply_heading(3); self.pause_blinking(cx);
+    pub(crate) fn on_insert_heading3(
+        &mut self,
+        _: &InsertHeading3,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.checkpoint();
+        self.apply_heading(3);
+        self.pause_blinking(cx);
     }
-    pub(crate) fn on_insert_heading4(&mut self, _: &InsertHeading4, _: &mut Window, cx: &mut Context<Self>) {
-        self.checkpoint(); self.apply_heading(4); self.pause_blinking(cx);
+    pub(crate) fn on_insert_heading4(
+        &mut self,
+        _: &InsertHeading4,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.checkpoint();
+        self.apply_heading(4);
+        self.pause_blinking(cx);
     }
-    pub(crate) fn on_insert_heading5(&mut self, _: &InsertHeading5, _: &mut Window, cx: &mut Context<Self>) {
-        self.checkpoint(); self.apply_heading(5); self.pause_blinking(cx);
+    pub(crate) fn on_insert_heading5(
+        &mut self,
+        _: &InsertHeading5,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.checkpoint();
+        self.apply_heading(5);
+        self.pause_blinking(cx);
     }
-    pub(crate) fn on_insert_heading6(&mut self, _: &InsertHeading6, _: &mut Window, cx: &mut Context<Self>) {
-        self.checkpoint(); self.apply_heading(6); self.pause_blinking(cx);
+    pub(crate) fn on_insert_heading6(
+        &mut self,
+        _: &InsertHeading6,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.checkpoint();
+        self.apply_heading(6);
+        self.pause_blinking(cx);
     }
 
     pub(crate) fn on_zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
@@ -538,11 +712,253 @@ impl EditorView {
         self.set_ui_scale(1.0, cx);
     }
 
-    pub(crate) fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_toggle_sidebar(
+        &mut self,
+        _: &ToggleSidebar,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.toggle_sidebar_visibility(cx);
     }
 
-    pub(crate) fn on_toggle_editor_left_align(&mut self, _: &ToggleEditorLeftAlign, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_toggle_editor_left_align(
+        &mut self,
+        _: &ToggleEditorLeftAlign,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.toggle_editor_alignment(cx);
+    }
+
+    pub(crate) fn on_select_line(
+        &mut self,
+        _: &SelectLine,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_edit.is_some() {
+            return;
+        }
+        let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
+        let start = self.buffer.line_start(line);
+        let end = self.buffer.line_end(line);
+        let select_end = if end < self.buffer.len() {
+            end + 1
+        } else {
+            end
+        };
+        self.cursor.anchor = start;
+        self.cursor.offset = select_end;
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_insert_line_below(
+        &mut self,
+        _: &InsertLineBelow,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_edit.is_some() {
+            return;
+        }
+        self.checkpoint();
+        let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
+        let end = self.buffer.line_end(line);
+        self.buffer.insert(end, "\n");
+        self.cursor.offset = end + 1;
+        self.cursor.anchor = self.cursor.offset;
+        self.mark_active_tab_dirty();
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_insert_line_above(
+        &mut self,
+        _: &InsertLineAbove,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_edit.is_some() {
+            return;
+        }
+        self.checkpoint();
+        let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
+        let start = self.buffer.line_start(line);
+        self.buffer.insert(start, "\n");
+        self.cursor.offset = start;
+        self.cursor.anchor = self.cursor.offset;
+        self.mark_active_tab_dirty();
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_duplicate_line(
+        &mut self,
+        _: &DuplicateLine,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_edit.is_some() {
+            return;
+        }
+        self.checkpoint();
+        let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
+        let start = self.buffer.line_start(line);
+        let end = self.buffer.line_end(line);
+        let line_text = self.buffer.text()[start..end].to_string();
+        self.buffer.insert(end, &format!("\n{}", line_text));
+        self.cursor.offset = end + 1 + line_text.len();
+        self.cursor.anchor = self.cursor.offset;
+        self.mark_active_tab_dirty();
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_delete_line(
+        &mut self,
+        _: &DeleteLine,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_edit.is_some() {
+            return;
+        }
+        self.checkpoint();
+        let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
+        let start = self.buffer.line_start(line);
+        let end = self.buffer.line_end(line);
+        let delete_end = if end < self.buffer.len() {
+            end + 1
+        } else {
+            end
+        };
+        let delete_start = if start == delete_end && start > 0 {
+            start - 1
+        } else {
+            start
+        };
+        self.buffer.delete(delete_start..delete_end);
+        self.cursor.offset = delete_start.min(self.buffer.len());
+        self.cursor.anchor = self.cursor.offset;
+        self.mark_active_tab_dirty();
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_move_line_up(
+        &mut self,
+        _: &MoveLineUp,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_edit.is_some() {
+            return;
+        }
+        let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
+        if line == 0 {
+            return;
+        }
+        self.checkpoint();
+        let start = self.buffer.line_start(line);
+        let end = self.buffer.line_end(line);
+        let line_text = self.buffer.text()[start..end].to_string();
+        let delete_end = if end < self.buffer.len() {
+            end + 1
+        } else {
+            end
+        };
+        self.buffer.delete(start..delete_end);
+        let prev_start = self.buffer.line_start(line - 1);
+        let insert_text = format!("{}\n", line_text);
+        self.buffer.insert(prev_start, &insert_text);
+        let new_offset = prev_start + col.min(line_text.len());
+        self.cursor.offset = new_offset;
+        self.cursor.anchor = self.cursor.offset;
+        self.mark_active_tab_dirty();
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_move_line_down(
+        &mut self,
+        _: &MoveLineDown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_edit.is_some() {
+            return;
+        }
+        let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
+        let line_count = self.buffer.line_count();
+        if line >= line_count.saturating_sub(1) {
+            return;
+        }
+        self.checkpoint();
+        let start = self.buffer.line_start(line);
+        let end = self.buffer.line_end(line);
+        let line_text = self.buffer.text()[start..end].to_string();
+        let delete_end = if end < self.buffer.len() {
+            end + 1
+        } else {
+            end
+        };
+        self.buffer.delete(start..delete_end);
+        let next_end = self.buffer.line_end(line);
+        let insert_text = format!("\n{}", line_text);
+        self.buffer.insert(next_end, &insert_text);
+        let new_offset = next_end + 1 + col.min(line_text.len());
+        self.cursor.offset = new_offset.min(self.buffer.len());
+        self.cursor.anchor = self.cursor.offset;
+        self.mark_active_tab_dirty();
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.active_tab_index() else {
+            return;
+        };
+        self.tabs[index].snapshot = self.current_snapshot();
+        let text = self.tabs[index].snapshot.text.clone();
+        if let Some(ref path) = self.tabs[index].path.clone() {
+            if std::fs::write(path, &text).is_ok() {
+                self.tabs[index].is_dirty = false;
+                cx.notify();
+            }
+        } else {
+            // No file path — open native save dialog in background
+            let default_name = format!("{}.md", self.tabs[index].title);
+            cx.spawn(async move |this, cx| {
+                let maybe_path = cx
+                    .background_executor()
+                    .spawn(async move { helpers::save_file_blocking(&default_name) })
+                    .await;
+                if let Some(path) = maybe_path {
+                    if std::fs::write(&path, &text).is_ok() {
+                        this.update(cx, |editor, cx| {
+                            if let Some(idx) = editor.active_tab_index() {
+                                editor.tabs[idx].path = Some(path.clone());
+                                editor.tabs[idx].title = EditorView::title_for_path(&path);
+                                editor.tabs[idx].is_dirty = false;
+                                editor.current_file_path = Some(path);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    }
+                }
+            })
+            .detach();
+        }
+    }
+
+    pub(crate) fn on_new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.create_scratch_tab(cx);
     }
 }

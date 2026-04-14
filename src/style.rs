@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use gpui::Hsla;
 
-use crate::theme::Theme;
+use crate::theme::{Theme, with_alpha};
 
 /// Per-component style configuration, derived from the active theme.
 ///
@@ -30,6 +30,7 @@ pub struct Styles {
     pub hr: HrStyles,
     pub ime: ImeStyles,
     pub image_preview: ImagePreviewStyles,
+    pub dialog: DialogStyles,
 }
 
 // ── Window ──────────────────────────────────────────────────────────
@@ -84,6 +85,7 @@ pub struct SidebarStyles {
     pub sidebar_item_height_px: f32,
     pub sidebar_item_indent_base_px: f32,
     pub sidebar_item_indent_step_px: f32,
+    pub sidebar_item_left_shift_px: f32,
     pub sidebar_item_padding_right_px: f32,
     pub sidebar_item_gap_px: f32,
     pub sidebar_item_hover_bg: Hsla,
@@ -139,6 +141,10 @@ pub struct SidebarStyles {
     pub sidebar_resize_active_indicator_color: Hsla,
     pub sidebar_resize_min_width_px: f32,
     pub sidebar_resize_max_width_px: f32,
+    // Indent alignment guides
+    pub sidebar_indent_guide_color: Hsla,
+    // Focus ring
+    pub sidebar_item_focus_border_color: Hsla,
 }
 
 // ── Tab Bar ─────────────────────────────────────────────────────────
@@ -176,6 +182,11 @@ pub struct TabBarStyles {
     pub tab_item_close_hover_bg: Hsla,
     pub tab_item_close_active_opacity: f32,
     pub tab_item_close_inactive_opacity: f32,
+    // Tab dirty indicator
+    pub tab_item_dirty_dot_size_px: f32,
+    pub tab_item_dirty_dot_color: Hsla,
+    // Tab deleted indicator
+    pub tab_item_deleted_text_color: Hsla,
     // New-tab button
     pub tab_new_width_px: f32,
     pub tab_new_font_size_px: f32,
@@ -323,6 +334,39 @@ pub struct ImeStyles {
     pub ime_underline_color: Hsla,
 }
 
+// ── Dialog ──────────────────────────────────────────────────────────
+
+pub struct DialogStyles {
+    pub dialog_backdrop_color: Hsla,
+    pub dialog_bg: Hsla,
+    pub dialog_border_width_px: f32,
+    pub dialog_border_color: Hsla,
+    pub dialog_radius_px: f32,
+    pub dialog_width_px: f32,
+    pub dialog_padding_x_px: f32,
+    pub dialog_padding_y_px: f32,
+    pub dialog_gap_px: f32,
+    pub dialog_title_font_size_px: f32,
+    pub dialog_title_text_color: Hsla,
+    pub dialog_message_font_size_px: f32,
+    pub dialog_message_text_color: Hsla,
+    pub dialog_btn_height_px: f32,
+    pub dialog_btn_padding_x_px: f32,
+    pub dialog_btn_font_size_px: f32,
+    pub dialog_btn_radius_px: f32,
+    pub dialog_btn_gap_px: f32,
+    pub dialog_btn_hover_opacity: f32,
+    pub dialog_btn_primary_bg: Hsla,
+    pub dialog_btn_primary_text_color: Hsla,
+    pub dialog_btn_primary_hover_bg: Hsla,
+    pub dialog_btn_secondary_bg: Hsla,
+    pub dialog_btn_secondary_text_color: Hsla,
+    pub dialog_btn_secondary_hover_bg: Hsla,
+    pub dialog_btn_danger_bg: Hsla,
+    pub dialog_btn_danger_text_color: Hsla,
+    pub dialog_btn_danger_hover_bg: Hsla,
+}
+
 // ── Context Menu ────────────────────────────────────────────────────
 
 pub struct ContextMenuStyles {
@@ -389,19 +433,20 @@ impl Styles {
                 sidebar_bottom_spacer_height_px: 30.0,
                 sidebar_logo_size_px: 50.0,
                 sidebar_logo_padding_y_px: 12.0,
-                sidebar_header_height_px: 28.0,
-                sidebar_header_bg: theme.bg_sunken,
+                sidebar_header_height_px: 26.0,
+                sidebar_header_bg: gpui::transparent_black(),
                 sidebar_header_padding_left_px: 14.0,
                 sidebar_header_padding_right_px: 4.0,
                 sidebar_header_gap_px: 6.0,
                 sidebar_header_icon_size_px: 14.0,
                 sidebar_header_icon_color: theme.text_secondary,
-                sidebar_header_font_size_px: 12.0,
-                sidebar_header_text_color: theme.text_bright,
+                sidebar_header_font_size_px: 13.0,
+                sidebar_header_text_color: theme.text_primary,
                 sidebar_header_hover_bg: theme.bg_hover,
                 sidebar_item_height_px: 26.0,
                 sidebar_item_indent_base_px: 12.0,
                 sidebar_item_indent_step_px: 14.0,
+                sidebar_item_left_shift_px: 10.0,
                 sidebar_item_padding_right_px: 8.0,
                 sidebar_item_gap_px: 4.0,
                 sidebar_item_hover_bg: theme.bg_hover,
@@ -449,6 +494,8 @@ impl Styles {
                 sidebar_resize_active_indicator_color: theme.text_accent,
                 sidebar_resize_min_width_px: 140.0,
                 sidebar_resize_max_width_px: 600.0,
+                sidebar_indent_guide_color: with_alpha(theme.border_secondary, 0.5),
+                sidebar_item_focus_border_color: with_alpha(theme.text_accent, 0.6),
             },
             tab_bar: TabBarStyles {
                 tab_bar_height_px: 38.0,
@@ -478,6 +525,9 @@ impl Styles {
                 tab_item_close_hover_bg: theme.bg_hover,
                 tab_item_close_active_opacity: 1.0,
                 tab_item_close_inactive_opacity: 0.0,
+                tab_item_dirty_dot_size_px: 7.0,
+                tab_item_dirty_dot_color: theme.text_accent,
+                tab_item_deleted_text_color: theme.text_secondary,
                 tab_new_width_px: 36.0,
                 tab_new_font_size_px: 16.0,
                 tab_new_text_color: theme.text_secondary,
@@ -597,6 +647,36 @@ impl Styles {
                 menu_sidebar_width_px: 180.0,
                 menu_format_width_px: 180.0,
                 menu_tab_width_px: 180.0,
+            },
+            dialog: DialogStyles {
+                dialog_backdrop_color: gpui::hsla(0.0, 0.0, 0.0, 0.3),
+                dialog_bg: theme.bg_elevated,
+                dialog_border_width_px: 1.0,
+                dialog_border_color: theme.border_primary,
+                dialog_radius_px: 12.0,
+                dialog_width_px: 320.0,
+                dialog_padding_x_px: 20.0,
+                dialog_padding_y_px: 18.0,
+                dialog_gap_px: 12.0,
+                dialog_title_font_size_px: 14.0,
+                dialog_title_text_color: theme.text_bright,
+                dialog_message_font_size_px: 13.0,
+                dialog_message_text_color: theme.text_secondary,
+                dialog_btn_height_px: 28.0,
+                dialog_btn_padding_x_px: 14.0,
+                dialog_btn_font_size_px: 12.0,
+                dialog_btn_radius_px: 6.0,
+                dialog_btn_gap_px: 8.0,
+                dialog_btn_hover_opacity: 0.9,
+                dialog_btn_primary_bg: theme.text_accent,
+                dialog_btn_primary_text_color: gpui::white(),
+                dialog_btn_primary_hover_bg: theme.text_accent,
+                dialog_btn_secondary_bg: theme.bg_hover,
+                dialog_btn_secondary_text_color: theme.text_primary,
+                dialog_btn_secondary_hover_bg: theme.bg_selected,
+                dialog_btn_danger_bg: theme.text_danger,
+                dialog_btn_danger_text_color: gpui::white(),
+                dialog_btn_danger_hover_bg: theme.text_danger,
             },
         }
     }
