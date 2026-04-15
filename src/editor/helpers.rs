@@ -8,7 +8,10 @@ use gpui::{
 };
 
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Color as SyntectColor, Theme as SyntectTheme, ThemeSet};
+use syntect::highlighting::{
+    Color as SyntectColor, ScopeSelectors, StyleModifier, Theme as SyntectTheme, ThemeItem,
+    ThemeSettings,
+};
 use syntect::parsing::SyntaxSet;
 
 use image::Frame;
@@ -561,15 +564,383 @@ pub(crate) fn syntax_set() -> &'static SyntaxSet {
 
 pub(crate) fn syntect_theme() -> &'static SyntectTheme {
     static THEME: OnceLock<SyntectTheme> = OnceLock::new();
-    THEME.get_or_init(|| {
-        let themes = ThemeSet::load_defaults();
-        themes
-            .themes
-            .get("OneHalfDark")
-            .cloned()
-            .or_else(|| themes.themes.values().next().cloned())
-            .expect("syntect default themes are missing")
-    })
+    THEME.get_or_init(|| build_one_dark_pro_theme())
+}
+
+/// Build a One Dark Pro style syntect theme with comprehensive scope coverage.
+fn build_one_dark_pro_theme() -> SyntectTheme {
+    // One Dark Pro palette
+    let chalky = SyntectColor {
+        r: 0xe5,
+        g: 0xc0,
+        b: 0x7b,
+        a: 0xff,
+    }; // #e5c07b — yellow
+    let coral = SyntectColor {
+        r: 0xe0,
+        g: 0x6c,
+        b: 0x75,
+        a: 0xff,
+    }; // #e06c75 — red
+    let cyan = SyntectColor {
+        r: 0x56,
+        g: 0xb6,
+        b: 0xc2,
+        a: 0xff,
+    }; // #56b6c2 — cyan
+    let fountain_blue = SyntectColor {
+        r: 0x61,
+        g: 0xaf,
+        b: 0xef,
+        a: 0xff,
+    }; // #61afef — blue
+    let green = SyntectColor {
+        r: 0x98,
+        g: 0xc3,
+        b: 0x79,
+        a: 0xff,
+    }; // #98c379 — green
+    let ivory = SyntectColor {
+        r: 0xab,
+        g: 0xb2,
+        b: 0xbf,
+        a: 0xff,
+    }; // #abb2bf — text
+    let stone = SyntectColor {
+        r: 0x7f,
+        g: 0x84,
+        b: 0x8e,
+        a: 0xff,
+    }; // #7f848e — comment
+    let violet = SyntectColor {
+        r: 0xc6,
+        g: 0x78,
+        b: 0xdd,
+        a: 0xff,
+    }; // #c678dd — purple
+    let whiskey = SyntectColor {
+        r: 0xd1,
+        g: 0x9a,
+        b: 0x66,
+        a: 0xff,
+    }; // #d19a66 — orange
+
+    let bg = SyntectColor {
+        r: 0x28,
+        g: 0x2c,
+        b: 0x34,
+        a: 0xff,
+    };
+
+    fn rule(scope: &str, fg: SyntectColor) -> ThemeItem {
+        ThemeItem {
+            scope: scope
+                .parse::<ScopeSelectors>()
+                .unwrap_or_else(|_| ScopeSelectors { selectors: vec![] }),
+            style: StyleModifier {
+                foreground: Some(fg),
+                background: None,
+                font_style: None,
+            },
+        }
+    }
+
+    fn rule_italic(scope: &str, fg: SyntectColor) -> ThemeItem {
+        ThemeItem {
+            scope: scope
+                .parse::<ScopeSelectors>()
+                .unwrap_or_else(|_| ScopeSelectors { selectors: vec![] }),
+            style: StyleModifier {
+                foreground: Some(fg),
+                background: None,
+                font_style: Some(syntect::highlighting::FontStyle::ITALIC),
+            },
+        }
+    }
+
+    fn rule_bold(scope: &str, fg: SyntectColor) -> ThemeItem {
+        ThemeItem {
+            scope: scope
+                .parse::<ScopeSelectors>()
+                .unwrap_or_else(|_| ScopeSelectors { selectors: vec![] }),
+            style: StyleModifier {
+                foreground: Some(fg),
+                background: None,
+                font_style: Some(syntect::highlighting::FontStyle::BOLD),
+            },
+        }
+    }
+
+    SyntectTheme {
+        name: Some("One Dark Pro".to_string()),
+        author: None,
+        settings: ThemeSettings {
+            foreground: Some(ivory),
+            background: Some(bg),
+            ..ThemeSettings::default()
+        },
+        scopes: vec![
+            // ── Comments ────────────────────────────────────────
+            rule_italic("comment, punctuation.definition.comment", stone),
+            // ── Strings ─────────────────────────────────────────
+            rule(
+                "string, string.quoted, string.template, string.interpolated",
+                green,
+            ),
+            rule("string.regexp", coral),
+            // ── Constants / Numbers ─────────────────────────────
+            rule(
+                "constant.numeric, constant.language, constant.character",
+                whiskey,
+            ),
+            rule("constant.other, constant.other.color", whiskey),
+            // ── Variables ───────────────────────────────────────
+            rule("variable, variable.other, variable.parameter", coral),
+            rule("variable.language", coral),
+            rule(
+                "variable.other.constant, variable.other.enummember",
+                whiskey,
+            ),
+            // ── Keywords ────────────────────────────────────────
+            rule(
+                "keyword, keyword.control, keyword.operator.new, keyword.operator.expression, keyword.operator.logical, keyword.operator.delete, keyword.operator.typeof, keyword.operator.void, keyword.operator.instanceof, keyword.operator.in",
+                violet,
+            ),
+            rule(
+                "keyword.operator, keyword.operator.assignment, keyword.operator.arithmetic, keyword.operator.comparison, keyword.operator.ternary",
+                cyan,
+            ),
+            // ── Storage / Types ─────────────────────────────────
+            rule("storage, storage.type, storage.modifier", violet),
+            rule(
+                "support.type, support.class, entity.name.type, entity.name.namespace",
+                chalky,
+            ),
+            rule("entity.other.inherited-class", chalky),
+            // ── Functions ───────────────────────────────────────
+            rule(
+                "entity.name.function, support.function, meta.function-call",
+                fountain_blue,
+            ),
+            rule("variable.function", fountain_blue),
+            // ── Classes / Entities ──────────────────────────────
+            rule("entity.name.class, entity.name.type.class", chalky),
+            rule("entity.name.tag", coral),
+            rule("entity.other.attribute-name", whiskey),
+            // ── Punctuation ─────────────────────────────────────
+            rule("punctuation, meta.brace, meta.delimiter", ivory),
+            rule(
+                "punctuation.definition.string, punctuation.definition.template-expression",
+                green,
+            ),
+            rule("punctuation.definition.tag", coral),
+            rule("punctuation.section.embedded", coral),
+            // ── Support ─────────────────────────────────────────
+            rule("support.constant", whiskey),
+            rule("support.variable", coral),
+            rule("support.type.property-name", coral),
+            // ── Meta ────────────────────────────────────────────
+            rule("meta.object-literal.key", coral),
+            // ─── Shell / Bash ───────────────────────────────────
+            rule("source.shell variable, source.shell variable.other", coral),
+            rule(
+                "source.shell keyword.operator, source.shell keyword.operator.pipe, source.shell keyword.operator.redirect, source.shell keyword.operator.logical",
+                cyan,
+            ),
+            rule("source.shell support.function", fountain_blue),
+            rule("source.shell entity.name.function", fountain_blue),
+            rule("source.shell keyword.control", violet),
+            rule(
+                "source.shell string.quoted, source.shell string.unquoted",
+                green,
+            ),
+            rule("source.shell punctuation.definition.variable", coral),
+            rule(
+                "source.shell variable.other.special, source.shell variable.other.positional, source.shell variable.other.bracket",
+                coral,
+            ),
+            rule("source.shell meta.function-call.arguments", ivory),
+            rule("source.shell constant.other.option", whiskey),
+            // ─── Python ─────────────────────────────────────────
+            rule("source.python keyword.operator", cyan),
+            rule(
+                "source.python support.function, source.python meta.function-call",
+                fountain_blue,
+            ),
+            rule("source.python support.type", chalky),
+            rule(
+                "source.python entity.name.function.decorator, source.python meta.function.decorator",
+                chalky,
+            ),
+            rule("source.python constant.language", whiskey),
+            // ─── JavaScript / TypeScript ────────────────────────
+            rule(
+                "source.js variable.other.constant, source.ts variable.other.constant",
+                whiskey,
+            ),
+            rule(
+                "source.js keyword.operator, source.ts keyword.operator",
+                cyan,
+            ),
+            rule("source.js support.class, source.ts support.class", chalky),
+            rule(
+                "source.js punctuation.accessor, source.ts punctuation.accessor",
+                ivory,
+            ),
+            rule(
+                "source.js entity.name.function, source.ts entity.name.function",
+                fountain_blue,
+            ),
+            // ─── Rust ───────────────────────────────────────────
+            rule("source.rust keyword.operator", cyan),
+            rule(
+                "source.rust entity.name.type, source.rust entity.name.struct, source.rust entity.name.enum",
+                chalky,
+            ),
+            rule("source.rust entity.name.function", fountain_blue),
+            rule("source.rust entity.name.lifetime", whiskey),
+            rule("source.rust storage.type", violet),
+            rule(
+                "source.rust support.macro, source.rust entity.name.macro",
+                cyan,
+            ),
+            rule("source.rust constant.language", whiskey),
+            // ─── Go ─────────────────────────────────────────────
+            rule("source.go keyword.operator", cyan),
+            rule("source.go entity.name.function", fountain_blue),
+            rule("source.go entity.name.type", chalky),
+            rule("source.go support.function.builtin", cyan),
+            rule("source.go storage.type", violet),
+            // ─── C / C++ ───────────────────────────────────────
+            rule(
+                "source.c keyword.operator, source.c++ keyword.operator",
+                cyan,
+            ),
+            rule(
+                "source.c entity.name.function, source.c++ entity.name.function",
+                fountain_blue,
+            ),
+            rule("source.c storage.type, source.c++ storage.type", violet),
+            rule(
+                "source.c keyword.control.directive, source.c++ keyword.control.directive, meta.preprocessor",
+                violet,
+            ),
+            rule(
+                "source.c entity.name.type, source.c++ entity.name.type",
+                chalky,
+            ),
+            // ─── Java ───────────────────────────────────────────
+            rule("source.java keyword.operator", cyan),
+            rule("source.java entity.name.function", fountain_blue),
+            rule(
+                "source.java entity.name.type, source.java storage.type",
+                chalky,
+            ),
+            rule("source.java keyword.other.import", violet),
+            rule("source.java entity.name.class", chalky),
+            // ─── Ruby ───────────────────────────────────────────
+            rule("source.ruby keyword.operator", cyan),
+            rule("source.ruby entity.name.function", fountain_blue),
+            rule(
+                "source.ruby support.class, source.ruby entity.name.type.class",
+                chalky,
+            ),
+            rule("source.ruby variable.other.readwrite.instance", coral),
+            rule("source.ruby constant.language.symbol", fountain_blue),
+            rule("source.ruby punctuation.definition.variable", coral),
+            // ─── PHP ────────────────────────────────────────────
+            rule("source.php keyword.operator", cyan),
+            rule("source.php entity.name.function", fountain_blue),
+            rule("source.php support.class", chalky),
+            rule("source.php variable.other", coral),
+            rule("source.php punctuation.definition.variable", coral),
+            // ─── CSS / SCSS / LESS ──────────────────────────────
+            rule(
+                "source.css support.type.property-name, source.scss support.type.property-name",
+                coral,
+            ),
+            rule(
+                "source.css entity.other.attribute-name.class, source.scss entity.other.attribute-name.class",
+                chalky,
+            ),
+            rule(
+                "source.css entity.other.attribute-name.id, source.scss entity.other.attribute-name.id",
+                fountain_blue,
+            ),
+            rule(
+                "source.css constant.numeric, source.scss constant.numeric",
+                whiskey,
+            ),
+            rule(
+                "source.css keyword.other.unit, source.scss keyword.other.unit",
+                whiskey,
+            ),
+            rule(
+                "source.css support.constant, source.scss support.constant",
+                whiskey,
+            ),
+            rule(
+                "source.css entity.name.tag, source.scss entity.name.tag",
+                coral,
+            ),
+            // ─── HTML / XML ─────────────────────────────────────
+            rule("text.html entity.name.tag, text.xml entity.name.tag", coral),
+            rule(
+                "text.html entity.other.attribute-name, text.xml entity.other.attribute-name",
+                whiskey,
+            ),
+            rule("text.html string.quoted, text.xml string.quoted", green),
+            rule(
+                "text.html punctuation.definition.tag, text.xml punctuation.definition.tag",
+                ivory,
+            ),
+            // ─── JSON ───────────────────────────────────────────
+            rule("source.json support.type.property-name", coral),
+            rule("source.json string.quoted", green),
+            rule("source.json constant", whiskey),
+            // ─── YAML ───────────────────────────────────────────
+            rule("source.yaml entity.name.tag", coral),
+            rule("source.yaml string", green),
+            rule("source.yaml constant", whiskey),
+            // ─── TOML ───────────────────────────────────────────
+            rule(
+                "source.toml entity.name.tag, source.toml support.type.property-name",
+                coral,
+            ),
+            rule("source.toml string", green),
+            rule("source.toml constant", whiskey),
+            // ─── SQL ────────────────────────────────────────────
+            rule("source.sql keyword", violet),
+            rule("source.sql entity.name.function", fountain_blue),
+            rule(
+                "source.sql constant.other.database-name, source.sql constant.other.table-name",
+                chalky,
+            ),
+            rule("source.sql string", green),
+            // ─── Markdown (nested) ──────────────────────────────
+            rule("markup.heading", coral),
+            rule_bold("markup.bold", whiskey),
+            rule_italic("markup.italic", violet),
+            rule("markup.inline.raw", green),
+            rule("markup.underline.link", fountain_blue),
+            // ─── Diff ───────────────────────────────────────────
+            rule("markup.inserted", green),
+            rule("markup.deleted", coral),
+            rule("markup.changed", whiskey),
+            // ─── Dockerfile ─────────────────────────────────────
+            rule("source.dockerfile keyword", violet),
+            rule(
+                "source.dockerfile entity.name.function, source.dockerfile support.function",
+                fountain_blue,
+            ),
+            // ─── Makefile ───────────────────────────────────────
+            rule("source.makefile variable", coral),
+            rule("source.makefile entity.name.function", fountain_blue),
+            rule("source.makefile keyword.control", violet),
+            // ─── Catch-all for operators ────────────────────────
+            rule("keyword.operator", cyan),
+        ],
+    }
 }
 
 fn syntect_color_to_hsla(color: SyntectColor) -> Hsla {
@@ -637,17 +1008,7 @@ pub(crate) fn apply_code_block_highlighting(
         let mut byte_pos = 0usize;
         for (style, piece) in &ranges {
             let end = (byte_pos + piece.len()).min(colors.len());
-            let mut color = syntect_color_to_hsla(style.foreground);
-            if color.a > 0.05 {
-                color.a = color.a.max(0.9);
-                if color.s < 0.15 {
-                    color.h = 0.11;
-                    color.s = 0.65;
-                    color.l = (color.l * 1.1 + 0.05).clamp(0.55, 0.82);
-                } else {
-                    color.l = (color.l * 1.15 + 0.05).min(1.0);
-                }
-            }
+            let color = syntect_color_to_hsla(style.foreground);
             for idx in byte_pos..end {
                 colors[idx] = color;
                 weights[idx] = if style

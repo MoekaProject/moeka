@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, SharedString, Transformation,
-    div, img, prelude::*, px, radians, svg,
+    AnyElement, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent, SharedString,
+    Transformation, div, img, prelude::*, px, radians, svg,
 };
 
 use super::*;
@@ -60,14 +60,16 @@ impl EditorView {
                 } else {
                     String::from_utf8_lossy(&bytes).into_owned()
                 };
+                let first_line_end = text.find('\n').unwrap_or(text.len());
                 let tab = OpenTab {
                     id: self.next_tab_identity(),
                     title: Self::title_for_path(&path),
                     path: Some(path.clone()),
                     snapshot: EditorSnapshot {
                         text,
-                        cursor_offset: 0,
-                        cursor_anchor: 0,
+                        cursor_offset: first_line_end,
+                        cursor_anchor: first_line_end,
+                        scroll_offset: 0.0,
                     },
                     is_dirty: false,
                     is_deleted: false,
@@ -364,14 +366,21 @@ impl EditorView {
     }
 
     pub(crate) fn close_workspace(&mut self, path: &Path, cx: &mut Context<Self>) {
+        // Find the index of the workspace being closed so we can switch to the next one
+        let closing_idx = self.workspaces.iter().position(|w| w == path);
         self.workspaces.retain(|w| w != path);
         if self.sidebar_root == path {
-            if let Some(first) = self.workspaces.first().cloned() {
-                self.switch_workspace(first, cx);
+            if !self.workspaces.is_empty() {
+                // Switch to the next workspace (or last if we were at the end)
+                let next_idx = closing_idx
+                    .unwrap_or(0)
+                    .min(self.workspaces.len().saturating_sub(1));
+                let next = self.workspaces[next_idx].clone();
+                self.switch_workspace(next, cx);
             } else {
                 self.sidebar_root = PathBuf::new();
                 self.expanded_dirs.clear();
-                self.sidebar_error = Some("No workspace selected".to_string());
+                self.sidebar_error = None;
                 self.context_menu = None;
                 cx.notify();
             }
@@ -1127,6 +1136,7 @@ impl EditorView {
                     .overflow_hidden()
                     .text_size(px(self.scaled(wss.ws_bar_font_size_px)))
                     .text_color(wss.ws_bar_text_color)
+                    .font_weight(FontWeight::BOLD)
                     .truncate()
                     .child(ws_name),
             )

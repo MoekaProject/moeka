@@ -47,11 +47,54 @@ impl EditorView {
 
     pub(crate) fn scroll_to_line(&mut self, target_line: usize, cx: &mut Context<Self>) {
         let target_y = self.line_y_offset(target_line);
-        self.scroll_offset = (target_y - self.padding_top()).max(0.0);
-        self.cursor.offset = self.buffer.line_start(target_line);
-        self.cursor.anchor = self.cursor.offset;
+        let target_scroll = (target_y - self.padding_top()).max(0.0);
+        let line_end = self.buffer.line_end(target_line);
+        self.cursor.offset = line_end;
+        self.cursor.anchor = line_end;
+
+        // Animated smooth scroll
+        let start_scroll = self.scroll_offset;
+        let delta = target_scroll - start_scroll;
+        if delta.abs() < 1.0 {
+            self.scroll_offset = target_scroll;
+            self.clamp_scroll();
+            cx.notify();
+            return;
+        }
+        let total_steps = 20u32;
+        let step_ms = 8u64;
+        self.scroll_anim_epoch += 1;
+        let epoch = self.scroll_anim_epoch;
+        self.scroll_offset = target_scroll;
         self.clamp_scroll();
+        let final_scroll = self.scroll_offset;
+        self.scroll_offset = start_scroll;
         cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            for step in 1..=total_steps {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(step_ms))
+                    .await;
+                let result = this.update(cx, |this, cx| {
+                    if this.scroll_anim_epoch != epoch {
+                        return false;
+                    }
+                    let t = step as f32 / total_steps as f32;
+                    // ease-out cubic
+                    let ease = 1.0 - (1.0 - t).powi(3);
+                    this.scroll_offset = start_scroll + (final_scroll - start_scroll) * ease;
+                    this.clamp_scroll();
+                    cx.notify();
+                    true
+                });
+                match result {
+                    Ok(true) => {}
+                    _ => break,
+                }
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn render_outline(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -76,12 +119,7 @@ impl EditorView {
 
         let mut items: Vec<AnyElement> = Vec::with_capacity(headings.len() + 3);
 
-        items.push(
-            div()
-                .h(px(top_spacer))
-                .flex_shrink_0()
-                .into_any_element(),
-        );
+        items.push(div().h(px(top_spacer)).flex_shrink_0().into_any_element());
 
         items.push(
             div()
@@ -96,7 +134,11 @@ impl EditorView {
                 .into_any_element(),
         );
 
-        for heading in &headings {
+        // Pre-compute which guide levels are active for each heading.
+        // A guide at level L is active for heading[i] if there exists a later heading[j]
+        // with level <= L+1 (i.e., it connects siblings at level L+1) and all headings
+        // between i and j have level > L.
+        for (idx, heading) in headings.iter().enumerate() {
             let is_active = active_line == Some(heading.line);
             let indent = padding_left + (heading.level.saturating_sub(1) as f32) * indent_step;
             let target_line = heading.line;
@@ -106,13 +148,59 @@ impl EditorView {
             } else {
                 text_color
             };
-            let item_bg = if is_active { active_bg } else { gpui::transparent_black() };
+            let item_bg = if is_active {
+                active_bg
+            } else {
+                gpui::transparent_black()
+            };
+
+            // For each possible guide level (1..heading.level), check if there's a
+            // later heading at that level (meaning the guide should continue through this item)
+            let mut active_guide_levels = std::collections::HashSet::new();
+            for guide_level in 1..heading.level {
+                // Check if any later heading has level <= guide_level
+                // (which means the guide at guide_level should continue)
+                for future in &headings[idx + 1..] {
+                    if future.level <= guide_level {
+                        // A heading at or above this guide level exists later
+                        active_guide_levels.insert(guide_level);
+                        break;
+                    }
+                }
+            }
+
+            let guide_color = os.outline_indent_guide_color;
+            let guide_width = os.outline_indent_guide_width_px;
+            let dash_len = self.scaled(os.outline_indent_guide_dash_length_px);
+            let gap_len = self.scaled(os.outline_indent_guide_gap_length_px);
+
+            let guides: Vec<AnyElement> = (1..heading.level)
+                .filter(|level| active_guide_levels.contains(level))
+                .flat_map(|level| {
+                    let guide_x = padding_left + (level as f32 - 1.0) * indent_step;
+                    let segment_step = dash_len + gap_len;
+                    let count = (item_height / segment_step).ceil() as usize;
+                    (0..count).map(move |i| {
+                        let y = i as f32 * segment_step;
+                        let h = dash_len.min(item_height - y);
+                        div()
+                            .absolute()
+                            .left(px(guide_x))
+                            .top(px(y))
+                            .w(px(guide_width))
+                            .h(px(h))
+                            .bg(guide_color)
+                            .into_any_element()
+                    })
+                })
+                .collect();
 
             items.push(
                 div()
                     .id(SharedString::from(format!("outline-{}", target_line)))
                     .h(px(item_height))
                     .flex_shrink_0()
+                    .relative()
                     .flex()
                     .items_center()
                     .pl(px(indent))
@@ -122,8 +210,8 @@ impl EditorView {
                     .bg(item_bg)
                     .cursor(CursorStyle::Arrow)
                     .hover(move |s| s.bg(hover_bg))
-                    .overflow_hidden()
-                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .children(guides)
                     .child(title)
                     .on_mouse_down(
                         MouseButton::Left,

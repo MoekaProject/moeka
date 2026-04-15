@@ -117,6 +117,40 @@ pub(crate) const OUTLINE_TOGGLE_SVG_PATH: &str = concat!(
     "/assets/icons/outline-toggle.svg"
 );
 
+// ── Format menu SVG icons ───────────────────────────────────────────
+pub(crate) const FMT_BOLD_SVG: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/bold.svg");
+pub(crate) const FMT_ITALIC_SVG: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/icons/format/italic.svg"
+);
+pub(crate) const FMT_STRIKETHROUGH_SVG: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/icons/format/strikethrough.svg"
+);
+pub(crate) const FMT_INLINE_CODE_SVG: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/icons/format/inline-code.svg"
+);
+pub(crate) const FMT_CODE_SVG: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/code.svg");
+pub(crate) const FMT_QUOTE_SVG: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/quote.svg");
+pub(crate) const FMT_LIST_SVG: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/list.svg");
+pub(crate) const FMT_ORDER_LIST_SVG: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/icons/format/order-list.svg"
+);
+pub(crate) const FMT_TODO_SVG: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/todo.svg");
+pub(crate) const FMT_LINK_SVG: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/link.svg");
+pub(crate) const FMT_IMAGE_SVG: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/image.svg");
+pub(crate) const FMT_HEAD_SVG: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/head.svg");
+
 // ── UI constants ────────────────────────────────────────────────────
 // NOTE: UI dimension constants are now in style.rs.
 
@@ -127,6 +161,7 @@ pub(crate) struct EditorSnapshot {
     pub text: String,
     pub cursor_offset: usize,
     pub cursor_anchor: usize,
+    pub scroll_offset: f32,
 }
 
 #[derive(Clone)]
@@ -162,7 +197,7 @@ pub(crate) enum ContextMenuKind {
     Workspace,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) enum FormatMenuAction {
     Cut,
     Copy,
@@ -250,6 +285,7 @@ pub(crate) enum WordCharClass {
 pub struct EditorView {
     pub buffer: Buffer,
     pub cursor: Cursor,
+    pub(crate) extra_cursors: Vec<Cursor>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) theme_kind: ThemeKind,
     pub(crate) theme: Theme,
@@ -313,6 +349,9 @@ pub struct EditorView {
     pub(crate) outline_custom_width: Option<f32>,
     pub(crate) outline_resizing: bool,
     pub(crate) outline_scroll_handle: ScrollHandle,
+    pub(crate) scroll_anim_epoch: usize,
+    pub(crate) last_window_width: f32,
+    pub(crate) last_window_height: f32,
 }
 
 impl EditorView {
@@ -323,12 +362,14 @@ impl EditorView {
         let sidebar_error = (!sidebar_root.exists())
             .then(|| format!("Directory not found: {}", sidebar_root.display()));
         let initial_text = default_document_text();
+        let first_line_end = initial_text.find('\n').unwrap_or(initial_text.len());
         let buffer = Buffer::from_text(initial_text);
         let decorations = markdown::parse_decorations(buffer.text());
         let initial_snapshot = EditorSnapshot {
             text: initial_text.to_string(),
-            cursor_offset: 0,
-            cursor_anchor: 0,
+            cursor_offset: first_line_end,
+            cursor_anchor: first_line_end,
+            scroll_offset: 0.0,
         };
         let theme_kind = ThemeKind::OneDark;
         let theme = theme_kind.build();
@@ -340,6 +381,7 @@ impl EditorView {
         let mut this = Self {
             buffer,
             cursor: Cursor::new(),
+            extra_cursors: Vec::new(),
             focus_handle: cx.focus_handle(),
             theme_kind,
             theme,
@@ -408,6 +450,9 @@ impl EditorView {
             outline_custom_width: None,
             outline_resizing: false,
             outline_scroll_handle: ScrollHandle::new(),
+            scroll_anim_epoch: 0,
+            last_window_width: 1360.0,
+            last_window_height: 820.0,
         };
         this.start_blinking(cx);
         this.start_watching(cx);
@@ -848,11 +893,340 @@ impl EditorView {
         self.buffer.offset_to_line_col(self.cursor.offset).0
     }
 
+    pub(crate) fn has_extra_cursors(&self) -> bool {
+        !self.extra_cursors.is_empty()
+    }
+
+    pub(crate) fn clear_extra_cursors(&mut self) {
+        self.extra_cursors.clear();
+    }
+
+    /// Collect all cursor offsets+anchors sorted by offset (ascending).
+    pub(crate) fn all_cursor_ranges(&self) -> Vec<(usize, usize)> {
+        let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(1 + self.extra_cursors.len());
+        ranges.push((self.cursor.offset, self.cursor.anchor));
+        for c in &self.extra_cursors {
+            ranges.push((c.offset, c.anchor));
+        }
+        ranges.sort_by_key(|&(offset, _)| offset);
+        ranges
+    }
+
+    /// Add a new cursor at the given offset, deduplicating if one already exists there.
+    /// The new cursor becomes the primary (for IME positioning); the old primary
+    /// is moved to extra_cursors.
+    pub(crate) fn add_cursor_at(&mut self, offset: usize, anchor: usize) {
+        let offset = offset.min(self.buffer.len());
+        let anchor = anchor.min(self.buffer.len());
+        // Check no existing cursor is at this exact location
+        if self.cursor.offset == offset && self.cursor.anchor == anchor {
+            return;
+        }
+        for c in &self.extra_cursors {
+            if c.offset == offset && c.anchor == anchor {
+                return;
+            }
+        }
+        // Move current primary to extra, make new one primary
+        let old_primary = Cursor {
+            offset: self.cursor.offset,
+            anchor: self.cursor.anchor,
+        };
+        self.extra_cursors.push(old_primary);
+        self.cursor.offset = offset;
+        self.cursor.anchor = anchor;
+    }
+
+    /// Apply a text insertion across all cursors. Cursors are processed from end
+    /// to start so that earlier offsets remain valid.
+    pub(crate) fn multi_cursor_insert(&mut self, text: &str) {
+        if self.extra_cursors.is_empty() {
+            self.cursor.insert(&mut self.buffer, text);
+            return;
+        }
+        let mut all: Vec<(usize, usize, bool)> = Vec::with_capacity(1 + self.extra_cursors.len());
+        all.push((self.cursor.offset, self.cursor.anchor, true));
+        for c in self.extra_cursors.iter() {
+            all.push((c.offset, c.anchor, false));
+        }
+        // Sort by selection start, descending
+        all.sort_by(|a, b| {
+            let a_start = a.0.min(a.1);
+            let b_start = b.0.min(b.1);
+            b_start.cmp(&a_start)
+        });
+
+        let text_len = text.len();
+        let mut new_positions: Vec<(usize, bool)> = Vec::new();
+
+        for (offset, anchor, is_primary) in &all {
+            let range_start = (*offset).min(*anchor);
+            let range_end = (*offset).max(*anchor);
+            self.buffer.replace(range_start..range_end, text);
+            new_positions.push((range_start + text_len, *is_primary));
+        }
+
+        // Reverse to go ascending order for offset adjustments
+        new_positions.reverse();
+
+        // Assign positions back
+        self.extra_cursors.clear();
+        for (pos, is_primary) in &new_positions {
+            let clamped = (*pos).min(self.buffer.len());
+            if *is_primary {
+                self.cursor.offset = clamped;
+                self.cursor.anchor = clamped;
+            } else {
+                self.extra_cursors.push(Cursor {
+                    offset: clamped,
+                    anchor: clamped,
+                });
+            }
+        }
+    }
+
+    /// Apply backspace across all cursors.
+    pub(crate) fn multi_cursor_backspace(&mut self) {
+        if self.extra_cursors.is_empty() {
+            self.cursor.backspace(&mut self.buffer);
+            return;
+        }
+        let mut all: Vec<(usize, usize, bool)> = Vec::with_capacity(1 + self.extra_cursors.len());
+        all.push((self.cursor.offset, self.cursor.anchor, true));
+        for c in &self.extra_cursors {
+            all.push((c.offset, c.anchor, false));
+        }
+        all.sort_by(|a, b| {
+            let a_start = a.0.min(a.1);
+            let b_start = b.0.min(b.1);
+            b_start.cmp(&a_start)
+        });
+
+        let mut new_positions: Vec<(usize, bool)> = Vec::new();
+
+        for (offset, anchor, is_primary) in &all {
+            if *offset != *anchor {
+                let start = (*offset).min(*anchor);
+                let end = (*offset).max(*anchor);
+                self.buffer.delete(start..end);
+                new_positions.push((start, *is_primary));
+            } else if *offset > 0 {
+                let text = self.buffer.text().to_string();
+                let prev = text[..*offset]
+                    .char_indices()
+                    .next_back()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                self.buffer.delete(prev..*offset);
+                new_positions.push((prev, *is_primary));
+            } else {
+                new_positions.push((0, *is_primary));
+            }
+        }
+
+        new_positions.reverse();
+
+        self.extra_cursors.clear();
+        for (pos, is_primary) in &new_positions {
+            let clamped = (*pos).min(self.buffer.len());
+            if *is_primary {
+                self.cursor.offset = clamped;
+                self.cursor.anchor = clamped;
+            } else {
+                self.extra_cursors.push(Cursor {
+                    offset: clamped,
+                    anchor: clamped,
+                });
+            }
+        }
+    }
+
+    /// Apply delete (forward) across all cursors.
+    pub(crate) fn multi_cursor_delete(&mut self) {
+        if self.extra_cursors.is_empty() {
+            self.cursor.delete(&mut self.buffer);
+            return;
+        }
+        let mut all: Vec<(usize, usize, bool)> = Vec::with_capacity(1 + self.extra_cursors.len());
+        all.push((self.cursor.offset, self.cursor.anchor, true));
+        for c in &self.extra_cursors {
+            all.push((c.offset, c.anchor, false));
+        }
+        all.sort_by(|a, b| {
+            let a_start = a.0.min(a.1);
+            let b_start = b.0.min(b.1);
+            b_start.cmp(&a_start)
+        });
+
+        let mut new_positions: Vec<(usize, bool)> = Vec::new();
+
+        for (offset, anchor, is_primary) in &all {
+            if *offset != *anchor {
+                let start = (*offset).min(*anchor);
+                let end = (*offset).max(*anchor);
+                self.buffer.delete(start..end);
+                new_positions.push((start, *is_primary));
+            } else if *offset < self.buffer.len() {
+                let text = self.buffer.text().to_string();
+                let next = text[*offset..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| *offset + i)
+                    .unwrap_or(text.len());
+                self.buffer.delete(*offset..next);
+                new_positions.push((*offset, *is_primary));
+            } else {
+                new_positions.push((*offset, *is_primary));
+            }
+        }
+
+        new_positions.reverse();
+
+        self.extra_cursors.clear();
+        for (pos, is_primary) in &new_positions {
+            let clamped = (*pos).min(self.buffer.len());
+            if *is_primary {
+                self.cursor.offset = clamped;
+                self.cursor.anchor = clamped;
+            } else {
+                self.extra_cursors.push(Cursor {
+                    offset: clamped,
+                    anchor: clamped,
+                });
+            }
+        }
+    }
+
+    /// Move all cursors left.
+    pub(crate) fn multi_cursor_move_left(&mut self) {
+        self.cursor.move_left(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.move_left(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    /// Move all cursors right.
+    pub(crate) fn multi_cursor_move_right(&mut self) {
+        self.cursor.move_right(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.move_right(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    /// Move all cursors up.
+    pub(crate) fn multi_cursor_move_up(&mut self) {
+        self.cursor.move_up(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.move_up(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    /// Move all cursors down.
+    pub(crate) fn multi_cursor_move_down(&mut self) {
+        self.cursor.move_down(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.move_down(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    /// Select left for all cursors.
+    pub(crate) fn multi_cursor_select_left(&mut self) {
+        self.cursor.select_left(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.select_left(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    /// Select right for all cursors.
+    pub(crate) fn multi_cursor_select_right(&mut self) {
+        self.cursor.select_right(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.select_right(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    /// Select up for all cursors.
+    pub(crate) fn multi_cursor_select_up(&mut self) {
+        self.cursor.select_up(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.select_up(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    /// Select down for all cursors.
+    pub(crate) fn multi_cursor_select_down(&mut self) {
+        self.cursor.select_down(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.select_down(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    /// Move all cursors to line start.
+    pub(crate) fn multi_cursor_move_to_line_start(&mut self) {
+        self.cursor.move_to_line_start(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.move_to_line_start(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    /// Move all cursors to line end.
+    pub(crate) fn multi_cursor_move_to_line_end(&mut self) {
+        self.cursor.move_to_line_end(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.move_to_line_end(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    /// Select to line start for all cursors.
+    pub(crate) fn multi_cursor_select_to_line_start(&mut self) {
+        self.cursor.select_to_line_start(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.select_to_line_start(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    /// Select to line end for all cursors.
+    pub(crate) fn multi_cursor_select_to_line_end(&mut self) {
+        self.cursor.select_to_line_end(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.select_to_line_end(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    /// Remove duplicate extra cursors (same offset+anchor as primary or each other).
+    pub(crate) fn dedup_cursors(&mut self) {
+        self.extra_cursors
+            .retain(|c| c.offset != self.cursor.offset || c.anchor != self.cursor.anchor);
+        let mut seen = vec![(self.cursor.offset, self.cursor.anchor)];
+        self.extra_cursors.retain(|c| {
+            let key = (c.offset, c.anchor);
+            if seen.contains(&key) {
+                false
+            } else {
+                seen.push(key);
+                true
+            }
+        });
+    }
+
     pub(crate) fn current_snapshot(&self) -> EditorSnapshot {
         EditorSnapshot {
             text: self.buffer.text().to_string(),
             cursor_offset: self.cursor.offset,
             cursor_anchor: self.cursor.anchor,
+            scroll_offset: self.scroll_offset,
         }
     }
 

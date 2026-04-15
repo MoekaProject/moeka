@@ -101,6 +101,14 @@ fn main() {
             KeyBinding::new("cmd-n", NewTab, Some("MarkdownEditor")),
             KeyBinding::new("cmd-q", Quit, Some("MarkdownEditor")),
             KeyBinding::new("escape", Escape, Some("MarkdownEditor")),
+            KeyBinding::new("alt-cmd-up", AddCursorAbove, Some("MarkdownEditor")),
+            KeyBinding::new("alt-cmd-down", AddCursorBelow, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-d", SelectNextOccurrence, Some("MarkdownEditor")),
+            KeyBinding::new(
+                "cmd-shift-l",
+                SelectAllOccurrences,
+                Some("MarkdownEditor"),
+            ),
         ]);
 
         cx.on_action(|_: &Quit, cx| cx.quit());

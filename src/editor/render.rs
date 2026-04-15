@@ -6,10 +6,14 @@ use gpui::{
 use super::*;
 
 impl Render for EditorView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let resizing = self.sidebar_resizing || self.outline_resizing;
         let show_editor_toolbar = self.tabs.len() > 0 && self.scroll_offset <= self.scaled(18.0);
         let ws = &self.styles.window;
+        // Store window bounds for menu positioning
+        let wb = window.bounds();
+        self.last_window_width = f32::from(wb.size.width);
+        self.last_window_height = f32::from(wb.size.height);
         div()
             .id("editor-root")
             .key_context("MarkdownEditor")
@@ -23,38 +27,6 @@ impl Render for EditorView {
             .border(px(ws.window_border_width_px))
             .border_color(ws.window_border_color)
             .rounded(px(ws.window_radius_px))
-            .when(resizing, |this| {
-                this.cursor(CursorStyle::ResizeLeftRight)
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                        if this.sidebar_resizing {
-                            let new_width = f32::from(event.position.x);
-                            let min_w =
-                                this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
-                            let max_w =
-                                this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
-                            this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
-                            cx.notify();
-                        }
-                        if this.outline_resizing {
-                            let window_width = f32::from(window.bounds().size.width);
-                            let new_width = window_width - f32::from(event.position.x);
-                            let min_w =
-                                this.scaled(this.styles.outline.outline_resize_min_width_px);
-                            let max_w =
-                                this.scaled(this.styles.outline.outline_resize_max_width_px);
-                            this.outline_custom_width = Some(new_width.clamp(min_w, max_w));
-                            cx.notify();
-                        }
-                    }))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.sidebar_resizing = false;
-                            this.outline_resizing = false;
-                            cx.notify();
-                        }),
-                    )
-            })
             .on_action(cx.listener(Self::on_undo))
             .on_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::on_backspace))
@@ -115,6 +87,10 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(Self::on_toggle_outline))
+            .on_action(cx.listener(Self::on_add_cursor_above))
+            .on_action(cx.listener(Self::on_add_cursor_below))
+            .on_action(cx.listener(Self::on_select_next_occurrence))
+            .on_action(cx.listener(Self::on_select_all_occurrences))
             .when(self.sidebar_visible, |this| {
                 let sidebar_w = self.sidebar_width();
                 let ss = &self.styles.sidebar;
@@ -484,6 +460,51 @@ impl Render for EditorView {
                                 }),
                             ),
                     )
+            })
+            .when(resizing, |this| {
+                this.child(deferred(
+                    div()
+                        .occlude()
+                        .absolute()
+                        .left(px(0.0))
+                        .top(px(0.0))
+                        .w_full()
+                        .h_full()
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                            if this.sidebar_resizing {
+                                let new_width = f32::from(event.position.x);
+                                let min_w =
+                                    this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
+                                let max_w =
+                                    this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
+                                this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
+                                cx.notify();
+                            }
+                            if this.outline_resizing {
+                                let window_width = f32::from(window.bounds().size.width);
+                                let new_width = window_width - f32::from(event.position.x);
+                                let min_w =
+                                    this.scaled(this.styles.outline.outline_resize_min_width_px);
+                                let max_w =
+                                    this.scaled(this.styles.outline.outline_resize_max_width_px);
+                                this.outline_custom_width = Some(new_width.clamp(min_w, max_w));
+                                cx.notify();
+                            }
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.sidebar_resizing = false;
+                                this.outline_resizing = false;
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_this, _, _, _cx| {}),
+                        ),
+                ))
             })
             .when(self.context_menu.is_some(), |this| {
                 this.child(deferred(

@@ -64,6 +64,10 @@ actions!(
         Quit,
         Escape,
         ToggleOutline,
+        AddCursorAbove,
+        AddCursorBelow,
+        SelectNextOccurrence,
+        SelectAllOccurrences,
     ]
 );
 

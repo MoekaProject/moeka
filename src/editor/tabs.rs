@@ -41,9 +41,9 @@ impl EditorView {
         self.cursor.offset = tab.snapshot.cursor_offset.min(self.buffer.len());
         self.cursor.anchor = tab.snapshot.cursor_anchor.min(self.buffer.len());
         self.marked_range = None;
-        self.scroll_offset = 0.0;
+        self.scroll_offset = tab.snapshot.scroll_offset;
         self.reparse();
-        self.scroll_to_cursor();
+        self.clamp_scroll();
         self.pause_blinking(cx);
     }
 
@@ -166,6 +166,7 @@ impl EditorView {
                 text: String::new(),
                 cursor_offset: 0,
                 cursor_anchor: 0,
+                scroll_offset: 0.0,
             },
             is_dirty: false,
             is_deleted: false,
@@ -234,6 +235,8 @@ impl EditorView {
                     .flex_1()
                     .min_w(px(0.0))
                     .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
                     .text_size(px(self.scaled(ts.tab_item_font_size_px)))
                     .font_weight(if is_active {
                         FontWeight::MEDIUM
@@ -394,6 +397,28 @@ impl EditorView {
                 .into_any_element(),
         );
 
+        // Trailing spacer that fills remaining tab-bar space and handles window drag
+        tab_items.push(
+            div()
+                .id("tab-bar-drag-spacer")
+                .flex_1()
+                .h_full()
+                .min_w(px(0.0))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        this.focused_sidebar_path = None;
+                        if event.click_count >= 2 {
+                            window.zoom_window();
+                        } else {
+                            super::perform_window_drag(window);
+                        }
+                        cx.notify();
+                    }),
+                )
+                .into_any_element(),
+        );
+
         div()
             .id("tab-bar")
             .w_full()
@@ -404,20 +429,6 @@ impl EditorView {
             .border_b(px(ts.tab_bar_border_width_px))
             .border_color(ts.tab_bar_border_color)
             .overflow_x_scroll()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.focused_sidebar_path = None;
-                    // Only drag window if the click was not on a tab (which sets tab_dragging_id)
-                    if this.tab_dragging_id.is_none() {
-                        if event.click_count >= 2 {
-                            window.zoom_window();
-                        } else {
-                            super::perform_window_drag(window);
-                        }
-                    }
-                }),
-            )
             .children(tab_items)
             .into_any_element()
     }

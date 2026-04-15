@@ -29,6 +29,11 @@ impl EditorView {
             self.close_context_menu(cx);
             return;
         }
+        if self.has_extra_cursors() {
+            self.clear_extra_cursors();
+            cx.notify();
+            return;
+        }
         if self.focused_sidebar_path.is_some() {
             self.focused_sidebar_path = None;
             cx.notify();
@@ -54,6 +59,16 @@ impl EditorView {
             return;
         }
         self.checkpoint();
+
+        // Multi-cursor backspace
+        if self.has_extra_cursors() {
+            self.multi_cursor_backspace();
+            self.reparse();
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
+        }
+
         if !self.cursor.has_selection() {
             let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
             let line_start = self.buffer.line_start(line);
@@ -119,6 +134,13 @@ impl EditorView {
             return;
         }
         self.checkpoint();
+        if self.has_extra_cursors() {
+            self.multi_cursor_delete();
+            self.reparse();
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
+        }
         self.cursor.delete(&mut self.buffer);
         self.reparse();
         self.scroll_to_cursor();
@@ -128,6 +150,12 @@ impl EditorView {
     pub(crate) fn on_left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_left(cx);
+            return;
+        }
+        if self.has_extra_cursors() {
+            self.multi_cursor_move_left();
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
             return;
         }
         let prev_offset = self.cursor.offset;
@@ -169,6 +197,12 @@ impl EditorView {
             self.sidebar_nav_right(cx);
             return;
         }
+        if self.has_extra_cursors() {
+            self.multi_cursor_move_right();
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
+        }
         let prev_offset = self.cursor.offset;
         let (line, _col) = self.buffer.offset_to_line_col(self.cursor.offset);
         let cell_ranges = self
@@ -208,6 +242,12 @@ impl EditorView {
             cx.notify();
             return;
         }
+        if self.has_extra_cursors() {
+            self.multi_cursor_move_up();
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
+        }
         let prev_offset = self.cursor.offset;
         if let Some(offset) = self.offset_for_visual_up(self.cursor.offset) {
             self.cursor.move_to(offset, &self.buffer);
@@ -232,6 +272,12 @@ impl EditorView {
             cx.notify();
             return;
         }
+        if self.has_extra_cursors() {
+            self.multi_cursor_move_down();
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
+        }
         let prev_offset = self.cursor.offset;
         if let Some(offset) = self.offset_for_visual_down(self.cursor.offset) {
             self.cursor.move_to(offset, &self.buffer);
@@ -249,7 +295,11 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cursor.select_left(&self.buffer);
+        if self.has_extra_cursors() {
+            self.multi_cursor_select_left();
+        } else {
+            self.cursor.select_left(&self.buffer);
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -260,13 +310,19 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cursor.select_right(&self.buffer);
+        if self.has_extra_cursors() {
+            self.multi_cursor_select_right();
+        } else {
+            self.cursor.select_right(&self.buffer);
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
     pub(crate) fn on_select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(offset) = self.offset_for_visual_up(self.cursor.offset) {
+        if self.has_extra_cursors() {
+            self.multi_cursor_select_up();
+        } else if let Some(offset) = self.offset_for_visual_up(self.cursor.offset) {
             self.cursor.select_to(offset, &self.buffer);
         } else {
             self.cursor.select_up(&self.buffer);
@@ -281,7 +337,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(offset) = self.offset_for_visual_down(self.cursor.offset) {
+        if self.has_extra_cursors() {
+            self.multi_cursor_select_down();
+        } else if let Some(offset) = self.offset_for_visual_down(self.cursor.offset) {
             self.cursor.select_to(offset, &self.buffer);
         } else {
             self.cursor.select_down(&self.buffer);
@@ -296,13 +354,21 @@ impl EditorView {
     }
 
     pub(crate) fn on_home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.cursor.move_to_line_start(&self.buffer);
+        if self.has_extra_cursors() {
+            self.multi_cursor_move_to_line_start();
+        } else {
+            self.cursor.move_to_line_start(&self.buffer);
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
     pub(crate) fn on_end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        self.cursor.move_to_line_end(&self.buffer);
+        if self.has_extra_cursors() {
+            self.multi_cursor_move_to_line_end();
+        } else {
+            self.cursor.move_to_line_end(&self.buffer);
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -313,13 +379,21 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cursor.select_to_line_start(&self.buffer);
+        if self.has_extra_cursors() {
+            self.multi_cursor_select_to_line_start();
+        } else {
+            self.cursor.select_to_line_start(&self.buffer);
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
     pub(crate) fn on_select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.cursor.select_to_line_end(&self.buffer);
+        if self.has_extra_cursors() {
+            self.multi_cursor_select_to_line_end();
+        } else {
+            self.cursor.select_to_line_end(&self.buffer);
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -974,5 +1048,130 @@ impl EditorView {
 
     pub(crate) fn on_new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) {
         self.create_scratch_tab(cx);
+    }
+
+    // ── Multi-cursor actions ────────────────────────────────────────
+
+    pub(crate) fn on_add_cursor_above(
+        &mut self,
+        _: &AddCursorAbove,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
+        if line == 0 {
+            return;
+        }
+        let new_offset = self.buffer.line_col_to_offset(line - 1, col);
+        self.add_cursor_at(new_offset, new_offset);
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_add_cursor_below(
+        &mut self,
+        _: &AddCursorBelow,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
+        if line + 1 >= self.buffer.line_count() {
+            return;
+        }
+        let new_offset = self.buffer.line_col_to_offset(line + 1, col);
+        self.add_cursor_at(new_offset, new_offset);
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_select_next_occurrence(
+        &mut self,
+        _: &SelectNextOccurrence,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let search_text = if self.cursor.has_selection() {
+            let range = self.cursor.selection_range();
+            self.buffer.text()[range.clone()].to_string()
+        } else {
+            // Select the word under cursor first
+            let offset = self.cursor.offset;
+            self.select_word_at_offset(offset);
+            if !self.cursor.has_selection() {
+                return;
+            }
+            let range = self.cursor.selection_range();
+            self.buffer.text()[range.clone()].to_string()
+        };
+        if search_text.is_empty() {
+            return;
+        }
+
+        // Find the next occurrence after the last cursor
+        let all = self.all_cursor_ranges();
+        let last_end = all
+            .iter()
+            .map(|(o, a)| (*o).max(*a))
+            .max()
+            .unwrap_or(0);
+        let text = self.buffer.text();
+        let found = text[last_end..].find(&search_text).map(|i| last_end + i);
+        let found = found.or_else(|| text[..last_end].find(&search_text));
+        if let Some(start) = found {
+            let end = start + search_text.len();
+            // Don't add if any cursor already selects this exact range
+            let already = self.all_cursor_ranges().iter().any(|(o, a)| {
+                let s = (*o).min(*a);
+                let e = (*o).max(*a);
+                s == start && e == end
+            });
+            if !already {
+                self.add_cursor_at(end, start);
+            }
+        }
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_select_all_occurrences(
+        &mut self,
+        _: &SelectAllOccurrences,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let search_text = if self.cursor.has_selection() {
+            let range = self.cursor.selection_range();
+            self.buffer.text()[range.clone()].to_string()
+        } else {
+            let offset = self.cursor.offset;
+            self.select_word_at_offset(offset);
+            if !self.cursor.has_selection() {
+                return;
+            }
+            let range = self.cursor.selection_range();
+            self.buffer.text()[range.clone()].to_string()
+        };
+        if search_text.is_empty() {
+            return;
+        }
+
+        let text = self.buffer.text().to_string();
+        let mut start = 0;
+        let mut first = true;
+        self.extra_cursors.clear();
+        while let Some(pos) = text[start..].find(&search_text) {
+            let abs_start = start + pos;
+            let abs_end = abs_start + search_text.len();
+            if first {
+                self.cursor.anchor = abs_start;
+                self.cursor.offset = abs_end;
+                first = false;
+            } else {
+                self.extra_cursors.push(Cursor {
+                    offset: abs_end,
+                    anchor: abs_start,
+                });
+            }
+            start = abs_end;
+        }
+        self.pause_blinking(cx);
     }
 }

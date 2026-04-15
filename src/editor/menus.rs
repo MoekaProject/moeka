@@ -1,10 +1,67 @@
 use std::path::PathBuf;
 
-use gpui::{AnyElement, Context, CursorStyle, MouseButton, Pixels, Point, SharedString, div, prelude::*, px, svg};
+use gpui::{
+    AnyElement, Context, CursorStyle, MouseButton, Pixels, Point, SharedString, div, prelude::*,
+    px, svg,
+};
 
 use super::*;
 
 impl EditorView {
+    /// Detect which inline format actions are "active" at the cursor position.
+    /// Only highlights inline syntax (bold, italic, strikethrough, inline code)
+    /// surrounding the cursor. Block-level syntax is not highlighted.
+    fn active_format_actions(&self) -> Vec<FormatMenuAction> {
+        let mut active = Vec::new();
+        let text = self.buffer.text();
+        let offset = self.cursor.offset;
+        if offset > text.len() {
+            return active;
+        }
+        // Only look within the current line to avoid cross-line false positives
+        let cursor_line = self.cursor_line();
+        let line_start = self.buffer.line_start(cursor_line);
+        let line_end = self.buffer.line_end(cursor_line);
+        let before = &text[line_start..offset];
+        let after = &text[offset..line_end];
+        // Bold: **..cursor..**
+        if before
+            .rfind("**")
+            .is_some_and(|s| !before[s + 2..].contains("**"))
+            && after.find("**").is_some()
+        {
+            active.push(FormatMenuAction::Bold);
+        }
+        // Italic: *..cursor..*  (but not **)
+        if before.rfind('*').is_some_and(|s| {
+            let abs = line_start + s;
+            (abs == 0 || text.as_bytes().get(abs.wrapping_sub(1)) != Some(&b'*'))
+                && text.as_bytes().get(abs + 1) != Some(&b'*')
+                && !before[s + 1..].contains('*')
+        }) && after
+            .find('*')
+            .is_some_and(|s| s == 0 || after.as_bytes().get(s.wrapping_sub(1)) != Some(&b'*'))
+        {
+            active.push(FormatMenuAction::Italic);
+        }
+        // Strikethrough: ~~..cursor..~~
+        if before
+            .rfind("~~")
+            .is_some_and(|s| !before[s + 2..].contains("~~"))
+            && after.find("~~").is_some()
+        {
+            active.push(FormatMenuAction::Strikethrough);
+        }
+        // Inline code: `..cursor..`
+        if before
+            .rfind('`')
+            .is_some_and(|s| !before[s + 1..].contains('`'))
+            && after.find('`').is_some()
+        {
+            active.push(FormatMenuAction::InlineCode);
+        }
+        active
+    }
     pub(crate) fn open_sidebar_context_menu(
         &mut self,
         path: PathBuf,
@@ -288,8 +345,10 @@ impl EditorView {
     fn render_format_context_menu_item(
         &self,
         label: &str,
+        icon_path: Option<&str>,
         shortcut: Option<&str>,
         is_selected: bool,
+        is_active: bool,
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
@@ -300,6 +359,20 @@ impl EditorView {
             gpui::transparent_black()
         };
         let hover_bg = ms.menu_item_hover_bg;
+        let text_color = if is_active {
+            ms.menu_format_active_text_color
+        } else {
+            ms.menu_item_text_color
+        };
+        let icon_color = if is_active {
+            ms.menu_format_active_text_color
+        } else {
+            ms.menu_format_icon_color
+        };
+        let icon_size = self.scaled(ms.menu_format_icon_size_px);
+        let icon_gap = self.scaled(ms.menu_format_icon_gap_px);
+        let icon_shared: Option<SharedString> =
+            icon_path.map(|p| SharedString::from(p.to_string()));
         div()
             .w_full()
             .h(px(self.scaled(ms.menu_item_height_px)))
@@ -309,10 +382,30 @@ impl EditorView {
             .items_center()
             .justify_between()
             .text_size(px(self.scaled(ms.menu_item_font_size_px)))
-            .text_color(ms.menu_item_text_color)
+            .text_color(text_color)
             .hover(move |s| s.bg(hover_bg))
             .cursor(CursorStyle::Arrow)
-            .child(label.to_string())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(icon_gap))
+                    .child(
+                        div()
+                            .w(px(icon_size))
+                            .h(px(icon_size))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .flex_none()
+                            .when_some(icon_shared, |this, path| {
+                                this.child(
+                                    svg().path(path).size(px(icon_size)).text_color(icon_color),
+                                )
+                            }),
+                    )
+                    .child(label.to_string()),
+            )
             .when_some(shortcut, |this, shortcut| {
                 this.child(
                     div()
@@ -359,11 +452,14 @@ impl EditorView {
 
         {
             let pd = parent_dir.clone();
-            items.push(
-                self.render_context_menu_item("新建文件", false, cx, move |this, _, cx| {
+            items.push(self.render_context_menu_item(
+                "新建文件",
+                false,
+                cx,
+                move |this, _, cx| {
                     this.start_create_file(pd.clone(), cx);
-                }),
-            );
+                },
+            ));
         }
         {
             let pd = parent_dir.clone();
@@ -379,11 +475,14 @@ impl EditorView {
         items.push(self.render_context_menu_separator());
         {
             let p = path.clone();
-            items.push(
-                self.render_context_menu_item("重命名", false, cx, move |this, _, cx| {
+            items.push(self.render_context_menu_item(
+                "重命名",
+                false,
+                cx,
+                move |this, _, cx| {
                     this.start_rename(p.clone(), cx);
-                }),
-            );
+                },
+            ));
         }
         {
             let p = path.clone();
@@ -440,6 +539,7 @@ impl EditorView {
         let filter = self.slash_filter.to_lowercase();
         let selected_index = self.menu_selected_index;
         let mut actionable_index: usize = 0;
+        let active_actions = self.active_format_actions();
 
         let matches_filter = |label: &str, filter_text: &str| -> bool {
             if filter.is_empty() {
@@ -459,7 +559,9 @@ impl EditorView {
                 if matches_filter(label, ft) {
                     clip_matched.push(self.render_format_context_menu_item(
                         label,
+                        None,
                         shortcut,
+                        false,
                         false,
                         cx,
                         move |this, _, cx| {
@@ -473,65 +575,98 @@ impl EditorView {
             }
         }
 
-        let all_menu_items: &[(&str, &str, Option<&str>, FormatMenuAction)] = &[
-            ("粗体", "bold", Some("⌘B"), FormatMenuAction::Bold),
-            ("斜体", "italic", Some("⌘I"), FormatMenuAction::Italic),
+        // (label, filter_text, icon_path, shortcut, action)
+        let all_menu_items: &[(&str, &str, Option<&str>, Option<&str>, FormatMenuAction)] = &[
+            (
+                "粗体",
+                "bold",
+                Some(FMT_BOLD_SVG),
+                Some("⌘B"),
+                FormatMenuAction::Bold,
+            ),
+            (
+                "斜体",
+                "italic",
+                Some(FMT_ITALIC_SVG),
+                Some("⌘I"),
+                FormatMenuAction::Italic,
+            ),
             (
                 "删除线",
                 "strikethrough",
+                Some(FMT_STRIKETHROUGH_SVG),
                 Some("⌘⇧S"),
                 FormatMenuAction::Strikethrough,
             ),
             (
                 "行内代码",
                 "inline code",
+                Some(FMT_INLINE_CODE_SVG),
                 Some("⌘E"),
                 FormatMenuAction::InlineCode,
             ),
             (
                 "代码块",
                 "code block",
+                Some(FMT_CODE_SVG),
                 Some("⌘⌥C"),
                 FormatMenuAction::CodeBlock,
             ),
             (
                 "分割线",
                 "horizontal rule divider",
+                None,
                 Some("---"),
                 FormatMenuAction::HorizontalRule,
             ),
             (
                 "引用",
                 "quote blockquote",
+                Some(FMT_QUOTE_SVG),
                 Some("⌘⌥Q"),
                 FormatMenuAction::Quote,
             ),
             (
                 "无序列表",
                 "unordered list bullet",
+                Some(FMT_LIST_SVG),
                 Some("⌘⌥U"),
                 FormatMenuAction::UnorderedList,
             ),
             (
                 "有序列表",
                 "ordered list numbered",
+                Some(FMT_ORDER_LIST_SVG),
                 Some("⌘⌥O"),
                 FormatMenuAction::OrderedList,
             ),
             (
                 "待办事项",
                 "todo task checkbox",
+                Some(FMT_TODO_SVG),
                 Some("⌘⌥T"),
                 FormatMenuAction::Todo,
             ),
-            ("链接", "link url", Some("⌘K"), FormatMenuAction::Link),
-            ("图片", "image photo", Some("⌘⇧I"), FormatMenuAction::Image),
+            (
+                "链接",
+                "link url",
+                Some(FMT_LINK_SVG),
+                Some("⌘K"),
+                FormatMenuAction::Link,
+            ),
+            (
+                "图片",
+                "image photo",
+                Some(FMT_IMAGE_SVG),
+                Some("⌘⇧I"),
+                FormatMenuAction::Image,
+            ),
         ];
 
         let group_boundaries = [0usize, 4, 10, 12];
         let mut group_start_flags = [false; 3];
 
-        for (idx, &(label, ft, _, _)) in all_menu_items.iter().enumerate() {
+        for (idx, &(label, ft, _, _, _)) in all_menu_items.iter().enumerate() {
             if matches_filter(label, ft) {
                 for g in 0..3 {
                     if idx >= group_boundaries[g] && idx < group_boundaries[g + 1] {
@@ -550,13 +685,16 @@ impl EditorView {
                 items.push(self.render_context_menu_separator());
             }
             for idx in group_boundaries[g]..group_boundaries[g + 1] {
-                let (label, ft, shortcut, action) = all_menu_items[idx];
+                let (label, ft, icon, shortcut, action) = all_menu_items[idx];
                 if matches_filter(label, ft) {
                     let is_selected = is_slash_menu && actionable_index == selected_index;
+                    let is_active = active_actions.contains(&action);
                     items.push(self.render_format_context_menu_item(
                         label,
+                        icon,
                         shortcut,
                         is_selected,
+                        is_active,
                         cx,
                         move |this, _, cx| {
                             this.execute_format_menu_action(action, cx);
@@ -741,10 +879,7 @@ impl EditorView {
                         this.pick_workspace_folder(cx);
                     },
                 ));
-                (
-                    items,
-                    self.scaled(wss.ws_menu_width_px),
-                )
+                (items, self.scaled(wss.ws_menu_width_px))
             }
         };
 
@@ -756,51 +891,41 @@ impl EditorView {
         let menu_padding = self.scaled(ms.menu_padding_y_px) * 2.0;
         let estimated_menu_height = item_count as f32 * estimated_item_height + menu_padding;
 
-        let viewport_w = self.last_viewport_width;
-        let viewport_h = self.last_viewport_height;
-        let margin = self.scaled(ms.menu_max_height_margin_px).max(8.0);
+        // Use window bounds for positioning, adjusted for editor-root border
+        let border_w = self.styles.window.window_border_width_px;
+        let overlay_w = self.last_window_width - 2.0 * border_w;
+        let overlay_h = self.last_window_height - 2.0 * border_w;
+        // Convert window-coordinate mouse position to overlay-local coordinates
+        let pos_x = (pos_x - border_w).clamp(0.0, overlay_w);
+        let pos_y = (pos_y - border_w).clamp(0.0, overlay_h);
+        let margin = self.scaled(ms.menu_max_height_margin_px).max(4.0);
 
-        // Determine which corner of the menu should align with the cursor
-        // based on available space in each direction
-        let space_right = viewport_w - pos_x - margin;
+        let space_right = overlay_w - pos_x - margin;
         let space_left = pos_x - margin;
-        let space_below = viewport_h - pos_y - margin;
+        let space_below = overlay_h - pos_y - margin;
         let space_above = pos_y - margin;
 
-        // Horizontal: prefer opening to the right
-        let final_x = if space_right >= width {
+        // Decide direction
+        let open_right = space_right >= width || space_right >= space_left;
+        let open_down = space_below >= estimated_menu_height || space_below >= space_above;
+
+        let final_x = if open_right {
             pos_x
-        } else if space_left >= width {
-            pos_x - width
         } else {
-            // Not enough room either side — pick side with more space
-            if space_right >= space_left {
-                (viewport_w - width - margin).max(margin)
-            } else {
-                margin
-            }
+            (pos_x - width).max(margin)
         };
 
-        // Vertical: prefer opening downward
-        let (final_y, max_menu_height) = if space_below >= estimated_menu_height {
-            (pos_y, space_below)
-        } else if space_above >= estimated_menu_height {
-            (pos_y - estimated_menu_height, space_above)
+        let max_menu_height = if open_down {
+            (overlay_h - pos_y - margin).max(self.scaled(100.0))
         } else {
-            // Not enough room either direction — open on side with more space, allow scroll
-            if space_below >= space_above {
-                (pos_y, space_below.max(self.scaled(100.0)))
-            } else {
-                let h = space_above.max(self.scaled(100.0));
-                ((pos_y - h).max(margin), h)
-            }
+            (pos_y - margin).max(self.scaled(100.0))
         };
 
+        // Use .top() for downward, .bottom() for upward to anchor the correct edge
         let mut menu_div = div()
             .id("context-menu")
             .absolute()
             .left(px(final_x))
-            .top(px(final_y))
             .w(px(width))
             .max_h(px(max_menu_height))
             .overflow_y_scroll()
@@ -809,6 +934,12 @@ impl EditorView {
             .border(px(ms.menu_border_width_px))
             .border_color(ms.menu_border_color)
             .rounded(px(self.scaled(ms.menu_radius_px)));
+        if open_down {
+            menu_div = menu_div.top(px(pos_y));
+        } else {
+            // Anchor bottom edge of menu at cursor y position
+            menu_div = menu_div.bottom(px(overlay_h - pos_y));
+        }
         if ms.menu_shadow {
             menu_div = menu_div.shadow_xs();
         }

@@ -19,7 +19,7 @@ pub(crate) struct EditorElement {
 
 pub(crate) struct EditorPrepaintState {
     lines: Vec<PrepaintLine>,
-    cursor_quad: Option<PaintQuad>,
+    cursor_quads: Vec<PaintQuad>,
     selection_quads: Vec<PaintQuad>,
     line_highlight: Option<PaintQuad>,
     code_block_bgs: Vec<PaintQuad>,
@@ -120,14 +120,27 @@ impl Element for EditorElement {
         let mut selection_quads = Vec::new();
         let mut line_highlight = None;
         let mut code_block_bgs = Vec::new();
-        let mut cursor_quad = None;
+        let mut cursor_quads: Vec<PaintQuad> = Vec::new();
         let mut marked_underlines = Vec::new();
 
         let mut y = origin_y + editor.padding_top();
         let line_count = buffer.line_count();
 
+        // Collect all cursor selection ranges (primary + extra)
+        let mut all_sel_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(1 + editor.extra_cursors.len());
         let sel_range = cursor.selection_range();
-        let has_selection = cursor.has_selection();
+        let _has_selection = cursor.has_selection();
+        all_sel_ranges.push(sel_range.clone());
+        for ec in &editor.extra_cursors {
+            all_sel_ranges.push(ec.selection_range());
+        }
+        // Collect all cursor offsets for painting cursor bars
+        let mut all_cursor_offsets: Vec<usize> = Vec::with_capacity(1 + editor.extra_cursors.len());
+        all_cursor_offsets.push(cursor.offset);
+        for ec in &editor.extra_cursors {
+            all_cursor_offsets.push(ec.offset);
+        }
+        let any_selection = all_sel_ranges.iter().any(|r| r.start != r.end);
 
         let mut gutter_quads = Vec::new();
         let gutter_labels: Vec<(ShapedLine, Point<Pixels>, Pixels)> = Vec::new();
@@ -895,7 +908,7 @@ impl Element for EditorElement {
             }
 
             // Line highlight
-            if is_cursor_line && !has_selection {
+            if is_cursor_line && !any_selection && editor.extra_cursors.is_empty() {
                 line_highlight = Some(fill(
                     Bounds::new(
                         point(px(origin_x), px(line_top)),
@@ -905,10 +918,13 @@ impl Element for EditorElement {
                 ));
             }
 
-            // Selection quads
-            if has_selection {
-                let sel_start_on_line = sel_range.start.max(line_start_offset);
-                let sel_end_on_line = sel_range.end.min(line_end_offset);
+            // Selection quads — iterate over all cursors (primary + extra)
+            for sr in &all_sel_ranges {
+                if sr.start == sr.end {
+                    continue;
+                }
+                let sel_start_on_line = sr.start.max(line_start_offset);
+                let sel_end_on_line = sr.end.min(line_end_offset);
 
                 if sel_start_on_line < sel_end_on_line {
                     let buf_start_col = sel_start_on_line - line_start_offset;
@@ -932,7 +948,7 @@ impl Element for EditorElement {
                         window,
                     ));
                 }
-                if sel_range.end > line_end_offset && sel_range.start <= line_end_offset {
+                if sr.end > line_end_offset && sr.start <= line_end_offset {
                     let disp_len = display_text.len();
                     let pos_end = wrapped
                         .position_for_index(disp_len, px(line_height))
@@ -956,38 +972,47 @@ impl Element for EditorElement {
                 }
             }
 
-            // Cursor
-            if is_cursor_line
-                && editor.focus_handle.is_focused(window)
+            // Cursor bars — paint for all cursors (primary + extra)
+            if editor.focus_handle.is_focused(window)
                 && (editor.cursor_opacity > 0.0 || editor.is_selecting)
             {
-                let buf_cursor_col = cursor.offset.saturating_sub(line_start_offset);
-                let buf_cursor_col = buf_cursor_col.min(line_content.len());
-                let disp_cursor_col = if buf_cursor_col >= line_content.len() {
-                    display_text.len()
-                } else {
-                    helpers::buffer_to_display_offset(&buffer_to_display, buf_cursor_col)
-                };
+                for &cur_offset in &all_cursor_offsets {
+                    if cur_offset < line_start_offset || cur_offset > line_end_offset {
+                        continue;
+                    }
+                    // For line_end_offset, only match if this is the actual last offset
+                    // (handles cursor at end of line)
+                    if cur_offset == line_end_offset && cur_offset != line_start_offset {
+                        // cursor is at line end — show it here
+                    }
+                    let buf_cursor_col = cur_offset.saturating_sub(line_start_offset);
+                    let buf_cursor_col = buf_cursor_col.min(line_content.len());
+                    let disp_cursor_col = if buf_cursor_col >= line_content.len() {
+                        display_text.len()
+                    } else {
+                        helpers::buffer_to_display_offset(&buffer_to_display, buf_cursor_col)
+                    };
 
-                let cursor_pos = wrapped
-                    .position_for_index(disp_cursor_col, px(line_height))
-                    .unwrap_or_default();
+                    let cursor_pos = wrapped
+                        .position_for_index(disp_cursor_col, px(line_height))
+                        .unwrap_or_default();
 
-                let cursor_indent = helpers::indent_for_y(indent_px, cursor_pos.y, line_height);
-                let cursor_top = line_top + f32::from(cursor_pos.y);
-                let mut cursor_color = theme.cursor;
-                cursor_color.a *= if editor.is_selecting {
-                    editor.styles.cursor.cursor_opacity_max
-                } else {
-                    editor.cursor_opacity
-                };
-                cursor_quad = Some(fill(
-                    Bounds::new(
-                        point(px(content_x + cursor_indent) + cursor_pos.x, px(cursor_top)),
-                        size(px(editor.styles.cursor.cursor_width_px), px(line_height)),
-                    ),
-                    cursor_color,
-                ));
+                    let cursor_indent = helpers::indent_for_y(indent_px, cursor_pos.y, line_height);
+                    let cursor_top = line_top + f32::from(cursor_pos.y);
+                    let mut cursor_color = theme.cursor;
+                    cursor_color.a *= if editor.is_selecting {
+                        editor.styles.cursor.cursor_opacity_max
+                    } else {
+                        editor.cursor_opacity
+                    };
+                    cursor_quads.push(fill(
+                        Bounds::new(
+                            point(px(content_x + cursor_indent) + cursor_pos.x, px(cursor_top)),
+                            size(px(editor.styles.cursor.cursor_width_px), px(line_height)),
+                        ),
+                        cursor_color,
+                    ));
+                }
             }
 
             // IME marked text underline
@@ -1071,7 +1096,7 @@ impl Element for EditorElement {
 
         EditorPrepaintState {
             lines,
-            cursor_quad,
+            cursor_quads,
             selection_quads,
             line_highlight,
             code_block_bgs,
@@ -1215,7 +1240,7 @@ impl Element for EditorElement {
             );
         }
 
-        if let Some(cursor) = prepaint.cursor_quad.take() {
+        for cursor in prepaint.cursor_quads.drain(..) {
             window.paint_quad(cursor);
         }
 

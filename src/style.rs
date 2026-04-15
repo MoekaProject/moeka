@@ -187,6 +187,11 @@ pub struct OutlineStyles {
     pub outline_resize_active_indicator_color: Hsla,
     pub outline_resize_min_width_px: f32,
     pub outline_resize_max_width_px: f32,
+    // Indent alignment guides
+    pub outline_indent_guide_color: Hsla,
+    pub outline_indent_guide_width_px: f32,
+    pub outline_indent_guide_dash_length_px: f32,
+    pub outline_indent_guide_gap_length_px: f32,
 }
 
 // ── Tab Bar ─────────────────────────────────────────────────────────
@@ -438,6 +443,11 @@ pub struct ContextMenuStyles {
     // Shortcut label
     pub menu_shortcut_font_size_px: f32,
     pub menu_shortcut_text_color: Hsla,
+    // Format menu icon
+    pub menu_format_icon_size_px: f32,
+    pub menu_format_icon_gap_px: f32,
+    pub menu_format_icon_color: Hsla,
+    pub menu_format_active_text_color: Hsla,
     // Widths per menu kind
     pub menu_sidebar_width_px: f32,
     pub menu_format_width_px: f32,
@@ -561,7 +571,7 @@ impl Styles {
                 sidebar_resize_active_indicator_color: theme.text_accent,
                 sidebar_resize_min_width_px: 140.0,
                 sidebar_resize_max_width_px: 600.0,
-                sidebar_indent_guide_color: with_alpha(theme.border_secondary, 0.25),
+                sidebar_indent_guide_color: with_alpha(theme.border_secondary, 0.5),
                 sidebar_indent_guide_width_px: 1.0,
                 sidebar_indent_guide_dash_length_px: 3.0,
                 sidebar_indent_guide_gap_length_px: 3.0,
@@ -585,7 +595,7 @@ impl Styles {
                 outline_item_padding_right_px: 8.0,
                 outline_item_font_size_px: 13.0,
                 outline_item_text_color: theme.text_primary,
-                outline_item_active_text_color: theme.text_accent,
+                outline_item_active_text_color: theme.text_bright,
                 outline_item_active_bg: theme.bg_selected,
                 outline_item_hover_bg: theme.bg_hover,
                 outline_resize_handle_width_px: 5.0,
@@ -595,6 +605,10 @@ impl Styles {
                 outline_resize_active_indicator_color: theme.text_accent,
                 outline_resize_min_width_px: 120.0,
                 outline_resize_max_width_px: 400.0,
+                outline_indent_guide_color: with_alpha(theme.border_secondary, 0.5),
+                outline_indent_guide_width_px: 1.0,
+                outline_indent_guide_dash_length_px: 3.0,
+                outline_indent_guide_gap_length_px: 3.0,
             },
             tab_bar: TabBarStyles {
                 tab_bar_height_px: 38.0,
@@ -743,11 +757,15 @@ impl Styles {
                 menu_item_selected_bg: theme.bg_hover,
                 menu_shortcut_font_size_px: 11.5,
                 menu_shortcut_text_color: theme.text_secondary,
+                menu_format_icon_size_px: 14.0,
+                menu_format_icon_gap_px: 8.0,
+                menu_format_icon_color: theme.text_secondary,
+                menu_format_active_text_color: theme.text_bright,
                 menu_separator_height_px: 1.0,
                 menu_separator_margin_y_px: 0.0,
                 menu_separator_color: theme.border_primary,
                 menu_sidebar_width_px: 180.0,
-                menu_format_width_px: 180.0,
+                menu_format_width_px: 210.0,
                 menu_tab_width_px: 180.0,
             },
             dialog: DialogStyles {
@@ -788,7 +806,7 @@ impl Styles {
                 ws_bar_gap_px: 6.0,
                 ws_bar_icon_size_px: 14.0,
                 ws_bar_icon_color: theme.text_secondary,
-                ws_bar_font_size_px: 11.0,
+                ws_bar_font_size_px: 13.0,
                 ws_bar_text_color: theme.text_secondary,
                 ws_bar_hover_bg: theme.bg_hover,
                 ws_menu_width_px: 220.0,
