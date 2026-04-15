@@ -15,3 +15,5 @@ logs
 *.sw?
 
 target
+dist
+.cargo-home

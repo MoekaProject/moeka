@@ -340,11 +340,9 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                         );
                         // Store image path for preview rendering
                         if let Some(url) = dest_url {
-                            if !url.starts_with("http://") && !url.starts_with("https://") {
-                                let line = offset_to_line(start);
-                                if line < decorations.len() {
-                                    decorations[line].image_path = Some(url);
-                                }
+                            let line = offset_to_line(start);
+                            if line < decorations.len() {
+                                decorations[line].image_path = Some(url);
                             }
                         }
                     }

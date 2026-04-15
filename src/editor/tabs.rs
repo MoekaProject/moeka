@@ -9,6 +9,10 @@ use super::*;
 
 impl EditorView {
     pub(crate) fn sidebar_root_name(&self) -> String {
+        if self.sidebar_root.as_os_str().is_empty() {
+            return "打开目录...".to_string();
+        }
+
         self.sidebar_root
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())

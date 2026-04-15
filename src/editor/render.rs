@@ -95,7 +95,8 @@ impl Render for EditorView {
                 let sidebar_w = self.sidebar_width();
                 let ss = &self.styles.sidebar;
                 let hover_indicator_color = ss.sidebar_resize_active_indicator_color;
-                let hover_indicator_width = self.scaled(ss.sidebar_resize_active_indicator_width_px);
+                let hover_indicator_width =
+                    self.scaled(ss.sidebar_resize_active_indicator_width_px);
                 let handle_width = self.scaled(ss.sidebar_resize_handle_width_px);
                 this.child(self.render_sidebar(cx))
                     // Transparent sensing area for resize drag
@@ -192,7 +193,7 @@ impl Render for EditorView {
                                         .text_color(btn_color)
                                         .cursor(CursorStyle::Arrow)
                                         .hover(move |s| s.bg(bg_hover))
-                                        .child("双击新建文件")
+                                        .child("新建文件...")
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -260,13 +261,15 @@ impl Render for EditorView {
                                                 .cursor(CursorStyle::Arrow)
                                                 .hover(move |style| style.opacity(primary_hover))
                                                 .child(
-                                                    img(PathBuf::from(SIDEBAR_TOGGLE_SVG_PATH))
-                                                        .w(px(self.scaled(
-                                                            tb.toolbar_primary_icon_size_px,
-                                                        )))
-                                                        .h(px(self.scaled(
-                                                            tb.toolbar_primary_icon_size_px,
-                                                        ))),
+                                                    img(helpers::resolve_asset_image_path(
+                                                        SIDEBAR_TOGGLE_SVG_PATH,
+                                                    ))
+                                                    .w(px(self.scaled(
+                                                        tb.toolbar_primary_icon_size_px,
+                                                    )))
+                                                    .h(px(self.scaled(
+                                                        tb.toolbar_primary_icon_size_px,
+                                                    ))),
                                                 )
                                                 .on_mouse_down(
                                                     MouseButton::Left,
@@ -292,13 +295,15 @@ impl Render for EditorView {
                                                 .cursor(CursorStyle::Arrow)
                                                 .hover(move |style| style.opacity(secondary_hover))
                                                 .child(
-                                                    img(PathBuf::from(EDITOR_ALIGN_LEFT_SVG_PATH))
-                                                        .w(px(self.scaled(
-                                                            tb.toolbar_secondary_icon_size_px,
-                                                        )))
-                                                        .h(px(self.scaled(
-                                                            tb.toolbar_secondary_icon_size_px,
-                                                        ))),
+                                                    img(helpers::resolve_asset_image_path(
+                                                        EDITOR_ALIGN_LEFT_SVG_PATH,
+                                                    ))
+                                                    .w(px(self.scaled(
+                                                        tb.toolbar_secondary_icon_size_px,
+                                                    )))
+                                                    .h(px(self.scaled(
+                                                        tb.toolbar_secondary_icon_size_px,
+                                                    ))),
                                                 )
                                                 .on_mouse_down(
                                                     MouseButton::Left,
@@ -323,36 +328,6 @@ impl Render for EditorView {
                                         .opacity(toolbar_opacity)
                                         .child(
                                             div()
-                                                .id("toolbar-outline-toggle")
-                                                .w(px(self
-                                                    .scaled(tb.toolbar_secondary_btn_size_px)))
-                                                .h(px(self
-                                                    .scaled(tb.toolbar_secondary_btn_size_px)))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .cursor(CursorStyle::Arrow)
-                                                .hover(move |style| {
-                                                    style.opacity(secondary_hover)
-                                                })
-                                                .child(
-                                                    img(PathBuf::from(OUTLINE_TOGGLE_SVG_PATH))
-                                                        .w(px(self.scaled(
-                                                            tb.toolbar_secondary_icon_size_px,
-                                                        )))
-                                                        .h(px(self.scaled(
-                                                            tb.toolbar_secondary_icon_size_px,
-                                                        ))),
-                                                )
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(|this, _, _, cx| {
-                                                        this.toggle_outline_visibility(cx);
-                                                    }),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
                                                 .id("toolbar-theme-toggle")
                                                 .w(px(self
                                                     .scaled(tb.toolbar_secondary_btn_size_px)))
@@ -366,7 +341,7 @@ impl Render for EditorView {
                                                     style.opacity(secondary_hover)
                                                 })
                                                 .child(
-                                                    img(PathBuf::from(
+                                                    img(helpers::resolve_asset_image_path(
                                                         if matches!(
                                                             self.theme_kind,
                                                             crate::theme::ThemeKind::OneDark
@@ -390,6 +365,38 @@ impl Render for EditorView {
                                                     }),
                                                 ),
                                         )
+                                        .child(
+                                            div()
+                                                .id("toolbar-outline-toggle")
+                                                .w(px(self
+                                                    .scaled(tb.toolbar_secondary_btn_size_px)))
+                                                .h(px(self
+                                                    .scaled(tb.toolbar_secondary_btn_size_px)))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor(CursorStyle::Arrow)
+                                                .hover(move |style| {
+                                                    style.opacity(secondary_hover)
+                                                })
+                                                .child(
+                                                    img(helpers::resolve_asset_image_path(
+                                                        OUTLINE_TOGGLE_SVG_PATH,
+                                                    ))
+                                                    .w(px(self.scaled(
+                                                        tb.toolbar_secondary_icon_size_px,
+                                                    )))
+                                                    .h(px(self.scaled(
+                                                        tb.toolbar_secondary_icon_size_px,
+                                                    ))),
+                                                )
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.toggle_outline_visibility(cx);
+                                                    }),
+                                                ),
+                                        )
                                 })
                                 .child(element::EditorElement {
                                     editor: cx.entity().clone(),
@@ -404,62 +411,54 @@ impl Render for EditorView {
                 let hover_indicator_width =
                     self.scaled(os.outline_resize_active_indicator_width_px);
                 let handle_width = self.scaled(os.outline_resize_handle_width_px);
-                this.child(self.render_outline(cx))
-                    .child(
-                        div()
-                            .id("outline-resize-handle")
-                            .absolute()
-                            .right(px(outline_w - handle_width / 2.0))
-                            .top_0()
-                            .w(px(handle_width))
-                            .h_full()
-                            .cursor(CursorStyle::ResizeLeftRight)
-                            .hover(move |style| {
-                                style
-                                    .border_r(px(hover_indicator_width))
-                                    .border_color(hover_indicator_color)
-                            })
-                            .on_mouse_move(
-                                cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                                    if this.outline_resizing {
-                                        let window_width =
-                                            f32::from(window.bounds().size.width);
-                                        let new_width =
-                                            window_width - f32::from(event.position.x);
-                                        let min_w = this.scaled(
-                                            this.styles.outline.outline_resize_min_width_px,
-                                        );
-                                        let max_w = this.scaled(
-                                            this.styles.outline.outline_resize_max_width_px,
-                                        );
-                                        this.outline_custom_width =
-                                            Some(new_width.clamp(min_w, max_w));
-                                        cx.notify();
-                                    }
-                                }),
-                            )
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                    this.outline_resizing = true;
-                                    cx.notify();
-                                }),
-                            )
-                            .on_mouse_up(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.outline_resizing = false;
-                                    cx.notify();
-                                }),
-                            )
-                            .on_mouse_up_out(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.outline_resizing = false;
-                                    cx.notify();
-                                }),
-                            ),
-                    )
+                this.child(self.render_outline(cx)).child(
+                    div()
+                        .id("outline-resize-handle")
+                        .absolute()
+                        .right(px(outline_w - handle_width / 2.0))
+                        .top_0()
+                        .w(px(handle_width))
+                        .h_full()
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .hover(move |style| {
+                            style
+                                .border_r(px(hover_indicator_width))
+                                .border_color(hover_indicator_color)
+                        })
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                            if this.outline_resizing {
+                                let window_width = f32::from(window.bounds().size.width);
+                                let new_width = window_width - f32::from(event.position.x);
+                                let min_w =
+                                    this.scaled(this.styles.outline.outline_resize_min_width_px);
+                                let max_w =
+                                    this.scaled(this.styles.outline.outline_resize_max_width_px);
+                                this.outline_custom_width = Some(new_width.clamp(min_w, max_w));
+                                cx.notify();
+                            }
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                this.outline_resizing = true;
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.outline_resizing = false;
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.outline_resizing = false;
+                                cx.notify();
+                            }),
+                        ),
+                )
             })
             .when(resizing, |this| {
                 this.child(deferred(
@@ -500,10 +499,7 @@ impl Render for EditorView {
                                 cx.notify();
                             }),
                         )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|_this, _, _, _cx| {}),
-                        ),
+                        .on_mouse_down(MouseButton::Left, cx.listener(|_this, _, _, _cx| {})),
                 ))
             })
             .when(self.context_menu.is_some(), |this| {

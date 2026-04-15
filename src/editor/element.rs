@@ -127,7 +127,8 @@ impl Element for EditorElement {
         let line_count = buffer.line_count();
 
         // Collect all cursor selection ranges (primary + extra)
-        let mut all_sel_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(1 + editor.extra_cursors.len());
+        let mut all_sel_ranges: Vec<std::ops::Range<usize>> =
+            Vec::with_capacity(1 + editor.extra_cursors.len());
         let sel_range = cursor.selection_range();
         let _has_selection = cursor.has_selection();
         all_sel_ranges.push(sel_range.clone());
@@ -474,7 +475,9 @@ impl Element for EditorElement {
             let line_bottom = line_top + total_line_height;
             let content_x =
                 if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
-                    editor_left + editor.padding_left() + editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
+                    editor_left
+                        + editor.padding_left()
+                        + editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
                 } else {
                     editor_left + editor.padding_left()
                 };
@@ -678,7 +681,7 @@ impl Element for EditorElement {
                             if image_active {
                                 image_borders.push(quad(
                                     img_bounds,
-                                    Corners::all(px(6.0)),
+                                    Corners::all(px(10.0)),
                                     gpui::transparent_black(),
                                     px(2.0),
                                     theme.cursor,
@@ -1084,12 +1087,8 @@ impl Element for EditorElement {
         }
         if !new_image_paths.is_empty() {
             for path in new_image_paths {
-                let maybe_image = helpers::resolve_local_image_path(&path)
-                    .and_then(|resolved| helpers::load_render_image_from_path(&resolved).ok())
-                    .map(Arc::new);
                 self.editor.update(cx, |editor, cx| {
-                    editor.image_cache.insert(path, maybe_image);
-                    cx.notify();
+                    editor.queue_image_load(path, cx);
                 });
             }
         }
@@ -1218,7 +1217,13 @@ impl Element for EditorElement {
         // Image previews
         for (img_bounds, img_data) in &prepaint.image_previews {
             window
-                .paint_image(*img_bounds, Corners::default(), img_data.clone(), 0, false)
+                .paint_image(
+                    *img_bounds,
+                    Corners::all(px(10.0)),
+                    img_data.clone(),
+                    0,
+                    false,
+                )
                 .ok();
         }
 

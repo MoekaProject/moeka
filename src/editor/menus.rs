@@ -930,7 +930,7 @@ impl EditorView {
                 }
                 items.push(self.render_context_menu_separator());
                 items.push(self.render_context_menu_item(
-                    "打开 Workspace ...",
+                    "打开目录 ...",
                     false,
                     cx,
                     move |this, _, cx| {

@@ -7,6 +7,7 @@ mod style;
 mod theme;
 
 use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 
 use gpui::*;
 
@@ -17,11 +18,19 @@ struct FsAssets;
 
 impl AssetSource for FsAssets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
-        Ok(Some(std::fs::read(path)?.into()))
+        let Some(resolved_path) = resolve_runtime_path(path) else {
+            return Ok(None);
+        };
+
+        Ok(Some(std::fs::read(resolved_path)?.into()))
     }
 
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
-        Ok(std::fs::read_dir(path)?
+        let Some(resolved_path) = resolve_runtime_path(path) else {
+            return Ok(Vec::new());
+        };
+
+        Ok(std::fs::read_dir(resolved_path)?
             .filter_map(|entry| {
                 entry
                     .ok()
@@ -29,6 +38,45 @@ impl AssetSource for FsAssets {
             })
             .collect())
     }
+}
+
+pub(crate) fn resolve_runtime_path(path: impl AsRef<Path>) -> Option<PathBuf> {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        return path.exists().then(|| path.to_path_buf());
+    }
+
+    runtime_search_roots()
+        .into_iter()
+        .map(|root| root.join(path))
+        .find(|candidate| candidate.exists())
+}
+
+fn runtime_search_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    if let Ok(executable_path) = std::env::current_exe() {
+        if let Some(executable_dir) = executable_path.parent() {
+            roots.push(executable_dir.to_path_buf());
+
+            if let Some(contents_dir) = executable_dir.parent() {
+                roots.push(contents_dir.join("Resources"));
+            }
+        }
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        roots.push(current_dir.clone());
+        roots.push(current_dir.join("editor"));
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    roots.push(manifest_dir.clone());
+    if let Some(parent) = manifest_dir.parent() {
+        roots.push(parent.to_path_buf());
+    }
+
+    roots
 }
 
 fn main() {
@@ -104,11 +152,7 @@ fn main() {
             KeyBinding::new("alt-cmd-up", AddCursorAbove, Some("MarkdownEditor")),
             KeyBinding::new("alt-cmd-down", AddCursorBelow, Some("MarkdownEditor")),
             KeyBinding::new("cmd-d", SelectNextOccurrence, Some("MarkdownEditor")),
-            KeyBinding::new(
-                "cmd-shift-l",
-                SelectAllOccurrences,
-                Some("MarkdownEditor"),
-            ),
+            KeyBinding::new("cmd-shift-l", SelectAllOccurrences, Some("MarkdownEditor")),
         ]);
 
         cx.on_action(|_: &Quit, cx| cx.quit());

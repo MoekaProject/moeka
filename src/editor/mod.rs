@@ -54,8 +54,6 @@ pub(crate) fn perform_window_drag(_window: &gpui::Window) {}
 // NOTE: Numeric layout/style constants are now in style.rs (Styles struct).
 // Only non-style constants remain here.
 
-pub(crate) const KNOWLEDGE_BASE_ROOT: &str = "/Users/imeoer/code/我的知识库";
-
 // ── Cursor blink constants ──────────────────────────────────────────
 // NOTE: Cursor timing is now in style.rs (CursorStyles).
 
@@ -64,92 +62,37 @@ pub(crate) const KNOWLEDGE_BASE_ROOT: &str = "/Users/imeoer/code/我的知识库
 
 // ── SVG asset paths ─────────────────────────────────────────────────
 
-pub(crate) const HASH_SVG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/hash.svg");
-pub(crate) const COMMENT_SVG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/comment.svg");
-pub(crate) const CHECK_SVG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/check.svg");
-pub(crate) const FOLD_SVG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/fold.svg");
-pub(crate) const OPEN_SVG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/open.svg");
-pub(crate) const LOGO_SVG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/logo.svg");
-pub(crate) const ROOT_SVG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/filetree/all.svg");
-pub(crate) const FILETREE_FOLD_SVG_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/icons/filetree/fold.svg"
-);
-pub(crate) const SIDEBAR_TOGGLE_SVG_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/icons/sidebar-toggle.svg"
-);
-pub(crate) const EDITOR_ALIGN_LEFT_SVG_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/icons/editor-align-left.svg"
-);
-pub(crate) const THEME_TOGGLE_SVG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/theme-toggle.svg");
-pub(crate) const THEME_LIGHT_SVG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/theme-light.svg");
-pub(crate) const THEME_DARK_SVG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/theme-dark.svg");
-pub(crate) const FOLDER_OPEN_SVG_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/icons/filetree/folder-open.svg"
-);
-pub(crate) const FOLDER_CLOSED_SVG_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/icons/filetree/folder-closed.svg"
-);
-pub(crate) const MARKDOWN_SVG_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/icons/filetree/markdown.svg"
-);
-pub(crate) const WORKSPACE_EXPAND_SVG_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/icons/filetree/workspace-expand.svg"
-);
-pub(crate) const OUTLINE_TOGGLE_SVG_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/icons/outline-toggle.svg"
-);
+pub(crate) const HASH_SVG_PATH: &str = "assets/icons/hash.svg";
+pub(crate) const COMMENT_SVG_PATH: &str = "assets/icons/comment.svg";
+pub(crate) const CHECK_SVG_PATH: &str = "assets/icons/check.svg";
+pub(crate) const FOLD_SVG_PATH: &str = "assets/icons/fold.svg";
+pub(crate) const OPEN_SVG_PATH: &str = "assets/icons/open.svg";
+pub(crate) const LOGO_SVG_PATH: &str = "assets/icons/logo.svg";
+pub(crate) const ROOT_SVG_PATH: &str = "assets/icons/filetree/all.svg";
+pub(crate) const FILETREE_FOLD_SVG_PATH: &str = "assets/icons/filetree/fold.svg";
+pub(crate) const SIDEBAR_TOGGLE_SVG_PATH: &str = "assets/icons/sidebar-toggle.svg";
+pub(crate) const EDITOR_ALIGN_LEFT_SVG_PATH: &str = "assets/icons/editor-align-left.svg";
+pub(crate) const THEME_LIGHT_SVG_PATH: &str = "assets/icons/theme-light.svg";
+pub(crate) const THEME_DARK_SVG_PATH: &str = "assets/icons/theme-dark.svg";
+pub(crate) const FOLDER_OPEN_SVG_PATH: &str = "assets/icons/filetree/folder-open.svg";
+pub(crate) const FOLDER_CLOSED_SVG_PATH: &str = "assets/icons/filetree/folder-closed.svg";
+pub(crate) const MARKDOWN_SVG_PATH: &str = "assets/icons/filetree/markdown.svg";
+pub(crate) const WORKSPACE_EXPAND_SVG_PATH: &str = "assets/icons/filetree/workspace-expand.svg";
+pub(crate) const OUTLINE_TOGGLE_SVG_PATH: &str = "assets/icons/outline-toggle.svg";
 
 // ── Format menu SVG icons ───────────────────────────────────────────
-pub(crate) const FMT_BOLD_SVG: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/bold.svg");
-pub(crate) const FMT_ITALIC_SVG: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/icons/format/italic.svg"
-);
-pub(crate) const FMT_STRIKETHROUGH_SVG: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/icons/format/strikethrough.svg"
-);
-pub(crate) const FMT_INLINE_CODE_SVG: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/icons/format/inline-code.svg"
-);
-pub(crate) const FMT_CODE_SVG: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/code.svg");
-pub(crate) const FMT_QUOTE_SVG: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/quote.svg");
-pub(crate) const FMT_LIST_SVG: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/list.svg");
-pub(crate) const FMT_ORDER_LIST_SVG: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/icons/format/order-list.svg"
-);
-pub(crate) const FMT_TODO_SVG: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/todo.svg");
-pub(crate) const FMT_LINK_SVG: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/link.svg");
-pub(crate) const FMT_IMAGE_SVG: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/image.svg");
-pub(crate) const FMT_HEAD_SVG: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/format/head.svg");
+pub(crate) const FMT_BOLD_SVG: &str = "assets/icons/format/bold.svg";
+pub(crate) const FMT_ITALIC_SVG: &str = "assets/icons/format/italic.svg";
+pub(crate) const FMT_STRIKETHROUGH_SVG: &str = "assets/icons/format/strikethrough.svg";
+pub(crate) const FMT_INLINE_CODE_SVG: &str = "assets/icons/format/inline-code.svg";
+pub(crate) const FMT_CODE_SVG: &str = "assets/icons/format/code.svg";
+pub(crate) const FMT_QUOTE_SVG: &str = "assets/icons/format/quote.svg";
+pub(crate) const FMT_LIST_SVG: &str = "assets/icons/format/list.svg";
+pub(crate) const FMT_ORDER_LIST_SVG: &str = "assets/icons/format/order-list.svg";
+pub(crate) const FMT_TODO_SVG: &str = "assets/icons/format/todo.svg";
+pub(crate) const FMT_LINK_SVG: &str = "assets/icons/format/link.svg";
+pub(crate) const FMT_IMAGE_SVG: &str = "assets/icons/format/image.svg";
+pub(crate) const FMT_HEAD_SVG: &str = "assets/icons/format/head.svg";
 
 // ── UI constants ────────────────────────────────────────────────────
 // NOTE: UI dimension constants are now in style.rs.
@@ -400,17 +343,15 @@ pub struct EditorView {
 
 impl EditorView {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let sidebar_root = PathBuf::from(KNOWLEDGE_BASE_ROOT);
-        let mut expanded_dirs = HashSet::new();
-        expanded_dirs.insert(sidebar_root.clone());
-        let sidebar_error = (!sidebar_root.exists())
-            .then(|| format!("Directory not found: {}", sidebar_root.display()));
+        let sidebar_root = PathBuf::new();
+        let expanded_dirs = HashSet::new();
+        let sidebar_error = None;
         let initial_text = default_document_text();
         let first_line_end = initial_text.find('\n').unwrap_or(initial_text.len());
-        let buffer = Buffer::from_text(initial_text);
+        let buffer = Buffer::from_text(&initial_text);
         let decorations = markdown::parse_decorations(buffer.text());
         let initial_snapshot = EditorSnapshot {
-            text: initial_text.to_string(),
+            text: initial_text,
             cursor_offset: first_line_end,
             cursor_anchor: first_line_end,
             scroll_offset: 0.0,
@@ -453,7 +394,7 @@ impl EditorView {
             sidebar_error,
             tabs: vec![OpenTab {
                 id: "welcome-1".to_string(),
-                title: "Welcome".to_string(),
+                title: "欢迎使用".to_string(),
                 path: None,
                 snapshot: initial_snapshot,
                 is_dirty: false,
@@ -491,7 +432,7 @@ impl EditorView {
             sidebar_drag_hover_target: None,
             sidebar_drag_expand_task: None,
             sidebar_scroll_handle: ScrollHandle::new(),
-            workspaces: vec![sidebar_root.clone()],
+            workspaces: Vec::new(),
             _watcher_task: None,
             outline_visible: false,
             outline_custom_width: None,
@@ -504,13 +445,37 @@ impl EditorView {
         this.start_blinking(cx);
         this.start_watching(cx);
 
-        // Open EDITOR.md on startup if it exists
-        let editor_md = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/EDITOR.md"));
-        if editor_md.exists() {
-            this.open_sidebar_file(editor_md, cx);
+        this
+    }
+
+    pub(crate) fn queue_image_load(&mut self, path: String, cx: &mut Context<Self>) {
+        if self.image_cache.contains_key(&path) {
+            return;
         }
 
-        this
+        self.image_cache.insert(path.clone(), None);
+        cx.spawn(async move |this, cx| {
+            let image_path = path.clone();
+            let maybe_image = cx
+                .background_executor()
+                .spawn(async move {
+                    if helpers::is_remote_image_url(&image_path) {
+                        helpers::load_render_image_from_url(&image_path).ok()
+                    } else {
+                        helpers::resolve_local_image_path(&image_path)
+                            .and_then(|resolved| helpers::load_render_image_from_path(&resolved).ok())
+                    }
+                    .map(Arc::new)
+                })
+                .await;
+
+            this.update(cx, |editor, cx| {
+                editor.image_cache.insert(path, maybe_image);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     // ── Theme toggle ─────────────────────────────────────────────
@@ -1705,8 +1670,10 @@ pub(crate) fn is_markdown_file(path: &Path) -> bool {
         .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
 }
 
-pub(crate) fn default_document_text() -> &'static str {
-    "# Welcome to Markdown Editor\n\nThis is a **bold** and *italic* demo.\n\nYou can write `inline code` and:\n\n```rust\nfn greet(name: &str) {\n  println!(\"hello, {name}\");\n}\n```\n\n## Features\n\n- Syntax markers hide when cursor leaves the range\n- .md files open into real tabs\n- FileTree now lives in a fixed left pane\n- `inline code` with background\n- Headings with different sizes\n- [Visit Google](https://google.com) for search\n- Check out ![Logo](crates/zed/resources/app-icon.png) inline image\n\n> Blockquotes look like this\n\n### Tasks\n\n- [ ] Unchecked task item\n- [x] Completed task item\n- [ ] Another todo\n\n| Name | Type | Description |\n|------|------|-------------|\n| id | int | **Primary** key |\n| name | string | [User profile](https://example.com) |\n| email | string | `Email` addr |\n\n1. First ordered item\n2. Second ordered item\n\n---\n\nStart typing to edit!\n"
+pub(crate) fn default_document_text() -> String {
+    crate::resolve_runtime_path("EDITOR.md")
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_else(|| include_str!("../../EDITOR.md").to_string())
 }
 
 pub(crate) fn classify_word_char(ch: char) -> WordCharClass {

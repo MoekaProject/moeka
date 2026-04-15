@@ -412,10 +412,12 @@ pub(crate) fn compute_image_preview_size(
     image_height: f32,
     max_width: f32,
 ) -> (f32, f32) {
-    let width_scale = max_width / image_width;
-    let height_scale = 400.0 / image_height;
-    let scale = width_scale.min(height_scale);
-    (image_width * scale, image_height * scale)
+    if image_width <= 0.0 || image_height <= 0.0 || max_width <= 0.0 {
+        return (0.0, 0.0);
+    }
+
+    let scale = max_width / image_width;
+    (max_width, image_height * scale)
 }
 
 pub(crate) fn image_syntax_range(line_content: &str) -> Option<Range<usize>> {
@@ -1034,31 +1036,40 @@ pub(crate) fn apply_code_block_highlighting(
 }
 
 pub(crate) fn resolve_local_image_path(path: &str) -> Option<PathBuf> {
-    let path_buf = PathBuf::from(path);
-    if path_buf.is_absolute() {
-        return path_buf.exists().then_some(path_buf);
+    crate::resolve_runtime_path(path)
+}
+
+pub(crate) fn resolve_asset_image_path(path: &str) -> PathBuf {
+    crate::resolve_runtime_path(path).unwrap_or_else(|| PathBuf::from(path))
+}
+
+pub(crate) fn is_remote_image_url(path: &str) -> bool {
+    path.starts_with("http://") || path.starts_with("https://")
+}
+
+fn load_render_image_from_bytes(bytes: &[u8]) -> anyhow::Result<RenderImage> {
+    let dynamic = image::load_from_memory(bytes)?;
+    let mut buffer = dynamic.to_rgba8();
+
+    for pixel in buffer.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
     }
 
-    let mut candidates = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join(&path_buf));
-        candidates.push(cwd.join("editor").join(&path_buf));
-    }
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    candidates.push(manifest_dir.join(&path_buf));
-    if let Some(parent) = manifest_dir.parent() {
-        candidates.push(parent.join(&path_buf));
-    }
-
-    candidates.into_iter().find(|candidate| candidate.exists())
+    let frame = Frame::new(buffer);
+    Ok(RenderImage::new([frame]))
 }
 
 pub(crate) fn load_render_image_from_path(path: &PathBuf) -> anyhow::Result<RenderImage> {
     let bytes = std::fs::read(path)?;
-    let dynamic = image::load_from_memory(&bytes)?;
-    let frame = Frame::new(dynamic.to_rgba8());
-    Ok(RenderImage::new([frame]))
+    load_render_image_from_bytes(&bytes)
+}
+
+pub(crate) fn load_render_image_from_url(url: &str) -> anyhow::Result<RenderImage> {
+    let response = ureq::get(url).call()?;
+    let mut reader = response.into_reader();
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut reader, &mut bytes)?;
+    load_render_image_from_bytes(&bytes)
 }
 
 /// Show a native macOS file picker (via osascript) and return the chosen path.

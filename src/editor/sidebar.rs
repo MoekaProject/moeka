@@ -1006,6 +1006,7 @@ impl EditorView {
     pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let has_root = self.sidebar_root.exists() && self.sidebar_error.is_none();
         let ss = &self.styles.sidebar;
+        let show_workspace_bar = true;
 
         // Fixed header section (spacer + logo + root name)
         let top_spacer = div()
@@ -1188,7 +1189,7 @@ impl EditorView {
                 .justify_center()
                 .py(px(self.scaled(ss.sidebar_logo_padding_y_px)))
                 .child(
-                    img(PathBuf::from(LOGO_SVG_PATH))
+                    img(helpers::resolve_asset_image_path(LOGO_SVG_PATH))
                         .w(px(self.scaled(ss.sidebar_logo_size_px)))
                         .h(px(self.scaled(ss.sidebar_logo_size_px))),
                 )
@@ -1196,7 +1197,9 @@ impl EditorView {
         );
 
         // Header inside scrollable area (right after logo, before items)
-        tree_items.insert(1, header.into_any_element());
+        if has_root {
+            tree_items.insert(1, header.into_any_element());
+        }
 
         tree_items.push(
             div()
@@ -1211,7 +1214,7 @@ impl EditorView {
         let logo_area_height =
             self.scaled(ss.sidebar_logo_size_px + 2.0 * ss.sidebar_logo_padding_y_px);
         let scroll_y = -f32::from(self.sidebar_scroll_handle.offset().y);
-        let header_is_sticky = scroll_y >= logo_area_height;
+        let header_is_sticky = has_root && scroll_y >= logo_area_height;
 
         div()
             .id("sidebar")
@@ -1291,7 +1294,9 @@ impl EditorView {
                         ),
                 )
             })
-            .child(self.render_workspace_bar(cx))
+            .when(show_workspace_bar, |this| {
+                this.child(self.render_workspace_bar(cx))
+            })
             .into_any_element()
     }
 
