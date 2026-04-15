@@ -18,6 +18,7 @@ pub struct Styles {
     pub window: WindowStyles,
     pub editor: EditorStyles,
     pub sidebar: SidebarStyles,
+    pub outline: OutlineStyles,
     pub tab_bar: TabBarStyles,
     pub toolbar: ToolbarStyles,
     pub cursor: CursorStyles,
@@ -151,6 +152,41 @@ pub struct SidebarStyles {
     pub sidebar_item_focus_border_color: Hsla,
     // Active border (selected item)
     pub sidebar_item_active_border_color: Hsla,
+}
+
+// ── Outline ─────────────────────────────────────────────────────────
+
+pub struct OutlineStyles {
+    // Container
+    pub outline_width_px: f32,
+    pub outline_bg: Hsla,
+    pub outline_border_width_px: f32,
+    pub outline_border_color: Hsla,
+    pub outline_top_spacer_height_px: f32,
+    pub outline_bottom_spacer_height_px: f32,
+    // Header
+    pub outline_header_height_px: f32,
+    pub outline_header_padding_x_px: f32,
+    pub outline_header_font_size_px: f32,
+    pub outline_header_text_color: Hsla,
+    // Item
+    pub outline_item_height_px: f32,
+    pub outline_item_indent_step_px: f32,
+    pub outline_item_padding_left_px: f32,
+    pub outline_item_padding_right_px: f32,
+    pub outline_item_font_size_px: f32,
+    pub outline_item_text_color: Hsla,
+    pub outline_item_active_text_color: Hsla,
+    pub outline_item_active_bg: Hsla,
+    pub outline_item_hover_bg: Hsla,
+    // Resize handle
+    pub outline_resize_handle_width_px: f32,
+    pub outline_resize_indicator_width_px: f32,
+    pub outline_resize_active_indicator_width_px: f32,
+    pub outline_resize_indicator_color: Hsla,
+    pub outline_resize_active_indicator_color: Hsla,
+    pub outline_resize_min_width_px: f32,
+    pub outline_resize_max_width_px: f32,
 }
 
 // ── Tab Bar ─────────────────────────────────────────────────────────
@@ -529,8 +565,36 @@ impl Styles {
                 sidebar_indent_guide_width_px: 1.0,
                 sidebar_indent_guide_dash_length_px: 3.0,
                 sidebar_indent_guide_gap_length_px: 3.0,
-                sidebar_item_focus_border_color: with_alpha(theme.text_accent, 0.6),
-                sidebar_item_active_border_color: theme.text_accent,
+                sidebar_item_focus_border_color: with_alpha(theme.text_accent, 0.3),
+                sidebar_item_active_border_color: with_alpha(theme.text_accent, 0.2),
+            },
+            outline: OutlineStyles {
+                outline_width_px: 220.0,
+                outline_bg: theme.bg_secondary,
+                outline_border_width_px: 1.0,
+                outline_border_color: theme.border_secondary,
+                outline_top_spacer_height_px: 40.0,
+                outline_bottom_spacer_height_px: 30.0,
+                outline_header_height_px: 26.0,
+                outline_header_padding_x_px: 14.0,
+                outline_header_font_size_px: 11.0,
+                outline_header_text_color: theme.text_secondary,
+                outline_item_height_px: 26.0,
+                outline_item_indent_step_px: 14.0,
+                outline_item_padding_left_px: 14.0,
+                outline_item_padding_right_px: 8.0,
+                outline_item_font_size_px: 13.0,
+                outline_item_text_color: theme.text_primary,
+                outline_item_active_text_color: theme.text_accent,
+                outline_item_active_bg: theme.bg_selected,
+                outline_item_hover_bg: theme.bg_hover,
+                outline_resize_handle_width_px: 5.0,
+                outline_resize_indicator_width_px: 1.0,
+                outline_resize_active_indicator_width_px: 3.0,
+                outline_resize_indicator_color: theme.border_primary,
+                outline_resize_active_indicator_color: theme.text_accent,
+                outline_resize_min_width_px: 120.0,
+                outline_resize_max_width_px: 400.0,
             },
             tab_bar: TabBarStyles {
                 tab_bar_height_px: 38.0,

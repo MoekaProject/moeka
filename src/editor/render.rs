@@ -1,13 +1,13 @@
 use gpui::{
-    CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Render, Window, div, img, prelude::*,
-    px,
+    CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Render, Window, deferred, div, img,
+    prelude::*, px,
 };
 
 use super::*;
 
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let resizing = self.sidebar_resizing;
+        let resizing = self.sidebar_resizing || self.outline_resizing;
         let show_editor_toolbar = self.tabs.len() > 0 && self.scroll_offset <= self.scaled(18.0);
         let ws = &self.styles.window;
         div()
@@ -25,7 +25,7 @@ impl Render for EditorView {
             .rounded(px(ws.window_radius_px))
             .when(resizing, |this| {
                 this.cursor(CursorStyle::ResizeLeftRight)
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                         if this.sidebar_resizing {
                             let new_width = f32::from(event.position.x);
                             let min_w =
@@ -35,11 +35,22 @@ impl Render for EditorView {
                             this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
                             cx.notify();
                         }
+                        if this.outline_resizing {
+                            let window_width = f32::from(window.bounds().size.width);
+                            let new_width = window_width - f32::from(event.position.x);
+                            let min_w =
+                                this.scaled(this.styles.outline.outline_resize_min_width_px);
+                            let max_w =
+                                this.scaled(this.styles.outline.outline_resize_max_width_px);
+                            this.outline_custom_width = Some(new_width.clamp(min_w, max_w));
+                            cx.notify();
+                        }
                     }))
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
                             this.sidebar_resizing = false;
+                            this.outline_resizing = false;
                             cx.notify();
                         }),
                     )
@@ -103,20 +114,22 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_escape))
+            .on_action(cx.listener(Self::on_toggle_outline))
             .when(self.sidebar_visible, |this| {
                 let sidebar_w = self.sidebar_width();
                 let ss = &self.styles.sidebar;
                 let hover_indicator_color = ss.sidebar_resize_active_indicator_color;
-                let hover_indicator_width = ss.sidebar_resize_active_indicator_width_px;
+                let hover_indicator_width = self.scaled(ss.sidebar_resize_active_indicator_width_px);
+                let handle_width = self.scaled(ss.sidebar_resize_handle_width_px);
                 this.child(self.render_sidebar(cx))
                     // Transparent sensing area for resize drag
                     .child(
                         div()
                             .id("sidebar-resize-handle")
                             .absolute()
-                            .left(px(sidebar_w - 1.0))
+                            .left(px(sidebar_w - handle_width / 2.0))
                             .top_0()
-                            .w(px(ss.sidebar_resize_handle_width_px))
+                            .w(px(handle_width))
                             .h_full()
                             .cursor(CursorStyle::ResizeLeftRight)
                             .hover(move |style| {
@@ -330,7 +343,38 @@ impl Render for EditorView {
                                         .top(px(self.scaled(tb.toolbar_offset_top_px)))
                                         .flex()
                                         .items_center()
+                                        .gap(px(self.scaled(tb.toolbar_gap_px)))
                                         .opacity(toolbar_opacity)
+                                        .child(
+                                            div()
+                                                .id("toolbar-outline-toggle")
+                                                .w(px(self
+                                                    .scaled(tb.toolbar_secondary_btn_size_px)))
+                                                .h(px(self
+                                                    .scaled(tb.toolbar_secondary_btn_size_px)))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor(CursorStyle::Arrow)
+                                                .hover(move |style| {
+                                                    style.opacity(secondary_hover)
+                                                })
+                                                .child(
+                                                    img(PathBuf::from(OUTLINE_TOGGLE_SVG_PATH))
+                                                        .w(px(self.scaled(
+                                                            tb.toolbar_secondary_icon_size_px,
+                                                        )))
+                                                        .h(px(self.scaled(
+                                                            tb.toolbar_secondary_icon_size_px,
+                                                        ))),
+                                                )
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.toggle_outline_visibility(cx);
+                                                    }),
+                                                ),
+                                        )
                                         .child(
                                             div()
                                                 .id("toolbar-theme-toggle")
@@ -377,9 +421,74 @@ impl Render for EditorView {
                         )
                     }),
             )
+            .when(self.outline_visible && !self.tabs.is_empty(), |this| {
+                let os = &self.styles.outline;
+                let outline_w = self.outline_width();
+                let hover_indicator_color = os.outline_resize_active_indicator_color;
+                let hover_indicator_width =
+                    self.scaled(os.outline_resize_active_indicator_width_px);
+                let handle_width = self.scaled(os.outline_resize_handle_width_px);
+                this.child(self.render_outline(cx))
+                    .child(
+                        div()
+                            .id("outline-resize-handle")
+                            .absolute()
+                            .right(px(outline_w - handle_width / 2.0))
+                            .top_0()
+                            .w(px(handle_width))
+                            .h_full()
+                            .cursor(CursorStyle::ResizeLeftRight)
+                            .hover(move |style| {
+                                style
+                                    .border_r(px(hover_indicator_width))
+                                    .border_color(hover_indicator_color)
+                            })
+                            .on_mouse_move(
+                                cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                                    if this.outline_resizing {
+                                        let window_width =
+                                            f32::from(window.bounds().size.width);
+                                        let new_width =
+                                            window_width - f32::from(event.position.x);
+                                        let min_w = this.scaled(
+                                            this.styles.outline.outline_resize_min_width_px,
+                                        );
+                                        let max_w = this.scaled(
+                                            this.styles.outline.outline_resize_max_width_px,
+                                        );
+                                        this.outline_custom_width =
+                                            Some(new_width.clamp(min_w, max_w));
+                                        cx.notify();
+                                    }
+                                }),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    this.outline_resizing = true;
+                                    cx.notify();
+                                }),
+                            )
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.outline_resizing = false;
+                                    cx.notify();
+                                }),
+                            )
+                            .on_mouse_up_out(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.outline_resizing = false;
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+            })
             .when(self.context_menu.is_some(), |this| {
-                this.child(
+                this.child(deferred(
                     div()
+                        .occlude()
                         .absolute()
                         .left(px(0.0))
                         .top(px(0.0))
@@ -389,17 +498,17 @@ impl Render for EditorView {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| {
-                                eprintln!("[menu-debug] backdrop left click");
                                 this.close_context_menu(cx);
                             }),
                         )
-                        .on_mouse_up(MouseButton::Left, cx.listener(|_, _, _, _| {}))
-                        .on_mouse_up(MouseButton::Right, cx.listener(|_, _, _, _| {}))
-                        .on_mouse_down(MouseButton::Right, cx.listener(|_, _, _, _| {}))
-                        .on_mouse_move(cx.listener(|_, _, _, _| {}))
-                        .on_scroll_wheel(cx.listener(|_, _, _, _| {}))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, _, _, cx| {
+                                this.close_context_menu(cx);
+                            }),
+                        )
                         .child(self.render_context_menu(cx)),
-                )
+                ))
             })
             .when(self.dialog.is_some(), |this| {
                 this.child(self.render_dialog(cx))

@@ -226,4 +226,17 @@ impl EditorView {
         self.editor_left_aligned = !self.editor_left_aligned;
         cx.notify();
     }
+
+    pub(crate) fn outline_width(&self) -> f32 {
+        self.outline_custom_width
+            .unwrap_or_else(|| self.scaled(self.styles.outline.outline_width_px))
+    }
+
+    pub(crate) fn toggle_outline_visibility(&mut self, cx: &mut Context<Self>) {
+        self.outline_visible = !self.outline_visible;
+        if !self.outline_visible {
+            self.outline_resizing = false;
+        }
+        cx.notify();
+    }
 }

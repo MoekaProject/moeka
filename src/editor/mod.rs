@@ -4,6 +4,7 @@ mod handlers;
 mod helpers;
 mod input;
 mod menus;
+mod outline;
 mod render;
 mod scaling;
 mod sidebar;
@@ -110,6 +111,10 @@ pub(crate) const MARKDOWN_SVG_PATH: &str = concat!(
 pub(crate) const WORKSPACE_EXPAND_SVG_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/icons/filetree/workspace-expand.svg"
+);
+pub(crate) const OUTLINE_TOGGLE_SVG_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/icons/outline-toggle.svg"
 );
 
 // ── UI constants ────────────────────────────────────────────────────
@@ -304,6 +309,10 @@ pub struct EditorView {
     pub(crate) sidebar_scroll_handle: ScrollHandle,
     pub(crate) workspaces: Vec<PathBuf>,
     pub(crate) _watcher_task: Option<Task<()>>,
+    pub(crate) outline_visible: bool,
+    pub(crate) outline_custom_width: Option<f32>,
+    pub(crate) outline_resizing: bool,
+    pub(crate) outline_scroll_handle: ScrollHandle,
 }
 
 impl EditorView {
@@ -395,6 +404,10 @@ impl EditorView {
             sidebar_scroll_handle: ScrollHandle::new(),
             workspaces: vec![sidebar_root.clone()],
             _watcher_task: None,
+            outline_visible: false,
+            outline_custom_width: None,
+            outline_resizing: false,
+            outline_scroll_handle: ScrollHandle::new(),
         };
         this.start_blinking(cx);
         this.start_watching(cx);

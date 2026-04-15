@@ -63,6 +63,7 @@ actions!(
         NewTab,
         Quit,
         Escape,
+        ToggleOutline,
     ]
 );
 

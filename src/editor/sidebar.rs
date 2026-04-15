@@ -694,7 +694,7 @@ impl EditorView {
         let indent_step = ss.sidebar_item_indent_step_px;
         let item_height = self.scaled(ss.sidebar_item_height_px);
         let fold_w = self.scaled(ss.sidebar_item_fold_container_width_px);
-        let guides: Vec<gpui::AnyElement> = (1..item.depth)
+        let guides: Vec<gpui::AnyElement> = (1..=item.depth)
             .filter(|level| active_guide_levels.contains(level))
             .flat_map(|level| {
                 let guide_x = self
@@ -949,7 +949,7 @@ impl EditorView {
                 // For item[i], collect all levels L in 1..depth where
                 // the next item at level L exists after i
                 let mut levels = HashSet::new();
-                for level in 1..depth {
+                for level in 1..=depth {
                     if let Some(&next_idx) = next_at_depth.get(&level) {
                         if next_idx > i {
                             levels.insert(level);

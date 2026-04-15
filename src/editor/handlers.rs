@@ -726,6 +726,15 @@ impl EditorView {
         self.toggle_sidebar_visibility(cx);
     }
 
+    pub(crate) fn on_toggle_outline(
+        &mut self,
+        _: &ToggleOutline,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_outline_visibility(cx);
+    }
+
     pub(crate) fn on_toggle_editor_left_align(
         &mut self,
         _: &ToggleEditorLeftAlign,

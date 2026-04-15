@@ -286,6 +286,7 @@ impl EditorView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
                             if let Some(tab) = this.tabs.iter().find(|t| t.id == close_id) {
                                 if tab.is_dirty {
                                     this.show_dialog(
@@ -321,6 +322,7 @@ impl EditorView {
                 cx.listener(move |this, _, _, cx| {
                     this.tab_dragging_id = Some(tab_id.clone());
                     this.switch_to_tab(&tab_id, cx);
+                    cx.stop_propagation();
                 }),
             )
             .on_mouse_up(
@@ -335,12 +337,14 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
                     this.open_tab_context_menu(context_tab_id.clone(), event.position, cx);
                 }),
             )
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
                     this.close_tab(&middle_close_id, cx);
                 }),
             )
@@ -383,6 +387,7 @@ impl EditorView {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
                         this.create_scratch_tab(cx);
                     }),
                 )

@@ -646,7 +646,8 @@ impl EditorView {
                 let close_hover_color = wss.ws_menu_item_close_hover_color;
                 let close_size = self.scaled(wss.ws_menu_item_close_size_px);
                 let ms = &self.styles.context_menu;
-                let hover_bg = ms.menu_item_hover_bg;
+                let row_hover_bg = ms.menu_item_hover_bg;
+                let close_hover_bg = self.styles.tab_bar.tab_item_close_hover_bg;
                 let text_color = ms.menu_item_text_color;
 
                 for workspace in self.workspaces.clone() {
@@ -672,7 +673,7 @@ impl EditorView {
                             .gap(px(self.scaled(4.0)))
                             .text_size(px(self.scaled(ms.menu_item_font_size_px)))
                             .text_color(text_color)
-                            .hover(move |s| s.bg(hover_bg))
+                            .hover(move |s| s.bg(row_hover_bg))
                             .cursor(CursorStyle::Arrow)
                             .child(
                                 div()
@@ -712,7 +713,7 @@ impl EditorView {
                                     .text_size(px(self.scaled(10.0)))
                                     .text_color(close_color)
                                     .hover(move |s| {
-                                        s.text_color(close_hover_color).bg(hover_bg)
+                                        s.text_color(close_hover_color).bg(close_hover_bg)
                                     })
                                     .child("✕")
                                     .on_mouse_down(
@@ -759,32 +760,41 @@ impl EditorView {
         let viewport_h = self.last_viewport_height;
         let margin = self.scaled(ms.menu_max_height_margin_px).max(8.0);
 
-        // Adjust horizontal: prefer right of click, flip left if overflows
-        let mut final_x = pos_x;
-        if final_x + width > viewport_w - margin {
-            final_x = (pos_x - width).max(margin);
-        }
+        // Determine which corner of the menu should align with the cursor
+        // based on available space in each direction
+        let space_right = viewport_w - pos_x - margin;
+        let space_left = pos_x - margin;
+        let space_below = viewport_h - pos_y - margin;
+        let space_above = pos_y - margin;
 
-        // Adjust vertical: prefer below click, flip above if overflows
-        let mut final_y = pos_y;
-        let mut max_menu_height = (viewport_h - final_y - margin).max(self.scaled(100.0));
-        if estimated_menu_height > max_menu_height {
-            // Try flipping above the click position
-            let above_y = pos_y - estimated_menu_height;
-            if above_y >= margin {
-                final_y = above_y;
-                max_menu_height = estimated_menu_height;
+        // Horizontal: prefer opening to the right
+        let final_x = if space_right >= width {
+            pos_x
+        } else if space_left >= width {
+            pos_x - width
+        } else {
+            // Not enough room either side — pick side with more space
+            if space_right >= space_left {
+                (viewport_w - width - margin).max(margin)
             } else {
-                // Can't fit above either — pick the side with more room and scroll
-                let space_below = viewport_h - pos_y - margin;
-                let space_above = pos_y - margin;
-                if space_above > space_below {
-                    final_y = margin;
-                    max_menu_height = space_above;
-                }
-                // else keep original position (below) with scroll
+                margin
             }
-        }
+        };
+
+        // Vertical: prefer opening downward
+        let (final_y, max_menu_height) = if space_below >= estimated_menu_height {
+            (pos_y, space_below)
+        } else if space_above >= estimated_menu_height {
+            (pos_y - estimated_menu_height, space_above)
+        } else {
+            // Not enough room either direction — open on side with more space, allow scroll
+            if space_below >= space_above {
+                (pos_y, space_below.max(self.scaled(100.0)))
+            } else {
+                let h = space_above.max(self.scaled(100.0));
+                ((pos_y - h).max(margin), h)
+            }
+        };
 
         let mut menu_div = div()
             .id("context-menu")
