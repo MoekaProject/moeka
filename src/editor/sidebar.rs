@@ -1,16 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent, SharedString,
-    Transformation, div, img, prelude::*, px, radians, svg,
+    AnyElement, Context, CursorStyle, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent,
+    SharedString, Transformation, div, img, prelude::*, px, radians, svg,
 };
 
 use super::*;
 
 impl EditorView {
     pub(crate) fn toggle_sidebar_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.selected_sidebar_path = Some(path.clone());
         if !self.expanded_dirs.insert(path.clone()) {
             self.expanded_dirs.remove(&path);
         }
@@ -18,24 +18,135 @@ impl EditorView {
     }
 
     fn is_sidebar_item_selected(&self, item_path: &Path) -> bool {
-        if let Some(ref selected) = self.selected_sidebar_path {
-            if selected == item_path {
-                return true;
+        self.selected_sidebar_paths.contains(item_path)
+    }
+
+    /// Core multi-select logic: called on click with modifier keys.
+    /// - No modifier: clear selection, select only this item, set anchor
+    /// - Cmd (platform): toggle this item in selection, update anchor
+    /// - Shift: range-select from anchor to this item
+    /// - Cmd+Shift: add range to existing selection
+    fn sidebar_select_item(&mut self, path: &Path, shift: bool, cmd: bool) {
+        let items = self.sidebar_items();
+        let path_buf = path.to_path_buf();
+
+        if shift {
+            // Range select from anchor
+            let anchor = self
+                .sidebar_selection_anchor
+                .clone()
+                .unwrap_or_else(|| path_buf.clone());
+            let anchor_idx = items.iter().position(|i| i.path == anchor);
+            let target_idx = items.iter().position(|i| i.path == path_buf);
+            if let (Some(a), Some(t)) = (anchor_idx, target_idx) {
+                let (start, end) = if a <= t { (a, t) } else { (t, a) };
+                if !cmd {
+                    self.selected_sidebar_paths.clear();
+                }
+                for i in start..=end {
+                    self.selected_sidebar_paths.insert(items[i].path.clone());
+                }
+            } else {
+                if !cmd {
+                    self.selected_sidebar_paths.clear();
+                }
+                self.selected_sidebar_paths.insert(path_buf.clone());
+                self.sidebar_selection_anchor = Some(path_buf.clone());
+            }
+        } else if cmd {
+            // Toggle single item
+            if self.selected_sidebar_paths.contains(&path_buf) {
+                self.selected_sidebar_paths.remove(&path_buf);
+            } else {
+                self.selected_sidebar_paths.insert(path_buf.clone());
+            }
+            self.sidebar_selection_anchor = Some(path_buf.clone());
+        } else {
+            // Normal click: single select
+            self.selected_sidebar_paths.clear();
+            self.selected_sidebar_paths.insert(path_buf.clone());
+            self.sidebar_selection_anchor = Some(path_buf.clone());
+        }
+
+        self.focused_sidebar_path = Some(path_buf);
+    }
+
+    /// Filter out nested paths for drag operations.
+    /// If both /a and /a/b are selected, only /a is kept.
+    fn filter_nested_paths(paths: &HashSet<PathBuf>) -> Vec<PathBuf> {
+        let mut sorted: Vec<PathBuf> = paths.iter().cloned().collect();
+        sorted.sort();
+        let mut result = Vec::new();
+        for path in &sorted {
+            let dominated = result
+                .iter()
+                .any(|ancestor: &PathBuf| path.starts_with(ancestor));
+            if !dominated {
+                result.push(path.clone());
             }
         }
-        if self.selected_sidebar_path.is_none() {
-            if let Some(ref current) = self.current_file_path {
-                if current == item_path {
-                    return true;
+        result
+    }
+
+    /// Move sidebar items to target directory (for drag-and-drop).
+    pub(crate) fn move_sidebar_items(
+        &mut self,
+        paths: Vec<PathBuf>,
+        target_dir: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        for src in &paths {
+            let Some(name) = src.file_name() else {
+                continue;
+            };
+            let dst = target_dir.join(name);
+            if src == &dst || dst.starts_with(src) {
+                continue; // skip self or descendant
+            }
+            if let Err(e) = std::fs::rename(src, &dst) {
+                eprintln!("Move failed: {e}");
+                continue;
+            }
+            // Update open tabs
+            for tab in &mut self.tabs {
+                if let Some(ref tab_path) = tab.path {
+                    if tab_path.starts_with(src) {
+                        let relative = tab_path.strip_prefix(src).unwrap_or(tab_path.as_path());
+                        let new_tab_path = dst.join(relative);
+                        tab.title = Self::title_for_path(&new_tab_path);
+                        tab.path = Some(new_tab_path);
+                    }
+                }
+            }
+            // Update selection
+            let old_selected: Vec<PathBuf> = self
+                .selected_sidebar_paths
+                .iter()
+                .filter(|p| p.starts_with(src))
+                .cloned()
+                .collect();
+            for old in old_selected {
+                self.selected_sidebar_paths.remove(&old);
+                let relative = old.strip_prefix(src).unwrap_or(old.as_path());
+                self.selected_sidebar_paths.insert(dst.join(relative));
+            }
+            if self
+                .current_file_path
+                .as_ref()
+                .is_some_and(|p| p.starts_with(src))
+            {
+                if let Some(ref p) = self.current_file_path {
+                    let relative = p.strip_prefix(src).unwrap_or(p.as_path());
+                    self.current_file_path = Some(dst.join(relative));
                 }
             }
         }
-        false
+        self.context_menu = None;
+        cx.notify();
     }
 
     pub(crate) fn open_sidebar_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !is_markdown_file(&path) {
-            self.selected_sidebar_path = Some(path);
             cx.notify();
             return;
         }
@@ -45,7 +156,6 @@ impl EditorView {
                 .as_ref()
                 .is_some_and(|open_path| open_path == &path)
         }) {
-            self.selected_sidebar_path = Some(path);
             self.activate_tab_by_index(index, cx);
             return;
         }
@@ -76,15 +186,12 @@ impl EditorView {
                 };
                 self.persist_active_tab_state();
                 self.tabs.push(tab);
-                self.selected_sidebar_path = Some(path.clone());
-                self.sidebar_error = None;
                 if let Some(index) = self.tabs.len().checked_sub(1) {
                     self.activate_tab_by_index(index, cx);
                 }
             }
             Err(error) => {
-                self.sidebar_error = Some(format!("Failed to open file: {error}"));
-                self.selected_sidebar_path = Some(path);
+                eprintln!("Failed to open file: {error}");
                 cx.notify();
             }
         }
@@ -196,7 +303,7 @@ impl EditorView {
                 {
                     let new_path = path.with_file_name(trimmed);
                     if let Err(e) = std::fs::rename(path, &new_path) {
-                        self.sidebar_error = Some(format!("Rename failed: {e}"));
+                        eprintln!("Rename failed: {e}");
                     } else {
                         for tab in &mut self.tabs {
                             if tab.path.as_deref() == Some(path.as_path()) {
@@ -204,8 +311,9 @@ impl EditorView {
                                 tab.title = Self::title_for_path(&new_path);
                             }
                         }
-                        if self.selected_sidebar_path.as_deref() == Some(path.as_path()) {
-                            self.selected_sidebar_path = Some(new_path.clone());
+                        if self.selected_sidebar_paths.contains(path) {
+                            self.selected_sidebar_paths.remove(path);
+                            self.selected_sidebar_paths.insert(new_path.clone());
                         }
                         if self.current_file_path.as_deref() == Some(path.as_path()) {
                             self.current_file_path = Some(new_path);
@@ -221,7 +329,7 @@ impl EditorView {
                 if !trimmed.is_empty() {
                     let new_path = parent.join(trimmed);
                     if let Err(e) = std::fs::File::create(&new_path) {
-                        self.sidebar_error = Some(format!("Create file failed: {e}"));
+                        eprintln!("Create file failed: {e}");
                     } else if is_markdown_file(&new_path) {
                         self.open_sidebar_file(new_path, cx);
                         return;
@@ -236,7 +344,7 @@ impl EditorView {
                 if !trimmed.is_empty() {
                     let new_path = parent.join(trimmed);
                     if let Err(e) = std::fs::create_dir(&new_path) {
-                        self.sidebar_error = Some(format!("Create folder failed: {e}"));
+                        eprintln!("Create folder failed: {e}");
                     } else {
                         self.expanded_dirs.insert(new_path);
                     }
@@ -259,7 +367,7 @@ impl EditorView {
             std::fs::remove_file(&path)
         };
         if let Err(e) = result {
-            self.sidebar_error = Some(format!("Delete failed: {e}"));
+            eprintln!("Delete failed: {e}");
         } else {
             self.tabs
                 .retain(|tab| tab.path.as_ref().is_none_or(|p| !p.starts_with(&path)));
@@ -279,24 +387,6 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn cut_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.file_clipboard = Some(FileClipboard {
-            paths: vec![path],
-            is_cut: true,
-        });
-        self.context_menu = None;
-        cx.notify();
-    }
-
-    pub(crate) fn copy_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.file_clipboard = Some(FileClipboard {
-            paths: vec![path],
-            is_cut: false,
-        });
-        self.context_menu = None;
-        cx.notify();
-    }
-
     pub(crate) fn paste_into_dir(&mut self, target_dir: PathBuf, cx: &mut Context<Self>) {
         let Some(clipboard) = self.file_clipboard.take() else {
             return;
@@ -308,7 +398,7 @@ impl EditorView {
             let dst = target_dir.join(name);
             if clipboard.is_cut {
                 if let Err(e) = std::fs::rename(src, &dst) {
-                    self.sidebar_error = Some(format!("Move failed: {e}"));
+                    eprintln!("Move failed: {e}");
                 } else {
                     for tab in &mut self.tabs {
                         if tab.path.as_deref() == Some(src.as_path()) {
@@ -320,7 +410,7 @@ impl EditorView {
             } else {
                 if src.is_file() {
                     if let Err(e) = std::fs::copy(src, &dst) {
-                        self.sidebar_error = Some(format!("Copy failed: {e}"));
+                        eprintln!("Copy failed: {e}");
                     }
                 }
             }
@@ -359,6 +449,9 @@ impl EditorView {
         self.sidebar_root = path.clone();
         self.expanded_dirs.clear();
         self.expanded_dirs.insert(path);
+        self.selected_sidebar_paths.clear();
+        self.focused_sidebar_path = None;
+        self.sidebar_selection_anchor = None;
         self.sidebar_error = None;
         self.context_menu = None;
         self.start_watching(cx);
@@ -504,10 +597,14 @@ impl EditorView {
         };
         if self.sidebar_edit.is_some() {
             self.commit_sidebar_edit(cx);
-        } else if path.is_dir() {
-            self.toggle_sidebar_directory(path, cx);
         } else {
-            self.open_sidebar_file(path, cx);
+            // Set single selection on confirm
+            self.sidebar_select_item(&path, false, false);
+            if path.is_dir() {
+                self.toggle_sidebar_directory(path, cx);
+            } else {
+                self.open_sidebar_file(path, cx);
+            }
         }
     }
 
@@ -727,6 +824,22 @@ impl EditorView {
             })
             .collect();
 
+        let is_drag_over =
+            is_dir && self.sidebar_drag_hover_target.as_deref() == Some(path.as_path());
+        let drag_over_bg = ss.sidebar_item_selected_bg;
+
+        // Prepare drag payload: if item is selected, drag all; otherwise drag just this one
+        let drag_paths: Vec<PathBuf> = if self.selected_sidebar_paths.contains(&path) {
+            Self::filter_nested_paths(&self.selected_sidebar_paths)
+        } else {
+            vec![path.clone()]
+        };
+        let drag_label = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let drag_count = drag_paths.len();
+
         div()
             .id(SharedString::from(format!("sidebar-{}", path.display())))
             .w_full()
@@ -735,7 +848,7 @@ impl EditorView {
             .relative()
             .flex()
             .items_center()
-            .bg(row_bg)
+            .bg(if is_drag_over { drag_over_bg } else { row_bg })
             .border_1()
             .border_color(if is_selected {
                 active_border_color
@@ -802,20 +915,87 @@ impl EditorView {
                             .child(item.name),
                     ),
             )
+            // Multi-select click with modifier keys
             .on_click({
                 let path = path.clone();
-                cx.listener(move |this, _, _, cx| {
-                    this.focused_sidebar_path = Some(path.clone());
-                    if path.is_dir() {
-                        this.toggle_sidebar_directory(path.clone(), cx);
-                    } else {
-                        this.open_sidebar_file(path.clone(), cx);
+                cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                    let mods = event.modifiers();
+                    let has_modifier = mods.platform || mods.shift;
+                    this.sidebar_select_item(&path, mods.shift, mods.platform);
+                    // Only open/toggle on plain click (no modifier)
+                    if !has_modifier {
+                        if path.is_dir() {
+                            this.toggle_sidebar_directory(path.clone(), cx);
+                        } else {
+                            this.open_sidebar_file(path.clone(), cx);
+                        }
                     }
+                    cx.notify();
                 })
             })
+            // Drag initiation
+            .on_drag(DraggedSidebarItems { paths: drag_paths }, {
+                let label = drag_label;
+                let count = drag_count;
+                move |_dragged, _offset, _window, cx| {
+                    cx.new(|_cx| DraggedSidebarItemsView {
+                        label: label.clone(),
+                        count,
+                    })
+                }
+            })
+            // Drop target: only directories accept drops
+            .when(is_dir, |el| {
+                let drop_path = path.clone();
+                el.drag_over::<DraggedSidebarItems>(move |style, _dragged, _, _| {
+                    style.bg(drag_over_bg)
+                })
+                .on_drop(cx.listener(
+                    move |this, dragged: &DraggedSidebarItems, _, cx| {
+                        let paths = dragged.paths.clone();
+                        this.sidebar_drag_hover_target = None;
+                        this.sidebar_drag_expand_task = None;
+                        this.move_sidebar_items(paths, drop_path.clone(), cx);
+                    },
+                ))
+            })
+            // Drag-move: track hover target for auto-expand
+            .on_drag_move(cx.listener({
+                let path = path.clone();
+                move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
+                    if is_dir && event.bounds.contains(&event.event.position) {
+                        let new_target = Some(path.clone());
+                        if this.sidebar_drag_hover_target != new_target {
+                            this.sidebar_drag_hover_target = new_target;
+                            // Start auto-expand timer
+                            let expand_path = path.clone();
+                            this.sidebar_drag_expand_task =
+                                Some(cx.spawn(async move |this, cx| {
+                                    cx.background_executor()
+                                        .timer(Duration::from_millis(500))
+                                        .await;
+                                    this.update(cx, |editor, cx| {
+                                        if editor.sidebar_drag_hover_target.as_ref()
+                                            == Some(&expand_path)
+                                        {
+                                            editor.expanded_dirs.insert(expand_path);
+                                            cx.notify();
+                                        }
+                                    })
+                                    .ok();
+                                }));
+                            cx.notify();
+                        }
+                    }
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    // If right-clicking on an unselected item, select only that item
+                    if !this.selected_sidebar_paths.contains(&path) {
+                        this.sidebar_select_item(&path, false, false);
+                    }
                     this.focused_sidebar_path = Some(path.clone());
                     this.open_sidebar_context_menu(path.clone(), is_dir, event.position, cx);
                 }),
@@ -1058,6 +1238,17 @@ impl EditorView {
                             cx.notify();
                         }),
                     )
+                    // Root drop target: drop into sidebar_root
+                    .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)
+                    .on_drop({
+                        let root = self.sidebar_root.clone();
+                        cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
+                            let paths = dragged.paths.clone();
+                            this.sidebar_drag_hover_target = None;
+                            this.sidebar_drag_expand_task = None;
+                            this.move_sidebar_items(paths, root.clone(), cx);
+                        })
+                    })
                     .children(tree_items),
             )
             .when(header_is_sticky, |this| {

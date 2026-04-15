@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point, RenderImage, ScrollHandle,
-    SharedString, Task, WrappedLine,
+    ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point, Render, RenderImage,
+    ScrollHandle, SharedString, Task, WrappedLine,
 };
 
 use crate::actions::*;
@@ -239,6 +239,42 @@ pub(crate) struct FileClipboard {
     pub is_cut: bool,
 }
 
+// ── Sidebar drag-and-drop types ─────────────────────────────────────
+
+#[derive(Clone)]
+pub(crate) struct DraggedSidebarItems {
+    pub paths: Vec<PathBuf>,
+}
+
+pub(crate) struct DraggedSidebarItemsView {
+    pub label: String,
+    pub count: usize,
+}
+
+impl Render for DraggedSidebarItemsView {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{div, prelude::*, px};
+        let text = if self.count > 1 {
+            format!("{} (+{})", self.label, self.count - 1)
+        } else {
+            self.label.clone()
+        };
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .bg(gpui::rgb(0x2d2d2d))
+            .text_color(gpui::rgb(0xcccccc))
+            .text_size(px(13.0))
+            .rounded(px(4.0))
+            .shadow_md()
+            .child(text)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum DialogAction {
     CloseTabUnsaved { tab_id: String },
@@ -310,7 +346,8 @@ pub struct EditorView {
     pub(crate) redo_stack: Vec<EditorSnapshot>,
     pub(crate) sidebar_root: PathBuf,
     pub(crate) expanded_dirs: HashSet<PathBuf>,
-    pub(crate) selected_sidebar_path: Option<PathBuf>,
+    /// 多选：所有选中的 sidebar 路径
+    pub(crate) selected_sidebar_paths: HashSet<PathBuf>,
     pub(crate) current_file_path: Option<PathBuf>,
     pub(crate) sidebar_error: Option<String>,
     pub(crate) tabs: Vec<OpenTab>,
@@ -341,7 +378,14 @@ pub struct EditorView {
     pub(crate) editor_left_aligned: bool,
     pub(crate) tab_dragging_id: Option<String>,
     pub(crate) dialog: Option<Dialog>,
+    /// 多选：最后一个选中的 focus 路径
     pub(crate) focused_sidebar_path: Option<PathBuf>,
+    /// 多选锚点（shift 连续选择的起点）
+    pub(crate) sidebar_selection_anchor: Option<PathBuf>,
+    /// 拖拽悬停的目标目录（用于高亮和自动展开）
+    pub(crate) sidebar_drag_hover_target: Option<PathBuf>,
+    /// 拖拽悬停自动展开的延迟 task
+    pub(crate) sidebar_drag_expand_task: Option<Task<()>>,
     pub(crate) sidebar_scroll_handle: ScrollHandle,
     pub(crate) workspaces: Vec<PathBuf>,
     pub(crate) _watcher_task: Option<Task<()>>,
@@ -404,7 +448,7 @@ impl EditorView {
             redo_stack: Vec::new(),
             sidebar_root: sidebar_root.clone(),
             expanded_dirs,
-            selected_sidebar_path: None,
+            selected_sidebar_paths: HashSet::new(),
             current_file_path: None,
             sidebar_error,
             tabs: vec![OpenTab {
@@ -443,6 +487,9 @@ impl EditorView {
             tab_dragging_id: None,
             dialog: None,
             focused_sidebar_path: None,
+            sidebar_selection_anchor: None,
+            sidebar_drag_hover_target: None,
+            sidebar_drag_expand_task: None,
             sidebar_scroll_handle: ScrollHandle::new(),
             workspaces: vec![sidebar_root.clone()],
             _watcher_task: None,

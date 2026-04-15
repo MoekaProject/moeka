@@ -473,7 +473,8 @@ impl EditorView {
             ));
         }
         items.push(self.render_context_menu_separator());
-        {
+        // Rename: only for single selection
+        if self.selected_sidebar_paths.len() <= 1 {
             let p = path.clone();
             items.push(self.render_context_menu_item(
                 "重命名",
@@ -485,27 +486,84 @@ impl EditorView {
             ));
         }
         {
-            let p = path.clone();
-            items.push(
-                self.render_context_menu_item("删除", true, cx, move |this, _, cx| {
-                    this.delete_path(p.clone(), cx);
-                }),
-            );
+            let selected: Vec<std::path::PathBuf> =
+                self.selected_sidebar_paths.iter().cloned().collect();
+            let count = selected.len();
+            let delete_label = if count > 1 {
+                format!("删除 ({count} 项)")
+            } else {
+                "删除".to_string()
+            };
+            items.push(self.render_context_menu_item(
+                &delete_label,
+                true,
+                cx,
+                move |this, _, cx| {
+                    if selected.len() == 1 {
+                        this.delete_path(selected[0].clone(), cx);
+                    } else {
+                        // Delete all selected paths
+                        for p in &selected {
+                            let result = if p.is_dir() {
+                                std::fs::remove_dir_all(p)
+                            } else {
+                                std::fs::remove_file(p)
+                            };
+                            if let Err(e) = result {
+                                eprintln!("Delete failed: {e}");
+                            }
+                        }
+                        this.tabs.retain(|tab| {
+                            tab.path
+                                .as_ref()
+                                .is_none_or(|tp| !selected.iter().any(|sp| tp.starts_with(sp)))
+                        });
+                        if this.tabs.is_empty() {
+                            this.create_scratch_tab(cx);
+                            return;
+                        }
+                        let active_still_exists = this
+                            .active_tab_id
+                            .as_ref()
+                            .is_some_and(|id| this.tabs.iter().any(|t| &t.id == id));
+                        if !active_still_exists {
+                            this.activate_tab_by_index(0, cx);
+                        }
+                        this.selected_sidebar_paths.clear();
+                        this.context_menu = None;
+                        cx.notify();
+                    }
+                },
+            ));
         }
         items.push(self.render_context_menu_separator());
         {
-            let p = path.clone();
+            let selected: Vec<std::path::PathBuf> =
+                self.selected_sidebar_paths.iter().cloned().collect();
+            let paths = if selected.is_empty() {
+                vec![path.clone()]
+            } else {
+                selected
+            };
+            let cut_paths = paths.clone();
             items.push(
                 self.render_context_menu_item("剪切", false, cx, move |this, _, cx| {
-                    this.cut_path(p.clone(), cx);
+                    this.file_clipboard = Some(FileClipboard {
+                        paths: cut_paths.clone(),
+                        is_cut: true,
+                    });
+                    this.context_menu = None;
+                    cx.notify();
                 }),
             );
-        }
-        {
-            let p = path.clone();
             items.push(
                 self.render_context_menu_item("复制", false, cx, move |this, _, cx| {
-                    this.copy_path(p.clone(), cx);
+                    this.file_clipboard = Some(FileClipboard {
+                        paths: paths.clone(),
+                        is_cut: false,
+                    });
+                    this.context_menu = None;
+                    cx.notify();
                 }),
             );
         }
