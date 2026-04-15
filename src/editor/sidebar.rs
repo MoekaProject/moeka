@@ -1,8 +1,9 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent, SharedString,
-    Transformation, div, img, prelude::*, px, radians, svg,
+    AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, SharedString, Transformation,
+    div, img, prelude::*, px, radians, svg,
 };
 
 use super::*;
@@ -341,17 +342,55 @@ impl EditorView {
                 .await;
             if let Some(path) = maybe_path {
                 this.update(cx, |editor, cx| {
-                    editor.sidebar_root = path.clone();
-                    editor.expanded_dirs.clear();
-                    editor.expanded_dirs.insert(path.clone());
-                    editor.sidebar_error = None;
-                    editor.start_watching(cx);
-                    cx.notify();
+                    if !editor.workspaces.contains(&path) {
+                        editor.workspaces.push(path.clone());
+                    }
+                    editor.switch_workspace(path, cx);
                 })
                 .ok();
             }
         })
         .detach();
+    }
+
+    pub(crate) fn switch_workspace(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.sidebar_root = path.clone();
+        self.expanded_dirs.clear();
+        self.expanded_dirs.insert(path);
+        self.sidebar_error = None;
+        self.context_menu = None;
+        self.start_watching(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn close_workspace(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.workspaces.retain(|w| w != path);
+        if self.sidebar_root == path {
+            if let Some(first) = self.workspaces.first().cloned() {
+                self.switch_workspace(first, cx);
+            } else {
+                self.sidebar_root = PathBuf::new();
+                self.expanded_dirs.clear();
+                self.sidebar_error = Some("No workspace selected".to_string());
+                self.context_menu = None;
+                cx.notify();
+            }
+        } else {
+            self.context_menu = None;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn open_workspace_menu(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = Some(ContextMenu {
+            position,
+            kind: ContextMenuKind::Workspace,
+        });
+        cx.notify();
     }
 
     pub(crate) fn sidebar_edit_append(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -511,6 +550,7 @@ impl EditorView {
             MARKDOWN_SVG_PATH
         };
 
+        let focus_border_color = ss.sidebar_item_focus_border_color;
         div()
             .w_full()
             .h(px(self.scaled(ss.sidebar_item_height_px)))
@@ -518,6 +558,8 @@ impl EditorView {
             .flex()
             .items_center()
             .bg(ss.sidebar_item_selected_bg)
+            .border_1()
+            .border_color(focus_border_color)
             .child(
                 div()
                     .w_full()
@@ -557,13 +599,31 @@ impl EditorView {
                         div()
                             .flex_1()
                             .min_w(px(0.0))
-                            .text_size(px(self.scaled(ss.sidebar_item_font_size_px)))
-                            .text_color(text_color)
-                            .truncate()
-                            .child(if value.is_empty() {
-                                SharedString::from("Name…")
-                            } else {
-                                SharedString::from(format!("{value}|"))
+                            .flex()
+                            .items_center()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .text_size(px(self.scaled(ss.sidebar_item_font_size_px)))
+                                    .text_color(text_color)
+                                    .child(if value.is_empty() {
+                                        SharedString::from("名称...")
+                                    } else {
+                                        SharedString::from(value.to_string())
+                                    }),
+                            )
+                            .when(!value.is_empty() || true, |this| {
+                                let cursor_color = self.styles.cursor.cursor_color;
+                                let cursor_width = self.styles.cursor.cursor_width_px;
+                                let cursor_height = self.scaled(ss.sidebar_item_font_size_px);
+                                let cursor_opacity = self.cursor_opacity;
+                                this.child(
+                                    div()
+                                        .w(px(cursor_width))
+                                        .h(px(cursor_height))
+                                        .bg(cursor_color)
+                                        .opacity(cursor_opacity),
+                                )
                             }),
                     ),
             )
@@ -577,6 +637,7 @@ impl EditorView {
     pub(crate) fn render_sidebar_item(
         &self,
         item: SidebarItem,
+        active_guide_levels: &HashSet<usize>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(SidebarEditMode::Rename {
@@ -621,28 +682,39 @@ impl EditorView {
         };
         let is_focused = self.focused_sidebar_path.as_deref() == Some(path.as_path());
         let focus_border_color = ss.sidebar_item_focus_border_color;
+        let active_border_color = ss.sidebar_item_active_border_color;
         let item_hover_bg = ss.sidebar_item_hover_bg;
 
-        // Build indent guide lines (thin vertical strips for each ancestor level)
+        // Build indent guide lines (dashed vertical strips for levels with siblings below)
         let guide_color = ss.sidebar_indent_guide_color;
+        let guide_width = ss.sidebar_indent_guide_width_px;
+        let dash_len = self.scaled(ss.sidebar_indent_guide_dash_length_px);
+        let gap_len = self.scaled(ss.sidebar_indent_guide_gap_length_px);
         let indent_base = ss.sidebar_item_indent_base_px;
         let indent_step = ss.sidebar_item_indent_step_px;
         let item_height = self.scaled(ss.sidebar_item_height_px);
         let fold_w = self.scaled(ss.sidebar_item_fold_container_width_px);
         let guides: Vec<gpui::AnyElement> = (1..item.depth)
-            .map(|level| {
+            .filter(|level| active_guide_levels.contains(level))
+            .flat_map(|level| {
                 let guide_x = self
                     .scaled((indent_base + level as f32 * indent_step - shift).max(0.0))
                     + fold_w / 2.0
-                    - 0.5;
-                div()
-                    .absolute()
-                    .left(px(guide_x))
-                    .top(px(0.0))
-                    .w(px(1.0))
-                    .h(px(item_height))
-                    .bg(guide_color)
-                    .into_any_element()
+                    - guide_width / 2.0;
+                let segment_step = dash_len + gap_len;
+                let count = (item_height / segment_step).ceil() as usize;
+                (0..count).map(move |i| {
+                    let y = i as f32 * segment_step;
+                    let h = dash_len.min(item_height - y);
+                    div()
+                        .absolute()
+                        .left(px(guide_x))
+                        .top(px(y))
+                        .w(px(guide_width))
+                        .h(px(h))
+                        .bg(guide_color)
+                        .into_any_element()
+                })
             })
             .collect();
 
@@ -655,8 +727,13 @@ impl EditorView {
             .flex()
             .items_center()
             .bg(row_bg)
-            .when(is_focused, move |this| {
-                this.border_1().border_color(focus_border_color)
+            .border_1()
+            .border_color(if is_selected {
+                active_border_color
+            } else if is_focused {
+                focus_border_color
+            } else {
+                gpui::transparent_black()
             })
             .when(!self.sidebar_resizing, |this| {
                 this.hover(move |style| style.bg(item_hover_bg))
@@ -859,9 +936,36 @@ impl EditorView {
                 matches!(&self.sidebar_edit, Some(SidebarEditMode::CreateDir { .. }));
 
             let items = self.sidebar_items();
+
+            // Pre-compute which indent levels have a sibling below for each item.
+            // A guide at level L is shown for item[i] if there exists a later item[j] (j > i)
+            // with depth == L (a sibling at that level), meaning the vertical line continues.
+            // We walk backwards to efficiently compute this.
+            let mut next_at_depth: HashMap<usize, usize> = HashMap::new();
+            let mut item_guide_levels: Vec<HashSet<usize>> = vec![HashSet::new(); items.len()];
+            for i in (0..items.len()).rev() {
+                let depth = items[i].depth;
+                next_at_depth.insert(depth, i);
+                // For item[i], collect all levels L in 1..depth where
+                // the next item at level L exists after i
+                let mut levels = HashSet::new();
+                for level in 1..depth {
+                    if let Some(&next_idx) = next_at_depth.get(&level) {
+                        if next_idx > i {
+                            levels.insert(level);
+                        }
+                    }
+                }
+                item_guide_levels[i] = levels;
+            }
+
             let mut injected = false;
-            for item in items {
-                tree_items.push(self.render_sidebar_item(item.clone(), cx));
+            for (idx, item) in items.iter().enumerate() {
+                tree_items.push(self.render_sidebar_item(
+                    item.clone(),
+                    &item_guide_levels[idx],
+                    cx,
+                ));
                 if let Some(ref parent) = create_parent {
                     if !injected && item.is_dir && &item.path == parent {
                         let depth = create_depth.unwrap_or(1);
@@ -902,6 +1006,9 @@ impl EditorView {
                 .into_any_element(),
         );
 
+        // Header inside scrollable area (right after logo, before items)
+        tree_items.insert(1, header.into_any_element());
+
         tree_items.push(
             div()
                 .w_full()
@@ -910,6 +1017,13 @@ impl EditorView {
                 .into_any_element(),
         );
 
+        // Determine if header should be shown as sticky overlay.
+        // The logo area height is how far the header is from the top of scroll content.
+        let logo_area_height =
+            self.scaled(ss.sidebar_logo_size_px + 2.0 * ss.sidebar_logo_padding_y_px);
+        let scroll_y = -f32::from(self.sidebar_scroll_handle.offset().y);
+        let header_is_sticky = scroll_y >= logo_area_height;
+
         div()
             .id("sidebar")
             .w(px(self.sidebar_width()))
@@ -917,15 +1031,113 @@ impl EditorView {
             .flex_none()
             .flex()
             .flex_col()
+            .relative()
             .bg(ss.sidebar_bg)
+            .border_r(px(ss.sidebar_resize_indicator_width_px))
+            .border_color(ss.sidebar_resize_indicator_color)
             .child(top_spacer)
-            .child(header)
             .child(
                 div()
                     .id("sidebar-tree")
                     .flex_1()
                     .overflow_y_scroll()
+                    .track_scroll(&self.sidebar_scroll_handle)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.focused_sidebar_path = None;
+                            cx.notify();
+                        }),
+                    )
                     .children(tree_items),
+            )
+            .when(header_is_sticky, |this| {
+                let sticky_header_hover_bg = ss.sidebar_header_hover_bg;
+                let sticky_root_name = self.sidebar_root_name().to_uppercase();
+                this.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(self.scaled(ss.sidebar_top_spacer_height_px)))
+                        .w_full()
+                        .h(px(self.scaled(ss.sidebar_header_height_px)))
+                        .bg(ss.sidebar_bg)
+                        .px(px(self.scaled(ss.sidebar_header_padding_right_px)))
+                        .pl(px(self.scaled(ss.sidebar_header_padding_left_px)))
+                        .flex()
+                        .items_center()
+                        .gap(px(self.scaled(ss.sidebar_header_gap_px)))
+                        .flex_none()
+                        .hover(move |s| s.bg(sticky_header_hover_bg))
+                        .child(
+                            svg()
+                                .path(ROOT_SVG_PATH)
+                                .size(px(self.scaled(ss.sidebar_header_icon_size_px)))
+                                .text_color(ss.sidebar_header_icon_color),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
+                                .text_color(ss.sidebar_header_text_color)
+                                .overflow_hidden()
+                                .child(sticky_root_name),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.pick_workspace_folder(cx);
+                            }),
+                        ),
+                )
+            })
+            .child(self.render_workspace_bar(cx))
+            .into_any_element()
+    }
+
+    fn render_workspace_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let wss = &self.styles.workspace_switcher;
+        let ws_name = self.sidebar_root_name().to_uppercase();
+        let hover_bg = wss.ws_bar_hover_bg;
+
+        div()
+            .id("workspace-bar")
+            .w_full()
+            .h(px(self.scaled(wss.ws_bar_height_px)))
+            .flex_none()
+            .flex()
+            .items_center()
+            .px(px(self.scaled(wss.ws_bar_padding_x_px)))
+            .gap(px(self.scaled(wss.ws_bar_gap_px)))
+            .bg(wss.ws_bar_bg)
+            .border_t(px(1.0))
+            .border_color(wss.ws_bar_border_color)
+            .cursor(CursorStyle::Arrow)
+            .hover(move |s| s.bg(hover_bg))
+            .child(
+                svg()
+                    .path(WORKSPACE_EXPAND_SVG_PATH)
+                    .size(px(self.scaled(wss.ws_bar_icon_size_px)))
+                    .text_color(wss.ws_bar_icon_color),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .text_size(px(self.scaled(wss.ws_bar_font_size_px)))
+                    .text_color(wss.ws_bar_text_color)
+                    .truncate()
+                    .child(ws_name),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    let pos = event.position;
+                    // Menu should appear above the bar, so offset upward
+                    let menu_pos = gpui::point(pos.x, pos.y - gpui::px(20.0));
+                    this.open_workspace_menu(menu_pos, cx);
+                }),
             )
             .into_any_element()
     }

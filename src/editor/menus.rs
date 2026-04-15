@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use gpui::{AnyElement, Context, CursorStyle, MouseButton, Pixels, Point, div, prelude::*, px};
+use gpui::{AnyElement, Context, CursorStyle, MouseButton, Pixels, Point, SharedString, div, prelude::*, px, svg};
 
 use super::*;
 
@@ -263,7 +263,9 @@ impl EditorView {
             ms.menu_item_text_color
         };
         let hover_bg = ms.menu_item_hover_bg;
+        let item_id = SharedString::from(format!("menu-item-{}", label));
         div()
+            .id(item_id)
             .w_full()
             .h(px(ms.menu_item_height_px))
             .px(px(ms.menu_item_padding_x_px))
@@ -358,7 +360,7 @@ impl EditorView {
         {
             let pd = parent_dir.clone();
             items.push(
-                self.render_context_menu_item("New File", false, cx, move |this, _, cx| {
+                self.render_context_menu_item("新建文件", false, cx, move |this, _, cx| {
                     this.start_create_file(pd.clone(), cx);
                 }),
             );
@@ -366,7 +368,7 @@ impl EditorView {
         {
             let pd = parent_dir.clone();
             items.push(self.render_context_menu_item(
-                "New Folder",
+                "新建文件夹",
                 false,
                 cx,
                 move |this, _, cx| {
@@ -378,7 +380,7 @@ impl EditorView {
         {
             let p = path.clone();
             items.push(
-                self.render_context_menu_item("Rename", false, cx, move |this, _, cx| {
+                self.render_context_menu_item("重命名", false, cx, move |this, _, cx| {
                     this.start_rename(p.clone(), cx);
                 }),
             );
@@ -386,7 +388,7 @@ impl EditorView {
         {
             let p = path.clone();
             items.push(
-                self.render_context_menu_item("Delete", true, cx, move |this, _, cx| {
+                self.render_context_menu_item("删除", true, cx, move |this, _, cx| {
                     this.delete_path(p.clone(), cx);
                 }),
             );
@@ -395,7 +397,7 @@ impl EditorView {
         {
             let p = path.clone();
             items.push(
-                self.render_context_menu_item("Cut", false, cx, move |this, _, cx| {
+                self.render_context_menu_item("剪切", false, cx, move |this, _, cx| {
                     this.cut_path(p.clone(), cx);
                 }),
             );
@@ -403,7 +405,7 @@ impl EditorView {
         {
             let p = path.clone();
             items.push(
-                self.render_context_menu_item("Copy", false, cx, move |this, _, cx| {
+                self.render_context_menu_item("复制", false, cx, move |this, _, cx| {
                     this.copy_path(p.clone(), cx);
                 }),
             );
@@ -411,7 +413,7 @@ impl EditorView {
         if has_clipboard {
             let pd = parent_dir.clone();
             items.push(
-                self.render_context_menu_item("Paste", false, cx, move |this, _, cx| {
+                self.render_context_menu_item("粘贴", false, cx, move |this, _, cx| {
                     this.paste_into_dir(pd.clone(), cx);
                 }),
             );
@@ -420,7 +422,7 @@ impl EditorView {
         {
             let p = path.clone();
             items.push(self.render_context_menu_item(
-                "Reveal in Finder",
+                "在访达中显示",
                 false,
                 cx,
                 move |this, _, _cx| {
@@ -590,7 +592,7 @@ impl EditorView {
                 {
                     let id = tab_id.clone();
                     items.push(self.render_context_menu_item(
-                        "Close",
+                        "关闭",
                         false,
                         cx,
                         move |this, _, cx| {
@@ -601,7 +603,7 @@ impl EditorView {
                 {
                     let id = tab_id.clone();
                     items.push(self.render_context_menu_item(
-                        "Close Others",
+                        "关闭其他",
                         false,
                         cx,
                         move |this, _, cx| {
@@ -612,7 +614,7 @@ impl EditorView {
                 {
                     let id = tab_id.clone();
                     items.push(self.render_context_menu_item(
-                        "Close Right",
+                        "关闭右侧",
                         false,
                         cx,
                         move |this, _, cx| {
@@ -622,7 +624,7 @@ impl EditorView {
                 }
                 items.push(self.render_context_menu_separator());
                 items.push(self.render_context_menu_item(
-                    "Close Saved",
+                    "关闭已保存",
                     false,
                     cx,
                     move |this, _, cx| {
@@ -634,21 +636,161 @@ impl EditorView {
                     self.scaled(self.styles.context_menu.menu_tab_width_px),
                 )
             }
+            ContextMenuKind::Workspace => {
+                let mut items = Vec::new();
+                let wss = &self.styles.workspace_switcher;
+                let current_root = self.sidebar_root.clone();
+                let check_color = wss.ws_menu_item_check_color;
+                let check_size = self.scaled(wss.ws_menu_item_check_size_px);
+                let close_color = wss.ws_menu_item_close_color;
+                let close_hover_color = wss.ws_menu_item_close_hover_color;
+                let close_size = self.scaled(wss.ws_menu_item_close_size_px);
+                let ms = &self.styles.context_menu;
+                let hover_bg = ms.menu_item_hover_bg;
+                let text_color = ms.menu_item_text_color;
+
+                for workspace in self.workspaces.clone() {
+                    let ws_name = workspace
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| workspace.display().to_string())
+                        .to_uppercase();
+                    let is_current = workspace == current_root;
+                    let ws_switch = workspace.clone();
+                    let ws_close = workspace.clone();
+                    let item_id = SharedString::from(format!("ws-{}", ws_name));
+                    let close_btn_id = SharedString::from(format!("ws-close-{}", ws_name));
+
+                    items.push(
+                        div()
+                            .id(item_id)
+                            .w_full()
+                            .h(px(self.scaled(ms.menu_item_height_px)))
+                            .px(px(self.scaled(ms.menu_item_padding_x_px)))
+                            .flex()
+                            .items_center()
+                            .gap(px(self.scaled(4.0)))
+                            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
+                            .text_color(text_color)
+                            .hover(move |s| s.bg(hover_bg))
+                            .cursor(CursorStyle::Arrow)
+                            .child(
+                                div()
+                                    .w(px(check_size))
+                                    .h(px(check_size))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .flex_none()
+                                    .when(is_current, |this| {
+                                        this.child(
+                                            svg()
+                                                .path(CHECK_SVG_PATH)
+                                                .size(px(check_size))
+                                                .text_color(check_color),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .truncate()
+                                    .child(ws_name),
+                            )
+                            .child(
+                                div()
+                                    .id(close_btn_id)
+                                    .w(px(close_size))
+                                    .h(px(close_size))
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .text_size(px(self.scaled(10.0)))
+                                    .text_color(close_color)
+                                    .hover(move |s| {
+                                        s.text_color(close_hover_color).bg(hover_bg)
+                                    })
+                                    .child("✕")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.close_workspace(&ws_close, cx);
+                                        }),
+                                    ),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.switch_workspace(ws_switch.clone(), cx);
+                                }),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                items.push(self.render_context_menu_separator());
+                items.push(self.render_context_menu_item(
+                    "打开 Workspace ...",
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.pick_workspace_folder(cx);
+                    },
+                ));
+                (
+                    items,
+                    self.scaled(wss.ws_menu_width_px),
+                )
+            }
         };
 
         let ms = &self.styles.context_menu;
-        let max_menu_height = if self.last_viewport_height > 0.0 {
-            (self.last_viewport_height - pos_y - self.scaled(ms.menu_max_height_margin_px))
-                .max(self.scaled(100.0))
-        } else {
-            self.scaled(400.0)
-        };
+
+        // Estimate total menu height from items
+        let item_count = items.len();
+        let estimated_item_height = self.scaled(ms.menu_item_height_px);
+        let menu_padding = self.scaled(ms.menu_padding_y_px) * 2.0;
+        let estimated_menu_height = item_count as f32 * estimated_item_height + menu_padding;
+
+        let viewport_w = self.last_viewport_width;
+        let viewport_h = self.last_viewport_height;
+        let margin = self.scaled(ms.menu_max_height_margin_px).max(8.0);
+
+        // Adjust horizontal: prefer right of click, flip left if overflows
+        let mut final_x = pos_x;
+        if final_x + width > viewport_w - margin {
+            final_x = (pos_x - width).max(margin);
+        }
+
+        // Adjust vertical: prefer below click, flip above if overflows
+        let mut final_y = pos_y;
+        let mut max_menu_height = (viewport_h - final_y - margin).max(self.scaled(100.0));
+        if estimated_menu_height > max_menu_height {
+            // Try flipping above the click position
+            let above_y = pos_y - estimated_menu_height;
+            if above_y >= margin {
+                final_y = above_y;
+                max_menu_height = estimated_menu_height;
+            } else {
+                // Can't fit above either — pick the side with more room and scroll
+                let space_below = viewport_h - pos_y - margin;
+                let space_above = pos_y - margin;
+                if space_above > space_below {
+                    final_y = margin;
+                    max_menu_height = space_above;
+                }
+                // else keep original position (below) with scroll
+            }
+        }
 
         let mut menu_div = div()
             .id("context-menu")
             .absolute()
-            .left(px(pos_x))
-            .top(px(pos_y))
+            .left(px(final_x))
+            .top(px(final_y))
             .w(px(width))
             .max_h(px(max_menu_height))
             .overflow_y_scroll()
@@ -667,6 +809,12 @@ impl EditorView {
                 MouseButton::Left,
                 cx.listener(|_this, _event, _window, _cx| {}),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_this, _event, _window, _cx| {}),
+            )
+            .on_mouse_move(cx.listener(|_this, _event, _window, _cx| {}))
+            .on_scroll_wheel(cx.listener(|_this, _event, _window, _cx| {}))
             .into_any_element()
     }
 }

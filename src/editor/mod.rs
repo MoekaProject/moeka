@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point, RenderImage, SharedString, Task,
-    WrappedLine,
+    ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point, RenderImage, ScrollHandle,
+    SharedString, Task, WrappedLine,
 };
 
 use crate::actions::*;
@@ -107,6 +107,10 @@ pub(crate) const MARKDOWN_SVG_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/icons/filetree/markdown.svg"
 );
+pub(crate) const WORKSPACE_EXPAND_SVG_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/icons/filetree/workspace-expand.svg"
+);
 
 // ── UI constants ────────────────────────────────────────────────────
 // NOTE: UI dimension constants are now in style.rs.
@@ -150,6 +154,7 @@ pub(crate) enum ContextMenuKind {
     Sidebar { path: PathBuf, is_dir: bool },
     Format,
     Tab { tab_id: String },
+    Workspace,
 }
 
 #[derive(Clone, Copy)]
@@ -296,6 +301,8 @@ pub struct EditorView {
     pub(crate) tab_dragging_id: Option<String>,
     pub(crate) dialog: Option<Dialog>,
     pub(crate) focused_sidebar_path: Option<PathBuf>,
+    pub(crate) sidebar_scroll_handle: ScrollHandle,
+    pub(crate) workspaces: Vec<PathBuf>,
     pub(crate) _watcher_task: Option<Task<()>>,
 }
 
@@ -344,7 +351,7 @@ impl EditorView {
             image_cache: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            sidebar_root,
+            sidebar_root: sidebar_root.clone(),
             expanded_dirs,
             selected_sidebar_path: None,
             current_file_path: None,
@@ -385,6 +392,8 @@ impl EditorView {
             tab_dragging_id: None,
             dialog: None,
             focused_sidebar_path: None,
+            sidebar_scroll_handle: ScrollHandle::new(),
+            workspaces: vec![sidebar_root.clone()],
             _watcher_task: None,
         };
         this.start_blinking(cx);

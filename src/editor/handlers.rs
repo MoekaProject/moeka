@@ -27,6 +27,11 @@ impl EditorView {
         }
         if self.context_menu.is_some() {
             self.close_context_menu(cx);
+            return;
+        }
+        if self.focused_sidebar_path.is_some() {
+            self.focused_sidebar_path = None;
+            cx.notify();
         }
     }
 

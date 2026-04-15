@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, SharedString, Window, div,
-    prelude::*, px, svg,
+    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, SharedString, div, prelude::*,
+    px, svg,
 };
 
 use super::*;
@@ -200,6 +200,7 @@ impl EditorView {
 
         div()
             .id(SharedString::from(format!("tab-{}", tab.id)))
+            .group("tab-item")
             .h(px(self.tab_bar_height()))
             .min_w(px(self.scaled(ts.tab_item_min_width_px)))
             .max_w(px(self.scaled(ts.tab_item_max_width_px)))
@@ -276,11 +277,10 @@ impl EditorView {
                             } else {
                                 ts.tab_item_close_inactive_opacity
                             })
-                            .hover(move |style| {
-                                style
-                                    .bg(close_hover_bg)
-                                    .opacity(ts.tab_item_close_active_opacity)
+                            .group_hover("tab-item", |style| {
+                                style.opacity(ts.tab_item_close_active_opacity)
                             })
+                            .hover(move |style| style.bg(close_hover_bg))
                             .child("✕")
                     })
                     .on_mouse_down(
@@ -401,11 +401,15 @@ impl EditorView {
             .overflow_x_scroll()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
-                    if event.click_count >= 2 {
-                        window.zoom_window();
-                    } else {
-                        super::perform_window_drag(window);
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.focused_sidebar_path = None;
+                    // Only drag window if the click was not on a tab (which sets tab_dragging_id)
+                    if this.tab_dragging_id.is_none() {
+                        if event.click_count >= 2 {
+                            window.zoom_window();
+                        } else {
+                            super::perform_window_drag(window);
+                        }
                     }
                 }),
             )

@@ -31,6 +31,7 @@ pub struct Styles {
     pub ime: ImeStyles,
     pub image_preview: ImagePreviewStyles,
     pub dialog: DialogStyles,
+    pub workspace_switcher: WorkspaceSwitcherStyles,
 }
 
 // ── Window ──────────────────────────────────────────────────────────
@@ -143,8 +144,13 @@ pub struct SidebarStyles {
     pub sidebar_resize_max_width_px: f32,
     // Indent alignment guides
     pub sidebar_indent_guide_color: Hsla,
+    pub sidebar_indent_guide_width_px: f32,
+    pub sidebar_indent_guide_dash_length_px: f32,
+    pub sidebar_indent_guide_gap_length_px: f32,
     // Focus ring
     pub sidebar_item_focus_border_color: Hsla,
+    // Active border (selected item)
+    pub sidebar_item_active_border_color: Hsla,
 }
 
 // ── Tab Bar ─────────────────────────────────────────────────────────
@@ -208,6 +214,9 @@ pub struct ToolbarStyles {
     pub toolbar_secondary_btn_size_px: f32,
     pub toolbar_secondary_icon_size_px: f32,
     pub toolbar_secondary_hover_opacity: f32,
+    pub toolbar_btn_shadow: bool,
+    pub toolbar_btn_bg: Hsla,
+    pub toolbar_btn_radius_px: f32,
 }
 
 // ── Cursor ──────────────────────────────────────────────────────────
@@ -399,6 +408,28 @@ pub struct ContextMenuStyles {
     pub menu_tab_width_px: f32,
 }
 
+// ── Workspace Switcher ──────────────────────────────────────────────
+
+pub struct WorkspaceSwitcherStyles {
+    pub ws_bar_height_px: f32,
+    pub ws_bar_bg: Hsla,
+    pub ws_bar_border_color: Hsla,
+    pub ws_bar_padding_x_px: f32,
+    pub ws_bar_gap_px: f32,
+    pub ws_bar_icon_size_px: f32,
+    pub ws_bar_icon_color: Hsla,
+    pub ws_bar_font_size_px: f32,
+    pub ws_bar_text_color: Hsla,
+    pub ws_bar_hover_bg: Hsla,
+    // Workspace menu items
+    pub ws_menu_width_px: f32,
+    pub ws_menu_item_check_size_px: f32,
+    pub ws_menu_item_check_color: Hsla,
+    pub ws_menu_item_close_size_px: f32,
+    pub ws_menu_item_close_color: Hsla,
+    pub ws_menu_item_close_hover_color: Hsla,
+}
+
 // ═════════════════════════════════════════════════════════════════════
 // Construction
 // ═════════════════════════════════════════════════════════════════════
@@ -494,8 +525,12 @@ impl Styles {
                 sidebar_resize_active_indicator_color: theme.text_accent,
                 sidebar_resize_min_width_px: 140.0,
                 sidebar_resize_max_width_px: 600.0,
-                sidebar_indent_guide_color: with_alpha(theme.border_secondary, 0.5),
+                sidebar_indent_guide_color: with_alpha(theme.border_secondary, 0.25),
+                sidebar_indent_guide_width_px: 1.0,
+                sidebar_indent_guide_dash_length_px: 3.0,
+                sidebar_indent_guide_gap_length_px: 3.0,
                 sidebar_item_focus_border_color: with_alpha(theme.text_accent, 0.6),
+                sidebar_item_active_border_color: theme.text_accent,
             },
             tab_bar: TabBarStyles {
                 tab_bar_height_px: 38.0,
@@ -544,6 +579,9 @@ impl Styles {
                 toolbar_secondary_btn_size_px: 30.0,
                 toolbar_secondary_icon_size_px: 30.0,
                 toolbar_secondary_hover_opacity: 0.9,
+                toolbar_btn_shadow: true,
+                toolbar_btn_bg: with_alpha(theme.bg_elevated, 0.85),
+                toolbar_btn_radius_px: 8.0,
             },
             cursor: CursorStyles {
                 cursor_color: theme.cursor,
@@ -677,6 +715,24 @@ impl Styles {
                 dialog_btn_danger_bg: theme.text_danger,
                 dialog_btn_danger_text_color: gpui::white(),
                 dialog_btn_danger_hover_bg: theme.text_danger,
+            },
+            workspace_switcher: WorkspaceSwitcherStyles {
+                ws_bar_height_px: 32.0,
+                ws_bar_bg: gpui::transparent_black(),
+                ws_bar_border_color: theme.border_secondary,
+                ws_bar_padding_x_px: 14.0,
+                ws_bar_gap_px: 6.0,
+                ws_bar_icon_size_px: 14.0,
+                ws_bar_icon_color: theme.text_secondary,
+                ws_bar_font_size_px: 11.0,
+                ws_bar_text_color: theme.text_secondary,
+                ws_bar_hover_bg: theme.bg_hover,
+                ws_menu_width_px: 220.0,
+                ws_menu_item_check_size_px: 12.0,
+                ws_menu_item_check_color: theme.text_accent,
+                ws_menu_item_close_size_px: 14.0,
+                ws_menu_item_close_color: theme.text_secondary,
+                ws_menu_item_close_hover_color: theme.text_primary,
             },
         }
     }
