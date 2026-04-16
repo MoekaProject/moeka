@@ -496,10 +496,6 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.sidebar_edit.is_some() {
-            self.sidebar_edit_append(new_text, cx);
-            return;
-        }
         self.checkpoint();
 
         // Multi-cursor text input

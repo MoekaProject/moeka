@@ -4,6 +4,7 @@ mod cursor;
 mod editor;
 mod markdown;
 mod style;
+mod text_input;
 mod theme;
 
 use std::borrow::Cow;
@@ -153,6 +154,44 @@ fn main() {
             KeyBinding::new("alt-cmd-down", AddCursorBelow, Some("MarkdownEditor")),
             KeyBinding::new("cmd-d", SelectNextOccurrence, Some("MarkdownEditor")),
             KeyBinding::new("cmd-shift-l", SelectAllOccurrences, Some("MarkdownEditor")),
+            // Tab management
+            KeyBinding::new("cmd-w", CloseActiveTab, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-shift-t", ReopenClosedTab, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-shift-[", ActivatePreviousTab, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-shift-]", ActivateNextTab, Some("MarkdownEditor")),
+            // Search
+            KeyBinding::new("cmd-f", Find, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-g", FindNext, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-shift-g", FindPrevious, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-h", ToggleReplace, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-shift-f", FindInFiles, Some("MarkdownEditor")),
+        ]);
+
+        // TextInput keybindings
+        cx.bind_keys([
+            KeyBinding::new("left", text_input::TextInputLeft, Some("TextInput")),
+            KeyBinding::new("right", text_input::TextInputRight, Some("TextInput")),
+            KeyBinding::new("cmd-left", text_input::TextInputHome, Some("TextInput")),
+            KeyBinding::new("cmd-right", text_input::TextInputEnd, Some("TextInput")),
+            KeyBinding::new("shift-left", text_input::TextInputSelectLeft, Some("TextInput")),
+            KeyBinding::new("shift-right", text_input::TextInputSelectRight, Some("TextInput")),
+            KeyBinding::new("shift-cmd-left", text_input::TextInputSelectHome, Some("TextInput")),
+            KeyBinding::new("shift-cmd-right", text_input::TextInputSelectEnd, Some("TextInput")),
+            KeyBinding::new("cmd-a", text_input::TextInputSelectAll, Some("TextInput")),
+            KeyBinding::new("backspace", text_input::TextInputBackspace, Some("TextInput")),
+            KeyBinding::new("delete", text_input::TextInputDelete, Some("TextInput")),
+            KeyBinding::new("alt-backspace", text_input::TextInputDeleteWordLeft, Some("TextInput")),
+            KeyBinding::new("cmd-c", text_input::TextInputCopy, Some("TextInput")),
+            KeyBinding::new("cmd-x", text_input::TextInputCut, Some("TextInput")),
+            KeyBinding::new("cmd-v", text_input::TextInputPaste, Some("TextInput")),
+            KeyBinding::new("alt-left", text_input::TextInputMoveWordLeft, Some("TextInput")),
+            KeyBinding::new("alt-right", text_input::TextInputMoveWordRight, Some("TextInput")),
+            KeyBinding::new("shift-alt-left", text_input::TextInputSelectWordLeft, Some("TextInput")),
+            KeyBinding::new("shift-alt-right", text_input::TextInputSelectWordRight, Some("TextInput")),
+            KeyBinding::new("alt-delete", text_input::TextInputDeleteWordRight, Some("TextInput")),
+            KeyBinding::new("cmd-backspace", text_input::TextInputDeleteToStart, Some("TextInput")),
+            KeyBinding::new("ctrl-k", text_input::TextInputDeleteToEnd, Some("TextInput")),
+            KeyBinding::new("cmd-z", text_input::TextInputUndo, Some("TextInput")),
         ]);
 
         cx.on_action(|_: &Quit, cx| cx.quit());

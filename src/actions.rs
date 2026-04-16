@@ -68,6 +68,22 @@ actions!(
         AddCursorBelow,
         SelectNextOccurrence,
         SelectAllOccurrences,
+        // Tab management
+        CloseActiveTab,
+        ReopenClosedTab,
+        ActivatePreviousTab,
+        ActivateNextTab,
+        PinTab,
+        // Search
+        Find,
+        FindNext,
+        FindPrevious,
+        DismissSearch,
+        ToggleReplace,
+        ReplaceNext,
+        ReplaceAll,
+        // Global search
+        FindInFiles,
     ]
 );
 

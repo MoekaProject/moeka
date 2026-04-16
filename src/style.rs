@@ -33,6 +33,9 @@ pub struct Styles {
     pub image_preview: ImagePreviewStyles,
     pub dialog: DialogStyles,
     pub workspace_switcher: WorkspaceSwitcherStyles,
+    pub text_input: TextInputStyles,
+    pub search: SearchStyles,
+    pub workspace_search: WorkspaceSearchStyles,
 }
 
 // ── Window ──────────────────────────────────────────────────────────
@@ -241,6 +244,21 @@ pub struct TabBarStyles {
     pub tab_new_hover_text_color: Hsla,
     // Left spacer when sidebar is hidden
     pub tab_spacer_width_px: f32,
+    // Tab drag ghost
+    pub tab_drag_ghost_opacity: f32,
+    pub tab_drag_source_opacity: f32,
+    // Tab drop indicator
+    pub tab_drop_indicator_width_px: f32,
+    pub tab_drop_indicator_color: Hsla,
+    // Tab pin
+    pub tab_pin_icon_size_px: f32,
+    pub tab_pin_icon_color: Hsla,
+    pub tab_pinned_width_px: f32,
+    // Tab overflow indicator
+    pub tab_overflow_font_size_px: f32,
+    pub tab_overflow_text_color: Hsla,
+    pub tab_overflow_bg: Hsla,
+    pub tab_overflow_padding_x_px: f32,
 }
 
 // ── Toolbar ─────────────────────────────────────────────────────────
@@ -476,6 +494,115 @@ pub struct WorkspaceSwitcherStyles {
     pub ws_menu_item_close_hover_color: Hsla,
 }
 
+// ── TextInput ───────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct TextInputStyles {
+    pub text_input_height_px: f32,
+    pub text_input_padding_x_px: f32,
+    pub text_input_font_size_px: f32,
+    pub text_input_bg: Hsla,
+    pub text_input_focus_bg: Hsla,
+    pub text_input_text_color: Hsla,
+    pub text_input_placeholder_color: Hsla,
+    pub text_input_border_width_px: f32,
+    pub text_input_border_color: Hsla,
+    pub text_input_focus_border_color: Hsla,
+    pub text_input_radius_px: f32,
+    pub text_input_cursor_color: Hsla,
+    pub text_input_cursor_width_px: f32,
+    pub text_input_selection_color: Hsla,
+}
+
+// ── Search (in-editor buffer search) ────────────────────────────────
+
+pub struct SearchStyles {
+    // Search bar container
+    pub search_bar_width_px: f32,
+    pub search_bar_padding_px: f32,
+    pub search_bar_bg: Hsla,
+    pub search_bar_border_width_px: f32,
+    pub search_bar_border_color: Hsla,
+    pub search_bar_radius_px: f32,
+    pub search_bar_shadow: bool,
+    pub search_bar_gap_px: f32,
+    pub search_bar_offset_top_px: f32,
+    pub search_bar_offset_right_px: f32,
+    // Search option buttons
+    pub search_option_btn_size_px: f32,
+    pub search_option_btn_icon_size_px: f32,
+    pub search_option_btn_radius_px: f32,
+    pub search_option_btn_active_bg: Hsla,
+    pub search_option_btn_hover_bg: Hsla,
+    pub search_option_btn_icon_color: Hsla,
+    pub search_option_btn_active_icon_color: Hsla,
+    // Match counter
+    pub search_counter_font_size_px: f32,
+    pub search_counter_text_color: Hsla,
+    // Navigation buttons
+    pub search_nav_btn_size_px: f32,
+    pub search_nav_btn_icon_size_px: f32,
+    pub search_nav_btn_icon_color: Hsla,
+    pub search_nav_btn_hover_bg: Hsla,
+    // Match highlighting in editor
+    pub search_match_bg: Hsla,
+    pub search_match_active_bg: Hsla,
+    pub search_match_border_width_px: f32,
+    pub search_match_border_color: Hsla,
+    // Scrollbar match markers
+    pub search_scrollbar_marker_width_px: f32,
+    pub search_scrollbar_marker_height_px: f32,
+    pub search_scrollbar_marker_color: Hsla,
+    // Replace
+    pub search_replace_btn_height_px: f32,
+    pub search_replace_btn_padding_x_px: f32,
+    pub search_replace_btn_font_size_px: f32,
+    pub search_replace_btn_bg: Hsla,
+    pub search_replace_btn_text_color: Hsla,
+    pub search_replace_btn_hover_bg: Hsla,
+    // Close button
+    pub search_close_btn_size_px: f32,
+    pub search_close_btn_icon_color: Hsla,
+    pub search_close_btn_hover_bg: Hsla,
+}
+
+// ── Workspace Search (sidebar global search) ────────────────────────
+
+pub struct WorkspaceSearchStyles {
+    // Search area
+    pub ws_search_padding_px: f32,
+    pub ws_search_gap_px: f32,
+    // File group header (sticky)
+    pub ws_search_file_header_height_px: f32,
+    pub ws_search_file_header_bg: Hsla,
+    pub ws_search_file_header_font_size_px: f32,
+    pub ws_search_file_header_text_color: Hsla,
+    pub ws_search_file_header_icon_size_px: f32,
+    pub ws_search_file_header_count_font_size_px: f32,
+    pub ws_search_file_header_count_text_color: Hsla,
+    // Match line item
+    pub ws_search_match_height_px: f32,
+    pub ws_search_match_padding_x_px: f32,
+    pub ws_search_match_font_size_px: f32,
+    pub ws_search_match_text_color: Hsla,
+    pub ws_search_match_highlight_bg: Hsla,
+    pub ws_search_match_highlight_text_color: Hsla,
+    pub ws_search_match_line_number_color: Hsla,
+    pub ws_search_match_hover_bg: Hsla,
+    pub ws_search_match_active_bg: Hsla,
+    // Progress
+    pub ws_search_progress_height_px: f32,
+    pub ws_search_progress_color: Hsla,
+    // Summary
+    pub ws_search_summary_font_size_px: f32,
+    pub ws_search_summary_text_color: Hsla,
+    // Sidebar search icon button
+    pub ws_search_btn_size_px: f32,
+    pub ws_search_btn_icon_size_px: f32,
+    pub ws_search_btn_icon_color: Hsla,
+    pub ws_search_btn_hover_bg: Hsla,
+}
+
 // ═════════════════════════════════════════════════════════════════════
 // Construction
 // ═════════════════════════════════════════════════════════════════════
@@ -646,6 +773,17 @@ impl Styles {
                 tab_new_text_color: theme.text_secondary,
                 tab_new_hover_text_color: theme.text_bright,
                 tab_spacer_width_px: 84.0,
+                tab_drag_ghost_opacity: 0.7,
+                tab_drag_source_opacity: 0.3,
+                tab_drop_indicator_width_px: 2.0,
+                tab_drop_indicator_color: theme.text_accent,
+                tab_pin_icon_size_px: 12.0,
+                tab_pin_icon_color: theme.text_secondary,
+                tab_pinned_width_px: 36.0,
+                tab_overflow_font_size_px: 11.0,
+                tab_overflow_text_color: theme.text_secondary,
+                tab_overflow_bg: theme.bg_tab,
+                tab_overflow_padding_x_px: 6.0,
             },
             toolbar: ToolbarStyles {
                 toolbar_offset_left_px: 15.0,
@@ -815,6 +953,91 @@ impl Styles {
                 ws_menu_item_close_size_px: 14.0,
                 ws_menu_item_close_color: theme.text_secondary,
                 ws_menu_item_close_hover_color: theme.text_primary,
+            },
+            text_input: TextInputStyles {
+                text_input_height_px: 24.0,
+                text_input_padding_x_px: 6.0,
+                text_input_font_size_px: 13.0,
+                text_input_bg: theme.bg_primary,
+                text_input_focus_bg: theme.bg_elevated,
+                text_input_text_color: theme.text_bright,
+                text_input_placeholder_color: theme.text_secondary,
+                text_input_border_width_px: 1.0,
+                text_input_border_color: theme.border_primary,
+                text_input_focus_border_color: theme.text_accent,
+                text_input_radius_px: 4.0,
+                text_input_cursor_color: theme.cursor,
+                text_input_cursor_width_px: 2.0,
+                text_input_selection_color: theme.selection,
+            },
+            search: SearchStyles {
+                search_bar_width_px: 360.0,
+                search_bar_padding_px: 8.0,
+                search_bar_bg: theme.bg_elevated,
+                search_bar_border_width_px: 1.0,
+                search_bar_border_color: theme.border_primary,
+                search_bar_radius_px: 8.0,
+                search_bar_shadow: true,
+                search_bar_gap_px: 6.0,
+                search_bar_offset_top_px: 8.0,
+                search_bar_offset_right_px: 16.0,
+                search_option_btn_size_px: 22.0,
+                search_option_btn_icon_size_px: 14.0,
+                search_option_btn_radius_px: 4.0,
+                search_option_btn_active_bg: theme.bg_selected,
+                search_option_btn_hover_bg: theme.bg_hover,
+                search_option_btn_icon_color: theme.text_secondary,
+                search_option_btn_active_icon_color: theme.text_accent,
+                search_counter_font_size_px: 12.0,
+                search_counter_text_color: theme.text_secondary,
+                search_nav_btn_size_px: 22.0,
+                search_nav_btn_icon_size_px: 14.0,
+                search_nav_btn_icon_color: theme.text_secondary,
+                search_nav_btn_hover_bg: theme.bg_hover,
+                search_match_bg: gpui::hsla(0.14, 0.9, 0.5, 0.3),
+                search_match_active_bg: gpui::hsla(0.08, 0.9, 0.5, 0.5),
+                search_match_border_width_px: 1.0,
+                search_match_border_color: gpui::hsla(0.14, 0.9, 0.5, 0.5),
+                search_scrollbar_marker_width_px: 3.0,
+                search_scrollbar_marker_height_px: 2.0,
+                search_scrollbar_marker_color: gpui::hsla(0.14, 0.9, 0.5, 0.6),
+                search_replace_btn_height_px: 22.0,
+                search_replace_btn_padding_x_px: 8.0,
+                search_replace_btn_font_size_px: 11.0,
+                search_replace_btn_bg: theme.bg_hover,
+                search_replace_btn_text_color: theme.text_primary,
+                search_replace_btn_hover_bg: theme.bg_selected,
+                search_close_btn_size_px: 22.0,
+                search_close_btn_icon_color: theme.text_secondary,
+                search_close_btn_hover_bg: theme.bg_hover,
+            },
+            workspace_search: WorkspaceSearchStyles {
+                ws_search_padding_px: 10.0,
+                ws_search_gap_px: 8.0,
+                ws_search_file_header_height_px: 28.0,
+                ws_search_file_header_bg: theme.bg_secondary,
+                ws_search_file_header_font_size_px: 12.0,
+                ws_search_file_header_text_color: theme.text_primary,
+                ws_search_file_header_icon_size_px: 14.0,
+                ws_search_file_header_count_font_size_px: 11.0,
+                ws_search_file_header_count_text_color: theme.text_secondary,
+                ws_search_match_height_px: 24.0,
+                ws_search_match_padding_x_px: 14.0,
+                ws_search_match_font_size_px: 12.0,
+                ws_search_match_text_color: theme.text_primary,
+                ws_search_match_highlight_bg: gpui::hsla(0.14, 0.9, 0.5, 0.3),
+                ws_search_match_highlight_text_color: theme.text_bright,
+                ws_search_match_line_number_color: theme.text_secondary,
+                ws_search_match_hover_bg: theme.bg_hover,
+                ws_search_match_active_bg: theme.bg_selected,
+                ws_search_progress_height_px: 2.0,
+                ws_search_progress_color: theme.text_accent,
+                ws_search_summary_font_size_px: 11.0,
+                ws_search_summary_text_color: theme.text_secondary,
+                ws_search_btn_size_px: 22.0,
+                ws_search_btn_icon_size_px: 14.0,
+                ws_search_btn_icon_color: theme.text_secondary,
+                ws_search_btn_hover_bg: theme.bg_hover,
             },
         }
     }

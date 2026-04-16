@@ -85,6 +85,18 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_move_line_down))
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_new_tab))
+            .on_action(cx.listener(Self::on_close_active_tab))
+            .on_action(cx.listener(Self::on_reopen_closed_tab))
+            .on_action(cx.listener(Self::on_activate_previous_tab))
+            .on_action(cx.listener(Self::on_activate_next_tab))
+            .on_action(cx.listener(Self::on_find))
+            .on_action(cx.listener(Self::on_find_next))
+            .on_action(cx.listener(Self::on_find_previous))
+            .on_action(cx.listener(Self::on_dismiss_search))
+            .on_action(cx.listener(Self::on_toggle_replace))
+            .on_action(cx.listener(Self::on_replace_next))
+            .on_action(cx.listener(Self::on_replace_all))
+            .on_action(cx.listener(Self::on_find_in_files))
             .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(Self::on_toggle_outline))
             .on_action(cx.listener(Self::on_add_cursor_above))
@@ -400,6 +412,9 @@ impl Render for EditorView {
                                 })
                                 .child(element::EditorElement {
                                     editor: cx.entity().clone(),
+                                })
+                                .when(self.search_visible, |this: gpui::Stateful<gpui::Div>| {
+                                    this.child(self.render_search_bar(cx))
                                 }),
                         )
                     }),

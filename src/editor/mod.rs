@@ -7,7 +7,9 @@ mod menus;
 mod outline;
 mod render;
 mod scaling;
+mod search;
 mod sidebar;
+mod workspace_search;
 mod tabs;
 
 use std::collections::{HashMap, HashSet};
@@ -115,6 +117,7 @@ pub(crate) struct OpenTab {
     pub snapshot: EditorSnapshot,
     pub is_dirty: bool,
     pub is_deleted: bool,
+    pub is_pinned: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -161,18 +164,31 @@ pub(crate) enum FormatMenuAction {
 
 #[derive(Clone)]
 pub(crate) enum SidebarEditMode {
-    Rename { path: PathBuf, value: String },
-    CreateFile { parent: PathBuf, value: String },
-    CreateDir { parent: PathBuf, value: String },
+    Rename {
+        path: PathBuf,
+        editor: gpui::Entity<crate::text_input::TextInput>,
+    },
+    CreateFile {
+        parent: PathBuf,
+        editor: gpui::Entity<crate::text_input::TextInput>,
+    },
+    CreateDir {
+        parent: PathBuf,
+        editor: gpui::Entity<crate::text_input::TextInput>,
+    },
 }
 
 impl SidebarEditMode {
-    pub fn value_mut(&mut self) -> &mut String {
+    pub fn editor(&self) -> &gpui::Entity<crate::text_input::TextInput> {
         match self {
-            Self::Rename { value, .. }
-            | Self::CreateFile { value, .. }
-            | Self::CreateDir { value, .. } => value,
+            Self::Rename { editor, .. }
+            | Self::CreateFile { editor, .. }
+            | Self::CreateDir { editor, .. } => editor,
         }
+    }
+
+    pub fn text(&self, cx: &gpui::App) -> String {
+        self.editor().read(cx).text().to_string()
     }
 }
 
@@ -215,6 +231,53 @@ impl Render for DraggedSidebarItemsView {
             .rounded(px(4.0))
             .shadow_md()
             .child(text)
+    }
+}
+
+// ── Tab drag-and-drop types ─────────────────────────────────────────
+
+#[derive(Clone)]
+pub(crate) struct WorkspaceSearchMatch {
+    pub line_number: usize,
+    pub line_text: String,
+    pub match_start: usize,
+    pub match_end: usize,
+    pub byte_offset: usize,
+}
+
+#[derive(Clone)]
+pub(crate) struct WorkspaceSearchResult {
+    pub path: PathBuf,
+    pub matches: Vec<WorkspaceSearchMatch>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DraggedTab {
+    pub tab_id: String,
+    pub title: String,
+}
+
+pub(crate) struct DraggedTabView {
+    pub title: String,
+}
+
+impl Render for DraggedTabView {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{div, prelude::*, px};
+        div()
+            .px(px(10.0))
+            .py(px(4.0))
+            .bg(gpui::rgb(0x2d2d2d))
+            .text_color(gpui::rgb(0xcccccc))
+            .text_size(px(13.0))
+            .rounded(px(4.0))
+            .shadow_md()
+            .opacity(0.85)
+            .child(self.title.clone())
     }
 }
 
@@ -303,6 +366,7 @@ pub struct EditorView {
     pub(crate) content_origin: Point<Pixels>,
     pub(crate) context_menu: Option<ContextMenu>,
     pub(crate) sidebar_edit: Option<SidebarEditMode>,
+    pub(crate) sidebar_edit_blur_sub: Option<gpui::Subscription>,
     pub(crate) file_clipboard: Option<FileClipboard>,
     pub(crate) ui_scale: f32,
     pub(crate) folded_sections: HashSet<usize>,
@@ -320,6 +384,7 @@ pub struct EditorView {
     pub(crate) sidebar_visible: bool,
     pub(crate) editor_left_aligned: bool,
     pub(crate) tab_dragging_id: Option<String>,
+    pub(crate) recently_closed_tabs: Vec<OpenTab>,
     pub(crate) dialog: Option<Dialog>,
     /// 多选：最后一个选中的 focus 路径
     pub(crate) focused_sidebar_path: Option<PathBuf>,
@@ -339,6 +404,27 @@ pub struct EditorView {
     pub(crate) scroll_anim_epoch: usize,
     pub(crate) last_window_width: f32,
     pub(crate) last_window_height: f32,
+
+    // ── Buffer search state ─────────────────────────────────────────
+    pub(crate) search_visible: bool,
+    pub(crate) search_query: String,
+    pub(crate) search_replace: String,
+    pub(crate) search_replace_visible: bool,
+    pub(crate) search_case_sensitive: bool,
+    pub(crate) search_whole_word: bool,
+    pub(crate) search_use_regex: bool,
+    pub(crate) search_matches: Vec<std::ops::Range<usize>>,
+    pub(crate) search_current_index: Option<usize>,
+    pub(crate) search_query_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) search_replace_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+
+    // ── Global workspace search state ───────────────────────────────
+    pub(crate) workspace_search_visible: bool,
+    pub(crate) workspace_search_query: String,
+    pub(crate) workspace_search_results: Vec<WorkspaceSearchResult>,
+    pub(crate) workspace_search_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) workspace_search_task: Option<Task<()>>,
+    pub(crate) workspace_search_scroll_handle: ScrollHandle,
 }
 
 impl EditorView {
@@ -399,6 +485,7 @@ impl EditorView {
                 snapshot: initial_snapshot,
                 is_dirty: false,
                 is_deleted: false,
+                is_pinned: false,
             }],
             active_tab_id: Some("welcome-1".to_string()),
             next_tab_id: 2,
@@ -409,6 +496,7 @@ impl EditorView {
             content_origin: Point::default(),
             context_menu: None,
             sidebar_edit: None,
+            sidebar_edit_blur_sub: None,
             file_clipboard: None,
             ui_scale: 1.0,
             folded_sections: HashSet::new(),
@@ -426,6 +514,7 @@ impl EditorView {
             sidebar_visible: true,
             editor_left_aligned: false,
             tab_dragging_id: None,
+            recently_closed_tabs: Vec::new(),
             dialog: None,
             focused_sidebar_path: None,
             sidebar_selection_anchor: None,
@@ -441,6 +530,25 @@ impl EditorView {
             scroll_anim_epoch: 0,
             last_window_width: 1360.0,
             last_window_height: 820.0,
+
+            search_visible: false,
+            search_query: String::new(),
+            search_replace: String::new(),
+            search_replace_visible: false,
+            search_case_sensitive: false,
+            search_whole_word: false,
+            search_use_regex: false,
+            search_matches: Vec::new(),
+            search_current_index: None,
+            search_query_editor: None,
+            search_replace_editor: None,
+
+            workspace_search_visible: false,
+            workspace_search_query: String::new(),
+            workspace_search_results: Vec::new(),
+            workspace_search_editor: None,
+            workspace_search_task: None,
+            workspace_search_scroll_handle: ScrollHandle::new(),
         };
         this.start_blinking(cx);
         this.start_watching(cx);

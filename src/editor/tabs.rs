@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, SharedString, div, prelude::*,
-    px, svg,
+    AnyElement, Context, CursorStyle, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent,
+    SharedString, div, prelude::*, px, svg,
 };
 
 use super::*;
@@ -65,7 +65,14 @@ impl EditorView {
             return;
         };
         let was_active = self.active_tab_id.as_deref() == Some(tab_id);
-        self.tabs.remove(index);
+        // Save to recently closed (keep up to 20)
+        let removed = self.tabs.remove(index);
+        if removed.path.is_some() {
+            self.recently_closed_tabs.push(removed);
+            if self.recently_closed_tabs.len() > 20 {
+                self.recently_closed_tabs.remove(0);
+            }
+        }
         if self.tabs.is_empty() {
             self.active_tab_id = None;
             cx.notify();
@@ -79,8 +86,136 @@ impl EditorView {
         }
     }
 
+    pub(crate) fn close_active_tab(&mut self, cx: &mut Context<Self>) {
+        if let Some(tab_id) = self.active_tab_id.clone() {
+            // Check if dirty — show dialog
+            if let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) {
+                if tab.is_dirty {
+                    self.show_dialog(
+                        Dialog {
+                            title: "未保存的更改".to_string(),
+                            message: format!(
+                                "\"{}\" 中有未保存的更改。关闭后将丢失这些更改。",
+                                tab.title
+                            ),
+                            save_label: if tab.path.is_some() {
+                                Some("保存".to_string())
+                            } else {
+                                None
+                            },
+                            confirm_label: "不保存".to_string(),
+                            cancel_label: "取消".to_string(),
+                            is_danger: true,
+                            action: DialogAction::CloseTabUnsaved {
+                                tab_id: tab_id.clone(),
+                            },
+                        },
+                        cx,
+                    );
+                    return;
+                }
+            }
+            self.close_tab(&tab_id, cx);
+        }
+    }
+
+    pub(crate) fn reopen_closed_tab(&mut self, cx: &mut Context<Self>) {
+        if let Some(closed_tab) = self.recently_closed_tabs.pop() {
+            // Re-open the tab
+            let tab = OpenTab {
+                id: self.next_tab_identity(),
+                title: closed_tab.title,
+                path: closed_tab.path,
+                snapshot: closed_tab.snapshot,
+                is_dirty: false,
+                is_deleted: false,
+                is_pinned: false,
+            };
+            self.tabs.push(tab);
+            let index = self.tabs.len() - 1;
+            self.activate_tab_by_index(index, cx);
+        }
+    }
+
+    pub(crate) fn activate_previous_tab(&mut self, cx: &mut Context<Self>) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        if let Some(current) = self.active_tab_index() {
+            let prev = if current == 0 {
+                self.tabs.len() - 1
+            } else {
+                current - 1
+            };
+            self.activate_tab_by_index(prev, cx);
+        }
+    }
+
+    pub(crate) fn activate_next_tab(&mut self, cx: &mut Context<Self>) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        if let Some(current) = self.active_tab_index() {
+            let next = if current >= self.tabs.len() - 1 {
+                0
+            } else {
+                current + 1
+            };
+            self.activate_tab_by_index(next, cx);
+        }
+    }
+
+    pub(crate) fn toggle_pin_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.is_pinned = !tab.is_pinned;
+        }
+        // Move pinned tabs to the left
+        self.tabs.sort_by_key(|t| !t.is_pinned);
+        cx.notify();
+    }
+
+    pub(crate) fn close_left_tabs(&mut self, from_tab_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == from_tab_id) else {
+            return;
+        };
+        // Remove tabs before the specified index (skip pinned)
+        let mut to_remove: Vec<String> = Vec::new();
+        for i in 0..index {
+            if !self.tabs[i].is_pinned {
+                to_remove.push(self.tabs[i].id.clone());
+            }
+        }
+        for id in &to_remove {
+            if let Some(tab) = self.tabs.iter().find(|t| &t.id == id) {
+                if tab.path.is_some() {
+                    self.recently_closed_tabs.push(tab.clone());
+                }
+            }
+            self.tabs.retain(|t| &t.id != id);
+        }
+        if self.tabs.is_empty() {
+            self.create_scratch_tab(cx);
+            return;
+        }
+        if self
+            .active_tab_id
+            .as_deref()
+            .is_none_or(|id| !self.tabs.iter().any(|t| t.id == id))
+        {
+            self.activate_tab_by_index(0, cx);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn close_other_tabs(&mut self, current_tab_id: &str, cx: &mut Context<Self>) {
-        self.tabs.retain(|tab| tab.id == current_tab_id);
+        // Save non-pinned, non-current tabs to recently closed
+        for tab in &self.tabs {
+            if tab.id != current_tab_id && !tab.is_pinned && tab.path.is_some() {
+                self.recently_closed_tabs.push(tab.clone());
+            }
+        }
+        self.tabs
+            .retain(|tab| tab.id == current_tab_id || tab.is_pinned);
         if let Some(index) = self.tabs.iter().position(|tab| tab.id == current_tab_id) {
             self.activate_tab_by_index(index, cx);
         }
@@ -91,7 +226,21 @@ impl EditorView {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == from_tab_id) else {
             return;
         };
-        self.tabs.truncate(index + 1);
+        // Save right-side, non-pinned tabs to recently closed
+        for tab in &self.tabs[(index + 1)..] {
+            if !tab.is_pinned && tab.path.is_some() {
+                self.recently_closed_tabs.push(tab.clone());
+            }
+        }
+        // Keep tabs up to index + pinned tabs after index
+        let mut keep: Vec<OpenTab> = self.tabs[..=index].to_vec();
+        keep.extend(
+            self.tabs[(index + 1)..]
+                .iter()
+                .filter(|t| t.is_pinned)
+                .cloned(),
+        );
+        self.tabs = keep;
         if self.tabs.is_empty() {
             self.create_scratch_tab(cx);
             return;
@@ -174,6 +323,7 @@ impl EditorView {
             },
             is_dirty: false,
             is_deleted: false,
+            is_pinned: false,
         };
         self.tabs.push(tab);
         if let Some(index) = self.tabs.len().checked_sub(1) {
@@ -193,22 +343,37 @@ impl EditorView {
         let is_active = self.active_tab_id.as_deref() == Some(tab.id.as_str());
         let is_dirty = tab.is_dirty;
         let is_deleted = tab.is_deleted;
+        let is_pinned = tab.is_pinned;
         let tab_id = tab.id.clone();
         let close_id = tab.id.clone();
         let middle_close_id = tab.id.clone();
         let context_tab_id = tab.id.clone();
-        let drop_target_id = tab.id.clone();
+        let drag_tab_id = tab.id.clone();
+        let drop_tab_id = tab.id.clone();
         let title = tab.title.clone();
+        let drag_title = tab.title.clone();
         let ts = &self.styles.tab_bar;
         let tab_hover_bg = ts.tab_item_hover_bg;
         let close_hover_bg = ts.tab_item_close_hover_bg;
+        let drop_indicator_color = ts.tab_drop_indicator_color;
+        let drop_indicator_width = ts.tab_drop_indicator_width_px;
+        let source_opacity = ts.tab_drag_source_opacity;
+        let is_being_dragged = self.tab_dragging_id.as_deref() == Some(tab.id.as_str());
+        let pin_icon_size = self.scaled(ts.tab_pin_icon_size_px);
+        let pin_icon_color = ts.tab_pin_icon_color;
 
         div()
             .id(SharedString::from(format!("tab-{}", tab.id)))
             .group("tab-item")
+            .relative()
             .h(px(self.tab_bar_height()))
-            .min_w(px(self.scaled(ts.tab_item_min_width_px)))
-            .max_w(px(self.scaled(ts.tab_item_max_width_px)))
+            .when(is_pinned, |this: gpui::Stateful<gpui::Div>| {
+                this.w(px(self.scaled(ts.tab_pinned_width_px)))
+            })
+            .when(!is_pinned, |this: gpui::Stateful<gpui::Div>| {
+                this.min_w(px(self.scaled(ts.tab_item_min_width_px)))
+                    .max_w(px(self.scaled(ts.tab_item_max_width_px)))
+            })
             .pl(px(self.scaled(ts.tab_item_padding_left_px)))
             .pr(px(self.scaled(ts.tab_item_padding_right_px)))
             .flex()
@@ -223,122 +388,155 @@ impl EditorView {
             .border_r(px(ts.tab_item_border_width_px))
             .border_color(ts.tab_item_border_color)
             .hover(move |style| style.bg(tab_hover_bg))
-            .child(
-                svg()
-                    .path(MARKDOWN_SVG_PATH)
-                    .size(px(self.scaled(ts.tab_item_icon_size_px)))
-                    .text_color(ts.tab_item_icon_color)
-                    .opacity(if is_active {
-                        ts.tab_item_icon_active_opacity
-                    } else {
-                        ts.tab_item_icon_inactive_opacity
-                    }),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .text_size(px(self.scaled(ts.tab_item_font_size_px)))
-                    .font_weight(if is_active {
-                        FontWeight::MEDIUM
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(if is_deleted {
-                        ts.tab_item_deleted_text_color
-                    } else if is_active {
-                        ts.tab_item_active_text_color
-                    } else {
-                        ts.tab_item_text_color
-                    })
-                    .when(is_deleted, |this| this.line_through())
-                    .child(title),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("close-{}", tab.id)))
-                    .w(px(self.scaled(ts.tab_item_close_size_px)))
-                    .h(px(self.scaled(ts.tab_item_close_size_px)))
-                    .rounded_full()
-                    .flex()
-                    .flex_none()
-                    .justify_center()
-                    .items_center()
-                    .when(is_dirty, |this| {
-                        this.child(
-                            div()
-                                .w(px(self.scaled(ts.tab_item_dirty_dot_size_px)))
-                                .h(px(self.scaled(ts.tab_item_dirty_dot_size_px)))
-                                .rounded_full()
-                                .bg(ts.tab_item_dirty_dot_color),
-                        )
-                    })
-                    .when(!is_dirty, |this| {
-                        this.text_size(px(self.scaled(ts.tab_item_close_font_size_px)))
-                            .text_color(ts.tab_item_close_text_color)
-                            .opacity(if is_active {
-                                ts.tab_item_close_active_opacity
-                            } else {
-                                ts.tab_item_close_inactive_opacity
-                            })
-                            .group_hover("tab-item", |style| {
-                                style.opacity(ts.tab_item_close_active_opacity)
-                            })
-                            .hover(move |style| style.bg(close_hover_bg))
-                            .child("✕")
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            if let Some(tab) = this.tabs.iter().find(|t| t.id == close_id) {
-                                if tab.is_dirty {
-                                    this.show_dialog(
-                                        super::Dialog {
-                                            title: "未保存的更改".to_string(),
-                                            message: format!(
-                                                "\"{}\" 中有未保存的更改。关闭后将丢失这些更改。",
-                                                tab.title
-                                            ),
-                                            save_label: if tab.path.is_some() {
-                                                Some("保存".to_string())
-                                            } else {
-                                                None
-                                            },
-                                            confirm_label: "不保存".to_string(),
-                                            cancel_label: "取消".to_string(),
-                                            is_danger: true,
-                                            action: super::DialogAction::CloseTabUnsaved {
-                                                tab_id: close_id.clone(),
-                                            },
-                                        },
-                                        cx,
-                                    );
-                                    return;
-                                }
-                            }
-                            this.close_tab(&close_id, cx);
+            // Dim the source tab while dragging
+            .when(is_being_dragged, |this: gpui::Stateful<gpui::Div>| {
+                this.opacity(source_opacity)
+            })
+            // Drop indicator: highlight left border when hovering with a dragged tab
+            .drag_over::<DraggedTab>(move |style, _, _, _| {
+                style.border_l(px(drop_indicator_width)).border_color(drop_indicator_color)
+            })
+            // Handle drop: reorder the dragged tab before this one
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.reorder_tab_before(&dragged.tab_id, &drop_tab_id, cx);
+                this.tab_dragging_id = None;
+            }))
+            // Pinned tab: show pin icon, hide title/close
+            .when(is_pinned, |this: gpui::Stateful<gpui::Div>| {
+                this.justify_center().child(
+                    svg()
+                        .path("assets/icons/format/pin.svg")
+                        .size(px(pin_icon_size))
+                        .text_color(pin_icon_color),
+                )
+            })
+            // Normal (non-pinned) tab content
+            .when(!is_pinned, |this: gpui::Stateful<gpui::Div>| {
+                this.child(
+                    svg()
+                        .path(MARKDOWN_SVG_PATH)
+                        .size(px(self.scaled(ts.tab_item_icon_size_px)))
+                        .text_color(ts.tab_item_icon_color)
+                        .opacity(if is_active {
+                            ts.tab_item_icon_active_opacity
+                        } else {
+                            ts.tab_item_icon_inactive_opacity
                         }),
-                    ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_size(px(self.scaled(ts.tab_item_font_size_px)))
+                        .font_weight(if is_active {
+                            FontWeight::MEDIUM
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .text_color(if is_deleted {
+                            ts.tab_item_deleted_text_color
+                        } else if is_active {
+                            ts.tab_item_active_text_color
+                        } else {
+                            ts.tab_item_text_color
+                        })
+                        .when(is_deleted, |this| this.line_through())
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("close-{}", tab.id)))
+                        .w(px(self.scaled(ts.tab_item_close_size_px)))
+                        .h(px(self.scaled(ts.tab_item_close_size_px)))
+                        .rounded_full()
+                        .flex()
+                        .flex_none()
+                        .justify_center()
+                        .items_center()
+                        .when(is_dirty, |this| {
+                            this.child(
+                                div()
+                                    .w(px(self.scaled(ts.tab_item_dirty_dot_size_px)))
+                                    .h(px(self.scaled(ts.tab_item_dirty_dot_size_px)))
+                                    .rounded_full()
+                                    .bg(ts.tab_item_dirty_dot_color),
+                            )
+                        })
+                        .when(!is_dirty, |this| {
+                            this.text_size(px(self.scaled(ts.tab_item_close_font_size_px)))
+                                .text_color(ts.tab_item_close_text_color)
+                                .opacity(if is_active {
+                                    ts.tab_item_close_active_opacity
+                                } else {
+                                    ts.tab_item_close_inactive_opacity
+                                })
+                                .group_hover("tab-item", |style| {
+                                    style.opacity(ts.tab_item_close_active_opacity)
+                                })
+                                .hover(move |style| style.bg(close_hover_bg))
+                                .child("✕")
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(tab) = this.tabs.iter().find(|t| t.id == close_id) {
+                                    if tab.is_dirty {
+                                        this.show_dialog(
+                                            Dialog {
+                                                title: "未保存的更改".to_string(),
+                                                message: format!(
+                                                    "\"{}\" 中有未保存的更改。关闭后将丢失这些更改。",
+                                                    tab.title
+                                                ),
+                                                save_label: if tab.path.is_some() {
+                                                    Some("保存".to_string())
+                                                } else {
+                                                    None
+                                                },
+                                                confirm_label: "不保存".to_string(),
+                                                cancel_label: "取消".to_string(),
+                                                is_danger: true,
+                                                action: DialogAction::CloseTabUnsaved {
+                                                    tab_id: close_id.clone(),
+                                                },
+                                            },
+                                            cx,
+                                        );
+                                        return;
+                                    }
+                                }
+                                this.close_tab(&close_id, cx);
+                            }),
+                        ),
+                )
+            })
+            // Drag initiation: create ghost element
+            .on_drag(
+                DraggedTab {
+                    tab_id: drag_tab_id.clone(),
+                    title: drag_title,
+                },
+                {
+                    let tab_id_for_drag = drag_tab_id.clone();
+                    move |_dragged, _offset, _window, cx| {
+                        cx.new(|_cx| DraggedTabView {
+                            title: _dragged.title.clone(),
+                        })
+                    }
+                },
             )
+            .on_drag_move(cx.listener(move |this, _event: &DragMoveEvent<DraggedTab>, _, _cx| {
+                this.tab_dragging_id = Some(drag_tab_id.clone());
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
-                    this.tab_dragging_id = Some(tab_id.clone());
                     this.switch_to_tab(&tab_id, cx);
                     cx.stop_propagation();
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    if let Some(from_id) = this.tab_dragging_id.clone() {
-                        this.reorder_tab_before(&from_id, &drop_target_id, cx);
-                    }
-                    this.tab_dragging_id = None;
                 }),
             )
             .on_mouse_down(

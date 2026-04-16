@@ -456,8 +456,8 @@ impl EditorView {
                 "新建文件",
                 false,
                 cx,
-                move |this, _, cx| {
-                    this.start_create_file(pd.clone(), cx);
+                move |this, window, cx| {
+                    this.start_create_file(pd.clone(), window, cx);
                 },
             ));
         }
@@ -467,8 +467,8 @@ impl EditorView {
                 "新建文件夹",
                 false,
                 cx,
-                move |this, _, cx| {
-                    this.start_create_dir(pd.clone(), cx);
+                move |this, window, cx| {
+                    this.start_create_dir(pd.clone(), window, cx);
                 },
             ));
         }
@@ -480,8 +480,8 @@ impl EditorView {
                 "重命名",
                 false,
                 cx,
-                move |this, _, cx| {
-                    this.start_rename(p.clone(), cx);
+                move |this, window, cx| {
+                    this.start_rename(p.clone(), window, cx);
                 },
             ));
         }
@@ -572,6 +572,22 @@ impl EditorView {
             items.push(
                 self.render_context_menu_item("粘贴", false, cx, move |this, _, cx| {
                     this.paste_into_dir(pd.clone(), cx);
+                }),
+            );
+        }
+        items.push(self.render_context_menu_separator());
+        // Collapse / Expand all
+        if !self.expanded_dirs.is_empty() {
+            items.push(
+                self.render_context_menu_item("折叠所有文件夹", false, cx, move |this, _, cx| {
+                    this.collapse_all_dirs(cx);
+                }),
+            );
+        }
+        {
+            items.push(
+                self.render_context_menu_item("展开所有文件夹", false, cx, move |this, _, cx| {
+                    this.expand_all_dirs(cx);
                 }),
             );
         }
@@ -785,6 +801,11 @@ impl EditorView {
             ),
             ContextMenuKind::Tab { tab_id } => {
                 let mut items = Vec::new();
+                let is_pinned = self
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == *tab_id)
+                    .is_some_and(|t| t.is_pinned);
                 {
                     let id = tab_id.clone();
                     items.push(self.render_context_menu_item(
@@ -810,6 +831,17 @@ impl EditorView {
                 {
                     let id = tab_id.clone();
                     items.push(self.render_context_menu_item(
+                        "关闭左侧",
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_left_tabs(&id, cx);
+                        },
+                    ));
+                }
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
                         "关闭右侧",
                         false,
                         cx,
@@ -827,6 +859,43 @@ impl EditorView {
                         this.close_saved_tabs(cx);
                     },
                 ));
+                items.push(self.render_context_menu_separator());
+                {
+                    let id = tab_id.clone();
+                    let label = if is_pinned { "取消固定" } else { "固定标签" };
+                    items.push(self.render_context_menu_item(
+                        label,
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.toggle_pin_tab(&id, cx);
+                        },
+                    ));
+                }
+                // Copy path if tab has a file
+                if let Some(tab) = self.tabs.iter().find(|t| t.id == *tab_id) {
+                    if let Some(path) = &tab.path {
+                        let path_str = path.display().to_string();
+                        items.push(self.render_context_menu_item(
+                            "复制路径",
+                            false,
+                            cx,
+                            move |this, _, _cx| {
+                                this.context_menu = None;
+                                let _ = std::process::Command::new("pbcopy")
+                                    .stdin(std::process::Stdio::piped())
+                                    .spawn()
+                                    .and_then(|mut child| {
+                                        use std::io::Write;
+                                        if let Some(stdin) = child.stdin.as_mut() {
+                                            stdin.write_all(path_str.as_bytes())?;
+                                        }
+                                        child.wait()
+                                    });
+                            },
+                        ));
+                    }
+                }
                 (
                     items,
                     self.scaled(self.styles.context_menu.menu_tab_width_px),

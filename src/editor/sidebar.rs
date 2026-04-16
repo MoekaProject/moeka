@@ -17,6 +17,34 @@ impl EditorView {
         cx.notify();
     }
 
+    pub(crate) fn collapse_all_dirs(&mut self, cx: &mut Context<Self>) {
+        self.expanded_dirs.clear();
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    pub(crate) fn expand_all_dirs(&mut self, cx: &mut Context<Self>) {
+        fn collect_dirs(dir: &Path, out: &mut HashSet<PathBuf>) {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir()
+                        && !path
+                            .file_name()
+                            .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                    {
+                        out.insert(path.clone());
+                        collect_dirs(&path, out);
+                    }
+                }
+            }
+        }
+        let root = self.sidebar_root.clone();
+        collect_dirs(&root, &mut self.expanded_dirs);
+        self.context_menu = None;
+        cx.notify();
+    }
+
     fn is_sidebar_item_selected(&self, item_path: &Path) -> bool {
         self.selected_sidebar_paths.contains(item_path)
     }
@@ -183,6 +211,7 @@ impl EditorView {
                     },
                     is_dirty: false,
                     is_deleted: false,
+                    is_pinned: false,
                 };
                 self.persist_active_tab_state();
                 self.tabs.push(tab);
@@ -255,35 +284,91 @@ impl EditorView {
 
     // ── Sidebar edit operations ─────────────────────────────────────
 
-    pub(crate) fn start_rename(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn start_rename(&mut self, path: PathBuf, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let current_name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let styles = self.styles.text_input.clone();
+        let editor = cx.new(|cx| {
+            let mut ti = crate::text_input::TextInput::new(styles, "名称...", cx);
+            ti.set_text(&current_name, cx);
+            // Select filename without extension
+            let dot_pos = current_name.rfind('.').unwrap_or(current_name.len());
+            ti.set_selection(0, dot_pos, cx);
+            ti
+        });
+        cx.subscribe(&editor, |this, _editor, event: &crate::text_input::TextInputEvent, cx| {
+            match event {
+                crate::text_input::TextInputEvent::Submit => this.commit_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Escape => this.cancel_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Changed => {}
+            }
+        }).detach();
+        let focus_handle = editor.read(cx).focus_handle.clone();
+        let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.cancel_sidebar_edit(cx);
+        });
+        window.focus(&focus_handle);
         self.sidebar_edit = Some(SidebarEditMode::Rename {
             path,
-            value: current_name,
+            editor,
         });
+        self.sidebar_edit_blur_sub = Some(blur_sub);
         self.context_menu = None;
         cx.notify();
     }
 
-    pub(crate) fn start_create_file(&mut self, parent: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn start_create_file(&mut self, parent: PathBuf, window: &mut gpui::Window, cx: &mut Context<Self>) {
         self.expanded_dirs.insert(parent.clone());
+        let styles = self.styles.text_input.clone();
+        let editor = cx.new(|cx| {
+            crate::text_input::TextInput::new(styles, "文件名...", cx)
+        });
+        cx.subscribe(&editor, |this, _editor, event: &crate::text_input::TextInputEvent, cx| {
+            match event {
+                crate::text_input::TextInputEvent::Submit => this.commit_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Escape => this.cancel_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Changed => {}
+            }
+        }).detach();
+        let focus_handle = editor.read(cx).focus_handle.clone();
+        let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.cancel_sidebar_edit(cx);
+        });
+        window.focus(&focus_handle);
         self.sidebar_edit = Some(SidebarEditMode::CreateFile {
             parent,
-            value: String::new(),
+            editor,
         });
+        self.sidebar_edit_blur_sub = Some(blur_sub);
         self.context_menu = None;
         cx.notify();
     }
 
-    pub(crate) fn start_create_dir(&mut self, parent: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn start_create_dir(&mut self, parent: PathBuf, window: &mut gpui::Window, cx: &mut Context<Self>) {
         self.expanded_dirs.insert(parent.clone());
+        let styles = self.styles.text_input.clone();
+        let editor = cx.new(|cx| {
+            crate::text_input::TextInput::new(styles, "文件夹名...", cx)
+        });
+        cx.subscribe(&editor, |this, _editor, event: &crate::text_input::TextInputEvent, cx| {
+            match event {
+                crate::text_input::TextInputEvent::Submit => this.commit_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Escape => this.cancel_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Changed => {}
+            }
+        }).detach();
+        let focus_handle = editor.read(cx).focus_handle.clone();
+        let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.cancel_sidebar_edit(cx);
+        });
+        window.focus(&focus_handle);
         self.sidebar_edit = Some(SidebarEditMode::CreateDir {
             parent,
-            value: String::new(),
+            editor,
         });
+        self.sidebar_edit_blur_sub = Some(blur_sub);
         self.context_menu = None;
         cx.notify();
     }
@@ -292,10 +377,12 @@ impl EditorView {
         let Some(edit) = self.sidebar_edit.take() else {
             return;
         };
-        match edit {
+        self.sidebar_edit_blur_sub = None;
+        let value = edit.text(cx);
+        match &edit {
             SidebarEditMode::Rename {
-                ref path,
-                ref value,
+                path,
+                ..
             } => {
                 let trimmed = value.trim();
                 if !trimmed.is_empty()
@@ -322,8 +409,8 @@ impl EditorView {
                 }
             }
             SidebarEditMode::CreateFile {
-                ref parent,
-                ref value,
+                parent,
+                ..
             } => {
                 let trimmed = value.trim();
                 if !trimmed.is_empty() {
@@ -337,8 +424,8 @@ impl EditorView {
                 }
             }
             SidebarEditMode::CreateDir {
-                ref parent,
-                ref value,
+                parent,
+                ..
             } => {
                 let trimmed = value.trim();
                 if !trimmed.is_empty() {
@@ -356,6 +443,7 @@ impl EditorView {
 
     pub(crate) fn cancel_sidebar_edit(&mut self, cx: &mut Context<Self>) {
         if self.sidebar_edit.take().is_some() {
+            self.sidebar_edit_blur_sub = None;
             cx.notify();
         }
     }
@@ -495,23 +583,6 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn sidebar_edit_append(&mut self, text: &str, cx: &mut Context<Self>) {
-        if let Some(ref mut edit) = self.sidebar_edit {
-            edit.value_mut().push_str(text);
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn sidebar_edit_backspace(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref mut edit) = self.sidebar_edit {
-            let val = edit.value_mut();
-            if let Some((last_char_start, _)) = val.char_indices().next_back() {
-                val.truncate(last_char_start);
-            }
-            cx.notify();
-        }
-    }
-
     // ── Sidebar keyboard navigation ─────────────────────────────────
 
     pub(crate) fn sidebar_nav_up(&mut self, cx: &mut Context<Self>) {
@@ -633,10 +704,10 @@ impl EditorView {
 
     pub(crate) fn render_sidebar_edit_row(
         &self,
-        value: &str,
+        editor: &gpui::Entity<crate::text_input::TextInput>,
         depth: usize,
         is_dir: bool,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> AnyElement {
         let ss = &self.styles.sidebar;
         let shift = ss.sidebar_item_left_shift_px;
@@ -645,11 +716,6 @@ impl EditorView {
                 - shift)
                 .max(0.0),
         );
-        let text_color = if value.is_empty() {
-            ss.sidebar_edit_input_placeholder_color
-        } else {
-            ss.sidebar_edit_input_text_color
-        };
         let icon_path = if is_dir {
             FOLDER_CLOSED_SVG_PATH
         } else {
@@ -664,8 +730,6 @@ impl EditorView {
             .flex()
             .items_center()
             .bg(ss.sidebar_item_selected_bg)
-            .border_1()
-            .border_color(focus_border_color)
             .child(
                 div()
                     .w_full()
@@ -705,37 +769,12 @@ impl EditorView {
                         div()
                             .flex_1()
                             .min_w(px(0.0))
-                            .flex()
-                            .items_center()
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .text_size(px(self.scaled(ss.sidebar_item_font_size_px)))
-                                    .text_color(text_color)
-                                    .child(if value.is_empty() {
-                                        SharedString::from("名称...")
-                                    } else {
-                                        SharedString::from(value.to_string())
-                                    }),
-                            )
-                            .when(!value.is_empty() || true, |this| {
-                                let cursor_color = self.styles.cursor.cursor_color;
-                                let cursor_width = self.styles.cursor.cursor_width_px;
-                                let cursor_height = self.scaled(ss.sidebar_item_font_size_px);
-                                let cursor_opacity = self.cursor_opacity;
-                                this.child(
-                                    div()
-                                        .w(px(cursor_width))
-                                        .h(px(cursor_height))
-                                        .bg(cursor_color)
-                                        .opacity(cursor_opacity),
-                                )
-                            }),
+                            .child(editor.clone()),
                     ),
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_this, _event, _window, _cx| {}),
+                |_event, _window, _cx| {},
             )
             .into_any_element()
     }
@@ -748,11 +787,11 @@ impl EditorView {
     ) -> AnyElement {
         if let Some(SidebarEditMode::Rename {
             path: ref rp,
-            ref value,
+            ref editor,
         }) = self.sidebar_edit
         {
             if *rp == item.path {
-                return self.render_sidebar_edit_row(value, item.depth, item.is_dir, cx);
+                return self.render_sidebar_edit_row(editor, item.depth, item.is_dir, cx);
             }
         }
 
@@ -1117,9 +1156,9 @@ impl EditorView {
                     .map(|rel| rel.components().count() + 1)
                     .unwrap_or(1)
             });
-            let create_value = match &self.sidebar_edit {
-                Some(SidebarEditMode::CreateFile { value, .. })
-                | Some(SidebarEditMode::CreateDir { value, .. }) => Some(value.as_str()),
+            let create_editor = match &self.sidebar_edit {
+                Some(SidebarEditMode::CreateFile { editor, .. })
+                | Some(SidebarEditMode::CreateDir { editor, .. }) => Some(editor.clone()),
                 _ => None,
             };
             let create_is_dir =
@@ -1158,22 +1197,22 @@ impl EditorView {
                 ));
                 if let Some(ref parent) = create_parent {
                     if !injected && item.is_dir && &item.path == parent {
-                        let depth = create_depth.unwrap_or(1);
-                        let value = create_value.unwrap_or("");
-                        tree_items.push(self.render_sidebar_edit_row(
-                            value,
-                            depth,
-                            create_is_dir,
-                            cx,
-                        ));
-                        injected = true;
+                        if let Some(ref editor) = create_editor {
+                            let depth = create_depth.unwrap_or(1);
+                            tree_items.push(self.render_sidebar_edit_row(
+                                editor,
+                                depth,
+                                create_is_dir,
+                                cx,
+                            ));
+                            injected = true;
+                        }
                     }
                 }
             }
             if !injected {
-                if let Some(depth) = create_depth {
-                    let value = create_value.unwrap_or("");
-                    tree_items.push(self.render_sidebar_edit_row(value, depth, create_is_dir, cx));
+                if let (Some(depth), Some(editor)) = (create_depth, &create_editor) {
+                    tree_items.push(self.render_sidebar_edit_row(editor, depth, create_is_dir, cx));
                 }
             }
         }
@@ -1228,33 +1267,37 @@ impl EditorView {
             .border_r(px(ss.sidebar_resize_indicator_width_px))
             .border_color(ss.sidebar_resize_indicator_color)
             .child(top_spacer)
-            .child(
-                div()
-                    .id("sidebar-tree")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.sidebar_scroll_handle)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.focused_sidebar_path = None;
-                            cx.notify();
-                        }),
-                    )
-                    // Root drop target: drop into sidebar_root
-                    .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)
-                    .on_drop({
-                        let root = self.sidebar_root.clone();
-                        cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
-                            let paths = dragged.paths.clone();
-                            this.sidebar_drag_hover_target = None;
-                            this.sidebar_drag_expand_task = None;
-                            this.move_sidebar_items(paths, root.clone(), cx);
+            .when(self.workspace_search_visible, |this: gpui::Stateful<gpui::Div>| {
+                this.child(self.render_workspace_search(cx))
+            })
+            .when(!self.workspace_search_visible, |this: gpui::Stateful<gpui::Div>| {
+                this.child(
+                    div()
+                        .id("sidebar-tree")
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.sidebar_scroll_handle)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.focused_sidebar_path = None;
+                                cx.notify();
+                            }),
+                        )
+                        .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)
+                        .on_drop({
+                            let root = self.sidebar_root.clone();
+                            cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
+                                let paths = dragged.paths.clone();
+                                this.sidebar_drag_hover_target = None;
+                                this.sidebar_drag_expand_task = None;
+                                this.move_sidebar_items(paths, root.clone(), cx);
+                            })
                         })
-                    })
-                    .children(tree_items),
-            )
-            .when(header_is_sticky, |this| {
+                        .children(tree_items),
+                )
+            })
+            .when(header_is_sticky && !self.workspace_search_visible, |this: gpui::Stateful<gpui::Div>| {
                 let sticky_header_hover_bg = ss.sidebar_header_hover_bg;
                 let sticky_root_name = self.sidebar_root_name().to_uppercase();
                 this.child(
@@ -1294,7 +1337,7 @@ impl EditorView {
                         ),
                 )
             })
-            .when(show_workspace_bar, |this| {
+            .when(show_workspace_bar && !self.workspace_search_visible, |this: gpui::Stateful<gpui::Div>| {
                 this.child(self.render_workspace_bar(cx))
             })
             .into_any_element()

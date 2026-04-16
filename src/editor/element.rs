@@ -21,6 +21,7 @@ pub(crate) struct EditorPrepaintState {
     lines: Vec<PrepaintLine>,
     cursor_quads: Vec<PaintQuad>,
     selection_quads: Vec<PaintQuad>,
+    search_match_quads: Vec<PaintQuad>,
     line_highlight: Option<PaintQuad>,
     code_block_bgs: Vec<PaintQuad>,
     marked_underlines: Vec<PaintQuad>,
@@ -118,6 +119,7 @@ impl Element for EditorElement {
 
         let mut lines = Vec::new();
         let mut selection_quads = Vec::new();
+        let mut search_match_quads: Vec<PaintQuad> = Vec::new();
         let mut line_highlight = None;
         let mut code_block_bgs = Vec::new();
         let mut cursor_quads: Vec<PaintQuad> = Vec::new();
@@ -975,6 +977,39 @@ impl Element for EditorElement {
                 }
             }
 
+            // Search match quads
+            if !editor.search_matches.is_empty() {
+                let match_bg = editor.styles.search.search_match_bg;
+                let active_bg = editor.styles.search.search_match_active_bg;
+                for (match_idx, sr) in editor.search_matches.iter().enumerate() {
+                    let is_active = editor.search_current_index == Some(match_idx);
+                    let sel_start_on_line = sr.start.max(line_start_offset);
+                    let sel_end_on_line = sr.end.min(line_end_offset);
+                    if sel_start_on_line < sel_end_on_line {
+                        let buf_start_col = sel_start_on_line - line_start_offset;
+                        let buf_end_col = sel_end_on_line - line_start_offset;
+                        let disp_start =
+                            helpers::buffer_to_display_offset(&buffer_to_display, buf_start_col);
+                        let disp_end =
+                            helpers::buffer_to_display_offset(&buffer_to_display, buf_end_col);
+                        search_match_quads.extend(helpers::build_selection_quads(
+                            &display_text,
+                            &runs,
+                            wrapped,
+                            disp_start,
+                            disp_end,
+                            content_x,
+                            line_top,
+                            line_height,
+                            font_size,
+                            indent_px,
+                            if is_active { active_bg } else { match_bg },
+                            window,
+                        ));
+                    }
+                }
+            }
+
             // Cursor bars — paint for all cursors (primary + extra)
             if editor.focus_handle.is_focused(window)
                 && (editor.cursor_opacity > 0.0 || editor.is_selecting)
@@ -1097,6 +1132,7 @@ impl Element for EditorElement {
             lines,
             cursor_quads,
             selection_quads,
+            search_match_quads,
             line_highlight,
             code_block_bgs,
             marked_underlines,
@@ -1139,6 +1175,11 @@ impl Element for EditorElement {
 
         if let Some(highlight) = prepaint.line_highlight.take() {
             window.paint_quad(highlight);
+        }
+
+        // Search match highlights (behind selection)
+        for quad in prepaint.search_match_quads.drain(..) {
+            window.paint_quad(quad);
         }
 
         for quad in prepaint.selection_quads.drain(..) {

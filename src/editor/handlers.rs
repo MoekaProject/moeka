@@ -21,6 +21,10 @@ impl EditorView {
             self.dismiss_dialog(cx);
             return;
         }
+        if self.search_visible {
+            self.dismiss_search(cx);
+            return;
+        }
         if self.sidebar_edit.is_some() {
             self.cancel_sidebar_edit(cx);
             return;
@@ -54,10 +58,6 @@ impl EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.sidebar_edit.is_some() {
-            self.sidebar_edit_backspace(cx);
-            return;
-        }
         self.checkpoint();
 
         // Multi-cursor backspace
@@ -1048,6 +1048,42 @@ impl EditorView {
 
     pub(crate) fn on_new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) {
         self.create_scratch_tab(cx);
+    }
+
+    pub(crate) fn on_close_active_tab(
+        &mut self,
+        _: &CloseActiveTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_active_tab(cx);
+    }
+
+    pub(crate) fn on_reopen_closed_tab(
+        &mut self,
+        _: &ReopenClosedTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reopen_closed_tab(cx);
+    }
+
+    pub(crate) fn on_activate_previous_tab(
+        &mut self,
+        _: &ActivatePreviousTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_previous_tab(cx);
+    }
+
+    pub(crate) fn on_activate_next_tab(
+        &mut self,
+        _: &ActivateNextTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_next_tab(cx);
     }
 
     // ── Multi-cursor actions ────────────────────────────────────────
