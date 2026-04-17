@@ -1,3 +1,6 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::{
     AnyElement, Context, CursorStyle, Focusable, MouseButton, ScrollHandle, SharedString, Window,
     div, prelude::*, px,
@@ -9,7 +12,7 @@ use super::EditorView;
 
 // ── Font picker state ───────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum FontRole {
     UiFont,
     BodyFont,
@@ -29,7 +32,7 @@ pub(crate) struct FontPickerState {
 
 impl EditorView {
     pub(crate) fn render_settings_panel(
-        &self,
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -42,19 +45,20 @@ impl EditorView {
             .overflow_y_scroll()
             .track_scroll(&self.settings_scroll_handle)
             .bg(bg)
+            .text_size(px(self.scaled(13.0)))
             .child(
                 div()
-                    .max_w(px(560.0))
+                    .max_w(px(self.scaled(560.0)))
                     .mx_auto()
-                    .py(px(60.0))
-                    .px(px(40.0))
+                    .py(px(self.scaled(60.0)))
+                    .px(px(self.scaled(40.0)))
                     .flex()
                     .flex_col()
-                    .gap(px(32.0))
+                    .gap(px(self.scaled(32.0)))
                     // Title
                     .child(
                         div()
-                            .text_size(px(22.0))
+                            .text_size(px(self.scaled(22.0)))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(self.theme.text_bright)
                             .child("设置"),
@@ -75,10 +79,10 @@ impl EditorView {
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(self.scaled(8.0)))
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(self.scaled(12.0)))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(self.theme.text_secondary)
                     .child(label.to_uppercase()),
@@ -90,20 +94,127 @@ impl EditorView {
     // ── Theme section ───────────────────────────────────────────
 
     fn render_theme_section(&self, cx: &mut Context<Self>) -> AnyElement {
-        let themes = ThemeKind::all();
         let current = self.theme_kind;
+        let is_dark_mode = self.settings_theme_dark_mode;
+        let themes = if is_dark_mode {
+            ThemeKind::dark_themes()
+        } else {
+            ThemeKind::light_themes()
+        };
+        let text_secondary = self.theme.text_secondary;
+        let border_color = self.theme.border_secondary;
+        let hover_bg = self.theme.bg_hover;
+        let toggle_active_bg = self.theme.text_primary;
+        let toggle_active_text = self.theme.bg_primary;
 
         div()
             .flex()
             .flex_col()
-            .gap(px(12.0))
-            .child(self.render_section_heading("主题"))
+            .gap(px(self.scaled(12.0)))
             .child(
-                div().flex().flex_row().flex_wrap().gap(px(10.0)).children(
-                    themes
-                        .iter()
-                        .map(|&kind| self.render_theme_card(kind, kind == current, cx)),
-                ),
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(self.scaled(8.0)))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .items_end()
+                            .gap(px(self.scaled(12.0)))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(self.scaled(12.0)))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(text_secondary)
+                                    .child("主题".to_uppercase()),
+                            )
+                            .child(
+                                div()
+                                    .mb(px(self.scaled(5.0)))
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(0.0))
+                                    .rounded(px(self.scaled(5.0)))
+                                    .border(px(1.0))
+                                    .border_color(self.theme.border_primary)
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .id("theme-toggle-light")
+                                            .rounded_l(px(self.scaled(5.0)))
+                                            .px(px(self.scaled(12.0)))
+                                            .py(px(self.scaled(4.0)))
+                                            .text_size(px(self.scaled(11.0)))
+                                            .cursor(CursorStyle::Arrow)
+                                            .when(!is_dark_mode, |this| {
+                                                this.bg(toggle_active_bg)
+                                                    .text_color(toggle_active_text)
+                                            })
+                                            .when(is_dark_mode, |this| {
+                                                this.text_color(text_secondary)
+                                                    .hover(move |s| s.bg(hover_bg))
+                                            })
+                                            .child("浅色")
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, cx| {
+                                                    if this.settings_theme_dark_mode {
+                                                        this.settings_theme_dark_mode = false;
+                                                        let first_light =
+                                                            ThemeKind::light_themes()[0];
+                                                        this.set_theme(first_light, cx);
+                                                    }
+                                                }),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("theme-toggle-dark")
+                                            .rounded_r(px(self.scaled(5.0)))
+                                            .px(px(self.scaled(12.0)))
+                                            .py(px(self.scaled(4.0)))
+                                            .text_size(px(self.scaled(11.0)))
+                                            .cursor(CursorStyle::Arrow)
+                                            .when(is_dark_mode, |this| {
+                                                this.bg(toggle_active_bg)
+                                                    .text_color(toggle_active_text)
+                                            })
+                                            .when(!is_dark_mode, |this| {
+                                                this.text_color(text_secondary)
+                                                    .hover(move |s| s.bg(hover_bg))
+                                            })
+                                            .child("深色")
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, cx| {
+                                                    if !this.settings_theme_dark_mode {
+                                                        this.settings_theme_dark_mode = true;
+                                                        let first_dark =
+                                                            ThemeKind::dark_themes()[0];
+                                                        this.set_theme(first_dark, cx);
+                                                    }
+                                                }),
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .child(div().w_full().h(px(1.0)).bg(border_color)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_around()
+                    .gap(px(self.scaled(10.0)))
+                    .children(
+                        themes
+                            .iter()
+                            .map(|&kind| self.render_theme_card(kind, kind == current, cx)),
+                    ),
             )
             .into_any_element()
     }
@@ -124,22 +235,22 @@ impl EditorView {
         let active_accent = self.theme.text_accent;
         let hover_bg = self.theme.bg_hover;
 
-        let swatch_size = 12.0;
+        let swatch_size = self.scaled(12.0);
 
         div()
             .id(SharedString::from(format!("theme-{}", kind.label())))
-            .w(px(100.0))
-            .py(px(10.0))
-            .px(px(10.0))
+            .flex_1()
+            .py(px(self.scaled(10.0)))
+            .px(px(self.scaled(10.0)))
             .flex()
             .flex_col()
-            .gap(px(8.0))
-            .rounded(px(8.0))
-            .border(px(if is_active { 2.0 } else { 1.0 }))
+            .gap(px(self.scaled(8.0)))
+            .rounded(px(self.scaled(8.0)))
+            .border(px(2.0))
             .border_color(if is_active {
                 active_accent
             } else {
-                self.theme.border_primary
+                gpui::transparent_black()
             })
             .bg(card_bg)
             .cursor(CursorStyle::Arrow)
@@ -156,52 +267,52 @@ impl EditorView {
                     this.set_theme(kind, cx);
                 }),
             )
-            // Color swatches row
+            // Color swatches row (reversed order, circular)
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(4.0))
+                    .gap(px(self.scaled(4.0)))
                     .child(
                         div()
                             .w(px(swatch_size))
                             .h(px(swatch_size))
-                            .rounded(px(2.0))
-                            .bg(swatch_secondary_bg),
+                            .rounded_full()
+                            .bg(swatch_code),
                     )
                     .child(
                         div()
                             .w(px(swatch_size))
                             .h(px(swatch_size))
-                            .rounded(px(2.0))
-                            .bg(swatch_text),
-                    )
-                    .child(
-                        div()
-                            .w(px(swatch_size))
-                            .h(px(swatch_size))
-                            .rounded(px(2.0))
-                            .bg(swatch_accent),
-                    )
-                    .child(
-                        div()
-                            .w(px(swatch_size))
-                            .h(px(swatch_size))
-                            .rounded(px(2.0))
+                            .rounded_full()
                             .bg(swatch_heading),
                     )
                     .child(
                         div()
                             .w(px(swatch_size))
                             .h(px(swatch_size))
-                            .rounded(px(2.0))
-                            .bg(swatch_code),
+                            .rounded_full()
+                            .bg(swatch_accent),
+                    )
+                    .child(
+                        div()
+                            .w(px(swatch_size))
+                            .h(px(swatch_size))
+                            .rounded_full()
+                            .bg(swatch_text),
+                    )
+                    .child(
+                        div()
+                            .w(px(swatch_size))
+                            .h(px(swatch_size))
+                            .rounded_full()
+                            .bg(swatch_secondary_bg),
                     ),
             )
             // Theme name
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(self.scaled(11.0)))
                     .text_color(swatch_text)
                     .child(kind.label()),
             )
@@ -210,55 +321,32 @@ impl EditorView {
 
     // ── Font section ────────────────────────────────────────────
 
-    fn render_font_section(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let es = &self.styles.editor;
+    fn render_font_section(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let ui_font = self.styles.ui_font_family;
+        let body_latin = self.styles.editor.editor_body_latin_font_family;
+        let body_cjk = self.styles.editor.editor_body_cjk_font_family;
+        let monospace = self.styles.editor.editor_monospace_font_family;
 
         div()
             .flex()
             .flex_col()
-            .gap(px(12.0))
+            .gap(px(self.scaled(12.0)))
             .child(self.render_section_heading("字体"))
             // UI font
-            .child(self.render_font_row(
-                "界面字体",
-                self.styles.ui_font_family,
-                FontRole::UiFont,
-                0,
-                cx,
-            ))
-            // UI font size
+            .child(self.render_font_row("界面字体", ui_font, FontRole::UiFont, 0, cx))
+            // UI scale
             .child(self.render_ui_font_size_row(cx))
             // Body font (Latin)
-            .child(self.render_font_row(
-                "编辑器正文字体",
-                es.editor_body_latin_font_family,
-                FontRole::BodyFont,
-                0,
-                cx,
-            ))
+            .child(self.render_font_row("编辑器字体", body_latin, FontRole::BodyFont, 0, cx))
             // Body font (CJK)
-            .child(self.render_font_row(
-                "编辑器正文字体 (CJK)",
-                es.editor_body_cjk_font_family,
-                FontRole::BodyFont,
-                1,
-                cx,
-            ))
+            .child(self.render_font_row("编辑器字体(CJK)", body_cjk, FontRole::BodyFont, 1, cx))
             // Code font
-            .child(self.render_font_row(
-                "编辑器代码块字体",
-                es.editor_monospace_font_family,
-                FontRole::CodeFont,
-                0,
-                cx,
-            ))
-            // Editor font size
-            .child(self.render_font_size_row(cx))
+            .child(self.render_font_row("编辑器代码字体", monospace, FontRole::CodeFont, 0, cx))
             .into_any_element()
     }
 
     fn render_font_row(
-        &self,
+        &mut self,
         label: &str,
         current_font: &str,
         role: FontRole,
@@ -275,41 +363,58 @@ impl EditorView {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(12.0))
+            .gap(px(self.scaled(12.0)))
             .child(
                 div()
-                    .w(px(120.0))
-                    .text_size(px(13.0))
+                    .w(px(self.scaled(120.0)))
+                    .text_size(px(self.scaled(13.0)))
                     .text_color(text_secondary)
                     .child(label.to_string()),
             )
-            .child(
+            .child({
+                let bounds_cell = self
+                    .font_picker_button_bounds
+                    .entry((role, font_index))
+                    .or_insert_with(|| Rc::new(Cell::new(None)))
+                    .clone();
                 div()
-                    .id(SharedString::from(format!(
-                        "font-picker-{:?}-{}",
-                        role as u8, font_index
-                    )))
                     .flex_1()
-                    .h(px(30.0))
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.0))
-                    .border(px(1.0))
-                    .border_color(border_color)
-                    .text_size(px(13.0))
-                    .text_color(text_primary)
-                    .cursor(CursorStyle::Arrow)
-                    .hover(move |s| s.bg(hover_bg))
-                    .child(font_name)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                            window.prevent_default();
-                            this.open_font_picker(role, font_index, event.position, window, cx);
-                        }),
-                    ),
-            )
+                    .on_children_prepainted({
+                        let bounds_cell = bounds_cell.clone();
+                        move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
+                            if let Some(b) = bounds.first() {
+                                bounds_cell.set(Some(*b));
+                            }
+                        }
+                    })
+                    .child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "font-picker-{:?}-{}",
+                                role as u8, font_index
+                            )))
+                            .w_full()
+                            .h(px(self.scaled(30.0)))
+                            .px(px(self.scaled(10.0)))
+                            .flex()
+                            .items_center()
+                            .rounded(px(self.scaled(6.0)))
+                            .border(px(1.0))
+                            .border_color(border_color)
+                            .text_size(px(self.scaled(13.0)))
+                            .text_color(text_primary)
+                            .cursor(CursorStyle::Arrow)
+                            .hover(move |s| s.bg(hover_bg))
+                            .child(font_name)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _: &gpui::MouseDownEvent, window, cx| {
+                                    window.prevent_default();
+                                    this.open_font_picker(role, font_index, window, cx);
+                                }),
+                            ),
+                    )
+            })
             .into_any_element()
     }
 
@@ -484,13 +589,13 @@ impl EditorView {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(12.0))
+            .gap(px(self.scaled(12.0)))
             .child(
                 div()
-                    .w(px(120.0))
-                    .text_size(px(13.0))
+                    .w(px(self.scaled(120.0)))
+                    .text_size(px(self.scaled(13.0)))
                     .text_color(text_secondary)
-                    .child("界面字体大小"),
+                    .child("界面缩放系数"),
             )
             .child(
                 div()
@@ -500,16 +605,16 @@ impl EditorView {
                     .gap(px(0.0))
                     .child(
                         div()
-                            .id("ui-font-size-dec")
-                            .w(px(30.0))
-                            .h(px(30.0))
+                            .id("ui-scale-dec")
+                            .w(px(self.scaled(30.0)))
+                            .h(px(self.scaled(30.0)))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_l(px(6.0))
+                            .rounded_l(px(self.scaled(6.0)))
                             .border(px(1.0))
                             .border_color(border_color)
-                            .text_size(px(14.0))
+                            .text_size(px(self.scaled(14.0)))
                             .text_color(text_primary)
                             .cursor(CursorStyle::Arrow)
                             .hover(move |s| s.bg(hover_bg))
@@ -517,17 +622,15 @@ impl EditorView {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
-                                    let current = this.styles.ui_font_size_px;
-                                    if current > 10.0 {
-                                        this.apply_ui_font_size(current - 1.0, cx);
-                                    }
+                                    let current = this.ui_scale;
+                                    this.apply_ui_scale(current - 0.1, cx);
                                 }),
                             ),
                     )
                     .child(
                         div()
-                            .w(px(50.0))
-                            .h(px(30.0))
+                            .w(px(self.scaled(50.0)))
+                            .h(px(self.scaled(30.0)))
                             .border_y(px(1.0))
                             .border_color(border_color)
                             .flex()
@@ -540,16 +643,16 @@ impl EditorView {
                     )
                     .child(
                         div()
-                            .id("ui-font-size-inc")
-                            .w(px(30.0))
-                            .h(px(30.0))
+                            .id("ui-scale-inc")
+                            .w(px(self.scaled(30.0)))
+                            .h(px(self.scaled(30.0)))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_r(px(6.0))
+                            .rounded_r(px(self.scaled(6.0)))
                             .border(px(1.0))
                             .border_color(border_color)
-                            .text_size(px(14.0))
+                            .text_size(px(self.scaled(14.0)))
                             .text_color(text_primary)
                             .cursor(CursorStyle::Arrow)
                             .hover(move |s| s.bg(hover_bg))
@@ -557,10 +660,8 @@ impl EditorView {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
-                                    let current = this.styles.ui_font_size_px;
-                                    if current < 30.0 {
-                                        this.apply_ui_font_size(current + 1.0, cx);
-                                    }
+                                    let current = this.ui_scale;
+                                    this.apply_ui_scale(current + 0.1, cx);
                                 }),
                             ),
                     ),
@@ -568,14 +669,16 @@ impl EditorView {
             .into_any_element()
     }
 
-    pub(crate) fn apply_ui_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
-        let size = size.clamp(10.0, 30.0);
-        self.styles.ui_font_size_px = size;
-        self.app_settings.ui_font_size = size;
+    pub(crate) fn apply_ui_scale(&mut self, scale: f32, cx: &mut Context<Self>) {
+        let scale = (scale * 10.0).round() / 10.0; // Round to 0.1
+        self.set_ui_scale(scale, cx);
+        self.app_settings.ui_scale = self.ui_scale;
         self.app_settings.save();
+        self.line_display_info.clear();
         if let Some(editor) = &self.settings_ui_font_size_editor {
+            let current = self.ui_scale;
             editor.update(cx, |ti, cx| {
-                let display = format!("{:.0}", size);
+                let display = format!("{:.1}", current);
                 if ti.text() != display {
                     ti.set_text(&display, cx);
                 }
@@ -598,28 +701,26 @@ impl EditorView {
         styles.text_input_cursor_height_ratio = 0.6;
         let editor = cx.new(|cx| {
             let mut ti = crate::text_input::TextInput::new(styles, "", cx);
-            ti.set_text(&format!("{:.0}", self.styles.ui_font_size_px), cx);
+            ti.set_text(&format!("{:.1}", self.ui_scale), cx);
             ti
         });
         cx.subscribe(
             &editor,
-            |this, editor, event: &crate::text_input::TextInputEvent, cx| {
-                match event {
-                    crate::text_input::TextInputEvent::Submit => {
-                        let text = editor.read(cx).text().to_string();
-                        if let Ok(size) = text.parse::<f32>() {
-                            this.apply_ui_font_size(size, cx);
-                        }
+            |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Submit => {
+                    let text = editor.read(cx).text().to_string();
+                    if let Ok(scale) = text.parse::<f32>() {
+                        this.apply_ui_scale(scale, cx);
                     }
-                    crate::text_input::TextInputEvent::Escape => {
-                        let current = this.styles.ui_font_size_px;
-                        editor.update(cx, |ti, cx| {
-                            ti.set_text(&format!("{:.0}", current), cx);
-                        });
-                    }
-                    crate::text_input::TextInputEvent::Changed => {}
-                    _ => {}
                 }
+                crate::text_input::TextInputEvent::Escape => {
+                    let current = this.ui_scale;
+                    editor.update(cx, |ti, cx| {
+                        ti.set_text(&format!("{:.1}", current), cx);
+                    });
+                }
+                crate::text_input::TextInputEvent::Changed => {}
+                _ => {}
             },
         )
         .detach();
@@ -632,7 +733,6 @@ impl EditorView {
         &mut self,
         role: FontRole,
         font_index: usize,
-        position: gpui::Point<gpui::Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -654,7 +754,6 @@ impl EditorView {
             selected_index: 0,
             scroll_handle: ScrollHandle::new(),
         });
-        self.font_picker_trigger_position = Some(position);
 
         // Create TextInput for search
         let mut styles = self.styles.text_input.clone();
@@ -747,7 +846,7 @@ impl EditorView {
         let selected_bg = self.theme.bg_selected;
 
         let max_visible = 12;
-        let item_h = 28.0_f32;
+        let item_h = self.scaled(28.0);
         let items: Vec<AnyElement> = picker
             .filtered
             .iter()
@@ -760,10 +859,10 @@ impl EditorView {
                     .id(SharedString::from(format!("fp-item-{idx}")))
                     .w_full()
                     .h(px(item_h))
-                    .px(px(10.0))
+                    .px(px(self.scaled(10.0)))
                     .flex()
                     .items_center()
-                    .text_size(px(13.0))
+                    .text_size(px(self.scaled(13.0)))
                     .text_color(text_primary)
                     .font_family(SharedString::from(name.clone()))
                     .when(is_selected, |this| this.bg(selected_bg))
@@ -796,31 +895,39 @@ impl EditorView {
             0.0
         };
         let pane_w = self.last_window_width - sidebar_w - outline_w - 2.0 * border_w;
-        let settings_content_max_w = 560.0_f32;
-        let settings_px = 40.0_f32;
+        let settings_content_max_w = self.scaled(560.0);
+        let settings_px = self.scaled(40.0);
         let settings_content_w = settings_content_max_w.min(pane_w);
         // mx_auto centers the content within the pane
         let settings_left = sidebar_w + border_w + (pane_w - settings_content_w) / 2.0;
-        let button_left = settings_left + settings_px + 120.0 + 12.0;
-        let button_w = settings_content_w - 2.0 * settings_px - 120.0 - 12.0;
+        let button_left = settings_left + settings_px + self.scaled(120.0) + self.scaled(12.0);
+        let button_w =
+            settings_content_w - 2.0 * settings_px - self.scaled(120.0) - self.scaled(12.0);
 
-        // Use the click position for Y, compute dropdown below the button
-        let pos = self
-            .font_picker_trigger_position
-            .unwrap_or(gpui::point(gpui::px(200.0), gpui::px(200.0)));
-        let click_y: f32 = pos.y.into();
-        // Button is 30px tall — position the dropdown right below the button bottom
-        // Estimate button top from click Y (click can be anywhere in the 30px button)
-        // Use a fixed offset that looks good regardless of click position
-        let dropdown_y = click_y + 18.0;
+        // Use captured button bounds for precise positioning
+        let button_bounds = self
+            .font_picker_button_bounds
+            .get(&(picker.role, picker.font_index))
+            .and_then(|rc| rc.get());
+        let (button_x, button_y, button_w_val) = match button_bounds {
+            Some(b) => (
+                f32::from(b.origin.x),
+                f32::from(b.origin.y),
+                f32::from(b.size.width),
+            ),
+            None => (button_left, 200.0, button_w),
+        };
 
-        let dropdown_w = button_w.min(400.0).max(260.0);
-        let max_h = (max_visible as f32) * item_h + 42.0;
+        let dropdown_w = button_w_val.min(self.scaled(400.0)).max(self.scaled(260.0));
+        let gap = self.scaled(4.0);
+        let button_h = self.scaled(30.0);
+        let dropdown_y = button_y + button_h + gap;
+        let max_h = (max_visible as f32) * item_h + self.scaled(42.0);
         let window_h = self.last_window_height - 2.0 * border_w;
-        let final_x = button_left.max(8.0);
+        let final_x = button_x.max(8.0);
         // If dropdown would go below window, flip it above the button
         let dropdown_y = if dropdown_y + max_h > window_h - 8.0 {
-            (click_y - max_h - 4.0).max(8.0)
+            (button_y - max_h - gap).max(8.0)
         } else {
             dropdown_y
         };
@@ -836,7 +943,7 @@ impl EditorView {
             .bg(bg)
             .border(px(1.0))
             .border_color(border_color)
-            .rounded(px(8.0))
+            .rounded(px(self.scaled(8.0)))
             .shadow_md()
             .flex()
             .flex_col()
@@ -863,8 +970,8 @@ impl EditorView {
             .child(
                 div()
                     .w_full()
-                    .px(px(6.0))
-                    .py(px(6.0))
+                    .px(px(self.scaled(6.0)))
+                    .py(px(self.scaled(6.0)))
                     .border_b(px(1.0))
                     .border_color(border_color)
                     .when_some(self.settings_font_picker_editor.clone(), |this, editor| {
@@ -912,8 +1019,7 @@ impl EditorView {
             self.font_picker_trigger_position = None;
             match (picker.role, picker.font_index) {
                 (FontRole::UiFont, _) => {
-                    self.styles.ui_font_family =
-                        Box::leak(font_name.clone().into_boxed_str());
+                    self.styles.ui_font_family = Box::leak(font_name.clone().into_boxed_str());
                     self.app_settings.ui_font = font_name;
                 }
                 (FontRole::BodyFont, 0) => {

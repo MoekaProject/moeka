@@ -538,6 +538,8 @@ impl EditorView {
 
     pub(crate) fn switch_workspace(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.sidebar_root = path.clone();
+        self.sidebar_visible = true;
+        self.sidebar_resizing = false;
         self.expanded_dirs.clear();
         self.expanded_dirs.insert(path);
         self.selected_sidebar_paths.clear();
@@ -553,21 +555,27 @@ impl EditorView {
         // Find the index of the workspace being closed so we can switch to the next one
         let closing_idx = self.workspaces.iter().position(|w| w == path);
         self.workspaces.retain(|w| w != path);
+        if self.workspaces.is_empty() {
+            self.sidebar_root = PathBuf::new();
+            self.sidebar_visible = false;
+            self.sidebar_resizing = false;
+            self.expanded_dirs.clear();
+            self.selected_sidebar_paths.clear();
+            self.focused_sidebar_path = None;
+            self.sidebar_selection_anchor = None;
+            self.sidebar_error = None;
+            self.context_menu = None;
+            self._watcher_task = None;
+            cx.notify();
+            return;
+        }
         if self.sidebar_root == path {
-            if !self.workspaces.is_empty() {
-                // Switch to the next workspace (or last if we were at the end)
-                let next_idx = closing_idx
-                    .unwrap_or(0)
-                    .min(self.workspaces.len().saturating_sub(1));
-                let next = self.workspaces[next_idx].clone();
-                self.switch_workspace(next, cx);
-            } else {
-                self.sidebar_root = PathBuf::new();
-                self.expanded_dirs.clear();
-                self.sidebar_error = None;
-                self.context_menu = None;
-                cx.notify();
-            }
+            // Switch to the next workspace (or last if we were at the end)
+            let next_idx = closing_idx
+                .unwrap_or(0)
+                .min(self.workspaces.len().saturating_sub(1));
+            let next = self.workspaces[next_idx].clone();
+            self.switch_workspace(next, cx);
         } else {
             self.context_menu = None;
             cx.notify();

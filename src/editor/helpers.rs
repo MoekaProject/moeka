@@ -384,12 +384,16 @@ pub(crate) fn compute_table_render_widths(
         .saturating_mul(2)
         .saturating_mul(widths.len());
     let min_width = 3usize;
-    let min_required = min_width.saturating_mul(widths.len()).saturating_add(padding_budget);
+    let min_required = min_width
+        .saturating_mul(widths.len())
+        .saturating_add(padding_budget);
     if available_chars <= padding_budget {
         return vec![1; widths.len()];
     }
     if available_chars <= min_required {
-        let content_budget = available_chars.saturating_sub(padding_budget).max(widths.len());
+        let content_budget = available_chars
+            .saturating_sub(padding_budget)
+            .max(widths.len());
         let base = (content_budget / widths.len()).max(1);
         let mut remainder = content_budget.saturating_sub(base * widths.len());
         for width in &mut widths {
@@ -496,9 +500,7 @@ pub(crate) fn build_selection_quads(
                     None,
                     None,
                 ) {
-                    shaped
-                        .first()
-                        .map_or(0.0, |w| f32::from(w.width()))
+                    shaped.first().map_or(0.0, |w| f32::from(w.width()))
                 } else {
                     0.0
                 }
@@ -1255,7 +1257,10 @@ pub(crate) fn build_text_runs_for_display(
         Monospace,
     }
 
-    let is_code_line = matches!(decoration.block_type, BlockType::CodeBlock | BlockType::CodeBlockFence);
+    let is_code_line = matches!(
+        decoration.block_type,
+        BlockType::CodeBlock | BlockType::CodeBlockFence
+    );
     let default_font = if matches!(decoration.block_type, BlockType::Heading(_)) {
         heading_font
     } else {
@@ -1453,8 +1458,7 @@ pub(crate) fn build_text_runs_for_display(
                 }
             }
             BlockType::TaskList(_) => {
-                let placeholder_start =
-                    leading_ws.saturating_sub(collapsed_task_prefix_chars);
+                let placeholder_start = leading_ws.saturating_sub(collapsed_task_prefix_chars);
                 let placeholder_end = leading_ws.min(disp_len);
                 for i in placeholder_start..placeholder_end {
                     colors[i] = gpui::transparent_black();

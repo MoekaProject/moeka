@@ -114,11 +114,12 @@ impl EditorView {
                 } else {
                     0.0
                 };
-                let bottom = if line + 1 >= self.buffer.line_count() || self.is_non_empty_line(line + 1) {
-                    self.scaled(self.styles.editor.editor_heading_padding_bottom_px)
-                } else {
-                    0.0
-                };
+                let bottom =
+                    if line + 1 >= self.buffer.line_count() || self.is_non_empty_line(line + 1) {
+                        self.scaled(self.styles.editor.editor_heading_padding_bottom_px)
+                    } else {
+                        0.0
+                    };
                 (top, bottom)
             }
             _ if self.is_paragraph_style_line(line) => {
@@ -127,11 +128,12 @@ impl EditorView {
                 } else {
                     0.0
                 };
-                let bottom = if line + 1 >= self.buffer.line_count() || self.is_heading_line(line + 1) {
-                    self.scaled(self.styles.editor.editor_paragraph_padding_bottom_px)
-                } else {
-                    0.0
-                };
+                let bottom =
+                    if line + 1 >= self.buffer.line_count() || self.is_heading_line(line + 1) {
+                        self.scaled(self.styles.editor.editor_paragraph_padding_bottom_px)
+                    } else {
+                        0.0
+                    };
                 (top, bottom)
             }
             _ => (0.0, 0.0),
@@ -194,10 +196,10 @@ impl EditorView {
 
     pub(crate) fn clamp_scroll(&mut self) {
         // Allow scrolling the last line to the top (like Monaco's scrollBeyondLastLine)
-        let last_line_height = self.visual_height_for_line(
-            self.buffer.line_count().saturating_sub(1),
-        );
-        let max_scroll = (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0);
+        let last_line_height =
+            self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
+        let max_scroll =
+            (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0);
         self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
     }
 
@@ -295,6 +297,12 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_sidebar_visibility(&mut self, cx: &mut Context<Self>) {
+        if self.workspaces.is_empty() {
+            self.sidebar_visible = false;
+            self.sidebar_resizing = false;
+            cx.notify();
+            return;
+        }
         self.sidebar_visible = !self.sidebar_visible;
         if !self.sidebar_visible {
             self.sidebar_resizing = false;

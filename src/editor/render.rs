@@ -1,6 +1,6 @@
 use gpui::{
     CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Render, SharedString, Window,
-    deferred, div, img, prelude::*, px,
+    deferred, div, img, prelude::*, px, svg,
 };
 
 use super::*;
@@ -26,7 +26,6 @@ impl Render for EditorView {
             .flex_row()
             .overflow_hidden()
             .font_family(SharedString::from(self.styles.ui_font_family))
-            .text_size(px(self.styles.ui_font_size_px))
             .bg(ws.window_bg)
             .border(px(ws.window_border_width_px))
             .border_color(ws.window_border_color)
@@ -305,7 +304,11 @@ impl Render for EditorView {
                                                     .on_mouse_down(
                                                         MouseButton::Left,
                                                         cx.listener(|this, _, _, cx| {
-                                                            this.toggle_sidebar_visibility(cx);
+                                                            if this.workspaces.is_empty() {
+                                                                this.pick_workspace_folder(cx);
+                                                            } else {
+                                                                this.toggle_sidebar_visibility(cx);
+                                                            }
                                                         }),
                                                     ),
                                             )
@@ -371,10 +374,7 @@ impl Render for EditorView {
                                                     })
                                                     .child(
                                                         img(helpers::resolve_asset_image_path(
-                                                            if matches!(
-                                                                self.theme_kind,
-                                                                crate::theme::ThemeKind::OneDark
-                                                            ) {
+                                                            if self.theme_kind.is_dark() {
                                                                 THEME_DARK_SVG_PATH
                                                             } else {
                                                                 THEME_LIGHT_SVG_PATH

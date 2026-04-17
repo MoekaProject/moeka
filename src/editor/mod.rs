@@ -38,8 +38,8 @@ pub(crate) struct AppSettings {
     pub theme: String,
     #[serde(default = "default_ui_font")]
     pub ui_font: String,
-    #[serde(default = "default_ui_font_size")]
-    pub ui_font_size: f32,
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
     #[serde(default = "default_body_latin_font")]
     pub body_latin_font: String,
     #[serde(default = "default_body_cjk_font")]
@@ -59,6 +59,9 @@ fn default_ui_font() -> String {
 fn default_ui_font_size() -> f32 {
     13.0
 }
+fn default_ui_scale() -> f32 {
+    1.0
+}
 fn default_body_latin_font() -> String {
     "Menlo".to_string()
 }
@@ -77,7 +80,7 @@ impl Default for AppSettings {
         Self {
             theme: default_theme(),
             ui_font: default_ui_font(),
-            ui_font_size: default_ui_font_size(),
+            ui_scale: default_ui_scale(),
             body_latin_font: default_body_latin_font(),
             body_cjk_font: default_body_cjk_font(),
             code_font: default_code_font(),
@@ -121,6 +124,7 @@ impl AppSettings {
             "AyuDark" => ThemeKind::AyuDark,
             "AyuLight" => ThemeKind::AyuLight,
             "Milky" => ThemeKind::Milky,
+            "MilkyDark" => ThemeKind::MilkyDark,
             _ => ThemeKind::OneDark,
         }
     }
@@ -133,6 +137,7 @@ fn theme_kind_to_string(kind: ThemeKind) -> String {
         ThemeKind::AyuDark => "AyuDark",
         ThemeKind::AyuLight => "AyuLight",
         ThemeKind::Milky => "Milky",
+        ThemeKind::MilkyDark => "MilkyDark",
     }
     .to_string()
 }
@@ -553,11 +558,16 @@ pub struct EditorView {
 
     // Settings panel state
     pub(crate) settings_scroll_handle: ScrollHandle,
+    pub(crate) settings_theme_dark_mode: bool,
     pub(crate) settings_font_picker: Option<settings_panel::FontPickerState>,
     pub(crate) settings_font_picker_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) settings_font_size_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) settings_ui_font_size_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) font_picker_trigger_position: Option<gpui::Point<gpui::Pixels>>,
+    pub(crate) font_picker_button_bounds: std::collections::HashMap<
+        (crate::editor::settings_panel::FontRole, usize),
+        std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    >,
     pub(crate) cached_font_names: Option<Vec<String>>,
     pub(crate) app_settings: AppSettings,
 }
@@ -585,7 +595,6 @@ impl EditorView {
         // Apply saved font settings
         styles.editor.editor_font_size_px = app_settings.font_size;
         styles.ui_font_family = Box::leak(app_settings.ui_font.clone().into_boxed_str());
-        styles.ui_font_size_px = app_settings.ui_font_size;
         styles.editor.editor_body_latin_font_family =
             Box::leak(app_settings.body_latin_font.clone().into_boxed_str());
         styles.editor.editor_body_cjk_font_family =
@@ -666,7 +675,7 @@ impl EditorView {
             sidebar_edit: None,
             sidebar_edit_blur_sub: None,
             file_clipboard: None,
-            ui_scale: 1.0,
+            ui_scale: app_settings.ui_scale,
             folded_sections: HashSet::new(),
             folded_image_previews: HashSet::new(),
             gutter_fold_areas: Vec::new(),
@@ -679,7 +688,7 @@ impl EditorView {
             menu_selected_index: 0,
             slash_menu_start: None,
             slash_filter: String::new(),
-            sidebar_visible: true,
+            sidebar_visible: false,
             editor_left_aligned: false,
             tab_dragging_id: None,
             recently_closed_tabs: Vec::new(),
@@ -720,11 +729,13 @@ impl EditorView {
 
             // Settings panel state
             settings_scroll_handle: ScrollHandle::new(),
+            settings_theme_dark_mode: theme_kind.is_dark(),
             settings_font_picker: None,
             settings_font_picker_editor: None,
             settings_font_size_editor: None,
             settings_ui_font_size_editor: None,
             font_picker_trigger_position: None,
+            font_picker_button_bounds: std::collections::HashMap::new(),
             cached_font_names: None,
             app_settings,
         };
@@ -770,10 +781,7 @@ impl EditorView {
     // ── Theme toggle ─────────────────────────────────────────────
 
     pub(crate) fn toggle_theme(&mut self, cx: &mut Context<Self>) {
-        let all = ThemeKind::all();
-        let current_idx = all.iter().position(|k| *k == self.theme_kind).unwrap_or(0);
-        let next_idx = (current_idx + 1) % all.len();
-        self.set_theme(all[next_idx], cx);
+        self.set_theme(self.theme_kind.paired_appearance(), cx);
     }
 
     pub(crate) fn set_theme(&mut self, kind: ThemeKind, cx: &mut Context<Self>) {
@@ -783,7 +791,6 @@ impl EditorView {
         // Re-apply font overrides from settings since from_theme resets to defaults
         self.styles.editor.editor_font_size_px = self.app_settings.font_size;
         self.styles.ui_font_family = Box::leak(self.app_settings.ui_font.clone().into_boxed_str());
-        self.styles.ui_font_size_px = self.app_settings.ui_font_size;
         self.styles.editor.editor_body_latin_font_family =
             Box::leak(self.app_settings.body_latin_font.clone().into_boxed_str());
         self.styles.editor.editor_body_cjk_font_family =
@@ -1677,6 +1684,16 @@ impl EditorView {
         self.clamp_scroll();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
+        // Sync the scale editor display
+        if let Some(editor) = &self.settings_ui_font_size_editor {
+            let current = self.ui_scale;
+            editor.update(cx, |ti, cx| {
+                let display = format!("{:.1}", current);
+                if ti.text() != display {
+                    ti.set_text(&display, cx);
+                }
+            });
+        }
         cx.notify();
     }
 
@@ -1978,6 +1995,140 @@ impl EditorView {
             self.buffer
                 .replace(num_start..num_end, &new_num.to_string());
         }
+    }
+
+    pub(crate) fn ordered_list_prefix_info(
+        &self,
+        line: usize,
+    ) -> Option<(Range<usize>, usize, u32)> {
+        if line >= self.buffer.line_count() {
+            return None;
+        }
+
+        let line_content = self.buffer.line_content(line).to_string();
+        let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+        let trimmed = &line_content[leading_ws..];
+        let prefix_len = markdown::ordered_list_prefix_len(trimmed);
+        if prefix_len < 2 {
+            return None;
+        }
+
+        let number_text = &trimmed[..prefix_len - 2];
+        let number = number_text.parse::<u32>().ok()?;
+        let line_start = self.buffer.line_start(line);
+        Some((
+            line_start + leading_ws..line_start + leading_ws + prefix_len,
+            leading_ws,
+            number,
+        ))
+    }
+
+    pub(crate) fn ordered_list_prefix_touched_by_range(
+        &self,
+        range: &Range<usize>,
+    ) -> Option<usize> {
+        let (start_line, _) = self
+            .buffer
+            .offset_to_line_col(range.start.min(self.buffer.len()));
+        let end_probe = range
+            .end
+            .saturating_sub(usize::from(range.end > range.start));
+        let (end_line, _) = self
+            .buffer
+            .offset_to_line_col(end_probe.min(self.buffer.len()));
+
+        for line in start_line..=end_line {
+            let Some((prefix_range, _, _)) = self.ordered_list_prefix_info(line) else {
+                continue;
+            };
+            let touches = if range.is_empty() {
+                range.start >= prefix_range.start && range.start <= prefix_range.end
+            } else {
+                range.start < prefix_range.end && range.end > prefix_range.start
+            };
+            if touches {
+                return Some(line);
+            }
+        }
+
+        None
+    }
+
+    pub(crate) fn renumber_ordered_list_block_from(
+        &mut self,
+        start_line: usize,
+        starting_number: u32,
+        indent: usize,
+    ) {
+        let mut items: Vec<(usize, usize, u32)> = Vec::new();
+        let mut number = starting_number;
+        for line in start_line.. {
+            if line >= self.buffer.line_count() {
+                break;
+            }
+            let lc = self.buffer.line_content(line).to_string();
+            let lws = lc.len() - lc.trim_start_matches([' ', '\t']).len();
+            if lws != indent {
+                break;
+            }
+            let trimmed = &lc[lws..];
+            let plen = markdown::ordered_list_prefix_len(trimmed);
+            if plen < 2 {
+                break;
+            }
+            let current_str = &trimmed[..plen - 2];
+            if current_str.parse::<u32>().is_err() {
+                break;
+            }
+            let num_start = self.buffer.line_start(line) + lws;
+            let num_end = num_start + current_str.len();
+            items.push((num_start, num_end, number));
+            number += 1;
+        }
+
+        for (num_start, num_end, new_num) in items.into_iter().rev() {
+            self.buffer
+                .replace(num_start..num_end, &new_num.to_string());
+        }
+    }
+
+    pub(crate) fn normalize_ordered_list_near_line(
+        &mut self,
+        line: usize,
+        preserve_current_number: bool,
+    ) {
+        let candidate_line = if self.ordered_list_prefix_info(line).is_some() {
+            Some(line)
+        } else if line + 1 < self.buffer.line_count()
+            && self.ordered_list_prefix_info(line + 1).is_some()
+        {
+            Some(line + 1)
+        } else {
+            None
+        };
+
+        let Some(target_line) = candidate_line else {
+            return;
+        };
+        let Some((_, indent, current_number)) = self.ordered_list_prefix_info(target_line) else {
+            return;
+        };
+
+        if preserve_current_number {
+            self.renumber_ordered_list_after(target_line + 1, current_number + 1, indent);
+            return;
+        }
+
+        let starting_number = if target_line > 0 {
+            self.ordered_list_prefix_info(target_line - 1)
+                .filter(|(_, prev_indent, _)| *prev_indent == indent)
+                .map(|(_, _, prev_number)| prev_number + 1)
+                .unwrap_or(1)
+        } else {
+            1
+        };
+
+        self.renumber_ordered_list_block_from(target_line, starting_number, indent);
     }
 }
 

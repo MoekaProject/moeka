@@ -813,7 +813,7 @@ impl EditorView {
                         false,
                         cx,
                         move |this, _, cx| {
-                            this.close_tab(&id, cx);
+                            this.request_close_tab(&id, cx);
                         },
                     ));
                 }

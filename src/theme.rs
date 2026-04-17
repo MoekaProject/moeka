@@ -7,6 +7,7 @@ pub enum ThemeKind {
     AyuDark,
     AyuLight,
     Milky,
+    MilkyDark,
 }
 
 impl ThemeKind {
@@ -17,7 +18,16 @@ impl ThemeKind {
             Self::AyuDark,
             Self::AyuLight,
             Self::Milky,
+            Self::MilkyDark,
         ]
+    }
+
+    pub fn dark_themes() -> &'static [ThemeKind] {
+        &[Self::OneDark, Self::AyuDark, Self::MilkyDark]
+    }
+
+    pub fn light_themes() -> &'static [ThemeKind] {
+        &[Self::OneLight, Self::AyuLight, Self::Milky]
     }
 
     pub fn label(self) -> &'static str {
@@ -27,11 +37,23 @@ impl ThemeKind {
             Self::AyuDark => "Ayu Dark",
             Self::AyuLight => "Ayu Light",
             Self::Milky => "Milky",
+            Self::MilkyDark => "Milky Dark",
         }
     }
 
     pub fn is_dark(self) -> bool {
-        matches!(self, Self::OneDark | Self::AyuDark)
+        matches!(self, Self::OneDark | Self::AyuDark | Self::MilkyDark)
+    }
+
+    pub fn paired_appearance(self) -> ThemeKind {
+        match self {
+            Self::OneDark => Self::OneLight,
+            Self::OneLight => Self::OneDark,
+            Self::AyuDark => Self::AyuLight,
+            Self::AyuLight => Self::AyuDark,
+            Self::Milky => Self::MilkyDark,
+            Self::MilkyDark => Self::Milky,
+        }
     }
 
     pub fn build(self) -> Theme {
@@ -41,6 +63,7 @@ impl ThemeKind {
             Self::AyuDark => Theme::ayu_dark(),
             Self::AyuLight => Theme::ayu_light(),
             Self::Milky => Theme::milky(),
+            Self::MilkyDark => Theme::milky_dark(),
         }
     }
 }
@@ -185,6 +208,48 @@ impl Theme {
             list_marker: crate::hex_hsla!("#c74440"),
             checkbox_checked: crate::hex_hsla!("#2383e2"),
             gutter_heading: with_alpha(crate::hex_hsla!("#37352f"), 0.12),
+        }
+    }
+
+    pub fn milky_dark() -> Self {
+        Self {
+            // Text — warm tones on dark
+            text_primary: crate::hex_hsla!("#c8c3b8"),
+            text_secondary: crate::hex_hsla!("#7a766c"),
+            text_bright: crate::hex_hsla!("#e8e4da"),
+            text_accent: crate::hex_hsla!("#6daaed"),
+            text_danger: crate::hex_hsla!("#eb5757"),
+            // Background — warm dark tones
+            bg_primary: crate::hex_hsla!("#1e1d1b"),
+            bg_secondary: crate::hex_hsla!("#17161a"),
+            bg_elevated: crate::hex_hsla!("#252420"),
+            bg_hover: crate::hex_hsla!("#2e2d29"),
+            bg_selected: crate::hex_hsla!("#353430"),
+            bg_bar: crate::hex_hsla!("#222120"),
+            bg_tab: crate::hex_hsla!("#222120"),
+            bg_tab_hover: crate::hex_hsla!("#2a2926"),
+            bg_tab_active: crate::hex_hsla!("#1e1d1b"),
+            bg_code: crate::hex_hsla!("#252420"),
+            bg_code_inline: crate::hex_hsla!("#2a2825"),
+            // Border
+            border_primary: crate::hex_hsla!("#3a38349e"),
+            border_secondary: crate::hex_hsla!("#3a383455"),
+            border_tertiary: crate::hex_hsla!("#4a4843"),
+            border_decorative: with_alpha(crate::hex_hsla!("#7a766c"), 0.4),
+            // Editor/Markdown
+            cursor: crate::hex_hsla!("#528bff"),
+            selection: with_alpha(crate::hex_hsla!("#6daaed"), 0.2),
+            line_highlight: with_alpha(crate::hex_hsla!("#3a3834"), 0.4),
+            heading: crate::hex_hsla!("#e27570"),
+            bold: crate::hex_hsla!("#d4a06a"),
+            italic: crate::hex_hsla!("#c98de0"),
+            strikethrough: crate::hex_hsla!("#7a766c"),
+            inline_code: crate::hex_hsla!("#7db86a"),
+            link: crate::hex_hsla!("#6daaed"),
+            syntax_marker: with_alpha(crate::hex_hsla!("#808080"), 1.0),
+            list_marker: crate::hex_hsla!("#e27570"),
+            checkbox_checked: crate::hex_hsla!("#6daaed"),
+            gutter_heading: with_alpha(crate::hex_hsla!("#c8c3b8"), 0.12),
         }
     }
 

@@ -16,7 +16,6 @@ use crate::theme::{Theme, with_alpha};
 ///   单位 = px, ms, factor (无单位 = 无量纲比例)
 pub struct Styles {
     pub ui_font_family: &'static str,
-    pub ui_font_size_px: f32,
     pub window: WindowStyles,
     pub editor: EditorStyles,
     pub sidebar: SidebarStyles,
@@ -379,6 +378,7 @@ pub struct GutterStyles {
     pub gutter_heading_h4_icon_size_px: f32,
     pub gutter_heading_icon_gap_px: f32,
     pub gutter_heading_icon_offset_px: f32,
+    pub gutter_heading_max_total_width_px: f32,
     // Blockquote icon
     pub gutter_blockquote_icon_size_px: f32,
     pub gutter_blockquote_icon_color: Hsla,
@@ -627,7 +627,6 @@ impl Styles {
     pub fn from_theme(theme: &Theme) -> Self {
         Self {
             ui_font_family: ".SystemUIFont",
-            ui_font_size_px: 13.0,
             window: WindowStyles {
                 window_bg: theme.bg_primary,
                 window_border_width_px: 1.0,
@@ -880,8 +879,9 @@ impl Styles {
                 gutter_heading_h2_icon_size_px: 22.0,
                 gutter_heading_h3_icon_size_px: 18.0,
                 gutter_heading_h4_icon_size_px: 14.0,
-                gutter_heading_icon_gap_px: 3.0,
+                gutter_heading_icon_gap_px: 0.0,
                 gutter_heading_icon_offset_px: 10.0,
+                gutter_heading_max_total_width_px: 56.0,
                 gutter_blockquote_icon_size_px: 16.0,
                 gutter_blockquote_icon_color: theme.border_decorative,
                 gutter_blockquote_icon_offset_px: 10.0,

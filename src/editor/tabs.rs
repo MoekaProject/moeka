@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use gpui::{
-    AnyElement, Context, CursorStyle, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent,
-    SharedString, div, prelude::*, px, svg,
+    AnyElement, Context, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent, SharedString, div,
+    prelude::*, px, svg,
 };
 
 use super::*;
@@ -100,35 +100,39 @@ impl EditorView {
 
     pub(crate) fn close_active_tab(&mut self, cx: &mut Context<Self>) {
         if let Some(tab_id) = self.active_tab_id.clone() {
-            // Check if dirty — show dialog
-            if let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) {
-                if tab.is_dirty {
-                    self.show_dialog(
-                        Dialog {
-                            title: "未保存的更改".to_string(),
-                            message: format!(
-                                "\"{}\" 中有未保存的更改。关闭后将丢失这些更改。",
-                                tab.title
-                            ),
-                            save_label: if tab.path.is_some() {
-                                Some("保存".to_string())
-                            } else {
-                                None
-                            },
-                            confirm_label: "不保存".to_string(),
-                            cancel_label: "取消".to_string(),
-                            is_danger: true,
-                            action: DialogAction::CloseTabUnsaved {
-                                tab_id: tab_id.clone(),
-                            },
-                        },
-                        cx,
-                    );
-                    return;
-                }
-            }
-            self.close_tab(&tab_id, cx);
+            self.request_close_tab(&tab_id, cx);
         }
+    }
+
+    pub(crate) fn request_close_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) {
+            if tab.is_dirty {
+                self.show_dialog(
+                    Dialog {
+                        title: "未保存的更改".to_string(),
+                        message: format!(
+                            "\"{}\" 中有未保存的更改。关闭后将丢失这些更改。",
+                            tab.title
+                        ),
+                        save_label: if tab.path.is_some() {
+                            Some("保存".to_string())
+                        } else {
+                            None
+                        },
+                        confirm_label: "不保存".to_string(),
+                        cancel_label: "取消".to_string(),
+                        is_danger: true,
+                        action: DialogAction::CloseTabUnsaved {
+                            tab_id: tab_id.to_string(),
+                        },
+                    },
+                    cx,
+                );
+                return;
+            }
+        }
+
+        self.close_tab(tab_id, cx);
     }
 
     pub(crate) fn reopen_closed_tab(&mut self, cx: &mut Context<Self>) {
@@ -439,7 +443,9 @@ impl EditorView {
             })
             // Drop indicator: highlight left border when hovering with a dragged tab
             .drag_over::<DraggedTab>(move |style, _, _, _| {
-                style.border_l(px(drop_indicator_width)).border_color(drop_indicator_color)
+                style
+                    .border_l(px(drop_indicator_width))
+                    .border_color(drop_indicator_color)
             })
             // Handle drop: reorder the dragged tab before this one
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
@@ -457,33 +463,32 @@ impl EditorView {
             })
             // Normal (non-pinned) tab content
             .when(!is_pinned, |this: gpui::Stateful<gpui::Div>| {
-                this
-                    .when(tab_kind == TabKind::Editor, |this| {
-                        this.child(
-                            svg()
-                                .path(MARKDOWN_SVG_PATH)
-                                .size(px(self.scaled(ts.tab_item_icon_size_px)))
-                                .text_color(ts.tab_item_icon_color)
-                                .opacity(if is_active {
-                                    ts.tab_item_icon_active_opacity
-                                } else {
-                                    ts.tab_item_icon_inactive_opacity
-                                }),
-                        )
-                    })
-                    .when(tab_kind == TabKind::Settings, |this| {
-                        this.child(
-                            div()
-                                .text_size(px(self.scaled(ts.tab_item_icon_size_px)))
-                                .text_color(ts.tab_item_icon_color)
-                                .opacity(if is_active {
-                                    ts.tab_item_icon_active_opacity
-                                } else {
-                                    ts.tab_item_icon_inactive_opacity
-                                })
-                                .child("⚙"),
-                        )
-                    })
+                this.when(tab_kind == TabKind::Editor, |this| {
+                    this.child(
+                        svg()
+                            .path(MARKDOWN_SVG_PATH)
+                            .size(px(self.scaled(ts.tab_item_icon_size_px)))
+                            .text_color(ts.tab_item_icon_color)
+                            .opacity(if is_active {
+                                ts.tab_item_icon_active_opacity
+                            } else {
+                                ts.tab_item_icon_inactive_opacity
+                            }),
+                    )
+                })
+                .when(tab_kind == TabKind::Settings, |this| {
+                    this.child(
+                        div()
+                            .text_size(px(self.scaled(ts.tab_item_icon_size_px)))
+                            .text_color(ts.tab_item_icon_color)
+                            .opacity(if is_active {
+                                ts.tab_item_icon_active_opacity
+                            } else {
+                                ts.tab_item_icon_inactive_opacity
+                            })
+                            .child("⚙"),
+                    )
+                })
                 .child(
                     div()
                         .flex_1()
@@ -544,33 +549,7 @@ impl EditorView {
                             MouseButton::Left,
                             cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                if let Some(tab) = this.tabs.iter().find(|t| t.id == close_id) {
-                                    if tab.is_dirty {
-                                        this.show_dialog(
-                                            Dialog {
-                                                title: "未保存的更改".to_string(),
-                                                message: format!(
-                                                    "\"{}\" 中有未保存的更改。关闭后将丢失这些更改。",
-                                                    tab.title
-                                                ),
-                                                save_label: if tab.path.is_some() {
-                                                    Some("保存".to_string())
-                                                } else {
-                                                    None
-                                                },
-                                                confirm_label: "不保存".to_string(),
-                                                cancel_label: "取消".to_string(),
-                                                is_danger: true,
-                                                action: DialogAction::CloseTabUnsaved {
-                                                    tab_id: close_id.clone(),
-                                                },
-                                            },
-                                            cx,
-                                        );
-                                        return;
-                                    }
-                                }
-                                this.close_tab(&close_id, cx);
+                                this.request_close_tab(&close_id, cx);
                             }),
                         ),
                 )
@@ -582,7 +561,6 @@ impl EditorView {
                     title: drag_title,
                 },
                 {
-                    let tab_id_for_drag = drag_tab_id.clone();
                     move |_dragged, _offset, _window, cx| {
                         cx.new(|_cx| DraggedTabView {
                             title: _dragged.title.clone(),
@@ -590,12 +568,15 @@ impl EditorView {
                     }
                 },
             )
-            .on_drag_move(cx.listener(move |this, _event: &DragMoveEvent<DraggedTab>, _, _cx| {
-                this.tab_dragging_id = Some(drag_tab_id.clone());
-            }))
+            .on_drag_move(
+                cx.listener(move |this, _event: &DragMoveEvent<DraggedTab>, _, _cx| {
+                    this.tab_dragging_id = Some(drag_tab_id.clone());
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
+                cx.listener(move |this, _, window, cx| {
+                    window.prevent_default();
                     this.switch_to_tab(&tab_id, cx);
                     cx.stop_propagation();
                 }),
@@ -609,9 +590,10 @@ impl EditorView {
             )
             .on_mouse_down(
                 MouseButton::Middle,
-                cx.listener(move |this, _, _, cx| {
+                cx.listener(move |this, _, window, cx| {
+                    window.prevent_default();
                     cx.stop_propagation();
-                    this.close_tab(&middle_close_id, cx);
+                    this.request_close_tab(&middle_close_id, cx);
                 }),
             )
             .into_any_element()

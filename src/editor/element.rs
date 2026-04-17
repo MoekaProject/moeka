@@ -4,8 +4,8 @@ use std::sync::Arc;
 use gpui::{
     App, BorderStyle, Bounds, Corners, Element, ElementId, ElementInputHandler, Entity,
     FontFallbacks, GlobalElementId, Hsla, IntoElement, LayoutId, PaintQuad, Pixels, Point,
-    ShapedLine, Style, TextAlign, TextRun, TransformationMatrix, Window, WrappedLine, fill,
-    point, px, quad, relative, size,
+    ShapedLine, Style, TextAlign, TextRun, TransformationMatrix, Window, WrappedLine, fill, point,
+    px, quad, relative, size,
 };
 
 use crate::markdown::BlockType;
@@ -200,13 +200,15 @@ impl Element for EditorElement {
         body_cjk_font.fallbacks = None;
 
         let mut heading_font = text_style.font();
-        heading_font.family = configured_font_family(editor_styles.editor_heading_latin_font_family);
+        heading_font.family =
+            configured_font_family(editor_styles.editor_heading_latin_font_family);
         heading_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
             editor_styles.editor_heading_cjk_font_family.to_string(),
         ]));
 
         let mut heading_cjk_font = text_style.font();
-        heading_cjk_font.family = configured_font_family(editor_styles.editor_heading_cjk_font_family);
+        heading_cjk_font.family =
+            configured_font_family(editor_styles.editor_heading_cjk_font_family);
         heading_cjk_font.fallbacks = None;
 
         let base_char_width = {
@@ -272,8 +274,7 @@ impl Element for EditorElement {
             let block_type = &decoration.block_type;
             let font_size = editor.font_size_for_block(block_type);
             let line_height = editor.line_height_for_block(block_type);
-            let (block_padding_top, block_padding_bottom) =
-                editor.block_padding_for_line(line_idx);
+            let (block_padding_top, block_padding_bottom) = editor.block_padding_for_line(line_idx);
 
             if hidden_lines.contains(&line_idx) {
                 let line_content = buffer.line_content(line_idx);
@@ -768,17 +769,25 @@ impl Element for EditorElement {
                         .map(|col| helpers::prefix_is_folded(0, prefix_len + 1, Some(col)))
                         .unwrap_or(false);
                     let fold_hovered_this_line = editor.hovering_fold_line == Some(line_idx);
-                    if is_cursor_line && heading_prefix_folded && !fold_hovered_this_line {
+                    let gutter_styles = &editor.styles.gutter;
+                    let max_heading_width = editor.scaled(gutter_styles.gutter_heading_max_total_width_px);
+                    let heading_offset = editor.scaled(gutter_styles.gutter_heading_icon_offset_px);
+                    let available_gutter = editor.padding_left() - heading_offset;
+                    if is_cursor_line
+                        && heading_prefix_folded
+                        && !fold_hovered_this_line
+                        && available_gutter >= max_heading_width
+                    {
                         let icon_size = match *level {
-                            1 => 28.0,
-                            2 => 22.0,
-                            3 => 18.0,
-                            _ => 14.0,
+                            1 => editor.scaled(gutter_styles.gutter_heading_h1_icon_size_px),
+                            2 => editor.scaled(gutter_styles.gutter_heading_h2_icon_size_px),
+                            3 => editor.scaled(gutter_styles.gutter_heading_h3_icon_size_px),
+                            _ => editor.scaled(gutter_styles.gutter_heading_h4_icon_size_px),
                         };
-                        let gap = 3.0;
+                        let gap = editor.scaled(gutter_styles.gutter_heading_icon_gap_px);
                         let total_width = *level as f32 * icon_size + (*level as f32 - 1.0) * gap;
                         let start_x =
-                            editor_left + editor.padding_left() - total_width - editor.scaled(10.0);
+                            editor_left + editor.padding_left() - total_width - heading_offset;
                         for icon_index in 0..*level {
                             let icon_x = start_x + icon_index as f32 * (icon_size + gap);
                             let icon_y = gutter_center_y - icon_size / 2.0;
@@ -798,7 +807,7 @@ impl Element for EditorElement {
                     let icon_size = 16.0_f32;
                     let icon_x =
                         editor_left + editor.padding_left() - icon_size - editor.scaled(10.0);
-                    let icon_y = gutter_center_y - icon_size / 2.0;
+                    let icon_y = gutter_center_y - 2.0 - icon_size / 2.0;
                     gutter_svgs.push((
                         Bounds::new(
                             point(px(icon_x), px(icon_y)),
@@ -819,7 +828,7 @@ impl Element for EditorElement {
                     let line_content_str = buffer.line_content(line_idx);
                     let leading_ws_bytes = line_content_str.len()
                         - line_content_str.trim_start_matches([' ', '\t']).len();
-                    // For nested tasks, shift checkbox left to align with 
+                    // For nested tasks, shift checkbox left to align with
                     // parent's content start (parent prefix is typically 2 chars).
                     let cb_indent = leading_ws_bytes.saturating_sub(
                         editor.styles.checkbox.checkbox_parent_prefix_chars as usize,

@@ -492,7 +492,10 @@ fn add_inline_span(
         return;
     }
 
-    let full_trigger = start_col..end_col;
+    let line_len = text[line_starts[start_line]..]
+        .find('\n')
+        .unwrap_or(text.len() - line_starts[start_line]);
+    let full_trigger = start_col.saturating_sub(1)..(end_col + 1).min(line_len + 1);
 
     match &kind {
         InlineKind::Bold | InlineKind::Italic | InlineKind::Strikethrough => {

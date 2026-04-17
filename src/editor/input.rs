@@ -1,9 +1,9 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, Context, EntityInputHandler, Focusable, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent, UTF16Selection,
-    Window, point, px, size,
+    App, Bounds, Context, EntityInputHandler, Focusable, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent, UTF16Selection, Window, point,
+    px, size,
 };
 
 use crate::markdown::{BlockType, InlineKind};
@@ -348,7 +348,7 @@ impl EditorView {
         let delta_y: f32 = event
             .delta
             .pixel_delta(px(
-                self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor,
+                self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor
             ))
             .y
             .into();
@@ -517,11 +517,16 @@ impl EntityInputHandler for EditorView {
                 .map(|r| self.range_from_utf16(r))
                 .unwrap_or_else(|| self.cursor.selection_range())
         };
+        let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
 
         self.buffer.replace(range.clone(), new_text);
         let new_offset = range.start + new_text.len();
         self.cursor.move_to(new_offset, &self.buffer);
         self.reparse();
+        if let Some(line) = touched_ordered_prefix {
+            self.normalize_ordered_list_near_line(line, true);
+            self.reparse();
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
 
@@ -554,6 +559,7 @@ impl EntityInputHandler for EditorView {
                 .map(|r| self.range_from_utf16(r))
                 .unwrap_or_else(|| self.cursor.selection_range())
         };
+        let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
 
         self.buffer.replace(range.clone(), new_text);
 
@@ -580,6 +586,10 @@ impl EntityInputHandler for EditorView {
             .unwrap_or(mark_end);
         self.cursor.move_to(new_offset, &self.buffer);
         self.reparse();
+        if let Some(line) = touched_ordered_prefix {
+            self.normalize_ordered_list_near_line(line, true);
+            self.reparse();
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }

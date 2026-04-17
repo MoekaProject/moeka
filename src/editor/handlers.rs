@@ -63,6 +63,21 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.checkpoint();
+        let selection = self.cursor.selection_range();
+        let touched_ordered_prefix = if self.cursor.has_selection() {
+            self.ordered_list_prefix_touched_by_range(&selection)
+        } else {
+            self.cursor
+                .offset
+                .checked_sub(1)
+                .and_then(|offset| self.ordered_list_prefix_touched_by_range(&(offset..offset)))
+        };
+        let removes_line_break = if self.cursor.has_selection() {
+            self.buffer.text()[selection.clone()].contains('\n')
+        } else {
+            self.cursor.offset > 0
+                && self.buffer.text().as_bytes().get(self.cursor.offset - 1) == Some(&b'\n')
+        };
 
         // Multi-cursor backspace
         if self.has_extra_cursors() {
@@ -117,6 +132,13 @@ impl EditorView {
         }
         self.cursor.backspace(&mut self.buffer);
         self.reparse();
+        if let Some(line) = touched_ordered_prefix {
+            self.normalize_ordered_list_near_line(line, true);
+            self.reparse();
+        } else if removes_line_break {
+            self.normalize_ordered_list_near_line(self.cursor_line(), false);
+            self.reparse();
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
 
@@ -138,6 +160,17 @@ impl EditorView {
             return;
         }
         self.checkpoint();
+        let selection = self.cursor.selection_range();
+        let touched_ordered_prefix = if self.cursor.has_selection() {
+            self.ordered_list_prefix_touched_by_range(&selection)
+        } else {
+            self.ordered_list_prefix_touched_by_range(&(self.cursor.offset..self.cursor.offset))
+        };
+        let removes_line_break = if self.cursor.has_selection() {
+            self.buffer.text()[selection.clone()].contains('\n')
+        } else {
+            self.buffer.text().as_bytes().get(self.cursor.offset) == Some(&b'\n')
+        };
         if self.has_extra_cursors() {
             self.multi_cursor_delete();
             self.reparse();
@@ -147,6 +180,13 @@ impl EditorView {
         }
         self.cursor.delete(&mut self.buffer);
         self.reparse();
+        if let Some(line) = touched_ordered_prefix {
+            self.normalize_ordered_list_near_line(line, true);
+            self.reparse();
+        } else if removes_line_break {
+            self.normalize_ordered_list_near_line(self.cursor_line(), false);
+            self.reparse();
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -496,12 +536,14 @@ impl EditorView {
                         self.buffer.replace(line_start..line_end, "");
                         self.cursor.move_to(line_start, &self.buffer);
                         self.cursor.insert(&mut self.buffer, "\n");
+                        self.reparse();
+                        self.normalize_ordered_list_near_line(cursor_line, false);
                     } else {
                         let continuation = format!("\n{}{}. ", ws_str, number + 1);
                         self.cursor.insert(&mut self.buffer, &continuation);
                         self.renumber_ordered_list_after(cursor_line + 2, number + 2, leading_ws);
+                        self.reparse();
                     }
-                    self.reparse();
                     self.scroll_to_cursor();
                     self.pause_blinking(cx);
                     return;
@@ -699,6 +741,8 @@ impl EditorView {
     ) {
         self.checkpoint();
         self.toggle_current_line_prefix("1. ");
+        self.normalize_ordered_list_near_line(self.cursor_line(), true);
+        self.reparse();
         self.pause_blinking(cx);
     }
 
@@ -937,6 +981,8 @@ impl EditorView {
         self.cursor.anchor = self.cursor.offset;
         self.mark_active_tab_dirty();
         self.reparse();
+        self.normalize_ordered_list_near_line(self.cursor_line(), false);
+        self.reparse();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -1147,11 +1193,7 @@ impl EditorView {
 
         // Find the next occurrence after the last cursor
         let all = self.all_cursor_ranges();
-        let last_end = all
-            .iter()
-            .map(|(o, a)| (*o).max(*a))
-            .max()
-            .unwrap_or(0);
+        let last_end = all.iter().map(|(o, a)| (*o).max(*a)).max().unwrap_or(0);
         let text = self.buffer.text();
         let found = text[last_end..].find(&search_text).map(|i| last_end + i);
         let found = found.or_else(|| text[..last_end].find(&search_text));
