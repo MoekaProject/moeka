@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
-use gpui::{
-    AnyElement, Context, CursorStyle, FontWeight, MouseButton, div, prelude::*, px, svg,
-};
+use gpui::{AnyElement, Context, CursorStyle, FontWeight, MouseButton, div, prelude::*, px, svg};
 
 use super::*;
 
@@ -22,34 +20,40 @@ impl EditorView {
             self.sidebar_visible = true;
             if self.workspace_search_editor.is_none() {
                 let styles = self.styles.text_input.clone();
-                let editor = cx.new(|cx| {
-                    crate::text_input::TextInput::new(styles, "搜索文件...", cx)
-                });
-                cx.subscribe(&editor, |this, _editor, event: &crate::text_input::TextInputEvent, cx| {
-                    match event {
-                        crate::text_input::TextInputEvent::Changed => {
-                            let query = this.workspace_search_editor.as_ref()
-                                .map(|e| e.read(cx).text().to_string())
-                                .unwrap_or_default();
-                            this.workspace_search_query = query;
-                            this.run_workspace_search(cx);
-                        }
-                        crate::text_input::TextInputEvent::Submit => {
-                            // Navigate to first result
-                            if let Some(first) = this.workspace_search_results.first() {
-                                if let Some(m) = first.matches.first() {
-                                    let path = first.path.clone();
-                                    let offset = m.byte_offset;
-                                    this.open_file_at_offset(path, offset, cx);
+                let editor =
+                    cx.new(|cx| crate::text_input::TextInput::new(styles, "搜索文件...", cx));
+                cx.subscribe(
+                    &editor,
+                    |this, _editor, event: &crate::text_input::TextInputEvent, cx| {
+                        match event {
+                            crate::text_input::TextInputEvent::Changed => {
+                                let query = this
+                                    .workspace_search_editor
+                                    .as_ref()
+                                    .map(|e| e.read(cx).text().to_string())
+                                    .unwrap_or_default();
+                                this.workspace_search_query = query;
+                                this.run_workspace_search(cx);
+                            }
+                            crate::text_input::TextInputEvent::Submit => {
+                                // Navigate to first result
+                                if let Some(first) = this.workspace_search_results.first() {
+                                    if let Some(m) = first.matches.first() {
+                                        let path = first.path.clone();
+                                        let offset = m.byte_offset;
+                                        this.open_file_at_offset(path, offset, cx);
+                                    }
                                 }
                             }
+                            crate::text_input::TextInputEvent::Escape => {
+                                this.workspace_search_visible = false;
+                                cx.notify();
+                            }
+                            _ => {}
                         }
-                        crate::text_input::TextInputEvent::Escape => {
-                            this.workspace_search_visible = false;
-                            cx.notify();
-                        }
-                    }
-                }).detach();
+                    },
+                )
+                .detach();
                 self.workspace_search_editor = Some(editor);
             }
         }
@@ -73,17 +77,21 @@ impl EditorView {
 
         // Run search in background
         let task = cx.spawn(async move |this, cx| {
-            let results = cx.background_executor().spawn(async move {
-                let mut results = Vec::new();
-                search_directory(&root, &query, &mut results);
-                results
-            }).await;
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut results = Vec::new();
+                    search_directory(&root, &query, &mut results);
+                    results
+                })
+                .await;
 
             this.update(cx, |this, cx| {
                 this.workspace_search_results = results;
                 this.workspace_search_task = None;
                 cx.notify();
-            }).ok();
+            })
+            .ok();
         });
         self.workspace_search_task = Some(task);
     }
@@ -152,7 +160,11 @@ impl EditorView {
             );
         } else {
             // Summary
-            let total_matches: usize = self.workspace_search_results.iter().map(|r| r.matches.len()).sum();
+            let total_matches: usize = self
+                .workspace_search_results
+                .iter()
+                .map(|r| r.matches.len())
+                .sum();
             let file_count = self.workspace_search_results.len();
             children.push(
                 div()
@@ -196,9 +208,9 @@ impl EditorView {
                         )
                         .child(
                             div()
-                                .text_size(px(self.scaled(
-                                    wss.ws_search_file_header_count_font_size_px,
-                                )))
+                                .text_size(px(
+                                    self.scaled(wss.ws_search_file_header_count_font_size_px)
+                                ))
                                 .text_color(wss.ws_search_file_header_count_text_color)
                                 .child(format!("{match_count}")),
                         )
@@ -314,11 +326,7 @@ impl EditorView {
 
 // ── Background search helper ────────────────────────────────────────
 
-fn search_directory(
-    dir: &std::path::Path,
-    query: &str,
-    results: &mut Vec<WorkspaceSearchResult>,
-) {
+fn search_directory(dir: &std::path::Path, query: &str, results: &mut Vec<WorkspaceSearchResult>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };

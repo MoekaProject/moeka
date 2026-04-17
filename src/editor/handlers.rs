@@ -17,6 +17,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_font_picker.is_some() {
+            self.close_font_picker(cx);
+            return;
+        }
         if self.dialog.is_some() {
             self.dismiss_dialog(cx);
             return;

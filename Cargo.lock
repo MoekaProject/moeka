@@ -3119,6 +3119,8 @@ dependencies = [
  "raw-window-handle",
  "regex",
  "rfd",
+ "serde",
+ "serde_json",
  "smallvec",
  "syntect",
  "unicode-segmentation",

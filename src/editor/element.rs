@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use gpui::{
     App, BorderStyle, Bounds, Corners, Element, ElementId, ElementInputHandler, Entity,
-    GlobalElementId, Hsla, IntoElement, LayoutId, PaintQuad, Pixels, Point, ShapedLine, Style,
-    TextAlign, TextRun, TransformationMatrix, Window, WrappedLine, fill, point, px, quad, relative,
-    size,
+    FontFallbacks, GlobalElementId, Hsla, IntoElement, LayoutId, PaintQuad, Pixels, Point,
+    ShapedLine, Style, TextAlign, TextRun, TransformationMatrix, Window, WrappedLine, fill,
+    point, px, quad, relative, size,
 };
 
 use crate::markdown::BlockType;
@@ -46,7 +46,7 @@ struct PrepaintLine {
     origin: Point<Pixels>,
     line_height: Pixels,
     /// Per-visual-line shaped segments for indented painting.
-    segments: Option<Vec<(ShapedLine, Point<Pixels>)>>,
+    segments: Option<Vec<(WrappedLine, Point<Pixels>)>>,
 }
 
 impl IntoElement for EditorElement {
@@ -175,15 +175,44 @@ impl Element for EditorElement {
         };
 
         let text_style = window.text_style();
-        let mut base_font = text_style.font();
-        base_font.family = "Menlo".into();
-        let mut heading_font = base_font.clone();
-        heading_font.family = "Menlo".into();
+        let editor_styles = &editor.styles.editor;
+        let configured_font_family = |configured: &'static str| {
+            if configured == ".SystemUIFont" {
+                text_style.font().family.clone()
+            } else {
+                configured.into()
+            }
+        };
+        let mut monospace_font = text_style.font();
+        monospace_font.family = configured_font_family(editor_styles.editor_monospace_font_family);
+        monospace_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+            editor_styles.editor_body_cjk_font_family.to_string(),
+        ]));
+
+        let mut body_font = text_style.font();
+        body_font.family = configured_font_family(editor_styles.editor_body_latin_font_family);
+        body_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+            editor_styles.editor_body_cjk_font_family.to_string(),
+        ]));
+
+        let mut body_cjk_font = text_style.font();
+        body_cjk_font.family = configured_font_family(editor_styles.editor_body_cjk_font_family);
+        body_cjk_font.fallbacks = None;
+
+        let mut heading_font = text_style.font();
+        heading_font.family = configured_font_family(editor_styles.editor_heading_latin_font_family);
+        heading_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+            editor_styles.editor_heading_cjk_font_family.to_string(),
+        ]));
+
+        let mut heading_cjk_font = text_style.font();
+        heading_cjk_font.family = configured_font_family(editor_styles.editor_heading_cjk_font_family);
+        heading_cjk_font.fallbacks = None;
 
         let base_char_width = {
             let test_run = TextRun {
                 len: 1,
-                font: base_font.clone(),
+                font: monospace_font.clone(),
                 color: gpui::transparent_black(),
                 background_color: None,
                 underline: None,
@@ -209,6 +238,12 @@ impl Element for EditorElement {
         } else {
             (table_cell_padding_px / base_char_width).ceil().max(1.0) as usize
         };
+        let collapsed_task_prefix_chars = ((editor.base_font_size()
+            * editor.styles.checkbox.checkbox_size_factor
+            + editor.scaled(editor.styles.checkbox.checkbox_text_gap_px))
+            / base_char_width)
+            .ceil()
+            .max(3.0) as usize;
 
         let is_code_block_type = |i: usize| {
             matches!(
@@ -236,13 +271,15 @@ impl Element for EditorElement {
             let decoration = decorations.get(line_idx).cloned().unwrap_or_default();
             let block_type = &decoration.block_type;
             let font_size = editor.font_size_for_block(block_type);
-            let line_height = font_size * editor.styles.editor.editor_line_height_factor;
+            let line_height = editor.line_height_for_block(block_type);
+            let (block_padding_top, block_padding_bottom) =
+                editor.block_padding_for_line(line_idx);
 
             if hidden_lines.contains(&line_idx) {
                 let line_content = buffer.line_content(line_idx);
                 let blank_run = TextRun {
                     len: 1,
-                    font: base_font.clone(),
+                    font: body_font.clone(),
                     color: gpui::transparent_black(),
                     background_color: None,
                     underline: None,
@@ -337,7 +374,7 @@ impl Element for EditorElement {
             if hide_table_separator {
                 let blank_run = TextRun {
                     len: 1,
-                    font: base_font.clone(),
+                    font: body_font.clone(),
                     color: gpui::transparent_black(),
                     background_color: None,
                     underline: None,
@@ -375,6 +412,8 @@ impl Element for EditorElement {
                     cursor_col,
                     table_width_chars,
                     table_cell_padding_chars,
+                    collapsed_task_prefix_chars,
+                    editor.styles.checkbox.checkbox_parent_prefix_chars as usize,
                 );
 
             let runs = helpers::build_text_runs_for_display(
@@ -384,8 +423,12 @@ impl Element for EditorElement {
                 &decoration,
                 cursor_col,
                 prefix_collapsed,
-                &base_font,
+                &body_font,
+                &body_cjk_font,
+                &monospace_font,
                 &heading_font,
+                &heading_cjk_font,
+                collapsed_task_prefix_chars,
                 font_size,
                 theme,
             );
@@ -405,6 +448,7 @@ impl Element for EditorElement {
                     &display_text,
                     block_type,
                     prefix_collapsed,
+                    collapsed_task_prefix_chars,
                 );
                 if prefix_bytes > 0 && prefix_bytes <= display_text.len() {
                     let prefix_chars = display_text
@@ -425,11 +469,17 @@ impl Element for EditorElement {
                 wrap_width
             };
 
+            let wrap_width_param = if *block_type == BlockType::Table {
+                None
+            } else {
+                Some(px(effective_wrap_width))
+            };
+
             let Ok(wrapped_lines) = window.text_system().shape_text(
                 display_shared,
                 px(font_size),
                 &runs,
-                Some(px(effective_wrap_width)),
+                wrap_width_param,
                 None,
             ) else {
                 display_info_cache.push(None);
@@ -440,6 +490,8 @@ impl Element for EditorElement {
             let wrapped = &wrapped_lines[0];
             let visual_line_count = wrapped.wrap_boundaries().len() + 1;
             let text_line_height = line_height * visual_line_count as f32;
+            let image_gap_top = editor.scaled(editor.styles.image_preview.image_gap_top_px);
+            let image_gap_bottom = editor.scaled(editor.styles.image_preview.image_gap_bottom_px);
 
             let image_active = decoration.image_path.is_some()
                 && helpers::is_image_syntax_active(
@@ -450,7 +502,7 @@ impl Element for EditorElement {
                     &sel_range,
                 );
 
-            let extra_height = if let Some(ref path) = decoration.image_path {
+            let image_extra_height = if let Some(ref path) = decoration.image_path {
                 if editor.folded_image_previews.contains(&line_idx) {
                     0.0
                 } else if let Some(Some(img_data)) = image_cache.get(path) {
@@ -460,7 +512,7 @@ impl Element for EditorElement {
                     if img_w > 0.0 && img_h > 0.0 {
                         let (_, display_h) =
                             helpers::compute_image_preview_size(img_w, img_h, text_width);
-                        display_h + 8.0
+                        display_h + image_gap_top + image_gap_bottom
                     } else {
                         0.0
                     }
@@ -471,10 +523,12 @@ impl Element for EditorElement {
                 0.0
             };
 
+            let extra_height = block_padding_top + block_padding_bottom + image_extra_height;
             let total_line_height = text_line_height + extra_height;
 
             let line_top = y - scroll_offset;
             let line_bottom = line_top + total_line_height;
+            let text_line_top = line_top + block_padding_top;
             let content_x =
                 if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
                     editor_left
@@ -504,7 +558,7 @@ impl Element for EditorElement {
 
             let segments = if indent_px > 0.0 && wrapped.wrap_boundaries().len() > 0 {
                 let byte_indices = helpers::wrap_boundary_byte_indices(wrapped);
-                let mut shaped_segments: Vec<(ShapedLine, Point<Pixels>)> = Vec::new();
+                let mut shaped_segments: Vec<(WrappedLine, Point<Pixels>)> = Vec::new();
                 let mut seg_start = 0;
                 let seg_count = byte_indices.len() + 1;
                 for seg_idx in 0..seg_count {
@@ -520,17 +574,23 @@ impl Element for EditorElement {
                     } else {
                         seg_text.to_string().into()
                     };
-                    let seg_shaped =
-                        window
-                            .text_system()
-                            .shape_line(seg_shared, px(font_size), &seg_runs, None);
-                    let seg_x = if seg_idx == 0 {
-                        content_x
-                    } else {
-                        content_x + indent_px
-                    };
-                    let seg_y = line_top + seg_idx as f32 * line_height;
-                    shaped_segments.push((seg_shaped, point(px(seg_x), px(seg_y))));
+                    if let Ok(seg_wrapped_lines) = window.text_system().shape_text(
+                        seg_shared,
+                        px(font_size),
+                        &seg_runs,
+                        None,
+                        None,
+                    ) {
+                        if let Some(seg_wrapped) = seg_wrapped_lines.into_iter().next() {
+                            let seg_x = if seg_idx == 0 {
+                                content_x
+                            } else {
+                                content_x + indent_px
+                            };
+                            let seg_y = text_line_top + seg_idx as f32 * line_height;
+                            shaped_segments.push((seg_wrapped, point(px(seg_x), px(seg_y))));
+                        }
+                    }
                     seg_start = seg_end;
                 }
                 Some(shaped_segments)
@@ -538,7 +598,7 @@ impl Element for EditorElement {
                 None
             };
 
-            let origin = point(px(content_x), px(line_top));
+            let origin = point(px(content_x), px(text_line_top));
 
             // Code block background
             if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
@@ -629,7 +689,11 @@ impl Element for EditorElement {
                             border_color,
                         ));
 
-                        let render_col_widths = ti.column_widths.clone();
+                        let render_col_widths = helpers::compute_table_render_widths(
+                            ti,
+                            table_width_chars,
+                            table_cell_padding_chars,
+                        );
                         let mut col_x_offset = 0;
                         for (ci, cell) in ti.cells.iter().enumerate() {
                             let cell_chars = helpers::display_width(cell.trim());
@@ -656,7 +720,7 @@ impl Element for EditorElement {
 
             // HR dashed line
             if *block_type == BlockType::HorizontalRule && !is_cursor_line {
-                let hr_y = line_top + text_line_height / 2.0;
+                let hr_y = text_line_top + text_line_height / 2.0;
                 hr_lines.push((hr_y, editor_left + editor.padding_left(), text_width));
             }
 
@@ -670,7 +734,7 @@ impl Element for EditorElement {
                         if img_w > 0.0 && img_h > 0.0 {
                             let (display_w, display_h) =
                                 helpers::compute_image_preview_size(img_w, img_h, text_width);
-                            let img_top = line_top + text_line_height + 4.0;
+                            let img_top = text_line_top + text_line_height + image_gap_top;
                             let img_left = editor_left
                                 + editor.padding_left()
                                 + ((text_width - display_w) / 2.0).max(0.0);
@@ -696,7 +760,7 @@ impl Element for EditorElement {
             }
 
             // Gutter decorations
-            let gutter_center_y = line_top + line_height / 2.0;
+            let gutter_center_y = text_line_top + line_height / 2.0;
             match block_type {
                 BlockType::Heading(level) => {
                     let prefix_len = (*level as usize) + 1;
@@ -755,12 +819,13 @@ impl Element for EditorElement {
                     let line_content_str = buffer.line_content(line_idx);
                     let leading_ws_bytes = line_content_str.len()
                         - line_content_str.trim_start_matches([' ', '\t']).len();
-                    let cb_x = if leading_ws_bytes == 0 {
-                        content_x
-                    } else {
-                        content_x + (leading_ws_bytes as f32 + 1.0) * base_char_width
-                    };
-                    let cb_y = line_top + (line_height - cb_size) / 2.0;
+                    // For nested tasks, shift checkbox left to align with 
+                    // parent's content start (parent prefix is typically 2 chars).
+                    let cb_indent = leading_ws_bytes.saturating_sub(
+                        editor.styles.checkbox.checkbox_parent_prefix_chars as usize,
+                    );
+                    let cb_x = content_x + cb_indent as f32 * base_char_width;
+                    let cb_y = text_line_top + (line_height - cb_size) / 2.0;
                     let cb_bounds =
                         Bounds::new(point(px(cb_x), px(cb_y)), size(px(cb_size), px(cb_size)));
                     let corner_r = px(editor.scaled(editor.styles.checkbox.checkbox_radius_px));
@@ -812,9 +877,9 @@ impl Element for EditorElement {
                     let is_folded = editor.folded_sections.contains(&line_idx);
                     let is_hovered = editor.hovering_fold_line == Some(line_idx);
                     let fi_y = if *block_type == BlockType::CodeBlockFence && !is_folded {
-                        line_top + line_height + (line_height - fi_size) / 2.0
+                        text_line_top + line_height + (line_height - fi_size) / 2.0
                     } else {
-                        line_top + (line_height - fi_size) / 2.0
+                        text_line_top + (line_height - fi_size) / 2.0
                     };
                     let fi_alpha = if is_folded {
                         0.75_f32
@@ -903,7 +968,7 @@ impl Element for EditorElement {
                     .map(|pos| f32::from(pos.x))
                     .unwrap_or(0.0);
                 let ie_x = content_x + syntax_end_x + editor.scaled(10.0);
-                let ie_y = line_top + (line_height - ie_size) / 2.0;
+                let ie_y = text_line_top + (line_height - ie_size) / 2.0;
                 let ie_bounds =
                     Bounds::new(point(px(ie_x), px(ie_y)), size(px(ie_size), px(ie_size)));
                 let is_hovered = editor.hovering_image_edit_line == Some(line_idx);
@@ -945,7 +1010,7 @@ impl Element for EditorElement {
                         disp_start,
                         disp_end,
                         content_x,
-                        line_top,
+                        text_line_top,
                         line_height,
                         font_size,
                         indent_px,
@@ -963,13 +1028,13 @@ impl Element for EditorElement {
                         Bounds::from_corners(
                             point(
                                 px(content_x + indent_end) + pos_end.x,
-                                px(line_top) + pos_end.y,
+                                px(text_line_top) + pos_end.y,
                             ),
                             point(
                                 px(content_x + indent_end)
                                     + pos_end.x
                                     + px(editor.base_font_size() * 0.4),
-                                px(line_top) + pos_end.y + px(line_height),
+                                px(text_line_top) + pos_end.y + px(line_height),
                             ),
                         ),
                         theme.selection,
@@ -1036,7 +1101,11 @@ impl Element for EditorElement {
                         .unwrap_or_default();
 
                     let cursor_indent = helpers::indent_for_y(indent_px, cursor_pos.y, line_height);
-                    let cursor_top = line_top + f32::from(cursor_pos.y);
+                    let cursor_height =
+                        line_height * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
+                    let cursor_top = text_line_top
+                        + f32::from(cursor_pos.y)
+                        + (line_height - cursor_height) / 2.0;
                     let mut cursor_color = theme.cursor;
                     cursor_color.a *= if editor.is_selecting {
                         editor.styles.cursor.cursor_opacity_max
@@ -1046,7 +1115,7 @@ impl Element for EditorElement {
                     cursor_quads.push(fill(
                         Bounds::new(
                             point(px(content_x + cursor_indent) + cursor_pos.x, px(cursor_top)),
-                            size(px(editor.styles.cursor.cursor_width_px), px(line_height)),
+                            size(px(editor.styles.cursor.cursor_width_px), px(cursor_height)),
                         ),
                         cursor_color,
                     ));
@@ -1070,7 +1139,7 @@ impl Element for EditorElement {
                         .position_for_index(disp_end, px(line_height))
                         .unwrap_or_default();
                     let indent_start = helpers::indent_for_y(indent_px, pos_start.y, line_height);
-                    let underline_y = line_top + f32::from(pos_start.y) + line_height - 2.0;
+                    let underline_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
                     marked_underlines.push(fill(
                         Bounds::from_corners(
                             point(px(content_x + indent_start) + pos_start.x, px(underline_y)),
@@ -1238,8 +1307,17 @@ impl Element for EditorElement {
 
         for line in &prepaint.lines {
             if let Some(ref segments) = line.segments {
-                for (shaped, origin) in segments {
-                    shaped.paint(*origin, line.line_height, window, cx).ok();
+                for (seg_wrapped, seg_origin) in segments {
+                    seg_wrapped
+                        .paint(
+                            *seg_origin,
+                            line.line_height,
+                            TextAlign::Left,
+                            None,
+                            window,
+                            cx,
+                        )
+                        .ok();
                 }
             } else {
                 line.wrapped

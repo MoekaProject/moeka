@@ -8,9 +8,10 @@ mod outline;
 mod render;
 mod scaling;
 mod search;
+pub(crate) mod settings_panel;
 mod sidebar;
-mod workspace_search;
 mod tabs;
+mod workspace_search;
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -28,6 +29,124 @@ use crate::buffer::Buffer;
 use crate::cursor::Cursor;
 use crate::markdown::{self, BlockType, LineDecoration};
 use crate::theme::{Theme, ThemeKind};
+
+// ── Persistent settings ─────────────────────────────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub(crate) struct AppSettings {
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default = "default_ui_font")]
+    pub ui_font: String,
+    #[serde(default = "default_ui_font_size")]
+    pub ui_font_size: f32,
+    #[serde(default = "default_body_latin_font")]
+    pub body_latin_font: String,
+    #[serde(default = "default_body_cjk_font")]
+    pub body_cjk_font: String,
+    #[serde(default = "default_code_font")]
+    pub code_font: String,
+    #[serde(default = "default_font_size")]
+    pub font_size: f32,
+}
+
+fn default_theme() -> String {
+    "OneDark".to_string()
+}
+fn default_ui_font() -> String {
+    ".SystemUIFont".to_string()
+}
+fn default_ui_font_size() -> f32 {
+    13.0
+}
+fn default_body_latin_font() -> String {
+    "Menlo".to_string()
+}
+fn default_body_cjk_font() -> String {
+    "PingFang SC".to_string()
+}
+fn default_code_font() -> String {
+    "Menlo".to_string()
+}
+fn default_font_size() -> f32 {
+    15.0
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            theme: default_theme(),
+            ui_font: default_ui_font(),
+            ui_font_size: default_ui_font_size(),
+            body_latin_font: default_body_latin_font(),
+            body_cjk_font: default_body_cjk_font(),
+            code_font: default_code_font(),
+            font_size: default_font_size(),
+        }
+    }
+}
+
+impl AppSettings {
+    fn config_path() -> PathBuf {
+        let mut path = dirs_fallback();
+        path.push("settings.json");
+        path
+    }
+
+    pub fn load() -> Self {
+        let path = Self::config_path();
+        if path.exists() {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+                Err(_) => Self::default(),
+            }
+        } else {
+            Self::default()
+        }
+    }
+
+    pub fn save(&self) {
+        let path = Self::config_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    fn theme_kind(&self) -> ThemeKind {
+        match self.theme.as_str() {
+            "OneLight" => ThemeKind::OneLight,
+            "AyuDark" => ThemeKind::AyuDark,
+            "AyuLight" => ThemeKind::AyuLight,
+            "Milky" => ThemeKind::Milky,
+            _ => ThemeKind::OneDark,
+        }
+    }
+}
+
+fn theme_kind_to_string(kind: ThemeKind) -> String {
+    match kind {
+        ThemeKind::OneDark => "OneDark",
+        ThemeKind::OneLight => "OneLight",
+        ThemeKind::AyuDark => "AyuDark",
+        ThemeKind::AyuLight => "AyuLight",
+        ThemeKind::Milky => "Milky",
+    }
+    .to_string()
+}
+
+fn dirs_fallback() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        let mut p = PathBuf::from(home);
+        p.push(".config");
+        p.push("markdown-editor");
+        p
+    } else {
+        PathBuf::from(".")
+    }
+}
 
 // ── Platform helpers ────────────────────────────────────────────────
 
@@ -94,7 +213,6 @@ pub(crate) const FMT_ORDER_LIST_SVG: &str = "assets/icons/format/order-list.svg"
 pub(crate) const FMT_TODO_SVG: &str = "assets/icons/format/todo.svg";
 pub(crate) const FMT_LINK_SVG: &str = "assets/icons/format/link.svg";
 pub(crate) const FMT_IMAGE_SVG: &str = "assets/icons/format/image.svg";
-pub(crate) const FMT_HEAD_SVG: &str = "assets/icons/format/head.svg";
 
 // ── UI constants ────────────────────────────────────────────────────
 // NOTE: UI dimension constants are now in style.rs.
@@ -109,10 +227,17 @@ pub(crate) struct EditorSnapshot {
     pub scroll_offset: f32,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TabKind {
+    Editor,
+    Settings,
+}
+
 #[derive(Clone)]
 pub(crate) struct OpenTab {
     pub id: String,
     pub title: String,
+    pub kind: TabKind,
     pub path: Option<PathBuf>,
     pub snapshot: EditorSnapshot,
     pub is_dirty: bool,
@@ -425,6 +550,16 @@ pub struct EditorView {
     pub(crate) workspace_search_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) workspace_search_task: Option<Task<()>>,
     pub(crate) workspace_search_scroll_handle: ScrollHandle,
+
+    // Settings panel state
+    pub(crate) settings_scroll_handle: ScrollHandle,
+    pub(crate) settings_font_picker: Option<settings_panel::FontPickerState>,
+    pub(crate) settings_font_picker_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) settings_font_size_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) settings_ui_font_size_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) font_picker_trigger_position: Option<gpui::Point<gpui::Pixels>>,
+    pub(crate) cached_font_names: Option<Vec<String>>,
+    pub(crate) app_settings: AppSettings,
 }
 
 impl EditorView {
@@ -442,9 +577,24 @@ impl EditorView {
             cursor_anchor: first_line_end,
             scroll_offset: 0.0,
         };
-        let theme_kind = ThemeKind::OneDark;
+        // Load persisted settings
+        let app_settings = AppSettings::load();
+        let theme_kind = app_settings.theme_kind();
         let theme = theme_kind.build();
-        let styles = crate::style::Styles::from_theme(&theme);
+        let mut styles = crate::style::Styles::from_theme(&theme);
+        // Apply saved font settings
+        styles.editor.editor_font_size_px = app_settings.font_size;
+        styles.ui_font_family = Box::leak(app_settings.ui_font.clone().into_boxed_str());
+        styles.ui_font_size_px = app_settings.ui_font_size;
+        styles.editor.editor_body_latin_font_family =
+            Box::leak(app_settings.body_latin_font.clone().into_boxed_str());
+        styles.editor.editor_body_cjk_font_family =
+            Box::leak(app_settings.body_cjk_font.clone().into_boxed_str());
+        styles.editor.editor_heading_latin_font_family =
+            styles.editor.editor_body_latin_font_family;
+        styles.editor.editor_heading_cjk_font_family = styles.editor.editor_body_cjk_font_family;
+        styles.editor.editor_monospace_font_family =
+            Box::leak(app_settings.code_font.clone().into_boxed_str());
         let init_max_width = styles.editor.editor_max_width_px;
         let init_padding_left = styles.editor.editor_padding_left_px;
         let init_padding_right = styles.editor.editor_padding_right_px;
@@ -478,16 +628,34 @@ impl EditorView {
             selected_sidebar_paths: HashSet::new(),
             current_file_path: None,
             sidebar_error,
-            tabs: vec![OpenTab {
-                id: "welcome-1".to_string(),
-                title: "欢迎使用".to_string(),
-                path: None,
-                snapshot: initial_snapshot,
-                is_dirty: false,
-                is_deleted: false,
-                is_pinned: false,
-            }],
-            active_tab_id: Some("welcome-1".to_string()),
+            tabs: vec![
+                OpenTab {
+                    id: "welcome-1".to_string(),
+                    title: "欢迎使用".to_string(),
+                    kind: TabKind::Editor,
+                    path: None,
+                    snapshot: initial_snapshot,
+                    is_dirty: false,
+                    is_deleted: false,
+                    is_pinned: false,
+                },
+                OpenTab {
+                    id: "settings-1".to_string(),
+                    title: "设置".to_string(),
+                    kind: TabKind::Settings,
+                    path: None,
+                    snapshot: EditorSnapshot {
+                        text: String::new(),
+                        cursor_offset: 0,
+                        cursor_anchor: 0,
+                        scroll_offset: 0.0,
+                    },
+                    is_dirty: false,
+                    is_deleted: false,
+                    is_pinned: false,
+                },
+            ],
+            active_tab_id: Some("settings-1".to_string()),
             next_tab_id: 2,
             last_editor_left: 0.0,
             last_editor_width: init_max_width,
@@ -549,9 +717,21 @@ impl EditorView {
             workspace_search_editor: None,
             workspace_search_task: None,
             workspace_search_scroll_handle: ScrollHandle::new(),
+
+            // Settings panel state
+            settings_scroll_handle: ScrollHandle::new(),
+            settings_font_picker: None,
+            settings_font_picker_editor: None,
+            settings_font_size_editor: None,
+            settings_ui_font_size_editor: None,
+            font_picker_trigger_position: None,
+            cached_font_names: None,
+            app_settings,
         };
         this.start_blinking(cx);
         this.start_watching(cx);
+        this.ensure_font_size_editor(cx);
+        this.ensure_ui_font_size_editor(cx);
 
         this
     }
@@ -570,8 +750,9 @@ impl EditorView {
                     if helpers::is_remote_image_url(&image_path) {
                         helpers::load_render_image_from_url(&image_path).ok()
                     } else {
-                        helpers::resolve_local_image_path(&image_path)
-                            .and_then(|resolved| helpers::load_render_image_from_path(&resolved).ok())
+                        helpers::resolve_local_image_path(&image_path).and_then(|resolved| {
+                            helpers::load_render_image_from_path(&resolved).ok()
+                        })
                     }
                     .map(Arc::new)
                 })
@@ -589,9 +770,39 @@ impl EditorView {
     // ── Theme toggle ─────────────────────────────────────────────
 
     pub(crate) fn toggle_theme(&mut self, cx: &mut Context<Self>) {
-        self.theme_kind = self.theme_kind.toggle();
+        let all = ThemeKind::all();
+        let current_idx = all.iter().position(|k| *k == self.theme_kind).unwrap_or(0);
+        let next_idx = (current_idx + 1) % all.len();
+        self.set_theme(all[next_idx], cx);
+    }
+
+    pub(crate) fn set_theme(&mut self, kind: ThemeKind, cx: &mut Context<Self>) {
+        self.theme_kind = kind;
         self.theme = self.theme_kind.build();
         self.styles = crate::style::Styles::from_theme(&self.theme);
+        // Re-apply font overrides from settings since from_theme resets to defaults
+        self.styles.editor.editor_font_size_px = self.app_settings.font_size;
+        self.styles.ui_font_family = Box::leak(self.app_settings.ui_font.clone().into_boxed_str());
+        self.styles.ui_font_size_px = self.app_settings.ui_font_size;
+        self.styles.editor.editor_body_latin_font_family =
+            Box::leak(self.app_settings.body_latin_font.clone().into_boxed_str());
+        self.styles.editor.editor_body_cjk_font_family =
+            Box::leak(self.app_settings.body_cjk_font.clone().into_boxed_str());
+        self.styles.editor.editor_heading_latin_font_family =
+            self.styles.editor.editor_body_latin_font_family;
+        self.styles.editor.editor_heading_cjk_font_family =
+            self.styles.editor.editor_body_cjk_font_family;
+        self.styles.editor.editor_monospace_font_family =
+            Box::leak(self.app_settings.code_font.clone().into_boxed_str());
+        // Persist
+        self.app_settings.theme = theme_kind_to_string(kind);
+        self.app_settings.save();
+        self.line_display_info.clear();
+        // Recreate font size editor with new theme styles
+        self.settings_font_size_editor = None;
+        self.settings_ui_font_size_editor = None;
+        self.ensure_font_size_editor(cx);
+        self.ensure_ui_font_size_editor(cx);
         cx.notify();
     }
 

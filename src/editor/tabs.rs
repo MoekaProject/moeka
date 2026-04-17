@@ -26,10 +26,19 @@ impl EditorView {
             .and_then(|id| self.tabs.iter().position(|tab| &tab.id == id))
     }
 
+    pub(crate) fn active_tab_is_settings(&self) -> bool {
+        self.active_tab_id
+            .as_ref()
+            .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
+            .is_some_and(|tab| tab.kind == TabKind::Settings)
+    }
+
     pub(crate) fn persist_active_tab_state(&mut self) {
         if let Some(index) = self.active_tab_index() {
-            self.tabs[index].snapshot = self.current_snapshot();
-            self.current_file_path = self.tabs[index].path.clone();
+            if self.tabs[index].kind == TabKind::Editor {
+                self.tabs[index].snapshot = self.current_snapshot();
+                self.current_file_path = self.tabs[index].path.clone();
+            }
         }
     }
 
@@ -41,14 +50,17 @@ impl EditorView {
         let tab = self.tabs[index].clone();
         self.active_tab_id = Some(tab.id.clone());
         self.current_file_path = tab.path.clone();
-        self.buffer = Buffer::from_text(&tab.snapshot.text);
-        self.cursor.offset = tab.snapshot.cursor_offset.min(self.buffer.len());
-        self.cursor.anchor = tab.snapshot.cursor_anchor.min(self.buffer.len());
-        self.marked_range = None;
-        self.scroll_offset = tab.snapshot.scroll_offset;
-        self.reparse();
-        self.clamp_scroll();
-        self.pause_blinking(cx);
+        if tab.kind == TabKind::Editor {
+            self.buffer = Buffer::from_text(&tab.snapshot.text);
+            self.cursor.offset = tab.snapshot.cursor_offset.min(self.buffer.len());
+            self.cursor.anchor = tab.snapshot.cursor_anchor.min(self.buffer.len());
+            self.marked_range = None;
+            self.scroll_offset = tab.snapshot.scroll_offset;
+            self.reparse();
+            self.clamp_scroll();
+            self.pause_blinking(cx);
+        }
+        cx.notify();
     }
 
     pub(crate) fn switch_to_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
@@ -125,6 +137,7 @@ impl EditorView {
             let tab = OpenTab {
                 id: self.next_tab_identity(),
                 title: closed_tab.title,
+                kind: TabKind::Editor,
                 path: closed_tab.path,
                 snapshot: closed_tab.snapshot,
                 is_dirty: false,
@@ -314,6 +327,7 @@ impl EditorView {
         let tab = OpenTab {
             id: self.next_tab_identity(),
             title,
+            kind: TabKind::Editor,
             path: None,
             snapshot: EditorSnapshot {
                 text: String::new(),
@@ -337,6 +351,36 @@ impl EditorView {
         id
     }
 
+    pub(crate) fn open_settings_tab(&mut self, cx: &mut Context<Self>) {
+        // Singleton: if a settings tab already exists, switch to it
+        if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Settings) {
+            self.activate_tab_by_index(index, cx);
+            return;
+        }
+        self.persist_active_tab_state();
+        let tab = OpenTab {
+            id: self.next_tab_identity(),
+            title: "设置".to_string(),
+            kind: TabKind::Settings,
+            path: None,
+            snapshot: EditorSnapshot {
+                text: String::new(),
+                cursor_offset: 0,
+                cursor_anchor: 0,
+                scroll_offset: 0.0,
+            },
+            is_dirty: false,
+            is_deleted: false,
+            is_pinned: false,
+        };
+        self.tabs.push(tab);
+        self.ensure_font_size_editor(cx);
+        self.ensure_ui_font_size_editor(cx);
+        if let Some(index) = self.tabs.len().checked_sub(1) {
+            self.activate_tab_by_index(index, cx);
+        }
+    }
+
     // ── Tab rendering ───────────────────────────────────────────────
 
     pub(crate) fn render_tab(&self, tab: &OpenTab, cx: &mut Context<Self>) -> AnyElement {
@@ -344,6 +388,7 @@ impl EditorView {
         let is_dirty = tab.is_dirty;
         let is_deleted = tab.is_deleted;
         let is_pinned = tab.is_pinned;
+        let tab_kind = tab.kind;
         let tab_id = tab.id.clone();
         let close_id = tab.id.clone();
         let middle_close_id = tab.id.clone();
@@ -412,17 +457,33 @@ impl EditorView {
             })
             // Normal (non-pinned) tab content
             .when(!is_pinned, |this: gpui::Stateful<gpui::Div>| {
-                this.child(
-                    svg()
-                        .path(MARKDOWN_SVG_PATH)
-                        .size(px(self.scaled(ts.tab_item_icon_size_px)))
-                        .text_color(ts.tab_item_icon_color)
-                        .opacity(if is_active {
-                            ts.tab_item_icon_active_opacity
-                        } else {
-                            ts.tab_item_icon_inactive_opacity
-                        }),
-                )
+                this
+                    .when(tab_kind == TabKind::Editor, |this| {
+                        this.child(
+                            svg()
+                                .path(MARKDOWN_SVG_PATH)
+                                .size(px(self.scaled(ts.tab_item_icon_size_px)))
+                                .text_color(ts.tab_item_icon_color)
+                                .opacity(if is_active {
+                                    ts.tab_item_icon_active_opacity
+                                } else {
+                                    ts.tab_item_icon_inactive_opacity
+                                }),
+                        )
+                    })
+                    .when(tab_kind == TabKind::Settings, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(self.scaled(ts.tab_item_icon_size_px)))
+                                .text_color(ts.tab_item_icon_color)
+                                .opacity(if is_active {
+                                    ts.tab_item_icon_active_opacity
+                                } else {
+                                    ts.tab_item_icon_inactive_opacity
+                                })
+                                .child("⚙"),
+                        )
+                    })
                 .child(
                     div()
                         .flex_1()

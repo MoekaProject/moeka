@@ -1006,6 +1006,15 @@ impl EditorView {
                         this.pick_workspace_folder(cx);
                     },
                 ));
+                items.push(self.render_context_menu_separator());
+                items.push(self.render_context_menu_item(
+                    "打开设置...",
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.open_settings_tab(cx);
+                    },
+                ));
                 (items, self.scaled(wss.ws_menu_width_px))
             }
         };

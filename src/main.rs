@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 mod actions;
 mod buffer;
 mod cursor;
@@ -192,6 +194,9 @@ fn main() {
             KeyBinding::new("cmd-backspace", text_input::TextInputDeleteToStart, Some("TextInput")),
             KeyBinding::new("ctrl-k", text_input::TextInputDeleteToEnd, Some("TextInput")),
             KeyBinding::new("cmd-z", text_input::TextInputUndo, Some("TextInput")),
+            KeyBinding::new("up", text_input::TextInputPickerUp, Some("TextInput")),
+            KeyBinding::new("down", text_input::TextInputPickerDown, Some("TextInput")),
+            KeyBinding::new("enter", text_input::TextInputSubmit, Some("TextInput")),
         ]);
 
         cx.on_action(|_: &Quit, cx| cx.quit());

@@ -47,6 +47,16 @@ fn char_display_width(ch: char) -> usize {
     }
 }
 
+fn prefers_latin_text_font(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0000}'..='\u{024F}'
+            | '\u{1E00}'..='\u{1EFF}'
+            | '\u{2000}'..='\u{206F}'
+            | '\u{20A0}'..='\u{20CF}'
+    )
+}
+
 /// Build display text by selectively hiding syntax ranges.
 pub(crate) fn build_display_text(
     line_content: &str,
@@ -54,6 +64,8 @@ pub(crate) fn build_display_text(
     cursor_col: Option<usize>,
     table_width_chars: Option<usize>,
     table_cell_padding_chars: usize,
+    collapsed_task_prefix_chars: usize,
+    task_parent_prefix_chars: usize,
 ) -> (String, Vec<usize>, Vec<usize>, bool) {
     let len = line_content.len();
 
@@ -65,6 +77,8 @@ pub(crate) fn build_display_text(
                 cursor_col,
                 table_width_chars,
                 table_cell_padding_chars,
+                collapsed_task_prefix_chars,
+                task_parent_prefix_chars,
             );
         }
     }
@@ -75,13 +89,15 @@ pub(crate) fn build_display_text(
             .map(|ch| if ch == '\t' { '\t' } else { ' ' })
             .collect::<String>();
         let display_to_buffer: Vec<usize> = (0..len).collect();
-        let buffer_to_display: Vec<usize> = (0..len).collect();
+        let mut buffer_to_display: Vec<usize> = (0..len).collect();
+        buffer_to_display.push(display_text.len());
         return (display_text, display_to_buffer, buffer_to_display, false);
     }
 
     if decoration.syntax_ranges.is_empty() {
         let display_to_buffer: Vec<usize> = (0..len).collect();
-        let buffer_to_display: Vec<usize> = (0..len).collect();
+        let mut buffer_to_display: Vec<usize> = (0..len).collect();
+        buffer_to_display.push(len);
         return (
             line_content.to_string(),
             display_to_buffer,
@@ -110,7 +126,8 @@ pub(crate) fn build_display_text(
 
     if !hidden.iter().any(|&h| h) {
         let display_to_buffer: Vec<usize> = (0..len).collect();
-        let buffer_to_display: Vec<usize> = (0..len).collect();
+        let mut buffer_to_display: Vec<usize> = (0..len).collect();
+        buffer_to_display.push(len);
         return (
             line_content.to_string(),
             display_to_buffer,
@@ -156,9 +173,13 @@ pub(crate) fn build_display_text(
         BlockType::TaskList(_) => {
             let fold_len = task_prefix_len(trimmed);
             let trigger_len = task_syntax_len(trimmed);
-            let replacement = if leading_ws > 0 { "    " } else { "   " };
+            // Absorb parent-prefix indent so sub-task checkbox aligns
+            // with parent's text start. Keep collapsed placeholder width.
+            let indent_reduction = leading_ws.min(task_parent_prefix_chars);
+            let reduced_indent = leading_ws - indent_reduction;
+            let replacement = " ".repeat(reduced_indent + collapsed_task_prefix_chars.max(1));
             (fold_len > 0 && prefix_is_folded(leading_ws, trigger_len, cursor_col))
-                .then_some((leading_ws..leading_ws + fold_len, replacement.to_string()))
+                .then_some((0..leading_ws + fold_len, replacement))
         }
         _ => None,
     };
@@ -218,6 +239,8 @@ pub(crate) fn build_display_text(
         }
     }
 
+    buffer_to_display.push(display_text.len());
+
     (
         display_text,
         display_to_buffer,
@@ -231,22 +254,27 @@ pub(crate) fn build_table_display_text(
     line_content: &str,
     info: &TableLineInfo,
     _cursor_col: Option<usize>,
-    _available_chars: Option<usize>,
+    available_chars: Option<usize>,
     table_cell_padding_chars: usize,
+    collapsed_task_prefix_chars: usize,
+    task_parent_prefix_chars: usize,
 ) -> (String, Vec<usize>, Vec<usize>, bool) {
     let len = line_content.len();
     let cell_padding = table_cell_padding_chars;
-
-    let balanced_col_widths = info.column_widths.clone();
+    let balanced_col_widths = compute_table_render_widths(info, available_chars, cell_padding);
+    let target_row_chars = available_chars.unwrap_or_else(|| {
+        balanced_col_widths
+            .iter()
+            .map(|width| width + cell_padding * 2)
+            .sum::<usize>()
+            .max(1)
+    });
 
     if info.is_separator {
-        let total_chars: usize = balanced_col_widths
-            .iter()
-            .map(|w| w + cell_padding * 2)
-            .sum::<usize>();
-        let display = " ".repeat(total_chars.max(1));
+        let display = " ".repeat(target_row_chars.max(1));
         let d2b = vec![0; display.len()];
-        let b2d = vec![0; len];
+        let mut b2d = vec![0; len];
+        b2d.push(display.len());
         return (display, d2b, b2d, false);
     }
 
@@ -271,8 +299,15 @@ pub(crate) fn build_table_display_text(
             .into_iter()
             .next()
             .unwrap_or_default();
-        let (folded_cell_raw, cell_d2b_raw, cell_b2d_raw, _) =
-            build_display_text(cell, &cell_decoration, None, None, 0);
+        let (folded_cell_raw, cell_d2b_raw, cell_b2d_raw, _) = build_display_text(
+            cell,
+            &cell_decoration,
+            None,
+            None,
+            0,
+            collapsed_task_prefix_chars,
+            task_parent_prefix_chars,
+        );
         let trimmed_start = folded_cell_raw.len() - folded_cell_raw.trim_start().len();
         let trimmed_end = folded_cell_raw.len() - folded_cell_raw.trim_end().len();
         let folded_cell =
@@ -326,7 +361,85 @@ pub(crate) fn build_table_display_text(
         b2d[buf_i] = display_pos;
     }
 
+    b2d.push(display.len());
+
     (display, d2b, b2d, false)
+}
+
+pub(crate) fn compute_table_render_widths(
+    info: &TableLineInfo,
+    available_chars: Option<usize>,
+    table_cell_padding_chars: usize,
+) -> Vec<usize> {
+    let mut widths = info.column_widths.clone();
+    let Some(available_chars) = available_chars else {
+        return widths;
+    };
+
+    if widths.is_empty() {
+        return widths;
+    }
+
+    let padding_budget = table_cell_padding_chars
+        .saturating_mul(2)
+        .saturating_mul(widths.len());
+    let min_width = 3usize;
+    let min_required = min_width.saturating_mul(widths.len()).saturating_add(padding_budget);
+    if available_chars <= padding_budget {
+        return vec![1; widths.len()];
+    }
+    if available_chars <= min_required {
+        let content_budget = available_chars.saturating_sub(padding_budget).max(widths.len());
+        let base = (content_budget / widths.len()).max(1);
+        let mut remainder = content_budget.saturating_sub(base * widths.len());
+        for width in &mut widths {
+            *width = base;
+            if remainder > 0 {
+                *width += 1;
+                remainder -= 1;
+            }
+        }
+        return widths;
+    }
+
+    let content_budget = available_chars.saturating_sub(padding_budget);
+    let current_total: usize = widths.iter().sum();
+    if current_total <= content_budget {
+        return widths;
+    }
+
+    widths.fill(min_width);
+    let mut remaining = content_budget.saturating_sub(min_width * widths.len());
+    let desired_extras: Vec<usize> = info
+        .column_widths
+        .iter()
+        .map(|width| width.saturating_sub(min_width))
+        .collect();
+
+    while remaining > 0 {
+        let mut made_progress = false;
+        for (width, desired_extra) in widths.iter_mut().zip(desired_extras.iter()) {
+            if width.saturating_sub(min_width) < *desired_extra {
+                *width += 1;
+                remaining -= 1;
+                made_progress = true;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        if !made_progress {
+            let mut index = 0usize;
+            let width_count = widths.len();
+            while remaining > 0 {
+                widths[index % width_count] += 1;
+                remaining -= 1;
+                index += 1;
+            }
+        }
+    }
+
+    widths
 }
 
 pub(crate) fn build_selection_quads(
@@ -376,12 +489,19 @@ pub(crate) fn build_selection_quads(
                 } else {
                     segment_text.to_string().into()
                 };
-                f32::from(
-                    window
-                        .text_system()
-                        .shape_line(shared, px(font_size), &segment_runs, None)
-                        .width,
-                )
+                if let Ok(shaped) = window.text_system().shape_text(
+                    shared,
+                    px(font_size),
+                    &segment_runs,
+                    None,
+                    None,
+                ) {
+                    shaped
+                        .first()
+                        .map_or(0.0, |w| f32::from(w.width()))
+                } else {
+                    0.0
+                }
             } else {
                 f32::from(
                     wrapped
@@ -495,6 +615,7 @@ pub(crate) fn compute_display_prefix_bytes(
     display_text: &str,
     block_type: &BlockType,
     prefix_collapsed: bool,
+    _collapsed_task_prefix_chars: usize,
 ) -> usize {
     let leading_ws = display_text.len() - display_text.trim_start_matches([' ', '\t']).len();
     let trimmed = &display_text[leading_ws..];
@@ -513,7 +634,7 @@ pub(crate) fn compute_display_prefix_bytes(
         }
         BlockType::TaskList(_) => {
             if prefix_collapsed {
-                leading_ws + "   ".len()
+                leading_ws
             } else {
                 trimmed.find("] ").map(|p| leading_ws + p + 2).unwrap_or(0)
             }
@@ -551,12 +672,6 @@ fn task_prefix_len(trimmed: &str) -> usize {
 
 fn task_syntax_len(trimmed: &str) -> usize {
     task_prefix_len(trimmed)
-}
-
-fn trimmed_ordered_prefix_len(display_text: &str) -> usize {
-    let leading_ws = display_text.len() - display_text.trim_start_matches([' ', '\t']).len();
-    let trimmed = &display_text[leading_ws..];
-    markdown::ordered_list_prefix_len(trimmed) + leading_ws
 }
 
 pub(crate) fn syntax_set() -> &'static SyntaxSet {
@@ -1105,14 +1220,12 @@ pub(crate) fn save_file_blocking(default_name: &str) -> Option<PathBuf> {
 
 /// Map a buffer byte offset (within line) to display byte offset.
 pub(crate) fn buffer_to_display_offset(buffer_to_display: &[usize], buf_offset: usize) -> usize {
-    if buf_offset >= buffer_to_display.len() {
-        if let Some(&last) = buffer_to_display.last() {
-            last + 1
-        } else {
-            0
-        }
-    } else {
+    if buf_offset < buffer_to_display.len() {
         buffer_to_display[buf_offset]
+    } else if let Some(&last) = buffer_to_display.last() {
+        last
+    } else {
+        0
     }
 }
 
@@ -1124,20 +1237,38 @@ pub(crate) fn build_text_runs_for_display(
     decoration: &LineDecoration,
     cursor_col: Option<usize>,
     prefix_collapsed: bool,
-    base_font: &Font,
+    body_font: &Font,
+    body_cjk_font: &Font,
+    monospace_font: &Font,
     heading_font: &Font,
+    heading_cjk_font: &Font,
+    collapsed_task_prefix_chars: usize,
     _font_size: f32,
     theme: &Theme,
 ) -> Vec<TextRun> {
-    let line_font = if matches!(decoration.block_type, BlockType::Heading(_)) {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FontRole {
+        BodyLatin,
+        BodyCjk,
+        HeadingLatin,
+        HeadingCjk,
+        Monospace,
+    }
+
+    let is_code_line = matches!(decoration.block_type, BlockType::CodeBlock | BlockType::CodeBlockFence);
+    let default_font = if matches!(decoration.block_type, BlockType::Heading(_)) {
         heading_font
     } else {
-        base_font
+        body_font
     };
     if display_text.is_empty() {
         return vec![TextRun {
             len: 1,
-            font: line_font.clone(),
+            font: if is_code_line {
+                monospace_font.clone()
+            } else {
+                default_font.clone()
+            },
             color: theme.text_primary,
             background_color: None,
             underline: None,
@@ -1153,8 +1284,30 @@ pub(crate) fn build_text_runs_for_display(
     let mut buf_font_styles: Vec<FontStyle> = vec![FontStyle::Normal; buf_len];
     let mut buf_bg_colors: Vec<Option<Hsla>> = vec![None; buf_len];
     let mut buf_strikethroughs: Vec<bool> = vec![false; buf_len];
-    let mut buf_use_line_font: Vec<bool> =
-        vec![matches!(decoration.block_type, BlockType::Heading(_)); buf_len];
+    let mut buf_font_roles: Vec<FontRole> = vec![FontRole::BodyLatin; buf_len];
+
+    if is_code_line {
+        buf_font_roles.fill(FontRole::Monospace);
+    } else {
+        let is_heading = matches!(decoration.block_type, BlockType::Heading(_));
+        for (start, ch) in line_content.char_indices() {
+            let role = if prefers_latin_text_font(ch) {
+                if is_heading {
+                    FontRole::HeadingLatin
+                } else {
+                    FontRole::BodyLatin
+                }
+            } else if is_heading {
+                FontRole::HeadingCjk
+            } else {
+                FontRole::BodyCjk
+            };
+            let end = start + ch.len_utf8();
+            for idx in start..end.min(buf_len) {
+                buf_font_roles[idx] = role;
+            }
+        }
+    }
 
     match &decoration.block_type {
         BlockType::Heading(_) => {
@@ -1227,6 +1380,7 @@ pub(crate) fn build_text_runs_for_display(
                 InlineKind::InlineCode => {
                     buf_colors[i] = theme.inline_code;
                     buf_bg_colors[i] = Some(theme.bg_code_inline);
+                    buf_font_roles[i] = FontRole::Monospace;
                 }
                 InlineKind::Link => {
                     buf_colors[i] = theme.link;
@@ -1252,7 +1406,7 @@ pub(crate) fn build_text_runs_for_display(
                     };
                     for i in start..end {
                         buf_colors[i] = syntax_color;
-                        buf_use_line_font[i] = false;
+                        buf_font_roles[i] = FontRole::Monospace;
                     }
                 }
             }
@@ -1264,7 +1418,7 @@ pub(crate) fn build_text_runs_for_display(
     let mut font_styles: Vec<FontStyle> = Vec::with_capacity(disp_len);
     let mut bg_colors: Vec<Option<Hsla>> = Vec::with_capacity(disp_len);
     let mut strikethroughs: Vec<bool> = Vec::with_capacity(disp_len);
-    let mut use_line_font: Vec<bool> = Vec::with_capacity(disp_len);
+    let mut font_roles: Vec<FontRole> = Vec::with_capacity(disp_len);
 
     for i in 0..disp_len {
         let buf_idx = if i < display_to_buffer.len() {
@@ -1278,34 +1432,39 @@ pub(crate) fn build_text_runs_for_display(
         font_styles.push(buf_font_styles[buf_idx]);
         bg_colors.push(buf_bg_colors[buf_idx]);
         strikethroughs.push(buf_strikethroughs[buf_idx]);
-        use_line_font.push(buf_use_line_font[buf_idx]);
+        font_roles.push(buf_font_roles[buf_idx]);
     }
 
     if prefix_collapsed {
+        let leading_ws = display_text.len() - display_text.trim_start_matches([' ', '\t']).len();
+        let prefix_len = compute_display_prefix_bytes(
+            display_text,
+            &decoration.block_type,
+            true,
+            collapsed_task_prefix_chars,
+        )
+        .min(disp_len);
         match &decoration.block_type {
             BlockType::UnorderedList => {
-                let bullet_len = "• ".len();
-                for i in 0..bullet_len.min(disp_len) {
+                let bullet_end = (leading_ws + "• ".len()).min(prefix_len);
+                for i in leading_ws..bullet_end {
                     colors[i] = theme.list_marker;
-                    use_line_font[i] = false;
+                    font_roles[i] = FontRole::Monospace;
                 }
             }
             BlockType::TaskList(_) => {
-                let leading_ws =
-                    line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
-                let replacement_len = if leading_ws > 0 { 4 } else { 3 };
-                let start = leading_ws;
-                let end = (start + replacement_len).min(disp_len);
-                for i in start..end {
+                let placeholder_start =
+                    leading_ws.saturating_sub(collapsed_task_prefix_chars);
+                let placeholder_end = leading_ws.min(disp_len);
+                for i in placeholder_start..placeholder_end {
                     colors[i] = gpui::transparent_black();
-                    use_line_font[i] = false;
+                    font_roles[i] = FontRole::Monospace;
                 }
             }
             BlockType::OrderedList => {
-                let prefix_len = trimmed_ordered_prefix_len(display_text);
-                for i in 0..prefix_len.min(disp_len) {
+                for i in leading_ws..prefix_len {
                     colors[i] = theme.list_marker;
-                    use_line_font[i] = false;
+                    font_roles[i] = FontRole::Monospace;
                 }
             }
             _ => {}
@@ -1328,7 +1487,7 @@ pub(crate) fn build_text_runs_for_display(
             && font_styles[run_end] == style
             && bg_colors[run_end] == bg
             && strikethroughs[run_end] == strike
-            && use_line_font[run_end] == use_line_font[run_start]
+            && font_roles[run_end] == font_roles[run_start]
         {
             run_end += 1;
         }
@@ -1337,10 +1496,12 @@ pub(crate) fn build_text_runs_for_display(
             run_end += 1;
         }
 
-        let mut font = if use_line_font[run_start] {
-            line_font.clone()
-        } else {
-            base_font.clone()
+        let mut font = match font_roles[run_start] {
+            FontRole::BodyLatin => body_font.clone(),
+            FontRole::BodyCjk => body_cjk_font.clone(),
+            FontRole::HeadingLatin => heading_font.clone(),
+            FontRole::HeadingCjk => heading_cjk_font.clone(),
+            FontRole::Monospace => monospace_font.clone(),
         };
         font.weight = weight;
         font.style = style;

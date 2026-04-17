@@ -202,6 +202,7 @@ impl EditorView {
                 let tab = OpenTab {
                     id: self.next_tab_identity(),
                     title: Self::title_for_path(&path),
+                    kind: TabKind::Editor,
                     path: Some(path.clone()),
                     snapshot: EditorSnapshot {
                         text,
@@ -284,7 +285,12 @@ impl EditorView {
 
     // ── Sidebar edit operations ─────────────────────────────────────
 
-    pub(crate) fn start_rename(&mut self, path: PathBuf, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_rename(
+        &mut self,
+        path: PathBuf,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
         let current_name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -298,76 +304,82 @@ impl EditorView {
             ti.set_selection(0, dot_pos, cx);
             ti
         });
-        cx.subscribe(&editor, |this, _editor, event: &crate::text_input::TextInputEvent, cx| {
-            match event {
+        cx.subscribe(
+            &editor,
+            |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
                 crate::text_input::TextInputEvent::Submit => this.commit_sidebar_edit(cx),
                 crate::text_input::TextInputEvent::Escape => this.cancel_sidebar_edit(cx),
                 crate::text_input::TextInputEvent::Changed => {}
-            }
-        }).detach();
+                _ => {}
+            },
+        )
+        .detach();
         let focus_handle = editor.read(cx).focus_handle.clone();
         let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
             this.cancel_sidebar_edit(cx);
         });
         window.focus(&focus_handle);
-        self.sidebar_edit = Some(SidebarEditMode::Rename {
-            path,
-            editor,
-        });
+        self.sidebar_edit = Some(SidebarEditMode::Rename { path, editor });
         self.sidebar_edit_blur_sub = Some(blur_sub);
         self.context_menu = None;
         cx.notify();
     }
 
-    pub(crate) fn start_create_file(&mut self, parent: PathBuf, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_create_file(
+        &mut self,
+        parent: PathBuf,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
         self.expanded_dirs.insert(parent.clone());
         let styles = self.styles.text_input.clone();
-        let editor = cx.new(|cx| {
-            crate::text_input::TextInput::new(styles, "文件名...", cx)
-        });
-        cx.subscribe(&editor, |this, _editor, event: &crate::text_input::TextInputEvent, cx| {
-            match event {
+        let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "文件名...", cx));
+        cx.subscribe(
+            &editor,
+            |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
                 crate::text_input::TextInputEvent::Submit => this.commit_sidebar_edit(cx),
                 crate::text_input::TextInputEvent::Escape => this.cancel_sidebar_edit(cx),
                 crate::text_input::TextInputEvent::Changed => {}
-            }
-        }).detach();
+                _ => {}
+            },
+        )
+        .detach();
         let focus_handle = editor.read(cx).focus_handle.clone();
         let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
             this.cancel_sidebar_edit(cx);
         });
         window.focus(&focus_handle);
-        self.sidebar_edit = Some(SidebarEditMode::CreateFile {
-            parent,
-            editor,
-        });
+        self.sidebar_edit = Some(SidebarEditMode::CreateFile { parent, editor });
         self.sidebar_edit_blur_sub = Some(blur_sub);
         self.context_menu = None;
         cx.notify();
     }
 
-    pub(crate) fn start_create_dir(&mut self, parent: PathBuf, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_create_dir(
+        &mut self,
+        parent: PathBuf,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
         self.expanded_dirs.insert(parent.clone());
         let styles = self.styles.text_input.clone();
-        let editor = cx.new(|cx| {
-            crate::text_input::TextInput::new(styles, "文件夹名...", cx)
-        });
-        cx.subscribe(&editor, |this, _editor, event: &crate::text_input::TextInputEvent, cx| {
-            match event {
+        let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "文件夹名...", cx));
+        cx.subscribe(
+            &editor,
+            |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
                 crate::text_input::TextInputEvent::Submit => this.commit_sidebar_edit(cx),
                 crate::text_input::TextInputEvent::Escape => this.cancel_sidebar_edit(cx),
                 crate::text_input::TextInputEvent::Changed => {}
-            }
-        }).detach();
+                _ => {}
+            },
+        )
+        .detach();
         let focus_handle = editor.read(cx).focus_handle.clone();
         let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
             this.cancel_sidebar_edit(cx);
         });
         window.focus(&focus_handle);
-        self.sidebar_edit = Some(SidebarEditMode::CreateDir {
-            parent,
-            editor,
-        });
+        self.sidebar_edit = Some(SidebarEditMode::CreateDir { parent, editor });
         self.sidebar_edit_blur_sub = Some(blur_sub);
         self.context_menu = None;
         cx.notify();
@@ -380,10 +392,7 @@ impl EditorView {
         self.sidebar_edit_blur_sub = None;
         let value = edit.text(cx);
         match &edit {
-            SidebarEditMode::Rename {
-                path,
-                ..
-            } => {
+            SidebarEditMode::Rename { path, .. } => {
                 let trimmed = value.trim();
                 if !trimmed.is_empty()
                     && trimmed != path.file_name().and_then(|n| n.to_str()).unwrap_or("")
@@ -408,10 +417,7 @@ impl EditorView {
                     }
                 }
             }
-            SidebarEditMode::CreateFile {
-                parent,
-                ..
-            } => {
+            SidebarEditMode::CreateFile { parent, .. } => {
                 let trimmed = value.trim();
                 if !trimmed.is_empty() {
                     let new_path = parent.join(trimmed);
@@ -423,10 +429,7 @@ impl EditorView {
                     }
                 }
             }
-            SidebarEditMode::CreateDir {
-                parent,
-                ..
-            } => {
+            SidebarEditMode::CreateDir { parent, .. } => {
                 let trimmed = value.trim();
                 if !trimmed.is_empty() {
                     let new_path = parent.join(trimmed);
@@ -765,17 +768,9 @@ impl EditorView {
                             .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
                             .text_color(ss.sidebar_item_selected_icon_color),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .child(editor.clone()),
-                    ),
+                    .child(div().flex_1().min_w(px(0.0)).child(editor.clone())),
             )
-            .on_mouse_down(
-                MouseButton::Left,
-                |_event, _window, _cx| {},
-            )
+            .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
             .into_any_element()
     }
 
@@ -1267,79 +1262,87 @@ impl EditorView {
             .border_r(px(ss.sidebar_resize_indicator_width_px))
             .border_color(ss.sidebar_resize_indicator_color)
             .child(top_spacer)
-            .when(self.workspace_search_visible, |this: gpui::Stateful<gpui::Div>| {
-                this.child(self.render_workspace_search(cx))
-            })
-            .when(!self.workspace_search_visible, |this: gpui::Stateful<gpui::Div>| {
-                this.child(
-                    div()
-                        .id("sidebar-tree")
-                        .flex_1()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.sidebar_scroll_handle)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.focused_sidebar_path = None;
-                                cx.notify();
-                            }),
-                        )
-                        .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)
-                        .on_drop({
-                            let root = self.sidebar_root.clone();
-                            cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
-                                let paths = dragged.paths.clone();
-                                this.sidebar_drag_hover_target = None;
-                                this.sidebar_drag_expand_task = None;
-                                this.move_sidebar_items(paths, root.clone(), cx);
+            .when(
+                self.workspace_search_visible,
+                |this: gpui::Stateful<gpui::Div>| this.child(self.render_workspace_search(cx)),
+            )
+            .when(
+                !self.workspace_search_visible,
+                |this: gpui::Stateful<gpui::Div>| {
+                    this.child(
+                        div()
+                            .id("sidebar-tree")
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.sidebar_scroll_handle)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.focused_sidebar_path = None;
+                                    cx.notify();
+                                }),
+                            )
+                            .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)
+                            .on_drop({
+                                let root = self.sidebar_root.clone();
+                                cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
+                                    let paths = dragged.paths.clone();
+                                    this.sidebar_drag_hover_target = None;
+                                    this.sidebar_drag_expand_task = None;
+                                    this.move_sidebar_items(paths, root.clone(), cx);
+                                })
                             })
-                        })
-                        .children(tree_items),
-                )
-            })
-            .when(header_is_sticky && !self.workspace_search_visible, |this: gpui::Stateful<gpui::Div>| {
-                let sticky_header_hover_bg = ss.sidebar_header_hover_bg;
-                let sticky_root_name = self.sidebar_root_name().to_uppercase();
-                this.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top(px(self.scaled(ss.sidebar_top_spacer_height_px)))
-                        .w_full()
-                        .h(px(self.scaled(ss.sidebar_header_height_px)))
-                        .bg(ss.sidebar_bg)
-                        .px(px(self.scaled(ss.sidebar_header_padding_right_px)))
-                        .pl(px(self.scaled(ss.sidebar_header_padding_left_px)))
-                        .flex()
-                        .items_center()
-                        .gap(px(self.scaled(ss.sidebar_header_gap_px)))
-                        .flex_none()
-                        .hover(move |s| s.bg(sticky_header_hover_bg))
-                        .child(
-                            svg()
-                                .path(ROOT_SVG_PATH)
-                                .size(px(self.scaled(ss.sidebar_header_icon_size_px)))
-                                .text_color(ss.sidebar_header_icon_color),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
-                                .text_color(ss.sidebar_header_text_color)
-                                .overflow_hidden()
-                                .child(sticky_root_name),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.pick_workspace_folder(cx);
-                            }),
-                        ),
-                )
-            })
-            .when(show_workspace_bar && !self.workspace_search_visible, |this: gpui::Stateful<gpui::Div>| {
-                this.child(self.render_workspace_bar(cx))
-            })
+                            .children(tree_items),
+                    )
+                },
+            )
+            .when(
+                header_is_sticky && !self.workspace_search_visible,
+                |this: gpui::Stateful<gpui::Div>| {
+                    let sticky_header_hover_bg = ss.sidebar_header_hover_bg;
+                    let sticky_root_name = self.sidebar_root_name().to_uppercase();
+                    this.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top(px(self.scaled(ss.sidebar_top_spacer_height_px)))
+                            .w_full()
+                            .h(px(self.scaled(ss.sidebar_header_height_px)))
+                            .bg(ss.sidebar_bg)
+                            .px(px(self.scaled(ss.sidebar_header_padding_right_px)))
+                            .pl(px(self.scaled(ss.sidebar_header_padding_left_px)))
+                            .flex()
+                            .items_center()
+                            .gap(px(self.scaled(ss.sidebar_header_gap_px)))
+                            .flex_none()
+                            .hover(move |s| s.bg(sticky_header_hover_bg))
+                            .child(
+                                svg()
+                                    .path(ROOT_SVG_PATH)
+                                    .size(px(self.scaled(ss.sidebar_header_icon_size_px)))
+                                    .text_color(ss.sidebar_header_icon_color),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
+                                    .text_color(ss.sidebar_header_text_color)
+                                    .overflow_hidden()
+                                    .child(sticky_root_name),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.pick_workspace_folder(cx);
+                                }),
+                            ),
+                    )
+                },
+            )
+            .when(
+                show_workspace_bar && !self.workspace_search_visible,
+                |this: gpui::Stateful<gpui::Div>| this.child(self.render_workspace_bar(cx)),
+            )
             .into_any_element()
     }
 

@@ -15,6 +15,8 @@ use crate::theme::{Theme, with_alpha};
 ///   样式 = bg, text_color, font_size, width, height, padding, gap, radius, opacity, border_width, border_color, …
 ///   单位 = px, ms, factor (无单位 = 无量纲比例)
 pub struct Styles {
+    pub ui_font_family: &'static str,
+    pub ui_font_size_px: f32,
     pub window: WindowStyles,
     pub editor: EditorStyles,
     pub sidebar: SidebarStyles,
@@ -51,7 +53,17 @@ pub struct WindowStyles {
 
 pub struct EditorStyles {
     pub editor_font_size_px: f32,
-    pub editor_line_height_factor: f32,
+    pub editor_paragraph_line_height_factor: f32,
+    pub editor_heading_line_height_factor: f32,
+    pub editor_body_latin_font_family: &'static str,
+    pub editor_body_cjk_font_family: &'static str,
+    pub editor_heading_latin_font_family: &'static str,
+    pub editor_heading_cjk_font_family: &'static str,
+    pub editor_monospace_font_family: &'static str,
+    pub editor_paragraph_padding_top_px: f32,
+    pub editor_paragraph_padding_bottom_px: f32,
+    pub editor_heading_padding_top_px: f32,
+    pub editor_heading_padding_bottom_px: f32,
     pub editor_padding_left_px: f32,
     pub editor_padding_top_px: f32,
     pub editor_padding_right_px: f32,
@@ -283,6 +295,7 @@ pub struct ToolbarStyles {
 pub struct CursorStyles {
     pub cursor_color: Hsla,
     pub cursor_width_px: f32,
+    pub cursor_height_factor: f32,
     pub cursor_blink_tick_ms: u64,
     pub cursor_blink_pause_ms: u64,
     pub cursor_blink_visible_ms: u64,
@@ -328,6 +341,7 @@ pub struct SelectionStyles {
 pub struct CheckboxStyles {
     pub checkbox_size_factor: f32,
     pub checkbox_text_gap_px: f32,
+    pub checkbox_parent_prefix_chars: f32,
     pub checkbox_radius_px: f32,
     pub checkbox_border_width_px: f32,
     pub checkbox_border_color: Hsla,
@@ -511,7 +525,9 @@ pub struct TextInputStyles {
     pub text_input_radius_px: f32,
     pub text_input_cursor_color: Hsla,
     pub text_input_cursor_width_px: f32,
+    pub text_input_cursor_height_ratio: f32,
     pub text_input_selection_color: Hsla,
+    pub text_input_center: bool,
 }
 
 // ── Search (in-editor buffer search) ────────────────────────────────
@@ -610,6 +626,8 @@ pub struct WorkspaceSearchStyles {
 impl Styles {
     pub fn from_theme(theme: &Theme) -> Self {
         Self {
+            ui_font_family: ".SystemUIFont",
+            ui_font_size_px: 13.0,
             window: WindowStyles {
                 window_bg: theme.bg_primary,
                 window_border_width_px: 1.0,
@@ -618,7 +636,17 @@ impl Styles {
             },
             editor: EditorStyles {
                 editor_font_size_px: 15.0,
-                editor_line_height_factor: 1.6,
+                editor_paragraph_line_height_factor: 1.5,
+                editor_heading_line_height_factor: 1.5,
+                editor_body_latin_font_family: "Menlo",
+                editor_body_cjk_font_family: "PingFang SC",
+                editor_heading_latin_font_family: "Menlo",
+                editor_heading_cjk_font_family: "PingFang SC",
+                editor_monospace_font_family: "Menlo",
+                editor_paragraph_padding_top_px: 10.0,
+                editor_paragraph_padding_bottom_px: 10.0,
+                editor_heading_padding_top_px: 10.0,
+                editor_heading_padding_bottom_px: 10.0,
                 editor_padding_left_px: 40.0,
                 editor_padding_top_px: 80.0,
                 editor_padding_right_px: 40.0,
@@ -802,6 +830,7 @@ impl Styles {
             cursor: CursorStyles {
                 cursor_color: theme.cursor,
                 cursor_width_px: 2.0,
+                cursor_height_factor: 1.0,
                 cursor_blink_tick_ms: 5,
                 cursor_blink_pause_ms: 300,
                 cursor_blink_visible_ms: 200,
@@ -822,7 +851,8 @@ impl Styles {
             },
             checkbox: CheckboxStyles {
                 checkbox_size_factor: 1.2,
-                checkbox_text_gap_px: 24.0,
+                checkbox_text_gap_px: 6.0,
+                checkbox_parent_prefix_chars: 2.0,
                 checkbox_radius_px: 5.0,
                 checkbox_border_width_px: 1.5,
                 checkbox_border_color: theme.border_tertiary,
@@ -968,7 +998,9 @@ impl Styles {
                 text_input_radius_px: 4.0,
                 text_input_cursor_color: theme.cursor,
                 text_input_cursor_width_px: 2.0,
+                text_input_cursor_height_ratio: 1.0,
                 text_input_selection_color: theme.selection,
+                text_input_center: false,
             },
             search: SearchStyles {
                 search_bar_width_px: 360.0,

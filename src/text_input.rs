@@ -17,6 +17,8 @@ pub enum TextInputEvent {
     Changed,
     Submit,
     Escape,
+    MoveUp,
+    MoveDown,
 }
 
 impl gpui::EventEmitter<TextInputEvent> for TextInput {}
@@ -49,6 +51,9 @@ gpui::actions!(
         TextInputMoveWordLeft,
         TextInputMoveWordRight,
         TextInputUndo,
+        TextInputPickerUp,
+        TextInputPickerDown,
+        TextInputSubmit,
     ]
 );
 
@@ -65,6 +70,7 @@ pub struct TextInput {
     // Layout cache for mouse hit-testing
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    last_center_offset: Pixels,
     is_selecting: bool,
     // Cursor blink state
     cursor_opacity: f32,
@@ -93,6 +99,7 @@ impl TextInput {
             styles,
             last_layout: None,
             last_bounds: None,
+            last_center_offset: Pixels::ZERO,
             is_selecting: false,
             cursor_opacity: 1.0,
             cursor_opacity_direction: -1.0,
@@ -168,7 +175,7 @@ impl TextInput {
         if position.x >= bounds.right() {
             return self.text.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        line.closest_index_for_x(position.x - bounds.left() - self.last_center_offset)
     }
 
     fn prev_char_boundary(&self, offset: usize) -> usize {
@@ -806,11 +813,16 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::on_delete_to_start))
             .on_action(cx.listener(Self::on_delete_to_end))
             .on_action(cx.listener(Self::on_undo))
+            .on_action(cx.listener(|_this, _: &TextInputPickerUp, _window, cx| {
+                cx.emit(TextInputEvent::MoveUp);
+            }))
+            .on_action(cx.listener(|_this, _: &TextInputPickerDown, _window, cx| {
+                cx.emit(TextInputEvent::MoveDown);
+            }))
+            .on_action(cx.listener(|_this, _: &TextInputSubmit, _window, cx| {
+                cx.emit(TextInputEvent::Submit);
+            }))
             .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key == "enter" {
-                    cx.emit(TextInputEvent::Submit);
-                    cx.stop_propagation();
-                }
                 if event.keystroke.key == "escape" {
                     cx.emit(TextInputEvent::Escape);
                     cx.stop_propagation();
@@ -1013,6 +1025,7 @@ struct TextElementPrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    center_offset: Pixels,
 }
 
 impl IntoElement for TextElement {
@@ -1121,9 +1134,18 @@ impl Element for TextElement {
             vec![run]
         };
 
+        let display_text_len = display_text.len();
         let line = window
             .text_system()
             .shape_line(display_text, font_size, &runs, None);
+
+        // Compute center offset for centered text inputs
+        let center_offset = if styles.text_input_center {
+            let text_width = line.x_for_index(display_text_len);
+            ((bounds.size.width - text_width) / 2.0).max(Pixels::ZERO)
+        } else {
+            Pixels::ZERO
+        };
 
         let sel_start = cursor_offset.min(selection_anchor);
         let sel_end = cursor_offset.max(selection_anchor);
@@ -1133,20 +1155,33 @@ impl Element for TextElement {
         cursor_color.a *= cursor_opacity;
         let selection_color = styles.text_input_selection_color;
 
+        let cursor_h_ratio = styles.text_input_cursor_height_ratio.clamp(0.3, 1.0);
+        let cursor_h = bounds.size.height * cursor_h_ratio;
+        let cursor_y_inset = (bounds.size.height - cursor_h) / 2.0;
+
         let (selection, cursor) = if has_selection {
             let cursor_x = line.x_for_index(cursor_offset);
             (
                 Some(fill(
                     Bounds::from_corners(
-                        point(bounds.left() + line.x_for_index(sel_start), bounds.top()),
-                        point(bounds.left() + line.x_for_index(sel_end), bounds.bottom()),
+                        point(
+                            bounds.left() + center_offset + line.x_for_index(sel_start),
+                            bounds.top() + cursor_y_inset,
+                        ),
+                        point(
+                            bounds.left() + center_offset + line.x_for_index(sel_end),
+                            bounds.bottom() - cursor_y_inset,
+                        ),
                     ),
                     selection_color,
                 )),
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_x, bounds.top()),
-                        size(px(styles.text_input_cursor_width_px), bounds.size.height),
+                        point(
+                            bounds.left() + center_offset + cursor_x,
+                            bounds.top() + cursor_y_inset,
+                        ),
+                        size(px(styles.text_input_cursor_width_px), cursor_h),
                     ),
                     cursor_color,
                 )),
@@ -1157,8 +1192,11 @@ impl Element for TextElement {
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + x, bounds.top()),
-                        size(px(styles.text_input_cursor_width_px), bounds.size.height),
+                        point(
+                            bounds.left() + center_offset + x,
+                            bounds.top() + cursor_y_inset,
+                        ),
+                        size(px(styles.text_input_cursor_width_px), cursor_h),
                     ),
                     cursor_color,
                 )),
@@ -1169,8 +1207,8 @@ impl Element for TextElement {
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left(), bounds.top()),
-                        size(px(styles.text_input_cursor_width_px), bounds.size.height),
+                        point(bounds.left() + center_offset, bounds.top() + cursor_y_inset),
+                        size(px(styles.text_input_cursor_width_px), cursor_h),
                     ),
                     cursor_color,
                 )),
@@ -1181,6 +1219,7 @@ impl Element for TextElement {
             line: Some(line),
             cursor,
             selection,
+            center_offset,
         }
     }
 
@@ -1208,8 +1247,10 @@ impl Element for TextElement {
         }
 
         // Paint text
+        let center_offset = prepaint.center_offset;
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
+        let text_origin = bounds.origin + point(center_offset, Pixels::ZERO);
+        line.paint(text_origin, window.line_height(), window, cx)
             .unwrap();
 
         // Paint cursor (only when focused)
@@ -1223,6 +1264,7 @@ impl Element for TextElement {
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
+            input.last_center_offset = center_offset;
         });
     }
 }

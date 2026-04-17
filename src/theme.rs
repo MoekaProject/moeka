@@ -3,20 +3,43 @@ use gpui::Hsla;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ThemeKind {
     OneDark,
+    OneLight,
+    AyuDark,
+    AyuLight,
     Milky,
 }
 
 impl ThemeKind {
-    pub fn toggle(self) -> Self {
+    pub fn all() -> &'static [ThemeKind] {
+        &[
+            Self::OneDark,
+            Self::OneLight,
+            Self::AyuDark,
+            Self::AyuLight,
+            Self::Milky,
+        ]
+    }
+
+    pub fn label(self) -> &'static str {
         match self {
-            Self::OneDark => Self::Milky,
-            Self::Milky => Self::OneDark,
+            Self::OneDark => "One Dark",
+            Self::OneLight => "One Light",
+            Self::AyuDark => "Ayu Dark",
+            Self::AyuLight => "Ayu Light",
+            Self::Milky => "Milky",
         }
+    }
+
+    pub fn is_dark(self) -> bool {
+        matches!(self, Self::OneDark | Self::AyuDark)
     }
 
     pub fn build(self) -> Theme {
         match self {
             Self::OneDark => Theme::one_dark(),
+            Self::OneLight => Theme::one_light(),
+            Self::AyuDark => Theme::ayu_dark(),
+            Self::AyuLight => Theme::ayu_light(),
             Self::Milky => Theme::milky(),
         }
     }
@@ -35,7 +58,7 @@ macro_rules! hex_hsla {
 /// Naming convention: `{category}_{depth}` — no functional descriptions.
 ///   category = text | bg | border  (editor/markdown semantics keep their own names)
 ///   depth    = primary, secondary, tertiary, bright, accent, danger,
-///              elevated, sunken, hover, selected, active, bar, tab,
+///              elevated, hover, selected, bar, tab,
 ///              tab_hover, tab_active, code, code_inline, decorative …
 pub struct Theme {
     // ── Text colors ─────────────────────────────────────────────
@@ -49,10 +72,8 @@ pub struct Theme {
     pub bg_primary: Hsla,
     pub bg_secondary: Hsla,
     pub bg_elevated: Hsla,
-    pub bg_sunken: Hsla,
     pub bg_hover: Hsla,
     pub bg_selected: Hsla,
-    pub bg_active: Hsla,
     pub bg_bar: Hsla,
     pub bg_tab: Hsla,
     pub bg_tab_hover: Hsla,
@@ -95,10 +116,8 @@ impl Theme {
             bg_primary: crate::hex_hsla!("#282c34"),
             bg_secondary: crate::hex_hsla!("#21252b"),
             bg_elevated: crate::hex_hsla!("#252a31"),
-            bg_sunken: crate::hex_hsla!("#1d2127"),
             bg_hover: crate::hex_hsla!("#313842"),
             bg_selected: crate::hex_hsla!("#2f3742"),
-            bg_active: with_alpha(crate::hex_hsla!("#528bff"), 0.95),
             bg_bar: crate::hex_hsla!("#22262d"),
             bg_tab: crate::hex_hsla!("#22262d"),
             bg_tab_hover: crate::hex_hsla!("#282c34"),
@@ -139,10 +158,8 @@ impl Theme {
             bg_primary: crate::hex_hsla!("#faf8f5"),
             bg_secondary: crate::hex_hsla!("#f7f2ea"),
             bg_elevated: crate::hex_hsla!("#f5f2ed"),
-            bg_sunken: crate::hex_hsla!("#edeae5"),
             bg_hover: crate::hex_hsla!("#e8e5e0"),
             bg_selected: crate::hex_hsla!("#e3e0db"),
-            bg_active: with_alpha(crate::hex_hsla!("#2383e2"), 0.9),
             bg_bar: crate::hex_hsla!("#f3f0eb"),
             bg_tab: crate::hex_hsla!("#f3f0eb"),
             bg_tab_hover: crate::hex_hsla!("#faf8f5"),
@@ -168,6 +185,132 @@ impl Theme {
             list_marker: crate::hex_hsla!("#c74440"),
             checkbox_checked: crate::hex_hsla!("#2383e2"),
             gutter_heading: with_alpha(crate::hex_hsla!("#37352f"), 0.12),
+        }
+    }
+
+    pub fn one_light() -> Self {
+        Self {
+            // Text
+            text_primary: crate::hex_hsla!("#383a42"),
+            text_secondary: crate::hex_hsla!("#a0a1a7"),
+            text_bright: crate::hex_hsla!("#242529"),
+            text_accent: crate::hex_hsla!("#5c78e2"),
+            text_danger: crate::hex_hsla!("#d3604f"),
+            // Background
+            bg_primary: crate::hex_hsla!("#fafafa"),
+            bg_secondary: crate::hex_hsla!("#f0f0f1"),
+            bg_elevated: crate::hex_hsla!("#eaeaeb"),
+            bg_hover: crate::hex_hsla!("#e5e5e6"),
+            bg_selected: crate::hex_hsla!("#dcdcdd"),
+            bg_bar: crate::hex_hsla!("#ebebec"),
+            bg_tab: crate::hex_hsla!("#ebebec"),
+            bg_tab_hover: crate::hex_hsla!("#f5f5f5"),
+            bg_tab_active: crate::hex_hsla!("#fafafa"),
+            bg_code: crate::hex_hsla!("#f0f0f1"),
+            bg_code_inline: crate::hex_hsla!("#ecedef"),
+            // Border
+            border_primary: crate::hex_hsla!("#c9c9ca55"),
+            border_secondary: crate::hex_hsla!("#c9c9ca33"),
+            border_tertiary: crate::hex_hsla!("#c9c9ca"),
+            border_decorative: with_alpha(crate::hex_hsla!("#a0a1a7"), 0.4),
+            // Editor/Markdown
+            cursor: crate::hex_hsla!("#5c78e2"),
+            selection: with_alpha(crate::hex_hsla!("#5c78e2"), 0.15),
+            line_highlight: with_alpha(crate::hex_hsla!("#c9c9ca"), 0.3),
+            heading: crate::hex_hsla!("#d3604f"),
+            bold: crate::hex_hsla!("#ad6e25"),
+            italic: crate::hex_hsla!("#a449ab"),
+            strikethrough: crate::hex_hsla!("#a0a1a7"),
+            inline_code: crate::hex_hsla!("#649f57"),
+            link: crate::hex_hsla!("#5b79e3"),
+            syntax_marker: with_alpha(crate::hex_hsla!("#a0a1a7"), 0.7),
+            list_marker: crate::hex_hsla!("#d3604f"),
+            checkbox_checked: crate::hex_hsla!("#5c78e2"),
+            gutter_heading: with_alpha(crate::hex_hsla!("#383a42"), 0.12),
+        }
+    }
+
+    pub fn ayu_dark() -> Self {
+        Self {
+            // Text
+            text_primary: crate::hex_hsla!("#bfbdb6"),
+            text_secondary: crate::hex_hsla!("#636a76"),
+            text_bright: crate::hex_hsla!("#e6e1cf"),
+            text_accent: crate::hex_hsla!("#5ac1fe"),
+            text_danger: crate::hex_hsla!("#f07178"),
+            // Background
+            bg_primary: crate::hex_hsla!("#0d1017"),
+            bg_secondary: crate::hex_hsla!("#131721"),
+            bg_elevated: crate::hex_hsla!("#161b25"),
+            bg_hover: crate::hex_hsla!("#1f2430"),
+            bg_selected: crate::hex_hsla!("#232834"),
+            bg_bar: crate::hex_hsla!("#0f1319"),
+            bg_tab: crate::hex_hsla!("#0f1319"),
+            bg_tab_hover: crate::hex_hsla!("#131721"),
+            bg_tab_active: crate::hex_hsla!("#0d1017"),
+            bg_code: crate::hex_hsla!("#131721"),
+            bg_code_inline: crate::hex_hsla!("#1a1f2b"),
+            // Border
+            border_primary: crate::hex_hsla!("#3f404333"),
+            border_secondary: crate::hex_hsla!("#3f404322"),
+            border_tertiary: crate::hex_hsla!("#3f4043"),
+            border_decorative: with_alpha(crate::hex_hsla!("#5c6773"), 0.5),
+            // Editor/Markdown
+            cursor: crate::hex_hsla!("#5ac1fe"),
+            selection: with_alpha(crate::hex_hsla!("#5ac1fe"), 0.15),
+            line_highlight: with_alpha(crate::hex_hsla!("#1f2430"), 0.7),
+            heading: crate::hex_hsla!("#bfbdb6"),
+            bold: crate::hex_hsla!("#5ac1fe"),
+            italic: crate::hex_hsla!("#fe8f40"),
+            strikethrough: crate::hex_hsla!("#5c6773"),
+            inline_code: crate::hex_hsla!("#a9d94b"),
+            link: crate::hex_hsla!("#fe8f40"),
+            syntax_marker: with_alpha(crate::hex_hsla!("#5c6773"), 0.7),
+            list_marker: crate::hex_hsla!("#ff8f3f"),
+            checkbox_checked: crate::hex_hsla!("#5ac1fe"),
+            gutter_heading: with_alpha(crate::hex_hsla!("#bfbdb6"), 0.15),
+        }
+    }
+
+    pub fn ayu_light() -> Self {
+        Self {
+            // Text
+            text_primary: crate::hex_hsla!("#5c6166"),
+            text_secondary: crate::hex_hsla!("#8b8e92"),
+            text_bright: crate::hex_hsla!("#3a3d40"),
+            text_accent: crate::hex_hsla!("#3b9ee5"),
+            text_danger: crate::hex_hsla!("#f07178"),
+            // Background
+            bg_primary: crate::hex_hsla!("#fcfcfc"),
+            bg_secondary: crate::hex_hsla!("#f0f0f0"),
+            bg_elevated: crate::hex_hsla!("#e8e8e8"),
+            bg_hover: crate::hex_hsla!("#e0e0e0"),
+            bg_selected: crate::hex_hsla!("#d8d8d8"),
+            bg_bar: crate::hex_hsla!("#ececed"),
+            bg_tab: crate::hex_hsla!("#ececed"),
+            bg_tab_hover: crate::hex_hsla!("#f5f5f5"),
+            bg_tab_active: crate::hex_hsla!("#fcfcfc"),
+            bg_code: crate::hex_hsla!("#f0f0f0"),
+            bg_code_inline: crate::hex_hsla!("#ebeced"),
+            // Border
+            border_primary: crate::hex_hsla!("#cfd1d255"),
+            border_secondary: crate::hex_hsla!("#cfd1d233"),
+            border_tertiary: crate::hex_hsla!("#cfd1d2"),
+            border_decorative: with_alpha(crate::hex_hsla!("#8b8e92"), 0.4),
+            // Editor/Markdown
+            cursor: crate::hex_hsla!("#3b9ee5"),
+            selection: with_alpha(crate::hex_hsla!("#3b9ee5"), 0.15),
+            line_highlight: with_alpha(crate::hex_hsla!("#cfd1d2"), 0.3),
+            heading: crate::hex_hsla!("#5c6166"),
+            bold: crate::hex_hsla!("#3b9ee5"),
+            italic: crate::hex_hsla!("#f98d3f"),
+            strikethrough: crate::hex_hsla!("#8b8e92"),
+            inline_code: crate::hex_hsla!("#86b300"),
+            link: crate::hex_hsla!("#f98d3f"),
+            syntax_marker: with_alpha(crate::hex_hsla!("#abb0b6"), 0.7),
+            list_marker: crate::hex_hsla!("#fa8d3e"),
+            checkbox_checked: crate::hex_hsla!("#3b9ee5"),
+            gutter_heading: with_alpha(crate::hex_hsla!("#5c6166"), 0.12),
         }
     }
 }

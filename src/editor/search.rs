@@ -1,18 +1,11 @@
-use gpui::{
-    AnyElement, Context, MouseButton, div, prelude::*, px,
-};
+use gpui::{AnyElement, Context, MouseButton, div, prelude::*, px};
 
 use super::*;
 
 impl EditorView {
     // ── Search actions ──────────────────────────────────────────────
 
-    pub(crate) fn on_find(
-        &mut self,
-        _: &Find,
-        _: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn on_find(&mut self, _: &Find, _: &mut gpui::Window, cx: &mut Context<Self>) {
         self.open_search(false, cx);
     }
 
@@ -92,10 +85,13 @@ impl EditorView {
                 }
                 ti
             });
-            cx.subscribe(&editor, |this, _editor, event: &crate::text_input::TextInputEvent, cx| {
-                match event {
+            cx.subscribe(
+                &editor,
+                |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
                     crate::text_input::TextInputEvent::Changed => {
-                        let query = this.search_query_editor.as_ref()
+                        let query = this
+                            .search_query_editor
+                            .as_ref()
                             .map(|e| e.read(cx).text().to_string())
                             .unwrap_or_default();
                         this.search_query = query;
@@ -107,8 +103,10 @@ impl EditorView {
                     crate::text_input::TextInputEvent::Escape => {
                         this.dismiss_search(cx);
                     }
-                }
-            }).detach();
+                    _ => {}
+                },
+            )
+            .detach();
             self.search_query_editor = Some(editor);
         } else if was_visible {
             if let Some(editor) = &self.search_query_editor {
@@ -145,10 +143,13 @@ impl EditorView {
                 }
                 ti
             });
-            cx.subscribe(&editor, |this, _editor, event: &crate::text_input::TextInputEvent, cx| {
-                match event {
+            cx.subscribe(
+                &editor,
+                |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
                     crate::text_input::TextInputEvent::Changed => {
-                        let replace = this.search_replace_editor.as_ref()
+                        let replace = this
+                            .search_replace_editor
+                            .as_ref()
                             .map(|e| e.read(cx).text().to_string())
                             .unwrap_or_default();
                         this.search_replace = replace;
@@ -159,8 +160,10 @@ impl EditorView {
                     crate::text_input::TextInputEvent::Escape => {
                         this.dismiss_search(cx);
                     }
-                }
-            }).detach();
+                    _ => {}
+                },
+            )
+            .detach();
             self.search_replace_editor = Some(editor);
         }
 
@@ -385,8 +388,14 @@ impl EditorView {
                     .rounded(px(self.scaled(3.0)))
                     .text_size(px(btn_icon_size))
                     .cursor(gpui::CursorStyle::PointingHand)
-                    .when(case_active, |this: gpui::Stateful<gpui::Div>| this.bg(btn_active_bg))
-                    .text_color(if case_active { btn_active_color } else { btn_color })
+                    .when(case_active, |this: gpui::Stateful<gpui::Div>| {
+                        this.bg(btn_active_bg)
+                    })
+                    .text_color(if case_active {
+                        btn_active_color
+                    } else {
+                        btn_color
+                    })
                     .hover(move |s| s.bg(btn_hover_bg))
                     .child("Aa")
                     .on_mouse_down(
@@ -409,8 +418,14 @@ impl EditorView {
                     .rounded(px(self.scaled(3.0)))
                     .text_size(px(btn_icon_size))
                     .cursor(gpui::CursorStyle::PointingHand)
-                    .when(word_active, |this: gpui::Stateful<gpui::Div>| this.bg(btn_active_bg))
-                    .text_color(if word_active { btn_active_color } else { btn_color })
+                    .when(word_active, |this: gpui::Stateful<gpui::Div>| {
+                        this.bg(btn_active_bg)
+                    })
+                    .text_color(if word_active {
+                        btn_active_color
+                    } else {
+                        btn_color
+                    })
                     .hover(move |s| s.bg(btn_hover_bg))
                     .child("Ab")
                     .on_mouse_down(
@@ -433,8 +448,14 @@ impl EditorView {
                     .rounded(px(self.scaled(3.0)))
                     .text_size(px(btn_icon_size))
                     .cursor(gpui::CursorStyle::PointingHand)
-                    .when(regex_active, |this: gpui::Stateful<gpui::Div>| this.bg(btn_active_bg))
-                    .text_color(if regex_active { btn_active_color } else { btn_color })
+                    .when(regex_active, |this: gpui::Stateful<gpui::Div>| {
+                        this.bg(btn_active_bg)
+                    })
+                    .text_color(if regex_active {
+                        btn_active_color
+                    } else {
+                        btn_color
+                    })
                     .hover(move |s| s.bg(btn_hover_bg))
                     .child(".*")
                     .on_mouse_down(

@@ -42,10 +42,6 @@ impl EditorView {
         self.scaled(self.styles.tab_bar.tab_bar_height_px)
     }
 
-    pub(crate) fn sidebar_row_height(&self) -> f32 {
-        self.scaled(self.styles.sidebar.sidebar_header_height_px)
-    }
-
     pub(crate) fn font_size_for_block(&self, block_type: &BlockType) -> f32 {
         let base = self.base_font_size();
         match block_type {
@@ -60,7 +56,86 @@ impl EditorView {
     }
 
     pub(crate) fn line_height_for_block(&self, block_type: &BlockType) -> f32 {
-        self.font_size_for_block(block_type) * self.styles.editor.editor_line_height_factor
+        let factor = match block_type {
+            BlockType::Heading(_) => self.styles.editor.editor_heading_line_height_factor,
+            _ => self.styles.editor.editor_paragraph_line_height_factor,
+        };
+        self.font_size_for_block(block_type) * factor
+    }
+
+    fn is_non_empty_line(&self, line: usize) -> bool {
+        if line >= self.buffer.line_count() {
+            return false;
+        }
+
+        !self.buffer.line_content(line).trim().is_empty()
+    }
+
+    fn is_heading_line(&self, line: usize) -> bool {
+        if !self.is_non_empty_line(line) {
+            return false;
+        }
+
+        matches!(
+            self.decorations.get(line).map(|d| &d.block_type),
+            Some(BlockType::Heading(_))
+        )
+    }
+
+    fn is_paragraph_style_line(&self, line: usize) -> bool {
+        if !self.is_non_empty_line(line) {
+            return false;
+        }
+
+        matches!(
+            self.decorations.get(line).map(|d| &d.block_type),
+            Some(block_type) if !matches!(block_type, BlockType::Heading(_))
+        )
+    }
+
+    pub(crate) fn block_padding_for_line(&self, line: usize) -> (f32, f32) {
+        if line >= self.buffer.line_count() {
+            return (0.0, 0.0);
+        }
+
+        let line_content = self.buffer.line_content(line);
+        if line_content.trim().is_empty() {
+            return (0.0, 0.0);
+        }
+
+        let Some(block_type) = self.decorations.get(line).map(|d| &d.block_type) else {
+            return (0.0, 0.0);
+        };
+
+        match block_type {
+            BlockType::Heading(_) if self.is_heading_line(line) => {
+                let top = if line == 0 || self.is_non_empty_line(line - 1) {
+                    self.scaled(self.styles.editor.editor_heading_padding_top_px)
+                } else {
+                    0.0
+                };
+                let bottom = if line + 1 >= self.buffer.line_count() || self.is_non_empty_line(line + 1) {
+                    self.scaled(self.styles.editor.editor_heading_padding_bottom_px)
+                } else {
+                    0.0
+                };
+                (top, bottom)
+            }
+            _ if self.is_paragraph_style_line(line) => {
+                let top = if line == 0 || self.is_heading_line(line - 1) {
+                    self.scaled(self.styles.editor.editor_paragraph_padding_top_px)
+                } else {
+                    0.0
+                };
+                let bottom = if line + 1 >= self.buffer.line_count() || self.is_heading_line(line + 1) {
+                    self.scaled(self.styles.editor.editor_paragraph_padding_bottom_px)
+                } else {
+                    0.0
+                };
+                (top, bottom)
+            }
+            _ => (0.0, 0.0),
+        }
     }
 
     pub(crate) fn visual_height_for_line(&self, line: usize) -> f32 {
@@ -72,7 +147,8 @@ impl EditorView {
             } else {
                 &BlockType::Normal
             };
-            self.line_height_for_block(block_type)
+            let (padding_top, padding_bottom) = self.block_padding_for_line(line);
+            self.line_height_for_block(block_type) + padding_top + padding_bottom
         }
     }
 
