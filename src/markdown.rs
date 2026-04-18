@@ -159,11 +159,9 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                         .get(lvl as usize)
                         .is_some_and(|&b| b == b' ');
                     if prefix_len <= line_len && has_space {
-                        // Extend trigger_range by 1 so cursor at first text char still expands
-                        let trigger_end = (prefix_len + 1).min(line_len);
                         decorations[line].syntax_ranges.push(SyntaxRange {
                             range: 0..prefix_len,
-                            trigger_range: 0..trigger_end,
+                            trigger_range: 0..line_len,
                         });
                     }
                 }
@@ -523,20 +521,41 @@ fn add_inline_span(
             let prefix_len = if kind == InlineKind::Image { 2 } else { 1 };
             if let Some(bracket_pos) = source.find("](") {
                 let text_end_col = start_col + bracket_pos;
-                decorations[start_line].inline_spans.push(InlineSpan {
-                    kind,
-                    range: start_col + prefix_len..text_end_col,
-                });
-                // Hide opening `[` or `![`
-                decorations[start_line].syntax_ranges.push(SyntaxRange {
-                    range: start_col..start_col + prefix_len,
-                    trigger_range: full_trigger.clone(),
-                });
-                // Hide `](url)`
-                decorations[start_line].syntax_ranges.push(SyntaxRange {
-                    range: text_end_col..end_col,
-                    trigger_range: full_trigger,
-                });
+                let desc_is_empty = bracket_pos == prefix_len;
+                if desc_is_empty {
+                    // No description: show the URL as visible text when folded
+                    // Extract URL portion (between `](` and `)`)
+                    let url_start_col = text_end_col + 2; // skip `](`
+                    let url_end_col = end_col.saturating_sub(1); // skip trailing `)`
+                    decorations[start_line].inline_spans.push(InlineSpan {
+                        kind,
+                        range: url_start_col..url_end_col,
+                    });
+                    // Hide prefix `[` or `![`, `](` and trailing `)`
+                    decorations[start_line].syntax_ranges.push(SyntaxRange {
+                        range: start_col..url_start_col,
+                        trigger_range: full_trigger.clone(),
+                    });
+                    decorations[start_line].syntax_ranges.push(SyntaxRange {
+                        range: url_end_col..end_col,
+                        trigger_range: full_trigger,
+                    });
+                } else {
+                    decorations[start_line].inline_spans.push(InlineSpan {
+                        kind,
+                        range: start_col + prefix_len..text_end_col,
+                    });
+                    // Hide opening `[` or `![`
+                    decorations[start_line].syntax_ranges.push(SyntaxRange {
+                        range: start_col..start_col + prefix_len,
+                        trigger_range: full_trigger.clone(),
+                    });
+                    // Hide `](url)`
+                    decorations[start_line].syntax_ranges.push(SyntaxRange {
+                        range: text_end_col..end_col,
+                        trigger_range: full_trigger,
+                    });
+                }
             }
         }
         _ => {}

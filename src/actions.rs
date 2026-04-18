@@ -84,6 +84,7 @@ actions!(
         ReplaceAll,
         // Global search
         FindInFiles,
+        QuickOpen,
     ]
 );
 
@@ -121,11 +122,7 @@ pub fn toggle_wrap(
             result.push_str(selected);
             result.push_str(suffix);
             result.push_str(&text[sel_end..]);
-            (
-                result,
-                sel_start + prefix.len(),
-                sel_end + prefix.len(),
-            )
+            (result, sel_start + prefix.len(), sel_end + prefix.len())
         }
     }
 }

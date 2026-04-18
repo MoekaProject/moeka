@@ -16,9 +16,17 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn on_escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_font_picker.is_some() {
             self.close_font_picker(cx);
+            return;
+        }
+        if self.quick_open_visible {
+            self.close_quick_open(window, cx);
+            return;
+        }
+        if self.workspace_search_visible {
+            self.close_workspace_search(window, cx);
             return;
         }
         if self.dialog.is_some() {
@@ -26,7 +34,7 @@ impl EditorView {
             return;
         }
         if self.search_visible {
-            self.dismiss_search(cx);
+            self.dismiss_search(window, cx);
             return;
         }
         if self.sidebar_edit.is_some() {
@@ -298,6 +306,7 @@ impl EditorView {
         } else {
             self.cursor.move_up(&self.buffer);
         }
+        self.snap_cursor_to_content();
         self.maybe_auto_select_link_url(prev_offset, false);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -328,6 +337,7 @@ impl EditorView {
         } else {
             self.cursor.move_down(&self.buffer);
         }
+        self.snap_cursor_to_content();
         self.maybe_auto_select_link_url(prev_offset, false);
         self.scroll_to_cursor();
         self.pause_blinking(cx);

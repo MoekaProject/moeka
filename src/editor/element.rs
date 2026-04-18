@@ -2,10 +2,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{
-    App, BorderStyle, Bounds, Corners, Element, ElementId, ElementInputHandler, Entity,
-    FontFallbacks, GlobalElementId, Hsla, IntoElement, LayoutId, PaintQuad, Pixels, Point,
-    ShapedLine, Style, TextAlign, TextRun, TransformationMatrix, Window, WrappedLine, fill, point,
-    px, quad, relative, size,
+    App, BorderStyle, Bounds, Corners, CursorStyle, Element, ElementId, ElementInputHandler,
+    Entity, FontFallbacks, GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId,
+    PaintQuad, Pixels, Point, ShapedLine, Style, TextAlign, TextRun, TransformationMatrix, Window,
+    WrappedLine, fill, point, px, quad, relative, size,
 };
 
 use crate::markdown::BlockType;
@@ -18,6 +18,8 @@ pub(crate) struct EditorElement {
 }
 
 pub(crate) struct EditorPrepaintState {
+    hitbox: Hitbox,
+    link_hitboxes: Vec<Hitbox>,
     lines: Vec<PrepaintLine>,
     cursor_quads: Vec<PaintQuad>,
     selection_quads: Vec<PaintQuad>,
@@ -39,6 +41,8 @@ pub(crate) struct EditorPrepaintState {
     table_bgs: Vec<PaintQuad>,
     /// Image URL-edit icons: (bounds, line_idx, alpha)
     image_edit_icons: Vec<(Bounds<Pixels>, usize, f32)>,
+    /// Blue wavy underlines for links when cmd is held
+    link_underlines: Vec<PaintQuad>,
 }
 
 struct PrepaintLine {
@@ -124,6 +128,8 @@ impl Element for EditorElement {
         let mut code_block_bgs = Vec::new();
         let mut cursor_quads: Vec<PaintQuad> = Vec::new();
         let mut marked_underlines = Vec::new();
+        let mut link_underlines: Vec<PaintQuad> = Vec::new();
+        let mut link_hitboxes: Vec<Hitbox> = Vec::new();
 
         let mut y = origin_y + editor.padding_top();
         let line_count = buffer.line_count();
@@ -254,6 +260,34 @@ impl Element for EditorElement {
             )
         };
 
+        let code_block_group_range = |line_idx: usize| {
+            if !is_code_block_type(line_idx) {
+                return None;
+            }
+
+            let mut start = line_idx;
+            while start > 0 && is_code_block_type(start - 1) {
+                start -= 1;
+            }
+
+            let mut end = line_idx;
+            while end + 1 < line_count && is_code_block_type(end + 1) {
+                end += 1;
+            }
+
+            Some((start, end))
+        };
+
+        let active_code_fence_group = if cursor_line < line_count
+            && matches!(
+                decorations.get(cursor_line).map(|d| &d.block_type),
+                Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
+            ) {
+            code_block_group_range(cursor_line)
+        } else {
+            None
+        };
+
         for line_idx in 0..line_count {
             let is_cursor_line_early = line_idx == cursor_line;
             if has_valid_cache && !is_cursor_line_early {
@@ -321,7 +355,14 @@ impl Element for EditorElement {
             });
             let cursor_col = if editor.is_selecting && editor.cursor.has_selection() {
                 let sel = editor.cursor.selection_range();
-                if sel.start >= line_start_offset && sel.end <= line_end_offset {
+                let is_heading_line = matches!(decoration.block_type, BlockType::Heading(_));
+                // For headings: expand when any part of the selection touches this line
+                if is_heading_line
+                    && sel.start < line_end_offset
+                    && sel.end > line_start_offset
+                {
+                    Some(cursor.offset.saturating_sub(line_start_offset))
+                } else if sel.start >= line_start_offset && sel.end <= line_end_offset {
                     let sel_start_col = sel.start - line_start_offset;
                     let sel_end_col = sel.end - line_start_offset;
                     let within_syntax = decoration.inline_spans.iter().any(|span| {
@@ -406,11 +447,14 @@ impl Element for EditorElement {
             } else {
                 None
             };
+            let code_block_syntax_active = active_code_fence_group
+                .is_some_and(|(start, end)| line_idx >= start && line_idx <= end);
             let (display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
                 helpers::build_display_text(
                     line_content,
                     &decoration,
                     cursor_col,
+                    code_block_syntax_active,
                     table_width_chars,
                     table_cell_padding_chars,
                     collapsed_task_prefix_chars,
@@ -423,6 +467,7 @@ impl Element for EditorElement {
                 &display_to_buffer,
                 &decoration,
                 cursor_col,
+                code_block_syntax_active,
                 prefix_collapsed,
                 &body_font,
                 &body_cjk_font,
@@ -603,34 +648,32 @@ impl Element for EditorElement {
 
             // Code block background
             if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
-                let is_start_fence = matches!(block_type, BlockType::CodeBlockFence)
-                    && (line_idx == 0 || !is_code_block_type(line_idx - 1));
-                let is_end_fence = matches!(block_type, BlockType::CodeBlockFence)
-                    && (line_idx + 1 >= line_count || !is_code_block_type(line_idx + 1));
-                let cursor_on_this_line = cursor_line == line_idx;
-                let clip_top = if !cursor_on_this_line && is_start_fence {
-                    15.0
-                } else {
-                    0.0
-                };
-                let clip_bottom = if !cursor_on_this_line && is_end_fence {
-                    15.0
-                } else {
-                    0.0
-                };
-                let bg_height = total_line_height - clip_top - clip_bottom;
-                if bg_height > 0.0 {
-                    code_block_bgs.push(fill(
-                        Bounds::new(
-                            point(
-                                px(editor_left + editor.padding_left()),
-                                px(line_top + clip_top),
-                            ),
-                            size(px(text_width), px(bg_height)),
+                let corner_r = px(editor.scaled(editor.styles.code_block.code_block_radius_px));
+                let (group_start, group_end) =
+                    code_block_group_range(line_idx).unwrap_or((line_idx, line_idx));
+                let is_group_start = line_idx == group_start;
+                let is_group_end = line_idx == group_end;
+                let has_top_corner = is_group_start;
+                let has_bottom_corner = is_group_end;
+                code_block_bgs.push(quad(
+                    Bounds::new(
+                        point(
+                            px(editor_left + editor.padding_left()),
+                            px(line_top),
                         ),
-                        theme.bg_code,
-                    ));
-                }
+                        size(px(text_width), px(total_line_height)),
+                    ),
+                    Corners {
+                        top_left: if has_top_corner { corner_r } else { px(0.0) },
+                        top_right: if has_top_corner { corner_r } else { px(0.0) },
+                        bottom_right: if has_bottom_corner { corner_r } else { px(0.0) },
+                        bottom_left: if has_bottom_corner { corner_r } else { px(0.0) },
+                    },
+                    editor.styles.code_block.code_block_bg,
+                    px(0.0),
+                    gpui::transparent_black(),
+                    BorderStyle::default(),
+                ));
             }
 
             // Table rendering
@@ -763,51 +806,40 @@ impl Element for EditorElement {
             // Gutter decorations
             let gutter_center_y = text_line_top + line_height / 2.0;
             match block_type {
-                BlockType::Heading(level) => {
-                    let prefix_len = (*level as usize) + 1;
-                    let heading_prefix_folded = cursor_col
-                        .map(|col| helpers::prefix_is_folded(0, prefix_len + 1, Some(col)))
-                        .unwrap_or(false);
-                    let fold_hovered_this_line = editor.hovering_fold_line == Some(line_idx);
+                BlockType::Heading(level) if is_cursor_line => {
                     let gutter_styles = &editor.styles.gutter;
-                    let max_heading_width = editor.scaled(gutter_styles.gutter_heading_max_total_width_px);
                     let heading_offset = editor.scaled(gutter_styles.gutter_heading_icon_offset_px);
-                    let available_gutter = editor.padding_left() - heading_offset;
-                    if is_cursor_line
-                        && heading_prefix_folded
-                        && !fold_hovered_this_line
-                        && available_gutter >= max_heading_width
-                    {
-                        let icon_size = match *level {
-                            1 => editor.scaled(gutter_styles.gutter_heading_h1_icon_size_px),
-                            2 => editor.scaled(gutter_styles.gutter_heading_h2_icon_size_px),
-                            3 => editor.scaled(gutter_styles.gutter_heading_h3_icon_size_px),
-                            _ => editor.scaled(gutter_styles.gutter_heading_h4_icon_size_px),
-                        };
-                        let gap = editor.scaled(gutter_styles.gutter_heading_icon_gap_px);
-                        let total_width = *level as f32 * icon_size + (*level as f32 - 1.0) * gap;
-                        let start_x =
-                            editor_left + editor.padding_left() - total_width - heading_offset;
-                        for icon_index in 0..*level {
-                            let icon_x = start_x + icon_index as f32 * (icon_size + gap);
-                            let icon_y = gutter_center_y - icon_size / 2.0;
-                            gutter_svgs.push((
-                                Bounds::new(
-                                    point(px(icon_x), px(icon_y)),
-                                    size(px(icon_size), px(icon_size)),
-                                ),
-                                HASH_SVG_PATH,
-                                theme.gutter_heading,
-                                0.0_f32,
-                            ));
-                        }
-                    }
+                    let icon_size = match *level {
+                        1 => editor.scaled(gutter_styles.gutter_heading_h1_icon_size_px),
+                        2 => editor.scaled(gutter_styles.gutter_heading_h2_icon_size_px),
+                        3 => editor.scaled(gutter_styles.gutter_heading_h3_icon_size_px),
+                        _ => editor.scaled(gutter_styles.gutter_heading_h4_icon_size_px),
+                    };
+                    let icon_path = match *level {
+                        1 => HEADING_1_SVG_PATH,
+                        2 => HEADING_2_SVG_PATH,
+                        3 => HEADING_3_SVG_PATH,
+                        4 => HEADING_4_SVG_PATH,
+                        5 => HEADING_5_SVG_PATH,
+                        _ => HEADING_6_SVG_PATH,
+                    };
+                    let icon_x = editor_left + editor.padding_left() - icon_size - heading_offset;
+                    let icon_y = gutter_center_y + 1.0 - icon_size / 2.0;
+                    gutter_svgs.push((
+                        Bounds::new(
+                            point(px(icon_x), px(icon_y)),
+                            size(px(icon_size), px(icon_size)),
+                        ),
+                        icon_path,
+                        theme.gutter_heading,
+                        0.0_f32,
+                    ));
                 }
                 BlockType::Blockquote => {
                     let icon_size = 16.0_f32;
                     let icon_x =
                         editor_left + editor.padding_left() - icon_size - editor.scaled(10.0);
-                    let icon_y = gutter_center_y - 2.0 - icon_size / 2.0;
+                    let icon_y = gutter_center_y - 1.0 - icon_size / 2.0;
                     gutter_svgs.push((
                         Bounds::new(
                             point(px(icon_x), px(icon_y)),
@@ -1084,8 +1116,43 @@ impl Element for EditorElement {
                 }
             }
 
+            if editor.current_file_path == editor.workspace_search_highlight_path {
+                let match_bg = editor.styles.search.search_match_bg;
+                let active_bg = editor.styles.search.search_match_active_bg;
+                for (match_idx, sr) in editor.workspace_search_highlight_ranges.iter().enumerate() {
+                    let is_active =
+                        editor.workspace_search_highlight_current_index == Some(match_idx);
+                    let sel_start_on_line = sr.start.max(line_start_offset);
+                    let sel_end_on_line = sr.end.min(line_end_offset);
+                    if sel_start_on_line < sel_end_on_line {
+                        let buf_start_col = sel_start_on_line - line_start_offset;
+                        let buf_end_col = sel_end_on_line - line_start_offset;
+                        let disp_start =
+                            helpers::buffer_to_display_offset(&buffer_to_display, buf_start_col);
+                        let disp_end =
+                            helpers::buffer_to_display_offset(&buffer_to_display, buf_end_col);
+                        search_match_quads.extend(helpers::build_selection_quads(
+                            &display_text,
+                            &runs,
+                            wrapped,
+                            disp_start,
+                            disp_end,
+                            content_x,
+                            line_top,
+                            line_height,
+                            font_size,
+                            indent_px,
+                            if is_active { active_bg } else { match_bg },
+                            window,
+                        ));
+                    }
+                }
+            }
+
             // Cursor bars — paint for all cursors (primary + extra)
-            if editor.focus_handle.is_focused(window)
+            if window.is_window_active()
+                && editor.focus_handle.is_focused(window)
+                && editor.focused_sidebar_path.is_none()
                 && (editor.cursor_opacity > 0.0 || editor.is_selecting)
             {
                 for &cur_offset in &all_cursor_offsets {
@@ -1162,6 +1229,46 @@ impl Element for EditorElement {
                 }
             }
 
+            // Link underlines when cmd is held
+            if editor.command_held {
+                for span in &decoration.inline_spans {
+                    if span.kind != crate::markdown::InlineKind::Link {
+                        continue;
+                    }
+                    let buf_start = span.range.start.min(line_content.len());
+                    let buf_end = span.range.end.min(line_content.len());
+                    let disp_start =
+                        helpers::buffer_to_display_offset(&buffer_to_display, buf_start);
+                    let disp_end = helpers::buffer_to_display_offset(&buffer_to_display, buf_end);
+                    if let (Some(pos_start), Some(pos_end)) = (
+                        wrapped.position_for_index(disp_start, px(line_height)),
+                        wrapped.position_for_index(disp_end, px(line_height)),
+                    ) {
+                        let indent_start =
+                            helpers::indent_for_y(indent_px, pos_start.y, line_height);
+                        let ul_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
+                        link_underlines.push(fill(
+                            Bounds::from_corners(
+                                point(px(content_x + indent_start) + pos_start.x, px(ul_y)),
+                                point(px(content_x + indent_start) + pos_end.x, px(ul_y + 1.5)),
+                            ),
+                            theme.link,
+                        ));
+                        let link_bounds = Bounds::from_corners(
+                            point(
+                                px(content_x + indent_start) + pos_start.x,
+                                px(text_line_top + f32::from(pos_start.y)),
+                            ),
+                            point(
+                                px(content_x + indent_start) + pos_end.x,
+                                px(text_line_top + f32::from(pos_start.y) + line_height),
+                            ),
+                        );
+                        link_hitboxes.push(window.insert_hitbox(link_bounds, HitboxBehavior::Normal));
+                    }
+                }
+            }
+
             lines.push(PrepaintLine {
                 wrapped: wrapped.clone(),
                 origin,
@@ -1206,7 +1313,11 @@ impl Element for EditorElement {
             }
         }
 
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+
         EditorPrepaintState {
+            hitbox,
+            link_hitboxes,
             lines,
             cursor_quads,
             selection_quads,
@@ -1223,6 +1334,7 @@ impl Element for EditorElement {
             table_borders,
             table_bgs,
             image_edit_icons,
+            link_underlines,
         }
     }
 
@@ -1237,11 +1349,28 @@ impl Element for EditorElement {
         cx: &mut App,
     ) {
         let focus_handle = self.editor.read(cx).focus_handle.clone();
+        window.set_cursor_style(CursorStyle::IBeam, &prepaint.hitbox);
+        for link_hitbox in &prepaint.link_hitboxes {
+            window.set_cursor_style(CursorStyle::PointingHand, link_hitbox);
+        }
         window.handle_input(
             &focus_handle,
             ElementInputHandler::new(bounds, self.editor.clone()),
             cx,
         );
+
+        {
+            let editor = self.editor.clone();
+            window.on_modifiers_changed(move |event, _window, cx| {
+                editor.update(cx, |this, cx| {
+                    let new_val = event.modifiers.platform;
+                    if this.command_held != new_val {
+                        this.command_held = new_val;
+                        cx.notify();
+                    }
+                });
+            });
+        }
 
         for quad in prepaint.code_block_bgs.drain(..) {
             window.paint_quad(quad);
@@ -1378,6 +1507,10 @@ impl Element for EditorElement {
         }
 
         for quad in prepaint.marked_underlines.drain(..) {
+            window.paint_quad(quad);
+        }
+
+        for quad in prepaint.link_underlines.drain(..) {
             window.paint_quad(quad);
         }
     }

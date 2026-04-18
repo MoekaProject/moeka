@@ -5,6 +5,7 @@ mod helpers;
 mod input;
 mod menus;
 mod outline;
+mod quick_open;
 mod render;
 mod scaling;
 mod search;
@@ -190,6 +191,12 @@ pub(crate) fn perform_window_drag(_window: &gpui::Window) {}
 
 pub(crate) const HASH_SVG_PATH: &str = "assets/icons/hash.svg";
 pub(crate) const COMMENT_SVG_PATH: &str = "assets/icons/comment.svg";
+pub(crate) const HEADING_1_SVG_PATH: &str = "assets/icons/format/heading-1.svg";
+pub(crate) const HEADING_2_SVG_PATH: &str = "assets/icons/format/heading-2.svg";
+pub(crate) const HEADING_3_SVG_PATH: &str = "assets/icons/format/heading-3.svg";
+pub(crate) const HEADING_4_SVG_PATH: &str = "assets/icons/format/heading-4.svg";
+pub(crate) const HEADING_5_SVG_PATH: &str = "assets/icons/format/heading-5.svg";
+pub(crate) const HEADING_6_SVG_PATH: &str = "assets/icons/format/heading-6.svg";
 pub(crate) const CHECK_SVG_PATH: &str = "assets/icons/check.svg";
 pub(crate) const FOLD_SVG_PATH: &str = "assets/icons/fold.svg";
 pub(crate) const OPEN_SVG_PATH: &str = "assets/icons/open.svg";
@@ -245,6 +252,7 @@ pub(crate) struct OpenTab {
     pub kind: TabKind,
     pub path: Option<PathBuf>,
     pub snapshot: EditorSnapshot,
+    pub is_preview: bool,
     pub is_dirty: bool,
     pub is_deleted: bool,
     pub is_pinned: bool,
@@ -373,12 +381,21 @@ pub(crate) struct WorkspaceSearchMatch {
     pub match_start: usize,
     pub match_end: usize,
     pub byte_offset: usize,
+    pub byte_end: usize,
 }
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceSearchResult {
     pub path: PathBuf,
     pub matches: Vec<WorkspaceSearchMatch>,
+}
+
+#[derive(Clone)]
+pub(crate) struct QuickOpenResult {
+    pub path: PathBuf,
+    pub score: i64,
+    pub file_name_match_indices: Vec<usize>,
+    pub path_match_indices: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -505,6 +522,7 @@ pub struct EditorView {
     pub(crate) image_edit_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_image_edit_line: Option<usize>,
     pub(crate) hovering_fold_line: Option<usize>,
+    pub(crate) command_held: bool,
     pub(crate) sidebar_custom_width: Option<f32>,
     pub(crate) sidebar_resizing: bool,
     pub(crate) heading_submenu_open: bool,
@@ -516,6 +534,7 @@ pub struct EditorView {
     pub(crate) tab_dragging_id: Option<String>,
     pub(crate) recently_closed_tabs: Vec<OpenTab>,
     pub(crate) dialog: Option<Dialog>,
+    pub(crate) pending_close_tab_ids: Vec<String>,
     /// 多选：最后一个选中的 focus 路径
     pub(crate) focused_sidebar_path: Option<PathBuf>,
     /// 多选锚点（shift 连续选择的起点）
@@ -547,14 +566,34 @@ pub struct EditorView {
     pub(crate) search_current_index: Option<usize>,
     pub(crate) search_query_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) search_replace_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) pending_editor_focus: bool,
 
     // ── Global workspace search state ───────────────────────────────
     pub(crate) workspace_search_visible: bool,
     pub(crate) workspace_search_query: String,
+    pub(crate) workspace_search_case_sensitive: bool,
+    pub(crate) workspace_search_whole_word: bool,
+    pub(crate) workspace_search_use_regex: bool,
     pub(crate) workspace_search_results: Vec<WorkspaceSearchResult>,
+    pub(crate) workspace_search_selected_match: Option<usize>,
+    pub(crate) workspace_search_highlight_path: Option<PathBuf>,
+    pub(crate) workspace_search_highlight_ranges: Vec<std::ops::Range<usize>>,
+    pub(crate) workspace_search_highlight_current_index: Option<usize>,
     pub(crate) workspace_search_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) workspace_search_blur_sub: Option<gpui::Subscription>,
     pub(crate) workspace_search_task: Option<Task<()>>,
     pub(crate) workspace_search_scroll_handle: ScrollHandle,
+    pub(crate) workspace_search_render_limit: usize,
+
+    // ── Quick open state ───────────────────────────────────────────
+    pub(crate) quick_open_visible: bool,
+    pub(crate) quick_open_query: String,
+    pub(crate) quick_open_results: Vec<QuickOpenResult>,
+    pub(crate) quick_open_selected_index: usize,
+    pub(crate) quick_open_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) quick_open_task: Option<Task<()>>,
+    pub(crate) quick_open_scroll_handle: ScrollHandle,
+    pub(crate) quick_open_render_limit: usize,
 
     // Settings panel state
     pub(crate) settings_scroll_handle: ScrollHandle,
@@ -644,6 +683,7 @@ impl EditorView {
                     kind: TabKind::Editor,
                     path: None,
                     snapshot: initial_snapshot,
+                    is_preview: false,
                     is_dirty: false,
                     is_deleted: false,
                     is_pinned: false,
@@ -659,6 +699,7 @@ impl EditorView {
                         cursor_anchor: 0,
                         scroll_offset: 0.0,
                     },
+                    is_preview: false,
                     is_dirty: false,
                     is_deleted: false,
                     is_pinned: false,
@@ -682,6 +723,7 @@ impl EditorView {
             image_edit_areas: Vec::new(),
             hovering_image_edit_line: None,
             hovering_fold_line: None,
+            command_held: false,
             sidebar_custom_width: None,
             sidebar_resizing: false,
             heading_submenu_open: false,
@@ -693,6 +735,7 @@ impl EditorView {
             tab_dragging_id: None,
             recently_closed_tabs: Vec::new(),
             dialog: None,
+            pending_close_tab_ids: Vec::new(),
             focused_sidebar_path: None,
             sidebar_selection_anchor: None,
             sidebar_drag_hover_target: None,
@@ -719,13 +762,32 @@ impl EditorView {
             search_current_index: None,
             search_query_editor: None,
             search_replace_editor: None,
+            pending_editor_focus: false,
 
             workspace_search_visible: false,
             workspace_search_query: String::new(),
+            workspace_search_case_sensitive: false,
+            workspace_search_whole_word: false,
+            workspace_search_use_regex: false,
             workspace_search_results: Vec::new(),
+            workspace_search_selected_match: None,
+            workspace_search_highlight_path: None,
+            workspace_search_highlight_ranges: Vec::new(),
+            workspace_search_highlight_current_index: None,
             workspace_search_editor: None,
+            workspace_search_blur_sub: None,
             workspace_search_task: None,
             workspace_search_scroll_handle: ScrollHandle::new(),
+            workspace_search_render_limit: 100,
+
+            quick_open_visible: false,
+            quick_open_query: String::new(),
+            quick_open_results: Vec::new(),
+            quick_open_selected_index: 0,
+            quick_open_editor: None,
+            quick_open_task: None,
+            quick_open_scroll_handle: ScrollHandle::new(),
+            quick_open_render_limit: 100,
 
             // Settings panel state
             settings_scroll_handle: ScrollHandle::new(),
@@ -786,6 +848,7 @@ impl EditorView {
 
     pub(crate) fn set_theme(&mut self, kind: ThemeKind, cx: &mut Context<Self>) {
         self.theme_kind = kind;
+        self.settings_theme_dark_mode = kind.is_dark();
         self.theme = self.theme_kind.build();
         self.styles = crate::style::Styles::from_theme(&self.theme);
         // Re-apply font overrides from settings since from_theme resets to defaults
@@ -939,6 +1002,7 @@ impl EditorView {
 
     pub(crate) fn dismiss_dialog(&mut self, cx: &mut Context<Self>) {
         self.dialog = None;
+        self.pending_close_tab_ids.clear();
         cx.notify();
     }
 
@@ -976,9 +1040,37 @@ impl EditorView {
                         if std::fs::write(path, &tab.snapshot.text).is_ok() {
                             tab.is_dirty = false;
                         }
+                        self.close_tab(&tab_id, cx);
+                    } else {
+                        let text = tab.snapshot.text.clone();
+                        let default_name = format!("{}.md", tab.title);
+                        let tab_id_clone = tab_id.clone();
+                        cx.spawn(async move |this, cx| {
+                            let maybe_path = cx
+                                .background_executor()
+                                .spawn(async move { helpers::save_file_blocking(&default_name) })
+                                .await;
+                            if let Some(path) = maybe_path {
+                                if std::fs::write(&path, &text).is_ok() {
+                                    this.update(cx, |editor, cx| {
+                                        if let Some(tab) =
+                                            editor.tabs.iter_mut().find(|t| t.id == tab_id_clone)
+                                        {
+                                            tab.path = Some(path.clone());
+                                            tab.title = Self::title_for_path(&path);
+                                            tab.is_dirty = false;
+                                        }
+                                        editor.close_tab(&tab_id_clone, cx);
+                                    })
+                                    .ok();
+                                }
+                            }
+                        })
+                        .detach();
                     }
+                } else {
+                    self.close_tab(&tab_id, cx);
                 }
-                self.close_tab(&tab_id, cx);
             }
             DialogAction::DeletePath { .. } => {
                 // No save action for delete
@@ -998,17 +1090,6 @@ impl EditorView {
             return div().into_any_element();
         };
 
-        let is_danger = dialog.is_danger;
-        let btn_bg = if is_danger {
-            ds.dialog_btn_danger_bg
-        } else {
-            ds.dialog_btn_primary_bg
-        };
-        let btn_text = if is_danger {
-            ds.dialog_btn_danger_text_color
-        } else {
-            ds.dialog_btn_primary_text_color
-        };
         let confirm_label = SharedString::from(dialog.confirm_label.clone());
         let cancel_label = SharedString::from(dialog.cancel_label.clone());
         let save_label = dialog
@@ -1082,12 +1163,28 @@ impl EditorView {
                                     .cursor(CursorStyle::Arrow)
                                     .hover(move |s| s.opacity(btn_hover_opacity))
                                     .child(cancel_label)
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.dismiss_dialog(cx);
-                                        }),
-                                    ),
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.dismiss_dialog(cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("dialog-confirm")
+                                    .h(px(self.scaled(ds.dialog_btn_height_px)))
+                                    .px(px(self.scaled(ds.dialog_btn_padding_x_px)))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(secondary_bg)
+                                    .text_color(secondary_text)
+                                    .text_size(px(self.scaled(ds.dialog_btn_font_size_px)))
+                                    .rounded(px(ds.dialog_btn_radius_px))
+                                    .cursor(CursorStyle::Arrow)
+                                    .hover(move |s| s.opacity(btn_hover_opacity))
+                                    .child(confirm_label)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.confirm_dialog(cx);
+                                    })),
                             )
                             .when(has_save, |this| {
                                 this.child(
@@ -1105,36 +1202,11 @@ impl EditorView {
                                         .cursor(CursorStyle::Arrow)
                                         .hover(move |s| s.opacity(btn_hover_opacity))
                                         .child(save_label.unwrap_or_default())
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _, cx| {
-                                                this.save_and_close_dialog(cx);
-                                            }),
-                                        ),
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.save_and_close_dialog(cx);
+                                        })),
                                 )
-                            })
-                            .child(
-                                div()
-                                    .id("dialog-confirm")
-                                    .h(px(self.scaled(ds.dialog_btn_height_px)))
-                                    .px(px(self.scaled(ds.dialog_btn_padding_x_px)))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .bg(btn_bg)
-                                    .text_color(btn_text)
-                                    .text_size(px(self.scaled(ds.dialog_btn_font_size_px)))
-                                    .rounded(px(ds.dialog_btn_radius_px))
-                                    .cursor(CursorStyle::Arrow)
-                                    .hover(move |s| s.opacity(btn_hover_opacity))
-                                    .child(confirm_label)
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.confirm_dialog(cx);
-                                        }),
-                                    ),
-                            ),
+                            }),
                     ),
             )
             .into_any_element()
@@ -1229,6 +1301,58 @@ impl EditorView {
 
     pub(crate) fn cursor_line(&self) -> usize {
         self.buffer.offset_to_line_col(self.cursor.offset).0
+    }
+
+    /// Compute the byte column where content starts on a line (after block prefix).
+    /// Returns 0 if the line has no block prefix.
+    pub(crate) fn line_content_start_col(&self, line: usize) -> usize {
+        let block_type = self.decorations.get(line).map(|d| &d.block_type);
+        let content = self.buffer.line_content(line);
+        let leading_ws = content.len() - content.trim_start_matches([' ', '\t']).len();
+        let trimmed = &content[leading_ws..];
+        let prefix_len = match block_type {
+            Some(BlockType::OrderedList) => markdown::ordered_list_prefix_len(trimmed),
+            Some(BlockType::UnorderedList) => {
+                if trimmed.starts_with("- ")
+                    || trimmed.starts_with("* ")
+                    || trimmed.starts_with("+ ")
+                {
+                    2
+                } else {
+                    0
+                }
+            }
+            Some(BlockType::TaskList(_)) => task_prefix_len(trimmed),
+            Some(BlockType::Blockquote) => {
+                if trimmed.starts_with("> ") {
+                    2
+                } else if trimmed.starts_with(">") {
+                    1
+                } else {
+                    0
+                }
+            }
+            Some(BlockType::Heading(n)) => (*n as usize) + 1, // "# " = level + space
+            _ => 0,
+        };
+        if prefix_len > 0 {
+            leading_ws + prefix_len
+        } else {
+            0
+        }
+    }
+
+    /// After vertical cursor movement, if cursor lands within the block prefix
+    /// of the destination line, snap it to the content start.
+    pub(crate) fn snap_cursor_to_content(&mut self) {
+        let line = self.cursor_line();
+        let line_start = self.buffer.line_start(line);
+        let cursor_col = self.cursor.offset - line_start;
+        let content_start = self.line_content_start_col(line);
+        if content_start > 0 && cursor_col < content_start {
+            self.cursor
+                .move_to(line_start + content_start, &self.buffer);
+        }
     }
 
     pub(crate) fn has_extra_cursors(&self) -> bool {
@@ -1624,29 +1748,74 @@ impl EditorView {
         let line_text = self.buffer.line_content(line).to_string();
         let trimmed = line_text.trim_start();
         let leading_ws = line_text.len() - trimmed.len();
-        let replacement = if trimmed.starts_with(prefix) {
-            let mut new_line = String::with_capacity(line_text.len());
-            new_line.push_str(&line_text[..leading_ws]);
-            new_line.push_str(&trimmed[prefix.len()..]);
-            new_line
-        } else {
-            let mut new_line = String::with_capacity(line_text.len() + prefix.len());
-            new_line.push_str(&line_text[..leading_ws]);
-            new_line.push_str(prefix);
-            new_line.push_str(trimmed);
-            new_line
-        };
 
-        self.buffer.replace(line_start..line_end, &replacement);
-        let new_col = if trimmed.starts_with(prefix) {
-            self.cursor.offset.saturating_sub(prefix.len())
+        // Detect the exact existing block-level prefix
+        let existing_prefix_len = Self::detect_block_prefix_len(trimmed);
+        let existing_prefix = &trimmed[..existing_prefix_len];
+
+        // If the line already has the exact same prefix, just remove it
+        if existing_prefix == prefix {
+            let body = &trimmed[existing_prefix_len..];
+            let mut new_line = String::with_capacity(leading_ws + body.len());
+            new_line.push_str(&line_text[..leading_ws]);
+            new_line.push_str(body);
+            self.buffer.replace(line_start..line_end, &new_line);
+            let new_col = self.cursor.offset.saturating_sub(prefix.len());
+            self.cursor
+                .move_to(new_col.min(self.buffer.len()), &self.buffer);
+            self.reparse();
+            self.scroll_to_cursor();
+            return;
+        }
+
+        // Strip existing prefix and apply new one
+        let body = &trimmed[existing_prefix_len..];
+
+        let mut new_line = String::with_capacity(leading_ws + prefix.len() + body.len());
+        new_line.push_str(&line_text[..leading_ws]);
+        new_line.push_str(prefix);
+        new_line.push_str(body);
+
+        self.buffer.replace(line_start..line_end, &new_line);
+        let cursor_delta = prefix.len() as isize - existing_prefix_len as isize;
+        let new_col = if cursor_delta >= 0 {
+            self.cursor.offset + cursor_delta as usize
         } else {
-            self.cursor.offset + prefix.len()
+            self.cursor.offset.saturating_sub((-cursor_delta) as usize)
         };
         self.cursor
             .move_to(new_col.min(self.buffer.len()), &self.buffer);
         self.reparse();
         self.scroll_to_cursor();
+    }
+
+    fn detect_block_prefix_len(trimmed: &str) -> usize {
+        // Check todo variants first (longest match)
+        if trimmed.starts_with("- [x] ") || trimmed.starts_with("- [X] ") {
+            return 6;
+        }
+        if trimmed.starts_with("- [ ] ") {
+            return 6;
+        }
+        // Unordered list
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+            return 2;
+        }
+        // Blockquote
+        if trimmed.starts_with("> ") {
+            return 2;
+        }
+        // Heading (# ... ###### )
+        let hash_count = trimmed.bytes().take_while(|&b| b == b'#').count();
+        if hash_count > 0 && hash_count <= 6 && trimmed.as_bytes().get(hash_count) == Some(&b' ') {
+            return hash_count + 1;
+        }
+        // Ordered list: digits followed by ". "
+        let digit_count = trimmed.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digit_count > 0 && trimmed[digit_count..].starts_with(". ") {
+            return digit_count + 2;
+        }
+        0
     }
 
     pub(crate) fn toggle_horizontal_rule_at_cursor(&mut self) {
@@ -1755,47 +1924,81 @@ impl EditorView {
     }
 
     pub(crate) fn apply_wrap(&mut self, prefix: &str, suffix: &str) {
-        if !self.cursor.has_selection() {
-            let offset = self.cursor.offset;
-            let (line, col) = self.buffer.offset_to_line_col(offset);
-            let line_content = self.buffer.line_content(line).to_string();
-            if let Some(dec) = self.decorations.get(line).cloned() {
-                for span in &dec.inline_spans {
-                    let kind_prefix = match span.kind {
-                        crate::markdown::InlineKind::Bold => "**",
-                        crate::markdown::InlineKind::Italic => "*",
-                        crate::markdown::InlineKind::Strikethrough => "~~",
-                        crate::markdown::InlineKind::InlineCode => "`",
-                        _ => continue,
-                    };
-                    let kind_suffix = kind_prefix;
-                    if kind_prefix != prefix || kind_suffix != suffix {
-                        continue;
-                    }
-                    let marker_start = span.range.start.saturating_sub(prefix.len());
-                    let marker_end = (span.range.end + suffix.len()).min(line_content.len());
-                    if marker_start + prefix.len() <= line_content.len()
-                        && line_content[marker_start..].starts_with(prefix)
-                        && marker_end >= suffix.len()
-                        && line_content[marker_end - suffix.len()..marker_end].ends_with(suffix)
-                        && col >= marker_start
-                        && col <= marker_end
-                    {
-                        let line_start = self.buffer.line_start(line);
-                        let sel_start = line_start + marker_start;
-                        let sel_end = line_start + marker_end;
-                        let (new_text, new_start, new_end) =
-                            toggle_wrap(self.buffer.text(), sel_start, sel_end, prefix, suffix);
-                        self.buffer = Buffer::from_text(&new_text);
+        let offset = self.cursor.offset;
+        let (line, col) = self.buffer.offset_to_line_col(offset);
+        let line_content = self.buffer.line_content(line).to_string();
+
+        // Try to find an enclosing inline span the cursor/selection is in
+        if let Some(dec) = self.decorations.get(line).cloned() {
+            let enclosing = dec.inline_spans.iter().find(|span| {
+                let kind_prefix_len = match span.kind {
+                    crate::markdown::InlineKind::Bold => 2,
+                    crate::markdown::InlineKind::Italic => 1,
+                    crate::markdown::InlineKind::Strikethrough => 2,
+                    crate::markdown::InlineKind::InlineCode => 1,
+                    _ => return false,
+                };
+                let marker_start = span.range.start.saturating_sub(kind_prefix_len);
+                let kind_suffix_len = kind_prefix_len;
+                let marker_end = (span.range.end + kind_suffix_len).min(line_content.len());
+                if self.cursor.has_selection() {
+                    let sel = self.cursor.selection_range();
+                    let line_start = self.buffer.line_start(line);
+                    let sel_start_col = sel.start.saturating_sub(line_start);
+                    let sel_end_col = sel.end.saturating_sub(line_start);
+                    sel_start_col >= marker_start && sel_end_col <= marker_end
+                } else {
+                    col >= marker_start && col <= marker_end
+                }
+            });
+
+            if let Some(span) = enclosing.cloned() {
+                let (existing_prefix, existing_suffix) = match span.kind {
+                    crate::markdown::InlineKind::Bold => ("**", "**"),
+                    crate::markdown::InlineKind::Italic => ("*", "*"),
+                    crate::markdown::InlineKind::Strikethrough => ("~~", "~~"),
+                    crate::markdown::InlineKind::InlineCode => ("`", "`"),
+                    _ => unreachable!(),
+                };
+                let marker_start = span.range.start.saturating_sub(existing_prefix.len());
+                let marker_end = (span.range.end + existing_suffix.len()).min(line_content.len());
+                if marker_start + existing_prefix.len() <= line_content.len()
+                    && line_content[marker_start..].starts_with(existing_prefix)
+                    && marker_end >= existing_suffix.len()
+                    && line_content[marker_end - existing_suffix.len()..marker_end]
+                        .ends_with(existing_suffix)
+                {
+                    let line_start = self.buffer.line_start(line);
+                    let sel_start = line_start + marker_start;
+                    let sel_end = line_start + marker_end;
+                    // Remove existing format
+                    let (new_text, new_start, new_end) = toggle_wrap(
+                        self.buffer.text(),
+                        sel_start,
+                        sel_end,
+                        existing_prefix,
+                        existing_suffix,
+                    );
+                    self.buffer = Buffer::from_text(&new_text);
+                    if existing_prefix == prefix && existing_suffix == suffix {
+                        // Same format: select the inner text
                         self.cursor.anchor = new_start;
                         self.cursor.offset = new_end;
-                        self.reparse();
-                        self.scroll_to_cursor();
-                        return;
+                    } else {
+                        // Different format: apply the new wrap around inner text
+                        let (new_text2, new_start2, new_end2) =
+                            toggle_wrap(self.buffer.text(), new_start, new_end, prefix, suffix);
+                        self.buffer = Buffer::from_text(&new_text2);
+                        self.cursor.anchor = new_start2;
+                        self.cursor.offset = new_end2;
                     }
+                    self.reparse();
+                    self.scroll_to_cursor();
+                    return;
                 }
             }
         }
+
         let range = self.cursor.selection_range();
         let (new_text, new_start, new_end) =
             toggle_wrap(self.buffer.text(), range.start, range.end, prefix, suffix);

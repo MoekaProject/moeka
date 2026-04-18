@@ -102,6 +102,44 @@ impl EditorView {
         let prev_offset = self.cursor.offset;
         let offset = self.offset_for_position(event.position);
         if event.modifiers.platform {
+            // Cmd+click: open link if cursor is on a link span
+            let (line, col) = self.buffer.offset_to_line_col(offset);
+            let link_url = self.decorations.get(line).and_then(|dec| {
+                dec.inline_spans.iter().find_map(|span| {
+                    if span.kind != InlineKind::Link {
+                        return None;
+                    }
+                    let prefix_len = 1;
+                    let full_start = span.range.start.saturating_sub(prefix_len);
+                    let full_end = dec
+                        .syntax_ranges
+                        .iter()
+                        .filter(|sr| sr.range.start >= span.range.end)
+                        .map(|sr| sr.range.end)
+                        .max()
+                        .unwrap_or(span.range.end);
+                    if col >= full_start && col <= full_end {
+                        let line_content = self.buffer.line_content(line);
+                        let source = &line_content[full_start..full_end.min(line_content.len())];
+                        source.find("](").and_then(|bp| {
+                            let url = &source[bp + 2..source.len().saturating_sub(1)];
+                            if url.is_empty() {
+                                None
+                            } else {
+                                Some(url.to_string())
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                })
+            });
+            if let Some(url) = link_url {
+                let _ = std::process::Command::new("open").arg(&url).spawn();
+                self.is_selecting = false;
+                cx.notify();
+                return;
+            }
             // Cmd+click: add a new cursor
             self.add_cursor_at(offset, offset);
             self.is_selecting = false;
@@ -279,6 +317,13 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Track command key from mouse events for link underlines
+        let cmd = event.modifiers.platform;
+        if cmd != self.command_held {
+            self.command_held = cmd;
+            cx.notify();
+        }
+
         if self.context_menu.is_some() {
             return;
         }
@@ -499,6 +544,21 @@ impl EntityInputHandler for EditorView {
         cx: &mut Context<Self>,
     ) {
         self.checkpoint();
+
+        // When text is selected and user types a formatting character, wrap selection
+        if self.cursor.has_selection() && self.marked_range.is_none() && range_utf16.is_none() {
+            let wrap = match new_text {
+                "*" => Some(("**", "**")),
+                "~" => Some(("~~", "~~")),
+                "`" => Some(("`", "`")),
+                _ => None,
+            };
+            if let Some((prefix, suffix)) = wrap {
+                self.apply_wrap(prefix, suffix);
+                self.pause_blinking(cx);
+                return;
+            }
+        }
 
         // Multi-cursor text input
         if self.has_extra_cursors() && self.marked_range.is_none() && range_utf16.is_none() {

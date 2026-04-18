@@ -178,53 +178,7 @@ impl EditorView {
             cx.notify();
             return;
         }
-
-        if let Some(index) = self.tabs.iter().position(|tab| {
-            tab.path
-                .as_ref()
-                .is_some_and(|open_path| open_path == &path)
-        }) {
-            self.activate_tab_by_index(index, cx);
-            return;
-        }
-
-        match std::fs::read(&path) {
-            Ok(bytes) => {
-                let text = if bytes.contains(&0) {
-                    format!(
-                        "# Binary File\n\n{}\n\nThis file could not be opened as plain text.",
-                        path.display()
-                    )
-                } else {
-                    String::from_utf8_lossy(&bytes).into_owned()
-                };
-                let first_line_end = text.find('\n').unwrap_or(text.len());
-                let tab = OpenTab {
-                    id: self.next_tab_identity(),
-                    title: Self::title_for_path(&path),
-                    kind: TabKind::Editor,
-                    path: Some(path.clone()),
-                    snapshot: EditorSnapshot {
-                        text,
-                        cursor_offset: first_line_end,
-                        cursor_anchor: first_line_end,
-                        scroll_offset: 0.0,
-                    },
-                    is_dirty: false,
-                    is_deleted: false,
-                    is_pinned: false,
-                };
-                self.persist_active_tab_state();
-                self.tabs.push(tab);
-                if let Some(index) = self.tabs.len().checked_sub(1) {
-                    self.activate_tab_by_index(index, cx);
-                }
-            }
-            Err(error) => {
-                eprintln!("Failed to open file: {error}");
-                cx.notify();
-            }
-        }
+        self.open_path_in_permanent_tab(path, true, cx);
     }
 
     pub(crate) fn sorted_dir_entries(path: &Path) -> std::io::Result<Vec<std::fs::DirEntry>> {
@@ -899,7 +853,7 @@ impl EditorView {
             } else {
                 gpui::transparent_black()
             })
-            .when(!self.sidebar_resizing, |this| {
+            .when(!self.sidebar_resizing && !self.outline_resizing, |this| {
                 this.hover(move |style| style.bg(item_hover_bg))
             })
             .children(guides)
@@ -960,7 +914,7 @@ impl EditorView {
             // Multi-select click with modifier keys
             .on_click({
                 let path = path.clone();
-                cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     let mods = event.modifiers();
                     let has_modifier = mods.platform || mods.shift;
                     this.sidebar_select_item(&path, mods.shift, mods.platform);
@@ -968,23 +922,30 @@ impl EditorView {
                     if !has_modifier {
                         if path.is_dir() {
                             this.toggle_sidebar_directory(path.clone(), cx);
+                        } else if event.click_count() >= 2 {
+                            this.open_path_in_permanent_tab(path.clone(), true, cx);
                         } else {
-                            this.open_sidebar_file(path.clone(), cx);
+                            if !this.switch_to_existing_editor_tab_for_path(&path, true, cx) {
+                                this.open_path_in_preview_tab(path.clone(), true, cx);
+                            }
                         }
                     }
+                    window.prevent_default();
                     cx.notify();
                 })
             })
-            // Drag initiation
-            .on_drag(DraggedSidebarItems { paths: drag_paths }, {
-                let label = drag_label;
-                let count = drag_count;
-                move |_dragged, _offset, _window, cx| {
-                    cx.new(|_cx| DraggedSidebarItemsView {
-                        label: label.clone(),
-                        count,
-                    })
-                }
+            // Drag initiation (disabled during resize)
+            .when(!self.sidebar_resizing && !self.outline_resizing, |el| {
+                el.on_drag(DraggedSidebarItems { paths: drag_paths }, {
+                    let label = drag_label;
+                    let count = drag_count;
+                    move |_dragged, _offset, _window, cx| {
+                        cx.new(|_cx| DraggedSidebarItemsView {
+                            label: label.clone(),
+                            count,
+                        })
+                    }
+                })
             })
             // Drop target: only directories accept drops
             .when(is_dir, |el| {
@@ -1267,8 +1228,14 @@ impl EditorView {
             .flex_col()
             .relative()
             .bg(ss.sidebar_bg)
-            .border_r(px(ss.sidebar_resize_indicator_width_px))
-            .border_color(ss.sidebar_resize_indicator_color)
+            .when(self.sidebar_resizing, |this| {
+                this.border_r(px(self.scaled(ss.sidebar_resize_active_indicator_width_px)))
+                    .border_color(ss.sidebar_resize_active_indicator_color)
+            })
+            .when(!self.sidebar_resizing, |this| {
+                this.border_r(px(ss.sidebar_resize_indicator_width_px))
+                    .border_color(ss.sidebar_resize_indicator_color)
+            })
             .child(top_spacer)
             .when(
                 self.workspace_search_visible,

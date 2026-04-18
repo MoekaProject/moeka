@@ -1,0 +1,638 @@
+use std::path::{Path, PathBuf};
+
+use gpui::{AnyElement, Context, CursorStyle, Hsla, MouseButton, Window, div, prelude::*, px};
+use pinyin::ToPinyin;
+
+use crate::theme::with_alpha;
+
+use super::*;
+
+impl EditorView {
+    pub(crate) fn on_quick_open(
+        &mut self,
+        _: &QuickOpen,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_quick_open(window, cx);
+    }
+
+    pub(crate) fn toggle_quick_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.quick_open_visible = !self.quick_open_visible;
+        if !self.quick_open_visible {
+            self.close_quick_open(window, cx);
+            return;
+        }
+
+        if self.quick_open_editor.is_none() {
+            let styles = self.styles.text_input.clone();
+            let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "搜索文件...", cx));
+            cx.subscribe(
+                &editor,
+                |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                    crate::text_input::TextInputEvent::Changed => {
+                        let query = this
+                            .quick_open_editor
+                            .as_ref()
+                            .map(|e| e.read(cx).text().to_string())
+                            .unwrap_or_default();
+                        this.quick_open_query = query;
+                        this.run_quick_open_search(cx);
+                    }
+                    crate::text_input::TextInputEvent::Submit => {
+                        this.confirm_quick_open(cx);
+                    }
+                    crate::text_input::TextInputEvent::Escape => {}
+                    crate::text_input::TextInputEvent::MoveUp => {
+                        this.move_quick_open_selection(-1, cx);
+                    }
+                    crate::text_input::TextInputEvent::MoveDown => {
+                        this.move_quick_open_selection(1, cx);
+                    }
+                },
+            )
+            .detach();
+            self.quick_open_editor = Some(editor);
+        }
+
+        self.quick_open_selected_index = 0;
+        self.quick_open_render_limit = 100;
+        self.run_quick_open_search(cx);
+
+        if let Some(editor) = &self.quick_open_editor {
+            editor.update(cx, |ti, cx| {
+                ti.set_text(&self.quick_open_query, cx);
+                ti.select_all(cx);
+            });
+            editor.focus_handle(cx).focus(window);
+        }
+
+        cx.notify();
+    }
+
+    pub(crate) fn close_quick_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.quick_open_visible = false;
+        self.quick_open_task = None;
+        window.focus(&self.focus_handle(cx));
+        cx.notify();
+    }
+
+    pub(crate) fn move_quick_open_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.quick_open_results.is_empty() {
+            self.quick_open_selected_index = 0;
+            cx.notify();
+            return;
+        }
+
+        let len = self.quick_open_results.len() as isize;
+        let current = self.quick_open_selected_index as isize;
+        self.quick_open_selected_index = (current + delta).clamp(0, len - 1) as usize;
+        if self.quick_open_selected_index + 1 > self.quick_open_render_limit {
+            self.quick_open_render_limit =
+                (self.quick_open_selected_index + 100).min(self.quick_open_results.len());
+        }
+        self.quick_open_scroll_handle
+            .scroll_to_item(self.quick_open_selected_index);
+        cx.notify();
+    }
+
+    fn maybe_extend_quick_open_results(&mut self, cx: &mut Context<Self>) {
+        let total = self.quick_open_results.len();
+        if total <= self.quick_open_render_limit {
+            return;
+        }
+
+        let bottom_item = self.quick_open_scroll_handle.bottom_item();
+        if bottom_item + 12 >= self.quick_open_render_limit.saturating_sub(1) {
+            self.quick_open_render_limit = (self.quick_open_render_limit + 100).min(total);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn confirm_quick_open(&mut self, cx: &mut Context<Self>) {
+        let Some(result) = self
+            .quick_open_results
+            .get(self.quick_open_selected_index)
+            .cloned()
+        else {
+            self.quick_open_visible = false;
+            self.quick_open_task = None;
+            cx.notify();
+            return;
+        };
+        self.quick_open_visible = false;
+        self.quick_open_task = None;
+        cx.notify();
+        self.open_sidebar_file(result.path, cx);
+    }
+
+    pub(crate) fn run_quick_open_search(&mut self, cx: &mut Context<Self>) {
+        let root = self.sidebar_root.clone();
+        if !root.exists() {
+            self.quick_open_results.clear();
+            self.quick_open_selected_index = 0;
+            self.quick_open_task = None;
+            self.quick_open_render_limit = 100;
+            cx.notify();
+            return;
+        }
+
+        let query = self.quick_open_query.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move { collect_quick_open_results(&root, &query) })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.quick_open_results = results;
+                this.quick_open_selected_index = 0;
+                this.quick_open_task = None;
+                this.quick_open_render_limit = 100;
+                this.quick_open_scroll_handle.scroll_to_item(0);
+                cx.notify();
+            })
+            .ok();
+        });
+        self.quick_open_task = Some(task);
+    }
+
+    pub(crate) fn render_quick_open_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
+        let bg = self.theme.bg_elevated;
+        let border = self.theme.border_primary;
+        let hover_bg = self.theme.bg_hover;
+        let selected_bg = self.theme.bg_selected;
+        let text_primary = self.theme.text_primary;
+        let text_secondary = self.theme.text_secondary;
+        let accent = self.theme.text_accent;
+        let backdrop = with_alpha(Hsla::black(), 0.5);
+
+        let panel_w = self.scaled(640.0);
+        let sidebar_w = if self.sidebar_visible {
+            self.sidebar_width()
+        } else {
+            0.0
+        };
+        let outline_w = if self.outline_visible && !self.tabs.is_empty() {
+            self.outline_width()
+        } else {
+            0.0
+        };
+        let editor_w = (self.last_window_width - sidebar_w - outline_w).max(panel_w);
+        let panel_left = sidebar_w + (editor_w - panel_w) / 2.0;
+        let panel_top = (self.last_window_height / 5.0).max(self.scaled(48.0));
+        let row_h = self.scaled(44.0);
+        let path_font = self.scaled(11.0);
+        let name_font = self.scaled(13.0);
+        let max_results_h = self.scaled(360.0);
+
+        let mut result_children: Vec<AnyElement> = Vec::new();
+        if self.quick_open_results.is_empty() {
+            let message = if self.quick_open_query.is_empty() {
+                "输入文件名或路径以快速打开"
+            } else if self.quick_open_task.is_some() {
+                "正在搜索..."
+            } else {
+                "未找到匹配文件"
+            };
+            result_children.push(
+                div()
+                    .w_full()
+                    .h(px(self.scaled(64.0)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(self.scaled(12.0)))
+                    .text_color(text_secondary)
+                    .child(message)
+                    .into_any_element(),
+            );
+        } else {
+            for (index, result) in self
+                .quick_open_results
+                .iter()
+                .take(self.quick_open_render_limit)
+                .enumerate()
+            {
+                let is_selected = index == self.quick_open_selected_index;
+                let path = result.path.clone();
+                let file_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                let relative_path = path
+                    .strip_prefix(&self.sidebar_root)
+                    .unwrap_or(path.as_path())
+                    .display()
+                    .to_string();
+                let file_name_el = render_highlighted_text(
+                    &file_name,
+                    &result.file_name_match_indices,
+                    text_primary,
+                    accent,
+                    name_font,
+                );
+                let path_el = render_highlighted_text(
+                    &relative_path,
+                    &result.path_match_indices,
+                    text_secondary,
+                    accent,
+                    path_font,
+                );
+
+                result_children.push(
+                    div()
+                        .id(SharedString::from(format!("quick-open-{}", index)))
+                        .w_full()
+                        .h(px(row_h))
+                        .px(px(self.scaled(12.0)))
+                        .flex()
+                        .items_center()
+                        .cursor(CursorStyle::Arrow)
+                        .when(is_selected, |this| this.bg(selected_bg))
+                        .hover(move |s| s.bg(hover_bg))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .gap(px(self.scaled(2.0)))
+                                .child(file_name_el)
+                                .child(path_el),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                if let Some(pos) = this
+                                    .quick_open_results
+                                    .iter()
+                                    .position(|candidate| candidate.path == path)
+                                {
+                                    this.quick_open_selected_index = pos;
+                                }
+                                this.confirm_quick_open(cx);
+                            }),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+
+        div()
+            .occlude()
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .w_full()
+            .h_full()
+            .child(
+                div()
+                    .absolute()
+                    .left(px(0.0))
+                    .top(px(0.0))
+                    .w_full()
+                    .h_full()
+                    .bg(backdrop)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_quick_open(window, cx);
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .id("quick-open-overlay")
+                    .absolute()
+                    .top(px(panel_top))
+                    .left(px(panel_left.max(0.0)))
+                    .w(px(panel_w))
+                    .bg(bg)
+                    .border(px(1.0))
+                    .border_color(border)
+                    .rounded(px(self.scaled(10.0)))
+                    .shadow_md()
+                    .overflow_hidden()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, window, cx| {
+                            cx.stop_propagation();
+                            window.prevent_default();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .px(px(self.scaled(10.0)))
+                            .py(px(self.scaled(10.0)))
+                            .border_b(px(1.0))
+                            .border_color(border)
+                            .when_some(self.quick_open_editor.clone(), |this, editor| {
+                                this.child(editor)
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("quick-open-results")
+                            .w_full()
+                            .flex_1()
+                            .max_h(px(max_results_h))
+                            .overflow_y_scroll()
+                            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                                this.maybe_extend_quick_open_results(cx);
+                            }))
+                            .track_scroll(&self.quick_open_scroll_handle)
+                            .children(result_children),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+fn collect_quick_open_results(root: &Path, query: &str) -> Vec<QuickOpenResult> {
+    let mut paths = Vec::new();
+    collect_openable_files(root, &mut paths);
+
+    let mut results = Vec::new();
+    for path in paths {
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let relative_path = path
+            .strip_prefix(root)
+            .unwrap_or(path.as_path())
+            .display()
+            .to_string();
+
+        let file_match = fuzzy_match(&file_name, query);
+        let path_match = fuzzy_match(&relative_path, query);
+        if query.is_empty() {
+            results.push(QuickOpenResult {
+                path,
+                score: 0,
+                file_name_match_indices: Vec::new(),
+                path_match_indices: Vec::new(),
+            });
+            continue;
+        }
+
+        let (file_score, file_matches) = file_match.unwrap_or((0, Vec::new()));
+        let (path_score, path_matches) = path_match.unwrap_or((0, Vec::new()));
+        if file_score == 0 && path_score == 0 {
+            continue;
+        }
+
+        results.push(QuickOpenResult {
+            path,
+            score: file_score * 100 + path_score,
+            file_name_match_indices: file_matches,
+            path_match_indices: path_matches,
+        });
+    }
+
+    results.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| {
+                a.path
+                    .components()
+                    .count()
+                    .cmp(&b.path.components().count())
+            })
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    results
+}
+
+fn collect_openable_files(dir: &Path, results: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+        {
+            continue;
+        }
+        if path.is_dir() {
+            collect_openable_files(&path, results);
+        } else if is_markdown_file(&path) {
+            results.push(path);
+        }
+    }
+}
+
+fn fuzzy_match(text: &str, query: &str) -> Option<(i64, Vec<usize>)> {
+    let direct_match = fuzzy_match_direct(text, query);
+    let pinyin_match = fuzzy_match_via_pinyin(text, query);
+
+    match (direct_match, pinyin_match) {
+        (Some(direct), Some(pinyin)) => {
+            if direct.0 >= pinyin.0 {
+                Some(direct)
+            } else {
+                Some(pinyin)
+            }
+        }
+        (Some(direct), None) => Some(direct),
+        (None, Some(pinyin)) => Some(pinyin),
+        (None, None) => None,
+    }
+}
+
+fn fuzzy_match_direct(text: &str, query: &str) -> Option<(i64, Vec<usize>)> {
+    if query.is_empty() {
+        return Some((0, Vec::new()));
+    }
+
+    let text_chars: Vec<char> = text.chars().collect();
+    let query_chars: Vec<char> = query.chars().collect();
+    let source_indices: Vec<usize> = (0..text_chars.len()).collect();
+    fuzzy_match_chars(&text_chars, &query_chars, &text_chars, &source_indices)
+}
+
+fn fuzzy_match_via_pinyin(text: &str, query: &str) -> Option<(i64, Vec<usize>)> {
+    if !should_try_pinyin_match(text, query) {
+        return None;
+    }
+
+    let normalized_query: Vec<char> = query
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .map(lowercase_char)
+        .collect();
+    if normalized_query.is_empty() {
+        return None;
+    }
+
+    let text_chars: Vec<char> = text.chars().collect();
+    let (normalized_text, source_indices) = build_pinyin_index(&text_chars);
+    let (score, matched_indices) =
+        fuzzy_match_chars(&normalized_text, &normalized_query, &text_chars, &source_indices)?;
+    Some((score - 25, matched_indices))
+}
+
+fn should_try_pinyin_match(text: &str, query: &str) -> bool {
+    !query.is_empty()
+        && query
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '\\' | '-' | '_' | '.' | ' '))
+        && text.chars().any(is_cjk_character)
+}
+
+fn build_pinyin_index(text_chars: &[char]) -> (Vec<char>, Vec<usize>) {
+    let mut normalized_text = Vec::new();
+    let mut source_indices = Vec::new();
+
+    for (source_index, ch) in text_chars.iter().copied().enumerate() {
+        if let Some(pinyin) = ch.to_pinyin() {
+            for normalized in pinyin.plain().chars().map(lowercase_char) {
+                normalized_text.push(normalized);
+                source_indices.push(source_index);
+            }
+            continue;
+        }
+
+        normalized_text.push(lowercase_char(ch));
+        source_indices.push(source_index);
+    }
+
+    (normalized_text, source_indices)
+}
+
+fn fuzzy_match_chars(
+    text_chars: &[char],
+    query_chars: &[char],
+    original_chars: &[char],
+    source_indices: &[usize],
+) -> Option<(i64, Vec<usize>)> {
+    if query_chars.is_empty() {
+        return Some((0, Vec::new()));
+    }
+
+    let mut query_index = 0usize;
+    let mut matched_indices = Vec::new();
+    let mut score = 0i64;
+    let mut last_match: Option<usize> = None;
+
+    for (index, ch) in text_chars.iter().enumerate() {
+        if query_index >= query_chars.len() {
+            break;
+        }
+        if chars_equal(*ch, query_chars[query_index]) {
+            let source_index = source_indices.get(index).copied().unwrap_or(index);
+            if matched_indices.last().copied() != Some(source_index) {
+                matched_indices.push(source_index);
+            }
+            score += 10;
+            if source_index == 0 {
+                score += 30;
+            }
+            if matches!(last_match, Some(prev) if index == prev + 1) {
+                score += 20;
+            }
+            if source_index > 0 {
+                let prev = original_chars[source_index - 1];
+                if is_match_boundary(prev) {
+                    score += 15;
+                }
+            }
+            last_match = Some(index);
+            query_index += 1;
+        }
+    }
+
+    if query_index == query_chars.len() {
+        score += (200i64 - text_chars.len() as i64).max(0);
+        Some((score, matched_indices))
+    } else {
+        None
+    }
+}
+
+fn chars_equal(left: char, right: char) -> bool {
+    if left.is_ascii() && right.is_ascii() {
+        left.eq_ignore_ascii_case(&right)
+    } else {
+        left == right
+    }
+}
+
+fn lowercase_char(ch: char) -> char {
+    if ch.is_ascii() {
+        ch.to_ascii_lowercase()
+    } else {
+        ch
+    }
+}
+
+fn is_match_boundary(ch: char) -> bool {
+    matches!(ch, '/' | '\\' | '-' | '_' | ' ' | '.')
+}
+
+fn is_cjk_character(ch: char) -> bool {
+    let code = ch as u32;
+    (0x3400..=0x4DBF).contains(&code)
+        || (0x4E00..=0x9FFF).contains(&code)
+        || (0xF900..=0xFAFF).contains(&code)
+        || (0x20000..=0x2FA1F).contains(&code)
+}
+
+fn render_highlighted_text(
+    text: &str,
+    highlight_indices: &[usize],
+    normal_color: gpui::Hsla,
+    highlight_color: gpui::Hsla,
+    font_size: f32,
+) -> AnyElement {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return div().into_any_element();
+    }
+
+    let mut sorted_indices = highlight_indices.to_vec();
+    sorted_indices.sort_unstable();
+    sorted_indices.dedup();
+
+    let mut parts: Vec<(String, bool)> = Vec::new();
+    let mut current = String::new();
+    let mut highlight_cursor = 0usize;
+    let mut current_highlight = sorted_indices.first().copied() == Some(0);
+    for (index, ch) in chars.iter().enumerate() {
+        while highlight_cursor < sorted_indices.len() && sorted_indices[highlight_cursor] < index {
+            highlight_cursor += 1;
+        }
+        let is_highlight = sorted_indices.get(highlight_cursor).copied() == Some(index);
+        if index > 0 && is_highlight != current_highlight {
+            parts.push((current, current_highlight));
+            current = String::new();
+            current_highlight = is_highlight;
+        }
+        current.push(*ch);
+    }
+    if !current.is_empty() {
+        parts.push((current, current_highlight));
+    }
+
+    let mut row = div().flex().items_center().gap(px(0.0));
+    for (segment, is_highlight) in parts {
+        row = row.child(
+            div()
+                .text_size(px(font_size))
+                .text_color(if is_highlight {
+                    highlight_color
+                } else {
+                    normal_color
+                })
+                .child(segment),
+        );
+    }
+    row.into_any_element()
+}

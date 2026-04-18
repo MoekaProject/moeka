@@ -1,16 +1,18 @@
 use gpui::{
     CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Render, SharedString, Window,
-    deferred, div, img, prelude::*, px, svg,
+    deferred, div, img, prelude::*, px,
 };
 
 use super::*;
 
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.pending_editor_focus {
+            window.focus(&self.focus_handle(cx));
+            self.pending_editor_focus = false;
+        }
         let resizing = self.sidebar_resizing || self.outline_resizing;
-        let show_editor_toolbar = self.tabs.len() > 0
-            && self.scroll_offset <= self.scaled(18.0)
-            && !self.active_tab_is_settings();
+        let show_editor_toolbar = self.tabs.len() > 0 && !self.active_tab_is_settings();
         let ws = &self.styles.window;
         // Store window bounds for menu positioning
         let wb = window.bounds();
@@ -100,6 +102,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_replace_next))
             .on_action(cx.listener(Self::on_replace_all))
             .on_action(cx.listener(Self::on_find_in_files))
+            .on_action(cx.listener(Self::on_quick_open))
             .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(Self::on_toggle_outline))
             .on_action(cx.listener(Self::on_add_cursor_above))
@@ -260,6 +263,9 @@ impl Render for EditorView {
                                     )
                                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                                     .on_scroll_wheel(cx.listener(Self::on_scroll))
+                                    .child(element::EditorElement {
+                                        editor: cx.entity().clone(),
+                                    })
                                     .child({
                                         let tb = &self.styles.toolbar;
                                         let primary_hover = tb.toolbar_primary_hover_opacity;
@@ -427,9 +433,6 @@ impl Render for EditorView {
                                                     ),
                                             )
                                     })
-                                    .child(element::EditorElement {
-                                        editor: cx.entity().clone(),
-                                    })
                                     .when(
                                         self.search_visible,
                                         |this: gpui::Stateful<gpui::Div>| {
@@ -497,6 +500,39 @@ impl Render for EditorView {
                 )
             })
             .when(resizing, |this| {
+                let indicator_line = if self.sidebar_resizing {
+                    let iw =
+                        self.scaled(self.styles.sidebar.sidebar_resize_active_indicator_width_px);
+                    let ic = self.styles.sidebar.sidebar_resize_active_indicator_color;
+                    let x = self.sidebar_width() - iw;
+                    Some(
+                        div()
+                            .absolute()
+                            .left(px(x))
+                            .top_0()
+                            .w(px(iw))
+                            .h_full()
+                            .bg(ic)
+                            .into_any_element(),
+                    )
+                } else if self.outline_resizing {
+                    let iw =
+                        self.scaled(self.styles.outline.outline_resize_active_indicator_width_px);
+                    let ic = self.styles.outline.outline_resize_active_indicator_color;
+                    let ow = self.outline_width();
+                    Some(
+                        div()
+                            .absolute()
+                            .right(px(ow - iw))
+                            .top_0()
+                            .w(px(iw))
+                            .h_full()
+                            .bg(ic)
+                            .into_any_element(),
+                    )
+                } else {
+                    None
+                };
                 this.child(deferred(
                     div()
                         .occlude()
@@ -506,6 +542,7 @@ impl Render for EditorView {
                         .w_full()
                         .h_full()
                         .cursor(CursorStyle::ResizeLeftRight)
+                        .children(indicator_line)
                         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                             if this.sidebar_resizing {
                                 let new_width = f32::from(event.position.x);
@@ -569,6 +606,9 @@ impl Render for EditorView {
                 } else {
                     this
                 }
+            })
+            .when(self.quick_open_visible, |this| {
+                this.child(deferred(self.render_quick_open_overlay(cx)))
             })
             .when(self.dialog.is_some(), |this| {
                 this.child(self.render_dialog(cx))

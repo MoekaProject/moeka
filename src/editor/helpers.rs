@@ -62,6 +62,7 @@ pub(crate) fn build_display_text(
     line_content: &str,
     decoration: &LineDecoration,
     cursor_col: Option<usize>,
+    code_block_syntax_active: bool,
     table_width_chars: Option<usize>,
     table_cell_padding_chars: usize,
     collapsed_task_prefix_chars: usize,
@@ -75,6 +76,7 @@ pub(crate) fn build_display_text(
                 line_content,
                 table_info,
                 cursor_col,
+                code_block_syntax_active,
                 table_width_chars,
                 table_cell_padding_chars,
                 collapsed_task_prefix_chars,
@@ -83,15 +85,16 @@ pub(crate) fn build_display_text(
         }
     }
 
-    if decoration.block_type == BlockType::CodeBlockFence && cursor_col.is_none() {
-        let display_text = line_content
-            .chars()
-            .map(|ch| if ch == '\t' { '\t' } else { ' ' })
-            .collect::<String>();
+    if decoration.block_type == BlockType::CodeBlockFence {
         let display_to_buffer: Vec<usize> = (0..len).collect();
         let mut buffer_to_display: Vec<usize> = (0..len).collect();
-        buffer_to_display.push(display_text.len());
-        return (display_text, display_to_buffer, buffer_to_display, false);
+        buffer_to_display.push(len);
+        return (
+            line_content.to_string(),
+            display_to_buffer,
+            buffer_to_display,
+            false,
+        );
     }
 
     if decoration.syntax_ranges.is_empty() {
@@ -110,6 +113,9 @@ pub(crate) fn build_display_text(
         .syntax_ranges
         .iter()
         .map(|sr| {
+            if decoration.block_type == BlockType::CodeBlockFence && code_block_syntax_active {
+                return false;
+            }
             cursor_col.map_or(true, |col| {
                 let at_eol = col >= len;
                 if at_eol {
@@ -254,6 +260,7 @@ pub(crate) fn build_table_display_text(
     line_content: &str,
     info: &TableLineInfo,
     _cursor_col: Option<usize>,
+    _code_block_syntax_active: bool,
     available_chars: Option<usize>,
     table_cell_padding_chars: usize,
     collapsed_task_prefix_chars: usize,
@@ -303,6 +310,7 @@ pub(crate) fn build_table_display_text(
             cell,
             &cell_decoration,
             None,
+            false,
             None,
             0,
             collapsed_task_prefix_chars,
@@ -1238,6 +1246,7 @@ pub(crate) fn build_text_runs_for_display(
     display_to_buffer: &[usize],
     decoration: &LineDecoration,
     cursor_col: Option<usize>,
+    code_block_syntax_active: bool,
     prefix_collapsed: bool,
     body_font: &Font,
     body_cjk_font: &Font,
@@ -1290,6 +1299,14 @@ pub(crate) fn build_text_runs_for_display(
     let mut buf_bg_colors: Vec<Option<Hsla>> = vec![None; buf_len];
     let mut buf_strikethroughs: Vec<bool> = vec![false; buf_len];
     let mut buf_font_roles: Vec<FontRole> = vec![FontRole::BodyLatin; buf_len];
+
+    // Fence lines (``` or ```lang) always render semi-transparent
+    if matches!(decoration.block_type, BlockType::CodeBlockFence) {
+        let mut fence_color = theme.text_secondary;
+        fence_color.a *= 0.5;
+        buf_colors.fill(fence_color);
+        buf_font_roles.fill(FontRole::Monospace);
+    }
 
     if is_code_line {
         buf_font_roles.fill(FontRole::Monospace);
@@ -1400,7 +1417,16 @@ pub(crate) fn build_text_runs_for_display(
     if let Some(col) = cursor_col {
         if !matches!(decoration.block_type, BlockType::Table) {
             for sr in &decoration.syntax_ranges {
-                if col >= sr.trigger_range.start && col < sr.trigger_range.end {
+                let syntax_is_active = if matches!(decoration.block_type, BlockType::CodeBlockFence)
+                {
+                    // Fence lines always have syntax visible; use active code block check
+                    // to determine if markers should get syntax_marker color
+                    code_block_syntax_active
+                        || (col >= sr.trigger_range.start && col < sr.trigger_range.end)
+                } else {
+                    col >= sr.trigger_range.start && col < sr.trigger_range.end
+                };
+                if syntax_is_active {
                     let start = sr.range.start.min(buf_len);
                     let end = sr.range.end.min(buf_len);
                     let syntax_color = match decoration.block_type {
@@ -1414,6 +1440,15 @@ pub(crate) fn build_text_runs_for_display(
                         buf_font_roles[i] = FontRole::Monospace;
                     }
                 }
+            }
+        }
+    } else if matches!(decoration.block_type, BlockType::CodeBlockFence) && code_block_syntax_active {
+        for sr in &decoration.syntax_ranges {
+            let start = sr.range.start.min(buf_len);
+            let end = sr.range.end.min(buf_len);
+            for i in start..end {
+                buf_colors[i] = theme.syntax_marker;
+                buf_font_roles[i] = FontRole::Monospace;
             }
         }
     }

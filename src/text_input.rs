@@ -783,7 +783,8 @@ impl Render for TextInput {
             s.text_input_bg
         };
         let height = s.text_input_height_px;
-        let padding_x = s.text_input_padding_x_px;
+        let padding_left = s.text_input_padding_left_px;
+        let padding_right = s.text_input_padding_right_px;
         let font_size = s.text_input_font_size_px;
 
         div()
@@ -825,7 +826,6 @@ impl Render for TextInput {
             .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
                 if event.keystroke.key == "escape" {
                     cx.emit(TextInputEvent::Escape);
-                    cx.stop_propagation();
                 }
             }))
             .on_mouse_down(
@@ -842,7 +842,8 @@ impl Render for TextInput {
             .cursor(CursorStyle::IBeam)
             .w_full()
             .h(px(height))
-            .px(px(padding_x))
+            .pl(px(padding_left))
+            .pr(px(padding_right))
             .bg(bg)
             .rounded(px(s.text_input_radius_px))
             .flex()

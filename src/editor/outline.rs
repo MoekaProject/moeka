@@ -130,7 +130,7 @@ impl EditorView {
                 .px(px(header_padding_x))
                 .text_size(px(header_font_size))
                 .text_color(header_text_color)
-                .child("OUTLINE")
+                .child("内容大纲")
                 .into_any_element(),
         );
 
@@ -240,8 +240,14 @@ impl EditorView {
             .overflow_y_scroll()
             .track_scroll(&self.outline_scroll_handle)
             .bg(os.outline_bg)
-            .border_l(px(self.scaled(os.outline_border_width_px)))
-            .border_color(os.outline_border_color)
+            .when(self.outline_resizing, |this| {
+                this.border_l(px(self.scaled(os.outline_resize_active_indicator_width_px)))
+                    .border_color(os.outline_resize_active_indicator_color)
+            })
+            .when(!self.outline_resizing, |this| {
+                this.border_l(px(self.scaled(os.outline_border_width_px)))
+                    .border_color(os.outline_border_color)
+            })
             .children(items)
             .into_any_element()
     }

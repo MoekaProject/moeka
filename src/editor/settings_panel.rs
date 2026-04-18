@@ -26,6 +26,8 @@ pub(crate) struct FontPickerState {
     pub filtered: Vec<String>,
     pub selected_index: usize,
     pub scroll_handle: ScrollHandle,
+    /// Locked direction: once decided, keep dropdown above or below.
+    pub show_above: std::cell::Cell<Option<bool>>,
 }
 
 // ── Settings panel rendering ────────────────────────────────────────
@@ -163,10 +165,9 @@ impl EditorView {
                                                 MouseButton::Left,
                                                 cx.listener(|this, _, _, cx| {
                                                     if this.settings_theme_dark_mode {
-                                                        this.settings_theme_dark_mode = false;
-                                                        let first_light =
-                                                            ThemeKind::light_themes()[0];
-                                                        this.set_theme(first_light, cx);
+                                                        let paired =
+                                                            this.theme_kind.paired_appearance();
+                                                        this.set_theme(paired, cx);
                                                     }
                                                 }),
                                             ),
@@ -192,10 +193,9 @@ impl EditorView {
                                                 MouseButton::Left,
                                                 cx.listener(|this, _, _, cx| {
                                                     if !this.settings_theme_dark_mode {
-                                                        this.settings_theme_dark_mode = true;
-                                                        let first_dark =
-                                                            ThemeKind::dark_themes()[0];
-                                                        this.set_theme(first_dark, cx);
+                                                        let paired =
+                                                            this.theme_kind.paired_appearance();
+                                                        this.set_theme(paired, cx);
                                                     }
                                                 }),
                                             ),
@@ -541,7 +541,8 @@ impl EditorView {
         styles.text_input_bg = gpui::Hsla::transparent_black();
         styles.text_input_focus_bg = gpui::Hsla::transparent_black();
         styles.text_input_border_width_px = 0.0;
-        styles.text_input_padding_x_px = 2.0;
+        styles.text_input_padding_left_px = 2.0;
+        styles.text_input_padding_right_px = 2.0;
         styles.text_input_height_px = 28.0;
         styles.text_input_center = true;
         styles.text_input_cursor_height_ratio = 0.6;
@@ -695,7 +696,8 @@ impl EditorView {
         styles.text_input_bg = gpui::Hsla::transparent_black();
         styles.text_input_focus_bg = gpui::Hsla::transparent_black();
         styles.text_input_border_width_px = 0.0;
-        styles.text_input_padding_x_px = 2.0;
+        styles.text_input_padding_left_px = 2.0;
+        styles.text_input_padding_right_px = 2.0;
         styles.text_input_height_px = 28.0;
         styles.text_input_center = true;
         styles.text_input_cursor_height_ratio = 0.6;
@@ -753,6 +755,7 @@ impl EditorView {
             filtered: all_fonts,
             selected_index: 0,
             scroll_handle: ScrollHandle::new(),
+            show_above: std::cell::Cell::new(None),
         });
 
         // Create TextInput for search
@@ -909,29 +912,44 @@ impl EditorView {
             .font_picker_button_bounds
             .get(&(picker.role, picker.font_index))
             .and_then(|rc| rc.get());
-        let (button_x, button_y, button_w_val) = match button_bounds {
+        let (button_x, button_y, button_w_val, button_h) = match button_bounds {
             Some(b) => (
                 f32::from(b.origin.x),
                 f32::from(b.origin.y),
                 f32::from(b.size.width),
+                f32::from(b.size.height),
             ),
-            None => (button_left, 200.0, button_w),
+            None => (button_left, 200.0, button_w, self.scaled(30.0)),
         };
 
         let dropdown_w = button_w_val.min(self.scaled(400.0)).max(self.scaled(260.0));
         let gap = self.scaled(4.0);
-        let button_h = self.scaled(30.0);
-        let dropdown_y = button_y + button_h + gap;
-        let max_h = (max_visible as f32) * item_h + self.scaled(42.0);
+        let desired_visible = picker.filtered.len().min(200).min(max_visible).max(1);
+        let desired_h = desired_visible as f32 * item_h + self.scaled(42.0);
         let window_h = self.last_window_height - 2.0 * border_w;
         let final_x = button_x.max(8.0);
-        // If dropdown would go below window, flip it above the button
-        let dropdown_y = if dropdown_y + max_h > window_h - 8.0 {
-            (button_y - max_h - gap).max(8.0)
-        } else {
-            dropdown_y
+        let below_y = button_y + button_h + gap;
+        let available_below = (window_h - below_y - 8.0).max(0.0);
+        let available_above = (button_y - gap - 8.0).max(0.0);
+        // Lock direction on first render, keep it stable as height changes
+        let show_above = match picker.show_above.get() {
+            Some(locked) => locked,
+            None => {
+                let initial = desired_h > available_below && available_above > available_below;
+                picker.show_above.set(Some(initial));
+                initial
+            }
         };
-        let final_max_h = max_h.min(window_h - dropdown_y - 8.0).max(100.0);
+        let final_max_h = if show_above {
+            desired_h.min(available_above).max(100.0)
+        } else {
+            desired_h.min(available_below).max(100.0)
+        };
+        let dropdown_y = if show_above {
+            (button_y - final_max_h - gap).max(8.0)
+        } else {
+            below_y
+        };
 
         let dropdown = div()
             .id("font-picker-dropdown")

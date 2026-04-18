@@ -5,62 +5,75 @@ use gpui::{
     px, svg,
 };
 
+use crate::markdown::{BlockType, InlineKind};
+
 use super::*;
 
 impl EditorView {
-    /// Detect which inline format actions are "active" at the cursor position.
-    /// Only highlights inline syntax (bold, italic, strikethrough, inline code)
-    /// surrounding the cursor. Block-level syntax is not highlighted.
+    /// Detect which format action is "active" at the cursor position.
+    /// Uses the markdown parser's decoration data for accurate detection.
+    /// Inline syntax has priority over block-level syntax.
+    /// Returns at most one active action.
     fn active_format_actions(&self) -> Vec<FormatMenuAction> {
-        let mut active = Vec::new();
-        let text = self.buffer.text();
-        let offset = self.cursor.offset;
-        if offset > text.len() {
-            return active;
-        }
-        // Only look within the current line to avoid cross-line false positives
         let cursor_line = self.cursor_line();
+        let decoration = match self.decorations.get(cursor_line) {
+            Some(d) => d,
+            None => return Vec::new(),
+        };
+
         let line_start = self.buffer.line_start(cursor_line);
-        let line_end = self.buffer.line_end(cursor_line);
-        let before = &text[line_start..offset];
-        let after = &text[offset..line_end];
-        // Bold: **..cursor..**
-        if before
-            .rfind("**")
-            .is_some_and(|s| !before[s + 2..].contains("**"))
-            && after.find("**").is_some()
-        {
-            active.push(FormatMenuAction::Bold);
+        let cursor_col = self.cursor.offset.saturating_sub(line_start);
+
+        // Check inline spans (including markers) — pick the smallest (innermost) match
+        let mut best_inline: Option<(usize, FormatMenuAction)> = None;
+        for span in &decoration.inline_spans {
+            let marker_len = match &span.kind {
+                InlineKind::Bold => 2,
+                InlineKind::Italic => 1,
+                InlineKind::Strikethrough => 2,
+                InlineKind::InlineCode => 1,
+                InlineKind::Link => 0,
+                InlineKind::Image => 0,
+            };
+            let full_start = span.range.start.saturating_sub(marker_len);
+            let full_end = span.range.end + marker_len;
+            if cursor_col >= full_start && cursor_col <= full_end {
+                let action = match &span.kind {
+                    InlineKind::Bold => Some(FormatMenuAction::Bold),
+                    InlineKind::Italic => Some(FormatMenuAction::Italic),
+                    InlineKind::Strikethrough => Some(FormatMenuAction::Strikethrough),
+                    InlineKind::InlineCode => Some(FormatMenuAction::InlineCode),
+                    InlineKind::Link => Some(FormatMenuAction::Link),
+                    InlineKind::Image => Some(FormatMenuAction::Image),
+                };
+                if let Some(action) = action {
+                    let span_len = full_end - full_start;
+                    if best_inline
+                        .as_ref()
+                        .is_none_or(|(prev_len, _)| span_len < *prev_len)
+                    {
+                        best_inline = Some((span_len, action));
+                    }
+                }
+            }
         }
-        // Italic: *..cursor..*  (but not **)
-        if before.rfind('*').is_some_and(|s| {
-            let abs = line_start + s;
-            (abs == 0 || text.as_bytes().get(abs.wrapping_sub(1)) != Some(&b'*'))
-                && text.as_bytes().get(abs + 1) != Some(&b'*')
-                && !before[s + 1..].contains('*')
-        }) && after
-            .find('*')
-            .is_some_and(|s| s == 0 || after.as_bytes().get(s.wrapping_sub(1)) != Some(&b'*'))
-        {
-            active.push(FormatMenuAction::Italic);
+
+        if let Some((_, action)) = best_inline {
+            return vec![action];
         }
-        // Strikethrough: ~~..cursor..~~
-        if before
-            .rfind("~~")
-            .is_some_and(|s| !before[s + 2..].contains("~~"))
-            && after.find("~~").is_some()
-        {
-            active.push(FormatMenuAction::Strikethrough);
-        }
-        // Inline code: `..cursor..`
-        if before
-            .rfind('`')
-            .is_some_and(|s| !before[s + 1..].contains('`'))
-            && after.find('`').is_some()
-        {
-            active.push(FormatMenuAction::InlineCode);
-        }
-        active
+
+        // Fallback to block-level syntax
+        let block_action = match &decoration.block_type {
+            BlockType::Blockquote => Some(FormatMenuAction::Quote),
+            BlockType::UnorderedList => Some(FormatMenuAction::UnorderedList),
+            BlockType::OrderedList => Some(FormatMenuAction::OrderedList),
+            BlockType::TaskList(_) => Some(FormatMenuAction::Todo),
+            BlockType::CodeBlock | BlockType::CodeBlockFence => Some(FormatMenuAction::CodeBlock),
+            BlockType::HorizontalRule => Some(FormatMenuAction::HorizontalRule),
+            _ => None,
+        };
+
+        block_action.into_iter().collect()
     }
     pub(crate) fn open_sidebar_context_menu(
         &mut self,
@@ -261,28 +274,8 @@ impl EditorView {
 
         let mut actions = Vec::new();
         let all_items: &[(&str, &str, FormatMenuAction)] = &[
-            ("粗体", "bold", FormatMenuAction::Bold),
-            ("斜体", "italic", FormatMenuAction::Italic),
-            ("删除线", "strikethrough", FormatMenuAction::Strikethrough),
-            ("行内代码", "inline code", FormatMenuAction::InlineCode),
-            ("代码块", "code block", FormatMenuAction::CodeBlock),
-            (
-                "分割线",
-                "horizontal rule divider",
-                FormatMenuAction::HorizontalRule,
-            ),
-            ("引用", "quote blockquote", FormatMenuAction::Quote),
-            (
-                "无序列表",
-                "unordered list bullet",
-                FormatMenuAction::UnorderedList,
-            ),
-            (
-                "有序列表",
-                "ordered list numbered",
-                FormatMenuAction::OrderedList,
-            ),
             ("待办事项", "todo task checkbox", FormatMenuAction::Todo),
+            ("代码块", "code block", FormatMenuAction::CodeBlock),
             ("链接", "link url", FormatMenuAction::Link),
             ("图片", "image photo", FormatMenuAction::Image),
         ];
@@ -332,6 +325,63 @@ impl EditorView {
             .text_color(text_color)
             .hover(move |s| s.bg(hover_bg))
             .cursor(CursorStyle::Arrow)
+            .child(label.to_string())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, window, cx| {
+                    handler(this, window, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_context_menu_item_with_icon(
+        &self,
+        label: &str,
+        icon_path: &'static str,
+        is_destructive: bool,
+        cx: &mut Context<Self>,
+        handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let ms = &self.styles.context_menu;
+        let wss = &self.styles.workspace_switcher;
+        let text_color = if is_destructive {
+            ms.menu_item_danger_text_color
+        } else {
+            ms.menu_item_text_color
+        };
+        let hover_bg = ms.menu_item_hover_bg;
+        let item_id = SharedString::from(format!("menu-item-{}", label));
+        let icon_size = self.scaled(wss.ws_menu_item_action_icon_size_px);
+        let check_size = self.scaled(wss.ws_menu_item_check_size_px);
+        let icon_col_w = check_size.max(icon_size);
+        div()
+            .id(item_id)
+            .w_full()
+            .h(px(ms.menu_item_height_px))
+            .px(px(ms.menu_item_padding_x_px))
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(4.0)))
+            .text_size(px(ms.menu_item_font_size_px))
+            .text_color(text_color)
+            .hover(move |s| s.bg(hover_bg))
+            .cursor(CursorStyle::Arrow)
+            .child(
+                div()
+                    .w(px(icon_col_w))
+                    .h(px(icon_col_w))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        svg()
+                            .path(icon_path)
+                            .size(px(icon_size))
+                            .text_color(wss.ws_menu_item_action_icon_color),
+                    ),
+            )
             .child(label.to_string())
             .on_mouse_down(
                 MouseButton::Left,
@@ -578,18 +628,24 @@ impl EditorView {
         items.push(self.render_context_menu_separator());
         // Collapse / Expand all
         if !self.expanded_dirs.is_empty() {
-            items.push(
-                self.render_context_menu_item("折叠所有文件夹", false, cx, move |this, _, cx| {
+            items.push(self.render_context_menu_item(
+                "折叠所有文件夹",
+                false,
+                cx,
+                move |this, _, cx| {
                     this.collapse_all_dirs(cx);
-                }),
-            );
+                },
+            ));
         }
         {
-            items.push(
-                self.render_context_menu_item("展开所有文件夹", false, cx, move |this, _, cx| {
+            items.push(self.render_context_menu_item(
+                "展开所有文件夹",
+                false,
+                cx,
+                move |this, _, cx| {
                     this.expand_all_dirs(cx);
-                }),
-            );
+                },
+            ));
         }
         items.push(self.render_context_menu_separator());
         {
@@ -740,8 +796,16 @@ impl EditorView {
         let group_boundaries = [0usize, 4, 10, 12];
         let mut group_start_flags = [false; 3];
 
-        for (idx, &(label, ft, _, _, _)) in all_menu_items.iter().enumerate() {
-            if matches_filter(label, ft) {
+        let slash_only_actions: &[FormatMenuAction] = &[
+            FormatMenuAction::Todo,
+            FormatMenuAction::CodeBlock,
+            FormatMenuAction::Link,
+            FormatMenuAction::Image,
+        ];
+
+        for (idx, &(label, ft, _, _, action)) in all_menu_items.iter().enumerate() {
+            if matches_filter(label, ft) && (!is_slash_menu || slash_only_actions.contains(&action))
+            {
                 for g in 0..3 {
                     if idx >= group_boundaries[g] && idx < group_boundaries[g + 1] {
                         group_start_flags[g] = true;
@@ -760,7 +824,9 @@ impl EditorView {
             }
             for idx in group_boundaries[g]..group_boundaries[g + 1] {
                 let (label, ft, icon, shortcut, action) = all_menu_items[idx];
-                if matches_filter(label, ft) {
+                if matches_filter(label, ft)
+                    && (!is_slash_menu || slash_only_actions.contains(&action))
+                {
                     let is_selected = is_slash_menu && actionable_index == selected_index;
                     let is_active = active_actions.contains(&action);
                     items.push(self.render_format_context_menu_item(
@@ -862,7 +928,11 @@ impl EditorView {
                 items.push(self.render_context_menu_separator());
                 {
                     let id = tab_id.clone();
-                    let label = if is_pinned { "取消固定" } else { "固定标签" };
+                    let label = if is_pinned {
+                        "取消固定"
+                    } else {
+                        "固定标签"
+                    };
                     items.push(self.render_context_menu_item(
                         label,
                         false,
@@ -909,10 +979,10 @@ impl EditorView {
                 let check_size = self.scaled(wss.ws_menu_item_check_size_px);
                 let close_color = wss.ws_menu_item_close_color;
                 let close_hover_color = wss.ws_menu_item_close_hover_color;
+                let close_hover_bg = wss.ws_menu_item_close_hover_bg;
                 let close_size = self.scaled(wss.ws_menu_item_close_size_px);
                 let ms = &self.styles.context_menu;
                 let row_hover_bg = ms.menu_item_hover_bg;
-                let close_hover_bg = self.styles.tab_bar.tab_item_close_hover_bg;
                 let text_color = ms.menu_item_text_color;
 
                 for workspace in self.workspaces.clone() {
@@ -977,13 +1047,16 @@ impl EditorView {
                                     .rounded_full()
                                     .text_size(px(self.scaled(10.0)))
                                     .text_color(close_color)
+                                    .cursor(CursorStyle::Arrow)
                                     .hover(move |s| {
                                         s.text_color(close_hover_color).bg(close_hover_bg)
                                     })
                                     .child("✕")
                                     .on_mouse_down(
                                         MouseButton::Left,
-                                        cx.listener(move |this, _, _, cx| {
+                                        cx.listener(move |this, _, window, cx| {
+                                            window.prevent_default();
+                                            cx.stop_propagation();
                                             this.close_workspace(&ws_close, cx);
                                         }),
                                     ),
@@ -998,8 +1071,9 @@ impl EditorView {
                     );
                 }
                 items.push(self.render_context_menu_separator());
-                items.push(self.render_context_menu_item(
+                items.push(self.render_context_menu_item_with_icon(
                     "打开目录 ...",
+                    "assets/icons/filetree/all.svg",
                     false,
                     cx,
                     move |this, _, cx| {
@@ -1007,8 +1081,9 @@ impl EditorView {
                     },
                 ));
                 items.push(self.render_context_menu_separator());
-                items.push(self.render_context_menu_item(
+                items.push(self.render_context_menu_item_with_icon(
                     "打开设置...",
+                    "assets/icons/setting.svg",
                     false,
                     cx,
                     move |this, _, cx| {
@@ -1077,7 +1152,7 @@ impl EditorView {
             menu_div = menu_div.bottom(px(overlay_h - pos_y));
         }
         if ms.menu_shadow {
-            menu_div = menu_div.shadow_xs();
+            menu_div = menu_div.shadow_sm();
         }
         menu_div
             .children(items)
