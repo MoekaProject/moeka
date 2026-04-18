@@ -353,16 +353,20 @@ impl Element for EditorElement {
             let ime_active_on_line = editor.marked_range.as_ref().is_some_and(|marked| {
                 marked.start < line_end_offset && marked.end >= line_start_offset
             });
-            let cursor_col = if editor.is_selecting && editor.cursor.has_selection() {
+            let cursor_col = if editor.cursor.has_selection()
+                && matches!(decoration.block_type, BlockType::Heading(_))
+            {
                 let sel = editor.cursor.selection_range();
-                let is_heading_line = matches!(decoration.block_type, BlockType::Heading(_));
-                // For headings: expand when any part of the selection touches this line
-                if is_heading_line
-                    && sel.start < line_end_offset
-                    && sel.end > line_start_offset
-                {
+                if sel.start < line_end_offset && sel.end > line_start_offset {
+                    Some(0)
+                } else if is_cursor_line {
                     Some(cursor.offset.saturating_sub(line_start_offset))
-                } else if sel.start >= line_start_offset && sel.end <= line_end_offset {
+                } else {
+                    None
+                }
+            } else if editor.is_selecting && editor.cursor.has_selection() {
+                let sel = editor.cursor.selection_range();
+                if sel.start >= line_start_offset && sel.end <= line_end_offset {
                     let sel_start_col = sel.start - line_start_offset;
                     let sel_end_col = sel.end - line_start_offset;
                     let within_syntax = decoration.inline_spans.iter().any(|span| {
@@ -657,10 +661,7 @@ impl Element for EditorElement {
                 let has_bottom_corner = is_group_end;
                 code_block_bgs.push(quad(
                     Bounds::new(
-                        point(
-                            px(editor_left + editor.padding_left()),
-                            px(line_top),
-                        ),
+                        point(px(editor_left + editor.padding_left()), px(line_top)),
                         size(px(text_width), px(total_line_height)),
                     ),
                     Corners {
@@ -1264,7 +1265,8 @@ impl Element for EditorElement {
                                 px(text_line_top + f32::from(pos_start.y) + line_height),
                             ),
                         );
-                        link_hitboxes.push(window.insert_hitbox(link_bounds, HitboxBehavior::Normal));
+                        link_hitboxes
+                            .push(window.insert_hitbox(link_bounds, HitboxBehavior::Normal));
                     }
                 }
             }

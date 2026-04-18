@@ -161,7 +161,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                     if prefix_len <= line_len && has_space {
                         decorations[line].syntax_ranges.push(SyntaxRange {
                             range: 0..prefix_len,
-                            trigger_range: 0..line_len,
+                            trigger_range: 0..prefix_len,
                         });
                     }
                 }

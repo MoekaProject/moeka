@@ -803,47 +803,74 @@ impl EditorView {
             FormatMenuAction::Image,
         ];
 
-        for (idx, &(label, ft, _, _, action)) in all_menu_items.iter().enumerate() {
-            if matches_filter(label, ft) && (!is_slash_menu || slash_only_actions.contains(&action))
-            {
-                for g in 0..3 {
-                    if idx >= group_boundaries[g] && idx < group_boundaries[g + 1] {
-                        group_start_flags[g] = true;
+        if is_slash_menu {
+            // Render slash menu items in the fixed order defined by slash_only_actions
+            for &slash_action in slash_only_actions.iter() {
+                // Find the matching item in all_menu_items
+                if let Some(&(label, ft, icon, shortcut, action)) = all_menu_items
+                    .iter()
+                    .find(|&&(_, _, _, _, a)| a == slash_action)
+                {
+                    if matches_filter(label, ft) {
+                        let is_selected = actionable_index == selected_index;
+                        let is_active = active_actions.contains(&action);
+                        items.push(self.render_format_context_menu_item(
+                            label,
+                            icon,
+                            shortcut,
+                            is_selected,
+                            is_active,
+                            cx,
+                            move |this, _, cx| {
+                                this.execute_format_menu_action(action, cx);
+                            },
+                        ));
+                        actionable_index += 1;
                     }
                 }
             }
-        }
+        } else {
+            let group_boundaries = [0usize, 4, 10, 12];
+            let mut group_start_flags = [false; 3];
 
-        let mut prev_group_had_items = !items.is_empty();
-        for g in 0..3 {
-            if !group_start_flags[g] {
-                continue;
-            }
-            if prev_group_had_items {
-                items.push(self.render_context_menu_separator());
-            }
-            for idx in group_boundaries[g]..group_boundaries[g + 1] {
-                let (label, ft, icon, shortcut, action) = all_menu_items[idx];
-                if matches_filter(label, ft)
-                    && (!is_slash_menu || slash_only_actions.contains(&action))
-                {
-                    let is_selected = is_slash_menu && actionable_index == selected_index;
-                    let is_active = active_actions.contains(&action);
-                    items.push(self.render_format_context_menu_item(
-                        label,
-                        icon,
-                        shortcut,
-                        is_selected,
-                        is_active,
-                        cx,
-                        move |this, _, cx| {
-                            this.execute_format_menu_action(action, cx);
-                        },
-                    ));
-                    actionable_index += 1;
+            for (idx, &(label, ft, _, _, _)) in all_menu_items.iter().enumerate() {
+                if matches_filter(label, ft) {
+                    for g in 0..3 {
+                        if idx >= group_boundaries[g] && idx < group_boundaries[g + 1] {
+                            group_start_flags[g] = true;
+                        }
+                    }
                 }
             }
-            prev_group_had_items = true;
+
+            let mut prev_group_had_items = !items.is_empty();
+            for g in 0..3 {
+                if !group_start_flags[g] {
+                    continue;
+                }
+                if prev_group_had_items {
+                    items.push(self.render_context_menu_separator());
+                }
+                for idx in group_boundaries[g]..group_boundaries[g + 1] {
+                    let (label, ft, icon, shortcut, action) = all_menu_items[idx];
+                    if matches_filter(label, ft) {
+                        let is_selected = false;
+                        let is_active = active_actions.contains(&action);
+                        items.push(self.render_format_context_menu_item(
+                            label,
+                            icon,
+                            shortcut,
+                            is_selected,
+                            is_active,
+                            cx,
+                            move |this, _, cx| {
+                                this.execute_format_menu_action(action, cx);
+                            },
+                        ));
+                    }
+                }
+                prev_group_had_items = true;
+            }
         }
 
         items
