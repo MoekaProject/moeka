@@ -80,7 +80,7 @@ fn default_line_height() -> f32 {
     1.5
 }
 fn default_letter_spacing() -> f32 {
-    0.0
+    1.0
 }
 
 impl Default for AppSettings {

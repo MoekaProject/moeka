@@ -259,9 +259,9 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
-                    size(px(2048.0), px(1280.0)),
+                    size(px(800.0), px(640.0)),
                     cx,
-))),
+                ))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Markdown Editor".into()),
                     appears_transparent: true,

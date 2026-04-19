@@ -1,10 +1,11 @@
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use gpui::{
-    Bounds, Font, FontStyle, FontWeight, Hsla, PaintQuad, Pixels, SharedString, StrikethroughStyle,
-    TextRun, Window, WrappedLine, fill, point, px,
+    Bounds, Font, FontStyle, FontWeight, Hsla, LineLayout, PaintQuad, Pixels, SharedString,
+    ShapedGlyph, ShapedRun, StrikethroughStyle, TextRun, Window, WrappedLine, WrappedLineLayout,
+    fill, point, px,
 };
 
 use syntect::easy::HighlightLines;
@@ -471,6 +472,7 @@ pub(crate) fn build_selection_quads(
     font_size: f32,
     indent_px: f32,
     selection_color: Hsla,
+    letter_spacing: f32,
     window: &mut Window,
 ) -> Vec<PaintQuad> {
     if disp_start >= disp_end {
@@ -506,13 +508,18 @@ pub(crate) fn build_selection_quads(
                 } else {
                     segment_text.to_string().into()
                 };
-                if let Ok(shaped) = window.text_system().shape_text(
+                if let Ok(mut shaped) = window.text_system().shape_text(
                     shared,
                     px(font_size),
                     &segment_runs,
                     None,
                     None,
                 ) {
+                    if letter_spacing != 0.0 {
+                        for w in shaped.iter_mut() {
+                            apply_letter_spacing(w, letter_spacing);
+                        }
+                    }
                     shaped.first().map_or(0.0, |w| f32::from(w.width()))
                 } else {
                     0.0
@@ -1660,4 +1667,62 @@ pub(crate) fn build_text_runs_for_display(
     }
 
     runs
+}
+
+/// Apply letter spacing to a shaped WrappedLine by offsetting glyph positions.
+/// Each glyph's x position is shifted by `glyph_index * spacing` pixels.
+pub(crate) fn apply_letter_spacing(wrapped: &mut WrappedLine, spacing_px: f32) {
+    if spacing_px == 0.0 {
+        return;
+    }
+
+    let old_layout = &**wrapped;
+    let old_line = &old_layout.unwrapped_layout;
+
+    let mut new_runs: Vec<ShapedRun> = Vec::with_capacity(old_line.runs.len());
+    let mut glyph_count: usize = 0;
+
+    for run in &old_line.runs {
+        let mut new_glyphs: Vec<ShapedGlyph> = Vec::with_capacity(run.glyphs.len());
+        for glyph in &run.glyphs {
+            new_glyphs.push(ShapedGlyph {
+                id: glyph.id,
+                position: point(
+                    glyph.position.x + px(glyph_count as f32 * spacing_px),
+                    glyph.position.y,
+                ),
+                index: glyph.index,
+                is_emoji: glyph.is_emoji,
+            });
+            glyph_count += 1;
+        }
+        new_runs.push(ShapedRun {
+            font_id: run.font_id,
+            glyphs: new_glyphs,
+        });
+    }
+
+    let extra_width = if glyph_count > 0 {
+        px((glyph_count - 1) as f32 * spacing_px)
+    } else {
+        px(0.0)
+    };
+
+    let new_line_layout = Arc::new(LineLayout {
+        font_size: old_line.font_size,
+        width: old_line.width + extra_width,
+        ascent: old_line.ascent,
+        descent: old_line.descent,
+        runs: new_runs,
+        len: old_line.len,
+    });
+
+    let new_wrapped_layout = Arc::new(WrappedLineLayout {
+        unwrapped_layout: new_line_layout,
+        wrap_boundaries: old_layout.wrap_boundaries.clone(),
+        wrap_width: old_layout.wrap_width,
+    });
+
+    let arc_mut: &mut Arc<WrappedLineLayout> = &mut *wrapped;
+    *arc_mut = new_wrapped_layout;
 }

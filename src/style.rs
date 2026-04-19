@@ -712,7 +712,7 @@ impl Styles {
                 editor_scale_max: 1.6,
             },
             sidebar: SidebarStyles {
-                sidebar_width_px: 470.0,
+                sidebar_width_px: 230.0,
                 sidebar_bg: theme.bg_secondary,
                 sidebar_top_spacer_height_px: 40.0,
                 sidebar_bottom_spacer_height_px: 30.0,

@@ -512,10 +512,18 @@ impl Element for EditorElement {
                 0.0
             };
 
+            let letter_spacing = editor_styles.editor_letter_spacing_px;
+
             let effective_wrap_width = if indent_px > 0.0 {
                 (wrap_width - indent_px).max(wrap_width * 0.3)
             } else {
                 wrap_width
+            };
+
+            let effective_wrap_width = if letter_spacing > 0.0 {
+                effective_wrap_width * font_size / (font_size + letter_spacing)
+            } else {
+                effective_wrap_width
             };
 
             let wrap_width_param = if *block_type == BlockType::Table {
@@ -524,7 +532,7 @@ impl Element for EditorElement {
                 Some(px(effective_wrap_width))
             };
 
-            let Ok(wrapped_lines) = window.text_system().shape_text(
+            let Ok(mut wrapped_lines) = window.text_system().shape_text(
                 display_shared,
                 px(font_size),
                 &runs,
@@ -535,6 +543,12 @@ impl Element for EditorElement {
                 y += line_height;
                 continue;
             };
+
+            if letter_spacing != 0.0 {
+                for w in wrapped_lines.iter_mut() {
+                    helpers::apply_letter_spacing(w, letter_spacing);
+                }
+            }
 
             let wrapped = &wrapped_lines[0];
             let visual_line_count = wrapped.wrap_boundaries().len() + 1;
@@ -630,7 +644,10 @@ impl Element for EditorElement {
                         None,
                         None,
                     ) {
-                        if let Some(seg_wrapped) = seg_wrapped_lines.into_iter().next() {
+                        if let Some(mut seg_wrapped) = seg_wrapped_lines.into_iter().next() {
+                            if letter_spacing != 0.0 {
+                                helpers::apply_letter_spacing(&mut seg_wrapped, letter_spacing);
+                            }
                             let seg_x = if seg_idx == 0 {
                                 content_x
                             } else {
@@ -1060,6 +1077,7 @@ impl Element for EditorElement {
                         font_size,
                         indent_px,
                         theme.selection,
+                        letter_spacing,
                         window,
                     ));
                 }
@@ -1114,6 +1132,7 @@ impl Element for EditorElement {
                             font_size,
                             indent_px,
                             if is_active { active_bg } else { match_bg },
+                            letter_spacing,
                             window,
                         ));
                     }
@@ -1147,6 +1166,7 @@ impl Element for EditorElement {
                             font_size,
                             indent_px,
                             if is_active { active_bg } else { match_bg },
+                            letter_spacing,
                             window,
                         ));
                     }
