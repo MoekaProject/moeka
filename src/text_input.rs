@@ -1249,10 +1249,12 @@ impl Element for TextElement {
 
         // Paint text
         let center_offset = prepaint.center_offset;
-        let line = prepaint.line.take().unwrap();
+        let Some(line) = prepaint.line.take() else {
+            return;
+        };
         let text_origin = bounds.origin + point(center_offset, Pixels::ZERO);
         line.paint(text_origin, window.line_height(), window, cx)
-            .unwrap();
+            .ok();
 
         // Paint cursor (only when focused)
         if focus_handle.is_focused(window) {

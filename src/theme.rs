@@ -11,17 +11,6 @@ pub enum ThemeKind {
 }
 
 impl ThemeKind {
-    pub fn all() -> &'static [ThemeKind] {
-        &[
-            Self::OneDark,
-            Self::OneLight,
-            Self::AyuDark,
-            Self::AyuLight,
-            Self::Milky,
-            Self::MilkyDark,
-        ]
-    }
-
     pub fn dark_themes() -> &'static [ThemeKind] {
         &[Self::OneDark, Self::AyuDark, Self::MilkyDark]
     }
@@ -165,7 +154,7 @@ impl Theme {
             syntax_marker: with_alpha(crate::hex_hsla!("#636d83"), 0.7),
             list_marker: crate::hex_hsla!("#e06c75"),
             checkbox_checked: crate::hex_hsla!("#3778ae"),
-            gutter_heading: with_alpha(crate::hex_hsla!("#abb2bf"), 0.18),
+            gutter_heading: with_alpha(crate::hex_hsla!("#abb2bf"), 0.2),
         }
     }
 
@@ -207,7 +196,7 @@ impl Theme {
             syntax_marker: with_alpha(crate::hex_hsla!("#808080"), 1.0),
             list_marker: crate::hex_hsla!("#c74440"),
             checkbox_checked: crate::hex_hsla!("#2383e2"),
-            gutter_heading: with_alpha(crate::hex_hsla!("#37352f"), 0.12),
+            gutter_heading: with_alpha(crate::hex_hsla!("#37352f"), 0.2),
         }
     }
 
@@ -249,7 +238,7 @@ impl Theme {
             syntax_marker: with_alpha(crate::hex_hsla!("#808080"), 1.0),
             list_marker: crate::hex_hsla!("#e27570"),
             checkbox_checked: crate::hex_hsla!("#6daaed"),
-            gutter_heading: with_alpha(crate::hex_hsla!("#c8c3b8"), 0.12),
+            gutter_heading: with_alpha(crate::hex_hsla!("#c8c3b8"), 0.2),
         }
     }
 
@@ -291,7 +280,7 @@ impl Theme {
             syntax_marker: with_alpha(crate::hex_hsla!("#a0a1a7"), 0.7),
             list_marker: crate::hex_hsla!("#d3604f"),
             checkbox_checked: crate::hex_hsla!("#5c78e2"),
-            gutter_heading: with_alpha(crate::hex_hsla!("#383a42"), 0.12),
+            gutter_heading: with_alpha(crate::hex_hsla!("#383a42"), 0.2),
         }
     }
 
@@ -333,7 +322,7 @@ impl Theme {
             syntax_marker: with_alpha(crate::hex_hsla!("#5c6773"), 0.7),
             list_marker: crate::hex_hsla!("#ff8f3f"),
             checkbox_checked: crate::hex_hsla!("#5ac1fe"),
-            gutter_heading: with_alpha(crate::hex_hsla!("#bfbdb6"), 0.15),
+            gutter_heading: with_alpha(crate::hex_hsla!("#bfbdb6"), 0.2),
         }
     }
 
@@ -375,7 +364,7 @@ impl Theme {
             syntax_marker: with_alpha(crate::hex_hsla!("#abb0b6"), 0.7),
             list_marker: crate::hex_hsla!("#fa8d3e"),
             checkbox_checked: crate::hex_hsla!("#3b9ee5"),
-            gutter_heading: with_alpha(crate::hex_hsla!("#5c6166"), 0.12),
+            gutter_heading: with_alpha(crate::hex_hsla!("#5c6166"), 0.2),
         }
     }
 }

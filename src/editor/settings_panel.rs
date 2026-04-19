@@ -342,6 +342,10 @@ impl EditorView {
             .child(self.render_font_row("编辑器字体(CJK)", body_cjk, FontRole::BodyFont, 1, cx))
             // Code font
             .child(self.render_font_row("编辑器代码字体", monospace, FontRole::CodeFont, 0, cx))
+            // Line height
+            .child(self.render_line_height_row(cx))
+            // Letter spacing
+            .child(self.render_letter_spacing_row(cx))
             .into_any_element()
     }
 
@@ -415,102 +419,6 @@ impl EditorView {
                             ),
                     )
             })
-            .into_any_element()
-    }
-
-    fn render_font_size_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let text_primary = self.theme.text_primary;
-        let text_secondary = self.theme.text_secondary;
-        let hover_bg = self.theme.bg_hover;
-        let border_color = self.theme.border_primary;
-
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
-            .child(
-                div()
-                    .w(px(120.0))
-                    .text_size(px(13.0))
-                    .text_color(text_secondary)
-                    .child("编辑器字体大小"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(0.0))
-                    // Minus button
-                    .child(
-                        div()
-                            .id("font-size-dec")
-                            .w(px(30.0))
-                            .h(px(30.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_l(px(6.0))
-                            .border(px(1.0))
-                            .border_color(border_color)
-                            .text_size(px(14.0))
-                            .text_color(text_primary)
-                            .cursor(CursorStyle::Arrow)
-                            .hover(move |s| s.bg(hover_bg))
-                            .child("−")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    let current = this.styles.editor.editor_font_size_px;
-                                    if current > 10.0 {
-                                        this.apply_font_size(current - 1.0, cx);
-                                    }
-                                }),
-                            ),
-                    )
-                    // Value display — editable TextInput
-                    .child(
-                        div()
-                            .w(px(50.0))
-                            .h(px(30.0))
-                            .border_y(px(1.0))
-                            .border_color(border_color)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when_some(self.settings_font_size_editor.clone(), |this, editor| {
-                                this.child(editor)
-                            }),
-                    )
-                    // Plus button
-                    .child(
-                        div()
-                            .id("font-size-inc")
-                            .w(px(30.0))
-                            .h(px(30.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_r(px(6.0))
-                            .border(px(1.0))
-                            .border_color(border_color)
-                            .text_size(px(14.0))
-                            .text_color(text_primary)
-                            .cursor(CursorStyle::Arrow)
-                            .hover(move |s| s.bg(hover_bg))
-                            .child("+")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    let current = this.styles.editor.editor_font_size_px;
-                                    if current < 30.0 {
-                                        this.apply_font_size(current + 1.0, cx);
-                                    }
-                                }),
-                            ),
-                    ),
-            )
             .into_any_element()
     }
 
@@ -727,6 +635,306 @@ impl EditorView {
         )
         .detach();
         self.settings_ui_font_size_editor = Some(editor);
+    }
+
+    // ── Line height stepper ─────────────────────────────────────
+
+    fn render_line_height_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.ensure_line_height_editor(cx);
+        let text_primary = self.theme.text_primary;
+        let text_secondary = self.theme.text_secondary;
+        let hover_bg = self.theme.bg_hover;
+        let border_color = self.theme.border_primary;
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(self.scaled(12.0)))
+            .child(
+                div()
+                    .w(px(self.scaled(120.0)))
+                    .text_size(px(self.scaled(13.0)))
+                    .text_color(text_secondary)
+                    .child("编辑器行间距"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(0.0))
+                    .child(
+                        div()
+                            .id("line-height-dec")
+                            .w(px(self.scaled(30.0)))
+                            .h(px(self.scaled(30.0)))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_l(px(self.scaled(6.0)))
+                            .border(px(1.0))
+                            .border_color(border_color)
+                            .text_size(px(self.scaled(14.0)))
+                            .text_color(text_primary)
+                            .cursor(CursorStyle::Arrow)
+                            .hover(move |s| s.bg(hover_bg))
+                            .child("−")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    let current = this.app_settings.line_height;
+                                    this.apply_line_height(current - 0.1, cx);
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(self.scaled(50.0)))
+                            .h(px(self.scaled(30.0)))
+                            .border_y(px(1.0))
+                            .border_color(border_color)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when_some(self.settings_line_height_editor.clone(), |this, editor| {
+                                this.child(editor)
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("line-height-inc")
+                            .w(px(self.scaled(30.0)))
+                            .h(px(self.scaled(30.0)))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_r(px(self.scaled(6.0)))
+                            .border(px(1.0))
+                            .border_color(border_color)
+                            .text_size(px(self.scaled(14.0)))
+                            .text_color(text_primary)
+                            .cursor(CursorStyle::Arrow)
+                            .hover(move |s| s.bg(hover_bg))
+                            .child("+")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    let current = this.app_settings.line_height;
+                                    this.apply_line_height(current + 0.1, cx);
+                                }),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn apply_line_height(&mut self, value: f32, cx: &mut Context<Self>) {
+        let value = ((value * 10.0).round() / 10.0).clamp(1.0, 3.0);
+        self.styles.editor.editor_paragraph_line_height_factor = value;
+        self.styles.editor.editor_heading_line_height_factor = value;
+        self.app_settings.line_height = value;
+        self.app_settings.save();
+        self.line_display_info.clear();
+        if let Some(editor) = &self.settings_line_height_editor {
+            editor.update(cx, |ti, cx| {
+                let display = format!("{:.1}", value);
+                if ti.text() != display {
+                    ti.set_text(&display, cx);
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    fn ensure_line_height_editor(&mut self, cx: &mut Context<Self>) {
+        if self.settings_line_height_editor.is_some() {
+            return;
+        }
+        let mut styles = self.styles.text_input.clone();
+        styles.text_input_bg = gpui::Hsla::transparent_black();
+        styles.text_input_focus_bg = gpui::Hsla::transparent_black();
+        styles.text_input_border_width_px = 0.0;
+        styles.text_input_padding_left_px = 2.0;
+        styles.text_input_padding_right_px = 2.0;
+        styles.text_input_height_px = 28.0;
+        styles.text_input_center = true;
+        styles.text_input_cursor_height_ratio = 0.6;
+        let editor = cx.new(|cx| {
+            let mut ti = crate::text_input::TextInput::new(styles, "", cx);
+            ti.set_text(&format!("{:.1}", self.app_settings.line_height), cx);
+            ti
+        });
+        cx.subscribe(
+            &editor,
+            |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Submit => {
+                    let text = editor.read(cx).text().to_string();
+                    if let Ok(val) = text.parse::<f32>() {
+                        this.apply_line_height(val, cx);
+                    }
+                }
+                crate::text_input::TextInputEvent::Escape => {
+                    let current = this.app_settings.line_height;
+                    editor.update(cx, |ti, cx| {
+                        ti.set_text(&format!("{:.1}", current), cx);
+                    });
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        self.settings_line_height_editor = Some(editor);
+    }
+
+    // ── Letter spacing stepper ──────────────────────────────────
+
+    fn render_letter_spacing_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.ensure_letter_spacing_editor(cx);
+        let text_primary = self.theme.text_primary;
+        let text_secondary = self.theme.text_secondary;
+        let hover_bg = self.theme.bg_hover;
+        let border_color = self.theme.border_primary;
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(self.scaled(12.0)))
+            .child(
+                div()
+                    .w(px(self.scaled(120.0)))
+                    .text_size(px(self.scaled(13.0)))
+                    .text_color(text_secondary)
+                    .child("编辑器字符间距"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(0.0))
+                    .child(
+                        div()
+                            .id("letter-spacing-dec")
+                            .w(px(self.scaled(30.0)))
+                            .h(px(self.scaled(30.0)))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_l(px(self.scaled(6.0)))
+                            .border(px(1.0))
+                            .border_color(border_color)
+                            .text_size(px(self.scaled(14.0)))
+                            .text_color(text_primary)
+                            .cursor(CursorStyle::Arrow)
+                            .hover(move |s| s.bg(hover_bg))
+                            .child("−")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    let current = this.app_settings.letter_spacing;
+                                    this.apply_letter_spacing(current - 0.5, cx);
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(self.scaled(50.0)))
+                            .h(px(self.scaled(30.0)))
+                            .border_y(px(1.0))
+                            .border_color(border_color)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when_some(
+                                self.settings_letter_spacing_editor.clone(),
+                                |this, editor| this.child(editor),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("letter-spacing-inc")
+                            .w(px(self.scaled(30.0)))
+                            .h(px(self.scaled(30.0)))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_r(px(self.scaled(6.0)))
+                            .border(px(1.0))
+                            .border_color(border_color)
+                            .text_size(px(self.scaled(14.0)))
+                            .text_color(text_primary)
+                            .cursor(CursorStyle::Arrow)
+                            .hover(move |s| s.bg(hover_bg))
+                            .child("+")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    let current = this.app_settings.letter_spacing;
+                                    this.apply_letter_spacing(current + 0.5, cx);
+                                }),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn apply_letter_spacing(&mut self, value: f32, cx: &mut Context<Self>) {
+        let value = ((value * 2.0).round() / 2.0).clamp(-2.0, 10.0);
+        self.styles.editor.editor_letter_spacing_px = value;
+        self.app_settings.letter_spacing = value;
+        self.app_settings.save();
+        self.line_display_info.clear();
+        if let Some(editor) = &self.settings_letter_spacing_editor {
+            editor.update(cx, |ti, cx| {
+                let display = format!("{:.1}", value);
+                if ti.text() != display {
+                    ti.set_text(&display, cx);
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    fn ensure_letter_spacing_editor(&mut self, cx: &mut Context<Self>) {
+        if self.settings_letter_spacing_editor.is_some() {
+            return;
+        }
+        let mut styles = self.styles.text_input.clone();
+        styles.text_input_bg = gpui::Hsla::transparent_black();
+        styles.text_input_focus_bg = gpui::Hsla::transparent_black();
+        styles.text_input_border_width_px = 0.0;
+        styles.text_input_padding_left_px = 2.0;
+        styles.text_input_padding_right_px = 2.0;
+        styles.text_input_height_px = 28.0;
+        styles.text_input_center = true;
+        styles.text_input_cursor_height_ratio = 0.6;
+        let editor = cx.new(|cx| {
+            let mut ti = crate::text_input::TextInput::new(styles, "", cx);
+            ti.set_text(&format!("{:.1}", self.app_settings.letter_spacing), cx);
+            ti
+        });
+        cx.subscribe(
+            &editor,
+            |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Submit => {
+                    let text = editor.read(cx).text().to_string();
+                    if let Ok(val) = text.parse::<f32>() {
+                        this.apply_letter_spacing(val, cx);
+                    }
+                }
+                crate::text_input::TextInputEvent::Escape => {
+                    let current = this.app_settings.letter_spacing;
+                    editor.update(cx, |ti, cx| {
+                        ti.set_text(&format!("{:.1}", current), cx);
+                    });
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        self.settings_letter_spacing_editor = Some(editor);
     }
 
     // ── Font picker overlay ─────────────────────────────────────

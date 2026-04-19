@@ -25,6 +25,7 @@ actions!(
         Paste,
         Enter,
         Tab,
+        BackTab,
         ShowCharacterPalette,
         MoveWordLeft,
         MoveWordRight,

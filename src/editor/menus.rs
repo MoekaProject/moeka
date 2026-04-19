@@ -362,7 +362,7 @@ impl EditorView {
             .px(px(ms.menu_item_padding_x_px))
             .flex()
             .items_center()
-            .gap(px(self.scaled(4.0)))
+            .gap(px(self.scaled(wss.ws_menu_item_action_icon_gap_px)))
             .text_size(px(ms.menu_item_font_size_px))
             .text_color(text_color)
             .hover(move |s| s.bg(hover_bg))
@@ -793,9 +793,6 @@ impl EditorView {
             ),
         ];
 
-        let group_boundaries = [0usize, 4, 10, 12];
-        let mut group_start_flags = [false; 3];
-
         let slash_only_actions: &[FormatMenuAction] = &[
             FormatMenuAction::Todo,
             FormatMenuAction::CodeBlock,
@@ -979,7 +976,7 @@ impl EditorView {
                             cx,
                             move |this, _, _cx| {
                                 this.context_menu = None;
-                                let _ = std::process::Command::new("pbcopy")
+                                if let Err(e) = std::process::Command::new("pbcopy")
                                     .stdin(std::process::Stdio::piped())
                                     .spawn()
                                     .and_then(|mut child| {
@@ -988,7 +985,10 @@ impl EditorView {
                                             stdin.write_all(path_str.as_bytes())?;
                                         }
                                         child.wait()
-                                    });
+                                    })
+                                {
+                                    eprintln!("failed to copy to clipboard: {e}");
+                                }
                             },
                         ));
                     }
@@ -1032,7 +1032,7 @@ impl EditorView {
                             .px(px(self.scaled(ms.menu_item_padding_x_px)))
                             .flex()
                             .items_center()
-                            .gap(px(self.scaled(4.0)))
+                            .gap(px(self.scaled(wss.ws_menu_item_action_icon_gap_px)))
                             .text_size(px(self.scaled(ms.menu_item_font_size_px)))
                             .text_color(text_color)
                             .hover(move |s| s.bg(row_hover_bg))

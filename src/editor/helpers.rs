@@ -1160,16 +1160,105 @@ pub(crate) fn apply_code_block_highlighting(
     }
 }
 
-pub(crate) fn resolve_local_image_path(path: &str) -> Option<PathBuf> {
-    crate::resolve_runtime_path(path)
-}
-
 pub(crate) fn resolve_asset_image_path(path: &str) -> PathBuf {
     crate::resolve_runtime_path(path).unwrap_or_else(|| PathBuf::from(path))
 }
 
 pub(crate) fn is_remote_image_url(path: &str) -> bool {
     path.starts_with("http://") || path.starts_with("https://")
+}
+
+/// Resolve an image path to an absolute filesystem path.
+/// Tries in order:
+/// 1. Remote URLs (http:// https://) — not resolved to a local path
+/// 2. file:// scheme — strip the scheme
+/// 3. Home-relative paths (~/...)
+/// 4. Relative paths resolved against the current file's parent directory
+/// 5. Relative paths resolved against each workspace root
+fn resolve_image_to_path(
+    raw: &str,
+    file_dir: Option<&PathBuf>,
+    workspace_roots: &[PathBuf],
+) -> Option<PathBuf> {
+    // Strip file:// scheme
+    let path_str = if let Some(stripped) = raw.strip_prefix("file://") {
+        percent_decode_path(stripped)
+    } else {
+        raw.to_string()
+    };
+
+    let path_str = path_str.as_str();
+
+    // Expand ~/
+    let expanded = if let Some(rest) = path_str.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(home).join(rest)
+        } else {
+            return None;
+        }
+    } else {
+        PathBuf::from(path_str)
+    };
+
+    // If the path happens to be absolute (e.g. from file:// or ~/ expansion),
+    // just check existence.
+    if expanded.is_absolute() {
+        return expanded.exists().then_some(expanded);
+    }
+
+    // Relative to current file's directory
+    if let Some(dir) = file_dir {
+        let candidate = dir.join(&expanded);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    // Relative to workspace roots
+    for root in workspace_roots {
+        let candidate = root.join(&expanded);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn percent_decode_path(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
+                result.push(byte as char);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Load an image from any supported path/URL format.
+/// Supports: http(s), file://, ~/paths, relative paths (to file dir or workspace roots).
+pub(crate) fn load_image(
+    raw_path: &str,
+    file_dir: Option<&PathBuf>,
+    workspace_roots: &[PathBuf],
+) -> anyhow::Result<RenderImage> {
+    if is_remote_image_url(raw_path) {
+        return load_render_image_from_url(raw_path);
+    }
+
+    let resolved = resolve_image_to_path(raw_path, file_dir, workspace_roots)
+        .ok_or_else(|| anyhow::anyhow!("could not resolve image path: {}", raw_path))?;
+    load_render_image_from_path(&resolved)
 }
 
 fn load_render_image_from_bytes(bytes: &[u8]) -> anyhow::Result<RenderImage> {
@@ -1442,7 +1531,8 @@ pub(crate) fn build_text_runs_for_display(
                 }
             }
         }
-    } else if matches!(decoration.block_type, BlockType::CodeBlockFence) && code_block_syntax_active {
+    } else if matches!(decoration.block_type, BlockType::CodeBlockFence) && code_block_syntax_active
+    {
         for sr in &decoration.syntax_ranges {
             let start = sr.range.start.min(buf_len);
             let end = sr.range.end.min(buf_len);

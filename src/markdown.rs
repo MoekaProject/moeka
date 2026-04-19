@@ -138,6 +138,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
     let parser = Parser::new_ext(text, opts);
 
     let mut in_code_block = false;
+    let mut code_block_start_line: Option<usize> = None;
     let mut current_code_language: Option<String> = None;
     let mut in_blockquote = false;
     let mut inline_stack: Vec<(InlineKind, usize, Option<String>)> = Vec::new();
@@ -148,21 +149,27 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                 let line = offset_to_line(source_range.start);
                 let lvl = level as u8;
                 if line < decorations.len() {
-                    decorations[line].block_type = BlockType::Heading(lvl);
-                    let prefix_len = (lvl as usize) + 1;
                     let line_content =
                         get_line_content(text, &line_starts, line, decorations.len());
-                    let line_len = line_content.len();
-                    // Only fold heading syntax when there's a space after the last '#'
-                    let has_space = line_content
-                        .as_bytes()
-                        .get(lvl as usize)
-                        .is_some_and(|&b| b == b' ');
-                    if prefix_len <= line_len && has_space {
-                        decorations[line].syntax_ranges.push(SyntaxRange {
-                            range: 0..prefix_len,
-                            trigger_range: 0..prefix_len,
-                        });
+                    let trimmed = line_content.trim_start();
+                    // Only recognize ATX headings (lines starting with #).
+                    // Setext headings (text followed by --- or ===) are ignored
+                    // because they conflict with incomplete list sub-items
+                    // during live editing.
+                    if trimmed.starts_with('#') {
+                        decorations[line].block_type = BlockType::Heading(lvl);
+                        let prefix_len = (lvl as usize) + 1;
+                        let line_len = line_content.len();
+                        let has_space = line_content
+                            .as_bytes()
+                            .get(lvl as usize)
+                            .is_some_and(|&b| b == b' ');
+                        if prefix_len <= line_len && has_space {
+                            decorations[line].syntax_ranges.push(SyntaxRange {
+                                range: 0..prefix_len,
+                                trigger_range: 0..prefix_len,
+                            });
+                        }
                     }
                 }
             }
@@ -170,6 +177,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
             Event::Start(Tag::CodeBlock(kind)) => {
                 let line = offset_to_line(source_range.start);
                 in_code_block = true;
+                code_block_start_line = Some(line);
                 current_code_language = match kind {
                     CodeBlockKind::Fenced(info) => {
                         let first = info.split_whitespace().next().unwrap_or_default().trim();
@@ -195,6 +203,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
             }
             Event::End(TagEnd::CodeBlock) => {
                 in_code_block = false;
+                code_block_start_line = None;
                 current_code_language = None;
                 let line = offset_to_line(source_range.end.saturating_sub(1));
                 if line < decorations.len() && decorations[line].block_type == BlockType::Normal {
@@ -447,6 +456,22 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                 }
             }
             _ => {}
+        }
+    }
+
+    // If the code block was never closed, revert its decorations to Normal
+    if in_code_block {
+        if let Some(start) = code_block_start_line {
+            for d in decorations[start..].iter_mut() {
+                if matches!(
+                    d.block_type,
+                    BlockType::CodeBlock | BlockType::CodeBlockFence
+                ) {
+                    d.block_type = BlockType::Normal;
+                    d.code_language = None;
+                    d.syntax_ranges.clear();
+                }
+            }
         }
     }
 

@@ -571,17 +571,41 @@ impl EditorView {
     pub(crate) fn on_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
         self.checkpoint();
         let current_line = self.cursor_line();
-        let should_indent_list = matches!(
-            self.decorations.get(current_line).map(|d| &d.block_type),
+        let block_type = self.decorations.get(current_line).map(|d| &d.block_type);
+        let is_list = matches!(
+            block_type,
             Some(BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_))
-        ) || self.cursor.has_selection();
+        );
 
-        if should_indent_list {
-            self.indent_current_lines("  ");
+        if is_list || self.cursor.has_selection() {
+            let indent = match block_type {
+                Some(BlockType::OrderedList) => "   ",
+                _ => "  ",
+            };
+            self.indent_current_lines(indent);
         } else {
             self.cursor.insert(&mut self.buffer, "  ");
             self.reparse();
             self.scroll_to_cursor();
+        }
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_back_tab(&mut self, _: &BackTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.checkpoint();
+        let current_line = self.cursor_line();
+        let block_type = self.decorations.get(current_line).map(|d| &d.block_type);
+        let is_list = matches!(
+            block_type,
+            Some(BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_))
+        );
+
+        if is_list || self.cursor.has_selection() {
+            let count = match block_type {
+                Some(BlockType::OrderedList) => 3,
+                _ => 2,
+            };
+            self.unindent_current_lines(count);
         }
         self.pause_blinking(cx);
     }

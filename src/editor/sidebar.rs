@@ -465,10 +465,13 @@ impl EditorView {
     }
 
     pub(crate) fn reveal_in_finder(&self, path: &Path) {
-        let _ = std::process::Command::new("open")
+        if let Err(e) = std::process::Command::new("open")
             .arg("--reveal")
             .arg(path)
-            .spawn();
+            .spawn()
+        {
+            eprintln!("failed to reveal in Finder: {e}");
+        }
     }
 
     pub(crate) fn pick_workspace_folder(&mut self, cx: &mut Context<Self>) {
@@ -687,7 +690,6 @@ impl EditorView {
             MARKDOWN_SVG_PATH
         };
 
-        let focus_border_color = ss.sidebar_item_focus_border_color;
         div()
             .w_full()
             .h(px(self.scaled(ss.sidebar_item_height_px)))

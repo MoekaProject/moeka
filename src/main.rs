@@ -146,6 +146,7 @@ fn main() {
             KeyBinding::new("cmd-shift-enter", InsertLineAbove, Some("MarkdownEditor")),
             KeyBinding::new("cmd-shift-d", DuplicateLine, Some("MarkdownEditor")),
             KeyBinding::new("cmd-shift-k", DeleteLine, Some("MarkdownEditor")),
+            KeyBinding::new("shift-tab", BackTab, Some("MarkdownEditor")),
             KeyBinding::new("alt-up", MoveLineUp, Some("MarkdownEditor")),
             KeyBinding::new("alt-down", MoveLineDown, Some("MarkdownEditor")),
             KeyBinding::new("cmd-s", Save, Some("MarkdownEditor")),
@@ -258,9 +259,9 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
-                    size(px(1360.0), px(820.0)),
+                    size(px(2048.0), px(1280.0)),
                     cx,
-                ))),
+))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Markdown Editor".into()),
                     appears_transparent: true,
@@ -310,6 +311,6 @@ fn main() {
                 })
             },
         )
-        .unwrap();
+        .expect("failed to open main window");
     });
 }

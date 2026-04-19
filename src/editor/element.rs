@@ -356,10 +356,9 @@ impl Element for EditorElement {
             let cursor_col = if editor.cursor.has_selection()
                 && matches!(decoration.block_type, BlockType::Heading(_))
             {
-                let sel = editor.cursor.selection_range();
-                if sel.start < line_end_offset && sel.end > line_start_offset {
-                    Some(0)
-                } else if is_cursor_line {
+                // Only expand heading syntax if the cursor itself is on this heading line,
+                // not when selection merely passes through.
+                if is_cursor_line {
                     Some(cursor.offset.saturating_sub(line_start_offset))
                 } else {
                     None
@@ -947,8 +946,8 @@ impl Element for EditorElement {
                     }
                     gutter_fold_hit_areas_local.push((
                         Bounds::new(
-                            point(px(fi_x - 3.0), px(line_top)),
-                            size(px(fi_size + 6.0), px(line_height)),
+                            point(px(content_x - fi_size - editor.scaled(10.0)), px(line_top)),
+                            size(px(fi_size + editor.scaled(15.0)), px(total_line_height)),
                         ),
                         line_idx,
                         false,
@@ -956,10 +955,9 @@ impl Element for EditorElement {
                 }
 
                 // Image preview fold icon
-                if decoration.image_path.is_some()
-                    && image_cache
-                        .get(decoration.image_path.as_ref().unwrap())
-                        .is_some_and(|v| v.is_some())
+                if decoration.image_path.as_ref().is_some_and(|p|
+                    image_cache.get(p).is_some_and(|v| v.is_some())
+                )
                 {
                     let is_img_folded = editor.folded_image_previews.contains(&line_idx);
                     let is_hovered = editor.hovering_fold_line == Some(line_idx);
@@ -1418,7 +1416,7 @@ impl Element for EditorElement {
             } else {
                 TransformationMatrix::default()
             };
-            let _ = window.paint_svg(*icon_bounds, (*icon_path).into(), transform, *color, cx);
+            window.paint_svg(*icon_bounds, (*icon_path).into(), transform, *color, cx).ok();
         }
         for (shaped, origin, line_height) in &prepaint.gutter_labels {
             shaped.paint(*origin, *line_height, window, cx).ok();
@@ -1495,13 +1493,13 @@ impl Element for EditorElement {
             let theme = &self.editor.read(cx).theme;
             let mut color = theme.text_secondary;
             color.a = *alpha;
-            let _ = window.paint_svg(
+            window.paint_svg(
                 *icon_bounds,
                 OPEN_SVG_PATH.into(),
                 TransformationMatrix::default(),
                 color,
                 cx,
-            );
+            ).ok();
         }
 
         for cursor in prepaint.cursor_quads.drain(..) {

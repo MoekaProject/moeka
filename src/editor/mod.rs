@@ -49,6 +49,10 @@ pub(crate) struct AppSettings {
     pub code_font: String,
     #[serde(default = "default_font_size")]
     pub font_size: f32,
+    #[serde(default = "default_line_height")]
+    pub line_height: f32,
+    #[serde(default = "default_letter_spacing")]
+    pub letter_spacing: f32,
 }
 
 fn default_theme() -> String {
@@ -56,9 +60,6 @@ fn default_theme() -> String {
 }
 fn default_ui_font() -> String {
     ".SystemUIFont".to_string()
-}
-fn default_ui_font_size() -> f32 {
-    13.0
 }
 fn default_ui_scale() -> f32 {
     1.0
@@ -75,6 +76,12 @@ fn default_code_font() -> String {
 fn default_font_size() -> f32 {
     15.0
 }
+fn default_line_height() -> f32 {
+    1.5
+}
+fn default_letter_spacing() -> f32 {
+    0.0
+}
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -86,6 +93,8 @@ impl Default for AppSettings {
             body_cjk_font: default_body_cjk_font(),
             code_font: default_code_font(),
             font_size: default_font_size(),
+            line_height: default_line_height(),
+            letter_spacing: default_letter_spacing(),
         }
     }
 }
@@ -112,10 +121,15 @@ impl AppSettings {
     pub fn save(&self) {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("failed to create settings directory: {e}");
+                return;
+            }
         }
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
+            if let Err(e) = std::fs::write(&path, json) {
+                eprintln!("failed to save settings: {e}");
+            }
         }
     }
 
@@ -189,7 +203,6 @@ pub(crate) fn perform_window_drag(_window: &gpui::Window) {}
 
 // ── SVG asset paths ─────────────────────────────────────────────────
 
-pub(crate) const HASH_SVG_PATH: &str = "assets/icons/hash.svg";
 pub(crate) const COMMENT_SVG_PATH: &str = "assets/icons/comment.svg";
 pub(crate) const HEADING_1_SVG_PATH: &str = "assets/icons/format/heading-1.svg";
 pub(crate) const HEADING_2_SVG_PATH: &str = "assets/icons/format/heading-2.svg";
@@ -429,6 +442,7 @@ impl Render for DraggedTabView {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub(crate) enum DialogAction {
     CloseTabUnsaved { tab_id: String },
     SaveAndCloseTab { tab_id: String },
@@ -442,6 +456,7 @@ pub(crate) struct Dialog {
     pub save_label: Option<String>,
     pub confirm_label: String,
     pub cancel_label: String,
+    #[allow(dead_code)]
     pub is_danger: bool,
     pub action: DialogAction,
 }
@@ -602,6 +617,8 @@ pub struct EditorView {
     pub(crate) settings_font_picker_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) settings_font_size_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) settings_ui_font_size_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) settings_line_height_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) settings_letter_spacing_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) font_picker_trigger_position: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) font_picker_button_bounds: std::collections::HashMap<
         (crate::editor::settings_panel::FontRole, usize),
@@ -633,6 +650,9 @@ impl EditorView {
         let mut styles = crate::style::Styles::from_theme(&theme);
         // Apply saved font settings
         styles.editor.editor_font_size_px = app_settings.font_size;
+        styles.editor.editor_paragraph_line_height_factor = app_settings.line_height;
+        styles.editor.editor_heading_line_height_factor = app_settings.line_height;
+        styles.editor.editor_letter_spacing_px = app_settings.letter_spacing;
         styles.ui_font_family = Box::leak(app_settings.ui_font.clone().into_boxed_str());
         styles.editor.editor_body_latin_font_family =
             Box::leak(app_settings.body_latin_font.clone().into_boxed_str());
@@ -796,6 +816,8 @@ impl EditorView {
             settings_font_picker_editor: None,
             settings_font_size_editor: None,
             settings_ui_font_size_editor: None,
+            settings_line_height_editor: None,
+            settings_letter_spacing_editor: None,
             font_picker_trigger_position: None,
             font_picker_button_bounds: std::collections::HashMap::new(),
             cached_font_names: None,
@@ -815,19 +837,19 @@ impl EditorView {
         }
 
         self.image_cache.insert(path.clone(), None);
+        let current_file = self.current_file_path.clone();
+        let workspaces = self.workspaces.clone();
         cx.spawn(async move |this, cx| {
             let image_path = path.clone();
+            let file_dir = current_file
+                .as_ref()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()));
             let maybe_image = cx
                 .background_executor()
                 .spawn(async move {
-                    if helpers::is_remote_image_url(&image_path) {
-                        helpers::load_render_image_from_url(&image_path).ok()
-                    } else {
-                        helpers::resolve_local_image_path(&image_path).and_then(|resolved| {
-                            helpers::load_render_image_from_path(&resolved).ok()
-                        })
-                    }
-                    .map(Arc::new)
+                    helpers::load_image(&image_path, file_dir.as_ref(), &workspaces)
+                        .ok()
+                        .map(Arc::new)
                 })
                 .await;
 
@@ -853,6 +875,9 @@ impl EditorView {
         self.styles = crate::style::Styles::from_theme(&self.theme);
         // Re-apply font overrides from settings since from_theme resets to defaults
         self.styles.editor.editor_font_size_px = self.app_settings.font_size;
+        self.styles.editor.editor_paragraph_line_height_factor = self.app_settings.line_height;
+        self.styles.editor.editor_heading_line_height_factor = self.app_settings.line_height;
+        self.styles.editor.editor_letter_spacing_px = self.app_settings.letter_spacing;
         self.styles.ui_font_family = Box::leak(self.app_settings.ui_font.clone().into_boxed_str());
         self.styles.editor.editor_body_latin_font_family =
             Box::leak(self.app_settings.body_latin_font.clone().into_boxed_str());
@@ -871,6 +896,8 @@ impl EditorView {
         // Recreate font size editor with new theme styles
         self.settings_font_size_editor = None;
         self.settings_ui_font_size_editor = None;
+        self.settings_line_height_editor = None;
+        self.settings_letter_spacing_editor = None;
         self.ensure_font_size_editor(cx);
         self.ensure_ui_font_size_editor(cx);
         cx.notify();
@@ -1887,6 +1914,51 @@ impl EditorView {
         self.cursor.offset = new_end.min(self.buffer.len());
         self.reparse();
         self.scroll_to_cursor();
+    }
+
+    pub(crate) fn unindent_current_lines(&mut self, max_spaces: usize) {
+        let selection = self.cursor.selection_range();
+        let (start_line, _) = self.buffer.offset_to_line_col(selection.start);
+        let end_anchor = selection
+            .end
+            .saturating_sub(usize::from(selection.end > selection.start));
+        let (end_line, _) = self.buffer.offset_to_line_col(end_anchor);
+
+        // Collect how many leading spaces to strip from each line (before mutation)
+        let mut strips: Vec<usize> = Vec::new();
+        for line in start_line..=end_line {
+            let content = self.buffer.line_content(line);
+            let leading: usize = content
+                .bytes()
+                .take(max_spaces)
+                .take_while(|&b| b == b' ')
+                .count();
+            strips.push(leading);
+        }
+
+        let mut total_removed = 0usize;
+        let mut first_removed = 0usize;
+        for (i, &strip) in strips.iter().enumerate() {
+            if strip > 0 {
+                let line = start_line + i;
+                // After previous removals, line_start already reflects the new state
+                let line_start = self.buffer.line_start(line);
+                self.buffer.replace(line_start..line_start + strip, "");
+                if i == 0 {
+                    first_removed = strip;
+                }
+                total_removed += strip;
+            }
+        }
+
+        if total_removed > 0 {
+            let new_start = selection.start.saturating_sub(first_removed);
+            let new_end = selection.end.saturating_sub(total_removed);
+            self.cursor.anchor = new_start.min(self.buffer.len());
+            self.cursor.offset = new_end.min(self.buffer.len());
+            self.reparse();
+            self.scroll_to_cursor();
+        }
     }
 
     pub(crate) fn insert_link_or_image(&mut self, prefix: &str, suffix: &str, placeholder: &str) {

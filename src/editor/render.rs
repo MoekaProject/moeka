@@ -51,6 +51,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_select_end))
             .on_action(cx.listener(Self::on_enter))
             .on_action(cx.listener(Self::on_tab))
+            .on_action(cx.listener(Self::on_back_tab))
             .on_action(cx.listener(Self::on_copy))
             .on_action(cx.listener(Self::on_cut))
             .on_action(cx.listener(Self::on_paste))

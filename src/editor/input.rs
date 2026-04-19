@@ -135,7 +135,14 @@ impl EditorView {
                 })
             });
             if let Some(url) = link_url {
-                let _ = std::process::Command::new("open").arg(&url).spawn();
+                if url.starts_with("http://")
+                    || url.starts_with("https://")
+                    || url.starts_with("mailto:")
+                {
+                    if let Err(e) = std::process::Command::new("open").arg(&url).spawn() {
+                        eprintln!("failed to open URL: {e}");
+                    }
+                }
                 self.is_selecting = false;
                 cx.notify();
                 return;
