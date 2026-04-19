@@ -118,6 +118,11 @@ pub(crate) fn build_display_text(
             }
             cursor_col.map_or(true, |col| {
                 let at_eol = col >= len;
+                // For headings: always expand syntax when cursor is on the line and not at EOL;
+                // collapse when cursor is at EOL or selection merely passes through.
+                if matches!(decoration.block_type, BlockType::Heading(_)) {
+                    return at_eol;
+                }
                 if at_eol {
                     !matches!(
                         decoration.block_type,

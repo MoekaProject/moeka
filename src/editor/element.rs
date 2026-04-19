@@ -912,7 +912,9 @@ impl Element for EditorElement {
             // Gutter fold icon
             if !hidden_lines.contains(&line_idx) {
                 let fi_size = editor.scaled(editor.styles.gutter.gutter_fold_icon_size_px);
-                let fi_x = content_x - fi_size - editor.scaled(5.0);
+                let fi_x = content_x
+                    - fi_size
+                    - editor.scaled(editor.styles.gutter.gutter_fold_icon_offset_px);
 
                 if let Some(_) = editor.fold_range_for_line(line_idx) {
                     let is_folded = editor.folded_sections.contains(&line_idx);
@@ -922,19 +924,20 @@ impl Element for EditorElement {
                     } else {
                         text_line_top + (line_height - fi_size) / 2.0
                     };
+                    let gs = &editor.styles.gutter;
                     let fi_alpha = if is_folded {
-                        0.75_f32
+                        gs.gutter_fold_folded_opacity
                     } else if is_hovered {
-                        0.7_f32
+                        gs.gutter_fold_hover_opacity
                     } else {
-                        0.0_f32
+                        gs.gutter_fold_default_opacity
                     };
                     if fi_alpha > 0.0 {
                         let rotation_deg = if is_folded { 0.0_f32 } else { 90.0_f32 };
                         let mut fi_color = if is_folded {
-                            theme.text_accent
+                            gs.gutter_fold_folded_color
                         } else {
-                            theme.text_secondary
+                            gs.gutter_fold_hover_color
                         };
                         fi_color.a = fi_alpha;
                         gutter_svgs.push((
@@ -955,9 +958,10 @@ impl Element for EditorElement {
                 }
 
                 // Image preview fold icon
-                if decoration.image_path.as_ref().is_some_and(|p|
-                    image_cache.get(p).is_some_and(|v| v.is_some())
-                )
+                if decoration
+                    .image_path
+                    .as_ref()
+                    .is_some_and(|p| image_cache.get(p).is_some_and(|v| v.is_some()))
                 {
                     let is_img_folded = editor.folded_image_previews.contains(&line_idx);
                     let is_hovered = editor.hovering_fold_line == Some(line_idx);
@@ -967,19 +971,20 @@ impl Element for EditorElement {
                         line_top + text_line_height + extra_height / 2.0
                     };
                     let fi_y = preview_center_y - fi_size / 2.0;
+                    let gs = &editor.styles.gutter;
                     let fi_alpha = if is_img_folded {
-                        0.75_f32
+                        gs.gutter_fold_folded_opacity
                     } else if is_hovered {
-                        0.7_f32
+                        gs.gutter_fold_hover_opacity
                     } else {
-                        0.0_f32
+                        gs.gutter_fold_default_opacity
                     };
                     if fi_alpha > 0.0 {
                         let rotation_deg = if is_img_folded { 0.0_f32 } else { 90.0_f32 };
                         let mut fi_color = if is_img_folded {
-                            theme.text_accent
+                            gs.gutter_fold_folded_color
                         } else {
-                            theme.text_secondary
+                            gs.gutter_fold_hover_color
                         };
                         fi_color.a = fi_alpha;
                         gutter_svgs.push((
@@ -1416,7 +1421,9 @@ impl Element for EditorElement {
             } else {
                 TransformationMatrix::default()
             };
-            window.paint_svg(*icon_bounds, (*icon_path).into(), transform, *color, cx).ok();
+            window
+                .paint_svg(*icon_bounds, (*icon_path).into(), transform, *color, cx)
+                .ok();
         }
         for (shaped, origin, line_height) in &prepaint.gutter_labels {
             shaped.paint(*origin, *line_height, window, cx).ok();
@@ -1493,13 +1500,15 @@ impl Element for EditorElement {
             let theme = &self.editor.read(cx).theme;
             let mut color = theme.text_secondary;
             color.a = *alpha;
-            window.paint_svg(
-                *icon_bounds,
-                OPEN_SVG_PATH.into(),
-                TransformationMatrix::default(),
-                color,
-                cx,
-            ).ok();
+            window
+                .paint_svg(
+                    *icon_bounds,
+                    OPEN_SVG_PATH.into(),
+                    TransformationMatrix::default(),
+                    color,
+                    cx,
+                )
+                .ok();
         }
 
         for cursor in prepaint.cursor_quads.drain(..) {

@@ -138,7 +138,6 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
     let parser = Parser::new_ext(text, opts);
 
     let mut in_code_block = false;
-    let mut code_block_start_line: Option<usize> = None;
     let mut current_code_language: Option<String> = None;
     let mut in_blockquote = false;
     let mut inline_stack: Vec<(InlineKind, usize, Option<String>)> = Vec::new();
@@ -177,7 +176,6 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
             Event::Start(Tag::CodeBlock(kind)) => {
                 let line = offset_to_line(source_range.start);
                 in_code_block = true;
-                code_block_start_line = Some(line);
                 current_code_language = match kind {
                     CodeBlockKind::Fenced(info) => {
                         let first = info.split_whitespace().next().unwrap_or_default().trim();
@@ -203,7 +201,6 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
             }
             Event::End(TagEnd::CodeBlock) => {
                 in_code_block = false;
-                code_block_start_line = None;
                 current_code_language = None;
                 let line = offset_to_line(source_range.end.saturating_sub(1));
                 if line < decorations.len() && decorations[line].block_type == BlockType::Normal {
@@ -459,21 +456,10 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
         }
     }
 
-    // If the code block was never closed, revert its decorations to Normal
-    if in_code_block {
-        if let Some(start) = code_block_start_line {
-            for d in decorations[start..].iter_mut() {
-                if matches!(
-                    d.block_type,
-                    BlockType::CodeBlock | BlockType::CodeBlockFence
-                ) {
-                    d.block_type = BlockType::Normal;
-                    d.code_language = None;
-                    d.syntax_ranges.clear();
-                }
-            }
-        }
-    }
+    // Re-validate code blocks by matching fence markers from bottom to top.
+    // This prevents typing a new opening ``` from "stealing" the closing
+    // ``` of an existing code block below.
+    revalidate_code_fences(&mut decorations, text, &line_starts);
 
     // Second pass: detect table lines
     detect_tables(&mut decorations, text, &line_starts);
@@ -697,6 +683,75 @@ pub fn parse_table_cells_with_ranges(content: &str) -> Vec<(String, Range<usize>
     cells.push((text, range));
 
     cells
+}
+
+/// Re-validate code blocks by matching fence lines (```) from bottom to top.
+/// This ensures existing code blocks at the bottom stay intact when a new
+/// ``` is typed or appears at the top.
+fn revalidate_code_fences(decorations: &mut [LineDecoration], text: &str, line_starts: &[usize]) {
+    let line_count = decorations.len();
+
+    // Collect all fence line indices by checking the raw text
+    let mut fence_lines: Vec<usize> = Vec::new();
+    for i in 0..line_count {
+        let content = get_line_content(text, line_starts, i, line_count);
+        let trimmed = content.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fence_lines.push(i);
+        }
+    }
+
+    // Match fences in pairs from the end (last pair first)
+    let mut paired: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut i = fence_lines.len();
+    while i >= 2 {
+        i -= 1;
+        let close = fence_lines[i];
+        if paired.contains(&close) {
+            continue;
+        }
+        let open = fence_lines[i - 1];
+        if paired.contains(&open) {
+            continue;
+        }
+        // The open fence must come before the close fence with at least one line between
+        // or be adjacent (empty code block)
+        if open < close {
+            paired.insert(open);
+            paired.insert(close);
+            i -= 1;
+        }
+    }
+
+    // Now reset decorations for all lines that are CodeBlock/CodeBlockFence
+    // but are NOT within a valid paired range
+    let mut valid_code_lines: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let sorted_fences: Vec<usize> = {
+        let mut v: Vec<usize> = paired.iter().copied().collect();
+        v.sort();
+        v
+    };
+    let mut fi = 0;
+    while fi + 1 < sorted_fences.len() {
+        let open = sorted_fences[fi];
+        let close = sorted_fences[fi + 1];
+        for line in open..=close {
+            valid_code_lines.insert(line);
+        }
+        fi += 2;
+    }
+
+    for (i, d) in decorations.iter_mut().enumerate() {
+        if matches!(
+            d.block_type,
+            BlockType::CodeBlock | BlockType::CodeBlockFence
+        ) && !valid_code_lines.contains(&i)
+        {
+            d.block_type = BlockType::Normal;
+            d.code_language = None;
+            d.syntax_ranges.clear();
+        }
+    }
 }
 
 fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[usize]) {
