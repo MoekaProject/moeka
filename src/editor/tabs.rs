@@ -709,9 +709,11 @@ impl EditorView {
                     title: drag_title,
                 },
                 {
+                    let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
                     move |_dragged, _offset, _window, cx| {
                         cx.new(|_cx| DraggedTabView {
                             title: _dragged.title.clone(),
+                            font_size_px: ghost_font_size_px,
                         })
                     }
                 },

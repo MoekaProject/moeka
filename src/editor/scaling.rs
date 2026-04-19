@@ -43,15 +43,14 @@ impl EditorView {
     }
 
     pub(crate) fn font_size_for_block(&self, block_type: &BlockType) -> f32 {
-        let base = self.base_font_size();
         match block_type {
-            BlockType::Heading(1) => base * 1.8,
-            BlockType::Heading(2) => base * 1.5,
-            BlockType::Heading(3) => base * 1.3,
-            BlockType::Heading(4) => base * 1.15,
-            BlockType::Heading(5) => base * 1.05,
-            BlockType::Heading(6) => base * 1.0,
-            _ => base,
+            BlockType::Heading(1) => self.scaled(self.styles.editor.editor_h1_font_size_px),
+            BlockType::Heading(2) => self.scaled(self.styles.editor.editor_h2_font_size_px),
+            BlockType::Heading(3) => self.scaled(self.styles.editor.editor_h3_font_size_px),
+            BlockType::Heading(4) => self.scaled(self.styles.editor.editor_h4_font_size_px),
+            BlockType::Heading(5) => self.scaled(self.styles.editor.editor_h5_font_size_px),
+            BlockType::Heading(6) => self.scaled(self.styles.editor.editor_h6_font_size_px),
+            _ => self.base_font_size(),
         }
     }
 

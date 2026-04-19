@@ -359,6 +359,7 @@ pub(crate) struct DraggedSidebarItems {
 pub(crate) struct DraggedSidebarItemsView {
     pub label: String,
     pub count: usize,
+    pub font_size_px: f32,
 }
 
 impl Render for DraggedSidebarItemsView {
@@ -378,7 +379,7 @@ impl Render for DraggedSidebarItemsView {
             .py(px(4.0))
             .bg(gpui::rgb(0x2d2d2d))
             .text_color(gpui::rgb(0xcccccc))
-            .text_size(px(13.0))
+            .text_size(px(self.font_size_px))
             .rounded(px(4.0))
             .shadow_md()
             .child(text)
@@ -419,6 +420,7 @@ pub(crate) struct DraggedTab {
 
 pub(crate) struct DraggedTabView {
     pub title: String,
+    pub font_size_px: f32,
 }
 
 impl Render for DraggedTabView {
@@ -433,7 +435,7 @@ impl Render for DraggedTabView {
             .py(px(4.0))
             .bg(gpui::rgb(0x2d2d2d))
             .text_color(gpui::rgb(0xcccccc))
-            .text_size(px(13.0))
+            .text_size(px(self.font_size_px))
             .rounded(px(4.0))
             .shadow_md()
             .opacity(0.85)

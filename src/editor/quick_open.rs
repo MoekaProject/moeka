@@ -202,7 +202,7 @@ impl EditorView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(self.scaled(12.0)))
+                    .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
                     .text_color(text_secondary)
                     .child(message)
                     .into_any_element(),

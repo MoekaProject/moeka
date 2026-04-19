@@ -28,6 +28,7 @@ impl Render for EditorView {
             .flex_row()
             .overflow_hidden()
             .font_family(SharedString::from(self.styles.ui_font_family))
+            .text_size(px(self.scaled(self.styles.ui_font_size_px)))
             .bg(ws.window_bg)
             .border(px(ws.window_border_width_px))
             .border_color(ws.window_border_color)
@@ -208,7 +209,9 @@ impl Render for EditorView {
                                         .border_dashed()
                                         .border_color(border_color)
                                         .rounded_full()
-                                        .text_size(px(13.0))
+                                        .text_size(px(self.scaled(
+                                            self.styles.sidebar.sidebar_empty_btn_font_size_px,
+                                        )))
                                         .text_color(btn_color)
                                         .cursor(CursorStyle::Arrow)
                                         .hover(move |s| s.bg(bg_hover))

@@ -47,7 +47,7 @@ impl EditorView {
             .overflow_y_scroll()
             .track_scroll(&self.settings_scroll_handle)
             .bg(bg)
-            .text_size(px(self.scaled(13.0)))
+            .text_size(px(self.scaled(self.styles.ui_font_size_px)))
             .child(
                 div()
                     .max_w(px(self.scaled(560.0)))
@@ -60,7 +60,7 @@ impl EditorView {
                     // Title
                     .child(
                         div()
-                            .text_size(px(self.scaled(22.0)))
+                            .text_size(px(self.scaled(self.styles.ui_font_size_px + 9.0)))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(self.theme.text_bright)
                             .child("设置"),
@@ -84,7 +84,7 @@ impl EditorView {
             .gap(px(self.scaled(8.0)))
             .child(
                 div()
-                    .text_size(px(self.scaled(12.0)))
+                    .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(self.theme.text_secondary)
                     .child(label.to_uppercase()),

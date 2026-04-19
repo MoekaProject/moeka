@@ -941,10 +941,12 @@ impl EditorView {
                 el.on_drag(DraggedSidebarItems { paths: drag_paths }, {
                     let label = drag_label;
                     let count = drag_count;
+                    let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
                     move |_dragged, _offset, _window, cx| {
                         cx.new(|_cx| DraggedSidebarItemsView {
                             label: label.clone(),
                             count,
+                            font_size_px: ghost_font_size_px,
                         })
                     }
                 })

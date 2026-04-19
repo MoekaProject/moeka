@@ -1072,7 +1072,7 @@ impl EditorView {
                                     .items_center()
                                     .justify_center()
                                     .rounded_full()
-                                    .text_size(px(self.scaled(10.0)))
+                                    .text_size(px(self.scaled(self.styles.ui_font_size_px - 3.0)))
                                     .text_color(close_color)
                                     .cursor(CursorStyle::Arrow)
                                     .hover(move |s| {

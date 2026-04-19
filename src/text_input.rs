@@ -419,7 +419,7 @@ impl TextInput {
                     .px(px(8.0))
                     .flex()
                     .items_center()
-                    .text_size(px(12.0))
+                    .text_size(px(s.text_input_font_size_px - 1.0))
                     .text_color(item_text_color)
                     .rounded(px(4.0))
                     .when(enabled, |el| {
@@ -450,7 +450,7 @@ impl TextInput {
             .flex()
             .flex_col()
             .gap(px(1.0))
-            .text_size(px(12.0))
+            .text_size(px(s.text_input_font_size_px - 1.0))
             .line_height(px(26.0))
             .child(item("cut", "剪切", has_sel, cx, |this, w, cx| {
                 this.on_cut(&TextInputCut, w, cx);
