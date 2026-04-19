@@ -1119,6 +1119,105 @@ impl EditorView {
                 ));
                 (items, self.scaled(wss.ws_menu_width_px))
             }
+            ContextMenuKind::Table {
+                table_start_line,
+                row,
+                col,
+            } => {
+                let mut items = Vec::new();
+                let tsl = *table_start_line;
+                let r = *row;
+                let c = *col;
+                {
+                    let tsl = tsl;
+                    let r = r;
+                    items.push(self.render_context_menu_item(
+                        "上方新增行",
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.table_insert_row(tsl, r, true, cx);
+                        },
+                    ));
+                }
+                {
+                    let tsl = tsl;
+                    let r = r;
+                    items.push(self.render_context_menu_item(
+                        "下方新增行",
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.table_insert_row(tsl, r, false, cx);
+                        },
+                    ));
+                }
+                {
+                    let tsl = tsl;
+                    let c = c;
+                    items.push(self.render_context_menu_item(
+                        "左侧新增列",
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.table_insert_column(tsl, c, true, cx);
+                        },
+                    ));
+                }
+                {
+                    let tsl = tsl;
+                    let c = c;
+                    items.push(self.render_context_menu_item(
+                        "右侧新增列",
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.table_insert_column(tsl, c, false, cx);
+                        },
+                    ));
+                }
+                items.push(self.render_context_menu_separator());
+                {
+                    let tsl = tsl;
+                    let r = r;
+                    items.push(self.render_context_menu_item(
+                        "删除行",
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.table_delete_row(tsl, r, cx);
+                        },
+                    ));
+                }
+                {
+                    let tsl = tsl;
+                    let c = c;
+                    items.push(self.render_context_menu_item(
+                        "删除列",
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.table_delete_column(tsl, c, cx);
+                        },
+                    ));
+                }
+                items.push(self.render_context_menu_separator());
+                {
+                    let tsl = tsl;
+                    items.push(self.render_context_menu_item(
+                        "删除表格",
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.table_delete_table(tsl, cx);
+                        },
+                    ));
+                }
+                (
+                    items,
+                    self.scaled(self.styles.context_menu.menu_format_width_px),
+                )
+            }
         };
 
         let ms = &self.styles.context_menu;

@@ -44,6 +44,36 @@ impl EditorView {
             return;
         }
 
+        // Table column handle drag start
+        if let Some(&(_, table_start, col)) = self
+            .table_col_handle_areas
+            .iter()
+            .find(|(bounds, _, _)| bounds.contains(&event.position))
+        {
+            self.table_drag = Some(TableDragState::DraggingColumn {
+                table_start_line: table_start,
+                source_col: col,
+                current_x: f32::from(event.position.x),
+            });
+            cx.notify();
+            return;
+        }
+
+        // Table row handle drag start
+        if let Some(&(_, table_start, visual_row)) = self
+            .table_row_handle_areas
+            .iter()
+            .find(|(bounds, _, _)| bounds.contains(&event.position))
+        {
+            self.table_drag = Some(TableDragState::DraggingRow {
+                table_start_line: table_start,
+                source_row: visual_row,
+                current_y: f32::from(event.position.y),
+            });
+            cx.notify();
+            return;
+        }
+
         if let Some(line_idx) = self
             .image_click_areas
             .iter()
@@ -87,6 +117,49 @@ impl EditorView {
             self.hovering_checkbox = true;
             cx.notify();
             return;
+        }
+
+        // Table cell click: position cursor at the correct cell offset
+        if event.button == MouseButton::Left {
+            if let Some(&(bounds, table_start, visual_row, col)) = self
+                .table_click_areas
+                .iter()
+                .find(|(bounds, _, _, _)| bounds.contains(&event.position))
+            {
+                if let Some(source_line) = self.table_source_line_for_visual_row(table_start, visual_row) {
+                    if let Some(dec) = self.decorations.get(source_line) {
+                        if let Some(ref ti) = dec.table_info {
+                            if let Some(cell_range) = ti.cell_ranges.get(col) {
+                                let line_start = self.buffer.line_start(source_line);
+                                let cell_content = ti.cells.get(col).cloned().unwrap_or_default();
+                                let trimmed = cell_content.trim();
+                                let trim_offset = cell_content.len() - cell_content.trim_start().len();
+                                // Approximate character position based on click X within cell
+                                let click_x = f32::from(event.position.x) - f32::from(bounds.origin.x);
+                                let cell_w = f32::from(bounds.size.width);
+                                let char_count = trimmed.chars().count();
+                                let frac = (click_x / cell_w).clamp(0.0, 1.0);
+                                let char_idx = (frac * char_count as f32).round() as usize;
+                                let byte_offset: usize = trimmed.char_indices()
+                                    .nth(char_idx)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(trimmed.len());
+                                let offset = line_start + cell_range.start + trim_offset + byte_offset;
+                                if event.click_count >= 2 {
+                                    self.clear_extra_cursors();
+                                    self.select_word_at_offset(offset);
+                                    self.is_selecting = false;
+                                } else {
+                                    self.cursor.move_to(offset, &self.buffer);
+                                    self.is_selecting = true;
+                                }
+                                cx.notify();
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if event.button == MouseButton::Left && event.click_count >= 2 {
@@ -241,6 +314,25 @@ impl EditorView {
         if !clicked_selected_text {
             self.cursor.move_to(offset, &self.buffer);
         }
+
+        // Check if clicking inside a table cell
+        if let Some(&(_, table_start, visual_row, col)) = self
+            .table_click_areas
+            .iter()
+            .find(|(bounds, _, _, _)| bounds.contains(&event.position))
+        {
+            self.context_menu = Some(ContextMenu {
+                position: event.position,
+                kind: ContextMenuKind::Table {
+                    table_start_line: table_start,
+                    row: visual_row,
+                    col,
+                },
+            });
+            cx.notify();
+            return;
+        }
+
         self.open_format_context_menu(event.position, cx);
     }
 
@@ -311,10 +403,54 @@ impl EditorView {
 
     pub(crate) fn on_mouse_up(
         &mut self,
-        _: &MouseUpEvent,
+        event: &MouseUpEvent,
         _: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
+        // Handle table drag completion
+        if let Some(drag) = self.table_drag.take() {
+            match drag {
+                TableDragState::DraggingColumn {
+                    table_start_line,
+                    source_col,
+                    current_x,
+                } => {
+                    // Find target column from current_x position
+                    if let Some(target_col) = self.table_col_at_x(table_start_line, current_x) {
+                        if target_col != source_col {
+                            if let Some((start, end, lines)) =
+                                self.table_lines_for_block(table_start_line)
+                            {
+                                let new_lines =
+                                    crate::table_ops::move_column(&lines, source_col, target_col);
+                                self.replace_table_block(start, end, &new_lines);
+                            }
+                        }
+                    }
+                }
+                TableDragState::DraggingRow {
+                    table_start_line,
+                    source_row,
+                    current_y,
+                } => {
+                    if let Some(target_row) = self.table_row_at_y(table_start_line, current_y) {
+                        if target_row != source_row && source_row > 0 && target_row > 0 {
+                            if let Some((start, end, lines)) =
+                                self.table_lines_for_block(table_start_line)
+                            {
+                                let from_data = source_row.saturating_sub(1);
+                                let to_data = target_row.saturating_sub(1);
+                                let new_lines =
+                                    crate::table_ops::move_row(&lines, from_data, to_data);
+                                self.replace_table_block(start, end, &new_lines);
+                            }
+                        }
+                    }
+                }
+            }
+            cx.notify();
+            return;
+        }
         self.is_selecting = false;
     }
 
@@ -329,6 +465,20 @@ impl EditorView {
         if cmd != self.command_held {
             self.command_held = cmd;
             cx.notify();
+        }
+
+        // Update table drag position
+        if let Some(ref mut drag) = self.table_drag {
+            match drag {
+                TableDragState::DraggingColumn { current_x, .. } => {
+                    *current_x = f32::from(event.position.x);
+                }
+                TableDragState::DraggingRow { current_y, .. } => {
+                    *current_y = f32::from(event.position.y);
+                }
+            }
+            cx.notify();
+            return;
         }
 
         if self.context_menu.is_some() {
@@ -363,6 +513,22 @@ impl EditorView {
             cx.notify();
         }
 
+        // Track which table the mouse is hovering near (for handle visibility)
+        let hovering_table = self.table_click_areas.iter()
+            .find(|(bounds, _, _, _)| {
+                // Expand bounds slightly to include handle areas
+                let expanded = gpui::Bounds::new(
+                    gpui::point(bounds.origin.x - gpui::px(30.0), bounds.origin.y - gpui::px(30.0)),
+                    gpui::size(bounds.size.width + gpui::px(60.0), bounds.size.height + gpui::px(60.0)),
+                );
+                expanded.contains(&event.position)
+            })
+            .map(|(_, table_start, _, _)| *table_start);
+        if hovering_table != self.hovering_table_start {
+            self.hovering_table_start = hovering_table;
+            cx.notify();
+        }
+
         if self.is_selecting {
             let pos_y: f32 = event.position.y.into();
             let origin_y: f32 = self.content_origin.y.into();
@@ -386,6 +552,67 @@ impl EditorView {
             self.cursor.select_to(offset, &self.buffer);
             cx.notify();
         }
+    }
+
+    /// Find which column index a given x position corresponds to in a table.
+    fn table_col_at_x(&self, table_start_line: usize, x: f32) -> Option<usize> {
+        let areas: Vec<_> = self
+            .table_col_handle_areas
+            .iter()
+            .filter(|(_, tsl, _)| *tsl == table_start_line)
+            .collect();
+        // Find the closest column midpoint
+        let mut best_col = None;
+        let mut best_dist = f32::MAX;
+        for (bounds, _, col) in &areas {
+            let mid_x: f32 = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0;
+            let dist = (x - mid_x).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best_col = Some(*col);
+            }
+        }
+        best_col
+    }
+
+    /// Find which visual row a given y position corresponds to in a table.
+    fn table_row_at_y(&self, table_start_line: usize, y: f32) -> Option<usize> {
+        let areas: Vec<_> = self
+            .table_row_handle_areas
+            .iter()
+            .filter(|(_, tsl, _)| *tsl == table_start_line)
+            .collect();
+        let mut best_row = None;
+        let mut best_dist = f32::MAX;
+        for (bounds, _, row) in &areas {
+            let mid_y: f32 = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
+            let dist = (y - mid_y).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best_row = Some(*row);
+            }
+        }
+        best_row
+    }
+
+    /// Map a visual row index (skipping separator rows) back to the source buffer line.
+    fn table_source_line_for_visual_row(&self, table_start: usize, visual_row: usize) -> Option<usize> {
+        let header_info = self.decorations.get(table_start)?.table_info.as_ref()?;
+        let end = header_info.table_end_line;
+        let mut vi = 0;
+        for line_idx in table_start..end {
+            if let Some(dec) = self.decorations.get(line_idx) {
+                if let Some(ref ti) = dec.table_info {
+                    if !ti.is_separator {
+                        if vi == visual_row {
+                            return Some(line_idx);
+                        }
+                        vi += 1;
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub(crate) fn on_scroll(

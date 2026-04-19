@@ -6,6 +6,7 @@ mod cursor;
 mod editor;
 mod markdown;
 mod style;
+mod table_ops;
 mod text_input;
 mod theme;
 

@@ -73,6 +73,13 @@ pub struct LineDecoration {
     pub image_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TableAlign {
+    Left,
+    Center,
+    Right,
+}
+
 #[derive(Debug, Clone)]
 pub struct TableLineInfo {
     pub cells: Vec<String>,
@@ -82,6 +89,7 @@ pub struct TableLineInfo {
     pub table_start_line: usize,
     pub table_end_line: usize,
     pub column_widths: Vec<usize>,
+    pub aligns: Vec<TableAlign>,
 }
 
 impl Default for LineDecoration {
@@ -621,6 +629,19 @@ pub fn is_separator_row(cells: &[String]) -> bool {
     })
 }
 
+fn parse_column_align(cell: &str) -> TableAlign {
+    let t = cell.trim();
+    let starts_colon = t.starts_with(':');
+    let ends_colon = t.ends_with(':');
+    if starts_colon && ends_colon {
+        TableAlign::Center
+    } else if ends_colon {
+        TableAlign::Right
+    } else {
+        TableAlign::Left
+    }
+}
+
 pub fn parse_table_cells(content: &str) -> Vec<String> {
     parse_table_cells_with_ranges(content)
         .into_iter()
@@ -800,6 +821,19 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
                     *w = (*w).max(3);
                 }
 
+                // Parse column alignments from separator row
+                let mut aligns = vec![TableAlign::Left; max_cols];
+                for row in &all_cells {
+                    if is_separator_row(row) {
+                        for (ci, cell) in row.iter().enumerate() {
+                            if ci < max_cols {
+                                aligns[ci] = parse_column_align(cell);
+                            }
+                        }
+                        break;
+                    }
+                }
+
                 for (ri, l) in (table_start..table_end).enumerate() {
                     let is_sep = is_separator_row(&all_cells[ri]);
                     decorations[l].block_type = BlockType::Table;
@@ -814,6 +848,7 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
                         table_start_line: table_start,
                         table_end_line: table_end,
                         column_widths: col_widths.clone(),
+                        aligns: aligns.clone(),
                     });
                     // Mark entire line as syntax (hidden when folded)
                     let line_len = get_line_content(text, line_starts, l, line_count).len();

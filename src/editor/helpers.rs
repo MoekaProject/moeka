@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use gpui::{
-    Bounds, Font, FontStyle, FontWeight, Hsla, LineLayout, PaintQuad, Pixels, SharedString,
-    ShapedGlyph, ShapedRun, StrikethroughStyle, TextRun, Window, WrappedLine, WrappedLineLayout,
+    Bounds, Font, FontStyle, FontWeight, Hsla, LineLayout, PaintQuad, Pixels, ShapedGlyph,
+    ShapedRun, SharedString, StrikethroughStyle, TextRun, Window, WrappedLine, WrappedLineLayout,
     fill, point, px,
 };
 
@@ -458,6 +458,206 @@ pub(crate) fn compute_table_render_widths(
     }
 
     widths
+}
+
+/// Layout information for a table rendered as a block element.
+#[derive(Debug, Clone)]
+pub(crate) struct TableCellLayout {
+    /// Pixel bounds of the cell (relative to table origin).
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// Row index (0 = header, 1+ = data rows; separator rows skipped in visual layout).
+    pub visual_row: usize,
+    /// Column index.
+    pub col: usize,
+    /// The display text for this cell (with inline markdown folded).
+    pub display_text: String,
+    /// Mapping from display offset → buffer offset within the cell.
+    pub display_to_buffer: Vec<usize>,
+    /// Mapping from buffer offset → display offset within the cell.
+    pub buffer_to_display: Vec<usize>,
+    /// The original cell byte range within its source line.
+    pub cell_range: Range<usize>,
+    /// Source line index in the buffer.
+    pub source_line: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TableLayout {
+    /// Total pixel width of the table.
+    pub total_width: f32,
+    /// Total pixel height of the table (excluding handles).
+    pub total_height: f32,
+    /// Pixel widths for each column.
+    pub col_widths: Vec<f32>,
+    /// Pixel heights for each visual row.
+    pub row_heights: Vec<f32>,
+    /// Cell layouts indexed as [visual_row][col].
+    pub cells: Vec<Vec<TableCellLayout>>,
+    /// Number of visual rows (header + data rows, separator excluded).
+    pub visual_row_count: usize,
+    /// Number of columns.
+    pub col_count: usize,
+    /// The handle area size in pixels.
+    pub handle_size: f32,
+    /// Cell padding in pixels (horizontal, each side).
+    pub cell_padding_x: f32,
+    /// Cell padding in pixels (vertical, each side).
+    pub cell_padding_y: f32,
+    /// Maps visual_row → source line index in the buffer.
+    pub visual_row_to_line: Vec<usize>,
+    /// The cell text color for styling.
+    pub is_header: Vec<bool>,
+}
+
+/// Compute the full table layout from decoration data of all lines in the table block.
+/// - `decorations`: all parsed line decorations
+/// - `table_start`, `table_end`: line range of the table
+/// - `available_width`: pixel width available for the table
+/// - `cell_padding_x`, `cell_padding_y`: pixel padding per cell side
+/// - `base_char_width`: width of a monospace character in pixels
+/// - `line_height`: text line height in pixels
+/// - `handle_size`: drag-handle area size in pixels
+pub(crate) fn compute_table_layout(
+    decorations: &[LineDecoration],
+    table_start: usize,
+    table_end: usize,
+    available_width: f32,
+    cell_padding_x: f32,
+    cell_padding_y: f32,
+    base_char_width: f32,
+    line_height: f32,
+    handle_size: f32,
+) -> TableLayout {
+    // Collect non-separator rows with their line indices
+    let mut visual_rows: Vec<(usize, &TableLineInfo)> = Vec::new();
+    for line_idx in table_start..table_end {
+        if let Some(ref ti) = decorations
+            .get(line_idx)
+            .and_then(|d| d.table_info.as_ref())
+        {
+            if !ti.is_separator {
+                visual_rows.push((line_idx, ti));
+            }
+        }
+    }
+
+    let col_count = visual_rows
+        .first()
+        .map(|(_, ti)| ti.cells.len())
+        .unwrap_or(1);
+
+    // Measure desired column widths based on content
+    let mut desired_col_widths_chars = vec![3usize; col_count];
+    for (_, ti) in &visual_rows {
+        for (ci, cell) in ti.cells.iter().enumerate() {
+            if ci < col_count {
+                desired_col_widths_chars[ci] =
+                    desired_col_widths_chars[ci].max(display_width(cell.trim()));
+            }
+        }
+    }
+
+    // Convert to pixel widths, respecting available_width
+    let total_padding = cell_padding_x * 2.0 * col_count as f32;
+    let content_width = (available_width - total_padding).max(col_count as f32 * 28.0);
+    let desired_total: f32 = desired_col_widths_chars
+        .iter()
+        .map(|&w| w as f32 * base_char_width)
+        .sum();
+
+    let col_widths: Vec<f32> = if desired_total <= content_width {
+        // Enough space: use desired widths + distribute remaining space
+        let extra = content_width - desired_total;
+        let extra_per_col = extra / col_count as f32;
+        desired_col_widths_chars
+            .iter()
+            .map(|&w| w as f32 * base_char_width + extra_per_col)
+            .collect()
+    } else {
+        // Not enough: scale proportionally, with minimum 28px
+        let min_col = 28.0_f32;
+        let scale = content_width / desired_total;
+        desired_col_widths_chars
+            .iter()
+            .map(|&w| (w as f32 * base_char_width * scale).max(min_col))
+            .collect()
+    };
+
+    let row_height = line_height + cell_padding_y * 2.0;
+    let row_heights = vec![row_height; visual_rows.len()];
+    let total_width = col_widths.iter().sum::<f32>() + total_padding;
+    let total_height = row_height * visual_rows.len() as f32;
+
+    // Build cell layouts
+    let mut all_cells: Vec<Vec<TableCellLayout>> = Vec::new();
+    let mut visual_row_to_line = Vec::new();
+    let mut is_header_vec = Vec::new();
+
+    let mut current_y = 0.0_f32;
+    for (vi, (line_idx, ti)) in visual_rows.iter().enumerate() {
+        visual_row_to_line.push(*line_idx);
+        is_header_vec.push(ti.is_header);
+        let mut row_cells = Vec::new();
+        let mut current_x = 0.0_f32;
+        for ci in 0..col_count {
+            let cell_content = ti.cells.get(ci).cloned().unwrap_or_default();
+            let cell_range = ti.cell_ranges.get(ci).cloned().unwrap_or(0..0);
+
+            // Build display text for cell with inline markdown folding
+            let cell_decoration = markdown::parse_decorations(&cell_content)
+                .into_iter()
+                .next()
+                .unwrap_or_default();
+            let (folded_raw, d2b_raw, b2d_raw, _) =
+                build_display_text(&cell_content, &cell_decoration, None, false, None, 0, 0, 0);
+            let trimmed = folded_raw.trim();
+            let trim_start = folded_raw.len() - folded_raw.trim_start().len();
+            let trim_end = folded_raw.len() - folded_raw.trim_end().len();
+            let display_text = trimmed.to_string();
+            let d2b = d2b_raw[trim_start..d2b_raw.len() - trim_end].to_vec();
+            let b2d = b2d_raw
+                .iter()
+                .map(|&d| d.saturating_sub(trim_start))
+                .collect();
+
+            let col_w = col_widths.get(ci).copied().unwrap_or(28.0);
+            let cell_w = col_w + cell_padding_x * 2.0;
+            row_cells.push(TableCellLayout {
+                x: current_x,
+                y: current_y,
+                width: cell_w,
+                height: row_height,
+                visual_row: vi,
+                col: ci,
+                display_text,
+                display_to_buffer: d2b,
+                buffer_to_display: b2d,
+                cell_range,
+                source_line: *line_idx,
+            });
+            current_x += cell_w;
+        }
+        all_cells.push(row_cells);
+        current_y += row_height;
+    }
+
+    TableLayout {
+        total_width,
+        total_height,
+        col_widths,
+        row_heights,
+        cells: all_cells,
+        visual_row_count: visual_rows.len(),
+        col_count,
+        handle_size,
+        cell_padding_x,
+        cell_padding_y,
+        visual_row_to_line,
+        is_header: is_header_vec,
+    }
 }
 
 pub(crate) fn build_selection_quads(

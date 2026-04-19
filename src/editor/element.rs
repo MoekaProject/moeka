@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
@@ -43,6 +44,16 @@ pub(crate) struct EditorPrepaintState {
     image_edit_icons: Vec<(Bounds<Pixels>, usize, f32)>,
     /// Blue wavy underlines for links when cmd is held
     link_underlines: Vec<PaintQuad>,
+    /// Per-cell shaped texts for table block rendering.
+    table_cell_texts: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
+}
+
+/// Per-cell shape info for cursor/selection positioning in table rows.
+struct TableCellShape {
+    shaped: WrappedLine,
+    origin: Point<Pixels>,
+    /// Byte range of this cell within its source line (in the buffer).
+    cell_range: Range<usize>,
 }
 
 struct PrepaintLine {
@@ -51,6 +62,10 @@ struct PrepaintLine {
     line_height: Pixels,
     /// Per-visual-line shaped segments for indented painting.
     segments: Option<Vec<(WrappedLine, Point<Pixels>)>>,
+    /// True if this line is a table row rendered via per-cell block mode.
+    is_table_block: bool,
+    /// Per-cell shapes for cursor/selection on table rows.
+    table_cells: Option<Vec<TableCellShape>>,
 }
 
 impl IntoElement for EditorElement {
@@ -164,6 +179,11 @@ impl Element for EditorElement {
         let mut image_borders: Vec<PaintQuad> = Vec::new();
         let mut table_borders: Vec<PaintQuad> = Vec::new();
         let mut table_bgs: Vec<PaintQuad> = Vec::new();
+        let mut table_cell_texts: Vec<(WrappedLine, Point<Pixels>, Pixels)> = Vec::new();
+        let mut table_click_areas_local: Vec<(Bounds<Pixels>, usize, usize, usize)> = Vec::new();
+        let mut table_col_handle_areas_local: Vec<(Bounds<Pixels>, usize, usize)> = Vec::new();
+        let mut table_row_handle_areas_local: Vec<(Bounds<Pixels>, usize, usize)> = Vec::new();
+        let mut table_layout_cache: HashMap<usize, helpers::TableLayout> = HashMap::new();
         let mut image_edit_icons: Vec<(Bounds<Pixels>, usize, f32)> = Vec::new();
         let mut image_edit_hit_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut gutter_fold_hit_areas_local: Vec<(Bounds<Pixels>, usize, bool)> = Vec::new();
@@ -411,12 +431,14 @@ impl Element for EditorElement {
                 None
             };
 
-            let hide_table_separator = matches!(block_type, BlockType::Table)
-                && decoration
-                    .table_info
-                    .as_ref()
-                    .is_some_and(|table_info| table_info.is_separator);
-            if hide_table_separator {
+            // Hide all non-first-row table lines (rendered as block on the first row)
+            let hide_table_line = matches!(block_type, BlockType::Table)
+                && decoration.table_info.as_ref().is_some_and(|ti| {
+                    // Hide separator rows and all data rows
+                    // Only the first row (header) is kept as anchor for the table block
+                    ti.is_separator || !ti.is_header
+                });
+            if hide_table_line {
                 let blank_run = TextRun {
                     len: 1,
                     font: body_font.clone(),
@@ -586,7 +608,42 @@ impl Element for EditorElement {
                 0.0
             };
 
-            let extra_height = block_padding_top + block_padding_bottom + image_extra_height;
+            // Compute table block extra height for header line (table rendered as block below)
+            let table_extra_height = if *block_type == BlockType::Table {
+                if let Some(ref ti) = decoration.table_info {
+                    if ti.is_header {
+                        let layout = table_layout_cache
+                            .entry(ti.table_start_line)
+                            .or_insert_with(|| {
+                                let table_styles = &editor.styles.table;
+                                helpers::compute_table_layout(
+                                    &decorations,
+                                    ti.table_start_line,
+                                    ti.table_end_line,
+                                    text_width,
+                                    editor.scaled(table_styles.table_cell_padding_px),
+                                    editor.scaled(table_styles.table_cell_padding_px) * 0.6,
+                                    base_char_width,
+                                    line_height,
+                                    editor.scaled(table_styles.table_handle_size_px),
+                                )
+                            })
+                            .clone();
+                        // Subtract line_height since the header line's text area
+                        // (which is hidden via is_table_block) already occupies one line_height.
+                        (layout.total_height - line_height).max(0.0)
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+
+            let extra_height =
+                block_padding_top + block_padding_bottom + image_extra_height + table_extra_height;
             let total_line_height = text_line_height + extra_height;
 
             let line_top = y - scroll_offset;
@@ -693,86 +750,406 @@ impl Element for EditorElement {
                 ));
             }
 
-            // Table rendering
+            // Table rendering (independent visual block on header line)
             if *block_type == BlockType::Table {
                 if let Some(ref ti) = decoration.table_info {
-                    let border_color = theme.border_decorative;
-                    let border_w = 1.0_f32;
-                    let table_left = editor_left + editor.padding_left();
-                    let table_right = editor_left + editor.padding_left() + text_width;
-                    let table_width = table_right - table_left;
+                    if ti.is_header {
+                        let table_styles = &editor.styles.table;
+                        let border_color = table_styles.table_border_color;
+                        let border_w = table_styles.table_border_width_px;
+                        let table_left = editor_left + editor.padding_left();
 
-                    if ti.is_separator {
-                        table_borders.push(fill(
-                            Bounds::new(
-                                point(px(table_left), px(line_top)),
-                                size(px(table_width), px(border_w)),
-                            ),
-                            border_color,
-                        ));
-                    } else {
-                        if ti.is_header {
-                            table_bgs.push(fill(
+                        // Get or compute the cached table layout
+                        let layout = table_layout_cache
+                            .entry(ti.table_start_line)
+                            .or_insert_with(|| {
+                                helpers::compute_table_layout(
+                                    &decorations,
+                                    ti.table_start_line,
+                                    ti.table_end_line,
+                                    text_width,
+                                    table_cell_padding_px,
+                                    table_cell_padding_px * 0.6,
+                                    base_char_width,
+                                    line_height,
+                                    editor.scaled(table_styles.table_handle_size_px),
+                                )
+                            })
+                            .clone();
+
+                        let table_width = layout.total_width.min(text_width);
+                        // Table block starts at text_line_top (header text is hidden)
+                        let table_top = text_line_top;
+
+                        // Selection highlight: blue border when selection covers table
+                        let table_block_start_offset =
+                            buffer.line_start(ti.table_start_line);
+                        let table_block_end_offset =
+                            buffer.line_end(ti.table_end_line.saturating_sub(1));
+                        let selection_overlaps_table = all_sel_ranges.iter().any(|sr| {
+                            sr.start != sr.end
+                                && sr.start < table_block_end_offset
+                                && sr.end > table_block_start_offset
+                        });
+                        if selection_overlaps_table {
+                            let sel_border_w = table_styles.table_selection_border_width_px;
+                            table_borders.push(quad(
                                 Bounds::new(
-                                    point(px(table_left), px(line_top)),
-                                    size(px(table_width), px(text_line_height)),
+                                    point(
+                                        px(table_left - sel_border_w),
+                                        px(table_top - sel_border_w),
+                                    ),
+                                    size(
+                                        px(table_width + sel_border_w * 2.0),
+                                        px(layout.total_height + sel_border_w * 2.0),
+                                    ),
                                 ),
-                                theme.bg_code,
+                                Corners::all(px(4.0)),
+                                gpui::transparent_black(),
+                                px(sel_border_w),
+                                theme.cursor,
+                                BorderStyle::default(),
                             ));
                         }
 
-                        table_borders.push(fill(
-                            Bounds::new(
-                                point(px(table_left), px(line_top)),
-                                size(px(table_width), px(border_w)),
-                            ),
-                            border_color,
-                        ));
-                        table_borders.push(fill(
-                            Bounds::new(
-                                point(px(table_left), px(line_top + text_line_height - border_w)),
-                                size(px(table_width), px(border_w)),
-                            ),
-                            border_color,
-                        ));
-                        table_borders.push(fill(
-                            Bounds::new(
-                                point(px(table_left), px(line_top)),
-                                size(px(border_w), px(text_line_height)),
-                            ),
-                            border_color,
-                        ));
-                        table_borders.push(fill(
-                            Bounds::new(
-                                point(px(table_right - border_w), px(line_top)),
-                                size(px(border_w), px(text_line_height)),
-                            ),
-                            border_color,
-                        ));
-
-                        let render_col_widths = helpers::compute_table_render_widths(
-                            ti,
-                            table_width_chars,
-                            table_cell_padding_chars,
-                        );
-                        let mut col_x_offset = 0;
-                        for (ci, cell) in ti.cells.iter().enumerate() {
-                            let cell_chars = helpers::display_width(cell.trim());
-                            let col_w = render_col_widths
-                                .get(ci)
+                        // Render ALL visual rows of the table block
+                        for vi in 0..layout.visual_row_count {
+                            let row_y = table_top
+                                + layout
+                                    .row_heights
+                                    .iter()
+                                    .take(vi)
+                                    .sum::<f32>();
+                            let row_h = layout
+                                .row_heights
+                                .get(vi)
                                 .copied()
-                                .unwrap_or(cell_chars)
-                                .max(cell_chars);
-                            col_x_offset += col_w + table_cell_padding_chars * 2;
-                            if ci + 1 < ti.cells.len() {
-                                let sep_x = table_left + col_x_offset as f32 * base_char_width;
-                                table_borders.push(fill(
+                                .unwrap_or(line_height);
+
+                            // Header background
+                            if layout.is_header.get(vi).copied().unwrap_or(false) {
+                                table_bgs.push(fill(
                                     Bounds::new(
-                                        point(px(sep_x), px(line_top)),
-                                        size(px(border_w), px(text_line_height)),
+                                        point(px(table_left), px(row_y)),
+                                        size(px(table_width), px(row_h)),
                                     ),
-                                    border_color,
+                                    table_styles.table_header_bg,
                                 ));
+                            }
+
+                            // Row borders: top
+                            table_borders.push(fill(
+                                Bounds::new(
+                                    point(px(table_left), px(row_y)),
+                                    size(px(table_width), px(border_w)),
+                                ),
+                                border_color,
+                            ));
+                            // Bottom (only for last row, or each row)
+                            table_borders.push(fill(
+                                Bounds::new(
+                                    point(px(table_left), px(row_y + row_h - border_w)),
+                                    size(px(table_width), px(border_w)),
+                                ),
+                                border_color,
+                            ));
+                            // Left border
+                            table_borders.push(fill(
+                                Bounds::new(
+                                    point(px(table_left), px(row_y)),
+                                    size(px(border_w), px(row_h)),
+                                ),
+                                border_color,
+                            ));
+                            // Right border
+                            table_borders.push(fill(
+                                Bounds::new(
+                                    point(
+                                        px(table_left + table_width - border_w),
+                                        px(row_y),
+                                    ),
+                                    size(px(border_w), px(row_h)),
+                                ),
+                                border_color,
+                            ));
+
+                            // Column separator borders
+                            let mut col_x = 0.0_f32;
+                            for ci in 0..layout.col_count {
+                                let cell_w = layout
+                                    .cells
+                                    .get(vi)
+                                    .and_then(|row| row.get(ci))
+                                    .map(|c| c.width)
+                                    .unwrap_or(0.0);
+                                col_x += cell_w;
+                                if ci + 1 < layout.col_count {
+                                    table_borders.push(fill(
+                                        Bounds::new(
+                                            point(px(table_left + col_x), px(row_y)),
+                                            size(px(border_w), px(row_h)),
+                                        ),
+                                        border_color,
+                                    ));
+                                }
+                            }
+
+                            // Get the source line info for this visual row
+                            let source_line = layout
+                                .visual_row_to_line
+                                .get(vi)
+                                .copied()
+                                .unwrap_or(line_idx);
+                            let row_ti = decorations
+                                .get(source_line)
+                                .and_then(|d| d.table_info.as_ref());
+
+                            // Per-cell text shaping
+                            if let Some(row_cells) = layout.cells.get(vi) {
+                                for cell_layout in row_cells {
+                                    let cell_content = row_ti
+                                        .and_then(|t| t.cells.get(cell_layout.col))
+                                        .cloned()
+                                        .unwrap_or_default();
+
+                                    let cell_text: SharedString =
+                                        if cell_layout.display_text.is_empty() {
+                                            " ".into()
+                                        } else {
+                                            cell_layout.display_text.clone().into()
+                                        };
+
+                                    let cell_decoration =
+                                        crate::markdown::parse_decorations(&cell_content)
+                                            .into_iter()
+                                            .next()
+                                            .unwrap_or_default();
+
+                                    let cell_runs = helpers::build_text_runs_for_display(
+                                        &cell_layout.display_text,
+                                        &cell_content,
+                                        &cell_layout.display_to_buffer,
+                                        &cell_decoration,
+                                        None,
+                                        false,
+                                        false,
+                                        &body_font,
+                                        &body_cjk_font,
+                                        &monospace_font,
+                                        &heading_font,
+                                        &heading_cjk_font,
+                                        0,
+                                        font_size,
+                                        theme,
+                                    );
+
+                                    // Apply header bold weight
+                                    let cell_runs = if layout
+                                        .is_header
+                                        .get(vi)
+                                        .copied()
+                                        .unwrap_or(false)
+                                    {
+                                        cell_runs
+                                            .into_iter()
+                                            .map(|mut r| {
+                                                r.font.weight = gpui::FontWeight::BOLD;
+                                                r
+                                            })
+                                            .collect()
+                                    } else {
+                                        cell_runs
+                                    };
+
+                                    let cell_x =
+                                        table_left + cell_layout.x + layout.cell_padding_x;
+                                    let cell_text_y = row_y + layout.cell_padding_y;
+
+                                    if let Ok(shaped_lines) = window.text_system().shape_text(
+                                        cell_text,
+                                        px(font_size),
+                                        &cell_runs,
+                                        None,
+                                        None,
+                                    ) {
+                                        if let Some(shaped) = shaped_lines.into_iter().next() {
+                                            // Paint cursors within this cell
+                                            if window.is_window_active()
+                                                && editor.focus_handle.is_focused(window)
+                                                && editor.focused_sidebar_path.is_none()
+                                                && (editor.cursor_opacity > 0.0 || editor.is_selecting)
+                                            {
+                                                let cell_range_opt = row_ti
+                                                    .and_then(|t| t.cell_ranges.get(cell_layout.col));
+                                                if let Some(cell_range) = cell_range_opt {
+                                                    let line_start_off = buffer.line_start(source_line);
+                                                    let cell_buf_start = line_start_off + cell_range.start;
+                                                    let cell_buf_end = line_start_off + cell_range.end;
+                                                    for &cur_off in &all_cursor_offsets {
+                                                        if cur_off >= cell_buf_start && cur_off <= cell_buf_end {
+                                                            let in_cell = cur_off - cell_buf_start;
+                                                            let disp_col = helpers::buffer_to_display_offset(
+                                                                &cell_layout.buffer_to_display,
+                                                                in_cell,
+                                                            );
+                                                            let disp_col = disp_col.min(cell_layout.display_text.len());
+                                                            if let Some(pos) = shaped.position_for_index(
+                                                                disp_col,
+                                                                px(line_height),
+                                                            ) {
+                                                                let cursor_height = line_height
+                                                                    * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
+                                                                let cursor_top = cell_text_y
+                                                                    + f32::from(pos.y)
+                                                                    + (line_height - cursor_height) / 2.0;
+                                                                let mut cursor_color = theme.cursor;
+                                                                cursor_color.a *= if editor.is_selecting {
+                                                                    editor.styles.cursor.cursor_opacity_max
+                                                                } else {
+                                                                    editor.cursor_opacity
+                                                                };
+                                                                cursor_quads.push(fill(
+                                                                    Bounds::new(
+                                                                        point(
+                                                                            px(cell_x) + pos.x,
+                                                                            px(cursor_top),
+                                                                        ),
+                                                                        size(
+                                                                            px(editor.styles.cursor.cursor_width_px),
+                                                                            px(cursor_height),
+                                                                        ),
+                                                                    ),
+                                                                    cursor_color,
+                                                                ));
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            table_cell_texts.push((
+                                                shaped,
+                                                point(px(cell_x), px(cell_text_y)),
+                                                px(line_height),
+                                            ));
+                                        }
+                                    }
+
+                                    // Register cell click area
+                                    let click_bounds = Bounds::new(
+                                        point(px(table_left + cell_layout.x), px(row_y)),
+                                        size(px(cell_layout.width), px(row_h)),
+                                    );
+                                    table_click_areas_local.push((
+                                        click_bounds,
+                                        ti.table_start_line,
+                                        vi,
+                                        cell_layout.col,
+                                    ));
+                                }
+                            }
+
+                            // Row handle areas (left of each row, hover-only)
+                            {
+                                let handle_w = layout.handle_size;
+                                let handle_bounds = Bounds::new(
+                                    point(px(table_left - handle_w), px(row_y)),
+                                    size(px(handle_w), px(row_h)),
+                                );
+                                table_row_handle_areas_local.push((
+                                    handle_bounds,
+                                    ti.table_start_line,
+                                    vi,
+                                ));
+                            }
+                        }
+
+                        // Column handle areas (above header, hover-only)
+                        {
+                            let handle_h = layout.handle_size;
+                            let mut hx = 0.0_f32;
+                            for ci in 0..layout.col_count {
+                                let cell_w = layout
+                                    .cells
+                                    .first()
+                                    .and_then(|row| row.get(ci))
+                                    .map(|c| c.width)
+                                    .unwrap_or(0.0);
+                                let handle_bounds = Bounds::new(
+                                    point(px(table_left + hx), px(table_top - handle_h)),
+                                    size(px(cell_w), px(handle_h)),
+                                );
+                                table_col_handle_areas_local.push((
+                                    handle_bounds,
+                                    ti.table_start_line,
+                                    ci,
+                                ));
+                                hx += cell_w;
+                            }
+                        }
+
+                        // Draw handle grips only when hovering near the table
+                        let mouse_near_table = editor.hovering_table_start == Some(ti.table_start_line);
+                        if mouse_near_table {
+                            // Column handle grips
+                            let mut hx = 0.0_f32;
+                            let handle_h = layout.handle_size;
+                            for ci in 0..layout.col_count {
+                                let cell_w = layout
+                                    .cells
+                                    .first()
+                                    .and_then(|row| row.get(ci))
+                                    .map(|c| c.width)
+                                    .unwrap_or(0.0);
+                                let grip_w = 10.0_f32;
+                                let grip_h = 6.0_f32;
+                                let grip_x = table_left + hx + cell_w / 2.0 - grip_w / 2.0;
+                                let grip_y = table_top - handle_h / 2.0 - grip_h / 2.0;
+                                let dot_r = 1.5_f32;
+                                let mut handle_color = table_styles.table_handle_color;
+                                handle_color.a *= 0.5;
+                                for dr in 0..2 {
+                                    for dc in 0..3 {
+                                        let dx = grip_x + dc as f32 * (grip_w / 2.0);
+                                        let dy = grip_y + dr as f32 * grip_h;
+                                        table_bgs.push(fill(
+                                            Bounds::new(
+                                                point(px(dx), px(dy)),
+                                                size(px(dot_r * 2.0), px(dot_r * 2.0)),
+                                            ),
+                                            handle_color,
+                                        ));
+                                    }
+                                }
+                                hx += cell_w;
+                            }
+
+                            // Row handle grips
+                            for vi in 0..layout.visual_row_count {
+                                let row_y = table_top
+                                    + layout.row_heights.iter().take(vi).sum::<f32>();
+                                let row_h = layout.row_heights.get(vi).copied().unwrap_or(line_height);
+                                let handle_w = layout.handle_size;
+                                let grip_w = 6.0_f32;
+                                let grip_h = 10.0_f32;
+                                let grip_x = table_left - handle_w / 2.0 - grip_w / 2.0;
+                                let grip_y = row_y + row_h / 2.0 - grip_h / 2.0;
+                                let dot_r = 1.5_f32;
+                                let mut handle_color = table_styles.table_handle_color;
+                                handle_color.a *= 0.5;
+                                for dr in 0..3 {
+                                    for dc in 0..2 {
+                                        let dx = grip_x + dc as f32 * grip_w;
+                                        let dy = grip_y + dr as f32 * (grip_h / 2.0);
+                                        table_bgs.push(fill(
+                                            Bounds::new(
+                                                point(px(dx), px(dy)),
+                                                size(px(dot_r * 2.0), px(dot_r * 2.0)),
+                                            ),
+                                            handle_color,
+                                        ));
+                                    }
+                                }
                             }
                         }
                     }
@@ -1174,7 +1551,9 @@ impl Element for EditorElement {
             }
 
             // Cursor bars — paint for all cursors (primary + extra)
-            if window.is_window_active()
+            // Skip for table lines — table cursor is rendered within the table block
+            if *block_type != BlockType::Table
+                && window.is_window_active()
                 && editor.focus_handle.is_focused(window)
                 && editor.focused_sidebar_path.is_none()
                 && (editor.cursor_opacity > 0.0 || editor.is_selecting)
@@ -1294,11 +1673,20 @@ impl Element for EditorElement {
                 }
             }
 
+            // Determine if this is a table row with per-cell rendering
+            let is_table_block_line = *block_type == BlockType::Table
+                && decoration
+                    .table_info
+                    .as_ref()
+                    .is_some_and(|ti| !ti.is_separator);
+
             lines.push(PrepaintLine {
                 wrapped: wrapped.clone(),
                 origin,
                 line_height: px(line_height),
                 segments,
+                is_table_block: is_table_block_line,
+                table_cells: None,
             });
 
             y += total_line_height;
@@ -1310,6 +1698,9 @@ impl Element for EditorElement {
             editor.last_viewport_width = viewport_width;
             editor.checkbox_areas = checkbox_hit_areas.clone();
             editor.image_click_areas = image_hit_areas.clone();
+            editor.table_click_areas = table_click_areas_local.clone();
+            editor.table_col_handle_areas = table_col_handle_areas_local.clone();
+            editor.table_row_handle_areas = table_row_handle_areas_local.clone();
             editor.gutter_fold_areas = gutter_fold_hit_areas_local.clone();
             editor.image_edit_areas = image_edit_hit_areas_local.clone();
             editor.last_editor_left = editor_left;
@@ -1358,6 +1749,7 @@ impl Element for EditorElement {
             image_borders,
             table_borders,
             table_bgs,
+            table_cell_texts,
             image_edit_icons,
             link_underlines,
         }
@@ -1453,6 +1845,13 @@ impl Element for EditorElement {
             window.paint_quad(quad);
         }
 
+        // Table cell texts (per-cell rendering)
+        for (shaped, origin, lh) in &prepaint.table_cell_texts {
+            shaped
+                .paint(*origin, *lh, TextAlign::Left, None, window, cx)
+                .ok();
+        }
+
         // HR dashed lines
         for (hr_y, hr_start_x, hr_width) in &prepaint.hr_lines {
             let dash_len = 6.0_f32;
@@ -1471,6 +1870,10 @@ impl Element for EditorElement {
         }
 
         for line in &prepaint.lines {
+            // Skip normal text rendering for table rows (rendered via table_cell_texts)
+            if line.is_table_block {
+                continue;
+            }
             if let Some(ref segments) = line.segments {
                 for (seg_wrapped, seg_origin) in segments {
                     seg_wrapped

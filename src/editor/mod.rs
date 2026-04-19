@@ -288,10 +288,34 @@ pub(crate) struct ContextMenu {
 
 #[derive(Clone)]
 pub(crate) enum ContextMenuKind {
-    Sidebar { path: PathBuf, is_dir: bool },
+    Sidebar {
+        path: PathBuf,
+        is_dir: bool,
+    },
     Format,
-    Tab { tab_id: String },
+    Tab {
+        tab_id: String,
+    },
     Workspace,
+    Table {
+        table_start_line: usize,
+        row: usize,
+        col: usize,
+    },
+}
+
+#[derive(Clone)]
+pub(crate) enum TableDragState {
+    DraggingColumn {
+        table_start_line: usize,
+        source_col: usize,
+        current_x: f32,
+    },
+    DraggingRow {
+        table_start_line: usize,
+        source_row: usize,
+        current_y: f32,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -511,6 +535,16 @@ pub struct EditorView {
     pub(crate) checkbox_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_checkbox: bool,
     pub(crate) image_click_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
+    /// Table cell click areas: (bounds, table_start_line, visual_row, col)
+    pub(crate) table_click_areas: Vec<(gpui::Bounds<Pixels>, usize, usize, usize)>,
+    /// Table column handle areas: (bounds, table_start_line, col_index)
+    pub(crate) table_col_handle_areas: Vec<(gpui::Bounds<Pixels>, usize, usize)>,
+    /// Table row handle areas: (bounds, table_start_line, visual_row)
+    pub(crate) table_row_handle_areas: Vec<(gpui::Bounds<Pixels>, usize, usize)>,
+    /// Active table drag operation
+    pub(crate) table_drag: Option<TableDragState>,
+    /// Which table (by table_start_line) the mouse is hovering near (for handle visibility)
+    pub(crate) hovering_table_start: Option<usize>,
     pub(crate) image_cache: HashMap<String, Option<Arc<RenderImage>>>,
     pub(crate) undo_stack: Vec<EditorSnapshot>,
     pub(crate) redo_stack: Vec<EditorSnapshot>,
@@ -690,6 +724,11 @@ impl EditorView {
             checkbox_areas: Vec::new(),
             hovering_checkbox: false,
             image_click_areas: Vec::new(),
+            table_click_areas: Vec::new(),
+            table_col_handle_areas: Vec::new(),
+            table_row_handle_areas: Vec::new(),
+            table_drag: None,
+            hovering_table_start: None,
             image_cache: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -2235,6 +2274,129 @@ impl EditorView {
         self.cursor.offset = new_cursor_offset.min(self.buffer.len());
         self.cursor.anchor = self.cursor.offset;
         self.decorations = markdown::parse_decorations(self.buffer.text());
+    }
+
+    // ── Table context menu operations ──────────────────────────────
+
+    fn table_lines_for_block(
+        &self,
+        table_start_line: usize,
+    ) -> Option<(usize, usize, Vec<String>)> {
+        let dec = self.decorations.get(table_start_line)?;
+        let ti = dec.table_info.as_ref()?;
+        let start = ti.table_start_line;
+        let end = ti.table_end_line;
+        let lines: Vec<String> = (start..end)
+            .map(|l| self.buffer.line_content(l).to_string())
+            .collect();
+        Some((start, end, lines))
+    }
+
+    fn replace_table_block(&mut self, table_start: usize, table_end: usize, new_lines: &[String]) {
+        let text_start = self.buffer.line_start(table_start);
+        let text_end = self.buffer.line_end(table_end.saturating_sub(1));
+        let new_text = new_lines.join("\n");
+        self.buffer.replace(text_start..text_end, &new_text);
+        self.decorations = markdown::parse_decorations(self.buffer.text());
+    }
+
+    pub(crate) fn table_insert_row(
+        &mut self,
+        table_start_line: usize,
+        visual_row: usize,
+        above: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = None;
+        let Some((start, end, lines)) = self.table_lines_for_block(table_start_line) else {
+            cx.notify();
+            return;
+        };
+        // visual_row 0 = header; data rows start at index 0 in table_ops
+        let insert_at = if visual_row == 0 {
+            0
+        } else if above {
+            visual_row.saturating_sub(1)
+        } else {
+            visual_row
+        };
+        let new_lines = crate::table_ops::insert_row(&lines, insert_at);
+        self.replace_table_block(start, end, &new_lines);
+        cx.notify();
+    }
+
+    pub(crate) fn table_delete_row(
+        &mut self,
+        table_start_line: usize,
+        visual_row: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = None;
+        let Some((start, end, lines)) = self.table_lines_for_block(table_start_line) else {
+            cx.notify();
+            return;
+        };
+        if visual_row == 0 {
+            cx.notify();
+            return;
+        }
+        let row_idx = visual_row.saturating_sub(1);
+        let new_lines = crate::table_ops::delete_row(&lines, row_idx);
+        self.replace_table_block(start, end, &new_lines);
+        cx.notify();
+    }
+
+    pub(crate) fn table_insert_column(
+        &mut self,
+        table_start_line: usize,
+        col: usize,
+        left: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = None;
+        let Some((start, end, lines)) = self.table_lines_for_block(table_start_line) else {
+            cx.notify();
+            return;
+        };
+        let insert_at = if left { col } else { col + 1 };
+        let new_lines = crate::table_ops::insert_column(&lines, insert_at);
+        self.replace_table_block(start, end, &new_lines);
+        cx.notify();
+    }
+
+    pub(crate) fn table_delete_column(
+        &mut self,
+        table_start_line: usize,
+        col: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = None;
+        let Some((start, end, lines)) = self.table_lines_for_block(table_start_line) else {
+            cx.notify();
+            return;
+        };
+        let new_lines = crate::table_ops::delete_column(&lines, col);
+        self.replace_table_block(start, end, &new_lines);
+        cx.notify();
+    }
+
+    pub(crate) fn table_delete_table(&mut self, table_start_line: usize, cx: &mut Context<Self>) {
+        self.context_menu = None;
+        let Some((start, end, _)) = self.table_lines_for_block(table_start_line) else {
+            cx.notify();
+            return;
+        };
+        let text_start = self.buffer.line_start(start);
+        let text_end = if end < self.buffer.line_count() {
+            self.buffer.line_start(end)
+        } else {
+            self.buffer.len()
+        };
+        self.buffer.replace(text_start..text_end, "");
+        self.cursor.offset = text_start.min(self.buffer.len());
+        self.cursor.anchor = self.cursor.offset;
+        self.decorations = markdown::parse_decorations(self.buffer.text());
+        cx.notify();
     }
 
     pub(crate) fn renumber_ordered_list_after(
