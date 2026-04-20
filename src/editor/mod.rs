@@ -545,6 +545,8 @@ pub struct EditorView {
     pub(crate) table_drag: Option<TableDragState>,
     /// Which table (by table_start_line) the mouse is hovering near (for handle visibility)
     pub(crate) hovering_table_start: Option<usize>,
+    /// Which specific handle the mouse is over: (table_start_line, is_column, index)
+    pub(crate) hovering_handle: Option<(usize, bool, usize)>,
     pub(crate) image_cache: HashMap<String, Option<Arc<RenderImage>>>,
     pub(crate) undo_stack: Vec<EditorSnapshot>,
     pub(crate) redo_stack: Vec<EditorSnapshot>,
@@ -729,6 +731,7 @@ impl EditorView {
             table_row_handle_areas: Vec::new(),
             table_drag: None,
             hovering_table_start: None,
+            hovering_handle: None,
             image_cache: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),

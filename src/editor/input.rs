@@ -1,14 +1,22 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, Context, EntityInputHandler, Focusable, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent, UTF16Selection, Window, point,
-    px, size,
+    App, Bounds, Context, EntityInputHandler, Focusable, FontFallbacks, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent,
+    SharedString, UTF16Selection, Window, WrappedLine, point, px, size,
 };
 
 use crate::markdown::{BlockType, InlineKind};
 
 use super::*;
+
+struct TableCellDisplayInfo {
+    wrapped: WrappedLine,
+    display_text: String,
+    display_to_buffer: Vec<usize>,
+    cell_range: Range<usize>,
+    cell_content_len: usize,
+}
 
 impl EditorView {
     // ── Mouse handlers ──────────────────────────────────────────────
@@ -16,7 +24,7 @@ impl EditorView {
     pub(crate) fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.context_menu.is_some() {
@@ -126,38 +134,24 @@ impl EditorView {
                 .iter()
                 .find(|(bounds, _, _, _)| bounds.contains(&event.position))
             {
-                if let Some(source_line) = self.table_source_line_for_visual_row(table_start, visual_row) {
-                    if let Some(dec) = self.decorations.get(source_line) {
-                        if let Some(ref ti) = dec.table_info {
-                            if let Some(cell_range) = ti.cell_ranges.get(col) {
-                                let line_start = self.buffer.line_start(source_line);
-                                let cell_content = ti.cells.get(col).cloned().unwrap_or_default();
-                                let trimmed = cell_content.trim();
-                                let trim_offset = cell_content.len() - cell_content.trim_start().len();
-                                // Approximate character position based on click X within cell
-                                let click_x = f32::from(event.position.x) - f32::from(bounds.origin.x);
-                                let cell_w = f32::from(bounds.size.width);
-                                let char_count = trimmed.chars().count();
-                                let frac = (click_x / cell_w).clamp(0.0, 1.0);
-                                let char_idx = (frac * char_count as f32).round() as usize;
-                                let byte_offset: usize = trimmed.char_indices()
-                                    .nth(char_idx)
-                                    .map(|(i, _)| i)
-                                    .unwrap_or(trimmed.len());
-                                let offset = line_start + cell_range.start + trim_offset + byte_offset;
-                                if event.click_count >= 2 {
-                                    self.clear_extra_cursors();
-                                    self.select_word_at_offset(offset);
-                                    self.is_selecting = false;
-                                } else {
-                                    self.cursor.move_to(offset, &self.buffer);
-                                    self.is_selecting = true;
-                                }
-                                cx.notify();
-                                return;
-                            }
-                        }
+                if let Some(offset) = self.table_cell_offset_for_position(
+                    window,
+                    table_start,
+                    visual_row,
+                    col,
+                    &bounds,
+                    event.position,
+                ) {
+                    if event.click_count >= 2 {
+                        self.clear_extra_cursors();
+                        self.select_word_at_offset(offset);
+                        self.is_selecting = false;
+                    } else {
+                        self.cursor.move_to(offset, &self.buffer);
+                        self.is_selecting = true;
                     }
+                    cx.notify();
+                    return;
                 }
             }
         }
@@ -300,27 +294,30 @@ impl EditorView {
     pub(crate) fn on_editor_context_menu(
         &mut self,
         event: &MouseDownEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.context_menu.is_some() {
             return;
         }
         self.is_selecting = false;
-        let offset = self.offset_for_position(event.position);
-        let selection = self.cursor.selection_range();
-        let clicked_selected_text =
-            self.cursor.has_selection() && offset >= selection.start && offset <= selection.end;
-        if !clicked_selected_text {
-            self.cursor.move_to(offset, &self.buffer);
-        }
 
-        // Check if clicking inside a table cell
-        if let Some(&(_, table_start, visual_row, col)) = self
+        // Check if right-clicking inside a table cell
+        if let Some(&(bounds, table_start, visual_row, col)) = self
             .table_click_areas
             .iter()
             .find(|(bounds, _, _, _)| bounds.contains(&event.position))
         {
+            if let Some(offset) = self.table_cell_offset_for_position(
+                window,
+                table_start,
+                visual_row,
+                col,
+                &bounds,
+                event.position,
+            ) {
+                self.cursor.move_to(offset, &self.buffer);
+            }
             self.context_menu = Some(ContextMenu {
                 position: event.position,
                 kind: ContextMenuKind::Table {
@@ -331,6 +328,14 @@ impl EditorView {
             });
             cx.notify();
             return;
+        }
+
+        let offset = self.offset_for_position(event.position);
+        let selection = self.cursor.selection_range();
+        let clicked_selected_text =
+            self.cursor.has_selection() && offset >= selection.start && offset <= selection.end;
+        if !clicked_selected_text {
+            self.cursor.move_to(offset, &self.buffer);
         }
 
         self.open_format_context_menu(event.position, cx);
@@ -403,7 +408,7 @@ impl EditorView {
 
     pub(crate) fn on_mouse_up(
         &mut self,
-        event: &MouseUpEvent,
+        _event: &MouseUpEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -415,14 +420,13 @@ impl EditorView {
                     source_col,
                     current_x,
                 } => {
-                    // Find target column from current_x position
-                    if let Some(target_col) = self.table_col_at_x(table_start_line, current_x) {
-                        if target_col != source_col {
+                    if let Some(insert_at) = self.table_col_insert_at_x(table_start_line, current_x) {
+                        if insert_at != source_col && insert_at != source_col + 1 {
                             if let Some((start, end, lines)) =
                                 self.table_lines_for_block(table_start_line)
                             {
                                 let new_lines =
-                                    crate::table_ops::move_column(&lines, source_col, target_col);
+                                    crate::table_ops::move_column(&lines, source_col, insert_at);
                                 self.replace_table_block(start, end, &new_lines);
                             }
                         }
@@ -433,16 +437,20 @@ impl EditorView {
                     source_row,
                     current_y,
                 } => {
-                    if let Some(target_row) = self.table_row_at_y(table_start_line, current_y) {
-                        if target_row != source_row && source_row > 0 && target_row > 0 {
+                    if let Some(insert_visual) =
+                        self.table_row_insert_at_y(table_start_line, current_y)
+                    {
+                        if source_row > 0 {
                             if let Some((start, end, lines)) =
                                 self.table_lines_for_block(table_start_line)
                             {
                                 let from_data = source_row.saturating_sub(1);
-                                let to_data = target_row.saturating_sub(1);
-                                let new_lines =
-                                    crate::table_ops::move_row(&lines, from_data, to_data);
-                                self.replace_table_block(start, end, &new_lines);
+                                let to_data = insert_visual.saturating_sub(1);
+                                if to_data != from_data && to_data != from_data + 1 {
+                                    let new_lines =
+                                        crate::table_ops::move_row(&lines, from_data, to_data);
+                                    self.replace_table_block(start, end, &new_lines);
+                                }
                             }
                         }
                     }
@@ -457,7 +465,7 @@ impl EditorView {
     pub(crate) fn on_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Track command key from mouse events for link underlines
@@ -514,18 +522,43 @@ impl EditorView {
         }
 
         // Track which table the mouse is hovering near (for handle visibility)
-        let hovering_table = self.table_click_areas.iter()
+        let hovering_table = self
+            .table_click_areas
+            .iter()
             .find(|(bounds, _, _, _)| {
                 // Expand bounds slightly to include handle areas
                 let expanded = gpui::Bounds::new(
-                    gpui::point(bounds.origin.x - gpui::px(30.0), bounds.origin.y - gpui::px(30.0)),
-                    gpui::size(bounds.size.width + gpui::px(60.0), bounds.size.height + gpui::px(60.0)),
+                    gpui::point(
+                        bounds.origin.x - gpui::px(30.0),
+                        bounds.origin.y - gpui::px(30.0),
+                    ),
+                    gpui::size(
+                        bounds.size.width + gpui::px(60.0),
+                        bounds.size.height + gpui::px(60.0),
+                    ),
                 );
                 expanded.contains(&event.position)
             })
             .map(|(_, table_start, _, _)| *table_start);
         if hovering_table != self.hovering_table_start {
             self.hovering_table_start = hovering_table;
+            cx.notify();
+        }
+
+        // Track which specific handle the mouse is over
+        let hovering_handle = self
+            .table_col_handle_areas
+            .iter()
+            .find(|(bounds, _, _)| bounds.contains(&event.position))
+            .map(|(_, tsl, col)| (*tsl, true, *col))
+            .or_else(|| {
+                self.table_row_handle_areas
+                    .iter()
+                    .find(|(bounds, _, _)| bounds.contains(&event.position))
+                    .map(|(_, tsl, row)| (*tsl, false, *row))
+            });
+        if hovering_handle != self.hovering_handle {
+            self.hovering_handle = hovering_handle;
             cx.notify();
         }
 
@@ -548,55 +581,95 @@ impl EditorView {
                 self.clamp_scroll();
             }
 
-            let offset = self.offset_for_position(event.position);
+            // If dragging within a table cell, use table-aware positioning
+            let offset = if let Some(&(bounds, table_start, visual_row, col)) = self
+                .table_click_areas
+                .iter()
+                .find(|(bounds, _, _, _)| bounds.contains(&event.position))
+            {
+                self.table_cell_offset_for_position(
+                    window,
+                    table_start,
+                    visual_row,
+                    col,
+                    &bounds,
+                    event.position,
+                )
+                .unwrap_or_else(|| self.offset_for_position(event.position))
+            } else {
+                self.offset_for_position(event.position)
+            };
             self.cursor.select_to(offset, &self.buffer);
             cx.notify();
         }
     }
 
-    /// Find which column index a given x position corresponds to in a table.
-    fn table_col_at_x(&self, table_start_line: usize, x: f32) -> Option<usize> {
-        let areas: Vec<_> = self
-            .table_col_handle_areas
+    fn table_col_insert_at_x(&self, table_start_line: usize, x: f32) -> Option<usize> {
+        let mut header_cells: Vec<_> = self
+            .table_click_areas
             .iter()
-            .filter(|(_, tsl, _)| *tsl == table_start_line)
+            .filter(|(_, tsl, visual_row, _)| *tsl == table_start_line && *visual_row == 0)
+            .map(|(bounds, _, _, col)| (*col, *bounds))
             .collect();
-        // Find the closest column midpoint
-        let mut best_col = None;
-        let mut best_dist = f32::MAX;
-        for (bounds, _, col) in &areas {
-            let mid_x: f32 = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0;
-            let dist = (x - mid_x).abs();
-            if dist < best_dist {
-                best_dist = dist;
-                best_col = Some(*col);
-            }
+        header_cells.sort_by_key(|(col, _)| *col);
+        if header_cells.is_empty() {
+            return None;
         }
-        best_col
+
+        let mut boundaries = Vec::with_capacity(header_cells.len() + 1);
+        boundaries.push(f32::from(header_cells[0].1.origin.x));
+        for (_, bounds) in &header_cells {
+            boundaries.push(f32::from(bounds.origin.x) + f32::from(bounds.size.width));
+        }
+
+        boundaries
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                (*a - x)
+                    .abs()
+                    .partial_cmp(&(*b - x).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(idx, _)| idx)
     }
 
-    /// Find which visual row a given y position corresponds to in a table.
-    fn table_row_at_y(&self, table_start_line: usize, y: f32) -> Option<usize> {
-        let areas: Vec<_> = self
-            .table_row_handle_areas
+    fn table_row_insert_at_y(&self, table_start_line: usize, y: f32) -> Option<usize> {
+        let mut rows: Vec<_> = self
+            .table_click_areas
             .iter()
-            .filter(|(_, tsl, _)| *tsl == table_start_line)
+            .filter(|(_, tsl, _, col)| *tsl == table_start_line && *col == 0)
+            .map(|(bounds, _, visual_row, _)| (*visual_row, *bounds))
             .collect();
-        let mut best_row = None;
-        let mut best_dist = f32::MAX;
-        for (bounds, _, row) in &areas {
-            let mid_y: f32 = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
-            let dist = (y - mid_y).abs();
-            if dist < best_dist {
-                best_dist = dist;
-                best_row = Some(*row);
-            }
+        rows.sort_by_key(|(visual_row, _)| *visual_row);
+        if rows.is_empty() {
+            return None;
         }
-        best_row
+
+        let mut boundaries = Vec::with_capacity(rows.len() + 1);
+        boundaries.push(f32::from(rows[0].1.origin.y));
+        for (_, bounds) in &rows {
+            boundaries.push(f32::from(bounds.origin.y) + f32::from(bounds.size.height));
+        }
+
+        boundaries
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                (*a - y)
+                    .abs()
+                    .partial_cmp(&(*b - y).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(idx, _)| idx)
     }
 
     /// Map a visual row index (skipping separator rows) back to the source buffer line.
-    fn table_source_line_for_visual_row(&self, table_start: usize, visual_row: usize) -> Option<usize> {
+    fn table_source_line_for_visual_row(
+        &self,
+        table_start: usize,
+        visual_row: usize,
+    ) -> Option<usize> {
         let header_info = self.decorations.get(table_start)?.table_info.as_ref()?;
         let end = header_info.table_end_line;
         let mut vi = 0;
@@ -613,6 +686,153 @@ impl EditorView {
             }
         }
         None
+    }
+
+    fn table_cell_display_info(
+        &self,
+        window: &mut Window,
+        source_line: usize,
+        col: usize,
+        cell_inner_width: f32,
+    ) -> Option<TableCellDisplayInfo> {
+        let dec = self.decorations.get(source_line)?;
+        let ti = dec.table_info.as_ref()?;
+        let cell_content = ti.cells.get(col).cloned().unwrap_or_default();
+        let cell_range = ti.cell_ranges.get(col).cloned().unwrap_or(0..0);
+        let cell_decoration = crate::markdown::parse_decorations(&cell_content)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let (folded_raw, d2b_raw, _, _) =
+            helpers::build_display_text(&cell_content, &cell_decoration, None, false, None, 0, 0, 0);
+        let trim_start = folded_raw.len() - folded_raw.trim_start().len();
+        let trim_end = folded_raw.len() - folded_raw.trim_end().len();
+        let display_text = folded_raw.trim().to_string();
+        let display_to_buffer = d2b_raw[trim_start..d2b_raw.len() - trim_end].to_vec();
+
+        let text_style = window.text_style();
+        let editor_styles = &self.styles.editor;
+        let configured_font_family = |configured: &'static str| {
+            if configured == ".SystemUIFont" {
+                text_style.font().family.clone()
+            } else {
+                configured.into()
+            }
+        };
+
+        let mut monospace_font = text_style.font();
+        monospace_font.family = configured_font_family(editor_styles.editor_monospace_font_family);
+        monospace_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+            editor_styles.editor_body_cjk_font_family.to_string(),
+        ]));
+
+        let mut body_font = text_style.font();
+        body_font.family = configured_font_family(editor_styles.editor_body_latin_font_family);
+        body_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+            editor_styles.editor_body_cjk_font_family.to_string(),
+        ]));
+
+        let mut body_cjk_font = text_style.font();
+        body_cjk_font.family = configured_font_family(editor_styles.editor_body_cjk_font_family);
+        body_cjk_font.fallbacks = None;
+
+        let mut heading_font = text_style.font();
+        heading_font.family = configured_font_family(editor_styles.editor_heading_latin_font_family);
+        heading_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+            editor_styles.editor_heading_cjk_font_family.to_string(),
+        ]));
+
+        let mut heading_cjk_font = text_style.font();
+        heading_cjk_font.family = configured_font_family(editor_styles.editor_heading_cjk_font_family);
+        heading_cjk_font.fallbacks = None;
+
+        let font_size = self.base_font_size();
+        let mut cell_runs = helpers::build_text_runs_for_display(
+            &display_text,
+            &cell_content,
+            &display_to_buffer,
+            &cell_decoration,
+            None,
+            false,
+            false,
+            &body_font,
+            &body_cjk_font,
+            &monospace_font,
+            &heading_font,
+            &heading_cjk_font,
+            0,
+            font_size,
+            &self.theme,
+        );
+        if ti.is_header {
+            for run in &mut cell_runs {
+                run.font.weight = gpui::FontWeight::BOLD;
+            }
+        }
+
+        let cell_text: SharedString = if display_text.is_empty() {
+            " ".into()
+        } else {
+            display_text.clone().into()
+        };
+        let wrapped = window
+            .text_system()
+            .shape_text(
+                cell_text,
+                px(font_size),
+                &cell_runs,
+                Some(px(cell_inner_width.max(font_size * 0.5))),
+                None,
+            )
+            .ok()?
+            .into_iter()
+            .next()?;
+
+        Some(TableCellDisplayInfo {
+            wrapped,
+            display_text,
+            display_to_buffer,
+            cell_range,
+            cell_content_len: cell_content.len(),
+        })
+    }
+
+    /// Compute the buffer offset for a mouse position within a table cell.
+    fn table_cell_offset_for_position(
+        &self,
+        window: &mut Window,
+        table_start: usize,
+        visual_row: usize,
+        col: usize,
+        bounds: &Bounds<Pixels>,
+        position: Point<Pixels>,
+    ) -> Option<usize> {
+        let source_line = self.table_source_line_for_visual_row(table_start, visual_row)?;
+        let padding_x = self.scaled(self.styles.table.table_cell_padding_px);
+        let padding_y = self.scaled(self.styles.table.table_cell_padding_px) * 0.6;
+        let inner_width =
+            (f32::from(bounds.size.width) - padding_x * 2.0).max(self.base_font_size() * 0.5);
+        let info = self.table_cell_display_info(window, source_line, col, inner_width)?;
+        let line_height = self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
+        let local_x = (f32::from(position.x) - f32::from(bounds.origin.x) - padding_x).max(0.0);
+        let local_y = (f32::from(position.y) - f32::from(bounds.origin.y) - padding_y).max(0.0);
+        let display_index = match info
+            .wrapped
+            .closest_index_for_position(point(px(local_x), px(local_y)), px(line_height))
+        {
+            Ok(index) | Err(index) => index,
+        };
+        let mut display_index = display_index.min(info.display_text.len());
+        while display_index > 0 && !info.display_text.is_char_boundary(display_index) {
+            display_index -= 1;
+        }
+        let buffer_col = if display_index < info.display_to_buffer.len() {
+            info.display_to_buffer[display_index]
+        } else {
+            info.cell_content_len
+        };
+        let line_start = self.buffer.line_start(source_line);
+        Some(line_start + info.cell_range.start + buffer_col)
     }
 
     pub(crate) fn on_scroll(

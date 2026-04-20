@@ -148,7 +148,7 @@ pub fn delete_row(lines: &[String], row_index: usize) -> Vec<String> {
 
 pub fn move_row(lines: &[String], from: usize, to: usize) -> Vec<String> {
     let mut model = parse_table_block(lines);
-    if from >= model.data_rows.len() {
+    if from >= model.data_rows.len() || to > model.data_rows.len() {
         return serialize_table(&model);
     }
     let row = model.data_rows.remove(from);
@@ -190,7 +190,7 @@ pub fn delete_column(lines: &[String], col_idx: usize) -> Vec<String> {
 
 pub fn move_column(lines: &[String], from: usize, to: usize) -> Vec<String> {
     let mut model = parse_table_block(lines);
-    if from >= model.col_count || to >= model.col_count || from == to {
+    if from >= model.col_count || to > model.col_count || from == to {
         return serialize_table(&model);
     }
 
