@@ -532,6 +532,7 @@ pub struct EditorView {
     pub(crate) blink_epoch: usize,
     // IME preedit state
     pub(crate) marked_range: Option<Range<usize>>,
+    pub(crate) ime_composition_snapshot: Option<EditorSnapshot>,
     pub(crate) checkbox_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_checkbox: bool,
     pub(crate) image_click_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
@@ -725,6 +726,7 @@ impl EditorView {
             cursor_opacity_direction: -1.0,
             blink_epoch: 0,
             marked_range: None,
+            ime_composition_snapshot: None,
             checkbox_areas: Vec::new(),
             hovering_checkbox: false,
             image_click_areas: Vec::new(),
@@ -1770,17 +1772,23 @@ impl EditorView {
         self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
         self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());
         self.marked_range = None;
+        self.ime_composition_snapshot = None;
         self.reparse();
         self.scroll_to_cursor();
     }
 
-    pub(crate) fn checkpoint(&mut self) {
-        self.undo_stack.push(self.current_snapshot());
+    pub(crate) fn push_undo_snapshot(&mut self, snapshot: EditorSnapshot) {
+        self.undo_stack.push(snapshot);
         self.redo_stack.clear();
         self.mark_active_tab_dirty();
         if self.undo_stack.len() > 300 {
             self.undo_stack.remove(0);
         }
+    }
+
+    pub(crate) fn checkpoint(&mut self) {
+        self.ime_composition_snapshot = None;
+        self.push_undo_snapshot(self.current_snapshot());
     }
 
     pub(crate) fn copy_selection_to_clipboard(&self, cx: &mut Context<Self>) {
@@ -1958,6 +1966,124 @@ impl EditorView {
         let new_end = selection.end + inserted;
         self.cursor.anchor = new_start.min(self.buffer.len());
         self.cursor.offset = new_end.min(self.buffer.len());
+        self.reparse();
+        self.scroll_to_cursor();
+    }
+
+    pub(crate) fn selected_line_span(&self) -> (usize, usize) {
+        let selection = self.cursor.selection_range();
+        let (start_line, _) = self.buffer.offset_to_line_col(selection.start);
+        let end_anchor = selection
+            .end
+            .saturating_sub(usize::from(selection.end > selection.start));
+        let (end_line, _) = self.buffer.offset_to_line_col(end_anchor);
+        (start_line, end_line)
+    }
+
+    pub(crate) fn list_indent_width_for_line(&self, line: usize) -> Option<usize> {
+        match self
+            .decorations
+            .get(line)
+            .map(|decoration| &decoration.block_type)
+        {
+            Some(BlockType::OrderedList) => Some(3),
+            Some(BlockType::UnorderedList | BlockType::TaskList(_)) => Some(2),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn normalize_ordered_lists_in_line_span(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+    ) {
+        if self.buffer.line_count() == 0 {
+            return;
+        }
+
+        let first_line = start_line.saturating_sub(1);
+        let last_line = (end_line + 1).min(self.buffer.line_count().saturating_sub(1));
+        for line in first_line..=last_line {
+            self.normalize_ordered_list_near_line(line, false);
+        }
+    }
+
+    pub(crate) fn indent_selected_list_lines(&mut self) {
+        let selection = self.cursor.selection_range();
+        let (start_line, end_line) = self.selected_line_span();
+        let widths: Vec<usize> = (start_line..=end_line)
+            .map(|line| self.list_indent_width_for_line(line).unwrap_or(0))
+            .collect();
+
+        if widths.iter().all(|width| *width == 0) {
+            return;
+        }
+
+        let mut inserted = 0usize;
+        for (index, width) in widths.iter().copied().enumerate() {
+            if width == 0 {
+                continue;
+            }
+
+            let line = start_line + index;
+            let line_start = self.buffer.line_start(line) + inserted;
+            self.buffer.insert(line_start, &" ".repeat(width));
+            inserted += width;
+        }
+
+        let first_inserted = widths.first().copied().unwrap_or(0);
+        self.cursor.anchor = (selection.start + first_inserted).min(self.buffer.len());
+        self.cursor.offset = (selection.end + inserted).min(self.buffer.len());
+        self.reparse();
+        self.normalize_ordered_lists_in_line_span(start_line, end_line);
+        self.reparse();
+        self.scroll_to_cursor();
+    }
+
+    pub(crate) fn unindent_selected_list_lines(&mut self) {
+        let selection = self.cursor.selection_range();
+        let (start_line, end_line) = self.selected_line_span();
+        let strips: Vec<usize> = (start_line..=end_line)
+            .map(|line| {
+                let Some(max_spaces) = self.list_indent_width_for_line(line) else {
+                    return 0;
+                };
+                self.buffer
+                    .line_content(line)
+                    .bytes()
+                    .take(max_spaces)
+                    .take_while(|&byte| byte == b' ')
+                    .count()
+            })
+            .collect();
+
+        if strips.iter().all(|strip| *strip == 0) {
+            return;
+        }
+
+        let mut total_removed = 0usize;
+        for (index, strip) in strips.iter().copied().enumerate() {
+            if strip == 0 {
+                continue;
+            }
+
+            let line = start_line + index;
+            let line_start = self.buffer.line_start(line);
+            self.buffer.replace(line_start..line_start + strip, "");
+            total_removed += strip;
+        }
+
+        let first_removed = strips.first().copied().unwrap_or(0);
+        self.cursor.anchor = selection
+            .start
+            .saturating_sub(first_removed)
+            .min(self.buffer.len());
+        self.cursor.offset = selection
+            .end
+            .saturating_sub(total_removed)
+            .min(self.buffer.len());
+        self.reparse();
+        self.normalize_ordered_lists_in_line_span(start_line, end_line);
         self.reparse();
         self.scroll_to_cursor();
     }
@@ -2301,6 +2427,8 @@ impl EditorView {
         let text_start = self.buffer.line_start(table_start);
         let text_end = self.buffer.line_end(table_end.saturating_sub(1));
         let new_text = new_lines.join("\n");
+        self.ime_composition_snapshot = None;
+        self.push_undo_snapshot(self.current_snapshot());
         self.buffer.replace(text_start..text_end, &new_text);
         self.decorations = markdown::parse_decorations(self.buffer.text());
     }
@@ -2317,14 +2445,7 @@ impl EditorView {
             cx.notify();
             return;
         };
-        // visual_row 0 = header; data rows start at index 0 in table_ops
-        let insert_at = if visual_row == 0 {
-            0
-        } else if above {
-            visual_row.saturating_sub(1)
-        } else {
-            visual_row
-        };
+        let insert_at = if above { visual_row } else { visual_row + 1 };
         let new_lines = crate::table_ops::insert_row(&lines, insert_at);
         self.replace_table_block(start, end, &new_lines);
         cx.notify();
@@ -2341,12 +2462,7 @@ impl EditorView {
             cx.notify();
             return;
         };
-        if visual_row == 0 {
-            cx.notify();
-            return;
-        }
-        let row_idx = visual_row.saturating_sub(1);
-        let new_lines = crate::table_ops::delete_row(&lines, row_idx);
+        let new_lines = crate::table_ops::delete_row(&lines, visual_row);
         self.replace_table_block(start, end, &new_lines);
         cx.notify();
     }
@@ -2397,6 +2513,8 @@ impl EditorView {
         } else {
             self.buffer.len()
         };
+        self.ime_composition_snapshot = None;
+        self.push_undo_snapshot(self.current_snapshot());
         self.buffer.replace(text_start..text_end, "");
         self.cursor.offset = text_start.min(self.buffer.len());
         self.cursor.anchor = self.cursor.offset;

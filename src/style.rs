@@ -348,6 +348,7 @@ pub struct SelectionStyles {
 
 pub struct CheckboxStyles {
     pub checkbox_size_factor: f32,
+    pub checkbox_indent_step_px: f32,
     pub checkbox_text_gap_px: f32,
     pub checkbox_parent_prefix_chars: f32,
     pub checkbox_radius_px: f32,
@@ -912,8 +913,9 @@ impl Styles {
             },
             checkbox: CheckboxStyles {
                 checkbox_size_factor: 1.2,
-                checkbox_text_gap_px: 10.0,
-                checkbox_parent_prefix_chars: 0.0,
+                checkbox_indent_step_px: 24.0,
+                checkbox_text_gap_px: 0.0,
+                checkbox_parent_prefix_chars: 2.0,
                 checkbox_radius_px: 5.0,
                 checkbox_border_width_px: 1.5,
                 checkbox_border_color: theme.border_tertiary,
@@ -927,10 +929,10 @@ impl Styles {
                 table_border_width_px: 1.0,
                 table_border_color: theme.border_decorative,
                 table_header_bg: theme.bg_code,
-                table_handle_size_px: 16.0,
+                table_handle_size_px: 6.0,
                 table_handle_color: theme.border_decorative,
                 table_handle_dot_size_px: 2.0,
-                table_handle_gap_px: 4.0,
+                table_handle_gap_px: 1.0,
                 table_handle_highlight_width_px: 2.0,
                 table_drag_indicator_width_px: 2.0,
                 table_selection_border_width_px: 2.0,

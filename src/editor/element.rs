@@ -70,6 +70,7 @@ struct PrepaintLine {
 
 fn build_precise_table_layout(
     window: &mut Window,
+    buffer: &Buffer,
     decorations: &[LineDecoration],
     table_start: usize,
     table_end: usize,
@@ -86,6 +87,8 @@ fn build_precise_table_layout(
     heading_cjk_font: &Font,
     font_size: f32,
     theme: &Theme,
+    cursor_offsets: &[usize],
+    marked_range: Option<&Range<usize>>,
 ) -> helpers::TableLayout {
     let mut layout = helpers::compute_table_layout(
         decorations,
@@ -104,28 +107,58 @@ fn build_precise_table_layout(
         let Some(source_line) = layout.visual_row_to_line.get(vi).copied() else {
             continue;
         };
+        let line_start_offset = buffer.line_start(source_line);
         let row_ti = decorations
             .get(source_line)
             .and_then(|d| d.table_info.as_ref());
         let mut row_height = line_height + cell_padding_y * 2.0;
 
-        if let Some(row_ti) = row_ti {
-            for cell_layout in layout.cells.get(vi).into_iter().flatten() {
+        if let Some(row_ti) = row_ti
+            && let Some(row_cells) = layout.cells.get_mut(vi)
+        {
+            for cell_layout in row_cells.iter_mut() {
                 let cell_content = row_ti
                     .cells
                     .get(cell_layout.col)
                     .cloned()
                     .unwrap_or_default();
+                let cell_cursor_col = helpers::active_table_cell_cursor_col(
+                    line_start_offset,
+                    &cell_layout.cell_range,
+                    cursor_offsets,
+                    marked_range,
+                );
                 let cell_decoration = crate::markdown::parse_decorations(&cell_content)
                     .into_iter()
                     .next()
                     .unwrap_or_default();
+                let (folded_raw, d2b_raw, b2d_raw, _) = helpers::build_display_text(
+                    &cell_content,
+                    &cell_decoration,
+                    cell_cursor_col,
+                    false,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                );
+                let trim_start = folded_raw.len() - folded_raw.trim_start().len();
+                let trim_end = folded_raw.len() - folded_raw.trim_end().len();
+                cell_layout.display_text = folded_raw.trim().to_string();
+                cell_layout.display_to_buffer =
+                    d2b_raw[trim_start..d2b_raw.len() - trim_end].to_vec();
+                cell_layout.buffer_to_display = b2d_raw
+                    .iter()
+                    .map(|&display_index| display_index.saturating_sub(trim_start))
+                    .collect();
+
                 let mut cell_runs = helpers::build_text_runs_for_display(
                     &cell_layout.display_text,
                     &cell_content,
                     &cell_layout.display_to_buffer,
                     &cell_decoration,
-                    None,
+                    cell_cursor_col,
                     false,
                     false,
                     body_font,
@@ -389,6 +422,10 @@ impl Element for EditorElement {
             / base_char_width)
             .ceil()
             .max(3.0) as usize;
+        let checkbox_indent_step_chars =
+            (editor.scaled(editor.styles.checkbox.checkbox_indent_step_px) / base_char_width)
+                .ceil()
+                .max(1.0) as usize;
 
         let is_code_block_type = |i: usize| {
             matches!(
@@ -600,6 +637,7 @@ impl Element for EditorElement {
                     table_width_chars,
                     table_cell_padding_chars,
                     collapsed_task_prefix_chars,
+                    checkbox_indent_step_chars,
                     editor.styles.checkbox.checkbox_parent_prefix_chars as usize,
                 );
 
@@ -735,6 +773,7 @@ impl Element for EditorElement {
                                 let table_styles = &editor.styles.table;
                                 build_precise_table_layout(
                                     window,
+                                    buffer,
                                     &decorations,
                                     ti.table_start_line,
                                     ti.table_end_line,
@@ -751,6 +790,8 @@ impl Element for EditorElement {
                                     &heading_cjk_font,
                                     font_size,
                                     theme,
+                                    &all_cursor_offsets,
+                                    editor.marked_range.as_ref(),
                                 )
                             })
                             .clone();
@@ -890,6 +931,7 @@ impl Element for EditorElement {
                             .or_insert_with(|| {
                                 build_precise_table_layout(
                                     window,
+                                    buffer,
                                     &decorations,
                                     ti.table_start_line,
                                     ti.table_end_line,
@@ -906,6 +948,8 @@ impl Element for EditorElement {
                                     &heading_cjk_font,
                                     font_size,
                                     theme,
+                                    &all_cursor_offsets,
+                                    editor.marked_range.as_ref(),
                                 )
                             })
                             .clone();
@@ -944,6 +988,70 @@ impl Element for EditorElement {
                             ));
                         }
 
+                        // Draw outer table border once.
+                        table_borders.push(fill(
+                            Bounds::new(
+                                point(px(table_left), px(table_top)),
+                                size(px(table_width), px(border_w)),
+                            ),
+                            border_color,
+                        ));
+                        table_borders.push(fill(
+                            Bounds::new(
+                                point(
+                                    px(table_left),
+                                    px(table_top + layout.total_height - border_w),
+                                ),
+                                size(px(table_width), px(border_w)),
+                            ),
+                            border_color,
+                        ));
+                        table_borders.push(fill(
+                            Bounds::new(
+                                point(px(table_left), px(table_top)),
+                                size(px(border_w), px(layout.total_height)),
+                            ),
+                            border_color,
+                        ));
+                        table_borders.push(fill(
+                            Bounds::new(
+                                point(px(table_left + table_width - border_w), px(table_top)),
+                                size(px(border_w), px(layout.total_height)),
+                            ),
+                            border_color,
+                        ));
+
+                        // Draw internal horizontal separators once.
+                        let mut row_boundary_y = table_top;
+                        for row_h in layout
+                            .row_heights
+                            .iter()
+                            .take(layout.visual_row_count.saturating_sub(1))
+                        {
+                            row_boundary_y += *row_h;
+                            table_borders.push(fill(
+                                Bounds::new(
+                                    point(px(table_left), px(row_boundary_y)),
+                                    size(px(table_width), px(border_w)),
+                                ),
+                                border_color,
+                            ));
+                        }
+
+                        // Draw internal vertical separators once.
+                        if let Some(first_row) = layout.cells.first() {
+                            for cell in first_row.iter().take(layout.col_count.saturating_sub(1)) {
+                                let separator_x = table_left + cell.x + cell.width;
+                                table_borders.push(fill(
+                                    Bounds::new(
+                                        point(px(separator_x), px(table_top)),
+                                        size(px(border_w), px(layout.total_height)),
+                                    ),
+                                    border_color,
+                                ));
+                            }
+                        }
+
                         // Render ALL visual rows of the table block
                         for vi in 0..layout.visual_row_count {
                             let row_y = table_top + layout.row_heights.iter().take(vi).sum::<f32>();
@@ -958,60 +1066,6 @@ impl Element for EditorElement {
                                     ),
                                     table_styles.table_header_bg,
                                 ));
-                            }
-
-                            // Row borders: top
-                            table_borders.push(fill(
-                                Bounds::new(
-                                    point(px(table_left), px(row_y)),
-                                    size(px(table_width), px(border_w)),
-                                ),
-                                border_color,
-                            ));
-                            // Bottom (only for last row, or each row)
-                            table_borders.push(fill(
-                                Bounds::new(
-                                    point(px(table_left), px(row_y + row_h - border_w)),
-                                    size(px(table_width), px(border_w)),
-                                ),
-                                border_color,
-                            ));
-                            // Left border
-                            table_borders.push(fill(
-                                Bounds::new(
-                                    point(px(table_left), px(row_y)),
-                                    size(px(border_w), px(row_h)),
-                                ),
-                                border_color,
-                            ));
-                            // Right border
-                            table_borders.push(fill(
-                                Bounds::new(
-                                    point(px(table_left + table_width - border_w), px(row_y)),
-                                    size(px(border_w), px(row_h)),
-                                ),
-                                border_color,
-                            ));
-
-                            // Column separator borders
-                            let mut col_x = 0.0_f32;
-                            for ci in 0..layout.col_count {
-                                let cell_w = layout
-                                    .cells
-                                    .get(vi)
-                                    .and_then(|row| row.get(ci))
-                                    .map(|c| c.width)
-                                    .unwrap_or(0.0);
-                                col_x += cell_w;
-                                if ci + 1 < layout.col_count {
-                                    table_borders.push(fill(
-                                        Bounds::new(
-                                            point(px(table_left + col_x), px(row_y)),
-                                            size(px(border_w), px(row_h)),
-                                        ),
-                                        border_color,
-                                    ));
-                                }
                             }
 
                             // Get the source line info for this visual row
@@ -1050,7 +1104,12 @@ impl Element for EditorElement {
                                         &cell_content,
                                         &cell_layout.display_to_buffer,
                                         &cell_decoration,
-                                        None,
+                                        helpers::active_table_cell_cursor_col(
+                                            buffer.line_start(source_line),
+                                            &cell_layout.cell_range,
+                                            &all_cursor_offsets,
+                                            editor.marked_range.as_ref(),
+                                        ),
                                         false,
                                         false,
                                         &body_font,
@@ -1419,6 +1478,7 @@ impl Element for EditorElement {
                             let indicator_width = table_styles.table_drag_indicator_width_px;
                             match drag {
                                 TableDragState::DraggingColumn {
+                                    source_col,
                                     table_start_line,
                                     current_x,
                                     ..
@@ -1436,19 +1496,32 @@ impl Element for EditorElement {
                                             .partial_cmp(&(*b - *current_x).abs())
                                             .unwrap_or(std::cmp::Ordering::Equal)
                                     }) {
-                                        table_borders.push(fill(
-                                            Bounds::new(
-                                                point(
-                                                    px(indicator_x - indicator_width / 2.0),
-                                                    px(table_top),
+                                        let insert_at = boundaries
+                                            .iter()
+                                            .position(|boundary| {
+                                                (*boundary - indicator_x).abs() < 0.5
+                                            })
+                                            .unwrap_or(0);
+                                        if insert_at != *source_col && insert_at != *source_col + 1
+                                        {
+                                            table_borders.push(fill(
+                                                Bounds::new(
+                                                    point(
+                                                        px(indicator_x - indicator_width / 2.0),
+                                                        px(table_top),
+                                                    ),
+                                                    size(
+                                                        px(indicator_width),
+                                                        px(layout.total_height),
+                                                    ),
                                                 ),
-                                                size(px(indicator_width), px(layout.total_height)),
-                                            ),
-                                            indicator_color,
-                                        ));
+                                                indicator_color,
+                                            ));
+                                        }
                                     }
                                 }
                                 TableDragState::DraggingRow {
+                                    source_row,
                                     table_start_line,
                                     current_y,
                                     ..
@@ -1467,16 +1540,25 @@ impl Element for EditorElement {
                                             .partial_cmp(&(*b - *current_y).abs())
                                             .unwrap_or(std::cmp::Ordering::Equal)
                                     }) {
-                                        table_borders.push(fill(
-                                            Bounds::new(
-                                                point(
-                                                    px(table_left),
-                                                    px(indicator_y - indicator_width / 2.0),
+                                        let insert_at = boundaries
+                                            .iter()
+                                            .position(|boundary| {
+                                                (*boundary - indicator_y).abs() < 0.5
+                                            })
+                                            .unwrap_or(0);
+                                        if insert_at != *source_row && insert_at != *source_row + 1
+                                        {
+                                            table_borders.push(fill(
+                                                Bounds::new(
+                                                    point(
+                                                        px(table_left),
+                                                        px(indicator_y - indicator_width / 2.0),
+                                                    ),
+                                                    size(px(table_width), px(indicator_width)),
                                                 ),
-                                                size(px(table_width), px(indicator_width)),
-                                            ),
-                                            indicator_color,
-                                        ));
+                                                indicator_color,
+                                            ));
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -1584,9 +1666,9 @@ impl Element for EditorElement {
                     let line_content_str = buffer.line_content(line_idx);
                     let leading_ws_bytes = line_content_str.len()
                         - line_content_str.trim_start_matches([' ', '\t']).len();
-                    // For nested tasks, shift checkbox left to align with
-                    // parent's content start (parent prefix is typically 2 chars).
-                    let cb_indent = leading_ws_bytes.saturating_sub(
+                    let cb_indent = helpers::task_visual_indent_chars(
+                        leading_ws_bytes,
+                        checkbox_indent_step_chars,
                         editor.styles.checkbox.checkbox_parent_prefix_chars as usize,
                     );
                     let cb_x = content_x + cb_indent as f32 * base_char_width;

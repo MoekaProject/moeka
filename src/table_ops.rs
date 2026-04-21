@@ -8,6 +8,29 @@ pub struct TableModel {
     pub data_rows: Vec<Vec<String>>,
 }
 
+fn all_rows(model: &TableModel) -> Vec<Vec<String>> {
+    std::iter::once(model.header_cells.clone())
+        .chain(model.data_rows.clone())
+        .collect()
+}
+
+fn set_all_rows(model: &mut TableModel, mut rows: Vec<Vec<String>>) {
+    let col_count = model
+        .col_count
+        .max(rows.iter().map(|row| row.len()).max().unwrap_or(0))
+        .max(1);
+    if rows.is_empty() {
+        rows.push(vec![String::new(); col_count]);
+    }
+
+    let mut padded_rows: Vec<Vec<String>> =
+        rows.iter().map(|row| pad_cells(row, col_count)).collect();
+    model.col_count = col_count;
+    model.aligns.resize(col_count, TableAlign::Left);
+    model.header_cells = padded_rows.remove(0);
+    model.data_rows = padded_rows;
+}
+
 fn parse_row(text: &str) -> Vec<String> {
     let trimmed = text.trim();
     let inner = if trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() >= 2 {
@@ -131,30 +154,39 @@ pub fn update_cell(
 
 pub fn insert_row(lines: &[String], insert_at: usize) -> Vec<String> {
     let mut model = parse_table_block(lines);
-    let row_count = model.data_rows.len();
-    let clamped = insert_at.min(row_count);
+    let mut rows = all_rows(&model);
+    let clamped = insert_at.min(rows.len());
     let empty_row = vec![String::new(); model.col_count];
-    model.data_rows.insert(clamped, empty_row);
+    rows.insert(clamped, empty_row);
+    set_all_rows(&mut model, rows);
     serialize_table(&model)
 }
 
 pub fn delete_row(lines: &[String], row_index: usize) -> Vec<String> {
     let mut model = parse_table_block(lines);
-    if row_index < model.data_rows.len() {
-        model.data_rows.remove(row_index);
+    let mut rows = all_rows(&model);
+    if row_index < rows.len() {
+        if rows.len() == 1 {
+            rows[0] = vec![String::new(); model.col_count.max(1)];
+        } else {
+            rows.remove(row_index);
+        }
+        set_all_rows(&mut model, rows);
     }
     serialize_table(&model)
 }
 
 pub fn move_row(lines: &[String], from: usize, to: usize) -> Vec<String> {
     let mut model = parse_table_block(lines);
-    if from >= model.data_rows.len() || to > model.data_rows.len() {
+    let mut rows = all_rows(&model);
+    if from >= rows.len() || to > rows.len() || from == to {
         return serialize_table(&model);
     }
-    let row = model.data_rows.remove(from);
+    let row = rows.remove(from);
     let adjusted_to = if to > from { to.saturating_sub(1) } else { to };
-    let clamped = adjusted_to.min(model.data_rows.len());
-    model.data_rows.insert(clamped, row);
+    let clamped = adjusted_to.min(rows.len());
+    rows.insert(clamped, row);
+    set_all_rows(&mut model, rows);
     serialize_table(&model)
 }
 
@@ -259,8 +291,9 @@ mod tests {
         let input = lines(&["| H1 | H2 |", "| --- | --- |", "| A | B |"]);
         let result = insert_row(&input, 0);
         let model = parse_table_block(&result);
+        assert_eq!(model.header_cells, vec!["", ""]);
         assert_eq!(model.data_rows.len(), 2);
-        assert_eq!(model.data_rows[0], vec!["", ""]);
+        assert_eq!(model.data_rows[0], vec!["H1", "H2"]);
         assert_eq!(model.data_rows[1], vec!["A", "B"]);
     }
 
@@ -269,6 +302,7 @@ mod tests {
         let input = lines(&["| H1 | H2 |", "| --- | --- |", "| A | B |", "| C | D |"]);
         let result = delete_row(&input, 0);
         let model = parse_table_block(&result);
+        assert_eq!(model.header_cells, vec!["A", "B"]);
         assert_eq!(model.data_rows.len(), 1);
         assert_eq!(model.data_rows[0], vec!["C", "D"]);
     }
@@ -278,8 +312,9 @@ mod tests {
         let input = lines(&["| H |", "| --- |", "| A |", "| B |", "| C |"]);
         let result = move_row(&input, 0, 2);
         let model = parse_table_block(&result);
-        assert_eq!(model.data_rows[0], vec!["B"]);
-        assert_eq!(model.data_rows[1], vec!["A"]);
+        assert_eq!(model.header_cells, vec!["A"]);
+        assert_eq!(model.data_rows[0], vec!["H"]);
+        assert_eq!(model.data_rows[1], vec!["B"]);
         assert_eq!(model.data_rows[2], vec!["C"]);
     }
 

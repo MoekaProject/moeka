@@ -58,6 +58,20 @@ fn prefers_latin_text_font(ch: char) -> bool {
     )
 }
 
+pub(crate) fn task_visual_indent_chars(
+    leading_ws: usize,
+    visual_indent_step_chars: usize,
+    task_source_indent_step_chars: usize,
+) -> usize {
+    if visual_indent_step_chars == 0 || task_source_indent_step_chars == 0 {
+        return leading_ws;
+    }
+
+    let indent_levels = leading_ws / task_source_indent_step_chars;
+    let remainder = leading_ws % task_source_indent_step_chars;
+    indent_levels * visual_indent_step_chars.max(1) + remainder
+}
+
 /// Build display text by selectively hiding syntax ranges.
 pub(crate) fn build_display_text(
     line_content: &str,
@@ -67,7 +81,8 @@ pub(crate) fn build_display_text(
     table_width_chars: Option<usize>,
     table_cell_padding_chars: usize,
     collapsed_task_prefix_chars: usize,
-    task_parent_prefix_chars: usize,
+    task_indent_step_chars: usize,
+    task_source_indent_step_chars: usize,
 ) -> (String, Vec<usize>, Vec<usize>, bool) {
     let len = line_content.len();
 
@@ -81,7 +96,8 @@ pub(crate) fn build_display_text(
                 table_width_chars,
                 table_cell_padding_chars,
                 collapsed_task_prefix_chars,
-                task_parent_prefix_chars,
+                task_indent_step_chars,
+                task_source_indent_step_chars,
             );
         }
     }
@@ -185,11 +201,12 @@ pub(crate) fn build_display_text(
         BlockType::TaskList(_) => {
             let fold_len = task_prefix_len(trimmed);
             let trigger_len = task_syntax_len(trimmed);
-            // Absorb parent-prefix indent so sub-task checkbox aligns
-            // with parent's text start. Keep collapsed placeholder width.
-            let indent_reduction = leading_ws.min(task_parent_prefix_chars);
-            let reduced_indent = leading_ws - indent_reduction;
-            let replacement = " ".repeat(reduced_indent + collapsed_task_prefix_chars.max(1));
+            let visual_indent = task_visual_indent_chars(
+                leading_ws,
+                task_indent_step_chars,
+                task_source_indent_step_chars,
+            );
+            let replacement = " ".repeat(visual_indent + collapsed_task_prefix_chars.max(1));
             (fold_len > 0 && prefix_is_folded(leading_ws, trigger_len, cursor_col))
                 .then_some((0..leading_ws + fold_len, replacement))
         }
@@ -270,7 +287,8 @@ pub(crate) fn build_table_display_text(
     available_chars: Option<usize>,
     table_cell_padding_chars: usize,
     collapsed_task_prefix_chars: usize,
-    task_parent_prefix_chars: usize,
+    task_indent_step_chars: usize,
+    task_source_indent_step_chars: usize,
 ) -> (String, Vec<usize>, Vec<usize>, bool) {
     let len = line_content.len();
     let cell_padding = table_cell_padding_chars;
@@ -320,7 +338,8 @@ pub(crate) fn build_table_display_text(
             None,
             0,
             collapsed_task_prefix_chars,
-            task_parent_prefix_chars,
+            task_indent_step_chars,
+            task_source_indent_step_chars,
         );
         let trimmed_start = folded_cell_raw.len() - folded_cell_raw.trim_start().len();
         let trimmed_end = folded_cell_raw.len() - folded_cell_raw.trim_end().len();
@@ -378,6 +397,36 @@ pub(crate) fn build_table_display_text(
     b2d.push(display.len());
 
     (display, d2b, b2d, false)
+}
+
+pub(crate) fn active_table_cell_cursor_col(
+    line_start_offset: usize,
+    cell_range: &Range<usize>,
+    cursor_offsets: &[usize],
+    marked_range: Option<&Range<usize>>,
+) -> Option<usize> {
+    let cell_start = line_start_offset + cell_range.start;
+    let cell_end = line_start_offset + cell_range.end;
+
+    if let Some(cursor_offset) = cursor_offsets
+        .iter()
+        .copied()
+        .find(|offset| *offset >= cell_start && *offset <= cell_end)
+    {
+        return Some((cursor_offset - cell_start).min(cell_range.len()));
+    }
+
+    let marked_range = marked_range?;
+    if marked_range.end < cell_start || marked_range.start > cell_end {
+        return None;
+    }
+
+    Some(
+        marked_range
+            .end
+            .saturating_sub(cell_start)
+            .min(cell_range.len()),
+    )
 }
 
 pub(crate) fn compute_table_render_widths(
@@ -661,8 +710,17 @@ pub(crate) fn compute_table_layout(
                 .into_iter()
                 .next()
                 .unwrap_or_default();
-            let (folded_raw, d2b_raw, b2d_raw, _) =
-                build_display_text(&cell_content, &cell_decoration, None, false, None, 0, 0, 0);
+            let (folded_raw, d2b_raw, b2d_raw, _) = build_display_text(
+                &cell_content,
+                &cell_decoration,
+                None,
+                false,
+                None,
+                0,
+                0,
+                0,
+                0,
+            );
             let trimmed = folded_raw.trim();
             let trim_start = folded_raw.len() - folded_raw.trim_start().len();
             let trim_end = folded_raw.len() - folded_raw.trim_end().len();

@@ -579,19 +579,14 @@ impl EditorView {
 
     pub(crate) fn on_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
         self.checkpoint();
-        let current_line = self.cursor_line();
-        let block_type = self.decorations.get(current_line).map(|d| &d.block_type);
-        let is_list = matches!(
-            block_type,
-            Some(BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_))
-        );
+        let (start_line, end_line) = self.selected_line_span();
+        let has_list =
+            (start_line..=end_line).any(|line| self.list_indent_width_for_line(line).is_some());
 
-        if is_list || self.cursor.has_selection() {
-            let indent = match block_type {
-                Some(BlockType::OrderedList) => "   ",
-                _ => "  ",
-            };
-            self.indent_current_lines(indent);
+        if has_list {
+            self.indent_selected_list_lines();
+        } else if self.cursor.has_selection() {
+            self.indent_current_lines("  ");
         } else {
             self.cursor.insert(&mut self.buffer, "  ");
             self.reparse();
@@ -602,19 +597,14 @@ impl EditorView {
 
     pub(crate) fn on_back_tab(&mut self, _: &BackTab, _: &mut Window, cx: &mut Context<Self>) {
         self.checkpoint();
-        let current_line = self.cursor_line();
-        let block_type = self.decorations.get(current_line).map(|d| &d.block_type);
-        let is_list = matches!(
-            block_type,
-            Some(BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_))
-        );
+        let (start_line, end_line) = self.selected_line_span();
+        let has_list =
+            (start_line..=end_line).any(|line| self.list_indent_width_for_line(line).is_some());
 
-        if is_list || self.cursor.has_selection() {
-            let count = match block_type {
-                Some(BlockType::OrderedList) => 3,
-                _ => 2,
-            };
-            self.unindent_current_lines(count);
+        if has_list {
+            self.unindent_selected_list_lines();
+        } else if self.cursor.has_selection() {
+            self.unindent_current_lines(2);
         }
         self.pause_blinking(cx);
     }

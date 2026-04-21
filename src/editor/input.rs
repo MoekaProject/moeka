@@ -30,6 +30,25 @@ fn ime_debug_log(_message: impl AsRef<str>) {
 }
 
 impl EditorView {
+    fn begin_ime_composition(&mut self) {
+        if self.ime_composition_snapshot.is_none() {
+            self.ime_composition_snapshot = Some(self.current_snapshot());
+        }
+    }
+
+    fn finish_ime_composition(&mut self) {
+        let Some(snapshot) = self.ime_composition_snapshot.take() else {
+            return;
+        };
+
+        let changed = snapshot.text != self.buffer.text()
+            || snapshot.cursor_offset != self.cursor.offset
+            || snapshot.cursor_anchor != self.cursor.anchor;
+        if changed {
+            self.push_undo_snapshot(snapshot);
+        }
+    }
+
     // ── Mouse handlers ──────────────────────────────────────────────
 
     pub(crate) fn on_mouse_down(
@@ -461,7 +480,15 @@ impl EditorView {
                                 let new_lines =
                                     crate::table_ops::move_column(&lines, source_col, insert_at);
                                 self.replace_table_block(start, end, &new_lines);
+                                let selected_col = if insert_at > source_col {
+                                    insert_at.saturating_sub(1)
+                                } else {
+                                    insert_at
+                                };
+                                self.selected_handle = Some((table_start_line, true, selected_col));
                             }
+                        } else {
+                            self.selected_handle = Some((table_start_line, true, source_col));
                         }
                     }
                 }
@@ -473,18 +500,23 @@ impl EditorView {
                     if let Some(insert_visual) =
                         self.table_row_insert_at_y(table_start_line, current_y)
                     {
-                        if source_row > 0 {
+                        if insert_visual != source_row && insert_visual != source_row + 1 {
                             if let Some((start, end, lines)) =
                                 self.table_lines_for_block(table_start_line)
                             {
-                                let from_data = source_row.saturating_sub(1);
-                                let to_data = insert_visual.saturating_sub(1);
-                                if to_data != from_data && to_data != from_data + 1 {
-                                    let new_lines =
-                                        crate::table_ops::move_row(&lines, from_data, to_data);
-                                    self.replace_table_block(start, end, &new_lines);
-                                }
+                                let new_lines =
+                                    crate::table_ops::move_row(&lines, source_row, insert_visual);
+                                self.replace_table_block(start, end, &new_lines);
+                                let selected_row = if insert_visual > source_row {
+                                    insert_visual.saturating_sub(1)
+                                } else {
+                                    insert_visual
+                                };
+                                self.selected_handle =
+                                    Some((table_start_line, false, selected_row));
                             }
+                        } else {
+                            self.selected_handle = Some((table_start_line, false, source_row));
                         }
                     }
                 }
@@ -755,6 +787,16 @@ impl EditorView {
         let ti = dec.table_info.as_ref()?;
         let cell_content = ti.cells.get(col).cloned().unwrap_or_default();
         let cell_range = ti.cell_ranges.get(col).cloned().unwrap_or(0..0);
+        let line_start = self.buffer.line_start(source_line);
+        let cursor_offsets = std::iter::once(self.cursor.offset)
+            .chain(self.extra_cursors.iter().map(|cursor| cursor.offset))
+            .collect::<Vec<_>>();
+        let cell_cursor_col = helpers::active_table_cell_cursor_col(
+            line_start,
+            &cell_range,
+            &cursor_offsets,
+            self.marked_range.as_ref(),
+        );
         let cell_decoration = crate::markdown::parse_decorations(&cell_content)
             .into_iter()
             .next()
@@ -762,9 +804,10 @@ impl EditorView {
         let (folded_raw, d2b_raw, b2d_raw, _) = helpers::build_display_text(
             &cell_content,
             &cell_decoration,
-            None,
+            cell_cursor_col,
             false,
             None,
+            0,
             0,
             0,
             0,
@@ -822,7 +865,7 @@ impl EditorView {
             &cell_content,
             &display_to_buffer,
             &cell_decoration,
-            None,
+            cell_cursor_col,
             false,
             false,
             &body_font,
@@ -879,6 +922,7 @@ impl EditorView {
         position: Point<Pixels>,
     ) -> Option<usize> {
         let source_line = self.table_source_line_for_visual_row(table_start, visual_row)?;
+        let line_start = self.buffer.line_start(source_line);
         let padding_x = self.scaled(self.styles.table.table_cell_padding_px);
         let padding_y = self.scaled(self.styles.table.table_cell_padding_px) * 0.6;
         let inner_width =
@@ -903,7 +947,6 @@ impl EditorView {
         } else {
             info.cell_content_len
         };
-        let line_start = self.buffer.line_start(source_line);
         Some(line_start + info.cell_range.start + buffer_col)
     }
 
@@ -1069,10 +1112,7 @@ impl EntityInputHandler for EditorView {
         };
         ime_debug_log(format!(
             "selected_text_range -> {:?}, cursor=({},{}) marked={:?}",
-            selection.range,
-            self.cursor.anchor,
-            self.cursor.offset,
-            self.marked_range
+            selection.range, self.cursor.anchor, self.cursor.offset, self.marked_range
         ));
         Some(selection)
     }
@@ -1089,14 +1129,14 @@ impl EntityInputHandler for EditorView {
         let marked = self.marked_range.as_ref().map(|r| self.range_to_utf16(r));
         ime_debug_log(format!(
             "marked_text_range -> {:?} (utf8={:?})",
-            marked,
-            self.marked_range
+            marked, self.marked_range
         ));
         marked
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
         self.marked_range = None;
+        self.finish_ime_composition();
     }
 
     fn replace_text_in_range(
@@ -1113,7 +1153,10 @@ impl EntityInputHandler for EditorView {
             self.marked_range,
             self.cursor.selection_range()
         ));
-        self.checkpoint();
+        let had_ime_composition = self.ime_composition_snapshot.is_some();
+        if !had_ime_composition {
+            self.checkpoint();
+        }
 
         // When text is selected and user types a formatting character, wrap selection
         if self.cursor.has_selection() && self.marked_range.is_none() && range_utf16.is_none() {
@@ -1161,10 +1204,12 @@ impl EntityInputHandler for EditorView {
         }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
+        if had_ime_composition {
+            self.finish_ime_composition();
+        }
         ime_debug_log(format!(
             "replace_text_in_range end cursor={} marked_after={:?}",
-            self.cursor.offset,
-            self.marked_range
+            self.cursor.offset, self.marked_range
         ));
 
         if self.slash_menu_start.is_some() {
@@ -1195,7 +1240,7 @@ impl EntityInputHandler for EditorView {
             self.marked_range,
             self.cursor.selection_range()
         ));
-        self.checkpoint();
+        self.begin_ime_composition();
         let range = range_utf16
             .as_ref()
             .map(|r| self.range_from_utf16(r))
@@ -1236,9 +1281,7 @@ impl EntityInputHandler for EditorView {
         self.pause_blinking(cx);
         ime_debug_log(format!(
             "replace_and_mark_text_in_range end selection=({},{}) marked_after={:?}",
-            self.cursor.anchor,
-            self.cursor.offset,
-            self.marked_range
+            self.cursor.anchor, self.cursor.offset, self.marked_range
         ));
     }
 
@@ -1249,7 +1292,10 @@ impl EntityInputHandler for EditorView {
         window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        ime_debug_log(format!("bounds_for_range start range_utf16={:?}", range_utf16));
+        ime_debug_log(format!(
+            "bounds_for_range start range_utf16={:?}",
+            range_utf16
+        ));
         let range = self.range_from_utf16(&range_utf16);
         let (line, col) = self.buffer.offset_to_line_col(range.start);
         let origin_y: f32 = self.content_origin.y.into();
@@ -1310,14 +1356,7 @@ impl EntityInputHandler for EditorView {
                     self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
                 ime_debug_log(format!(
                     "bounds_for_range table line={} col={} cell_col={} visual_row={} range_utf8={:?} -> x={} y={} h={}",
-                    line,
-                    col,
-                    cell_col,
-                    visual_row,
-                    range,
-                    x,
-                    y,
-                    line_height
+                    line, col, cell_col, visual_row, range, x, y, line_height
                 ));
                 return Some(Bounds::new(
                     point(px(x), px(y)),
@@ -1337,12 +1376,7 @@ impl EntityInputHandler for EditorView {
             let y = line_top_y + f32::from(pos.y);
             ime_debug_log(format!(
                 "bounds_for_range normal line={} col={} range_utf8={:?} -> x={} y={} h={}",
-                line,
-                col,
-                range,
-                x,
-                y,
-                info.line_height
+                line, col, range, x, y, info.line_height
             ));
             Some(Bounds::new(
                 point(px(x), px(y)),
