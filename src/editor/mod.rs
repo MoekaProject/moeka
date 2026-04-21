@@ -547,6 +547,8 @@ pub struct EditorView {
     pub(crate) hovering_table_start: Option<usize>,
     /// Which specific handle the mouse is over: (table_start_line, is_column, index)
     pub(crate) hovering_handle: Option<(usize, bool, usize)>,
+    /// Which specific handle is selected: (table_start_line, is_column, index)
+    pub(crate) selected_handle: Option<(usize, bool, usize)>,
     pub(crate) image_cache: HashMap<String, Option<Arc<RenderImage>>>,
     pub(crate) undo_stack: Vec<EditorSnapshot>,
     pub(crate) redo_stack: Vec<EditorSnapshot>,
@@ -732,6 +734,7 @@ impl EditorView {
             table_drag: None,
             hovering_table_start: None,
             hovering_handle: None,
+            selected_handle: None,
             image_cache: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -1367,7 +1370,6 @@ impl EditorView {
 
     pub(crate) fn reparse(&mut self) {
         self.decorations = markdown::parse_decorations(self.buffer.text());
-        self.auto_align_table();
     }
 
     pub(crate) fn cursor_line(&self) -> usize {

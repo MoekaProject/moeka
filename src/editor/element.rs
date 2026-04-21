@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use gpui::{
     App, BorderStyle, Bounds, Corners, CursorStyle, Element, ElementId, ElementInputHandler,
-    Entity, Font, FontFallbacks, GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId,
-    PaintQuad, Pixels, Point, ShapedLine, Style, TextAlign, TextRun, TransformationMatrix, Window,
-    WrappedLine, fill, point, px, quad, relative, size,
+    Entity, Font, FontFallbacks, GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement,
+    LayoutId, PaintQuad, Pixels, Point, ShapedLine, Style, TextAlign, TextRun,
+    TransformationMatrix, Window, WrappedLine, fill, point, px, quad, relative, size,
 };
 
 use crate::markdown::BlockType;
@@ -111,7 +111,11 @@ fn build_precise_table_layout(
 
         if let Some(row_ti) = row_ti {
             for cell_layout in layout.cells.get(vi).into_iter().flatten() {
-                let cell_content = row_ti.cells.get(cell_layout.col).cloned().unwrap_or_default();
+                let cell_content = row_ti
+                    .cells
+                    .get(cell_layout.col)
+                    .cloned()
+                    .unwrap_or_default();
                 let cell_decoration = crate::markdown::parse_decorations(&cell_content)
                     .into_iter()
                     .next()
@@ -154,7 +158,8 @@ fn build_precise_table_layout(
                 ) {
                     if let Some(shaped) = shaped_lines.into_iter().next() {
                         let visual_lines = helpers::wrap_boundary_byte_indices(&shaped).len() + 1;
-                        row_height = row_height.max(visual_lines as f32 * line_height + cell_padding_y * 2.0);
+                        row_height = row_height
+                            .max(visual_lines as f32 * line_height + cell_padding_y * 2.0);
                     }
                 }
             }
@@ -165,7 +170,10 @@ fn build_precise_table_layout(
 
     let mut current_y = 0.0_f32;
     for (vi, row) in layout.cells.iter_mut().enumerate() {
-        let row_height = row_heights.get(vi).copied().unwrap_or(line_height + cell_padding_y * 2.0);
+        let row_height = row_heights
+            .get(vi)
+            .copied()
+            .unwrap_or(line_height + cell_padding_y * 2.0);
         for cell in row.iter_mut() {
             cell.y = current_y;
             cell.height = row_height;
@@ -1072,9 +1080,9 @@ impl Element for EditorElement {
                                     let cell_x = table_left + cell_layout.x + layout.cell_padding_x;
                                     let cell_text_y = row_y + layout.cell_padding_y;
 
-                                    let wrap_width =
-                                        (cell_layout.width - layout.cell_padding_x * 2.0)
-                                            .max(base_char_width);
+                                    let wrap_width = (cell_layout.width
+                                        - layout.cell_padding_x * 2.0)
+                                        .max(base_char_width);
 
                                     if let Ok(shaped_lines) = window.text_system().shape_text(
                                         cell_text,
@@ -1088,7 +1096,8 @@ impl Element for EditorElement {
                                                 .and_then(|t| t.cell_ranges.get(cell_layout.col))
                                             {
                                                 let line_start_off = buffer.line_start(source_line);
-                                                let cell_buf_start = line_start_off + cell_range.start;
+                                                let cell_buf_start =
+                                                    line_start_off + cell_range.start;
                                                 let cell_buf_end = line_start_off + cell_range.end;
 
                                                 for sr in &all_sel_ranges {
@@ -1144,59 +1153,65 @@ impl Element for EditorElement {
                                                     }
                                                 }
 
-                                            // Paint cursors within this cell
-                                            if window.is_window_active()
-                                                && editor.focus_handle.is_focused(window)
-                                                && editor.focused_sidebar_path.is_none()
-                                                && (editor.cursor_opacity > 0.0
-                                                    || editor.is_selecting)
-                                            {
+                                                // Paint cursors within this cell
+                                                if editor.selected_handle.is_none()
+                                                    && window.is_window_active()
+                                                    && editor.focus_handle.is_focused(window)
+                                                    && editor.focused_sidebar_path.is_none()
+                                                    && (editor.cursor_opacity > 0.0
+                                                        || editor.is_selecting)
                                                 {
-                                                    for &cur_off in &all_cursor_offsets {
-                                                        if cur_off >= cell_buf_start
-                                                            && cur_off <= cell_buf_end
-                                                        {
-                                                            let in_cell = cur_off - cell_buf_start;
-                                                            let disp_col = if in_cell
-                                                                >= cell_layout.buffer_to_display.len()
+                                                    {
+                                                        for &cur_off in &all_cursor_offsets {
+                                                            if cur_off >= cell_buf_start
+                                                                && cur_off <= cell_buf_end
                                                             {
-                                                                cell_layout.display_text.len()
-                                                            } else {
-                                                                helpers::buffer_to_display_offset(
+                                                                let in_cell =
+                                                                    cur_off - cell_buf_start;
+                                                                let disp_col = if in_cell
+                                                                    >= cell_layout
+                                                                        .buffer_to_display
+                                                                        .len()
+                                                                {
+                                                                    cell_layout.display_text.len()
+                                                                } else {
+                                                                    helpers::buffer_to_display_offset(
                                                                     &cell_layout.buffer_to_display,
                                                                     in_cell,
                                                                 )
-                                                            };
-                                                            let disp_col = disp_col.min(
-                                                                cell_layout.display_text.len(),
-                                                            );
-                                                            if let Some(pos) = shaped
-                                                                .position_for_index(
-                                                                    disp_col,
-                                                                    px(line_height),
-                                                                )
-                                                            {
-                                                                let cursor_height = line_height
-                                                                    * editor
-                                                                        .styles
-                                                                        .cursor
-                                                                        .cursor_height_factor
-                                                                        .clamp(0.1, 1.0);
-                                                                let cursor_top = cell_text_y
-                                                                    + f32::from(pos.y)
-                                                                    + (line_height - cursor_height)
-                                                                        / 2.0;
-                                                                let mut cursor_color = theme.cursor;
-                                                                cursor_color.a *=
-                                                                    if editor.is_selecting {
-                                                                        editor
+                                                                };
+                                                                let disp_col = disp_col.min(
+                                                                    cell_layout.display_text.len(),
+                                                                );
+                                                                if let Some(pos) = shaped
+                                                                    .position_for_index(
+                                                                        disp_col,
+                                                                        px(line_height),
+                                                                    )
+                                                                {
+                                                                    let cursor_height = line_height
+                                                                        * editor
                                                                             .styles
                                                                             .cursor
-                                                                            .cursor_opacity_max
-                                                                    } else {
-                                                                        editor.cursor_opacity
-                                                                    };
-                                                                cursor_quads.push(fill(
+                                                                            .cursor_height_factor
+                                                                            .clamp(0.1, 1.0);
+                                                                    let cursor_top = cell_text_y
+                                                                        + f32::from(pos.y)
+                                                                        + (line_height
+                                                                            - cursor_height)
+                                                                            / 2.0;
+                                                                    let mut cursor_color =
+                                                                        theme.cursor;
+                                                                    cursor_color.a *=
+                                                                        if editor.is_selecting {
+                                                                            editor
+                                                                                .styles
+                                                                                .cursor
+                                                                                .cursor_opacity_max
+                                                                        } else {
+                                                                            editor.cursor_opacity
+                                                                        };
+                                                                    cursor_quads.push(fill(
                                                                     Bounds::new(
                                                                         point(
                                                                             px(cell_x) + pos.x,
@@ -1212,11 +1227,11 @@ impl Element for EditorElement {
                                                                     ),
                                                                     cursor_color,
                                                                 ));
+                                                                }
                                                             }
                                                         }
                                                     }
                                                 }
-                                            }
                                             }
 
                                             table_cell_texts.push((
@@ -1280,6 +1295,11 @@ impl Element for EditorElement {
                             }
                         }
 
+                        let selected_handle = editor.selected_handle;
+                        let highlight_width = table_styles.table_handle_highlight_width_px;
+                        let dot_size = table_styles.table_handle_dot_size_px;
+                        let dot_gap = table_styles.table_handle_gap_px;
+
                         // Draw handle grips only for the specific handle being hovered
                         let hovering_handle = editor.hovering_handle;
                         // Column handle grips
@@ -1295,21 +1315,43 @@ impl Element for EditorElement {
                                     .unwrap_or(0.0);
                                 let is_hovered =
                                     hovering_handle == Some((ti.table_start_line, true, ci));
+                                let is_selected =
+                                    selected_handle == Some((ti.table_start_line, true, ci));
+                                let is_drag_source = matches!(
+                                    &editor.table_drag,
+                                    Some(TableDragState::DraggingColumn {
+                                        table_start_line,
+                                        source_col,
+                                        ..
+                                    }) if *table_start_line == ti.table_start_line && *source_col == ci
+                                );
+                                if is_hovered || is_selected || is_drag_source {
+                                    table_borders.push(quad(
+                                        Bounds::new(
+                                            point(px(table_left + hx), px(table_top)),
+                                            size(px(cell_w), px(layout.total_height)),
+                                        ),
+                                        Corners::all(px(4.0)),
+                                        gpui::transparent_black(),
+                                        px(highlight_width),
+                                        theme.cursor,
+                                        BorderStyle::default(),
+                                    ));
+                                }
                                 if is_hovered {
-                                    let grip_w = 10.0_f32;
-                                    let grip_h = 6.0_f32;
+                                    let grip_w = dot_size * 3.0 + dot_gap * 2.0;
+                                    let grip_h = dot_size * 2.0 + dot_gap;
                                     let grip_x = table_left + hx + cell_w / 2.0 - grip_w / 2.0;
                                     let grip_y = table_top - handle_h / 2.0 - grip_h / 2.0;
-                                    let dot_r = 1.5_f32;
                                     let handle_color = table_styles.table_handle_color;
                                     for dr in 0..2 {
                                         for dc in 0..3 {
-                                            let dx = grip_x + dc as f32 * (grip_w / 2.0);
-                                            let dy = grip_y + dr as f32 * grip_h;
+                                            let dx = grip_x + dc as f32 * (dot_size + dot_gap);
+                                            let dy = grip_y + dr as f32 * (dot_size + dot_gap);
                                             table_bgs.push(fill(
                                                 Bounds::new(
                                                     point(px(dx), px(dy)),
-                                                    size(px(dot_r * 2.0), px(dot_r * 2.0)),
+                                                    size(px(dot_size), px(dot_size)),
                                                 ),
                                                 handle_color,
                                             ));
@@ -1326,22 +1368,44 @@ impl Element for EditorElement {
                             let row_h = layout.row_heights.get(vi).copied().unwrap_or(line_height);
                             let is_hovered =
                                 hovering_handle == Some((ti.table_start_line, false, vi));
+                            let is_selected =
+                                selected_handle == Some((ti.table_start_line, false, vi));
+                            let is_drag_source = matches!(
+                                &editor.table_drag,
+                                Some(TableDragState::DraggingRow {
+                                    table_start_line,
+                                    source_row,
+                                    ..
+                                }) if *table_start_line == ti.table_start_line && *source_row == vi
+                            );
+                            if is_hovered || is_selected || is_drag_source {
+                                table_borders.push(quad(
+                                    Bounds::new(
+                                        point(px(table_left), px(row_y)),
+                                        size(px(table_width), px(row_h)),
+                                    ),
+                                    Corners::all(px(4.0)),
+                                    gpui::transparent_black(),
+                                    px(highlight_width),
+                                    theme.cursor,
+                                    BorderStyle::default(),
+                                ));
+                            }
                             if is_hovered {
                                 let handle_w = layout.handle_size;
-                                let grip_w = 6.0_f32;
-                                let grip_h = 10.0_f32;
+                                let grip_w = dot_size * 2.0 + dot_gap;
+                                let grip_h = dot_size * 3.0 + dot_gap * 2.0;
                                 let grip_x = table_left - handle_w / 2.0 - grip_w / 2.0;
                                 let grip_y = row_y + row_h / 2.0 - grip_h / 2.0;
-                                let dot_r = 1.5_f32;
                                 let handle_color = table_styles.table_handle_color;
                                 for dr in 0..3 {
                                     for dc in 0..2 {
-                                        let dx = grip_x + dc as f32 * grip_w;
-                                        let dy = grip_y + dr as f32 * (grip_h / 2.0);
+                                        let dx = grip_x + dc as f32 * (dot_size + dot_gap);
+                                        let dy = grip_y + dr as f32 * (dot_size + dot_gap);
                                         table_bgs.push(fill(
                                             Bounds::new(
                                                 point(px(dx), px(dy)),
-                                                size(px(dot_r * 2.0), px(dot_r * 2.0)),
+                                                size(px(dot_size), px(dot_size)),
                                             ),
                                             handle_color,
                                         ));
@@ -1352,6 +1416,7 @@ impl Element for EditorElement {
 
                         if let Some(drag) = &editor.table_drag {
                             let indicator_color = theme.cursor;
+                            let indicator_width = table_styles.table_drag_indicator_width_px;
                             match drag {
                                 TableDragState::DraggingColumn {
                                     table_start_line,
@@ -1373,8 +1438,11 @@ impl Element for EditorElement {
                                     }) {
                                         table_borders.push(fill(
                                             Bounds::new(
-                                                point(px(indicator_x - 1.0), px(table_top)),
-                                                size(px(2.0), px(layout.total_height)),
+                                                point(
+                                                    px(indicator_x - indicator_width / 2.0),
+                                                    px(table_top),
+                                                ),
+                                                size(px(indicator_width), px(layout.total_height)),
                                             ),
                                             indicator_color,
                                         ));
@@ -1385,7 +1453,8 @@ impl Element for EditorElement {
                                     current_y,
                                     ..
                                 } if *table_start_line == ti.table_start_line => {
-                                    let mut boundaries = Vec::with_capacity(layout.visual_row_count + 1);
+                                    let mut boundaries =
+                                        Vec::with_capacity(layout.visual_row_count + 1);
                                     boundaries.push(table_top);
                                     let mut y_cursor = table_top;
                                     for row_height in &layout.row_heights {
@@ -1400,8 +1469,11 @@ impl Element for EditorElement {
                                     }) {
                                         table_borders.push(fill(
                                             Bounds::new(
-                                                point(px(table_left), px(indicator_y - 1.0)),
-                                                size(px(table_width), px(2.0)),
+                                                point(
+                                                    px(table_left),
+                                                    px(indicator_y - indicator_width / 2.0),
+                                                ),
+                                                size(px(table_width), px(indicator_width)),
                                             ),
                                             indicator_color,
                                         ));
@@ -1675,7 +1747,11 @@ impl Element for EditorElement {
             }
 
             // Line highlight
-            if is_cursor_line && !any_selection && editor.extra_cursors.is_empty() {
+            if editor.selected_handle.is_none()
+                && is_cursor_line
+                && !any_selection
+                && editor.extra_cursors.is_empty()
+            {
                 line_highlight = Some(fill(
                     Bounds::new(
                         point(px(origin_x), px(line_top)),
@@ -1810,7 +1886,8 @@ impl Element for EditorElement {
 
             // Cursor bars — paint for all cursors (primary + extra)
             // Skip for table lines — table cursor is rendered within the table block
-            if *block_type != BlockType::Table
+            if editor.selected_handle.is_none()
+                && *block_type != BlockType::Table
                 && window.is_window_active()
                 && editor.focus_handle.is_focused(window)
                 && editor.focused_sidebar_path.is_none()
@@ -2023,8 +2100,14 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let focus_handle = self.editor.read(cx).focus_handle.clone();
-        window.set_cursor_style(CursorStyle::IBeam, &prepaint.hitbox);
+        let editor = self.editor.read(cx);
+        let focus_handle = editor.focus_handle.clone();
+        let cursor_style = match editor.hovering_handle {
+            Some((_, true, _)) => CursorStyle::ResizeColumn,
+            Some((_, false, _)) => CursorStyle::ResizeRow,
+            None => CursorStyle::IBeam,
+        };
+        window.set_cursor_style(cursor_style, &prepaint.hitbox);
         for link_hitbox in &prepaint.link_hitboxes {
             window.set_cursor_style(CursorStyle::PointingHand, link_hitbox);
         }

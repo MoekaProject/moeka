@@ -577,13 +577,63 @@ pub(crate) fn compute_table_layout(
             .map(|&w| w as f32 * base_char_width + extra_per_col)
             .collect()
     } else {
-        // Not enough: scale proportionally, with minimum 28px
         let min_col = 28.0_f32;
-        let scale = content_width / desired_total;
-        desired_col_widths_chars
+        let mut widths: Vec<f32> = desired_col_widths_chars
             .iter()
-            .map(|&w| (w as f32 * base_char_width * scale).max(min_col))
-            .collect()
+            .map(|&w| (w as f32 * base_char_width).max(min_col))
+            .collect();
+
+        let mut unresolved: Vec<usize> = (0..col_count).collect();
+        let mut remaining_width = content_width;
+        loop {
+            if unresolved.is_empty() {
+                break;
+            }
+
+            let avg_width = (remaining_width / unresolved.len() as f32).max(min_col);
+            let mut changed = false;
+            let mut next_unresolved = Vec::new();
+
+            for &index in &unresolved {
+                if widths[index] <= avg_width {
+                    remaining_width -= widths[index];
+                    changed = true;
+                } else {
+                    next_unresolved.push(index);
+                }
+            }
+
+            if !changed {
+                for &index in &unresolved {
+                    widths[index] = avg_width;
+                }
+                break;
+            }
+
+            unresolved = next_unresolved;
+        }
+
+        let actual_total: f32 = widths.iter().sum();
+        if actual_total > content_width {
+            let excess = actual_total - content_width;
+            let shrinkable: Vec<usize> = widths
+                .iter()
+                .enumerate()
+                .filter_map(|(index, width)| (*width > min_col + 0.1).then_some(index))
+                .collect();
+            let shrinkable_total: f32 = shrinkable
+                .iter()
+                .map(|&index| widths[index] - min_col)
+                .sum();
+            if shrinkable_total > 0.0 {
+                for index in shrinkable {
+                    let share = (widths[index] - min_col) / shrinkable_total;
+                    widths[index] = (widths[index] - excess * share).max(min_col);
+                }
+            }
+        }
+
+        widths
     };
 
     let row_height = line_height + cell_padding_y * 2.0;

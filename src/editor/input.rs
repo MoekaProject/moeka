@@ -2,8 +2,8 @@ use std::ops::Range;
 
 use gpui::{
     App, Bounds, Context, EntityInputHandler, Focusable, FontFallbacks, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent,
-    SharedString, UTF16Selection, Window, WrappedLine, point, px, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent, SharedString,
+    UTF16Selection, Window, WrappedLine, point, px, size,
 };
 
 use crate::markdown::{BlockType, InlineKind};
@@ -14,8 +14,19 @@ struct TableCellDisplayInfo {
     wrapped: WrappedLine,
     display_text: String,
     display_to_buffer: Vec<usize>,
+    buffer_to_display: Vec<usize>,
     cell_range: Range<usize>,
     cell_content_len: usize,
+}
+
+fn ime_debug_enabled() -> bool {
+    false
+}
+
+fn ime_debug_log(_message: impl AsRef<str>) {
+    if ime_debug_enabled() {
+        eprintln!("[ime-debug] logging enabled");
+    }
 }
 
 impl EditorView {
@@ -30,6 +41,7 @@ impl EditorView {
         if self.context_menu.is_some() {
             return;
         }
+        self.selected_handle = None;
         if let Some(&(_, line_idx, is_image_fold)) = self
             .gutter_fold_areas
             .iter()
@@ -58,6 +70,10 @@ impl EditorView {
             .iter()
             .find(|(bounds, _, _)| bounds.contains(&event.position))
         {
+            self.selected_handle = Some((table_start, true, col));
+            self.marked_range = None;
+            self.clear_extra_cursors();
+            self.is_selecting = false;
             self.table_drag = Some(TableDragState::DraggingColumn {
                 table_start_line: table_start,
                 source_col: col,
@@ -73,6 +89,10 @@ impl EditorView {
             .iter()
             .find(|(bounds, _, _)| bounds.contains(&event.position))
         {
+            self.selected_handle = Some((table_start, false, visual_row));
+            self.marked_range = None;
+            self.clear_extra_cursors();
+            self.is_selecting = false;
             self.table_drag = Some(TableDragState::DraggingRow {
                 table_start_line: table_start,
                 source_row: visual_row,
@@ -142,9 +162,21 @@ impl EditorView {
                     &bounds,
                     event.position,
                 ) {
+                    ime_debug_log(format!(
+                        "table cell mouse_down table_start={} visual_row={} col={} offset={} shift={} click_count={}",
+                        table_start,
+                        visual_row,
+                        col,
+                        offset,
+                        event.modifiers.shift,
+                        event.click_count
+                    ));
                     if event.click_count >= 2 {
                         self.clear_extra_cursors();
                         self.select_word_at_offset(offset);
+                        self.is_selecting = false;
+                    } else if event.modifiers.shift {
+                        self.cursor.select_to(offset, &self.buffer);
                         self.is_selecting = false;
                     } else {
                         self.cursor.move_to(offset, &self.buffer);
@@ -420,7 +452,8 @@ impl EditorView {
                     source_col,
                     current_x,
                 } => {
-                    if let Some(insert_at) = self.table_col_insert_at_x(table_start_line, current_x) {
+                    if let Some(insert_at) = self.table_col_insert_at_x(table_start_line, current_x)
+                    {
                         if insert_at != source_col && insert_at != source_col + 1 {
                             if let Some((start, end, lines)) =
                                 self.table_lines_for_block(table_start_line)
@@ -688,6 +721,29 @@ impl EditorView {
         None
     }
 
+    fn table_visual_row_for_source_line(
+        &self,
+        table_start: usize,
+        source_line: usize,
+    ) -> Option<usize> {
+        let header_info = self.decorations.get(table_start)?.table_info.as_ref()?;
+        let mut visual_row = 0;
+        for line_idx in table_start..header_info.table_end_line {
+            let table_info = self
+                .decorations
+                .get(line_idx)
+                .and_then(|decoration| decoration.table_info.as_ref())?;
+            if table_info.is_separator {
+                continue;
+            }
+            if line_idx == source_line {
+                return Some(visual_row);
+            }
+            visual_row += 1;
+        }
+        None
+    }
+
     fn table_cell_display_info(
         &self,
         window: &mut Window,
@@ -703,12 +759,24 @@ impl EditorView {
             .into_iter()
             .next()
             .unwrap_or_default();
-        let (folded_raw, d2b_raw, _, _) =
-            helpers::build_display_text(&cell_content, &cell_decoration, None, false, None, 0, 0, 0);
+        let (folded_raw, d2b_raw, b2d_raw, _) = helpers::build_display_text(
+            &cell_content,
+            &cell_decoration,
+            None,
+            false,
+            None,
+            0,
+            0,
+            0,
+        );
         let trim_start = folded_raw.len() - folded_raw.trim_start().len();
         let trim_end = folded_raw.len() - folded_raw.trim_end().len();
         let display_text = folded_raw.trim().to_string();
         let display_to_buffer = d2b_raw[trim_start..d2b_raw.len() - trim_end].to_vec();
+        let buffer_to_display = b2d_raw
+            .iter()
+            .map(|&display_index| display_index.saturating_sub(trim_start))
+            .collect();
 
         let text_style = window.text_style();
         let editor_styles = &self.styles.editor;
@@ -737,13 +805,15 @@ impl EditorView {
         body_cjk_font.fallbacks = None;
 
         let mut heading_font = text_style.font();
-        heading_font.family = configured_font_family(editor_styles.editor_heading_latin_font_family);
+        heading_font.family =
+            configured_font_family(editor_styles.editor_heading_latin_font_family);
         heading_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
             editor_styles.editor_heading_cjk_font_family.to_string(),
         ]));
 
         let mut heading_cjk_font = text_style.font();
-        heading_cjk_font.family = configured_font_family(editor_styles.editor_heading_cjk_font_family);
+        heading_cjk_font.family =
+            configured_font_family(editor_styles.editor_heading_cjk_font_family);
         heading_cjk_font.fallbacks = None;
 
         let font_size = self.base_font_size();
@@ -792,6 +862,7 @@ impl EditorView {
             wrapped,
             display_text,
             display_to_buffer,
+            buffer_to_display,
             cell_range,
             cell_content_len: cell_content.len(),
         })
@@ -813,7 +884,8 @@ impl EditorView {
         let inner_width =
             (f32::from(bounds.size.width) - padding_x * 2.0).max(self.base_font_size() * 0.5);
         let info = self.table_cell_display_info(window, source_line, col, inner_width)?;
-        let line_height = self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
+        let line_height =
+            self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
         let local_x = (f32::from(position.x) - f32::from(bounds.origin.x) - padding_x).max(0.0);
         let local_y = (f32::from(position.y) - f32::from(bounds.origin.y) - padding_y).max(0.0);
         let display_index = match info
@@ -948,6 +1020,21 @@ impl EditorView {
     fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
         self.offset_from_utf16(range.start)..self.offset_from_utf16(range.end)
     }
+
+    fn utf8_offset_in_text_for_utf16(text: &str, utf16_offset: usize) -> usize {
+        let mut utf8_offset = 0usize;
+        let mut utf16_count = 0usize;
+
+        for ch in text.chars() {
+            if utf16_count >= utf16_offset {
+                break;
+            }
+            utf16_count += ch.len_utf16();
+            utf8_offset += ch.len_utf8();
+        }
+
+        utf8_offset.min(text.len())
+    }
 }
 
 impl EntityInputHandler for EditorView {
@@ -972,10 +1059,22 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        Some(UTF16Selection {
+        if self.selected_handle.is_some() {
+            ime_debug_log("selected_text_range -> None (table handle selected)");
+            return None;
+        }
+        let selection = UTF16Selection {
             range: self.range_to_utf16(&self.cursor.selection_range()),
             reversed: self.cursor.offset < self.cursor.anchor,
-        })
+        };
+        ime_debug_log(format!(
+            "selected_text_range -> {:?}, cursor=({},{}) marked={:?}",
+            selection.range,
+            self.cursor.anchor,
+            self.cursor.offset,
+            self.marked_range
+        ));
+        Some(selection)
     }
 
     fn marked_text_range(
@@ -983,7 +1082,17 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
-        self.marked_range.as_ref().map(|r| self.range_to_utf16(r))
+        if self.selected_handle.is_some() {
+            ime_debug_log("marked_text_range -> None (table handle selected)");
+            return None;
+        }
+        let marked = self.marked_range.as_ref().map(|r| self.range_to_utf16(r));
+        ime_debug_log(format!(
+            "marked_text_range -> {:?} (utf8={:?})",
+            marked,
+            self.marked_range
+        ));
+        marked
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
@@ -997,6 +1106,13 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        ime_debug_log(format!(
+            "replace_text_in_range start range_utf16={:?} new_text={:?} marked_before={:?} selection_before={:?}",
+            range_utf16,
+            new_text,
+            self.marked_range,
+            self.cursor.selection_range()
+        ));
         self.checkpoint();
 
         // When text is selected and user types a formatting character, wrap selection
@@ -1023,19 +1139,21 @@ impl EntityInputHandler for EditorView {
             return;
         }
 
-        let range = if let Some(marked) = self.marked_range.take() {
-            marked
-        } else {
-            range_utf16
-                .as_ref()
-                .map(|r| self.range_from_utf16(r))
-                .unwrap_or_else(|| self.cursor.selection_range())
-        };
+        let range = range_utf16
+            .as_ref()
+            .map(|r| self.range_from_utf16(r))
+            .or_else(|| self.marked_range.clone())
+            .unwrap_or_else(|| self.cursor.selection_range());
+        ime_debug_log(format!(
+            "replace_text_in_range resolved range_utf8={:?}",
+            range
+        ));
         let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
 
         self.buffer.replace(range.clone(), new_text);
         let new_offset = range.start + new_text.len();
         self.cursor.move_to(new_offset, &self.buffer);
+        self.marked_range = None;
         self.reparse();
         if let Some(line) = touched_ordered_prefix {
             self.normalize_ordered_list_near_line(line, true);
@@ -1043,6 +1161,11 @@ impl EntityInputHandler for EditorView {
         }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
+        ime_debug_log(format!(
+            "replace_text_in_range end cursor={} marked_after={:?}",
+            self.cursor.offset,
+            self.marked_range
+        ));
 
         if self.slash_menu_start.is_some() {
             self.update_slash_filter(cx);
@@ -1064,15 +1187,24 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        ime_debug_log(format!(
+            "replace_and_mark_text_in_range start range_utf16={:?} new_text={:?} new_selected_range_utf16={:?} marked_before={:?} selection_before={:?}",
+            range_utf16,
+            new_text,
+            new_selected_range_utf16,
+            self.marked_range,
+            self.cursor.selection_range()
+        ));
         self.checkpoint();
-        let range = if let Some(marked) = self.marked_range.take() {
-            marked
-        } else {
-            range_utf16
-                .as_ref()
-                .map(|r| self.range_from_utf16(r))
-                .unwrap_or_else(|| self.cursor.selection_range())
-        };
+        let range = range_utf16
+            .as_ref()
+            .map(|r| self.range_from_utf16(r))
+            .or_else(|| self.marked_range.clone())
+            .unwrap_or_else(|| self.cursor.selection_range());
+        ime_debug_log(format!(
+            "replace_and_mark_text_in_range resolved range_utf8={:?}",
+            range
+        ));
         let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
 
         self.buffer.replace(range.clone(), new_text);
@@ -1081,24 +1213,20 @@ impl EntityInputHandler for EditorView {
         let mark_end = range.start + new_text.len();
         if !new_text.is_empty() {
             self.marked_range = Some(mark_start..mark_end);
+        } else {
+            self.marked_range = None;
         }
 
-        let new_offset = new_selected_range_utf16
+        let (selection_start, selection_end) = new_selected_range_utf16
             .as_ref()
             .map(|r| {
-                let mut utf8_pos = 0usize;
-                let mut utf16_count = 0usize;
-                for ch in new_text.chars() {
-                    if utf16_count >= r.end {
-                        break;
-                    }
-                    utf16_count += ch.len_utf16();
-                    utf8_pos += ch.len_utf8();
-                }
-                mark_start + utf8_pos.min(new_text.len())
+                let start = mark_start + Self::utf8_offset_in_text_for_utf16(new_text, r.start);
+                let end = mark_start + Self::utf8_offset_in_text_for_utf16(new_text, r.end);
+                (start, end)
             })
-            .unwrap_or(mark_end);
-        self.cursor.move_to(new_offset, &self.buffer);
+            .unwrap_or((mark_end, mark_end));
+        self.cursor.anchor = self.buffer.clamp_offset(selection_start);
+        self.cursor.offset = self.buffer.clamp_offset(selection_end);
         self.reparse();
         if let Some(line) = touched_ordered_prefix {
             self.normalize_ordered_list_near_line(line, true);
@@ -1106,19 +1234,97 @@ impl EntityInputHandler for EditorView {
         }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
+        ime_debug_log(format!(
+            "replace_and_mark_text_in_range end selection=({},{}) marked_after={:?}",
+            self.cursor.anchor,
+            self.cursor.offset,
+            self.marked_range
+        ));
     }
 
     fn bounds_for_range(
         &mut self,
         range_utf16: Range<usize>,
         _bounds: Bounds<Pixels>,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        ime_debug_log(format!("bounds_for_range start range_utf16={:?}", range_utf16));
         let range = self.range_from_utf16(&range_utf16);
         let (line, col) = self.buffer.offset_to_line_col(range.start);
         let origin_y: f32 = self.content_origin.y.into();
         let line_top_y = origin_y + self.line_y_offset(line) - self.scroll_offset;
+
+        if let Some(table_info) = self
+            .decorations
+            .get(line)
+            .and_then(|dec| dec.table_info.as_ref())
+        {
+            if !table_info.is_separator {
+                let table_start_line = table_info.table_start_line;
+                let visual_row = self.table_visual_row_for_source_line(table_start_line, line)?;
+                let cell_col = table_info
+                    .cell_ranges
+                    .iter()
+                    .position(|cell_range| col >= cell_range.start && col <= cell_range.end)
+                    .or_else(|| {
+                        table_info
+                            .cell_ranges
+                            .iter()
+                            .enumerate()
+                            .find(|(_, cell_range)| col == cell_range.end)
+                            .map(|(index, _)| index)
+                    })?;
+                let cell_bounds = self
+                    .table_click_areas
+                    .iter()
+                    .find(|(_, tsl, vr, c)| {
+                        *tsl == table_start_line && *vr == visual_row && *c == cell_col
+                    })
+                    .map(|(bounds, _, _, _)| *bounds)?;
+
+                let padding_x = self.scaled(self.styles.table.table_cell_padding_px);
+                let padding_y = self.scaled(self.styles.table.table_cell_padding_px) * 0.6;
+                let inner_width = (f32::from(cell_bounds.size.width) - padding_x * 2.0)
+                    .max(self.base_font_size() * 0.5);
+                let info = self.table_cell_display_info(window, line, cell_col, inner_width)?;
+                let cell_offset = range
+                    .start
+                    .saturating_sub(self.buffer.line_start(line) + info.cell_range.start);
+                let disp_col = if cell_offset >= info.buffer_to_display.len() {
+                    info.display_text.len()
+                } else {
+                    helpers::buffer_to_display_offset(&info.buffer_to_display, cell_offset)
+                };
+                let pos = info
+                    .wrapped
+                    .position_for_index(
+                        disp_col.min(info.display_text.len()),
+                        px(self.base_font_size()
+                            * self.styles.editor.editor_paragraph_line_height_factor),
+                    )
+                    .unwrap_or_default();
+                let x = f32::from(cell_bounds.origin.x) + padding_x + f32::from(pos.x);
+                let y = f32::from(cell_bounds.origin.y) + padding_y + f32::from(pos.y);
+                let line_height =
+                    self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
+                ime_debug_log(format!(
+                    "bounds_for_range table line={} col={} cell_col={} visual_row={} range_utf8={:?} -> x={} y={} h={}",
+                    line,
+                    col,
+                    cell_col,
+                    visual_row,
+                    range,
+                    x,
+                    y,
+                    line_height
+                ));
+                return Some(Bounds::new(
+                    point(px(x), px(y)),
+                    size(px(self.base_font_size() * 0.6), px(line_height)),
+                ));
+            }
+        }
 
         if let Some(Some(info)) = self.line_display_info.get(line) {
             let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
@@ -1129,6 +1335,15 @@ impl EntityInputHandler for EditorView {
             let indent_adjust = helpers::indent_for_y(info.indent_px, pos.y, info.line_height);
             let x = info.content_x + indent_adjust + f32::from(pos.x);
             let y = line_top_y + f32::from(pos.y);
+            ime_debug_log(format!(
+                "bounds_for_range normal line={} col={} range_utf8={:?} -> x={} y={} h={}",
+                line,
+                col,
+                range,
+                x,
+                y,
+                info.line_height
+            ));
             Some(Bounds::new(
                 point(px(x), px(y)),
                 size(px(info.font_size * 0.6), px(info.line_height)),
@@ -1150,11 +1365,20 @@ impl EntityInputHandler for EditorView {
 
     fn character_index_for_point(
         &mut self,
-        _point: Point<Pixels>,
+        point: Point<Pixels>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        None
+        let utf8_offset = self.offset_for_position(point);
+        let utf16_offset = self.offset_to_utf16(utf8_offset);
+        ime_debug_log(format!(
+            "character_index_for_point point=({}, {}) -> utf8={} utf16={}",
+            f32::from(point.x),
+            f32::from(point.y),
+            utf8_offset,
+            utf16_offset
+        ));
+        Some(utf16_offset)
     }
 }
 

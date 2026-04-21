@@ -368,6 +368,10 @@ pub struct TableStyles {
     pub table_header_bg: Hsla,
     pub table_handle_size_px: f32,
     pub table_handle_color: Hsla,
+    pub table_handle_dot_size_px: f32,
+    pub table_handle_gap_px: f32,
+    pub table_handle_highlight_width_px: f32,
+    pub table_drag_indicator_width_px: f32,
     pub table_selection_border_width_px: f32,
 }
 
@@ -923,8 +927,12 @@ impl Styles {
                 table_border_width_px: 1.0,
                 table_border_color: theme.border_decorative,
                 table_header_bg: theme.bg_code,
-                table_handle_size_px: 20.0,
+                table_handle_size_px: 16.0,
                 table_handle_color: theme.border_decorative,
+                table_handle_dot_size_px: 2.0,
+                table_handle_gap_px: 4.0,
+                table_handle_highlight_width_px: 2.0,
+                table_drag_indicator_width_px: 2.0,
                 table_selection_border_width_px: 2.0,
             },
             gutter: GutterStyles {

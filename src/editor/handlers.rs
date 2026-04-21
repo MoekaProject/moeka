@@ -167,6 +167,15 @@ impl EditorView {
             self.sidebar_delete_focused(cx);
             return;
         }
+        if let Some((table_start_line, is_column, index)) = self.selected_handle.take() {
+            if is_column {
+                self.table_delete_column(table_start_line, index, cx);
+            } else if index > 0 {
+                self.table_delete_row(table_start_line, index, cx);
+            }
+            self.pause_blinking(cx);
+            return;
+        }
         self.checkpoint();
         let selection = self.cursor.selection_range();
         let touched_ordered_prefix = if self.cursor.has_selection() {
