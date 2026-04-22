@@ -12,7 +12,8 @@ impl Render for EditorView {
             self.pending_editor_focus = false;
         }
         let resizing = self.sidebar_resizing || self.outline_resizing;
-        let show_editor_toolbar = self.tabs.len() > 0 && !self.active_tab_is_settings();
+        let show_editor_toolbar =
+            self.tabs.len() > 0 && !self.active_tab_is_settings() && self.active_tab_is_markdown();
         let ws = &self.styles.window;
         // Store window bounds for menu positioning
         let wb = window.bounds();
@@ -240,15 +241,15 @@ impl Render for EditorView {
                                     .relative()
                                     .flex_1()
                                     .overflow_hidden()
-                                    .cursor(
-                                        if self.hovering_checkbox
-                                            || self.hovering_image_edit_line.is_some()
-                                        {
-                                            CursorStyle::Arrow
-                                        } else {
-                                            CursorStyle::IBeam
-                                        },
-                                    )
+                                    .cursor(if self.active_tab_is_image()
+                                        || self.active_tab_is_binary()
+                                        || self.hovering_checkbox
+                                        || self.hovering_image_edit_line.is_some()
+                                    {
+                                        CursorStyle::Arrow
+                                    } else {
+                                        CursorStyle::IBeam
+                                    })
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(|this, event, window, cx| {
@@ -267,15 +268,30 @@ impl Render for EditorView {
                                     )
                                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                                     .on_scroll_wheel(cx.listener(Self::on_scroll))
-                                    .child(element::EditorElement {
-                                        editor: cx.entity().clone(),
+                                    .child(if self.active_tab_is_image() {
+                                        image_view::ImageViewElement {
+                                            editor: cx.entity().clone(),
+                                        }
+                                        .into_any_element()
+                                    } else if self.active_tab_is_binary() {
+                                        self.render_binary_placeholder(cx)
+                                    } else {
+                                        element::EditorElement {
+                                            editor: cx.entity().clone(),
+                                        }
+                                        .into_any_element()
                                     })
                                     .child({
                                         let tb = &self.styles.toolbar;
                                         let primary_hover = tb.toolbar_primary_hover_opacity;
                                         let secondary_hover = tb.toolbar_secondary_hover_opacity;
-                                        let toolbar_opacity =
-                                            if show_editor_toolbar { 1.0 } else { 0.0 };
+                                        let toolbar_opacity = if self
+                                            .should_show_editor_toolbar(show_editor_toolbar)
+                                        {
+                                            1.0
+                                        } else {
+                                            tb.toolbar_hidden_opacity
+                                        };
                                         div()
                                             .absolute()
                                             .left(px(self.scaled(tb.toolbar_offset_left_px)))
@@ -358,8 +374,13 @@ impl Render for EditorView {
                                     .child({
                                         let tb = &self.styles.toolbar;
                                         let secondary_hover = tb.toolbar_secondary_hover_opacity;
-                                        let toolbar_opacity =
-                                            if show_editor_toolbar { 1.0 } else { 0.0 };
+                                        let toolbar_opacity = if self
+                                            .should_show_editor_toolbar(show_editor_toolbar)
+                                        {
+                                            1.0
+                                        } else {
+                                            tb.toolbar_hidden_opacity
+                                        };
                                         div()
                                             .absolute()
                                             .right(px(self.scaled(tb.toolbar_offset_left_px)))
@@ -438,7 +459,7 @@ impl Render for EditorView {
                                             )
                                     })
                                     .when(
-                                        self.search_visible,
+                                        self.search_visible && self.active_tab_supports_text_search(),
                                         |this: gpui::Stateful<gpui::Div>| {
                                             this.child(self.render_search_bar(cx))
                                         },
@@ -617,5 +638,59 @@ impl Render for EditorView {
             .when(self.dialog.is_some(), |this| {
                 this.child(self.render_dialog(cx))
             })
+    }
+}
+
+impl EditorView {
+    fn render_binary_placeholder(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let path = self
+            .active_tab_index()
+            .and_then(|index| self.tabs.get(index))
+            .and_then(|tab| tab.path.clone());
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(self.scaled(10.0)))
+            .text_color(self.theme.text_secondary)
+            .child(
+                div()
+                    .text_size(px(self.scaled(self.styles.ui_font_size_px + 1.0)))
+                    .text_color(self.theme.text_primary)
+                    .child("该文件不是文本文件"),
+            )
+            .child(
+                div()
+                    .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
+                    .child(
+                        path.as_ref()
+                            .map(|value| value.display().to_string())
+                            .unwrap_or_else(|| "当前文件".to_string()),
+                    ),
+            )
+            .child(
+                div()
+                    .px(px(self.scaled(12.0)))
+                    .py(px(self.scaled(8.0)))
+                    .rounded(px(self.scaled(8.0)))
+                    .bg(self.theme.bg_hover)
+                    .text_color(self.theme.text_primary)
+                    .cursor(CursorStyle::PointingHand)
+                    .child("打开该非文本文件")
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                        if let Some(path) = this
+                            .active_tab_index()
+                            .and_then(|index| this.tabs.get(index))
+                            .and_then(|tab| tab.path.clone())
+                        {
+                            let _ = std::process::Command::new("open").arg(path).spawn();
+                        }
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
     }
 }

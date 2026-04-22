@@ -2,6 +2,7 @@ mod element;
 mod fold;
 mod handlers;
 mod helpers;
+mod image_view;
 mod input;
 mod menus;
 mod outline;
@@ -215,6 +216,9 @@ pub(crate) const FOLD_SVG_PATH: &str = "assets/icons/fold.svg";
 pub(crate) const OPEN_SVG_PATH: &str = "assets/icons/open.svg";
 pub(crate) const LOGO_SVG_PATH: &str = "assets/icons/logo.svg";
 pub(crate) const ROOT_SVG_PATH: &str = "assets/icons/filetree/all.svg";
+pub(crate) const FILETREE_SEARCH_SVG_PATH: &str = "assets/icons/filetree/search.svg";
+pub(crate) const FILETREE_SORT_SVG_PATH: &str = "assets/icons/filetree/sort.svg";
+pub(crate) const FILETREE_ADD_SVG_PATH: &str = "assets/icons/filetree/add.svg";
 pub(crate) const FILETREE_FOLD_SVG_PATH: &str = "assets/icons/filetree/fold.svg";
 pub(crate) const SIDEBAR_TOGGLE_SVG_PATH: &str = "assets/icons/sidebar-toggle.svg";
 pub(crate) const EDITOR_ALIGN_LEFT_SVG_PATH: &str = "assets/icons/editor-align-left.svg";
@@ -258,13 +262,74 @@ pub(crate) enum TabKind {
     Settings,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FileKind {
+    Markdown,
+    Code { language: String },
+    Text,
+    Image,
+    Binary,
+}
+
+impl FileKind {
+    pub(crate) fn supports_text_buffer(&self) -> bool {
+        matches!(self, Self::Markdown | Self::Code { .. } | Self::Text)
+    }
+
+    pub(crate) fn supports_text_search(&self) -> bool {
+        self.supports_text_buffer()
+    }
+
+    pub(crate) fn supports_persistent_save(&self) -> bool {
+        self.supports_text_buffer()
+    }
+
+    pub(crate) fn is_markdown(&self) -> bool {
+        matches!(self, Self::Markdown)
+    }
+
+    pub(crate) fn is_image(&self) -> bool {
+        matches!(self, Self::Image)
+    }
+
+    pub(crate) fn is_binary(&self) -> bool {
+        matches!(self, Self::Binary)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ImageViewState {
+    pub zoom_factor: f32,
+    pub pan_x: f32,
+    pub pan_y: f32,
+}
+
+impl Default for ImageViewState {
+    fn default() -> Self {
+        Self {
+            zoom_factor: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ImageDragState {
+    pub start_position: Point<Pixels>,
+    pub start_pan_x: f32,
+    pub start_pan_y: f32,
+}
+
 #[derive(Clone)]
 pub(crate) struct OpenTab {
     pub id: String,
     pub title: String,
     pub kind: TabKind,
     pub path: Option<PathBuf>,
+    pub file_kind: Option<FileKind>,
     pub snapshot: EditorSnapshot,
+    pub image_view: ImageViewState,
     pub is_preview: bool,
     pub is_dirty: bool,
     pub is_deleted: bool,
@@ -292,6 +357,8 @@ pub(crate) enum ContextMenuKind {
         path: PathBuf,
         is_dir: bool,
     },
+    SidebarSort,
+    SidebarCreate,
     Format,
     Tab {
         tab_id: String,
@@ -316,6 +383,27 @@ pub(crate) enum TableDragState {
         source_row: usize,
         current_y: f32,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarSortMode {
+    CreatedDesc,
+    CreatedAsc,
+    NameAsc,
+    NameDesc,
+    Type,
+}
+
+impl SidebarSortMode {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::CreatedDesc => "创建时间（新到旧）",
+            Self::CreatedAsc => "创建时间（旧到新）",
+            Self::NameAsc => "名称（A-Z）",
+            Self::NameDesc => "名称（Z-A）",
+            Self::Type => "类型",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -578,6 +666,7 @@ pub struct EditorView {
     pub(crate) image_edit_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_image_edit_line: Option<usize>,
     pub(crate) hovering_fold_line: Option<usize>,
+    pub(crate) image_drag_state: Option<ImageDragState>,
     pub(crate) command_held: bool,
     pub(crate) sidebar_custom_width: Option<f32>,
     pub(crate) sidebar_resizing: bool,
@@ -595,6 +684,7 @@ pub struct EditorView {
     pub(crate) focused_sidebar_path: Option<PathBuf>,
     /// 多选锚点（shift 连续选择的起点）
     pub(crate) sidebar_selection_anchor: Option<PathBuf>,
+    pub(crate) sidebar_sort_mode: SidebarSortMode,
     /// 拖拽悬停的目标目录（用于高亮和自动展开）
     pub(crate) sidebar_drag_hover_target: Option<PathBuf>,
     /// 拖拽悬停自动展开的延迟 task
@@ -607,6 +697,8 @@ pub struct EditorView {
     pub(crate) outline_resizing: bool,
     pub(crate) outline_scroll_handle: ScrollHandle,
     pub(crate) scroll_anim_epoch: usize,
+    pub(crate) toolbar_hidden_by_scroll: bool,
+    pub(crate) toolbar_corner_hovered: bool,
     pub(crate) last_window_width: f32,
     pub(crate) last_window_height: f32,
 
@@ -751,7 +843,9 @@ impl EditorView {
                     title: "欢迎使用".to_string(),
                     kind: TabKind::Editor,
                     path: None,
+                    file_kind: Some(FileKind::Markdown),
                     snapshot: initial_snapshot,
+                    image_view: ImageViewState::default(),
                     is_preview: false,
                     is_dirty: false,
                     is_deleted: false,
@@ -762,12 +856,14 @@ impl EditorView {
                     title: "设置".to_string(),
                     kind: TabKind::Settings,
                     path: None,
+                    file_kind: None,
                     snapshot: EditorSnapshot {
                         text: String::new(),
                         cursor_offset: 0,
                         cursor_anchor: 0,
                         scroll_offset: 0.0,
                     },
+                    image_view: ImageViewState::default(),
                     is_preview: false,
                     is_dirty: false,
                     is_deleted: false,
@@ -792,6 +888,7 @@ impl EditorView {
             image_edit_areas: Vec::new(),
             hovering_image_edit_line: None,
             hovering_fold_line: None,
+            image_drag_state: None,
             command_held: false,
             sidebar_custom_width: None,
             sidebar_resizing: false,
@@ -807,6 +904,7 @@ impl EditorView {
             pending_close_tab_ids: Vec::new(),
             focused_sidebar_path: None,
             sidebar_selection_anchor: None,
+            sidebar_sort_mode: SidebarSortMode::NameAsc,
             sidebar_drag_hover_target: None,
             sidebar_drag_expand_task: None,
             sidebar_scroll_handle: ScrollHandle::new(),
@@ -817,6 +915,8 @@ impl EditorView {
             outline_resizing: false,
             outline_scroll_handle: ScrollHandle::new(),
             scroll_anim_epoch: 0,
+            toolbar_hidden_by_scroll: false,
+            toolbar_corner_hovered: false,
             last_window_width: 1360.0,
             last_window_height: 820.0,
 
@@ -878,6 +978,28 @@ impl EditorView {
         this.ensure_ui_font_size_editor(cx);
 
         this
+    }
+
+    pub(crate) fn should_show_editor_toolbar(&self, base_visible: bool) -> bool {
+        base_visible
+            && (self.scroll_offset <= 0.5
+                || !self.toolbar_hidden_by_scroll
+                || self.toolbar_corner_hovered)
+    }
+
+    pub(crate) fn update_toolbar_corner_hover(&mut self, position: Point<Pixels>) -> bool {
+        let toolbar_styles = &self.styles.toolbar;
+        let corner_width = self.scaled(toolbar_styles.toolbar_corner_reveal_width_px);
+        let corner_height = self.scaled(toolbar_styles.toolbar_corner_reveal_height_px);
+        let left = self.last_editor_left;
+        let right = (self.last_editor_left + self.last_editor_width).max(left + corner_width);
+        let x = f32::from(position.x);
+        let y = f32::from(position.y);
+        let hovering =
+            y <= corner_height && (x <= left + corner_width || x >= right - corner_width);
+        let changed = hovering != self.toolbar_corner_hovered;
+        self.toolbar_corner_hovered = hovering;
+        changed
     }
 
     pub(crate) fn queue_image_load(&mut self, path: String, cx: &mut Context<Self>) {
@@ -1371,7 +1493,107 @@ impl EditorView {
     // ── Shared utilities ────────────────────────────────────────────
 
     pub(crate) fn reparse(&mut self) {
-        self.decorations = markdown::parse_decorations(self.buffer.text());
+        let file_kind = self
+            .active_file_kind()
+            .cloned()
+            .unwrap_or(FileKind::Markdown);
+        self.decorations = parse_decorations_for_file_kind(self.buffer.text(), &file_kind);
+    }
+
+    pub(crate) fn active_file_kind(&self) -> Option<&FileKind> {
+        self.active_tab_index()
+            .and_then(|index| self.tabs.get(index))
+            .and_then(|tab| tab.file_kind.as_ref())
+    }
+
+    pub(crate) fn active_tab_supports_text_buffer(&self) -> bool {
+        self.active_file_kind()
+            .is_some_and(FileKind::supports_text_buffer)
+    }
+
+    pub(crate) fn active_tab_is_non_markdown_text(&self) -> bool {
+        self.active_file_kind()
+            .is_some_and(|file_kind| file_kind.supports_text_buffer() && !file_kind.is_markdown())
+    }
+
+    pub(crate) fn active_tab_supports_text_search(&self) -> bool {
+        self.active_file_kind()
+            .is_some_and(FileKind::supports_text_search)
+    }
+
+    pub(crate) fn active_tab_supports_persistent_save(&self) -> bool {
+        self.active_file_kind()
+            .is_some_and(FileKind::supports_persistent_save)
+    }
+
+    pub(crate) fn active_tab_is_markdown(&self) -> bool {
+        self.active_file_kind().is_some_and(FileKind::is_markdown)
+    }
+
+    pub(crate) fn active_tab_is_image(&self) -> bool {
+        self.active_file_kind().is_some_and(FileKind::is_image)
+    }
+
+    pub(crate) fn active_tab_is_binary(&self) -> bool {
+        self.active_file_kind().is_some_and(FileKind::is_binary)
+    }
+
+    pub(crate) fn active_image_view_state(&self) -> Option<ImageViewState> {
+        self.active_tab_index()
+            .and_then(|index| self.tabs.get(index))
+            .and_then(|tab| {
+                tab.file_kind
+                    .as_ref()
+                    .filter(|kind| kind.is_image())
+                    .map(|_| tab.image_view)
+            })
+    }
+
+    pub(crate) fn active_image_view_state_mut(&mut self) -> Option<&mut ImageViewState> {
+        let index = self.active_tab_index()?;
+        let tab = self.tabs.get_mut(index)?;
+        tab.file_kind.as_ref().filter(|kind| kind.is_image())?;
+        Some(&mut tab.image_view)
+    }
+
+    pub(crate) fn reset_active_image_view(&mut self) {
+        if let Some(image_view) = self.active_image_view_state_mut() {
+            *image_view = ImageViewState::default();
+        }
+    }
+
+    pub(crate) fn clamp_active_image_view(&mut self) {
+        let image_size = self.active_image_dimensions();
+        let viewport_width = self.last_viewport_width.max(1.0);
+        let viewport_height = self.last_viewport_height.max(1.0);
+        if let Some(image_view) = self.active_image_view_state_mut() {
+            image_view.zoom_factor = image_view.zoom_factor.clamp(0.2, 8.0);
+            if let Some((image_width, image_height)) = image_size {
+                let fit_scale = (viewport_width / image_width)
+                    .min(viewport_height / image_height)
+                    .min(1.0);
+                let display_width = image_width * fit_scale * image_view.zoom_factor;
+                let display_height = image_height * fit_scale * image_view.zoom_factor;
+                let limit_x = ((display_width - viewport_width) / 2.0).max(0.0);
+                let limit_y = ((display_height - viewport_height) / 2.0).max(0.0);
+                image_view.pan_x = image_view.pan_x.clamp(-limit_x, limit_x);
+                image_view.pan_y = image_view.pan_y.clamp(-limit_y, limit_y);
+            } else {
+                image_view.pan_x = 0.0;
+                image_view.pan_y = 0.0;
+            }
+        }
+    }
+
+    pub(crate) fn active_image_dimensions(&self) -> Option<(f32, f32)> {
+        let tab = self
+            .active_tab_index()
+            .and_then(|index| self.tabs.get(index))?;
+        let path = tab.path.as_ref()?;
+        let key = path.to_string_lossy();
+        let image = self.image_cache.get(key.as_ref())?.as_ref()?;
+        let size = image.size(0);
+        Some((size.width.0 as f32, size.height.0 as f32))
     }
 
     pub(crate) fn cursor_line(&self) -> usize {
@@ -2700,6 +2922,158 @@ pub(crate) fn is_markdown_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
+}
+
+pub(crate) fn is_image_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff" | "avif"
+            )
+        })
+}
+
+pub(crate) fn should_skip_path(path: &Path, is_dir: bool) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    if name.starts_with('.') {
+        return true;
+    }
+
+    if !is_dir {
+        return false;
+    }
+
+    matches!(
+        name,
+        "node_modules" | "target" | "dist" | "build" | "coverage" | ".git"
+    )
+}
+
+fn looks_like_text(bytes: &[u8]) -> bool {
+    if bytes.contains(&0) {
+        return false;
+    }
+
+    if bytes.is_empty() {
+        return true;
+    }
+
+    let sample = &bytes[..bytes.len().min(4096)];
+    let control_count = sample
+        .iter()
+        .filter(|&&byte| byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t' | 0x08 | 0x0c))
+        .count();
+    if control_count * 10 > sample.len().max(1) {
+        return false;
+    }
+
+    if std::str::from_utf8(sample).is_ok() {
+        return true;
+    }
+
+    let lossy = String::from_utf8_lossy(sample);
+    let replacement_count = lossy.chars().filter(|&ch| ch == '\u{fffd}').count();
+    replacement_count * 20 <= lossy.chars().count().max(1)
+}
+
+pub(crate) fn classify_file_kind_for_bytes(path: &Path, bytes: &[u8]) -> FileKind {
+    if is_markdown_file(path) {
+        return FileKind::Markdown;
+    }
+
+    if is_image_file(path) {
+        return FileKind::Image;
+    }
+
+    if let Ok(Some(syntax)) = helpers::syntax_set().find_syntax_for_file(path)
+        && syntax.name != "Plain Text"
+        && syntax.name != "Markdown"
+    {
+        return FileKind::Code {
+            language: syntax.name.to_string(),
+        };
+    }
+
+    if looks_like_text(bytes) {
+        FileKind::Text
+    } else {
+        FileKind::Binary
+    }
+}
+
+pub(crate) fn classify_file_kind(path: &Path) -> FileKind {
+    std::fs::read(path)
+        .map(|bytes| classify_file_kind_for_bytes(path, &bytes))
+        .unwrap_or_else(|_| {
+            if is_markdown_file(path) {
+                FileKind::Markdown
+            } else if is_image_file(path) {
+                FileKind::Image
+            } else {
+                FileKind::Text
+            }
+        })
+}
+
+pub(crate) fn file_kind_badge_text(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(file_kind_badge_text_for_name)
+}
+
+pub(crate) fn file_kind_badge_text_for_name(name: &str) -> Option<String> {
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .filter(|ext| !ext.is_empty())?;
+    if matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown") {
+        None
+    } else {
+        Some(ext.to_ascii_uppercase())
+    }
+}
+
+pub(crate) fn split_file_name_for_display(name: &str) -> (&str, Option<&str>) {
+    match name.rfind('.') {
+        Some(index) if index > 0 && index + 1 < name.len() => {
+            (&name[..index], Some(&name[index..]))
+        }
+        _ => (name, None),
+    }
+}
+
+pub(crate) fn parse_decorations_for_file_kind(
+    text: &str,
+    file_kind: &FileKind,
+) -> Vec<LineDecoration> {
+    match file_kind {
+        FileKind::Markdown => markdown::parse_decorations(text),
+        FileKind::Code { language } => plain_text_decorations(text, Some(language.clone())),
+        FileKind::Text | FileKind::Image | FileKind::Binary => plain_text_decorations(text, None),
+    }
+}
+
+fn plain_text_decorations(text: &str, code_language: Option<String>) -> Vec<LineDecoration> {
+    let line_count = text.lines().count().max(1);
+    let line_count = if text.ends_with('\n') {
+        line_count + 1
+    } else {
+        line_count
+    };
+
+    let mut decorations: Vec<LineDecoration> =
+        (0..line_count).map(|_| LineDecoration::default()).collect();
+    if let Some(language) = code_language {
+        for decoration in &mut decorations {
+            decoration.code_language = Some(language.clone());
+        }
+    }
+    decorations
 }
 
 pub(crate) fn default_document_text() -> String {

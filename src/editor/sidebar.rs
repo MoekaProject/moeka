@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::time::SystemTime;
 
 use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent,
@@ -10,6 +11,72 @@ use gpui::{
 use super::*;
 
 impl EditorView {
+    fn compare_sidebar_entries(
+        &self,
+        left: &std::fs::DirEntry,
+        right: &std::fs::DirEntry,
+    ) -> std::cmp::Ordering {
+        let left_is_dir = left.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        let right_is_dir = right.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        right_is_dir
+            .cmp(&left_is_dir)
+            .then_with(|| match self.sidebar_sort_mode {
+                SidebarSortMode::NameAsc => left
+                    .file_name()
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .cmp(&right.file_name().to_string_lossy().to_lowercase()),
+                SidebarSortMode::NameDesc => right
+                    .file_name()
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .cmp(&left.file_name().to_string_lossy().to_lowercase()),
+                SidebarSortMode::Type => {
+                    let left_ext = left
+                        .path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    let right_ext = right
+                        .path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    left_ext.cmp(&right_ext).then_with(|| {
+                        left.file_name()
+                            .to_string_lossy()
+                            .to_lowercase()
+                            .cmp(&right.file_name().to_string_lossy().to_lowercase())
+                    })
+                }
+                SidebarSortMode::CreatedDesc | SidebarSortMode::CreatedAsc => {
+                    let fallback = SystemTime::UNIX_EPOCH;
+                    let left_created = left
+                        .metadata()
+                        .and_then(|meta| meta.created().or_else(|_| meta.modified()))
+                        .unwrap_or(fallback);
+                    let right_created = right
+                        .metadata()
+                        .and_then(|meta| meta.created().or_else(|_| meta.modified()))
+                        .unwrap_or(fallback);
+                    let order = left_created.cmp(&right_created);
+                    let order = if self.sidebar_sort_mode == SidebarSortMode::CreatedDesc {
+                        order.reverse()
+                    } else {
+                        order
+                    };
+                    order.then_with(|| {
+                        left.file_name()
+                            .to_string_lossy()
+                            .to_lowercase()
+                            .cmp(&right.file_name().to_string_lossy().to_lowercase())
+                    })
+                }
+            })
+    }
+
     pub(crate) fn toggle_sidebar_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !self.expanded_dirs.insert(path.clone()) {
             self.expanded_dirs.remove(&path);
@@ -174,25 +241,15 @@ impl EditorView {
     }
 
     pub(crate) fn open_sidebar_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if !is_markdown_file(&path) {
-            cx.notify();
-            return;
-        }
         self.open_path_in_permanent_tab(path, true, cx);
     }
 
-    pub(crate) fn sorted_dir_entries(path: &Path) -> std::io::Result<Vec<std::fs::DirEntry>> {
+    pub(crate) fn sorted_dir_entries(
+        &self,
+        path: &Path,
+    ) -> std::io::Result<Vec<std::fs::DirEntry>> {
         let mut entries: Vec<_> = std::fs::read_dir(path)?.filter_map(Result::ok).collect();
-        entries.sort_by(|left, right| {
-            let left_is_dir = left.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-            let right_is_dir = right.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-            right_is_dir.cmp(&left_is_dir).then_with(|| {
-                left.file_name()
-                    .to_string_lossy()
-                    .to_lowercase()
-                    .cmp(&right.file_name().to_string_lossy().to_lowercase())
-            })
-        });
+        entries.sort_by(|left, right| self.compare_sidebar_entries(left, right));
         Ok(entries)
     }
 
@@ -202,7 +259,7 @@ impl EditorView {
         depth: usize,
         items: &mut Vec<SidebarItem>,
     ) {
-        let Ok(entries) = Self::sorted_dir_entries(path) else {
+        let Ok(entries) = self.sorted_dir_entries(path) else {
             return;
         };
 
@@ -212,7 +269,7 @@ impl EditorView {
                 continue;
             };
             let is_dir = file_type.is_dir();
-            if !is_dir && !is_markdown_file(&entry_path) {
+            if should_skip_path(&entry_path, is_dir) {
                 continue;
             }
             let is_expanded = is_dir && self.expanded_dirs.contains(&entry_path);
@@ -377,7 +434,7 @@ impl EditorView {
                     let new_path = parent.join(trimmed);
                     if let Err(e) = std::fs::File::create(&new_path) {
                         eprintln!("Create file failed: {e}");
-                    } else if is_markdown_file(&new_path) {
+                    } else {
                         self.open_sidebar_file(new_path, cx);
                         return;
                     }
@@ -551,6 +608,213 @@ impl EditorView {
         cx.notify();
     }
 
+    pub(crate) fn open_sidebar_sort_menu(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = Some(ContextMenu {
+            position,
+            kind: ContextMenuKind::SidebarSort,
+        });
+        self.sidebar_edit = None;
+        cx.notify();
+    }
+
+    pub(crate) fn open_sidebar_create_menu(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = Some(ContextMenu {
+            position,
+            kind: ContextMenuKind::SidebarCreate,
+        });
+        self.sidebar_edit = None;
+        cx.notify();
+    }
+
+    fn render_sidebar_name_label(&self, name: &str, color: gpui::Hsla) -> AnyElement {
+        let ss = &self.styles.sidebar;
+        let (base, suffix) = split_file_name_for_display(name);
+        div()
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .flex()
+            .gap(px(0.0))
+            .items_center()
+            .text_size(px(self.scaled(ss.sidebar_item_font_size_px)))
+            .text_color(color)
+            .child(div().whitespace_nowrap().child(base.to_string()))
+            .when_some(suffix, |this, suffix| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .opacity(ss.sidebar_item_suffix_opacity)
+                        .child(suffix.to_string()),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_sidebar_edit_indicator(
+        &self,
+        name: &str,
+        is_dir: bool,
+        color: gpui::Hsla,
+    ) -> AnyElement {
+        let ss = &self.styles.sidebar;
+        if is_dir {
+            return svg()
+                .path(FOLDER_CLOSED_SVG_PATH)
+                .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
+                .text_color(color)
+                .into_any_element();
+        }
+
+        if let Some(label) = file_kind_badge_text_for_name(name) {
+            return div()
+                .min_w(px(self.scaled(ss.sidebar_item_badge_min_width_px)))
+                .h(px(self.scaled(ss.sidebar_item_badge_height_px)))
+                .px(px(self.scaled(ss.sidebar_item_badge_padding_x_px)))
+                .rounded(px(self.scaled(ss.sidebar_item_badge_radius_px)))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(ss.sidebar_item_badge_bg)
+                .text_size(px(self.scaled(ss.sidebar_item_badge_font_size_px)))
+                .text_color(ss.sidebar_item_badge_text_color)
+                .font_weight(FontWeight::EXTRA_BOLD)
+                .child(label)
+                .into_any_element();
+        }
+
+        svg()
+            .path(MARKDOWN_SVG_PATH)
+            .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
+            .text_color(color)
+            .into_any_element()
+    }
+
+    fn render_sidebar_header_action_button(
+        &self,
+        id: &'static str,
+        icon_path: &'static str,
+        cx: &mut Context<Self>,
+        handler: impl Fn(&mut Self, &MouseDownEvent, &mut gpui::Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let ss = &self.styles.sidebar;
+        let hover_opacity = ss.sidebar_header_action_hover_opacity;
+        div()
+            .id(id)
+            .w(px(self.scaled(ss.sidebar_header_action_btn_size_px)))
+            .h(px(self.scaled(ss.sidebar_header_action_btn_size_px)))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .cursor(CursorStyle::Arrow)
+            .opacity(ss.sidebar_header_action_opacity)
+            .hover(move |style| style.opacity(hover_opacity))
+            .child(
+                svg()
+                    .path(icon_path)
+                    .size(px(self.scaled(ss.sidebar_header_action_icon_size_px)))
+                    .text_color(ss.sidebar_header_icon_color),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    handler(this, event, window, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_sidebar_header(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ss = &self.styles.sidebar;
+        let root_name = self.sidebar_root_name().to_uppercase();
+        let header_hover_bg = ss.sidebar_header_hover_bg;
+        div()
+            .w_full()
+            .h(px(self.scaled(ss.sidebar_header_height_px)))
+            .bg(ss.sidebar_header_bg)
+            .px(px(self.scaled(ss.sidebar_header_padding_right_px)))
+            .pl(px(self.scaled(ss.sidebar_header_padding_left_px)))
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(ss.sidebar_header_gap_px)))
+            .flex_none()
+            .hover(move |s| s.bg(header_hover_bg))
+            .child(
+                svg()
+                    .path(ROOT_SVG_PATH)
+                    .size(px(self.scaled(ss.sidebar_header_icon_size_px)))
+                    .text_color(ss.sidebar_header_icon_color),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
+                    .text_color(ss.sidebar_header_text_color)
+                    .overflow_hidden()
+                    .truncate()
+                    .child(root_name),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(self.scaled(ss.sidebar_header_action_gap_px)))
+                    .child(self.render_sidebar_header_action_button(
+                        "sidebar-header-search",
+                        FILETREE_SEARCH_SVG_PATH,
+                        cx,
+                        |this, _event, window, cx| {
+                            this.toggle_workspace_search(window, cx);
+                        },
+                    ))
+                    .child(self.render_sidebar_header_action_button(
+                        "sidebar-header-sort",
+                        FILETREE_SORT_SVG_PATH,
+                        cx,
+                        |this, event, _window, cx| {
+                            this.open_sidebar_sort_menu(event.position, cx);
+                        },
+                    ))
+                    .child(self.render_sidebar_header_action_button(
+                        "sidebar-header-create",
+                        FILETREE_ADD_SVG_PATH,
+                        cx,
+                        |this, event, _window, cx| {
+                            this.open_sidebar_create_menu(event.position, cx);
+                        },
+                    )),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.pick_workspace_folder(cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.open_sidebar_context_menu(
+                        this.sidebar_root.clone(),
+                        true,
+                        event.position,
+                        cx,
+                    );
+                }),
+            )
+            .into_any_element()
+    }
+
     // ── Sidebar keyboard navigation ─────────────────────────────────
 
     pub(crate) fn sidebar_nav_up(&mut self, cx: &mut Context<Self>) {
@@ -675,7 +939,7 @@ impl EditorView {
         editor: &gpui::Entity<crate::text_input::TextInput>,
         depth: usize,
         is_dir: bool,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let ss = &self.styles.sidebar;
         let shift = ss.sidebar_item_left_shift_px;
@@ -684,11 +948,7 @@ impl EditorView {
                 - shift)
                 .max(0.0),
         );
-        let icon_path = if is_dir {
-            FOLDER_CLOSED_SVG_PATH
-        } else {
-            MARKDOWN_SVG_PATH
-        };
+        let current_name = editor.read(cx).text().to_string();
 
         div()
             .w_full()
@@ -726,12 +986,11 @@ impl EditorView {
                                     .into_any_element()
                             }),
                     )
-                    .child(
-                        svg()
-                            .path(icon_path)
-                            .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
-                            .text_color(ss.sidebar_item_selected_icon_color),
-                    )
+                    .child(self.render_sidebar_edit_indicator(
+                        &current_name,
+                        is_dir,
+                        ss.sidebar_item_selected_icon_color,
+                    ))
                     .child(div().flex_1().min_w(px(0.0)).child(editor.clone())),
             )
             .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
@@ -778,11 +1037,6 @@ impl EditorView {
             ss.sidebar_item_selected_text_color
         } else {
             ss.sidebar_item_text_color
-        };
-        let folder_icon = if item.is_expanded {
-            FOLDER_OPEN_SVG_PATH
-        } else {
-            FOLDER_CLOSED_SVG_PATH
         };
         let is_focused = self.focused_sidebar_path.as_deref() == Some(path.as_path());
         let focus_border_color = ss.sidebar_item_focus_border_color;
@@ -837,6 +1091,38 @@ impl EditorView {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let drag_count = drag_paths.len();
+        let indicator = if item.is_dir {
+            svg()
+                .path(if item.is_expanded {
+                    FOLDER_OPEN_SVG_PATH
+                } else {
+                    FOLDER_CLOSED_SVG_PATH
+                })
+                .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
+                .text_color(icon_color)
+                .into_any_element()
+        } else if let Some(label) = file_kind_badge_text(&item.path) {
+            div()
+                .min_w(px(self.scaled(ss.sidebar_item_badge_min_width_px)))
+                .h(px(self.scaled(ss.sidebar_item_badge_height_px)))
+                .px(px(self.scaled(ss.sidebar_item_badge_padding_x_px)))
+                .rounded(px(self.scaled(ss.sidebar_item_badge_radius_px)))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(ss.sidebar_item_badge_bg)
+                .text_size(px(self.scaled(ss.sidebar_item_badge_font_size_px)))
+                .text_color(ss.sidebar_item_badge_text_color)
+                .font_weight(FontWeight::EXTRA_BOLD)
+                .child(label)
+                .into_any_element()
+        } else {
+            svg()
+                .path(MARKDOWN_SVG_PATH)
+                .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
+                .text_color(icon_color)
+                .into_any_element()
+        };
 
         div()
             .id(SharedString::from(format!("sidebar-{}", path.display())))
@@ -893,25 +1179,8 @@ impl EditorView {
                                     .into_any_element()
                             }),
                     )
-                    .child(
-                        svg()
-                            .path(if item.is_dir {
-                                folder_icon
-                            } else {
-                                MARKDOWN_SVG_PATH
-                            })
-                            .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
-                            .text_color(icon_color),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_size(px(self.scaled(ss.sidebar_item_font_size_px)))
-                            .text_color(label_color)
-                            .truncate()
-                            .child(item.name),
-                    ),
+                    .child(indicator)
+                    .child(self.render_sidebar_name_label(&item.name, label_color)),
             )
             // Multi-select click with modifier keys
             .on_click({
@@ -1032,39 +1301,7 @@ impl EditorView {
                 }),
             );
 
-        let root_name = self.sidebar_root_name().to_uppercase();
-        let header_hover_bg = ss.sidebar_header_hover_bg;
-        let header = div()
-            .w_full()
-            .h(px(self.scaled(ss.sidebar_header_height_px)))
-            .bg(ss.sidebar_header_bg)
-            .px(px(self.scaled(ss.sidebar_header_padding_right_px)))
-            .pl(px(self.scaled(ss.sidebar_header_padding_left_px)))
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(ss.sidebar_header_gap_px)))
-            .flex_none()
-            .hover(move |s| s.bg(header_hover_bg))
-            .child(
-                svg()
-                    .path(ROOT_SVG_PATH)
-                    .size(px(self.scaled(ss.sidebar_header_icon_size_px)))
-                    .text_color(ss.sidebar_header_icon_color),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
-                    .text_color(ss.sidebar_header_text_color)
-                    .overflow_hidden()
-                    .child(root_name),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.pick_workspace_folder(cx);
-                }),
-            );
+        let header = self.render_sidebar_header(cx);
 
         // Scrollable content section
         let mut tree_items: Vec<AnyElement> = Vec::new();
@@ -1205,7 +1442,7 @@ impl EditorView {
 
         // Header inside scrollable area (right after logo, before items)
         if has_root {
-            tree_items.insert(1, header.into_any_element());
+            tree_items.insert(1, header);
         }
 
         tree_items.push(
@@ -1278,43 +1515,14 @@ impl EditorView {
             .when(
                 header_is_sticky && !self.workspace_search_visible,
                 |this: gpui::Stateful<gpui::Div>| {
-                    let sticky_header_hover_bg = ss.sidebar_header_hover_bg;
-                    let sticky_root_name = self.sidebar_root_name().to_uppercase();
                     this.child(
                         div()
                             .absolute()
                             .left_0()
                             .top(px(self.scaled(ss.sidebar_top_spacer_height_px)))
                             .w_full()
-                            .h(px(self.scaled(ss.sidebar_header_height_px)))
                             .bg(ss.sidebar_bg)
-                            .px(px(self.scaled(ss.sidebar_header_padding_right_px)))
-                            .pl(px(self.scaled(ss.sidebar_header_padding_left_px)))
-                            .flex()
-                            .items_center()
-                            .gap(px(self.scaled(ss.sidebar_header_gap_px)))
-                            .flex_none()
-                            .hover(move |s| s.bg(sticky_header_hover_bg))
-                            .child(
-                                svg()
-                                    .path(ROOT_SVG_PATH)
-                                    .size(px(self.scaled(ss.sidebar_header_icon_size_px)))
-                                    .text_color(ss.sidebar_header_icon_color),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
-                                    .text_color(ss.sidebar_header_text_color)
-                                    .overflow_hidden()
-                                    .child(sticky_root_name),
-                            )
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.pick_workspace_folder(cx);
-                                }),
-                            ),
+                            .child(self.render_sidebar_header(cx)),
                     )
                 },
             )

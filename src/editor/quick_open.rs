@@ -415,15 +415,13 @@ fn collect_openable_files(dir: &Path, results: &mut Vec<PathBuf>) {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with('.'))
-        {
+        let is_dir = path.is_dir();
+        if should_skip_path(&path, is_dir) {
             continue;
         }
-        if path.is_dir() {
+        if is_dir {
             collect_openable_files(&path, results);
-        } else if is_markdown_file(&path) {
+        } else {
             results.push(path);
         }
     }

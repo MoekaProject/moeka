@@ -793,16 +793,16 @@ fn search_directory(
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with('.'))
-        {
+        let is_dir = path.is_dir();
+        if should_skip_path(&path, is_dir) {
             continue;
         }
-        if path.is_dir() {
+        if is_dir {
             search_directory(&path, query, case_sensitive, whole_word, use_regex, results);
-        } else if is_markdown_file(&path) {
-            if let Ok(content) = std::fs::read_to_string(&path) {
+        } else if let Ok(bytes) = std::fs::read(&path) {
+            let file_kind = classify_file_kind_for_bytes(&path, &bytes);
+            if file_kind.supports_text_search() {
+                let content = String::from_utf8_lossy(&bytes).into_owned();
                 let match_ranges =
                     find_search_matches(&content, query, case_sensitive, whole_word, use_regex);
                 if match_ranges.is_empty() {

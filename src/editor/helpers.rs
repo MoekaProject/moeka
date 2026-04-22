@@ -1449,6 +1449,7 @@ pub(crate) fn apply_code_block_highlighting(
     let syntax_set = syntax_set();
     let syntax = syntax_set
         .find_syntax_by_token(language)
+        .or_else(|| syntax_set.find_syntax_by_name(language))
         .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
     let mut highlighter = HighlightLines::new(syntax, syntect_theme());
     if let Ok(ranges) = highlighter.highlight_line(line_content, syntax_set) {
@@ -1779,9 +1780,12 @@ pub(crate) fn build_text_runs_for_display(
         }
     }
 
-    if matches!(decoration.block_type, BlockType::CodeBlock)
-        && let Some(language) = decoration.code_language.as_deref()
-    {
+    let highlight_entire_line = matches!(decoration.block_type, BlockType::CodeBlock)
+        || matches!(decoration.block_type, BlockType::Normal)
+            && decoration.inline_spans.is_empty()
+            && decoration.syntax_ranges.is_empty()
+            && decoration.table_info.is_none();
+    if highlight_entire_line && let Some(language) = decoration.code_language.as_deref() {
         apply_code_block_highlighting(
             line_content,
             language,

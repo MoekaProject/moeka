@@ -12,6 +12,9 @@ pub(crate) const SEARCH_CLOSE_ICON_SVG_PATH: &str = "assets/icons/filetree/close
 
 impl EditorView {
     pub(crate) fn on_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.active_tab_supports_text_search() {
+            return;
+        }
         self.open_search(false, window, cx);
     }
 
@@ -43,6 +46,9 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_supports_text_search() {
+            return;
+        }
         if !self.search_visible {
             self.open_search(true, window, cx);
         } else {
@@ -75,6 +81,9 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_supports_text_search() {
+            return;
+        }
         let was_visible = self.search_visible;
         self.search_visible = true;
         self.search_replace_visible = with_replace;

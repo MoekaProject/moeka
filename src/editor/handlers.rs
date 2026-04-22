@@ -673,6 +673,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.apply_wrap("**", "**");
         self.pause_blinking(cx);
@@ -684,6 +687,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.apply_wrap("*", "*");
         self.pause_blinking(cx);
@@ -695,6 +701,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.apply_wrap("~~", "~~");
         self.pause_blinking(cx);
@@ -706,6 +715,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.apply_wrap("`", "`");
         self.pause_blinking(cx);
@@ -717,6 +729,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.insert_link_or_image("[", "](https://)", "title");
         self.pause_blinking(cx);
@@ -728,6 +743,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.insert_link_or_image("![", "](image.png)", "alt");
         self.pause_blinking(cx);
@@ -739,6 +757,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.toggle_current_line_prefix("> ");
         self.pause_blinking(cx);
@@ -750,6 +771,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.toggle_current_line_prefix("- [ ] ");
         self.pause_blinking(cx);
@@ -761,6 +785,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.toggle_current_line_prefix("- ");
         self.pause_blinking(cx);
@@ -772,6 +799,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.toggle_current_line_prefix("1. ");
         self.normalize_ordered_list_near_line(self.cursor_line(), true);
@@ -785,6 +815,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.apply_wrap("```\n", "\n```");
         self.pause_blinking(cx);
@@ -796,6 +829,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.toggle_horizontal_rule_at_cursor();
         self.pause_blinking(cx);
@@ -807,6 +843,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.apply_heading(1);
         self.pause_blinking(cx);
@@ -817,6 +856,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.apply_heading(2);
         self.pause_blinking(cx);
@@ -827,6 +869,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.apply_heading(3);
         self.pause_blinking(cx);
@@ -837,6 +882,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.apply_heading(4);
         self.pause_blinking(cx);
@@ -847,6 +895,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.apply_heading(5);
         self.pause_blinking(cx);
@@ -857,6 +908,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
         self.checkpoint();
         self.apply_heading(6);
         self.pause_blinking(cx);
@@ -1092,6 +1146,9 @@ impl EditorView {
     }
 
     pub(crate) fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.active_tab_supports_persistent_save() {
+            return;
+        }
         let Some(index) = self.active_tab_index() else {
             return;
         };

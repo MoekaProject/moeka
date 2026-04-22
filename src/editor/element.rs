@@ -22,6 +22,7 @@ pub(crate) struct EditorPrepaintState {
     hitbox: Hitbox,
     link_hitboxes: Vec<Hitbox>,
     lines: Vec<PrepaintLine>,
+    whitespace_dots: Vec<PaintQuad>,
     cursor_quads: Vec<PaintQuad>,
     selection_quads: Vec<PaintQuad>,
     search_match_quads: Vec<PaintQuad>,
@@ -225,6 +226,90 @@ impl IntoElement for EditorElement {
     }
 }
 
+fn push_whitespace_dot_quads(
+    dots: &mut Vec<PaintQuad>,
+    text: &str,
+    wrapped: &WrappedLine,
+    origin: Point<Pixels>,
+    line_height: f32,
+    dot_size: f32,
+    dot_color: Hsla,
+) {
+    let dot_radius = px(dot_size / 2.0);
+    for (index, character) in text.char_indices() {
+        if character != ' ' && character != '\t' {
+            continue;
+        }
+        let Some(start) = wrapped.position_for_index(index, px(line_height)) else {
+            continue;
+        };
+        let next_index = index + character.len_utf8();
+        let end = wrapped
+            .position_for_index(next_index.min(text.len()), px(line_height))
+            .unwrap_or(start);
+        let start_x = f32::from(start.x);
+        let start_y = f32::from(start.y);
+        let end_x = if f32::from(end.y) == start_y {
+            f32::from(end.x)
+        } else {
+            start_x + line_height * 0.45
+        };
+        let width = (end_x - start_x).abs().max(dot_size);
+        let dot_x = f32::from(origin.x) + start_x + (width - dot_size) * 0.5;
+        let dot_y = f32::from(origin.y) + start_y + (line_height - dot_size) * 0.5;
+        dots.push(quad(
+            Bounds::new(
+                point(px(dot_x), px(dot_y)),
+                size(px(dot_size), px(dot_size)),
+            ),
+            Corners::all(dot_radius),
+            dot_color,
+            px(0.0),
+            gpui::transparent_black(),
+            BorderStyle::default(),
+        ));
+    }
+}
+
+fn push_gutter_line_number_label(
+    gutter_labels: &mut Vec<(ShapedLine, Point<Pixels>, Pixels)>,
+    window: &mut Window,
+    line_index: usize,
+    is_active: bool,
+    font: &Font,
+    font_size: f32,
+    content_x: f32,
+    text_line_top: f32,
+    line_height: f32,
+    right_gap: f32,
+    text_color: Hsla,
+    active_text_color: Hsla,
+) {
+    let line_number = (line_index + 1).to_string();
+    let line_number_run = TextRun {
+        len: line_number.len(),
+        font: font.clone(),
+        color: if is_active {
+            active_text_color
+        } else {
+            text_color
+        },
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let shaped = window.text_system().shape_line(
+        line_number.into(),
+        px(font_size),
+        &[line_number_run],
+        None,
+    );
+    let label_x = content_x - right_gap - f32::from(shaped.width);
+    let metrics_height = f32::from(shaped.ascent + shaped.descent);
+    let label_y = text_line_top + (line_height - metrics_height) / 2.0 - 2.0;
+    gutter_labels.push((shaped, point(px(label_x), px(label_y)), px(line_height)));
+}
+
 impl Element for EditorElement {
     type RequestLayoutState = ();
     type PrepaintState = EditorPrepaintState;
@@ -271,17 +356,19 @@ impl Element for EditorElement {
         let viewport_width: f32 = bounds.size.width.into();
         let origin_x: f32 = bounds.origin.x.into();
         let origin_y: f32 = bounds.origin.y.into();
-        let editor_width = if editor.editor_left_aligned {
-            viewport_width
+        let left_aligned = editor.editor_left_aligned || editor.active_tab_is_non_markdown_text();
+        let editor_width = if left_aligned {
+            viewport_width.min(editor.max_editor_width())
         } else {
             viewport_width.min(editor.max_editor_width())
         };
         let centered_left = origin_x + ((viewport_width - editor_width) / 2.0).max(0.0);
-        let editor_left = if editor.editor_left_aligned {
+        let editor_left = if left_aligned {
             origin_x
         } else {
             centered_left
         };
+        let width_independent_layout = editor.active_tab_is_non_markdown_text();
         let text_width = (editor_width - editor.padding_left() - editor.padding_right())
             .max(editor.scaled(120.0));
         let wrap_width = text_width;
@@ -291,6 +378,7 @@ impl Element for EditorElement {
         let mut search_match_quads: Vec<PaintQuad> = Vec::new();
         let mut line_highlight = None;
         let mut code_block_bgs = Vec::new();
+        let mut whitespace_dots: Vec<PaintQuad> = Vec::new();
         let mut cursor_quads: Vec<PaintQuad> = Vec::new();
         let mut marked_underlines = Vec::new();
         let mut link_underlines: Vec<PaintQuad> = Vec::new();
@@ -317,13 +405,13 @@ impl Element for EditorElement {
         let any_selection = all_sel_ranges.iter().any(|r| r.start != r.end);
 
         let mut gutter_quads = Vec::new();
-        let gutter_labels: Vec<(ShapedLine, Point<Pixels>, Pixels)> = Vec::new();
+        let mut gutter_labels: Vec<(ShapedLine, Point<Pixels>, Pixels)> = Vec::new();
         let mut gutter_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla, f32)> = Vec::new();
         let mut checkbox_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut image_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut display_info_cache: Vec<Option<LineDisplayInfo>> = Vec::with_capacity(line_count);
         let has_valid_cache = editor.line_display_info.len() == line_count
-            && (editor.last_viewport_width - viewport_width).abs() < 0.5;
+            && (width_independent_layout || (editor.last_text_width - text_width).abs() < 0.5);
         let mut hr_lines: Vec<(f32, f32, f32)> = Vec::new();
         let mut image_previews: Vec<(Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
         let mut image_borders: Vec<PaintQuad> = Vec::new();
@@ -626,6 +714,299 @@ impl Element for EditorElement {
             } else {
                 None
             };
+
+            if editor.active_tab_is_non_markdown_text()
+                && has_valid_cache
+                && !is_cursor_line_early
+                && let Some(Some(cached)) = editor.line_display_info.get(line_idx)
+            {
+                let font_size = cached.font_size;
+                let line_height = cached.line_height;
+                let visual_line_count = cached.visual_line_count;
+                let text_line_height = line_height * visual_line_count as f32;
+                let total_line_height = text_line_height + cached.extra_height;
+                let line_top = y - scroll_offset;
+                let line_bottom = line_top + total_line_height;
+                let text_line_top = line_top;
+                let content_x = editor_left + editor.padding_left();
+
+                display_info_cache.push(Some(LineDisplayInfo {
+                    display_text: cached.display_text.clone(),
+                    display_to_buffer: cached.display_to_buffer.clone(),
+                    buffer_to_display: cached.buffer_to_display.clone(),
+                    font_size,
+                    line_height,
+                    visual_line_count,
+                    wrapped_line: cached.wrapped_line.clone(),
+                    extra_height: cached.extra_height,
+                    indent_px: cached.indent_px,
+                    content_x,
+                }));
+
+                if line_bottom < origin_y || line_top > origin_y + viewport_height {
+                    y += total_line_height;
+                    continue;
+                }
+
+                let runs = helpers::build_text_runs_for_display(
+                    &cached.display_text,
+                    line_content,
+                    &cached.display_to_buffer,
+                    &decoration,
+                    cursor_col,
+                    false,
+                    false,
+                    &body_font,
+                    &body_cjk_font,
+                    &monospace_font,
+                    &heading_font,
+                    &heading_cjk_font,
+                    collapsed_task_prefix_chars,
+                    font_size,
+                    theme,
+                );
+                let origin = point(px(content_x), px(text_line_top));
+                push_whitespace_dot_quads(
+                    &mut whitespace_dots,
+                    &cached.display_text,
+                    &cached.wrapped_line,
+                    origin,
+                    line_height,
+                    editor.scaled(editor.styles.editor.editor_whitespace_dot_size_px),
+                    editor.styles.editor.editor_whitespace_dot_color,
+                );
+
+                let gutter_styles = &editor.styles.gutter;
+                push_gutter_line_number_label(
+                    &mut gutter_labels,
+                    window,
+                    line_idx,
+                    is_cursor_line,
+                    &monospace_font,
+                    editor.scaled(gutter_styles.gutter_line_number_font_size_px),
+                    content_x,
+                    text_line_top,
+                    line_height,
+                    editor.scaled(gutter_styles.gutter_line_number_right_gap_px),
+                    gutter_styles.gutter_line_number_text_color,
+                    gutter_styles.gutter_line_number_active_text_color,
+                );
+
+                if editor.selected_handle.is_none()
+                    && is_cursor_line
+                    && !any_selection
+                    && editor.extra_cursors.is_empty()
+                {
+                    line_highlight = Some(fill(
+                        Bounds::new(
+                            point(px(origin_x), px(line_top)),
+                            size(px(viewport_width), px(total_line_height)),
+                        ),
+                        theme.line_highlight,
+                    ));
+                }
+
+                for sr in &all_sel_ranges {
+                    if sr.start == sr.end {
+                        continue;
+                    }
+                    let sel_start_on_line = sr.start.max(line_start_offset);
+                    let sel_end_on_line = sr.end.min(line_end_offset);
+
+                    if sel_start_on_line < sel_end_on_line {
+                        let buf_start_col = sel_start_on_line - line_start_offset;
+                        let buf_end_col = sel_end_on_line - line_start_offset;
+                        let disp_start = helpers::buffer_to_display_offset(
+                            &cached.buffer_to_display,
+                            buf_start_col,
+                        );
+                        let disp_end = helpers::buffer_to_display_offset(
+                            &cached.buffer_to_display,
+                            buf_end_col,
+                        );
+                        selection_quads.extend(helpers::build_selection_quads(
+                            &cached.display_text,
+                            &runs,
+                            &cached.wrapped_line,
+                            disp_start,
+                            disp_end,
+                            content_x,
+                            text_line_top,
+                            line_height,
+                            font_size,
+                            cached.indent_px,
+                            theme.selection,
+                            editor_styles.editor_letter_spacing_px,
+                            window,
+                        ));
+                    }
+                }
+
+                if !editor.search_matches.is_empty() {
+                    let match_bg = editor.styles.search.search_match_bg;
+                    let active_bg = editor.styles.search.search_match_active_bg;
+                    for (match_idx, sr) in editor.search_matches.iter().enumerate() {
+                        let is_active = editor.search_current_index == Some(match_idx);
+                        let sel_start_on_line = sr.start.max(line_start_offset);
+                        let sel_end_on_line = sr.end.min(line_end_offset);
+                        if sel_start_on_line < sel_end_on_line {
+                            let buf_start_col = sel_start_on_line - line_start_offset;
+                            let buf_end_col = sel_end_on_line - line_start_offset;
+                            let disp_start = helpers::buffer_to_display_offset(
+                                &cached.buffer_to_display,
+                                buf_start_col,
+                            );
+                            let disp_end = helpers::buffer_to_display_offset(
+                                &cached.buffer_to_display,
+                                buf_end_col,
+                            );
+                            search_match_quads.extend(helpers::build_selection_quads(
+                                &cached.display_text,
+                                &runs,
+                                &cached.wrapped_line,
+                                disp_start,
+                                disp_end,
+                                content_x,
+                                line_top,
+                                line_height,
+                                font_size,
+                                cached.indent_px,
+                                if is_active { active_bg } else { match_bg },
+                                editor_styles.editor_letter_spacing_px,
+                                window,
+                            ));
+                        }
+                    }
+                }
+
+                if editor.current_file_path == editor.workspace_search_highlight_path {
+                    let match_bg = editor.styles.search.search_match_bg;
+                    let active_bg = editor.styles.search.search_match_active_bg;
+                    for (match_idx, sr) in
+                        editor.workspace_search_highlight_ranges.iter().enumerate()
+                    {
+                        let is_active =
+                            editor.workspace_search_highlight_current_index == Some(match_idx);
+                        let sel_start_on_line = sr.start.max(line_start_offset);
+                        let sel_end_on_line = sr.end.min(line_end_offset);
+                        if sel_start_on_line < sel_end_on_line {
+                            let buf_start_col = sel_start_on_line - line_start_offset;
+                            let buf_end_col = sel_end_on_line - line_start_offset;
+                            let disp_start = helpers::buffer_to_display_offset(
+                                &cached.buffer_to_display,
+                                buf_start_col,
+                            );
+                            let disp_end = helpers::buffer_to_display_offset(
+                                &cached.buffer_to_display,
+                                buf_end_col,
+                            );
+                            search_match_quads.extend(helpers::build_selection_quads(
+                                &cached.display_text,
+                                &runs,
+                                &cached.wrapped_line,
+                                disp_start,
+                                disp_end,
+                                content_x,
+                                line_top,
+                                line_height,
+                                font_size,
+                                cached.indent_px,
+                                if is_active { active_bg } else { match_bg },
+                                editor_styles.editor_letter_spacing_px,
+                                window,
+                            ));
+                        }
+                    }
+                }
+
+                if editor.selected_handle.is_none()
+                    && window.is_window_active()
+                    && editor.focus_handle.is_focused(window)
+                    && editor.focused_sidebar_path.is_none()
+                    && (editor.cursor_opacity > 0.0 || editor.is_selecting)
+                {
+                    for &cur_offset in &all_cursor_offsets {
+                        if cur_offset < line_start_offset || cur_offset > line_end_offset {
+                            continue;
+                        }
+                        let buf_cursor_col = cur_offset.saturating_sub(line_start_offset);
+                        let buf_cursor_col = buf_cursor_col.min(line_content.len());
+                        let disp_cursor_col = if buf_cursor_col >= line_content.len() {
+                            cached.display_text.len()
+                        } else {
+                            helpers::buffer_to_display_offset(
+                                &cached.buffer_to_display,
+                                buf_cursor_col,
+                            )
+                        };
+
+                        let cursor_pos = cached
+                            .wrapped_line
+                            .position_for_index(disp_cursor_col, px(line_height))
+                            .unwrap_or_default();
+                        let cursor_height =
+                            line_height * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
+                        let cursor_top = text_line_top
+                            + f32::from(cursor_pos.y)
+                            + (line_height - cursor_height) / 2.0;
+                        let mut cursor_color = theme.cursor;
+                        cursor_color.a *= if editor.is_selecting {
+                            editor.styles.cursor.cursor_opacity_max
+                        } else {
+                            editor.cursor_opacity
+                        };
+                        cursor_quads.push(fill(
+                            Bounds::new(
+                                point(px(content_x) + cursor_pos.x, px(cursor_top)),
+                                size(px(editor.styles.cursor.cursor_width_px), px(cursor_height)),
+                            ),
+                            cursor_color,
+                        ));
+                    }
+                }
+
+                if let Some(ref marked) = editor.marked_range {
+                    let mark_start_on_line = marked.start.max(line_start_offset);
+                    let mark_end_on_line = marked.end.min(line_end_offset);
+                    if mark_start_on_line < mark_end_on_line {
+                        let buf_start = mark_start_on_line - line_start_offset;
+                        let buf_end = mark_end_on_line - line_start_offset;
+                        let disp_start =
+                            helpers::buffer_to_display_offset(&cached.buffer_to_display, buf_start);
+                        let disp_end =
+                            helpers::buffer_to_display_offset(&cached.buffer_to_display, buf_end);
+                        let pos_start = cached
+                            .wrapped_line
+                            .position_for_index(disp_start, px(line_height))
+                            .unwrap_or_default();
+                        let pos_end = cached
+                            .wrapped_line
+                            .position_for_index(disp_end, px(line_height))
+                            .unwrap_or_default();
+                        let underline_y =
+                            text_line_top + f32::from(pos_start.y) + line_height - 2.0;
+                        marked_underlines.push(fill(
+                            Bounds::from_corners(
+                                point(px(content_x) + pos_start.x, px(underline_y)),
+                                point(px(content_x) + pos_end.x, px(underline_y + 1.0)),
+                            ),
+                            theme.text_primary,
+                        ));
+                    }
+                }
+
+                lines.push(PrepaintLine {
+                    wrapped: cached.wrapped_line.clone(),
+                    origin,
+                    line_height: px(line_height),
+                    segments: None,
+                    is_table_block: false,
+                    table_cells: None,
+                });
+
+                y += total_line_height;
+                continue;
+            }
             let code_block_syntax_active = active_code_fence_group
                 .is_some_and(|(start, end)| line_idx >= start && line_idx <= end);
             let (display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
@@ -703,7 +1084,7 @@ impl Element for EditorElement {
                 effective_wrap_width
             };
 
-            let wrap_width_param = if *block_type == BlockType::Table {
+            let wrap_width_param = if *block_type == BlockType::Table || width_independent_layout {
                 None
             } else {
                 Some(px(effective_wrap_width))
@@ -888,6 +1269,22 @@ impl Element for EditorElement {
             };
 
             let origin = point(px(content_x), px(text_line_top));
+            let is_table_source_row = *block_type == BlockType::Table
+                && decoration
+                    .table_info
+                    .as_ref()
+                    .is_some_and(|ti| !ti.is_separator);
+            if !is_table_source_row {
+                push_whitespace_dot_quads(
+                    &mut whitespace_dots,
+                    &display_text,
+                    &wrapped,
+                    origin,
+                    line_height,
+                    editor.scaled(editor.styles.editor.editor_whitespace_dot_size_px),
+                    editor.styles.editor.editor_whitespace_dot_color,
+                );
+            }
 
             // Code block background
             if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
@@ -1293,6 +1690,21 @@ impl Element for EditorElement {
                                                 }
                                             }
 
+                                            push_whitespace_dot_quads(
+                                                &mut whitespace_dots,
+                                                &cell_layout.display_text,
+                                                &shaped,
+                                                point(px(cell_x), px(cell_text_y)),
+                                                line_height,
+                                                editor.scaled(
+                                                    editor
+                                                        .styles
+                                                        .editor
+                                                        .editor_whitespace_dot_size_px,
+                                                ),
+                                                editor.styles.editor.editor_whitespace_dot_color,
+                                            );
+
                                             table_cell_texts.push((
                                                 shaped,
                                                 point(px(cell_x), px(cell_text_y)),
@@ -1611,6 +2023,24 @@ impl Element for EditorElement {
 
             // Gutter decorations
             let gutter_center_y = text_line_top + line_height / 2.0;
+            if editor.active_tab_is_non_markdown_text() {
+                let gutter_styles = &editor.styles.gutter;
+                push_gutter_line_number_label(
+                    &mut gutter_labels,
+                    window,
+                    line_idx,
+                    is_cursor_line,
+                    &monospace_font,
+                    editor.scaled(gutter_styles.gutter_line_number_font_size_px),
+                    content_x,
+                    text_line_top,
+                    line_height,
+                    editor.scaled(gutter_styles.gutter_line_number_right_gap_px),
+                    gutter_styles.gutter_line_number_text_color,
+                    gutter_styles.gutter_line_number_active_text_color,
+                );
+            }
+
             match block_type {
                 BlockType::Heading(level) if is_cursor_line => {
                     let gutter_styles = &editor.styles.gutter;
@@ -2152,6 +2582,7 @@ impl Element for EditorElement {
             hitbox,
             link_hitboxes,
             lines,
+            whitespace_dots,
             cursor_quads,
             selection_quads,
             search_match_quads,
@@ -2230,6 +2661,10 @@ impl Element for EditorElement {
         }
 
         for quad in prepaint.selection_quads.drain(..) {
+            window.paint_quad(quad);
+        }
+
+        for quad in prepaint.whitespace_dots.drain(..) {
             window.paint_quad(quad);
         }
 

@@ -80,33 +80,36 @@ impl EditorView {
         true
     }
 
-    fn load_editor_snapshot_for_path(path: &Path) -> Option<EditorSnapshot> {
+    fn load_editor_tab_state_for_path(path: &Path) -> Option<(EditorSnapshot, FileKind)> {
         let bytes = std::fs::read(path).ok()?;
-        let text = if bytes.contains(&0) {
-            format!(
-                "# Binary File\n\n{}\n\nThis file could not be opened as plain text.",
-                path.display()
-            )
-        } else {
+        let file_kind = classify_file_kind_for_bytes(path, &bytes);
+        let text = if file_kind.supports_text_buffer() {
             String::from_utf8_lossy(&bytes).into_owned()
+        } else {
+            String::new()
         };
         let first_line_end = text.find('\n').unwrap_or(text.len());
-        Some(EditorSnapshot {
-            text,
-            cursor_offset: first_line_end,
-            cursor_anchor: first_line_end,
-            scroll_offset: 0.0,
-        })
+        Some((
+            EditorSnapshot {
+                text,
+                cursor_offset: first_line_end,
+                cursor_anchor: first_line_end,
+                scroll_offset: 0.0,
+            },
+            file_kind,
+        ))
     }
 
     fn build_file_tab(&mut self, path: &Path, is_preview: bool) -> Option<OpenTab> {
-        let snapshot = Self::load_editor_snapshot_for_path(path)?;
+        let (snapshot, file_kind) = Self::load_editor_tab_state_for_path(path)?;
         Some(OpenTab {
             id: self.next_tab_identity(),
             title: Self::title_for_path(path),
             kind: TabKind::Editor,
             path: Some(path.to_path_buf()),
+            file_kind: Some(file_kind),
             snapshot,
+            image_view: ImageViewState::default(),
             is_preview,
             is_dirty: false,
             is_deleted: false,
@@ -197,7 +200,13 @@ impl EditorView {
     pub(crate) fn persist_active_tab_state(&mut self) {
         if let Some(index) = self.active_tab_index() {
             if self.tabs[index].kind == TabKind::Editor {
-                self.tabs[index].snapshot = self.current_snapshot();
+                if self.tabs[index]
+                    .file_kind
+                    .as_ref()
+                    .is_some_and(FileKind::supports_text_buffer)
+                {
+                    self.tabs[index].snapshot = self.current_snapshot();
+                }
                 self.current_file_path = self.tabs[index].path.clone();
             }
         }
@@ -219,12 +228,30 @@ impl EditorView {
         self.active_tab_id = Some(tab.id.clone());
         self.current_file_path = tab.path.clone();
         if tab.kind == TabKind::Editor {
-            self.buffer = Buffer::from_text(&tab.snapshot.text);
-            self.cursor.offset = tab.snapshot.cursor_offset.min(self.buffer.len());
-            self.cursor.anchor = tab.snapshot.cursor_anchor.min(self.buffer.len());
+            if tab
+                .file_kind
+                .as_ref()
+                .is_some_and(FileKind::supports_text_buffer)
+            {
+                self.buffer = Buffer::from_text(&tab.snapshot.text);
+                self.cursor.offset = tab.snapshot.cursor_offset.min(self.buffer.len());
+                self.cursor.anchor = tab.snapshot.cursor_anchor.min(self.buffer.len());
+            } else {
+                self.buffer = Buffer::from_text("");
+                self.cursor.offset = 0;
+                self.cursor.anchor = 0;
+            }
             self.marked_range = None;
             self.scroll_offset = tab.snapshot.scroll_offset;
+            self.image_drag_state = None;
+            self.toolbar_hidden_by_scroll = false;
+            self.toolbar_corner_hovered = false;
             self.reparse();
+            if tab.file_kind.as_ref().is_some_and(FileKind::is_image)
+                && let Some(path) = tab.path.as_ref()
+            {
+                self.queue_image_load(path.to_string_lossy().into_owned(), cx);
+            }
             self.clamp_scroll();
             self.pause_blinking(cx);
         }
@@ -317,7 +344,9 @@ impl EditorView {
                 title: closed_tab.title,
                 kind: TabKind::Editor,
                 path: closed_tab.path,
+                file_kind: closed_tab.file_kind,
                 snapshot: closed_tab.snapshot,
+                image_view: closed_tab.image_view,
                 is_preview: false,
                 is_dirty: false,
                 is_deleted: false,
@@ -470,12 +499,14 @@ impl EditorView {
             title,
             kind: TabKind::Editor,
             path: None,
+            file_kind: Some(FileKind::Markdown),
             snapshot: EditorSnapshot {
                 text: String::new(),
                 cursor_offset: 0,
                 cursor_anchor: 0,
                 scroll_offset: 0.0,
             },
+            image_view: ImageViewState::default(),
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -506,12 +537,14 @@ impl EditorView {
             title: "设置".to_string(),
             kind: TabKind::Settings,
             path: None,
+            file_kind: None,
             snapshot: EditorSnapshot {
                 text: String::new(),
                 cursor_offset: 0,
                 cursor_anchor: 0,
                 scroll_offset: 0.0,
             },
+            image_view: ImageViewState::default(),
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -528,6 +561,92 @@ impl EditorView {
 
     // ── Tab rendering ───────────────────────────────────────────────
 
+    fn render_tab_title_label(
+        &self,
+        tab: &OpenTab,
+        is_active: bool,
+        is_preview: bool,
+        is_deleted: bool,
+    ) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let text_color = if is_deleted {
+            ts.tab_item_deleted_text_color
+        } else if is_active {
+            ts.tab_item_active_text_color
+        } else {
+            ts.tab_item_text_color
+        };
+        let (base, suffix) = split_file_name_for_display(&tab.title);
+
+        div()
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .flex()
+            .gap(px(0.0))
+            .items_center()
+            .text_size(px(self.scaled(ts.tab_item_font_size_px)))
+            .text_color(text_color)
+            .when(is_preview && !is_active, |this| this.opacity(0.72))
+            .when(is_preview, |this| {
+                this.font_family("Helvetica Neue").italic()
+            })
+            .font_weight(if is_preview {
+                FontWeight::NORMAL
+            } else if is_active {
+                FontWeight::MEDIUM
+            } else {
+                FontWeight::NORMAL
+            })
+            .when(is_deleted, |this| this.line_through())
+            .child(div().whitespace_nowrap().child(base.to_string()))
+            .when_some(suffix.filter(|_| tab.path.is_some()), |this, suffix| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .opacity(ts.tab_item_suffix_opacity)
+                        .child(suffix.to_string()),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_tab_file_indicator(&self, tab: &OpenTab, is_active: bool) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let opacity = if is_active {
+            ts.tab_item_icon_active_opacity
+        } else {
+            ts.tab_item_icon_inactive_opacity
+        };
+
+        if let Some(path) = tab.path.as_ref()
+            && let Some(label) = file_kind_badge_text(path)
+        {
+            return div()
+                .min_w(px(self.scaled(ts.tab_item_badge_min_width_px)))
+                .h(px(self.scaled(ts.tab_item_badge_height_px)))
+                .px(px(self.scaled(ts.tab_item_badge_padding_x_px)))
+                .rounded(px(self.scaled(ts.tab_item_badge_radius_px)))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(ts.tab_item_badge_bg)
+                .text_size(px(self.scaled(ts.tab_item_badge_font_size_px)))
+                .text_color(ts.tab_item_badge_text_color)
+                .opacity(opacity)
+                .child(label)
+                .into_any_element();
+        }
+
+        svg()
+            .path(MARKDOWN_SVG_PATH)
+            .size(px(self.scaled(ts.tab_item_icon_size_px)))
+            .text_color(ts.tab_item_icon_color)
+            .opacity(opacity)
+            .into_any_element()
+    }
+
     pub(crate) fn render_tab(&self, tab: &OpenTab, cx: &mut Context<Self>) -> AnyElement {
         let is_active = self.active_tab_id.as_deref() == Some(tab.id.as_str());
         let is_dirty = tab.is_dirty;
@@ -541,7 +660,6 @@ impl EditorView {
         let context_tab_id = tab.id.clone();
         let drag_tab_id = tab.id.clone();
         let drop_tab_id = tab.id.clone();
-        let title = tab.title.clone();
         let drag_title = tab.title.clone();
         let ts = &self.styles.tab_bar;
         let tab_hover_bg = ts.tab_item_hover_bg;
@@ -606,17 +724,7 @@ impl EditorView {
             // Normal (non-pinned) tab content
             .when(!is_pinned, |this: gpui::Stateful<gpui::Div>| {
                 this.when(tab_kind == TabKind::Editor, |this| {
-                    this.child(
-                        svg()
-                            .path(MARKDOWN_SVG_PATH)
-                            .size(px(self.scaled(ts.tab_item_icon_size_px)))
-                            .text_color(ts.tab_item_icon_color)
-                            .opacity(if is_active {
-                                ts.tab_item_icon_active_opacity
-                            } else {
-                                ts.tab_item_icon_inactive_opacity
-                            }),
-                    )
+                    this.child(self.render_tab_file_indicator(tab, is_active))
                 })
                 .when(tab_kind == TabKind::Settings, |this| {
                     this.child(
@@ -631,35 +739,7 @@ impl EditorView {
                             }),
                     )
                 })
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .text_size(px(self.scaled(ts.tab_item_font_size_px)))
-                        .text_color(if is_deleted {
-                            ts.tab_item_deleted_text_color
-                        } else if is_active {
-                            ts.tab_item_active_text_color
-                        } else {
-                            ts.tab_item_text_color
-                        })
-                        .when(is_preview && !is_active, |this| this.opacity(0.72))
-                        .when(is_preview, |this| {
-                            this.font_family("Helvetica Neue").italic()
-                        })
-                        .font_weight(if is_preview {
-                            FontWeight::NORMAL
-                        } else if is_active {
-                            FontWeight::MEDIUM
-                        } else {
-                            FontWeight::NORMAL
-                        })
-                        .when(is_deleted, |this| this.line_through())
-                        .child(title),
-                )
+                .child(self.render_tab_title_label(tab, is_active, is_preview, is_deleted))
                 .child(
                     div()
                         .id(SharedString::from(format!("close-{}", tab.id)))

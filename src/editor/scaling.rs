@@ -18,7 +18,11 @@ impl EditorView {
     }
 
     pub(crate) fn padding_top(&self) -> f32 {
-        self.scaled(self.styles.editor.editor_padding_top_px)
+        if self.active_tab_is_non_markdown_text() {
+            self.scaled(self.styles.editor.editor_non_markdown_padding_top_px)
+        } else {
+            self.scaled(self.styles.editor.editor_padding_top_px)
+        }
     }
 
     pub(crate) fn padding_right(&self) -> f32 {
@@ -30,7 +34,11 @@ impl EditorView {
     }
 
     pub(crate) fn max_editor_width(&self) -> f32 {
-        self.scaled(self.styles.editor.editor_max_width_px)
+        if self.active_tab_is_non_markdown_text() {
+            self.scaled(self.styles.editor.editor_non_markdown_max_width_px)
+        } else {
+            self.scaled(self.styles.editor.editor_max_width_px)
+        }
     }
 
     pub(crate) fn sidebar_width(&self) -> f32 {

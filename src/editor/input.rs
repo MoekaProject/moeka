@@ -57,6 +57,26 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_tab_is_image() && event.button == MouseButton::Left {
+            if event.click_count >= 2 {
+                self.reset_active_image_view();
+                self.clamp_active_image_view();
+                self.image_drag_state = None;
+                cx.notify();
+                return;
+            }
+
+            if let Some(state) = self.active_image_view_state() {
+                self.image_drag_state = Some(ImageDragState {
+                    start_position: event.position,
+                    start_pan_x: state.pan_x,
+                    start_pan_y: state.pan_y,
+                });
+                cx.notify();
+                return;
+            }
+        }
+
         if self.context_menu.is_some() {
             return;
         }
@@ -463,6 +483,11 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.image_drag_state.take().is_some() {
+            cx.notify();
+            return;
+        }
+
         // Handle table drag completion
         if let Some(drag) = self.table_drag.take() {
             match drag {
@@ -533,6 +558,22 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let toolbar_hover_changed = self.update_toolbar_corner_hover(event.position);
+        if self.active_tab_is_image() {
+            if let Some(drag) = self.image_drag_state {
+                if let Some(image_view) = self.active_image_view_state_mut() {
+                    image_view.pan_x = drag.start_pan_x + (f32::from(event.position.x) - f32::from(drag.start_position.x));
+                    image_view.pan_y = drag.start_pan_y + (f32::from(event.position.y) - f32::from(drag.start_position.y));
+                }
+                self.clamp_active_image_view();
+                if toolbar_hover_changed {
+                    cx.notify();
+                }
+                cx.notify();
+                return;
+            }
+        }
+
         // Track command key from mouse events for link underlines
         let cmd = event.modifiers.platform;
         if cmd != self.command_held {
@@ -555,6 +596,9 @@ impl EditorView {
         }
 
         if self.context_menu.is_some() {
+            if toolbar_hover_changed {
+                cx.notify();
+            }
             return;
         }
         let hovering_checkbox = self
@@ -665,6 +709,8 @@ impl EditorView {
                 self.offset_for_position(event.position)
             };
             self.cursor.select_to(offset, &self.buffer);
+            cx.notify();
+        } else if toolbar_hover_changed {
             cx.notify();
         }
     }
@@ -956,6 +1002,23 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_tab_is_image() {
+            let delta_y: f32 = event.delta.pixel_delta(px(40.0)).y.into();
+            if delta_y != 0.0 {
+                let zoom_ratio = 1.0 + (delta_y.abs() / 300.0).clamp(0.05, 0.35);
+                if let Some(image_view) = self.active_image_view_state_mut() {
+                    if delta_y < 0.0 {
+                        image_view.zoom_factor *= zoom_ratio;
+                    } else {
+                        image_view.zoom_factor /= zoom_ratio;
+                    }
+                }
+                self.clamp_active_image_view();
+                cx.notify();
+            }
+            return;
+        }
+
         if self.context_menu.is_some() {
             return;
         }
@@ -968,6 +1031,10 @@ impl EditorView {
             .into();
         self.scroll_offset -= delta_y;
         self.clamp_scroll();
+        self.toolbar_hidden_by_scroll = self.scroll_offset > 0.5;
+        if self.toolbar_hidden_by_scroll {
+            self.toolbar_corner_hovered = false;
+        }
         cx.notify();
     }
 
@@ -1088,6 +1155,10 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
+        if !self.active_tab_supports_text_buffer() {
+            actual_range.take();
+            return None;
+        }
         let range = self.range_from_utf16(&range_utf16);
         let clamped_end = range.end.min(self.buffer.len());
         let clamped_start = range.start.min(clamped_end);
@@ -1102,6 +1173,9 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
+        if !self.active_tab_supports_text_buffer() {
+            return None;
+        }
         if self.selected_handle.is_some() {
             ime_debug_log("selected_text_range -> None (table handle selected)");
             return None;
@@ -1122,6 +1196,9 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
+        if !self.active_tab_supports_text_buffer() {
+            return None;
+        }
         if self.selected_handle.is_some() {
             ime_debug_log("marked_text_range -> None (table handle selected)");
             return None;
@@ -1135,6 +1212,9 @@ impl EntityInputHandler for EditorView {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        if !self.active_tab_supports_text_buffer() {
+            return;
+        }
         self.marked_range = None;
         self.finish_ime_composition();
     }
@@ -1146,6 +1226,9 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_supports_text_buffer() {
+            return;
+        }
         ime_debug_log(format!(
             "replace_text_in_range start range_utf16={:?} new_text={:?} marked_before={:?} selection_before={:?}",
             range_utf16,
@@ -1232,6 +1315,9 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_tab_supports_text_buffer() {
+            return;
+        }
         ime_debug_log(format!(
             "replace_and_mark_text_in_range start range_utf16={:?} new_text={:?} new_selected_range_utf16={:?} marked_before={:?} selection_before={:?}",
             range_utf16,
@@ -1292,6 +1378,9 @@ impl EntityInputHandler for EditorView {
         window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        if !self.active_tab_supports_text_buffer() {
+            return None;
+        }
         ime_debug_log(format!(
             "bounds_for_range start range_utf16={:?}",
             range_utf16

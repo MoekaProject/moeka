@@ -392,6 +392,57 @@ impl EditorView {
             .into_any_element()
     }
 
+    fn render_context_menu_choice_item(
+        &self,
+        label: &str,
+        is_active: bool,
+        cx: &mut Context<Self>,
+        handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let ms = &self.styles.context_menu;
+        let wss = &self.styles.workspace_switcher;
+        let hover_bg = ms.menu_item_hover_bg;
+        let icon_size = self.scaled(wss.ws_menu_item_check_size_px);
+        let gap = self.scaled(wss.ws_menu_item_action_icon_gap_px);
+
+        div()
+            .w_full()
+            .h(px(self.scaled(ms.menu_item_height_px)))
+            .px(px(self.scaled(ms.menu_item_padding_x_px)))
+            .flex()
+            .items_center()
+            .gap(px(gap))
+            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
+            .text_color(ms.menu_item_text_color)
+            .hover(move |s| s.bg(hover_bg))
+            .cursor(CursorStyle::Arrow)
+            .child(
+                div()
+                    .w(px(icon_size))
+                    .h(px(icon_size))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .when(is_active, |this| {
+                        this.child(
+                            svg()
+                                .path(CHECK_SVG_PATH)
+                                .size(px(icon_size))
+                                .text_color(wss.ws_menu_item_check_color),
+                        )
+                    }),
+            )
+            .child(label.to_string())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, window, cx| {
+                    handler(this, window, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
     fn render_format_context_menu_item(
         &self,
         label: &str,
@@ -490,6 +541,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let has_clipboard = self.file_clipboard.is_some();
+        let is_root = is_dir && path == self.sidebar_root;
         let parent_dir = if is_dir {
             path.clone()
         } else {
@@ -499,6 +551,63 @@ impl EditorView {
         };
 
         let mut items: Vec<AnyElement> = Vec::new();
+
+        if is_root {
+            {
+                let pd = parent_dir.clone();
+                items.push(self.render_context_menu_item(
+                    "新建文件",
+                    false,
+                    cx,
+                    move |this, window, cx| {
+                        this.start_create_file(pd.clone(), window, cx);
+                    },
+                ));
+            }
+            {
+                let pd = parent_dir.clone();
+                items.push(self.render_context_menu_item(
+                    "新建目录",
+                    false,
+                    cx,
+                    move |this, window, cx| {
+                        this.start_create_dir(pd.clone(), window, cx);
+                    },
+                ));
+            }
+            items.push(self.render_context_menu_separator());
+            if !self.expanded_dirs.is_empty() {
+                items.push(self.render_context_menu_item(
+                    "折叠所有目录",
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.collapse_all_dirs(cx);
+                    },
+                ));
+            }
+            items.push(self.render_context_menu_item(
+                "展开所有目录",
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.expand_all_dirs(cx);
+                },
+            ));
+            items.push(self.render_context_menu_separator());
+            {
+                let p = path.clone();
+                items.push(self.render_context_menu_item(
+                    "在访达中显示",
+                    false,
+                    cx,
+                    move |this, _, _cx| {
+                        this.reveal_in_finder(&p);
+                    },
+                ));
+            }
+            return items;
+        }
 
         {
             let pd = parent_dir.clone();
@@ -885,6 +994,62 @@ impl EditorView {
                 self.render_sidebar_context_menu(path.clone(), *is_dir, cx),
                 self.scaled(self.styles.context_menu.menu_sidebar_width_px),
             ),
+            ContextMenuKind::SidebarSort => {
+                let mut items = Vec::new();
+                for mode in [
+                    SidebarSortMode::CreatedDesc,
+                    SidebarSortMode::CreatedAsc,
+                    SidebarSortMode::NameAsc,
+                    SidebarSortMode::NameDesc,
+                    SidebarSortMode::Type,
+                ] {
+                    items.push(self.render_context_menu_choice_item(
+                        mode.label(),
+                        self.sidebar_sort_mode == mode,
+                        cx,
+                        move |this, _, cx| {
+                            this.sidebar_sort_mode = mode;
+                            this.context_menu = None;
+                            cx.notify();
+                        },
+                    ));
+                }
+                (
+                    items,
+                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                )
+            }
+            ContextMenuKind::SidebarCreate => {
+                let mut items = Vec::new();
+                {
+                    let parent = self.sidebar_root.clone();
+                    items.push(self.render_context_menu_item_with_icon(
+                        "新建文件",
+                        FILETREE_ADD_SVG_PATH,
+                        false,
+                        cx,
+                        move |this, window, cx| {
+                            this.start_create_file(parent.clone(), window, cx);
+                        },
+                    ));
+                }
+                {
+                    let parent = self.sidebar_root.clone();
+                    items.push(self.render_context_menu_item_with_icon(
+                        "新建目录",
+                        FOLDER_CLOSED_SVG_PATH,
+                        false,
+                        cx,
+                        move |this, window, cx| {
+                            this.start_create_dir(parent.clone(), window, cx);
+                        },
+                    ));
+                }
+                (
+                    items,
+                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                )
+            }
             ContextMenuKind::Format => (
                 self.render_format_context_menu(cx),
                 self.scaled(self.styles.context_menu.menu_format_width_px),
