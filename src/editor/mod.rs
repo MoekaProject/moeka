@@ -189,8 +189,26 @@ pub(crate) fn perform_window_drag(window: &gpui::Window) {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn set_window_movable(window: &gpui::Window, movable: bool) {
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(handle) = HasWindowHandle::window_handle(window) {
+        if let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
+            unsafe {
+                let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
+                let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
+                let () = msg_send![ns_window, setMovable: movable];
+            }
+        }
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn perform_window_drag(_window: &gpui::Window) {}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn set_window_movable(_window: &gpui::Window, _movable: bool) {}
 
 // ── Layout constants ────────────────────────────────────────────────
 // NOTE: Numeric layout/style constants are now in style.rs (Styles struct).

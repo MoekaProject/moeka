@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, Context, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent, SharedString, div,
-    prelude::*, px, svg,
+    AnyElement, Context, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
+    SharedString, div, prelude::*, px, svg,
 };
 
 use super::*;
@@ -478,6 +478,16 @@ impl EditorView {
         cx.notify();
     }
 
+    pub(crate) fn reorder_tab_to_end(&mut self, from_id: &str, cx: &mut Context<Self>) {
+        let Some(from_idx) = self.tabs.iter().position(|tab| tab.id == from_id) else {
+            return;
+        };
+        let moved = self.tabs.remove(from_idx);
+        self.tabs.push(moved);
+        self.ensure_settings_tab_first();
+        cx.notify();
+    }
+
     pub(crate) fn mark_active_tab_dirty(&mut self) {
         if let Some(index) = self.active_tab_index() {
             self.tabs[index].is_preview = false;
@@ -798,14 +808,21 @@ impl EditorView {
                     }
                 },
             )
-            .on_drag_move(
-                cx.listener(move |this, _event: &DragMoveEvent<DraggedTab>, _, _cx| {
+            .on_drag_move(cx.listener(
+                move |this, _event: &DragMoveEvent<DraggedTab>, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
                     this.tab_dragging_id = Some(drag_tab_id.clone());
-                }),
-            )
+                },
+            ))
+            .on_mouse_move(cx.listener(|_, _event: &MouseMoveEvent, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    super::set_window_movable(window, false);
                     window.prevent_default();
                     this.switch_to_tab(&tab_id, cx);
                     if event.click_count >= 2 {
@@ -834,6 +851,8 @@ impl EditorView {
 
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let ts = &self.styles.tab_bar;
+        let end_drop_indicator_color = ts.tab_drop_indicator_color;
+        let end_drop_indicator_width = ts.tab_drop_indicator_width_px;
         let mut tab_items: Vec<AnyElement> = self
             .tabs
             .iter()
@@ -882,9 +901,23 @@ impl EditorView {
                 .flex_1()
                 .h_full()
                 .min_w(px(0.0))
+                .drag_over::<DraggedTab>(move |style, _, _, _| {
+                    style
+                        .border_l(px(end_drop_indicator_width))
+                        .border_color(end_drop_indicator_color)
+                })
+                .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                    this.reorder_tab_to_end(&dragged.tab_id, cx);
+                    this.tab_dragging_id = None;
+                }))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        if this.tab_dragging_id.is_some() {
+                            cx.stop_propagation();
+                            return;
+                        }
+                        super::set_window_movable(window, true);
                         this.focused_sidebar_path = None;
                         if event.click_count >= 2 {
                             window.zoom_window();
@@ -907,6 +940,30 @@ impl EditorView {
             .border_b(px(ts.tab_bar_border_width_px))
             .border_color(ts.tab_bar_border_color)
             .overflow_x_scroll()
+            .on_mouse_move(cx.listener(|this, _event: &MouseMoveEvent, window, cx| {
+                if this.tab_dragging_id.is_some() {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    super::set_window_movable(window, true);
+                    if this.tab_dragging_id.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    super::set_window_movable(window, true);
+                    if this.tab_dragging_id.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .children(tab_items)
             .into_any_element()
     }

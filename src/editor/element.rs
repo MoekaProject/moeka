@@ -356,19 +356,19 @@ impl Element for EditorElement {
         let viewport_width: f32 = bounds.size.width.into();
         let origin_x: f32 = bounds.origin.x.into();
         let origin_y: f32 = bounds.origin.y.into();
-        let left_aligned = editor.editor_left_aligned || editor.active_tab_is_non_markdown_text();
-        let editor_width = if left_aligned {
-            viewport_width.min(editor.max_editor_width())
+        let width_independent_layout = editor.active_tab_is_non_markdown_text();
+        let expanded_layout = editor.editor_left_aligned || width_independent_layout;
+        let editor_width = if expanded_layout {
+            viewport_width
         } else {
             viewport_width.min(editor.max_editor_width())
         };
         let centered_left = origin_x + ((viewport_width - editor_width) / 2.0).max(0.0);
-        let editor_left = if left_aligned {
+        let editor_left = if expanded_layout {
             origin_x
         } else {
             centered_left
         };
-        let width_independent_layout = editor.active_tab_is_non_markdown_text();
         let text_width = (editor_width - editor.padding_left() - editor.padding_right())
             .max(editor.scaled(120.0));
         let wrap_width = text_width;
