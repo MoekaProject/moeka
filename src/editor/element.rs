@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use gpui::{
     App, BorderStyle, Bounds, Corners, CursorStyle, Element, ElementId, ElementInputHandler,
-    Entity, Font, FontFallbacks, GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement,
-    LayoutId, PaintQuad, Pixels, Point, ShapedLine, Style, TextAlign, TextRun,
+    Entity, Font, FontFallbacks, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
+    IntoElement, LayoutId, PaintQuad, Pixels, Point, ShapedLine, Style, TextAlign, TextRun,
     TransformationMatrix, Window, WrappedLine, fill, point, px, quad, relative, size,
 };
 
@@ -170,6 +170,8 @@ fn build_precise_table_layout(
                     0,
                     font_size,
                     theme,
+                    theme.link,
+                    FontWeight::BOLD,
                 );
                 if layout.is_header.get(vi).copied().unwrap_or(false) {
                     for run in &mut cell_runs {
@@ -234,9 +236,13 @@ fn push_whitespace_dot_quads(
     line_height: f32,
     dot_size: f32,
     dot_color: Hsla,
+    skip_prefix_bytes: usize,
 ) {
     let dot_radius = px(dot_size / 2.0);
     for (index, character) in text.char_indices() {
+        if index < skip_prefix_bytes {
+            continue;
+        }
         if character != ' ' && character != '\t' {
             continue;
         }
@@ -357,7 +363,7 @@ impl Element for EditorElement {
         let origin_x: f32 = bounds.origin.x.into();
         let origin_y: f32 = bounds.origin.y.into();
         let width_independent_layout = editor.active_tab_is_non_markdown_text();
-        let expanded_layout = editor.editor_left_aligned || width_independent_layout;
+        let expanded_layout = editor.editor_left_aligned;
         let editor_width = if expanded_layout {
             viewport_width
         } else {
@@ -748,7 +754,7 @@ impl Element for EditorElement {
                     continue;
                 }
 
-                let runs = helpers::build_text_runs_for_display(
+                let mut runs = helpers::build_text_runs_for_display(
                     &cached.display_text,
                     line_content,
                     &cached.display_to_buffer,
@@ -764,7 +770,31 @@ impl Element for EditorElement {
                     collapsed_task_prefix_chars,
                     font_size,
                     theme,
+                    editor.styles.wiki_link.wiki_link_text_color,
+                    editor.styles.wiki_link.wiki_link_text_weight,
                 );
+                helpers::apply_search_match_text_styles(
+                    &mut runs,
+                    &cached.display_text,
+                    &cached.display_to_buffer,
+                    line_start_offset,
+                    &editor.search_matches,
+                    editor.search_current_index,
+                    editor.styles.search.search_match_text_color,
+                    editor.styles.search.search_match_active_text_color,
+                );
+                if editor.current_file_path == editor.workspace_search_highlight_path {
+                    helpers::apply_search_match_text_styles(
+                        &mut runs,
+                        &cached.display_text,
+                        &cached.display_to_buffer,
+                        line_start_offset,
+                        &editor.workspace_search_highlight_ranges,
+                        editor.workspace_search_highlight_current_index,
+                        editor.styles.search.search_match_text_color,
+                        editor.styles.search.search_match_active_text_color,
+                    );
+                }
                 let origin = point(px(content_x), px(text_line_top));
                 push_whitespace_dot_quads(
                     &mut whitespace_dots,
@@ -774,6 +804,7 @@ impl Element for EditorElement {
                     line_height,
                     editor.scaled(editor.styles.editor.editor_whitespace_dot_size_px),
                     editor.styles.editor.editor_whitespace_dot_color,
+                    0,
                 );
 
                 let gutter_styles = &editor.styles.gutter;
@@ -1022,7 +1053,7 @@ impl Element for EditorElement {
                     editor.styles.checkbox.checkbox_parent_prefix_chars as usize,
                 );
 
-            let runs = helpers::build_text_runs_for_display(
+            let mut runs = helpers::build_text_runs_for_display(
                 &display_text,
                 line_content,
                 &display_to_buffer,
@@ -1038,7 +1069,31 @@ impl Element for EditorElement {
                 collapsed_task_prefix_chars,
                 font_size,
                 theme,
+                editor.styles.wiki_link.wiki_link_text_color,
+                editor.styles.wiki_link.wiki_link_text_weight,
             );
+            helpers::apply_search_match_text_styles(
+                &mut runs,
+                &display_text,
+                &display_to_buffer,
+                line_start_offset,
+                &editor.search_matches,
+                editor.search_current_index,
+                editor.styles.search.search_match_text_color,
+                editor.styles.search.search_match_active_text_color,
+            );
+            if editor.current_file_path == editor.workspace_search_highlight_path {
+                helpers::apply_search_match_text_styles(
+                    &mut runs,
+                    &display_text,
+                    &display_to_buffer,
+                    line_start_offset,
+                    &editor.workspace_search_highlight_ranges,
+                    editor.workspace_search_highlight_current_index,
+                    editor.styles.search.search_match_text_color,
+                    editor.styles.search.search_match_active_text_color,
+                );
+            }
 
             let display_shared: SharedString = if display_text.is_empty() {
                 " ".into()
@@ -1050,25 +1105,17 @@ impl Element for EditorElement {
                 block_type,
                 BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_)
             );
-            let indent_px = if is_list_type {
-                let prefix_bytes = helpers::compute_display_prefix_bytes(
+            let prefix_bytes = if is_list_type {
+                helpers::compute_display_prefix_bytes(
                     &display_text,
                     block_type,
                     prefix_collapsed,
                     collapsed_task_prefix_chars,
-                );
-                if prefix_bytes > 0 && prefix_bytes <= display_text.len() {
-                    let prefix_chars = display_text
-                        .char_indices()
-                        .take_while(|(i, _)| *i < prefix_bytes)
-                        .count();
-                    prefix_chars as f32 * base_char_width
-                } else {
-                    0.0
-                }
+                )
             } else {
-                0.0
+                0
             };
+            let indent_px = 0.0;
 
             let letter_spacing = editor_styles.editor_letter_spacing_px;
 
@@ -1109,6 +1156,15 @@ impl Element for EditorElement {
             }
 
             let wrapped = &wrapped_lines[0];
+            let indent_px =
+                if is_list_type && prefix_bytes > 0 && prefix_bytes <= display_text.len() {
+                    wrapped
+                        .position_for_index(prefix_bytes, px(line_height))
+                        .map(|pos| f32::from(pos.x))
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
             let visual_line_count = wrapped.wrap_boundaries().len() + 1;
             let text_line_height = line_height * visual_line_count as f32;
             let image_gap_top = editor.scaled(editor.styles.image_preview.image_gap_top_px);
@@ -1275,6 +1331,11 @@ impl Element for EditorElement {
                     .as_ref()
                     .is_some_and(|ti| !ti.is_separator);
             if !is_table_source_row {
+                let whitespace_skip_prefix_bytes = if matches!(block_type, BlockType::TaskList(_)) {
+                    prefix_bytes
+                } else {
+                    0
+                };
                 push_whitespace_dot_quads(
                     &mut whitespace_dots,
                     &display_text,
@@ -1283,6 +1344,7 @@ impl Element for EditorElement {
                     line_height,
                     editor.scaled(editor.styles.editor.editor_whitespace_dot_size_px),
                     editor.styles.editor.editor_whitespace_dot_color,
+                    whitespace_skip_prefix_bytes,
                 );
             }
 
@@ -1517,6 +1579,8 @@ impl Element for EditorElement {
                                         0,
                                         font_size,
                                         theme,
+                                        editor.styles.wiki_link.wiki_link_text_color,
+                                        editor.styles.wiki_link.wiki_link_text_weight,
                                     );
 
                                     // Apply header bold weight
@@ -1703,6 +1767,7 @@ impl Element for EditorElement {
                                                         .editor_whitespace_dot_size_px,
                                                 ),
                                                 editor.styles.editor.editor_whitespace_dot_color,
+                                                0,
                                             );
 
                                             table_cell_texts.push((
@@ -2490,6 +2555,53 @@ impl Element for EditorElement {
                     let disp_start =
                         helpers::buffer_to_display_offset(&buffer_to_display, buf_start);
                     let disp_end = helpers::buffer_to_display_offset(&buffer_to_display, buf_end);
+                    if let (Some(pos_start), Some(pos_end)) = (
+                        wrapped.position_for_index(disp_start, px(line_height)),
+                        wrapped.position_for_index(disp_end, px(line_height)),
+                    ) {
+                        let indent_start =
+                            helpers::indent_for_y(indent_px, pos_start.y, line_height);
+                        let ul_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
+                        link_underlines.push(fill(
+                            Bounds::from_corners(
+                                point(px(content_x + indent_start) + pos_start.x, px(ul_y)),
+                                point(px(content_x + indent_start) + pos_end.x, px(ul_y + 1.5)),
+                            ),
+                            theme.link,
+                        ));
+                        let link_bounds = Bounds::from_corners(
+                            point(
+                                px(content_x + indent_start) + pos_start.x,
+                                px(text_line_top + f32::from(pos_start.y)),
+                            ),
+                            point(
+                                px(content_x + indent_start) + pos_end.x,
+                                px(text_line_top + f32::from(pos_start.y) + line_height),
+                            ),
+                        );
+                        link_hitboxes
+                            .push(window.insert_hitbox(link_bounds, HitboxBehavior::Normal));
+                    }
+                }
+
+                for wiki_link in &decoration.wiki_links {
+                    let Some(_resolved_path) =
+                        resolve_wiki_link_target_path(&editor.sidebar_root, &wiki_link.target_path)
+                    else {
+                        continue;
+                    };
+                    let is_collapsed = cursor_col.is_none_or(|col| {
+                        col < wiki_link.full_range.start || col >= wiki_link.full_range.end
+                    });
+                    let visible_range = if is_collapsed {
+                        wiki_link.collapsed_range.clone()
+                    } else {
+                        wiki_link.full_range.clone()
+                    };
+                    let disp_start =
+                        helpers::buffer_to_display_offset(&buffer_to_display, visible_range.start);
+                    let disp_end =
+                        helpers::buffer_to_display_offset(&buffer_to_display, visible_range.end);
                     if let (Some(pos_start), Some(pos_end)) = (
                         wrapped.position_for_index(disp_start, px(line_height)),
                         wrapped.position_for_index(disp_end, px(line_height)),

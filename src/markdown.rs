@@ -63,10 +63,18 @@ pub struct SyntaxRange {
 }
 
 #[derive(Debug, Clone)]
+pub struct WikiLinkSpan {
+    pub full_range: Range<usize>,
+    pub collapsed_range: Range<usize>,
+    pub target_path: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct LineDecoration {
     pub block_type: BlockType,
     pub inline_spans: Vec<InlineSpan>,
     pub syntax_ranges: Vec<SyntaxRange>,
+    pub wiki_links: Vec<WikiLinkSpan>,
     pub table_info: Option<TableLineInfo>,
     pub code_language: Option<String>,
     /// For image lines, the local file path from `![alt](path)`.
@@ -98,6 +106,7 @@ impl Default for LineDecoration {
             block_type: BlockType::Normal,
             inline_spans: Vec::new(),
             syntax_ranges: Vec::new(),
+            wiki_links: Vec::new(),
             table_info: None,
             code_language: None,
             image_path: None,
@@ -471,6 +480,9 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
 
     // Second pass: detect table lines
     detect_tables(&mut decorations, text, &line_starts);
+
+    // Third pass: detect [[wiki links]] on each line.
+    detect_wiki_links(&mut decorations, text, &line_starts);
 
     decorations
 }
@@ -860,6 +872,64 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
             }
         } else {
             line_idx += 1;
+        }
+    }
+}
+
+fn detect_wiki_links(decorations: &mut [LineDecoration], text: &str, line_starts: &[usize]) {
+    let line_count = decorations.len();
+
+    for (line, decoration) in decorations.iter_mut().enumerate() {
+        if matches!(
+            decoration.block_type,
+            BlockType::CodeBlock | BlockType::CodeBlockFence
+        ) {
+            continue;
+        }
+
+        let line_content = get_line_content(text, line_starts, line, line_count);
+        let mut search_start = 0usize;
+
+        while search_start + 4 <= line_content.len() {
+            let Some(open_rel) = line_content[search_start..].find("[[") else {
+                break;
+            };
+            let open = search_start + open_rel;
+            let inner_start = open + 2;
+            let Some(close_rel) = line_content[inner_start..].find("]]") else {
+                break;
+            };
+            let close_start = inner_start + close_rel;
+            let full_end = close_start + 2;
+            let target_path = &line_content[inner_start..close_start];
+
+            if !target_path.trim().is_empty() {
+                let basename_rel = target_path
+                    .rfind(|ch| ch == '/' || ch == '\\')
+                    .map(|index| index + 1)
+                    .unwrap_or(0);
+                let collapsed_start = inner_start + basename_rel;
+                let collapsed_end = close_start;
+
+                if collapsed_start < collapsed_end {
+                    let full_trigger = open..full_end;
+                    decoration.syntax_ranges.push(SyntaxRange {
+                        range: open..collapsed_start,
+                        trigger_range: full_trigger.clone(),
+                    });
+                    decoration.syntax_ranges.push(SyntaxRange {
+                        range: collapsed_end..full_end,
+                        trigger_range: full_trigger.clone(),
+                    });
+                    decoration.wiki_links.push(WikiLinkSpan {
+                        full_range: full_trigger,
+                        collapsed_range: collapsed_start..collapsed_end,
+                        target_path: target_path.to_string(),
+                    });
+                }
+            }
+
+            search_start = full_end;
         }
     }
 }

@@ -13,7 +13,7 @@ impl Render for EditorView {
         }
         let resizing = self.sidebar_resizing || self.outline_resizing;
         let show_editor_toolbar =
-            self.tabs.len() > 0 && !self.active_tab_is_settings() && self.active_tab_is_markdown();
+            self.tabs.len() > 0 && !self.active_tab_is_settings() && !self.active_tab_is_binary();
         let ws = &self.styles.window;
         // Store window bounds for menu positioning
         let wb = window.bounds();

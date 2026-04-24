@@ -1,5 +1,5 @@
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use gpui::{
@@ -13,7 +13,7 @@ use syntect::highlighting::{
     Color as SyntectColor, ScopeSelectors, StyleModifier, Theme as SyntectTheme, ThemeItem,
     ThemeSettings,
 };
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{SyntaxReference, SyntaxSet};
 
 use image::Frame;
 
@@ -233,11 +233,46 @@ pub(crate) fn build_display_text(
 
         let collapsed_display_start = display_pos;
         display_text.push_str(replacement);
-        for _ in 0..replacement.len() {
-            display_to_buffer.push(prefix_range.start);
-        }
-        for buf_i in prefix_range.start..prefix_range.end.min(len) {
-            buffer_to_display[buf_i] = collapsed_display_start;
+        let collapsed_buffer_start = prefix_range.start.min(len);
+        let collapsed_buffer_end = prefix_range.end.min(len);
+        let collapsed_buffer_len = collapsed_buffer_end.saturating_sub(collapsed_buffer_start);
+        if replacement.is_empty() || collapsed_buffer_len == 0 {
+            for _ in 0..replacement.len() {
+                display_to_buffer.push(collapsed_buffer_end);
+            }
+            for buf_i in collapsed_buffer_start..collapsed_buffer_end {
+                buffer_to_display[buf_i] = collapsed_display_start;
+            }
+        } else {
+            let replacement_char_starts: Vec<usize> = replacement
+                .char_indices()
+                .map(|(char_start, _)| char_start)
+                .collect();
+            let mut prefix_segments = Vec::with_capacity(replacement_char_starts.len());
+
+            for (index, char_start) in replacement_char_starts.iter().copied().enumerate() {
+                let char_end = replacement_char_starts
+                    .get(index + 1)
+                    .copied()
+                    .unwrap_or(replacement.len());
+                let prefix_offset = (char_start * collapsed_buffer_len / replacement.len())
+                    .min(collapsed_buffer_len - 1);
+                prefix_segments.push((prefix_offset, char_start));
+                for _ in char_start..char_end {
+                    display_to_buffer.push(collapsed_buffer_start + prefix_offset);
+                }
+            }
+
+            let mut segment_index = 0;
+            for prefix_offset in 0..collapsed_buffer_len {
+                while segment_index + 1 < prefix_segments.len()
+                    && prefix_segments[segment_index + 1].0 <= prefix_offset
+                {
+                    segment_index += 1;
+                }
+                buffer_to_display[collapsed_buffer_start + prefix_offset] =
+                    collapsed_display_start + prefix_segments[segment_index].1;
+            }
         }
         display_pos += replacement.len();
     }
@@ -1009,6 +1044,158 @@ pub(crate) fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
+fn push_syntax_candidate(candidates: &mut Vec<String>, candidate: impl Into<String>) {
+    let candidate = candidate.into();
+    if candidate.is_empty() || candidates.iter().any(|existing| existing == &candidate) {
+        return;
+    }
+    candidates.push(candidate);
+}
+
+fn syntax_lookup_candidates(language: &str) -> Vec<String> {
+    let token = language
+        .trim()
+        .trim_matches('`')
+        .split(|ch: char| {
+            ch.is_whitespace() || matches!(ch, ',' | '{' | '}' | '[' | ']' | '(' | ')')
+        })
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('.');
+    let lowered = token.to_ascii_lowercase();
+    let mut candidates = Vec::new();
+    push_syntax_candidate(&mut candidates, token);
+    push_syntax_candidate(&mut candidates, lowered.clone());
+    push_syntax_candidate(&mut candidates, token.to_ascii_uppercase());
+
+    match lowered.as_str() {
+        "bash" | "sh" | "shell" | "zsh" => {
+            push_syntax_candidate(&mut candidates, "bash");
+            push_syntax_candidate(&mut candidates, "shell");
+            push_syntax_candidate(&mut candidates, "Shell-Unix-Generic");
+        }
+        "c" => {
+            push_syntax_candidate(&mut candidates, "C");
+        }
+        "cpp" | "cxx" | "cc" | "c++" => {
+            push_syntax_candidate(&mut candidates, "cpp");
+            push_syntax_candidate(&mut candidates, "C++");
+        }
+        "cs" | "csharp" | "c#" => {
+            push_syntax_candidate(&mut candidates, "cs");
+            push_syntax_candidate(&mut candidates, "C#");
+        }
+        "dockerfile" => {
+            push_syntax_candidate(&mut candidates, "Dockerfile");
+        }
+        "html" | "htm" => {
+            push_syntax_candidate(&mut candidates, "html");
+            push_syntax_candidate(&mut candidates, "HTML");
+        }
+        "ini" | "cfg" | "conf" => {
+            push_syntax_candidate(&mut candidates, "ini");
+            push_syntax_candidate(&mut candidates, "INI");
+        }
+        "java" => {
+            push_syntax_candidate(&mut candidates, "Java");
+        }
+        "js" | "javascript" => {
+            push_syntax_candidate(&mut candidates, "javascript");
+            push_syntax_candidate(&mut candidates, "JavaScript");
+        }
+        "json" => {
+            push_syntax_candidate(&mut candidates, "JSON");
+        }
+        "kt" | "kts" | "kotlin" => {
+            push_syntax_candidate(&mut candidates, "kotlin");
+            push_syntax_candidate(&mut candidates, "Kotlin");
+        }
+        "lua" => {
+            push_syntax_candidate(&mut candidates, "Lua");
+        }
+        "md" | "markdown" => {
+            push_syntax_candidate(&mut candidates, "markdown");
+            push_syntax_candidate(&mut candidates, "Markdown");
+        }
+        "objc" | "objective-c" => {
+            push_syntax_candidate(&mut candidates, "objective-c");
+            push_syntax_candidate(&mut candidates, "Objective-C");
+        }
+        "php" => {
+            push_syntax_candidate(&mut candidates, "PHP");
+        }
+        "py" | "python" => {
+            push_syntax_candidate(&mut candidates, "python");
+            push_syntax_candidate(&mut candidates, "Python");
+        }
+        "rb" | "ruby" => {
+            push_syntax_candidate(&mut candidates, "ruby");
+            push_syntax_candidate(&mut candidates, "Ruby");
+        }
+        "rs" | "rust" => {
+            push_syntax_candidate(&mut candidates, "rust");
+            push_syntax_candidate(&mut candidates, "Rust");
+        }
+        "scss" => {
+            push_syntax_candidate(&mut candidates, "SCSS");
+        }
+        "sql" => {
+            push_syntax_candidate(&mut candidates, "SQL");
+        }
+        "swift" => {
+            push_syntax_candidate(&mut candidates, "Swift");
+        }
+        "toml" => {
+            push_syntax_candidate(&mut candidates, "TOML");
+        }
+        "ts" | "typescript" => {
+            push_syntax_candidate(&mut candidates, "typescript");
+            push_syntax_candidate(&mut candidates, "TypeScript");
+        }
+        "tsx" => {
+            push_syntax_candidate(&mut candidates, "tsx");
+            push_syntax_candidate(&mut candidates, "TypeScriptReact");
+            push_syntax_candidate(&mut candidates, "TypeScript React");
+        }
+        "vue" => {
+            push_syntax_candidate(&mut candidates, "Vue");
+        }
+        "xml" => {
+            push_syntax_candidate(&mut candidates, "XML");
+        }
+        "yaml" | "yml" => {
+            push_syntax_candidate(&mut candidates, "yaml");
+            push_syntax_candidate(&mut candidates, "YAML");
+        }
+        _ => {}
+    }
+
+    candidates
+}
+
+pub(crate) fn find_syntax_for_language(language: &str) -> Option<&'static SyntaxReference> {
+    let syntax_set = syntax_set();
+    syntax_lookup_candidates(language)
+        .into_iter()
+        .find_map(|candidate| {
+            syntax_set
+                .find_syntax_by_token(&candidate)
+                .or_else(|| syntax_set.find_syntax_by_name(&candidate))
+        })
+}
+
+pub(crate) fn find_syntax_for_path(path: &Path) -> Option<&'static SyntaxReference> {
+    if let Ok(Some(syntax)) = syntax_set().find_syntax_for_file(path)
+        && syntax.name != "Plain Text"
+    {
+        return Some(syntax);
+    }
+
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .and_then(find_syntax_for_language)
+}
+
 pub(crate) fn syntect_theme() -> &'static SyntectTheme {
     static THEME: OnceLock<SyntectTheme> = OnceLock::new();
     THEME.get_or_init(|| build_one_dark_pro_theme())
@@ -1447,10 +1634,8 @@ pub(crate) fn apply_code_block_highlighting(
     }
 
     let syntax_set = syntax_set();
-    let syntax = syntax_set
-        .find_syntax_by_token(language)
-        .or_else(|| syntax_set.find_syntax_by_name(language))
-        .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
+    let syntax =
+        find_syntax_for_language(language).unwrap_or_else(|| syntax_set.find_syntax_plain_text());
     let mut highlighter = HighlightLines::new(syntax, syntect_theme());
     if let Ok(ranges) = highlighter.highlight_line(line_content, syntax_set) {
         let mut byte_pos = 0usize;
@@ -1666,6 +1851,8 @@ pub(crate) fn build_text_runs_for_display(
     collapsed_task_prefix_chars: usize,
     _font_size: f32,
     theme: &Theme,
+    wiki_link_text_color: Hsla,
+    wiki_link_text_weight: FontWeight,
 ) -> Vec<TextRun> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FontRole {
@@ -1827,6 +2014,15 @@ pub(crate) fn build_text_runs_for_display(
         }
     }
 
+    for wiki_link in &decoration.wiki_links {
+        let target_start = (wiki_link.full_range.start + 2).min(buf_len);
+        let target_end = wiki_link.full_range.end.saturating_sub(2).min(buf_len);
+        for index in target_start..target_end {
+            buf_colors[index] = wiki_link_text_color;
+            buf_weights[index] = wiki_link_text_weight;
+        }
+    }
+
     if let Some(col) = cursor_col {
         if !matches!(decoration.block_type, BlockType::Table) {
             for sr in &decoration.syntax_ranges {
@@ -1922,6 +2118,12 @@ pub(crate) fn build_text_runs_for_display(
             }
             _ => {}
         }
+
+        if matches!(decoration.block_type, BlockType::TaskList(true)) {
+            for strike in strikethroughs.iter_mut().take(prefix_len) {
+                *strike = false;
+            }
+        }
     }
 
     let mut runs = Vec::new();
@@ -1979,6 +2181,87 @@ pub(crate) fn build_text_runs_for_display(
     }
 
     runs
+}
+
+pub(crate) fn apply_search_match_text_styles(
+    runs: &mut Vec<TextRun>,
+    display_text: &str,
+    display_to_buffer: &[usize],
+    line_start_offset: usize,
+    search_matches: &[std::ops::Range<usize>],
+    active_match_index: Option<usize>,
+    inactive_color: Hsla,
+    active_color: Hsla,
+) {
+    if runs.is_empty() || display_text.is_empty() || search_matches.is_empty() {
+        return;
+    }
+
+    let mut byte_colors: Vec<Option<Hsla>> = vec![None; display_text.len()];
+    for (match_idx, search_match) in search_matches.iter().enumerate() {
+        let color = if active_match_index == Some(match_idx) {
+            active_color
+        } else {
+            inactive_color
+        };
+        for (display_index, &buffer_index) in display_to_buffer.iter().enumerate() {
+            let absolute_offset = line_start_offset + buffer_index;
+            if absolute_offset >= search_match.start && absolute_offset < search_match.end {
+                byte_colors[display_index] = Some(color);
+            }
+        }
+    }
+
+    let original_runs = std::mem::take(runs);
+    let mut styled_runs = Vec::with_capacity(original_runs.len());
+    let mut run_start = 0usize;
+    for run in original_runs {
+        let run_end = run_start + run.len;
+        let mut segment_start = run_start;
+        let mut segment_color = byte_colors
+            .get(run_start)
+            .copied()
+            .flatten()
+            .unwrap_or(run.color);
+        let mut cursor = run_start;
+
+        while cursor < run_end {
+            let next = display_text[cursor..]
+                .chars()
+                .next()
+                .map(|ch| cursor + ch.len_utf8())
+                .unwrap_or(run_end)
+                .min(run_end);
+            let next_color = if next < run_end {
+                byte_colors
+                    .get(next)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(run.color)
+            } else {
+                segment_color
+            };
+
+            if next < run_end && next_color != segment_color {
+                let mut segment_run = run.clone();
+                segment_run.len = next - segment_start;
+                segment_run.color = segment_color;
+                styled_runs.push(segment_run);
+                segment_start = next;
+                segment_color = next_color;
+            }
+
+            cursor = next;
+        }
+
+        let mut segment_run = run;
+        segment_run.len = run_end - segment_start;
+        segment_run.color = segment_color;
+        styled_runs.push(segment_run);
+        run_start = run_end;
+    }
+
+    *runs = styled_runs;
 }
 
 /// Apply letter spacing to a shaped WrappedLine by offsetting glyph positions.

@@ -478,6 +478,25 @@ impl EditorView {
         cx.notify();
     }
 
+    pub(crate) fn reorder_tab_after(&mut self, from_id: &str, to_id: &str, cx: &mut Context<Self>) {
+        if from_id == to_id {
+            return;
+        }
+        let Some(from_idx) = self.tabs.iter().position(|tab| tab.id == from_id) else {
+            return;
+        };
+        let Some(mut to_idx) = self.tabs.iter().position(|tab| tab.id == to_id) else {
+            return;
+        };
+        let moved = self.tabs.remove(from_idx);
+        if from_idx < to_idx {
+            to_idx = to_idx.saturating_sub(1);
+        }
+        self.tabs.insert((to_idx + 1).min(self.tabs.len()), moved);
+        self.ensure_settings_tab_first();
+        cx.notify();
+    }
+
     pub(crate) fn reorder_tab_to_end(&mut self, from_id: &str, cx: &mut Context<Self>) {
         let Some(from_idx) = self.tabs.iter().position(|tab| tab.id == from_id) else {
             return;
@@ -629,6 +648,7 @@ impl EditorView {
         } else {
             ts.tab_item_icon_inactive_opacity
         };
+        let icon_size = px(self.scaled(ts.tab_item_icon_size_px));
 
         if let Some(path) = tab.path.as_ref()
             && let Some(label) = file_kind_badge_text(path)
@@ -649,9 +669,21 @@ impl EditorView {
                 .into_any_element();
         }
 
+        if tab
+            .path
+            .as_ref()
+            .is_some_and(|path| !file_kind_has_indicator(path))
+        {
+            return div()
+                .w(icon_size)
+                .h(icon_size)
+                .flex_none()
+                .into_any_element();
+        }
+
         svg()
             .path(MARKDOWN_SVG_PATH)
-            .size(px(self.scaled(ts.tab_item_icon_size_px)))
+            .size(icon_size)
             .text_color(ts.tab_item_icon_color)
             .opacity(opacity)
             .into_any_element()
@@ -664,11 +696,18 @@ impl EditorView {
         let is_pinned = tab.is_pinned;
         let is_preview = tab.is_preview;
         let tab_kind = tab.kind;
+        let tab_index = self
+            .tabs
+            .iter()
+            .position(|candidate| candidate.id == tab.id)
+            .unwrap_or(0);
         let tab_id = tab.id.clone();
         let close_id = tab.id.clone();
         let middle_close_id = tab.id.clone();
         let context_tab_id = tab.id.clone();
         let drag_tab_id = tab.id.clone();
+        let press_tab_id = tab.id.clone();
+        let hover_tab_id = tab.id.clone();
         let drop_tab_id = tab.id.clone();
         let drag_title = tab.title.clone();
         let ts = &self.styles.tab_bar;
@@ -711,15 +750,38 @@ impl EditorView {
             .when(is_being_dragged, |this: gpui::Stateful<gpui::Div>| {
                 this.opacity(source_opacity)
             })
-            // Drop indicator: highlight left border when hovering with a dragged tab
-            .drag_over::<DraggedTab>(move |style, _, _, _| {
-                style
-                    .border_l(px(drop_indicator_width))
-                    .border_color(drop_indicator_color)
+            // Drop indicator: show a single insertion line on the side where the tab will land.
+            .drag_over::<DraggedTab>(move |style, dragged, _, _| {
+                if tab_index <= dragged.source_index {
+                    style
+                        .border_l(px(drop_indicator_width))
+                        .border_r(px(0.0))
+                        .border_color(drop_indicator_color)
+                } else {
+                    style
+                        .border_l(px(0.0))
+                        .border_r(px(drop_indicator_width))
+                        .border_color(drop_indicator_color)
+                }
             })
-            // Handle drop: reorder the dragged tab before this one
+            // Handle drop: reorder on the indicated side of the hovered tab.
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
-                this.reorder_tab_before(&dragged.tab_id, &drop_tab_id, cx);
+                let place_after = this
+                    .tabs
+                    .iter()
+                    .position(|candidate| candidate.id == dragged.tab_id)
+                    .zip(
+                        this.tabs
+                            .iter()
+                            .position(|candidate| candidate.id == drop_tab_id),
+                    )
+                    .is_some_and(|(from_idx, to_idx)| from_idx < to_idx);
+                if place_after {
+                    this.reorder_tab_after(&dragged.tab_id, &drop_tab_id, cx);
+                } else {
+                    this.reorder_tab_before(&dragged.tab_id, &drop_tab_id, cx);
+                }
+                this.tab_drag_candidate_id = None;
                 this.tab_dragging_id = None;
             }))
             // Pinned tab: show pin icon, hide title/close
@@ -797,6 +859,7 @@ impl EditorView {
                 DraggedTab {
                     tab_id: drag_tab_id.clone(),
                     title: drag_title,
+                    source_index: tab_index,
                 },
                 {
                     let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
@@ -812,17 +875,25 @@ impl EditorView {
                 move |this, _event: &DragMoveEvent<DraggedTab>, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
+                    this.tab_drag_candidate_id = Some(drag_tab_id.clone());
                     this.tab_dragging_id = Some(drag_tab_id.clone());
                 },
             ))
-            .on_mouse_move(cx.listener(|_, _event: &MouseMoveEvent, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-            }))
+            .on_mouse_move(
+                cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
+                    if event.dragging()
+                        && this.tab_drag_candidate_id.as_deref() == Some(hover_tab_id.as_str())
+                    {
+                        this.tab_dragging_id = Some(hover_tab_id.clone());
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    super::set_window_movable(window, false);
+                    this.tab_drag_candidate_id = Some(press_tab_id.clone());
                     window.prevent_default();
                     this.switch_to_tab(&tab_id, cx);
                     if event.click_count >= 2 {
@@ -894,7 +965,7 @@ impl EditorView {
                 .into_any_element(),
         );
 
-        // Trailing spacer that fills remaining tab-bar space and handles window drag
+        // Trailing spacer that fills remaining tab-bar space and supports drop-to-end.
         tab_items.push(
             div()
                 .id("tab-bar-drag-spacer")
@@ -908,21 +979,19 @@ impl EditorView {
                 })
                 .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
                     this.reorder_tab_to_end(&dragged.tab_id, cx);
+                    this.tab_drag_candidate_id = None;
                     this.tab_dragging_id = None;
                 }))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                        if this.tab_dragging_id.is_some() {
+                        if this.tab_drag_candidate_id.is_some() || this.tab_dragging_id.is_some() {
                             cx.stop_propagation();
                             return;
                         }
-                        super::set_window_movable(window, true);
                         this.focused_sidebar_path = None;
                         if event.click_count >= 2 {
                             window.zoom_window();
-                        } else {
-                            super::perform_window_drag(window);
                         }
                         cx.notify();
                     }),
@@ -938,18 +1007,23 @@ impl EditorView {
             .items_center()
             .bg(ts.tab_bar_bg)
             .border_b(px(ts.tab_bar_border_width_px))
+            .when(!self.sidebar_visible, |this| {
+                this.border_l(px(ts.tab_bar_border_width_px))
+            })
             .border_color(ts.tab_bar_border_color)
             .overflow_x_scroll()
-            .on_mouse_move(cx.listener(|this, _event: &MouseMoveEvent, window, cx| {
-                if this.tab_dragging_id.is_some() {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if event.dragging()
+                    && (this.tab_drag_candidate_id.is_some() || this.tab_dragging_id.is_some())
+                {
                     window.prevent_default();
                     cx.stop_propagation();
                 }
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    super::set_window_movable(window, true);
+                cx.listener(|this, _, _, cx| {
+                    this.tab_drag_candidate_id = None;
                     if this.tab_dragging_id.take().is_some() {
                         cx.notify();
                     }
@@ -957,8 +1031,8 @@ impl EditorView {
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    super::set_window_movable(window, true);
+                cx.listener(|this, _, _, cx| {
+                    this.tab_drag_candidate_id = None;
                     if this.tab_dragging_id.take().is_some() {
                         cx.notify();
                     }

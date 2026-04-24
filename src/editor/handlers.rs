@@ -137,6 +137,18 @@ impl EditorView {
                 self.pause_blinking(cx);
                 return;
             }
+
+            if let Some(delete_range) = self.auto_paired_backspace_range() {
+                self.buffer.delete(delete_range.clone());
+                self.cursor.move_to(delete_range.start, &self.buffer);
+                self.reparse();
+                self.scroll_to_cursor();
+                self.pause_blinking(cx);
+                if self.wiki_link_start.is_some() {
+                    self.sync_wiki_link_menu(cx);
+                }
+                return;
+            }
         }
         self.cursor.backspace(&mut self.buffer);
         self.reparse();
@@ -159,6 +171,8 @@ impl EditorView {
             } else {
                 self.update_slash_filter(cx);
             }
+        } else if self.wiki_link_start.is_some() {
+            self.sync_wiki_link_menu(cx);
         }
     }
 
@@ -206,6 +220,9 @@ impl EditorView {
         }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
+        if self.wiki_link_start.is_some() {
+            self.sync_wiki_link_menu(cx);
+        }
     }
 
     pub(crate) fn on_left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -251,6 +268,9 @@ impl EditorView {
         self.maybe_auto_select_link_url(prev_offset, false);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
+        if self.wiki_link_start.is_some() {
+            self.sync_wiki_link_menu(cx);
+        }
     }
 
     pub(crate) fn on_right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
@@ -289,11 +309,21 @@ impl EditorView {
         self.maybe_auto_select_link_url(prev_offset, false);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
+        if self.wiki_link_start.is_some() {
+            self.sync_wiki_link_menu(cx);
+        }
     }
 
     pub(crate) fn on_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_up(cx);
+            return;
+        }
+        if self.wiki_link_start.is_some() {
+            if self.menu_selected_index > 0 {
+                self.menu_selected_index -= 1;
+            }
+            cx.notify();
             return;
         }
         if self.slash_menu_start.is_some() {
@@ -324,6 +354,14 @@ impl EditorView {
     pub(crate) fn on_down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_down(cx);
+            return;
+        }
+        if self.wiki_link_start.is_some() {
+            let max_index = self.wiki_link_result_count().saturating_sub(1);
+            if self.menu_selected_index < max_index {
+                self.menu_selected_index += 1;
+            }
+            cx.notify();
             return;
         }
         if self.slash_menu_start.is_some() {
@@ -468,6 +506,10 @@ impl EditorView {
             } else {
                 self.sidebar_confirm_focused(cx);
             }
+            return;
+        }
+        if self.wiki_link_start.is_some() {
+            self.confirm_wiki_link_selection(cx);
             return;
         }
         if self.slash_menu_start.is_some() {

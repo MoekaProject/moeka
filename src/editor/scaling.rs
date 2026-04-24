@@ -18,11 +18,7 @@ impl EditorView {
     }
 
     pub(crate) fn padding_top(&self) -> f32 {
-        if self.active_tab_is_non_markdown_text() {
-            self.scaled(self.styles.editor.editor_non_markdown_padding_top_px)
-        } else {
-            self.scaled(self.styles.editor.editor_padding_top_px)
-        }
+        self.scaled(self.styles.editor.editor_padding_top_px)
     }
 
     pub(crate) fn padding_right(&self) -> f32 {

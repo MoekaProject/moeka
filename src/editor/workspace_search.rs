@@ -380,7 +380,7 @@ impl EditorView {
             div()
                 .w_full()
                 .px(px(self.scaled(workspace_styles.ws_search_padding_px)))
-                .py(px(self.scaled(6.0)))
+                .py(px(self.scaled(workspace_styles.ws_search_padding_px)))
                 .child(
                     div()
                         .relative()

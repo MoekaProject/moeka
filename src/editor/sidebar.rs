@@ -11,6 +11,46 @@ use gpui::{
 use super::*;
 
 impl EditorView {
+    pub(crate) fn invalidate_sidebar_items_cache(&mut self) {
+        self.sidebar_items_dirty = true;
+    }
+
+    fn reset_sidebar_render_limit(&mut self) {
+        self.sidebar_render_limit = 200;
+    }
+
+    fn maybe_extend_sidebar_items(&mut self, total_items: usize, cx: &mut Context<Self>) {
+        if self.sidebar_edit.is_some() || total_items <= self.sidebar_render_limit {
+            return;
+        }
+
+        let bottom_item = self.sidebar_scroll_handle.bottom_item();
+        if bottom_item + 12 >= self.sidebar_render_limit.saturating_sub(1) {
+            self.sidebar_render_limit = (self.sidebar_render_limit + 200).min(total_items);
+            cx.notify();
+        }
+    }
+
+    fn sidebar_edit_text_input_styles(&self) -> crate::style::TextInputStyles {
+        let mut styles = self.styles.text_input.clone();
+        let sidebar_styles = &self.styles.sidebar;
+        styles.text_input_height_px = sidebar_styles.sidebar_edit_input_height_px;
+        styles.text_input_padding_left_px = sidebar_styles.sidebar_edit_input_padding_x_px;
+        styles.text_input_padding_right_px = sidebar_styles.sidebar_edit_input_padding_x_px;
+        styles.text_input_font_size_px = sidebar_styles.sidebar_edit_input_font_size_px;
+        styles.text_input_bg = sidebar_styles.sidebar_edit_input_bg;
+        styles.text_input_focus_bg = sidebar_styles.sidebar_edit_input_bg;
+        styles.text_input_border_width_px = sidebar_styles.sidebar_edit_input_border_width_px;
+        styles.text_input_border_color = sidebar_styles.sidebar_edit_input_border_color;
+        styles.text_input_focus_border_color = sidebar_styles.sidebar_edit_input_border_color;
+        styles.text_input_radius_px = sidebar_styles.sidebar_edit_input_radius_px;
+        styles.text_input_text_color = sidebar_styles.sidebar_edit_input_text_color;
+        styles.text_input_placeholder_color = sidebar_styles.sidebar_edit_input_placeholder_color;
+        styles.text_input_cursor_height_ratio =
+            sidebar_styles.sidebar_edit_input_cursor_height_ratio;
+        styles
+    }
+
     fn compare_sidebar_entries(
         &self,
         left: &std::fs::DirEntry,
@@ -81,11 +121,15 @@ impl EditorView {
         if !self.expanded_dirs.insert(path.clone()) {
             self.expanded_dirs.remove(&path);
         }
+        self.invalidate_sidebar_items_cache();
+        self.reset_sidebar_render_limit();
         cx.notify();
     }
 
     pub(crate) fn collapse_all_dirs(&mut self, cx: &mut Context<Self>) {
         self.expanded_dirs.clear();
+        self.invalidate_sidebar_items_cache();
+        self.reset_sidebar_render_limit();
         self.context_menu = None;
         cx.notify();
     }
@@ -108,6 +152,8 @@ impl EditorView {
         }
         let root = self.sidebar_root.clone();
         collect_dirs(&root, &mut self.expanded_dirs);
+        self.invalidate_sidebar_items_cache();
+        self.reset_sidebar_render_limit();
         self.context_menu = None;
         cx.notify();
     }
@@ -237,6 +283,7 @@ impl EditorView {
             }
         }
         self.context_menu = None;
+        self.invalidate_sidebar_items_cache();
         cx.notify();
     }
 
@@ -286,12 +333,17 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn sidebar_items(&self) -> Vec<SidebarItem> {
-        let mut items = Vec::new();
-        if self.sidebar_error.is_none() && self.sidebar_root.exists() {
-            self.collect_sidebar_items(&self.sidebar_root, 1, &mut items);
+    pub(crate) fn sidebar_items(&mut self) -> Vec<SidebarItem> {
+        if self.sidebar_items_dirty {
+            let mut items = Vec::new();
+            if self.sidebar_error.is_none() && self.sidebar_root.exists() {
+                self.collect_sidebar_items(&self.sidebar_root, 1, &mut items);
+            }
+            self.sidebar_items_cache = items;
+            self.sidebar_items_dirty = false;
         }
-        items
+
+        self.sidebar_items_cache.clone()
     }
 
     // ── Sidebar edit operations ─────────────────────────────────────
@@ -306,7 +358,7 @@ impl EditorView {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let styles = self.styles.text_input.clone();
+        let styles = self.sidebar_edit_text_input_styles();
         let editor = cx.new(|cx| {
             let mut ti = crate::text_input::TextInput::new(styles, "名称...", cx);
             ti.set_text(&current_name, cx);
@@ -343,7 +395,8 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.expanded_dirs.insert(parent.clone());
-        let styles = self.styles.text_input.clone();
+        self.invalidate_sidebar_items_cache();
+        let styles = self.sidebar_edit_text_input_styles();
         let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "文件名...", cx));
         cx.subscribe(
             &editor,
@@ -373,8 +426,9 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.expanded_dirs.insert(parent.clone());
-        let styles = self.styles.text_input.clone();
-        let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "文件夹名...", cx));
+        self.invalidate_sidebar_items_cache();
+        let styles = self.sidebar_edit_text_input_styles();
+        let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "目录名...", cx));
         cx.subscribe(
             &editor,
             |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -412,6 +466,7 @@ impl EditorView {
                     if let Err(e) = std::fs::rename(path, &new_path) {
                         eprintln!("Rename failed: {e}");
                     } else {
+                        self.invalidate_sidebar_items_cache();
                         for tab in &mut self.tabs {
                             if tab.path.as_deref() == Some(path.as_path()) {
                                 tab.path = Some(new_path.clone());
@@ -435,6 +490,7 @@ impl EditorView {
                     if let Err(e) = std::fs::File::create(&new_path) {
                         eprintln!("Create file failed: {e}");
                     } else {
+                        self.invalidate_sidebar_items_cache();
                         self.open_sidebar_file(new_path, cx);
                         return;
                     }
@@ -448,6 +504,7 @@ impl EditorView {
                         eprintln!("Create folder failed: {e}");
                     } else {
                         self.expanded_dirs.insert(new_path);
+                        self.invalidate_sidebar_items_cache();
                     }
                 }
             }
@@ -471,6 +528,7 @@ impl EditorView {
         if let Err(e) = result {
             eprintln!("Delete failed: {e}");
         } else {
+            self.invalidate_sidebar_items_cache();
             self.tabs
                 .retain(|tab| tab.path.as_ref().is_none_or(|p| !p.starts_with(&path)));
             if self.tabs.is_empty() {
@@ -560,6 +618,8 @@ impl EditorView {
         self.focused_sidebar_path = None;
         self.sidebar_selection_anchor = None;
         self.sidebar_error = None;
+        self.invalidate_sidebar_items_cache();
+        self.reset_sidebar_render_limit();
         self.context_menu = None;
         self.start_watching(cx);
         cx.notify();
@@ -578,6 +638,7 @@ impl EditorView {
             self.focused_sidebar_path = None;
             self.sidebar_selection_anchor = None;
             self.sidebar_error = None;
+            self.invalidate_sidebar_items_cache();
             self.context_menu = None;
             self._watcher_task = None;
             cx.notify();
@@ -689,6 +750,11 @@ impl EditorView {
                 .font_weight(FontWeight::EXTRA_BOLD)
                 .child(label)
                 .into_any_element();
+        }
+
+        if !file_kind_has_indicator_for_name(name) {
+            let icon_size = px(self.scaled(ss.sidebar_item_icon_size_px));
+            return div().w(icon_size).h(icon_size).flex_none().into_any_element();
         }
 
         svg()
@@ -864,6 +930,7 @@ impl EditorView {
         };
         if path.is_dir() && self.expanded_dirs.contains(&path) {
             self.expanded_dirs.remove(&path);
+            self.invalidate_sidebar_items_cache();
             cx.notify();
         } else if let Some(parent) = path.parent() {
             if parent != self.sidebar_root && parent.starts_with(&self.sidebar_root) {
@@ -881,6 +948,7 @@ impl EditorView {
         if path.is_dir() {
             if !self.expanded_dirs.contains(&path) {
                 self.expanded_dirs.insert(path.clone());
+                self.invalidate_sidebar_items_cache();
                 cx.notify();
             } else {
                 // Already expanded: move focus to first child
@@ -1116,6 +1184,12 @@ impl EditorView {
                 .font_weight(FontWeight::EXTRA_BOLD)
                 .child(label)
                 .into_any_element()
+        } else if !file_kind_has_indicator(&item.path) {
+            div()
+                .w(px(self.scaled(ss.sidebar_item_icon_size_px)))
+                .h(px(self.scaled(ss.sidebar_item_icon_size_px)))
+                .flex_none()
+                .into_any_element()
         } else {
             svg()
                 .path(MARKDOWN_SVG_PATH)
@@ -1195,6 +1269,7 @@ impl EditorView {
                             this.toggle_sidebar_directory(path.clone(), cx);
                         } else if event.click_count() >= 2 {
                             this.open_path_in_permanent_tab(path.clone(), true, cx);
+                            this.move_cursor_to_first_line_end();
                         } else {
                             if !this.switch_to_existing_editor_tab_for_path(&path, true, cx) {
                                 this.open_path_in_preview_tab(path.clone(), true, cx);
@@ -1255,6 +1330,7 @@ impl EditorView {
                                             == Some(&expand_path)
                                         {
                                             editor.expanded_dirs.insert(expand_path);
+                                            editor.invalidate_sidebar_items_cache();
                                             cx.notify();
                                         }
                                     })
@@ -1279,10 +1355,15 @@ impl EditorView {
             .into_any_element()
     }
 
-    pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let has_root = self.sidebar_root.exists() && self.sidebar_error.is_none();
-        let ss = &self.styles.sidebar;
         let show_workspace_bar = true;
+        let items = if has_root {
+            Some(self.sidebar_items())
+        } else {
+            None
+        };
+        let ss = self.styles.sidebar.clone();
 
         // Fixed header section (spacer + logo + root name)
         let top_spacer = div()
@@ -1369,7 +1450,13 @@ impl EditorView {
             let create_is_dir =
                 matches!(&self.sidebar_edit, Some(SidebarEditMode::CreateDir { .. }));
 
-            let items = self.sidebar_items();
+            let items = items.unwrap_or_default();
+            let render_all_items = self.sidebar_edit.is_some();
+            let item_limit = if render_all_items {
+                items.len()
+            } else {
+                self.sidebar_render_limit.min(items.len())
+            };
 
             // Pre-compute which indent levels have a sibling below for each item.
             // A guide at level L is shown for item[i] if there exists a later item[j] (j > i)
@@ -1394,7 +1481,13 @@ impl EditorView {
             }
 
             let mut injected = false;
-            for (idx, item) in items.iter().enumerate() {
+            if create_parent.as_ref() == Some(&self.sidebar_root) {
+                if let Some(ref editor) = create_editor {
+                    tree_items.push(self.render_sidebar_edit_row(editor, 1, create_is_dir, cx));
+                    injected = true;
+                }
+            }
+            for (idx, item) in items.iter().take(item_limit).enumerate() {
                 tree_items.push(self.render_sidebar_item(
                     item.clone(),
                     &item_guide_levels[idx],
@@ -1415,7 +1508,7 @@ impl EditorView {
                     }
                 }
             }
-            if !injected {
+            if render_all_items && !injected {
                 if let (Some(depth), Some(editor)) = (create_depth, &create_editor) {
                     tree_items.push(self.render_sidebar_edit_row(editor, depth, create_is_dir, cx));
                 }
@@ -1491,6 +1584,10 @@ impl EditorView {
                             .flex_1()
                             .overflow_y_scroll()
                             .track_scroll(&self.sidebar_scroll_handle)
+                            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                                let total_items = this.sidebar_items().len();
+                                this.maybe_extend_sidebar_items(total_items, cx);
+                            }))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {

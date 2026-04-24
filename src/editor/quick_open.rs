@@ -1,9 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-use gpui::{AnyElement, Context, CursorStyle, Hsla, MouseButton, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, CursorStyle, MouseButton, Window, div, prelude::*, px};
 use pinyin::ToPinyin;
-
-use crate::theme::with_alpha;
 
 use super::*;
 
@@ -158,16 +157,17 @@ impl EditorView {
     }
 
     pub(crate) fn render_quick_open_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
-        let bg = self.theme.bg_elevated;
-        let border = self.theme.border_primary;
-        let hover_bg = self.theme.bg_hover;
-        let selected_bg = self.theme.bg_selected;
-        let text_primary = self.theme.text_primary;
-        let text_secondary = self.theme.text_secondary;
-        let accent = self.theme.text_accent;
-        let backdrop = with_alpha(Hsla::black(), 0.5);
+        let styles = &self.styles.quick_open;
+        let bg = styles.quick_open_panel_bg;
+        let border = styles.quick_open_panel_border_color;
+        let hover_bg = styles.quick_open_result_hover_bg;
+        let selected_bg = styles.quick_open_result_selected_bg;
+        let text_primary = styles.quick_open_result_text_color;
+        let text_secondary = styles.quick_open_result_secondary_text_color;
+        let match_color = styles.quick_open_result_match_text_color;
+        let backdrop = styles.quick_open_backdrop_bg;
 
-        let panel_w = self.scaled(640.0);
+        let panel_w = self.scaled(styles.quick_open_panel_width_px);
         let sidebar_w = if self.sidebar_visible {
             self.sidebar_width()
         } else {
@@ -180,11 +180,12 @@ impl EditorView {
         };
         let editor_w = (self.last_window_width - sidebar_w - outline_w).max(panel_w);
         let panel_left = sidebar_w + (editor_w - panel_w) / 2.0;
-        let panel_top = (self.last_window_height / 5.0).max(self.scaled(48.0));
-        let row_h = self.scaled(44.0);
-        let path_font = self.scaled(11.0);
-        let name_font = self.scaled(13.0);
-        let max_results_h = self.scaled(360.0);
+        let panel_top =
+            (self.last_window_height / 5.0).max(self.scaled(styles.quick_open_panel_top_offset_px));
+        let row_h = self.scaled(styles.quick_open_result_row_height_px);
+        let path_font = self.scaled(styles.quick_open_result_path_font_size_px);
+        let name_font = self.scaled(styles.quick_open_result_name_font_size_px);
+        let max_results_h = self.scaled(styles.quick_open_results_max_height_px);
 
         let mut result_children: Vec<AnyElement> = Vec::new();
         if self.quick_open_results.is_empty() {
@@ -198,12 +199,12 @@ impl EditorView {
             result_children.push(
                 div()
                     .w_full()
-                    .h(px(self.scaled(64.0)))
+                    .h(px(self.scaled(styles.quick_open_empty_height_px)))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
-                    .text_color(text_secondary)
+                    .text_size(px(self.scaled(styles.quick_open_empty_font_size_px)))
+                    .text_color(styles.quick_open_empty_text_color)
                     .child(message)
                     .into_any_element(),
             );
@@ -229,14 +230,14 @@ impl EditorView {
                     &file_name,
                     &result.file_name_match_indices,
                     text_primary,
-                    accent,
+                    match_color,
                     name_font,
                 );
                 let path_el = render_highlighted_text(
                     &relative_path,
                     &result.path_match_indices,
                     text_secondary,
-                    accent,
+                    match_color,
                     path_font,
                 );
 
@@ -245,7 +246,7 @@ impl EditorView {
                         .id(SharedString::from(format!("quick-open-{}", index)))
                         .w_full()
                         .h(px(row_h))
-                        .px(px(self.scaled(12.0)))
+                        .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
                         .flex()
                         .items_center()
                         .cursor(CursorStyle::Arrow)
@@ -258,7 +259,7 @@ impl EditorView {
                                 .flex()
                                 .flex_col()
                                 .justify_center()
-                                .gap(px(self.scaled(2.0)))
+                                .gap(px(self.scaled(styles.quick_open_result_gap_y_px)))
                                 .child(file_name_el)
                                 .child(path_el),
                         )
@@ -313,7 +314,7 @@ impl EditorView {
                     .bg(bg)
                     .border(px(1.0))
                     .border_color(border)
-                    .rounded(px(self.scaled(10.0)))
+                    .rounded(px(self.scaled(styles.quick_open_panel_radius_px)))
                     .shadow_md()
                     .overflow_hidden()
                     .on_mouse_down(
@@ -326,8 +327,8 @@ impl EditorView {
                     .child(
                         div()
                             .w_full()
-                            .px(px(self.scaled(10.0)))
-                            .py(px(self.scaled(10.0)))
+                            .px(px(self.scaled(styles.quick_open_input_padding_x_px)))
+                            .py(px(self.scaled(styles.quick_open_input_padding_y_px)))
                             .border_b(px(1.0))
                             .border_color(border)
                             .when_some(self.quick_open_editor.clone(), |this, editor| {
@@ -408,6 +409,86 @@ fn collect_quick_open_results(root: &Path, query: &str) -> Vec<QuickOpenResult> 
     results
 }
 
+pub(crate) fn collect_wiki_link_recent_files(
+    root: &Path,
+    limit: usize,
+) -> Vec<WorkspaceFileCandidate> {
+    let mut ranked = Vec::new();
+    collect_recent_openable_files(root, root, limit.max(1), &mut ranked);
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.relative_path.cmp(&right.1.relative_path))
+    });
+    ranked.into_iter().map(|(_, candidate)| candidate).collect()
+}
+
+pub(crate) fn collect_wiki_link_search_results(
+    root: &Path,
+    query: &str,
+    limit: usize,
+) -> Vec<QuickOpenResult> {
+    let mut results = collect_quick_open_results(root, query);
+    results.truncate(limit);
+    results
+}
+
+fn collect_recent_openable_files(
+    root: &Path,
+    dir: &Path,
+    limit: usize,
+    ranked: &mut Vec<(SystemTime, WorkspaceFileCandidate)>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_dir = path.is_dir();
+        if should_skip_path(&path, is_dir) {
+            continue;
+        }
+        if is_dir {
+            collect_recent_openable_files(root, &path, limit, ranked);
+            continue;
+        }
+
+        let fallback = SystemTime::UNIX_EPOCH;
+        let created = entry
+            .metadata()
+            .and_then(|meta| meta.created().or_else(|_| meta.modified()))
+            .unwrap_or(fallback);
+        let relative_path = path
+            .strip_prefix(root)
+            .unwrap_or(path.as_path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| relative_path.clone());
+        ranked.push((
+            created,
+            WorkspaceFileCandidate {
+                path,
+                relative_path,
+                file_name,
+            },
+        ));
+        ranked.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| left.1.relative_path.cmp(&right.1.relative_path))
+        });
+        if ranked.len() > limit {
+            ranked.truncate(limit);
+        }
+    }
+}
+
 fn collect_openable_files(dir: &Path, results: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -472,16 +553,20 @@ fn fuzzy_match_via_pinyin(text: &str, query: &str) -> Option<(i64, Vec<usize>)> 
 
     let text_chars: Vec<char> = text.chars().collect();
     let (normalized_text, source_indices) = build_pinyin_index(&text_chars);
-    let (score, matched_indices) =
-        fuzzy_match_chars(&normalized_text, &normalized_query, &text_chars, &source_indices)?;
+    let (score, matched_indices) = fuzzy_match_chars(
+        &normalized_text,
+        &normalized_query,
+        &text_chars,
+        &source_indices,
+    )?;
     Some((score - 25, matched_indices))
 }
 
 fn should_try_pinyin_match(text: &str, query: &str) -> bool {
     !query.is_empty()
-        && query
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '\\' | '-' | '_' | '.' | ' '))
+        && query.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '/' | '\\' | '-' | '_' | '.' | ' ')
+        })
         && text.chars().any(is_cjk_character)
 }
 
@@ -583,7 +668,7 @@ fn is_cjk_character(ch: char) -> bool {
         || (0x20000..=0x2FA1F).contains(&code)
 }
 
-fn render_highlighted_text(
+pub(crate) fn render_highlighted_text(
     text: &str,
     highlight_indices: &[usize],
     normal_color: gpui::Hsla,

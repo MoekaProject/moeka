@@ -1,15 +1,189 @@
-use std::path::PathBuf;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, Context, CursorStyle, MouseButton, Pixels, Point, SharedString, div, prelude::*,
-    px, svg,
+    AnyElement, Context, CursorStyle, FontWeight, MouseButton, Pixels, Point, SharedString, div,
+    prelude::*, px, svg,
 };
 
 use crate::markdown::{BlockType, InlineKind};
 
 use super::*;
 
+#[derive(Clone)]
+struct ImageMenuTarget {
+    line: usize,
+    full_range: Range<usize>,
+    desc_range: Range<usize>,
+    url_range: Range<usize>,
+}
+
 impl EditorView {
+    fn current_heading_action(&self) -> Option<FormatMenuAction> {
+        match self.decorations.get(self.cursor_line())?.block_type {
+            BlockType::Heading(1) => Some(FormatMenuAction::Heading1),
+            BlockType::Heading(2) => Some(FormatMenuAction::Heading2),
+            BlockType::Heading(3) => Some(FormatMenuAction::Heading3),
+            BlockType::Heading(4) => Some(FormatMenuAction::Heading4),
+            BlockType::Heading(5) => Some(FormatMenuAction::Heading5),
+            BlockType::Heading(6) => Some(FormatMenuAction::Heading6),
+            _ => None,
+        }
+    }
+
+    fn current_image_menu_target(&self) -> Option<ImageMenuTarget> {
+        let line = self.cursor_line();
+        let decoration = self.decorations.get(line)?;
+        let span = decoration
+            .inline_spans
+            .iter()
+            .find(|span| span.kind == InlineKind::Image)?;
+        let url_range = decoration.syntax_ranges.iter().find(|range| {
+            range.range.start == span.range.end && range.range.end > range.range.start + 1
+        })?;
+        let line_start = self.buffer.line_start(line);
+        let line_content = self.buffer.line_content(line);
+        let full_start = line_start + span.range.start.saturating_sub(2);
+        let full_end = line_start + url_range.range.end.min(line_content.len());
+        let selection = self.cursor.selection_range();
+        let cursor_offset = self.cursor.offset;
+        let selected_image = selection.start == full_start && selection.end == full_end;
+        let cursor_in_image = cursor_offset >= full_start && cursor_offset <= full_end;
+        if !selected_image && !cursor_in_image {
+            return None;
+        }
+
+        Some(ImageMenuTarget {
+            line,
+            full_range: full_start..full_end,
+            desc_range: line_start + span.range.start..line_start + span.range.end,
+            url_range: line_start + url_range.range.start + 2
+                ..line_start + url_range.range.end.saturating_sub(1),
+        })
+    }
+
+    fn set_selection_range(&mut self, range: Range<usize>) {
+        self.cursor.anchor = range.start.min(self.buffer.len());
+        self.cursor.offset = range.end.min(self.buffer.len());
+        self.scroll_to_cursor();
+    }
+
+    fn replace_image_url_on_line_with_text(
+        &mut self,
+        line: usize,
+        new_url: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let line_content = self.buffer.line_content(line).to_string();
+        let line_start = self.buffer.line_start(line);
+        if let Some(bracket_pos) = line_content.find("](") {
+            let url_start = bracket_pos + 2;
+            if let Some(close_pos) = line_content[url_start..].find(')') {
+                let url_end = url_start + close_pos;
+                self.checkpoint();
+                self.buffer
+                    .replace(line_start + url_start..line_start + url_end, new_url);
+                self.reparse();
+                self.pause_blinking(cx);
+                self.scroll_to_cursor();
+            }
+        }
+    }
+
+    fn replace_image_from_picker(
+        &mut self,
+        line: usize,
+        source_path: &Path,
+        document_path: &Path,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(document_dir) = document_path.parent() else {
+            return;
+        };
+        let Some(file_name) = source_path.file_name() else {
+            return;
+        };
+
+        let destination_path = document_dir.join(file_name);
+        if source_path != destination_path {
+            if let Err(error) = std::fs::copy(source_path, &destination_path) {
+                eprintln!("failed to copy image into document directory: {error}");
+                return;
+            }
+        }
+
+        let relative_path = file_name.to_string_lossy().to_string();
+        self.replace_image_url_on_line_with_text(line, &relative_path, cx);
+    }
+
+    fn pick_image_for_current_markdown_image(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.current_image_menu_target() else {
+            return;
+        };
+        let Some(document_path) = self.current_file_path.clone() else {
+            eprintln!("select image requires a saved markdown file");
+            return;
+        };
+
+        cx.spawn(async move |this, cx| {
+            let maybe_path = cx
+                .background_executor()
+                .spawn(async move { helpers::pick_image_file_blocking() })
+                .await;
+            if let Some(path) = maybe_path {
+                this.update(cx, |editor, cx| {
+                    editor.replace_image_from_picker(target.line, &path, &document_path, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn clear_wiki_link_menu_state(&mut self) {
+        self.wiki_link_start = None;
+        self.wiki_link_query.clear();
+        self.wiki_link_recent_task = None;
+        self.wiki_link_search_task = None;
+        self.wiki_link_search_results.clear();
+    }
+
+    fn wiki_link_query_end(&self, start: usize) -> Option<usize> {
+        let text = self.buffer.text();
+        if text.get(start..start + 2) != Some("[[") {
+            return None;
+        }
+        let suffix = text.get(start + 2..)?;
+        suffix.find("]]").map(|index| start + 2 + index)
+    }
+
+    pub(crate) fn wiki_link_result_count(&self) -> usize {
+        if self.wiki_link_query.trim().is_empty() {
+            self.wiki_link_recent_results.len()
+        } else {
+            self.wiki_link_search_results.len()
+        }
+    }
+
+    fn selected_wiki_link_relative_path(&self) -> Option<String> {
+        let path = if self.wiki_link_query.trim().is_empty() {
+            self.wiki_link_recent_results
+                .get(self.menu_selected_index)
+                .map(|candidate| candidate.path.clone())
+        } else {
+            self.wiki_link_search_results
+                .get(self.menu_selected_index)
+                .map(|result| result.path.clone())
+        }?;
+
+        Some(
+            path.strip_prefix(&self.sidebar_root)
+                .unwrap_or(path.as_path())
+                .to_string_lossy()
+                .replace('\\', "/"),
+        )
+    }
+
     /// Detect which format action is "active" at the cursor position.
     /// Uses the markdown parser's decoration data for accurate detection.
     /// Inline syntax has priority over block-level syntax.
@@ -64,6 +238,12 @@ impl EditorView {
 
         // Fallback to block-level syntax
         let block_action = match &decoration.block_type {
+            BlockType::Heading(1) => Some(FormatMenuAction::Heading1),
+            BlockType::Heading(2) => Some(FormatMenuAction::Heading2),
+            BlockType::Heading(3) => Some(FormatMenuAction::Heading3),
+            BlockType::Heading(4) => Some(FormatMenuAction::Heading4),
+            BlockType::Heading(5) => Some(FormatMenuAction::Heading5),
+            BlockType::Heading(6) => Some(FormatMenuAction::Heading6),
             BlockType::Blockquote => Some(FormatMenuAction::Quote),
             BlockType::UnorderedList => Some(FormatMenuAction::UnorderedList),
             BlockType::OrderedList => Some(FormatMenuAction::OrderedList),
@@ -103,8 +283,8 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn cursor_screen_position(&self) -> Point<Pixels> {
-        let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
+    fn screen_position_for_offset(&self, offset: usize) -> Point<Pixels> {
+        let (line, col) = self.buffer.offset_to_line_col(offset);
         let origin_y: f32 = self.content_origin.y.into();
         let y = origin_y + self.line_y_offset(line) - self.scroll_offset;
         let line_height = self.visual_height_for_line(line);
@@ -121,6 +301,16 @@ impl EditorView {
         gpui::point(px(x), px(y + line_height))
     }
 
+    pub(crate) fn cursor_screen_position(&self) -> Point<Pixels> {
+        self.screen_position_for_offset(self.cursor.offset)
+    }
+
+    fn wiki_link_menu_position(&self, start: usize) -> Point<Pixels> {
+        let start_position = self.screen_position_for_offset(start);
+        let cursor_position = self.cursor_screen_position();
+        gpui::point(start_position.x, cursor_position.y)
+    }
+
     pub(crate) fn open_slash_menu(&mut self, cx: &mut Context<Self>) {
         self.slash_menu_start = Some(self.cursor.offset - 1);
         self.slash_filter = String::new();
@@ -128,6 +318,20 @@ impl EditorView {
         self.heading_submenu_open = false;
         let pos = self.cursor_screen_position();
         self.open_format_context_menu(pos, cx);
+    }
+
+    pub(crate) fn open_wiki_link_menu(&mut self, start: usize, cx: &mut Context<Self>) {
+        self.wiki_link_start = Some(start);
+        self.wiki_link_query.clear();
+        self.wiki_link_search_results.clear();
+        self.menu_selected_index = 0;
+        let pos = self.wiki_link_menu_position(start);
+        self.context_menu = Some(ContextMenu {
+            position: pos,
+            kind: ContextMenuKind::WikiLink,
+        });
+        self.run_wiki_link_recent_search(cx);
+        cx.notify();
     }
 
     pub(crate) fn update_slash_filter(&mut self, cx: &mut Context<Self>) {
@@ -149,6 +353,91 @@ impl EditorView {
             }
             cx.notify();
         }
+    }
+
+    pub(crate) fn update_wiki_link_query(&mut self, cx: &mut Context<Self>) {
+        if let Some(start) = self.wiki_link_start {
+            self.menu_selected_index = 0;
+            let end = self.cursor.offset;
+            let query_start = start + 2;
+            if query_start <= end && end <= self.buffer.len() {
+                let text = self.buffer.text();
+                self.wiki_link_query = text[query_start..end].to_string();
+            } else {
+                self.wiki_link_query.clear();
+            }
+
+            let pos = self.wiki_link_menu_position(start);
+            if let Some(menu) = &mut self.context_menu {
+                menu.position = pos;
+            }
+
+            if self.wiki_link_query.trim().is_empty() {
+                self.run_wiki_link_recent_search(cx);
+            } else {
+                self.run_wiki_link_search(cx);
+            }
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn run_wiki_link_recent_search(&mut self, cx: &mut Context<Self>) {
+        self.wiki_link_recent_task = None;
+        self.wiki_link_search_task = None;
+        self.wiki_link_search_results.clear();
+
+        let root = self.sidebar_root.clone();
+        if !root.exists() {
+            self.wiki_link_recent_results.clear();
+            cx.notify();
+            return;
+        }
+
+        let task = cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::editor::quick_open::collect_wiki_link_recent_files(&root, 10)
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.wiki_link_recent_results = results;
+                this.wiki_link_recent_task = None;
+                cx.notify();
+            })
+            .ok();
+        });
+        self.wiki_link_recent_task = Some(task);
+    }
+
+    pub(crate) fn run_wiki_link_search(&mut self, cx: &mut Context<Self>) {
+        self.wiki_link_search_task = None;
+
+        let root = self.sidebar_root.clone();
+        let query = self.wiki_link_query.clone();
+        if !root.exists() || query.trim().is_empty() {
+            self.wiki_link_search_results.clear();
+            cx.notify();
+            return;
+        }
+
+        let task = cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::editor::quick_open::collect_wiki_link_search_results(&root, &query, 10)
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.wiki_link_search_results = results;
+                this.wiki_link_search_task = None;
+                cx.notify();
+            })
+            .ok();
+        });
+        self.wiki_link_search_task = Some(task);
     }
 
     pub(crate) fn open_tab_context_menu(
@@ -176,8 +465,48 @@ impl EditorView {
                 }
                 self.slash_filter.clear();
             }
+            self.clear_wiki_link_menu_state();
             cx.notify();
         }
+    }
+
+    pub(crate) fn sync_wiki_link_menu(&mut self, cx: &mut Context<Self>) {
+        let Some(start) = self.wiki_link_start else {
+            return;
+        };
+        let Some(query_end) = self.wiki_link_query_end(start) else {
+            self.close_context_menu(cx);
+            return;
+        };
+        let query_start = start + 2;
+        if self.cursor.offset < query_start || self.cursor.offset > query_end {
+            self.close_context_menu(cx);
+            return;
+        }
+        self.update_wiki_link_query(cx);
+    }
+
+    pub(crate) fn confirm_wiki_link_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(start) = self.wiki_link_start else {
+            return;
+        };
+        let Some(query_end) = self.wiki_link_query_end(start) else {
+            self.close_context_menu(cx);
+            return;
+        };
+        let Some(relative_path) = self.selected_wiki_link_relative_path() else {
+            return;
+        };
+
+        let replace_start = start + 2;
+        self.buffer
+            .replace(replace_start..query_end, &relative_path);
+        self.cursor
+            .move_to(replace_start + relative_path.len(), &self.buffer);
+        self.reparse();
+        self.close_context_menu(cx);
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
     }
 
     pub(crate) fn execute_format_menu_action(
@@ -199,6 +528,51 @@ impl EditorView {
             FormatMenuAction::Cut => self.cut_selection_to_clipboard(cx),
             FormatMenuAction::Copy => self.copy_selection_to_clipboard(cx),
             FormatMenuAction::Paste => self.paste_from_clipboard(cx),
+            FormatMenuAction::Heading1 => {
+                self.checkpoint();
+                self.apply_heading(1);
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Heading2 => {
+                self.checkpoint();
+                self.apply_heading(2);
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Heading3 => {
+                self.checkpoint();
+                self.apply_heading(3);
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Heading4 => {
+                self.checkpoint();
+                self.apply_heading(4);
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Heading5 => {
+                self.checkpoint();
+                self.apply_heading(5);
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Heading6 => {
+                self.checkpoint();
+                self.apply_heading(6);
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Paragraph => {
+                if let Some(current_heading) = self.current_heading_action() {
+                    self.checkpoint();
+                    match current_heading {
+                        FormatMenuAction::Heading1 => self.apply_heading(1),
+                        FormatMenuAction::Heading2 => self.apply_heading(2),
+                        FormatMenuAction::Heading3 => self.apply_heading(3),
+                        FormatMenuAction::Heading4 => self.apply_heading(4),
+                        FormatMenuAction::Heading5 => self.apply_heading(5),
+                        FormatMenuAction::Heading6 => self.apply_heading(6),
+                        _ => {}
+                    }
+                    self.pause_blinking(cx);
+                }
+            }
             FormatMenuAction::Bold => {
                 self.checkpoint();
                 self.apply_wrap("**", "**");
@@ -254,10 +628,66 @@ impl EditorView {
                 self.insert_link_or_image("[", "](https://)", "title");
                 self.pause_blinking(cx);
             }
+            FormatMenuAction::WikiLink => {
+                self.checkpoint();
+                let range = self.cursor.selection_range();
+                let selected_text = self.buffer.text()[range.clone()].to_string();
+                let replacement = format!("[[{}]]", selected_text);
+                self.buffer.replace(range.clone(), &replacement);
+                let cursor_offset = range.start + 2 + selected_text.len();
+                self.cursor.move_to(cursor_offset, &self.buffer);
+                self.reparse();
+                self.open_wiki_link_menu(range.start, cx);
+                if !selected_text.is_empty() {
+                    self.update_wiki_link_query(cx);
+                }
+                self.scroll_to_cursor();
+                self.pause_blinking(cx);
+                return;
+            }
             FormatMenuAction::Image => {
                 self.checkpoint();
                 self.insert_link_or_image("![", "](image.png)", "alt");
                 self.pause_blinking(cx);
+            }
+            FormatMenuAction::Table => {
+                self.checkpoint();
+                let range = self.cursor.selection_range();
+                let snippet =
+                    "| 列1 | 列2 |\n| --- | --- |\n| 单元格1 | 单元格2 |\n| 单元格3 | 单元格4 |";
+                self.buffer.replace(range.clone(), snippet);
+                let select_start = range.start + 2;
+                let select_end = select_start + "列1".len();
+                self.cursor.anchor = select_start;
+                self.cursor.offset = select_end;
+                self.reparse();
+                self.scroll_to_cursor();
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::EditImageDescription => {
+                if let Some(target) = self.current_image_menu_target() {
+                    self.set_selection_range(target.desc_range);
+                    self.pause_blinking(cx);
+                }
+            }
+            FormatMenuAction::EditImageUrl => {
+                if let Some(target) = self.current_image_menu_target() {
+                    self.set_selection_range(target.url_range);
+                    self.pause_blinking(cx);
+                }
+            }
+            FormatMenuAction::DeleteImage => {
+                if let Some(target) = self.current_image_menu_target() {
+                    self.checkpoint();
+                    self.buffer.replace(target.full_range.clone(), "");
+                    self.cursor.move_to(target.full_range.start, &self.buffer);
+                    self.reparse();
+                    self.scroll_to_cursor();
+                    self.pause_blinking(cx);
+                }
+            }
+            FormatMenuAction::SelectImageFile => {
+                self.pick_image_for_current_markdown_image(cx);
             }
         }
         self.close_context_menu(cx);
@@ -276,7 +706,13 @@ impl EditorView {
         let all_items: &[(&str, &str, FormatMenuAction)] = &[
             ("待办事项", "todo task checkbox", FormatMenuAction::Todo),
             ("代码块", "code block", FormatMenuAction::CodeBlock),
+            ("表格", "table grid 2x2", FormatMenuAction::Table),
             ("链接", "link url", FormatMenuAction::Link),
+            (
+                "双向链接",
+                "wiki link backlink bidirectional",
+                FormatMenuAction::WikiLink,
+            ),
             ("图片", "image photo", FormatMenuAction::Image),
         ];
         for &(label, ft, action) in all_items {
@@ -623,7 +1059,7 @@ impl EditorView {
         {
             let pd = parent_dir.clone();
             items.push(self.render_context_menu_item(
-                "新建文件夹",
+                "新建目录",
                 false,
                 cx,
                 move |this, window, cx| {
@@ -738,7 +1174,7 @@ impl EditorView {
         // Collapse / Expand all
         if !self.expanded_dirs.is_empty() {
             items.push(self.render_context_menu_item(
-                "折叠所有文件夹",
+                "折叠所有目录",
                 false,
                 cx,
                 move |this, _, cx| {
@@ -748,7 +1184,7 @@ impl EditorView {
         }
         {
             items.push(self.render_context_menu_item(
-                "展开所有文件夹",
+                "展开所有目录",
                 false,
                 cx,
                 move |this, _, cx| {
@@ -772,7 +1208,108 @@ impl EditorView {
         items
     }
 
+    fn render_heading_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let active_actions = self.active_format_actions();
+        let heading_items: &[(&str, Option<&str>, FormatMenuAction)] = &[
+            (
+                "标题1",
+                Some(HEADING_1_SVG_PATH),
+                FormatMenuAction::Heading1,
+            ),
+            (
+                "标题2",
+                Some(HEADING_2_SVG_PATH),
+                FormatMenuAction::Heading2,
+            ),
+            (
+                "标题3",
+                Some(HEADING_3_SVG_PATH),
+                FormatMenuAction::Heading3,
+            ),
+            (
+                "标题4",
+                Some(HEADING_4_SVG_PATH),
+                FormatMenuAction::Heading4,
+            ),
+            (
+                "标题5",
+                Some(HEADING_5_SVG_PATH),
+                FormatMenuAction::Heading5,
+            ),
+            (
+                "标题6",
+                Some(HEADING_6_SVG_PATH),
+                FormatMenuAction::Heading6,
+            ),
+            ("正文", None, FormatMenuAction::Paragraph),
+        ];
+
+        heading_items
+            .iter()
+            .map(|&(label, icon, action)| {
+                let is_active = if action == FormatMenuAction::Paragraph {
+                    self.current_heading_action().is_none()
+                } else {
+                    active_actions.contains(&action)
+                };
+                self.render_format_context_menu_item(
+                    label,
+                    icon,
+                    None,
+                    false,
+                    is_active,
+                    cx,
+                    move |this, _, cx| {
+                        this.execute_format_menu_action(action, cx);
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn render_image_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        [
+            (
+                "修改描述",
+                None,
+                FormatMenuAction::EditImageDescription,
+                false,
+            ),
+            ("修改 URL", None, FormatMenuAction::EditImageUrl, false),
+            ("删除", None, FormatMenuAction::DeleteImage, true),
+            (
+                "选择图片...",
+                None,
+                FormatMenuAction::SelectImageFile,
+                false,
+            ),
+        ]
+        .into_iter()
+        .map(|(label, icon, action, _is_destructive)| {
+            self.render_format_context_menu_item(
+                label,
+                icon,
+                None,
+                false,
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.execute_format_menu_action(action, cx);
+                },
+            )
+        })
+        .collect()
+    }
+
     fn render_format_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if self.current_image_menu_target().is_some() {
+            return self.render_image_context_menu(cx);
+        }
+
+        if self.current_heading_action().is_some() {
+            return self.render_heading_context_menu(cx);
+        }
+
         let mut items: Vec<AnyElement> = Vec::new();
         let is_slash_menu = self.slash_menu_start.is_some();
         let filter = self.slash_filter.to_lowercase();
@@ -816,6 +1353,13 @@ impl EditorView {
 
         // (label, filter_text, icon_path, shortcut, action)
         let all_menu_items: &[(&str, &str, Option<&str>, Option<&str>, FormatMenuAction)] = &[
+            (
+                "标题",
+                "heading title h1",
+                Some(HEADING_1_SVG_PATH),
+                None,
+                FormatMenuAction::Heading1,
+            ),
             (
                 "粗体",
                 "bold",
@@ -894,18 +1438,34 @@ impl EditorView {
                 FormatMenuAction::Link,
             ),
             (
+                "双向链接",
+                "wiki link backlink bidirectional",
+                Some(FMT_LINK_SVG),
+                Some("[["),
+                FormatMenuAction::WikiLink,
+            ),
+            (
                 "图片",
                 "image photo",
                 Some(FMT_IMAGE_SVG),
                 Some("⌘⇧I"),
                 FormatMenuAction::Image,
             ),
+            (
+                "表格",
+                "table grid 2x2",
+                None,
+                Some("2×2"),
+                FormatMenuAction::Table,
+            ),
         ];
 
         let slash_only_actions: &[FormatMenuAction] = &[
             FormatMenuAction::Todo,
             FormatMenuAction::CodeBlock,
+            FormatMenuAction::Table,
             FormatMenuAction::Link,
+            FormatMenuAction::WikiLink,
             FormatMenuAction::Image,
         ];
 
@@ -936,7 +1496,7 @@ impl EditorView {
                 }
             }
         } else {
-            let group_boundaries = [0usize, 4, 10, 12];
+            let group_boundaries = [0usize, 5, 11, 15];
             let mut group_start_flags = [false; 3];
 
             for (idx, &(label, ft, _, _, _)) in all_menu_items.iter().enumerate() {
@@ -982,6 +1542,202 @@ impl EditorView {
         items
     }
 
+    fn render_wiki_link_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut items: Vec<AnyElement> = Vec::new();
+        let ms = &self.styles.context_menu;
+
+        let has_query = !self.wiki_link_query.trim().is_empty();
+        let show_loading = if has_query {
+            self.wiki_link_search_task.is_some()
+                && self.wiki_link_search_results.is_empty()
+                && self.wiki_link_recent_results.is_empty()
+        } else {
+            self.wiki_link_recent_task.is_some() && self.wiki_link_recent_results.is_empty()
+        };
+        if show_loading {
+            items.push(self.render_context_menu_item(
+                "正在搜索文件...",
+                false,
+                cx,
+                |_this, _, _cx| {},
+            ));
+            return items;
+        }
+
+        let search_items = if has_query {
+            if self.wiki_link_search_results.is_empty() && self.wiki_link_search_task.is_some() {
+                self.wiki_link_recent_results
+                    .iter()
+                    .map(|candidate| {
+                        (
+                            candidate.path.clone(),
+                            candidate.file_name.clone(),
+                            Vec::new(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                self.wiki_link_search_results
+                    .iter()
+                    .map(|result| {
+                        let path = &result.path;
+                        (
+                            path.clone(),
+                            path.file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| path.display().to_string()),
+                            result.file_name_match_indices.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }
+        } else {
+            self.wiki_link_recent_results
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate.path.clone(),
+                        candidate.file_name.clone(),
+                        Vec::new(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if search_items.is_empty() {
+            let label = if has_query {
+                "无匹配可引用文件"
+            } else {
+                "暂无可引用文件"
+            };
+            items.push(self.render_context_menu_item(label, false, cx, |_this, _, _cx| {}));
+            return items;
+        }
+
+        for (index, (path, item, highlight_indices)) in search_items.into_iter().enumerate() {
+            let is_selected = index == self.menu_selected_index;
+            let hover_bg = ms.menu_item_hover_bg;
+            items.push(
+                div()
+                    .id(SharedString::from(format!("wiki-link-item-{}", index)))
+                    .w_full()
+                    .h(px(self.scaled(ms.menu_item_height_px)))
+                    .px(px(self.scaled(ms.menu_item_padding_x_px)))
+                    .flex()
+                    .items_center()
+                    .gap(px(self.scaled(self.styles.sidebar.sidebar_item_gap_px)))
+                    .text_size(px(self.scaled(ms.menu_item_font_size_px)))
+                    .text_color(ms.menu_item_text_color)
+                    .bg(if is_selected {
+                        ms.menu_item_selected_bg
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .hover(move |style| style.bg(hover_bg))
+                    .cursor(CursorStyle::Arrow)
+                    .child(self.render_wiki_link_menu_indicator(&path, &item))
+                    .child(self.render_wiki_link_menu_label(
+                        &item,
+                        &highlight_indices,
+                        ms.menu_item_text_color,
+                        self.styles.quick_open.quick_open_result_match_text_color,
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.menu_selected_index = index;
+                            this.confirm_wiki_link_selection(cx);
+                        }),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        items
+    }
+
+    fn render_wiki_link_menu_label(
+        &self,
+        name: &str,
+        highlight_indices: &[usize],
+        color: gpui::Hsla,
+        highlight_color: gpui::Hsla,
+    ) -> AnyElement {
+        let ss = &self.styles.sidebar;
+        let (base, suffix) = split_file_name_for_display(name);
+        let base_char_count = base.chars().count();
+        let base_highlight_indices = highlight_indices
+            .iter()
+            .copied()
+            .filter(|index| *index < base_char_count)
+            .collect::<Vec<_>>();
+        let suffix_highlight_indices = highlight_indices
+            .iter()
+            .filter_map(|index| index.checked_sub(base_char_count))
+            .collect::<Vec<_>>();
+        div()
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .flex()
+            .gap(px(0.0))
+            .items_center()
+            .text_size(px(self.scaled(ss.sidebar_item_font_size_px)))
+            .text_color(color)
+            .child(div().whitespace_nowrap().child(
+                crate::editor::quick_open::render_highlighted_text(
+                    base,
+                    &base_highlight_indices,
+                    color,
+                    highlight_color,
+                    self.scaled(ss.sidebar_item_font_size_px),
+                ),
+            ))
+            .when_some(suffix, |this, suffix| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .opacity(ss.sidebar_item_suffix_opacity)
+                        .child(crate::editor::quick_open::render_highlighted_text(
+                            suffix,
+                            &suffix_highlight_indices,
+                            color,
+                            highlight_color,
+                            self.scaled(ss.sidebar_item_font_size_px),
+                        )),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_wiki_link_menu_indicator(&self, path: &std::path::Path, _name: &str) -> AnyElement {
+        let ss = &self.styles.sidebar;
+
+        if let Some(label) = file_kind_badge_text(path) {
+            return div()
+                .min_w(px(self.scaled(ss.sidebar_item_badge_min_width_px)))
+                .h(px(self.scaled(ss.sidebar_item_badge_height_px)))
+                .px(px(self.scaled(ss.sidebar_item_badge_padding_x_px)))
+                .rounded(px(self.scaled(ss.sidebar_item_badge_radius_px)))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(ss.sidebar_item_badge_bg)
+                .text_size(px(self.scaled(ss.sidebar_item_badge_font_size_px)))
+                .text_color(ss.sidebar_item_badge_text_color)
+                .font_weight(FontWeight::EXTRA_BOLD)
+                .child(label)
+                .into_any_element();
+        }
+
+        svg()
+            .path(MARKDOWN_SVG_PATH)
+            .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
+            .text_color(ss.sidebar_item_icon_color)
+            .into_any_element()
+    }
+
     pub(crate) fn render_context_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(menu) = &self.context_menu else {
             return div().into_any_element();
@@ -1009,6 +1765,7 @@ impl EditorView {
                         cx,
                         move |this, _, cx| {
                             this.sidebar_sort_mode = mode;
+                            this.invalidate_sidebar_items_cache();
                             this.context_menu = None;
                             cx.notify();
                         },
@@ -1053,6 +1810,10 @@ impl EditorView {
             ContextMenuKind::Format => (
                 self.render_format_context_menu(cx),
                 self.scaled(self.styles.context_menu.menu_format_width_px),
+            ),
+            ContextMenuKind::WikiLink => (
+                self.render_wiki_link_context_menu(cx),
+                self.scaled(self.styles.context_menu.menu_sidebar_width_px),
             ),
             ContextMenuKind::Tab { tab_id } => {
                 let mut items = Vec::new();

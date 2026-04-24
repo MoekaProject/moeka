@@ -19,6 +19,71 @@ struct TableCellDisplayInfo {
     cell_content_len: usize,
 }
 
+fn paired_delimiter(input: &str) -> Option<(&'static str, &'static str)> {
+    match input {
+        "[" => Some(("[", "]")),
+        "{" => Some(("{", "}")),
+        "(" => Some(("(", ")")),
+        "<" => Some(("<", ">")),
+        "\"" => Some(("\"", "\"")),
+        "'" => Some(("'", "'")),
+        "`" => Some(("`", "`")),
+        "【" => Some(("【", "】")),
+        "｛" => Some(("｛", "｝")),
+        "（" => Some(("（", "）")),
+        "《" => Some(("《", "》")),
+        "〈" => Some(("〈", "〉")),
+        "「" => Some(("「", "」")),
+        "『" => Some(("『", "』")),
+        "“" => Some(("“", "”")),
+        "‘" => Some(("‘", "’")),
+        _ => None,
+    }
+}
+
+fn is_auto_closing_delimiter(input: &str) -> bool {
+    matches!(
+        input,
+        "]" | "}"
+            | ")"
+            | ">"
+            | "\""
+            | "'"
+            | "`"
+            | "】"
+            | "｝"
+            | "）"
+            | "》"
+            | "〉"
+            | "」"
+            | "』"
+            | "”"
+            | "’"
+    )
+}
+
+fn auto_paired_delimiter_matches(open: char, close: char) -> bool {
+    matches!(
+        (open, close),
+        ('[', ']')
+            | ('{', '}')
+            | ('(', ')')
+            | ('<', '>')
+            | ('"', '"')
+            | ('\'', '\'')
+            | ('`', '`')
+            | ('【', '】')
+            | ('｛', '｝')
+            | ('（', '）')
+            | ('《', '》')
+            | ('〈', '〉')
+            | ('「', '」')
+            | ('『', '』')
+            | ('“', '”')
+            | ('‘', '’')
+    )
+}
+
 fn ime_debug_enabled() -> bool {
     false
 }
@@ -30,6 +95,42 @@ fn ime_debug_log(_message: impl AsRef<str>) {
 }
 
 impl EditorView {
+    fn should_skip_auto_closing_delimiter(&self, new_text: &str) -> bool {
+        if !is_auto_closing_delimiter(new_text) {
+            return false;
+        }
+
+        self.buffer
+            .text()
+            .get(self.cursor.offset..self.cursor.offset + new_text.len())
+            == Some(new_text)
+    }
+
+    pub(crate) fn auto_paired_backspace_range(&self) -> Option<Range<usize>> {
+        if self.cursor.has_selection() {
+            return None;
+        }
+
+        let text = self.buffer.text();
+        let offset = self.cursor.offset;
+
+        if offset >= 2
+            && text.get(offset - 2..offset) == Some("[[")
+            && text.get(offset..offset + 2) == Some("]]")
+        {
+            return Some(offset - 2..offset + 2);
+        }
+
+        let (prev_start, prev_char) = text[..offset].char_indices().next_back()?;
+        let next_char = text[offset..].chars().next()?;
+        let next_end = offset + next_char.len_utf8();
+        if auto_paired_delimiter_matches(prev_char, next_char) {
+            Some(prev_start..next_end)
+        } else {
+            None
+        }
+    }
+
     fn begin_ime_composition(&mut self) {
         if self.ime_composition_snapshot.is_none() {
             self.ime_composition_snapshot = Some(self.current_snapshot());
@@ -147,28 +248,9 @@ impl EditorView {
             .find(|(bounds, _)| bounds.contains(&event.position))
             .map(|(_, line)| *line)
         {
-            if let Some(dec) = self.decorations.get(line_idx) {
-                if let Some(span) = dec
-                    .inline_spans
-                    .iter()
-                    .find(|s| s.kind == InlineKind::Image)
-                {
-                    let line_start = self.buffer.line_start(line_idx);
-                    let line_content = self.buffer.line_content(line_idx);
-                    let full_start = span.range.start.saturating_sub(2);
-                    let full_end = dec
-                        .syntax_ranges
-                        .iter()
-                        .filter(|sr| sr.range.start >= span.range.end)
-                        .map(|sr| sr.range.end)
-                        .max()
-                        .unwrap_or(span.range.end)
-                        .min(line_content.len());
-                    self.cursor.offset = line_start + full_start;
-                    self.cursor.anchor = line_start + full_end;
-                    cx.notify();
-                    return;
-                }
+            if self.select_image_syntax_on_line(line_idx) {
+                cx.notify();
+                return;
             }
         }
 
@@ -242,6 +324,20 @@ impl EditorView {
         if event.modifiers.platform {
             // Cmd+click: open link if cursor is on a link span
             let (line, col) = self.buffer.offset_to_line_col(offset);
+            let wiki_link_path = self.decorations.get(line).and_then(|dec| {
+                dec.wiki_links.iter().find_map(|wiki_link| {
+                    if col < wiki_link.full_range.start || col > wiki_link.full_range.end {
+                        return None;
+                    }
+                    resolve_wiki_link_target_path(&self.sidebar_root, &wiki_link.target_path)
+                })
+            });
+            if let Some(path) = wiki_link_path {
+                self.open_path_in_permanent_tab(path, true, cx);
+                self.is_selecting = false;
+                cx.notify();
+                return;
+            }
             let link_url = self.decorations.get(line).and_then(|dec| {
                 dec.inline_spans.iter().find_map(|span| {
                     if span.kind != InlineKind::Link {
@@ -300,6 +396,34 @@ impl EditorView {
             self.maybe_auto_select_link_url(prev_offset, true);
         }
         cx.notify();
+    }
+
+    fn select_image_syntax_on_line(&mut self, line_idx: usize) -> bool {
+        let Some(decoration) = self.decorations.get(line_idx) else {
+            return false;
+        };
+        let Some(span) = decoration
+            .inline_spans
+            .iter()
+            .find(|span| span.kind == InlineKind::Image)
+        else {
+            return false;
+        };
+
+        let line_start = self.buffer.line_start(line_idx);
+        let line_content = self.buffer.line_content(line_idx);
+        let full_start = span.range.start.saturating_sub(2);
+        let full_end = decoration
+            .syntax_ranges
+            .iter()
+            .filter(|range| range.range.start >= span.range.end)
+            .map(|range| range.range.end)
+            .max()
+            .unwrap_or(span.range.end)
+            .min(line_content.len());
+        self.cursor.offset = line_start + full_start;
+        self.cursor.anchor = line_start + full_end;
+        true
     }
 
     pub(crate) fn maybe_auto_select_link_url(
@@ -399,6 +523,19 @@ impl EditorView {
             });
             cx.notify();
             return;
+        }
+
+        if let Some(line_idx) = self
+            .image_click_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(_, line)| *line)
+        {
+            if self.select_image_syntax_on_line(line_idx) {
+                self.open_format_context_menu(event.position, cx);
+                cx.notify();
+                return;
+            }
         }
 
         let offset = self.offset_for_position(event.position);
@@ -562,8 +699,10 @@ impl EditorView {
         if self.active_tab_is_image() {
             if let Some(drag) = self.image_drag_state {
                 if let Some(image_view) = self.active_image_view_state_mut() {
-                    image_view.pan_x = drag.start_pan_x + (f32::from(event.position.x) - f32::from(drag.start_position.x));
-                    image_view.pan_y = drag.start_pan_y + (f32::from(event.position.y) - f32::from(drag.start_position.y));
+                    image_view.pan_x = drag.start_pan_x
+                        + (f32::from(event.position.x) - f32::from(drag.start_position.x));
+                    image_view.pan_y = drag.start_pan_y
+                        + (f32::from(event.position.y) - f32::from(drag.start_position.y));
                 }
                 self.clamp_active_image_view();
                 if toolbar_hover_changed {
@@ -922,6 +1061,8 @@ impl EditorView {
             0,
             font_size,
             &self.theme,
+            self.styles.wiki_link.wiki_link_text_color,
+            self.styles.wiki_link.wiki_link_text_weight,
         );
         if ti.is_header {
             for run in &mut cell_runs {
@@ -1059,6 +1200,99 @@ impl EditorView {
                 0.0
             };
             let local_x = (pos_x - info.content_x - indent_adjust).max(0.0);
+
+            if visual_line_idx > 0 && local_x <= 0.0 {
+                let target_y = visual_line_idx as f32 * info.line_height;
+                let display_index = info
+                    .display_text
+                    .char_indices()
+                    .map(|(index, _)| index)
+                    .chain(std::iter::once(info.display_text.len()))
+                    .find(|display_index| {
+                        info.wrapped_line
+                            .position_for_index(*display_index, px(info.line_height))
+                            .map(|pos| f32::from(pos.y) >= target_y)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(info.display_text.len());
+
+                let buffer_col = if display_index < info.display_to_buffer.len() {
+                    info.display_to_buffer[display_index]
+                } else if let Some(&last) = info.display_to_buffer.last() {
+                    last + 1
+                } else {
+                    0
+                };
+                return self.buffer.line_start(line) + buffer_col;
+            }
+
+            if visual_line_idx == 0
+                && let Some(decoration) = self.decorations.get(line)
+                && matches!(
+                    decoration.block_type,
+                    BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_)
+                )
+            {
+                let prefix_buffer_end = self.line_content_start_col(line).min(line_content.len());
+                let prefix_collapsed = info.display_text != line_content;
+                let collapsed_task_prefix_chars = ((self.base_font_size()
+                    * self.styles.checkbox.checkbox_size_factor
+                    + self.scaled(self.styles.checkbox.checkbox_text_gap_px))
+                    / (self.base_font_size() * 0.6))
+                    .ceil()
+                    .max(3.0) as usize;
+                let prefix_display_bytes = helpers::compute_display_prefix_bytes(
+                    &info.display_text,
+                    &decoration.block_type,
+                    prefix_collapsed,
+                    collapsed_task_prefix_chars,
+                );
+
+                if prefix_buffer_end > 0 && prefix_display_bytes > 0 {
+                    let prefix_end_x = info
+                        .wrapped_line
+                        .position_for_index(
+                            prefix_display_bytes.min(info.display_text.len()),
+                            px(info.line_height),
+                        )
+                        .map(|pos| f32::from(pos.x))
+                        .unwrap_or(0.0);
+
+                    if local_x <= prefix_end_x {
+                        let nearest_prefix_boundary = (0..=prefix_buffer_end)
+                            .min_by(|left, right| {
+                                let left_display = helpers::buffer_to_display_offset(
+                                    &info.buffer_to_display,
+                                    *left,
+                                )
+                                .min(info.display_text.len());
+                                let right_display = helpers::buffer_to_display_offset(
+                                    &info.buffer_to_display,
+                                    *right,
+                                )
+                                .min(info.display_text.len());
+                                let left_x = info
+                                    .wrapped_line
+                                    .position_for_index(left_display, px(info.line_height))
+                                    .map(|pos| f32::from(pos.x))
+                                    .unwrap_or(prefix_end_x);
+                                let right_x = info
+                                    .wrapped_line
+                                    .position_for_index(right_display, px(info.line_height))
+                                    .map(|pos| f32::from(pos.x))
+                                    .unwrap_or(prefix_end_x);
+                                (left_x - local_x)
+                                    .abs()
+                                    .partial_cmp(&(right_x - local_x).abs())
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                            .unwrap_or(prefix_buffer_end);
+
+                        return self.buffer.line_start(line) + nearest_prefix_boundary;
+                    }
+                }
+            }
+
             let line_end_position = info
                 .wrapped_line
                 .position_for_index(info.display_text.len(), px(info.line_height))
@@ -1229,6 +1463,21 @@ impl EntityInputHandler for EditorView {
         if !self.active_tab_supports_text_buffer() {
             return;
         }
+        if !self.cursor.has_selection()
+            && self.marked_range.is_none()
+            && range_utf16.is_none()
+            && !self.has_extra_cursors()
+            && self.should_skip_auto_closing_delimiter(new_text)
+        {
+            self.cursor
+                .move_to(self.cursor.offset + new_text.len(), &self.buffer);
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            if self.wiki_link_start.is_some() {
+                self.sync_wiki_link_menu(cx);
+            }
+            return;
+        }
         ime_debug_log(format!(
             "replace_text_in_range start range_utf16={:?} new_text={:?} marked_before={:?} selection_before={:?}",
             range_utf16,
@@ -1243,6 +1492,11 @@ impl EntityInputHandler for EditorView {
 
         // When text is selected and user types a formatting character, wrap selection
         if self.cursor.has_selection() && self.marked_range.is_none() && range_utf16.is_none() {
+            if let Some((prefix, suffix)) = paired_delimiter(new_text) {
+                self.apply_wrap(prefix, suffix);
+                self.pause_blinking(cx);
+                return;
+            }
             let wrap = match new_text {
                 "*" => Some(("**", "**")),
                 "~" => Some(("~~", "~~")),
@@ -1276,6 +1530,23 @@ impl EntityInputHandler for EditorView {
         ));
         let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
 
+        if range.is_empty()
+            && self.marked_range.is_none()
+            && range_utf16.is_none()
+            && new_text != "["
+            && let Some((open, close)) = paired_delimiter(new_text)
+        {
+            let mut paired_text = String::with_capacity(open.len() + close.len());
+            paired_text.push_str(open);
+            paired_text.push_str(close);
+            self.buffer.replace(range.clone(), &paired_text);
+            self.cursor.move_to(range.start + open.len(), &self.buffer);
+            self.reparse();
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
+        }
+
         self.buffer.replace(range.clone(), new_text);
         let new_offset = range.start + new_text.len();
         self.cursor.move_to(new_offset, &self.buffer);
@@ -1297,6 +1568,18 @@ impl EntityInputHandler for EditorView {
 
         if self.slash_menu_start.is_some() {
             self.update_slash_filter(cx);
+        } else if self.wiki_link_start.is_some() {
+            self.sync_wiki_link_menu(cx);
+        } else if new_text == "[" && new_offset >= 2 {
+            let text = self.buffer.text();
+            if text.get(new_offset - 2..new_offset) == Some("[[") {
+                if text.get(new_offset..new_offset + 2) != Some("]]") {
+                    self.buffer.replace(new_offset..new_offset, "]]");
+                    self.reparse();
+                }
+                self.cursor.move_to(new_offset, &self.buffer);
+                self.open_wiki_link_menu(new_offset - 2, cx);
+            }
         } else if new_text == "/" {
             let (line, col) = self.buffer.offset_to_line_col(new_offset);
             let line_content = self.buffer.line_content(line);

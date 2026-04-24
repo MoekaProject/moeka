@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use gpui::Hsla;
+use gpui::{FontWeight, Hsla};
 
 use crate::theme::{Theme, with_alpha};
 
@@ -25,6 +25,7 @@ pub struct Styles {
     pub toolbar: ToolbarStyles,
     pub cursor: CursorStyles,
     pub code_block: CodeBlockStyles,
+    pub wiki_link: WikiLinkStyles,
     pub checkbox: CheckboxStyles,
     pub table: TableStyles,
     pub gutter: GutterStyles,
@@ -38,6 +39,7 @@ pub struct Styles {
     pub text_input: TextInputStyles,
     pub search: SearchStyles,
     pub workspace_search: WorkspaceSearchStyles,
+    pub quick_open: QuickOpenStyles,
 }
 
 // ── Window ──────────────────────────────────────────────────────────
@@ -89,6 +91,7 @@ pub struct EditorStyles {
 
 // ── Sidebar ─────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct SidebarStyles {
     // Container
     pub sidebar_width_px: f32,
@@ -155,6 +158,7 @@ pub struct SidebarStyles {
     pub sidebar_edit_input_border_color: Hsla,
     pub sidebar_edit_input_radius_px: f32,
     pub sidebar_edit_input_font_size_px: f32,
+    pub sidebar_edit_input_cursor_height_ratio: f32,
     pub sidebar_edit_input_text_color: Hsla,
     pub sidebar_edit_input_placeholder_color: Hsla,
     // Error message
@@ -362,6 +366,13 @@ pub struct CodeBlockStyles {
     pub code_block_radius_px: f32,
     pub code_block_text_padding_left_px: f32,
     pub code_block_fence_clip_px: f32,
+}
+
+// ── Wiki Link ───────────────────────────────────────────────────────
+
+pub struct WikiLinkStyles {
+    pub wiki_link_text_color: Hsla,
+    pub wiki_link_text_weight: FontWeight,
 }
 
 // ── Selection & Line Highlight ──────────────────────────────────────
@@ -628,6 +639,8 @@ pub struct SearchStyles {
     // Match highlighting in editor
     pub search_match_bg: Hsla,
     pub search_match_active_bg: Hsla,
+    pub search_match_text_color: Hsla,
+    pub search_match_active_text_color: Hsla,
     pub search_match_border_width_px: f32,
     pub search_match_border_color: Hsla,
     // Scrollbar match markers
@@ -697,6 +710,33 @@ pub struct WorkspaceSearchStyles {
     pub ws_search_btn_active_icon_color: Hsla,
     pub ws_search_btn_hover_bg: Hsla,
     pub ws_search_btn_active_bg: Hsla,
+}
+
+// ── Quick Open ─────────────────────────────────────────────────────
+
+pub struct QuickOpenStyles {
+    pub quick_open_backdrop_bg: Hsla,
+    pub quick_open_panel_width_px: f32,
+    pub quick_open_panel_top_offset_px: f32,
+    pub quick_open_panel_radius_px: f32,
+    pub quick_open_panel_border_color: Hsla,
+    pub quick_open_panel_bg: Hsla,
+    pub quick_open_input_padding_x_px: f32,
+    pub quick_open_input_padding_y_px: f32,
+    pub quick_open_results_max_height_px: f32,
+    pub quick_open_result_row_height_px: f32,
+    pub quick_open_result_padding_x_px: f32,
+    pub quick_open_result_gap_y_px: f32,
+    pub quick_open_result_name_font_size_px: f32,
+    pub quick_open_result_path_font_size_px: f32,
+    pub quick_open_result_hover_bg: Hsla,
+    pub quick_open_result_selected_bg: Hsla,
+    pub quick_open_result_text_color: Hsla,
+    pub quick_open_result_secondary_text_color: Hsla,
+    pub quick_open_result_match_text_color: Hsla,
+    pub quick_open_empty_height_px: f32,
+    pub quick_open_empty_font_size_px: f32,
+    pub quick_open_empty_text_color: Hsla,
 }
 
 // ═════════════════════════════════════════════════════════════════════
@@ -808,11 +848,12 @@ impl Styles {
                 sidebar_item_active_dot_color: theme.text_accent,
                 sidebar_edit_input_height_px: 20.0,
                 sidebar_edit_input_padding_x_px: 6.0,
-                sidebar_edit_input_bg: theme.bg_primary,
+                sidebar_edit_input_bg: gpui::transparent_black(),
                 sidebar_edit_input_border_width_px: 1.0,
                 sidebar_edit_input_border_color: theme.text_accent,
                 sidebar_edit_input_radius_px: 3.0,
                 sidebar_edit_input_font_size_px: ui_font_size_px,
+                sidebar_edit_input_cursor_height_ratio: 0.58,
                 sidebar_edit_input_text_color: theme.text_bright,
                 sidebar_edit_input_placeholder_color: theme.text_secondary,
                 sidebar_error_padding_x_px: 14.0,
@@ -963,9 +1004,13 @@ impl Styles {
             },
             code_block: CodeBlockStyles {
                 code_block_bg: theme.bg_code,
-                code_block_radius_px: 5.0,
+                code_block_radius_px: 10.0,
                 code_block_text_padding_left_px: 10.0,
                 code_block_fence_clip_px: 15.0,
+            },
+            wiki_link: WikiLinkStyles {
+                wiki_link_text_color: theme.inline_code,
+                wiki_link_text_weight: FontWeight::BOLD,
             },
             selection: SelectionStyles {
                 selection_color: theme.selection,
@@ -1179,6 +1224,8 @@ impl Styles {
                 search_nav_btn_hover_bg: theme.bg_hover,
                 search_match_bg: gpui::hsla(0.14, 0.9, 0.5, 0.3),
                 search_match_active_bg: gpui::hsla(0.08, 0.9, 0.5, 0.5),
+                search_match_text_color: theme.text_bright,
+                search_match_active_text_color: theme.text_bright,
                 search_match_border_width_px: 1.0,
                 search_match_border_color: gpui::hsla(0.14, 0.9, 0.5, 0.5),
                 search_scrollbar_marker_width_px: 3.0,
@@ -1236,6 +1283,30 @@ impl Styles {
                 ws_search_btn_active_icon_color: theme.text_accent,
                 ws_search_btn_hover_bg: theme.bg_hover,
                 ws_search_btn_active_bg: theme.bg_selected,
+            },
+            quick_open: QuickOpenStyles {
+                quick_open_backdrop_bg: with_alpha(Hsla::black(), 0.5),
+                quick_open_panel_width_px: 640.0,
+                quick_open_panel_top_offset_px: 48.0,
+                quick_open_panel_radius_px: 10.0,
+                quick_open_panel_border_color: theme.border_primary,
+                quick_open_panel_bg: theme.bg_elevated,
+                quick_open_input_padding_x_px: 10.0,
+                quick_open_input_padding_y_px: 10.0,
+                quick_open_results_max_height_px: 360.0,
+                quick_open_result_row_height_px: 44.0,
+                quick_open_result_padding_x_px: 12.0,
+                quick_open_result_gap_y_px: 2.0,
+                quick_open_result_name_font_size_px: 13.0,
+                quick_open_result_path_font_size_px: 11.0,
+                quick_open_result_hover_bg: theme.bg_hover,
+                quick_open_result_selected_bg: theme.bg_selected,
+                quick_open_result_text_color: theme.text_primary,
+                quick_open_result_secondary_text_color: theme.text_secondary,
+                quick_open_result_match_text_color: theme.text_bright,
+                quick_open_empty_height_px: 64.0,
+                quick_open_empty_font_size_px: ui_font_size_sm_px,
+                quick_open_empty_text_color: theme.text_secondary,
             },
         }
     }

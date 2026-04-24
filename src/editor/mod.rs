@@ -190,25 +190,8 @@ pub(crate) fn perform_window_drag(window: &gpui::Window) {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn set_window_movable(window: &gpui::Window, movable: bool) {
-    use objc::{msg_send, sel, sel_impl};
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    if let Ok(handle) = HasWindowHandle::window_handle(window) {
-        if let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
-            unsafe {
-                let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
-                let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
-                let () = msg_send![ns_window, setMovable: movable];
-            }
-        }
-    }
-}
-
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn perform_window_drag(_window: &gpui::Window) {}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn set_window_movable(_window: &gpui::Window, _movable: bool) {}
 
 // ── Layout constants ────────────────────────────────────────────────
 // NOTE: Numeric layout/style constants are now in style.rs (Styles struct).
@@ -378,6 +361,7 @@ pub(crate) enum ContextMenuKind {
     SidebarSort,
     SidebarCreate,
     Format,
+    WikiLink,
     Tab {
         tab_id: String,
     },
@@ -429,6 +413,17 @@ pub(crate) enum FormatMenuAction {
     Cut,
     Copy,
     Paste,
+    Heading1,
+    Heading2,
+    Heading3,
+    Heading4,
+    Heading5,
+    Heading6,
+    Paragraph,
+    EditImageDescription,
+    EditImageUrl,
+    DeleteImage,
+    SelectImageFile,
     Bold,
     Italic,
     Strikethrough,
@@ -440,7 +435,9 @@ pub(crate) enum FormatMenuAction {
     OrderedList,
     Todo,
     Link,
+    WikiLink,
     Image,
+    Table,
 }
 
 #[derive(Clone)]
@@ -543,9 +540,17 @@ pub(crate) struct QuickOpenResult {
 }
 
 #[derive(Clone)]
+pub(crate) struct WorkspaceFileCandidate {
+    pub path: PathBuf,
+    pub relative_path: String,
+    pub file_name: String,
+}
+
+#[derive(Clone)]
 pub(crate) struct DraggedTab {
     pub tab_id: String,
     pub title: String,
+    pub source_index: usize,
 }
 
 pub(crate) struct DraggedTabView {
@@ -691,9 +696,16 @@ pub struct EditorView {
     pub(crate) heading_submenu_open: bool,
     pub(crate) slash_menu_start: Option<usize>,
     pub(crate) slash_filter: String,
+    pub(crate) wiki_link_start: Option<usize>,
+    pub(crate) wiki_link_query: String,
+    pub(crate) wiki_link_recent_results: Vec<WorkspaceFileCandidate>,
+    pub(crate) wiki_link_search_results: Vec<QuickOpenResult>,
+    pub(crate) wiki_link_recent_task: Option<Task<()>>,
+    pub(crate) wiki_link_search_task: Option<Task<()>>,
     pub(crate) menu_selected_index: usize,
     pub(crate) sidebar_visible: bool,
     pub(crate) editor_left_aligned: bool,
+    pub(crate) tab_drag_candidate_id: Option<String>,
     pub(crate) tab_dragging_id: Option<String>,
     pub(crate) recently_closed_tabs: Vec<OpenTab>,
     pub(crate) dialog: Option<Dialog>,
@@ -707,7 +719,10 @@ pub struct EditorView {
     pub(crate) sidebar_drag_hover_target: Option<PathBuf>,
     /// 拖拽悬停自动展开的延迟 task
     pub(crate) sidebar_drag_expand_task: Option<Task<()>>,
+    pub(crate) sidebar_items_cache: Vec<SidebarItem>,
+    pub(crate) sidebar_items_dirty: bool,
     pub(crate) sidebar_scroll_handle: ScrollHandle,
+    pub(crate) sidebar_render_limit: usize,
     pub(crate) workspaces: Vec<PathBuf>,
     pub(crate) _watcher_task: Option<Task<()>>,
     pub(crate) outline_visible: bool,
@@ -914,8 +929,15 @@ impl EditorView {
             menu_selected_index: 0,
             slash_menu_start: None,
             slash_filter: String::new(),
+            wiki_link_start: None,
+            wiki_link_query: String::new(),
+            wiki_link_recent_results: Vec::new(),
+            wiki_link_search_results: Vec::new(),
+            wiki_link_recent_task: None,
+            wiki_link_search_task: None,
             sidebar_visible: false,
             editor_left_aligned: false,
+            tab_drag_candidate_id: None,
             tab_dragging_id: None,
             recently_closed_tabs: Vec::new(),
             dialog: None,
@@ -925,7 +947,10 @@ impl EditorView {
             sidebar_sort_mode: SidebarSortMode::NameAsc,
             sidebar_drag_hover_target: None,
             sidebar_drag_expand_task: None,
+            sidebar_items_cache: Vec::new(),
+            sidebar_items_dirty: true,
             sidebar_scroll_handle: ScrollHandle::new(),
+            sidebar_render_limit: 200,
             workspaces: Vec::new(),
             _watcher_task: None,
             outline_visible: false,
@@ -1156,7 +1181,8 @@ impl EditorView {
     }
 
     pub(crate) fn handle_fs_events(&mut self, changed_paths: &[PathBuf], cx: &mut Context<Self>) {
-        let mut needs_notify = false;
+        let mut needs_notify = true;
+        self.invalidate_sidebar_items_cache();
 
         for tab in &mut self.tabs {
             if let Some(ref tab_path) = tab.path {
@@ -2062,50 +2088,112 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn toggle_current_line_prefix(&mut self, prefix: &str) {
-        let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
-        let line_start = self.buffer.line_start(line);
-        let line_end = self.buffer.line_end(line);
-        let line_text = self.buffer.line_content(line).to_string();
-        let trimmed = line_text.trim_start();
-        let leading_ws = line_text.len() - trimmed.len();
-
-        // Detect the exact existing block-level prefix
-        let existing_prefix_len = Self::detect_block_prefix_len(trimmed);
-        let existing_prefix = &trimmed[..existing_prefix_len];
-
-        // If the line already has the exact same prefix, just remove it
-        if existing_prefix == prefix {
-            let body = &trimmed[existing_prefix_len..];
-            let mut new_line = String::with_capacity(leading_ws + body.len());
-            new_line.push_str(&line_text[..leading_ws]);
-            new_line.push_str(body);
-            self.buffer.replace(line_start..line_end, &new_line);
-            let new_col = self.cursor.offset.saturating_sub(prefix.len());
-            self.cursor
-                .move_to(new_col.min(self.buffer.len()), &self.buffer);
-            self.reparse();
-            self.scroll_to_cursor();
-            return;
+    fn adjust_offset_for_replaced_line(
+        offset: usize,
+        line_start: usize,
+        line_end: usize,
+        leading_ws: usize,
+        old_prefix_len: usize,
+        new_prefix_len: usize,
+        new_line_len: usize,
+    ) -> usize {
+        if offset <= line_start {
+            return offset;
         }
 
-        // Strip existing prefix and apply new one
-        let body = &trimmed[existing_prefix_len..];
+        let old_line_len = line_end.saturating_sub(line_start);
+        let diff = new_line_len as isize - old_line_len as isize;
+        if offset >= line_end {
+            return if diff >= 0 {
+                offset + diff as usize
+            } else {
+                offset.saturating_sub((-diff) as usize)
+            };
+        }
 
-        let mut new_line = String::with_capacity(leading_ws + prefix.len() + body.len());
-        new_line.push_str(&line_text[..leading_ws]);
-        new_line.push_str(prefix);
-        new_line.push_str(body);
-
-        self.buffer.replace(line_start..line_end, &new_line);
-        let cursor_delta = prefix.len() as isize - existing_prefix_len as isize;
-        let new_col = if cursor_delta >= 0 {
-            self.cursor.offset + cursor_delta as usize
+        let col = offset.saturating_sub(line_start);
+        let old_prefix_end = leading_ws + old_prefix_len;
+        let new_prefix_end = leading_ws + new_prefix_len;
+        if col <= leading_ws {
+            line_start + col.min(new_line_len)
+        } else if col <= old_prefix_end {
+            line_start + new_prefix_end.min(new_line_len)
         } else {
-            self.cursor.offset.saturating_sub((-cursor_delta) as usize)
-        };
-        self.cursor
-            .move_to(new_col.min(self.buffer.len()), &self.buffer);
+            line_start + (new_prefix_end + (col - old_prefix_end)).min(new_line_len)
+        }
+    }
+
+    pub(crate) fn toggle_current_line_prefix(&mut self, prefix: &str) {
+        let selection = self.cursor.selection_range();
+        let selection_start = selection.start.min(selection.end);
+        let selection_end = selection.start.max(selection.end);
+        let (start_line, _) = self.buffer.offset_to_line_col(selection_start);
+        let (mut end_line, _) = self.buffer.offset_to_line_col(selection_end);
+        if selection_end > selection_start && end_line > start_line {
+            let end_line_start = self.buffer.line_start(end_line);
+            if selection_end == end_line_start {
+                end_line = end_line.saturating_sub(1);
+            }
+        }
+
+        let mut cursor_offset = self.cursor.offset;
+        let mut anchor_offset = self.cursor.anchor;
+        for line in (start_line..=end_line).rev() {
+            let line_start = self.buffer.line_start(line);
+            let line_end = self.buffer.line_end(line);
+            let line_text = self.buffer.line_content(line).to_string();
+            let trimmed = line_text.trim_start();
+            let leading_ws = line_text.len() - trimmed.len();
+            let existing_prefix_len = Self::detect_block_prefix_len(trimmed);
+            let existing_prefix = &trimmed[..existing_prefix_len];
+
+            let new_line = if existing_prefix == prefix {
+                let body = &trimmed[existing_prefix_len..];
+                let mut new_line = String::with_capacity(leading_ws + body.len());
+                new_line.push_str(&line_text[..leading_ws]);
+                new_line.push_str(body);
+                new_line
+            } else {
+                let body = &trimmed[existing_prefix_len..];
+                let mut new_line = String::with_capacity(leading_ws + prefix.len() + body.len());
+                new_line.push_str(&line_text[..leading_ws]);
+                new_line.push_str(prefix);
+                new_line.push_str(body);
+                new_line
+            };
+
+            cursor_offset = Self::adjust_offset_for_replaced_line(
+                cursor_offset,
+                line_start,
+                line_end,
+                leading_ws,
+                existing_prefix_len,
+                if existing_prefix == prefix {
+                    0
+                } else {
+                    prefix.len()
+                },
+                new_line.len(),
+            );
+            anchor_offset = Self::adjust_offset_for_replaced_line(
+                anchor_offset,
+                line_start,
+                line_end,
+                leading_ws,
+                existing_prefix_len,
+                if existing_prefix == prefix {
+                    0
+                } else {
+                    prefix.len()
+                },
+                new_line.len(),
+            );
+
+            self.buffer.replace(line_start..line_end, &new_line);
+        }
+
+        self.cursor.offset = cursor_offset.min(self.buffer.len());
+        self.cursor.anchor = anchor_offset.min(self.buffer.len());
         self.reparse();
         self.scroll_to_cursor();
     }
@@ -2502,6 +2590,12 @@ impl EditorView {
         self.buffer = Buffer::from_text(&new_text);
         self.cursor.move_to(new_cursor, &self.buffer);
         self.reparse();
+        self.scroll_to_cursor();
+    }
+
+    pub(crate) fn move_cursor_to_first_line_end(&mut self) {
+        let target = self.buffer.line_end(0).min(self.buffer.len());
+        self.cursor.move_to(target, &self.buffer);
         self.scroll_to_cursor();
     }
 
@@ -3008,7 +3102,7 @@ pub(crate) fn classify_file_kind_for_bytes(path: &Path, bytes: &[u8]) -> FileKin
         return FileKind::Image;
     }
 
-    if let Ok(Some(syntax)) = helpers::syntax_set().find_syntax_for_file(path)
+    if let Some(syntax) = helpers::find_syntax_for_path(path)
         && syntax.name != "Plain Text"
         && syntax.name != "Markdown"
     {
@@ -3044,6 +3138,12 @@ pub(crate) fn file_kind_badge_text(path: &Path) -> Option<String> {
         .and_then(file_kind_badge_text_for_name)
 }
 
+pub(crate) fn file_kind_has_indicator(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(file_kind_has_indicator_for_name)
+}
+
 pub(crate) fn file_kind_badge_text_for_name(name: &str) -> Option<String> {
     let ext = Path::new(name)
         .extension()
@@ -3056,6 +3156,13 @@ pub(crate) fn file_kind_badge_text_for_name(name: &str) -> Option<String> {
     }
 }
 
+pub(crate) fn file_kind_has_indicator_for_name(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| !ext.is_empty())
+}
+
 pub(crate) fn split_file_name_for_display(name: &str) -> (&str, Option<&str>) {
     match name.rfind('.') {
         Some(index) if index > 0 && index + 1 < name.len() => {
@@ -3063,6 +3170,21 @@ pub(crate) fn split_file_name_for_display(name: &str) -> (&str, Option<&str>) {
         }
         _ => (name, None),
     }
+}
+
+pub(crate) fn resolve_wiki_link_target_path(sidebar_root: &Path, target: &str) -> Option<PathBuf> {
+    if target.trim().is_empty() {
+        return None;
+    }
+
+    let relative = PathBuf::from(target);
+    let resolved = if relative.is_absolute() {
+        relative
+    } else {
+        sidebar_root.join(relative)
+    };
+
+    resolved.exists().then_some(resolved)
 }
 
 pub(crate) fn parse_decorations_for_file_kind(
