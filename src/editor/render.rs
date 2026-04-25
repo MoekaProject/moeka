@@ -241,15 +241,17 @@ impl Render for EditorView {
                                     .relative()
                                     .flex_1()
                                     .overflow_hidden()
-                                    .cursor(if self.active_tab_is_image()
-                                        || self.active_tab_is_binary()
-                                        || self.hovering_checkbox
-                                        || self.hovering_image_edit_line.is_some()
-                                    {
-                                        CursorStyle::Arrow
-                                    } else {
-                                        CursorStyle::IBeam
-                                    })
+                                    .cursor(
+                                        if self.active_tab_is_image()
+                                            || self.active_tab_is_binary()
+                                            || self.hovering_checkbox
+                                            || self.hovering_image_edit_line.is_some()
+                                        {
+                                            CursorStyle::Arrow
+                                        } else {
+                                            CursorStyle::IBeam
+                                        },
+                                    )
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(|this, event, window, cx| {
@@ -459,7 +461,8 @@ impl Render for EditorView {
                                             )
                                     })
                                     .when(
-                                        self.search_visible && self.active_tab_supports_text_search(),
+                                        self.search_visible
+                                            && self.active_tab_supports_text_search(),
                                         |this: gpui::Stateful<gpui::Div>| {
                                             this.child(self.render_search_bar(cx))
                                         },
@@ -680,16 +683,19 @@ impl EditorView {
                     .text_color(self.theme.text_primary)
                     .cursor(CursorStyle::PointingHand)
                     .child("打开该非文本文件")
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        if let Some(path) = this
-                            .active_tab_index()
-                            .and_then(|index| this.tabs.get(index))
-                            .and_then(|tab| tab.path.clone())
-                        {
-                            let _ = std::process::Command::new("open").arg(path).spawn();
-                        }
-                        cx.notify();
-                    })),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            if let Some(path) = this
+                                .active_tab_index()
+                                .and_then(|index| this.tabs.get(index))
+                                .and_then(|tab| tab.path.clone())
+                            {
+                                let _ = std::process::Command::new("open").arg(path).spawn();
+                            }
+                            cx.notify();
+                        }),
+                    ),
             )
             .into_any_element()
     }

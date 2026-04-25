@@ -1,0 +1,67 @@
+schema_version: 1
+
+settings:
+  theme: OneDark
+  ui_font: .SystemUIFont
+  ui_scale: 1.0
+  body_latin_font: Menlo
+  body_cjk_font: PingFang SC
+  code_font: Menlo
+  font_size: 15.0
+  line_height: 1.5
+  letter_spacing: 1.0
+
+workspaces:
+  roots:
+  - /path/to/workspace-a
+  - /path/to/workspace-b
+  active_root: /path/to/workspace-a
+
+session:
+  active_tab_id: tab-2
+  next_tab_id: 5
+  tabs:
+  - id: settings-1
+    kind: settings
+    title: 设置
+    path: null
+    file_kind: null
+    is_preview: false
+    is_pinned: false
+    view:
+      cursor_offset: 0
+      cursor_anchor: 0
+      scroll_offset: 0.0
+    recovery:
+      temp_path: null
+      source_path: null
+      source_mtime: null
+      source_content_hash: null
+      recovered_from_temp: false
+    history:
+      undo_log_path: null
+      source_identity: null
+      current_index: null
+      entry_count: 0
+  - id: tab-2
+    kind: editor
+    title: note.md
+    path: /path/to/workspace-a/note.md
+    file_kind: markdown
+    is_preview: false
+    is_pinned: false
+    view:
+      cursor_offset: 128
+      cursor_anchor: 128
+      scroll_offset: 240.0
+    recovery:
+      temp_path: /path/to/workspace-a/.note.md.temp
+      source_path: /path/to/workspace-a/note.md
+      source_mtime: 1745529600
+      source_content_hash: samplehash
+      recovered_from_temp: true
+    history:
+      undo_log_path: /Users/example/Library/Caches/markdown-editor/history/note.md.44e0a532.undo.json
+      source_identity: /path/to/workspace-a/note.md
+      current_index: 12
+      entry_count: 18

@@ -18,11 +18,7 @@ impl EditorView {
                         )
                     })
                     .unwrap_or(line_count);
-                if end > start {
-                    Some(start..end)
-                } else {
-                    None
-                }
+                if end > start { Some(start..end) } else { None }
             }
             BlockType::CodeBlockFence => {
                 if line > 0
@@ -43,11 +39,7 @@ impl EditorView {
                     })
                     .map(|l| l + 1)
                     .unwrap_or(line_count);
-                if end > start {
-                    Some(start..end)
-                } else {
-                    None
-                }
+                if end > start { Some(start..end) } else { None }
             }
             BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_) => {
                 let content = self.buffer.line_content(line);
@@ -69,11 +61,7 @@ impl EditorView {
                         !lc.trim().is_empty() && li <= indent
                     })
                     .unwrap_or(line_count);
-                if end > start {
-                    Some(start..end)
-                } else {
-                    None
-                }
+                if end > start { Some(start..end) } else { None }
             }
             _ => None,
         }

@@ -112,7 +112,7 @@ impl Buffer {
         }
         o
     }
- 
+
     fn rebuild_line_starts(&mut self) {
         self.line_starts.clear();
         self.line_starts.push(0);

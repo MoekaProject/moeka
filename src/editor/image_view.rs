@@ -68,14 +68,23 @@ impl Element for ImageViewElement {
                 .active_tab_index()
                 .and_then(|index| editor.tabs.get(index))
             else {
-                return ImageViewPrepaintState { hitbox, image: None };
+                return ImageViewPrepaintState {
+                    hitbox,
+                    image: None,
+                };
             };
             let Some(path) = tab.path.as_ref() else {
-                return ImageViewPrepaintState { hitbox, image: None };
+                return ImageViewPrepaintState {
+                    hitbox,
+                    image: None,
+                };
             };
             let key = path.to_string_lossy();
             let Some(Some(image)) = editor.image_cache.get(key.as_ref()) else {
-                return ImageViewPrepaintState { hitbox, image: None };
+                return ImageViewPrepaintState {
+                    hitbox,
+                    image: None,
+                };
             };
 
             let state = tab.image_view;
@@ -83,7 +92,10 @@ impl Element for ImageViewElement {
             let image_width = image_size.width.0 as f32;
             let image_height = image_size.height.0 as f32;
             if image_width <= 0.0 || image_height <= 0.0 {
-                return ImageViewPrepaintState { hitbox, image: None };
+                return ImageViewPrepaintState {
+                    hitbox,
+                    image: None,
+                };
             }
 
             let fit_scale = (viewport_width / image_width)
@@ -91,12 +103,10 @@ impl Element for ImageViewElement {
                 .min(1.0);
             let display_width = image_width * fit_scale * state.zoom_factor;
             let display_height = image_height * fit_scale * state.zoom_factor;
-            let origin_x = f32::from(bounds.origin.x)
-                + (viewport_width - display_width) * 0.5
-                + state.pan_x;
-            let origin_y = f32::from(bounds.origin.y)
-                + (viewport_height - display_height) * 0.5
-                + state.pan_y;
+            let origin_x =
+                f32::from(bounds.origin.x) + (viewport_width - display_width) * 0.5 + state.pan_x;
+            let origin_y =
+                f32::from(bounds.origin.y) + (viewport_height - display_height) * 0.5 + state.pan_y;
 
             Some((
                 Bounds::new(

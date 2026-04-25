@@ -102,8 +102,10 @@ impl EditorView {
 
     fn build_file_tab(&mut self, path: &Path, is_preview: bool) -> Option<OpenTab> {
         let (snapshot, file_kind) = Self::load_editor_tab_state_for_path(path)?;
+        let id = self.next_tab_identity();
+        let history = history_store::load_tab_history(&id, Some(path), &snapshot);
         Some(OpenTab {
-            id: self.next_tab_identity(),
+            id,
             title: Self::title_for_path(path),
             kind: TabKind::Editor,
             path: Some(path.to_path_buf()),
@@ -114,6 +116,8 @@ impl EditorView {
             is_dirty: false,
             is_deleted: false,
             is_pinned: false,
+            recovery: config_store::TabRecoveryState::default(),
+            history,
         })
     }
 
@@ -159,6 +163,7 @@ impl EditorView {
         if focus_editor {
             self.request_editor_focus(cx);
         }
+        session_store::persist_session(self);
     }
 
     pub(crate) fn open_path_in_permanent_tab(
@@ -191,6 +196,7 @@ impl EditorView {
         if focus_editor {
             self.request_editor_focus(cx);
         }
+        session_store::persist_session(self);
     }
 
     fn should_track_in_recently_closed(tab: &OpenTab) -> bool {
@@ -218,6 +224,7 @@ impl EditorView {
         }
         self.persist_active_tab_state();
         self.activate_tab_by_index_without_persist(index, cx);
+        session_store::persist_session(self);
     }
 
     fn activate_tab_by_index_without_persist(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -285,6 +292,7 @@ impl EditorView {
             self.active_tab_id = None;
             self.pending_close_tab_ids.clear();
             cx.notify();
+            session_store::persist_session(self);
             return;
         }
         if was_active {
@@ -294,6 +302,7 @@ impl EditorView {
             cx.notify();
         }
         self.process_pending_close_queue(cx);
+        session_store::persist_session(self);
     }
 
     pub(crate) fn process_pending_close_queue(&mut self, cx: &mut Context<Self>) {
@@ -351,10 +360,13 @@ impl EditorView {
                 is_dirty: false,
                 is_deleted: false,
                 is_pinned: false,
+                recovery: closed_tab.recovery,
+                history: closed_tab.history,
             };
             self.tabs.push(tab);
             let index = self.tabs.len() - 1;
             self.activate_tab_by_index(index, cx);
+            session_store::persist_session(self);
         }
     }
 
@@ -540,11 +552,23 @@ impl EditorView {
             is_dirty: false,
             is_deleted: false,
             is_pinned: false,
+            recovery: config_store::TabRecoveryState::default(),
+            history: history_store::TabHistory::new(
+                Some(history_store::default_source_identity(
+                    &format!("tab-{}", self.next_tab_id),
+                    None,
+                )),
+                Some(history_store::default_journal_path(
+                    &format!("tab-{}", self.next_tab_id),
+                    None,
+                )),
+            ),
         };
         self.tabs.push(tab);
         if let Some(index) = self.tabs.len().checked_sub(1) {
             self.activate_tab_by_index(index, cx);
         }
+        session_store::persist_session(self);
     }
 
     pub(crate) fn next_tab_identity(&mut self) -> String {
@@ -578,6 +602,8 @@ impl EditorView {
             is_dirty: false,
             is_deleted: false,
             is_pinned: false,
+            recovery: config_store::TabRecoveryState::default(),
+            history: history_store::TabHistory::default(),
         };
         self.tabs.push(tab);
         self.ensure_settings_tab_first();
@@ -586,6 +612,7 @@ impl EditorView {
         if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Settings) {
             self.activate_tab_by_index(index, cx);
         }
+        session_store::persist_session(self);
     }
 
     // ── Tab rendering ───────────────────────────────────────────────
@@ -937,6 +964,8 @@ impl EditorView {
                     .h(px(self.tab_bar_height()))
                     .w(px(self.scaled(ts.tab_spacer_width_px)))
                     .flex_none()
+                    .border_r(px(ts.tab_bar_border_width_px))
+                    .border_color(ts.tab_bar_border_color)
                     .into_any_element(),
             );
         }
@@ -1007,9 +1036,6 @@ impl EditorView {
             .items_center()
             .bg(ts.tab_bar_bg)
             .border_b(px(ts.tab_bar_border_width_px))
-            .when(!self.sidebar_visible, |this| {
-                this.border_l(px(ts.tab_bar_border_width_px))
-            })
             .border_color(ts.tab_bar_border_color)
             .overflow_x_scroll()
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {

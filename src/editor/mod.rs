@@ -1,7 +1,10 @@
+mod config_paths;
+mod config_store;
 mod element;
 mod fold;
 mod handlers;
 mod helpers;
+mod history_store;
 mod image_view;
 mod input;
 mod menus;
@@ -10,9 +13,11 @@ mod quick_open;
 mod render;
 mod scaling;
 mod search;
+mod session_store;
 pub(crate) mod settings_panel;
 mod sidebar;
 mod tabs;
+mod temp_store;
 mod workspace_search;
 
 use std::collections::{HashMap, HashSet};
@@ -34,7 +39,7 @@ use crate::theme::{Theme, ThemeKind};
 
 // ── Persistent settings ─────────────────────────────────────────────
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AppSettings {
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -101,37 +106,12 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
-    fn config_path() -> PathBuf {
-        let mut path = dirs_fallback();
-        path.push("settings.json");
-        path
-    }
-
     pub fn load() -> Self {
-        let path = Self::config_path();
-        if path.exists() {
-            match std::fs::read_to_string(&path) {
-                Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-                Err(_) => Self::default(),
-            }
-        } else {
-            Self::default()
-        }
+        config_store::load_settings()
     }
 
     pub fn save(&self) {
-        let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("failed to create settings directory: {e}");
-                return;
-            }
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            if let Err(e) = std::fs::write(&path, json) {
-                eprintln!("failed to save settings: {e}");
-            }
-        }
+        config_store::save_settings(self);
     }
 
     fn theme_kind(&self) -> ThemeKind {
@@ -156,17 +136,6 @@ fn theme_kind_to_string(kind: ThemeKind) -> String {
         ThemeKind::MilkyDark => "MilkyDark",
     }
     .to_string()
-}
-
-fn dirs_fallback() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        let mut p = PathBuf::from(home);
-        p.push(".config");
-        p.push("markdown-editor");
-        p
-    } else {
-        PathBuf::from(".")
-    }
 }
 
 // ── Platform helpers ────────────────────────────────────────────────
@@ -249,7 +218,7 @@ pub(crate) const FMT_IMAGE_SVG: &str = "assets/icons/format/image.svg";
 
 // ── Data types ──────────────────────────────────────────────────────
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct EditorSnapshot {
     pub text: String,
     pub cursor_offset: usize,
@@ -257,7 +226,7 @@ pub(crate) struct EditorSnapshot {
     pub scroll_offset: f32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TabKind {
     Editor,
     Settings,
@@ -335,6 +304,8 @@ pub(crate) struct OpenTab {
     pub is_dirty: bool,
     pub is_deleted: bool,
     pub is_pinned: bool,
+    pub recovery: config_store::TabRecoveryState,
+    pub history: history_store::TabHistory,
 }
 
 #[derive(Clone, Debug)]
@@ -662,8 +633,6 @@ pub struct EditorView {
     /// Which specific handle is selected: (table_start_line, is_column, index)
     pub(crate) selected_handle: Option<(usize, bool, usize)>,
     pub(crate) image_cache: HashMap<String, Option<Arc<RenderImage>>>,
-    pub(crate) undo_stack: Vec<EditorSnapshot>,
-    pub(crate) redo_stack: Vec<EditorSnapshot>,
     pub(crate) sidebar_root: PathBuf,
     pub(crate) expanded_dirs: HashSet<PathBuf>,
     /// 多选：所有选中的 sidebar 路径
@@ -725,6 +694,8 @@ pub struct EditorView {
     pub(crate) sidebar_render_limit: usize,
     pub(crate) workspaces: Vec<PathBuf>,
     pub(crate) _watcher_task: Option<Task<()>>,
+    pub(crate) temp_save_tasks: HashMap<String, Task<()>>,
+    pub(crate) temp_save_epochs: HashMap<String, usize>,
     pub(crate) outline_visible: bool,
     pub(crate) outline_custom_width: Option<f32>,
     pub(crate) outline_resizing: bool,
@@ -863,8 +834,6 @@ impl EditorView {
             hovering_handle: None,
             selected_handle: None,
             image_cache: HashMap::new(),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
             sidebar_root: sidebar_root.clone(),
             expanded_dirs,
             selected_sidebar_paths: HashSet::new(),
@@ -883,6 +852,11 @@ impl EditorView {
                     is_dirty: false,
                     is_deleted: false,
                     is_pinned: false,
+                    recovery: config_store::TabRecoveryState::default(),
+                    history: history_store::TabHistory::new(
+                        Some(history_store::default_source_identity("welcome-1", None)),
+                        Some(history_store::default_journal_path("welcome-1", None)),
+                    ),
                 },
                 OpenTab {
                     id: "settings-1".to_string(),
@@ -901,6 +875,8 @@ impl EditorView {
                     is_dirty: false,
                     is_deleted: false,
                     is_pinned: false,
+                    recovery: config_store::TabRecoveryState::default(),
+                    history: history_store::TabHistory::default(),
                 },
             ],
             active_tab_id: Some("settings-1".to_string()),
@@ -953,6 +929,8 @@ impl EditorView {
             sidebar_render_limit: 200,
             workspaces: Vec::new(),
             _watcher_task: None,
+            temp_save_tasks: HashMap::new(),
+            temp_save_epochs: HashMap::new(),
             outline_visible: false,
             outline_custom_width: None,
             outline_resizing: false,
@@ -1015,8 +993,11 @@ impl EditorView {
             cached_font_names: None,
             app_settings,
         };
+        session_store::restore_session(&mut this);
         this.start_blinking(cx);
-        this.start_watching(cx);
+        if !this.sidebar_root.as_os_str().is_empty() {
+            this.start_watching(cx);
+        }
         this.ensure_font_size_editor(cx);
         this.ensure_ui_font_size_editor(cx);
 
@@ -1282,6 +1263,15 @@ impl EditorView {
                         if std::fs::write(path, &tab.snapshot.text).is_ok() {
                             tab.is_dirty = false;
                         }
+                        let snapshot = tab.snapshot.clone();
+                        let _ = history_store::persist_tab_history(
+                            &tab_id,
+                            tab.path.as_deref(),
+                            &mut tab.history,
+                            &snapshot,
+                        );
+                        self.clear_temp_file_for_tab(&tab_id);
+                        session_store::persist_session(self);
                         self.close_tab(&tab_id, cx);
                     } else {
                         let text = tab.snapshot.text.clone();
@@ -1301,7 +1291,16 @@ impl EditorView {
                                             tab.path = Some(path.clone());
                                             tab.title = Self::title_for_path(&path);
                                             tab.is_dirty = false;
+                                            let snapshot = tab.snapshot.clone();
+                                            let _ = history_store::persist_tab_history(
+                                                &tab_id_clone,
+                                                tab.path.as_deref(),
+                                                &mut tab.history,
+                                                &snapshot,
+                                            );
                                         }
+                                        editor.clear_temp_file_for_tab(&tab_id_clone);
+                                        session_store::persist_session(editor);
                                         editor.close_tab(&tab_id_clone, cx);
                                     })
                                     .ok();
@@ -1520,6 +1519,7 @@ impl EditorView {
         self.cursor_opacity_direction = -1.0;
         let epoch = self.next_blink_epoch();
         self.persist_active_tab_state();
+        self.schedule_temp_save_for_active_tab(cx);
         cx.notify();
         let pause_delay = self.styles.cursor.blink_pause_delay();
         cx.spawn(async move |this, cx| {
@@ -2037,6 +2037,7 @@ impl EditorView {
         self.buffer = Buffer::from_text(&snapshot.text);
         self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
         self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());
+        self.scroll_offset = snapshot.scroll_offset;
         self.marked_range = None;
         self.ime_composition_snapshot = None;
         self.reparse();
@@ -2044,12 +2045,10 @@ impl EditorView {
     }
 
     pub(crate) fn push_undo_snapshot(&mut self, snapshot: EditorSnapshot) {
-        self.undo_stack.push(snapshot);
-        self.redo_stack.clear();
-        self.mark_active_tab_dirty();
-        if self.undo_stack.len() > 300 {
-            self.undo_stack.remove(0);
+        if let Some(index) = self.active_tab_index() {
+            self.tabs[index].history.push_undo_snapshot(snapshot);
         }
+        self.mark_active_tab_dirty();
     }
 
     pub(crate) fn checkpoint(&mut self) {

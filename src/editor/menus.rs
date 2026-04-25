@@ -2035,7 +2035,7 @@ impl EditorView {
                 ));
                 items.push(self.render_context_menu_separator());
                 items.push(self.render_context_menu_item_with_icon(
-                    "打开设置...",
+                    "应用设置...",
                     "assets/icons/setting.svg",
                     false,
                     cx,

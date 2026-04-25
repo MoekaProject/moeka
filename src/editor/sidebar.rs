@@ -601,6 +601,7 @@ impl EditorView {
                         editor.workspaces.push(path.clone());
                     }
                     editor.switch_workspace(path, cx);
+                    session_store::persist_session(editor);
                 })
                 .ok();
             }
@@ -623,6 +624,7 @@ impl EditorView {
         self.context_menu = None;
         self.start_watching(cx);
         cx.notify();
+        session_store::persist_session(self);
     }
 
     pub(crate) fn close_workspace(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -642,6 +644,7 @@ impl EditorView {
             self.context_menu = None;
             self._watcher_task = None;
             cx.notify();
+            session_store::persist_session(self);
             return;
         }
         if self.sidebar_root == path {
@@ -655,6 +658,7 @@ impl EditorView {
             self.context_menu = None;
             cx.notify();
         }
+        session_store::persist_session(self);
     }
 
     pub(crate) fn open_workspace_menu(
@@ -754,7 +758,11 @@ impl EditorView {
 
         if !file_kind_has_indicator_for_name(name) {
             let icon_size = px(self.scaled(ss.sidebar_item_icon_size_px));
-            return div().w(icon_size).h(icon_size).flex_none().into_any_element();
+            return div()
+                .w(icon_size)
+                .h(icon_size)
+                .flex_none()
+                .into_any_element();
         }
 
         svg()

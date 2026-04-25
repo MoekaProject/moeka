@@ -9,9 +9,13 @@ impl EditorView {
     // ── Action handlers ─────────────────────────────────────────────
 
     pub(crate) fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(snapshot) = self.undo_stack.pop() {
-            self.redo_stack.push(self.current_snapshot());
+        let current = self.current_snapshot();
+        if let Some(index) = self.active_tab_index()
+            && let Some(snapshot) = self.tabs[index].history.take_undo(&current)
+        {
             self.restore_snapshot(snapshot);
+            self.tabs[index].snapshot = self.current_snapshot();
+            session_store::persist_session(self);
             self.pause_blinking(cx);
         }
     }
@@ -57,9 +61,13 @@ impl EditorView {
     }
 
     pub(crate) fn on_redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(snapshot) = self.redo_stack.pop() {
-            self.undo_stack.push(self.current_snapshot());
+        let current = self.current_snapshot();
+        if let Some(index) = self.active_tab_index()
+            && let Some(snapshot) = self.tabs[index].history.take_redo(&current)
+        {
             self.restore_snapshot(snapshot);
+            self.tabs[index].snapshot = self.current_snapshot();
+            session_store::persist_session(self);
             self.pause_blinking(cx);
         }
     }
@@ -1199,6 +1207,18 @@ impl EditorView {
         if let Some(ref path) = self.tabs[index].path.clone() {
             if std::fs::write(path, &text).is_ok() {
                 self.tabs[index].is_dirty = false;
+                let tab_id = self.tabs[index].id.clone();
+                self.clear_temp_file_for_tab(&tab_id);
+                self.tabs[index].snapshot = self.current_snapshot();
+                let snapshot = self.tabs[index].snapshot.clone();
+                let source_path = self.tabs[index].path.clone();
+                let _ = history_store::persist_tab_history(
+                    &tab_id,
+                    source_path.as_deref(),
+                    &mut self.tabs[index].history,
+                    &snapshot,
+                );
+                session_store::persist_session(self);
                 cx.notify();
             }
         } else {
@@ -1209,19 +1229,31 @@ impl EditorView {
                     .background_executor()
                     .spawn(async move { helpers::save_file_blocking(&default_name) })
                     .await;
-                if let Some(path) = maybe_path {
-                    if std::fs::write(&path, &text).is_ok() {
-                        this.update(cx, |editor, cx| {
-                            if let Some(idx) = editor.active_tab_index() {
-                                editor.tabs[idx].path = Some(path.clone());
-                                editor.tabs[idx].title = EditorView::title_for_path(&path);
-                                editor.tabs[idx].is_dirty = false;
-                                editor.current_file_path = Some(path);
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                    }
+                if let Some(path) = maybe_path
+                    && std::fs::write(&path, &text).is_ok()
+                {
+                    this.update(cx, |editor, cx| {
+                        if let Some(idx) = editor.active_tab_index() {
+                            let tab_id = editor.tabs[idx].id.clone();
+                            editor.tabs[idx].path = Some(path.clone());
+                            editor.tabs[idx].title = EditorView::title_for_path(&path);
+                            editor.tabs[idx].is_dirty = false;
+                            editor.tabs[idx].snapshot = editor.current_snapshot();
+                            let snapshot = editor.tabs[idx].snapshot.clone();
+                            let source_path = editor.tabs[idx].path.clone();
+                            editor.clear_temp_file_for_tab(&tab_id);
+                            let _ = history_store::persist_tab_history(
+                                &tab_id,
+                                source_path.as_deref(),
+                                &mut editor.tabs[idx].history,
+                                &snapshot,
+                            );
+                            editor.current_file_path = Some(path);
+                            session_store::persist_session(editor);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
                 }
             })
             .detach();
