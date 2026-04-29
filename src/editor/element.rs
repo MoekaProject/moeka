@@ -453,17 +453,18 @@ impl Element for EditorElement {
                 configured.into()
             }
         };
+        let body_cjk_fallbacks = |configured: &'static str| {
+            (configured != editor_styles.editor_body_cjk_font_family).then(|| {
+                FontFallbacks::from_fonts(vec![editor_styles.editor_body_cjk_font_family.to_string()])
+            })
+        };
         let mut monospace_font = text_style.font();
         monospace_font.family = configured_font_family(editor_styles.editor_monospace_font_family);
-        monospace_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
-            editor_styles.editor_body_cjk_font_family.to_string(),
-        ]));
+        monospace_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_monospace_font_family);
 
         let mut body_font = text_style.font();
         body_font.family = configured_font_family(editor_styles.editor_body_latin_font_family);
-        body_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
-            editor_styles.editor_body_cjk_font_family.to_string(),
-        ]));
+        body_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_body_latin_font_family);
 
         let mut body_cjk_font = text_style.font();
         body_cjk_font.family = configured_font_family(editor_styles.editor_body_cjk_font_family);
@@ -472,9 +473,7 @@ impl Element for EditorElement {
         let mut heading_font = text_style.font();
         heading_font.family =
             configured_font_family(editor_styles.editor_heading_latin_font_family);
-        heading_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
-            editor_styles.editor_heading_cjk_font_family.to_string(),
-        ]));
+        heading_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_heading_latin_font_family);
 
         let mut heading_cjk_font = text_style.font();
         heading_cjk_font.family =
@@ -621,6 +620,19 @@ impl Element for EditorElement {
             let ime_active_on_line = editor.marked_range.as_ref().is_some_and(|marked| {
                 marked.start < line_end_offset && marked.end >= line_start_offset
             });
+            let ime_cursor_col = editor.marked_range.as_ref().and_then(|marked| {
+                if marked.end < line_start_offset || marked.start > line_end_offset {
+                    return None;
+                }
+
+                let anchor = if marked.start >= line_start_offset {
+                    marked.start
+                } else {
+                    marked.end.min(line_end_offset)
+                };
+
+                Some(anchor.saturating_sub(line_start_offset).min(line_content.len()))
+            });
             let cursor_col = if editor.cursor.has_selection()
                 && matches!(decoration.block_type, BlockType::Heading(_))
             {
@@ -670,7 +682,9 @@ impl Element for EditorElement {
                     None
                 }
             } else if ime_active_on_line {
-                Some(line_content.len())
+                ime_cursor_col.or_else(|| {
+                    Some(cursor.offset.saturating_sub(line_start_offset).min(line_content.len()))
+                })
             } else if is_cursor_line {
                 Some(cursor.offset.saturating_sub(line_start_offset))
             } else if cursor_in_table {

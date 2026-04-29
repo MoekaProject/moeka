@@ -85,6 +85,10 @@ pub(crate) fn build_display_text(
     task_source_indent_step_chars: usize,
 ) -> (String, Vec<usize>, Vec<usize>, bool) {
     let len = line_content.len();
+    let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+    let trimmed = &line_content[leading_ws..];
+    let task_core_len = task_core_syntax_len(trimmed);
+    let task_fold_len = task_prefix_len(trimmed);
 
     if decoration.block_type == BlockType::Table {
         if let Some(ref table_info) = decoration.table_info {
@@ -133,6 +137,13 @@ pub(crate) fn build_display_text(
             if decoration.block_type == BlockType::CodeBlockFence && code_block_syntax_active {
                 return false;
             }
+            if matches!(decoration.block_type, BlockType::TaskList(_))
+                && task_core_len > 0
+                && sr.trigger_range.start == leading_ws
+                && sr.trigger_range.end <= leading_ws + task_fold_len.max(task_core_len)
+            {
+                return task_prefix_is_folded(line_content, leading_ws, task_core_len, cursor_col);
+            }
             cursor_col.map_or(true, |col| {
                 let at_eol = col >= len;
                 // For headings: always expand syntax when cursor is on the line and not at EOL;
@@ -175,9 +186,6 @@ pub(crate) fn build_display_text(
         }
     }
 
-    let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
-    let trimmed = &line_content[leading_ws..];
-
     let prefix_range_and_replacement = match decoration.block_type {
         BlockType::UnorderedList => {
             let fold_len = if trimmed.starts_with("- ")
@@ -199,16 +207,16 @@ pub(crate) fn build_display_text(
             ))
         }
         BlockType::TaskList(_) => {
-            let fold_len = task_prefix_len(trimmed);
-            let trigger_len = task_syntax_len(trimmed);
+            let fold_len = task_fold_len;
             let visual_indent = task_visual_indent_chars(
                 leading_ws,
                 task_indent_step_chars,
                 task_source_indent_step_chars,
             );
             let replacement = " ".repeat(visual_indent + collapsed_task_prefix_chars.max(1));
-            (fold_len > 0 && prefix_is_folded(leading_ws, trigger_len, cursor_col))
-                .then_some((0..leading_ws + fold_len, replacement))
+            (fold_len > 0
+                && task_prefix_is_folded(line_content, leading_ws, task_core_len, cursor_col))
+            .then_some((0..leading_ws + fold_len, replacement))
         }
         _ => None,
     };
@@ -1035,8 +1043,37 @@ fn task_prefix_len(trimmed: &str) -> usize {
     0
 }
 
-fn task_syntax_len(trimmed: &str) -> usize {
-    task_prefix_len(trimmed)
+fn task_core_syntax_len(trimmed: &str) -> usize {
+    for marker in ["- [ ]", "- [x]", "* [ ]", "* [x]", "+ [ ]", "+ [x]"] {
+        if trimmed.starts_with(marker) {
+            return marker.len();
+        }
+    }
+    0
+}
+
+fn task_prefix_is_folded(
+    line_content: &str,
+    leading_ws: usize,
+    task_core_len: usize,
+    cursor_col: Option<usize>,
+) -> bool {
+    cursor_col.is_none_or(|col| {
+        let core_end = leading_ws + task_core_len;
+        if col < leading_ws {
+            return true;
+        }
+        if col < core_end {
+            return false;
+        }
+        if col == core_end {
+            return line_content
+                .as_bytes()
+                .get(core_end)
+                .is_some_and(|byte| *byte == b' ');
+        }
+        true
+    })
 }
 
 pub(crate) fn syntax_set() -> &'static SyntaxSet {
@@ -1171,6 +1208,36 @@ fn syntax_lookup_candidates(language: &str) -> Vec<String> {
     }
 
     candidates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{prefix_is_folded, task_prefix_is_folded};
+
+    #[test]
+    fn regular_prefix_hides_at_trailing_edge() {
+        assert!(prefix_is_folded(0, 2, Some(2)));
+    }
+
+    #[test]
+    fn task_prefix_stays_visible_without_trailing_space() {
+        assert!(!task_prefix_is_folded("- [ ]", 0, 5, Some(5)));
+    }
+
+    #[test]
+    fn task_prefix_stays_visible_before_non_space_suffix() {
+        assert!(!task_prefix_is_folded("- [ ]a", 0, 5, Some(5)));
+    }
+
+    #[test]
+    fn task_prefix_hides_when_trailing_space_exists() {
+        assert!(task_prefix_is_folded("- [ ] ", 0, 5, Some(5)));
+    }
+
+    #[test]
+    fn task_prefix_hides_after_content_gap() {
+        assert!(task_prefix_is_folded("- [ ] text", 0, 5, Some(6)));
+    }
 }
 
 pub(crate) fn find_syntax_for_language(language: &str) -> Option<&'static SyntaxReference> {
@@ -1896,17 +1963,37 @@ pub(crate) fn build_text_runs_for_display(
     let mut buf_bg_colors: Vec<Option<Hsla>> = vec![None; buf_len];
     let mut buf_strikethroughs: Vec<bool> = vec![false; buf_len];
     let mut buf_font_roles: Vec<FontRole> = vec![FontRole::BodyLatin; buf_len];
+    let mut assign_font_roles =
+        |range: Range<usize>, latin_role: FontRole, non_latin_role: FontRole| {
+            let start = range.start.min(buf_len);
+            let end = range.end.min(buf_len);
+            if start >= end {
+                return;
+            }
+
+            for (char_start, ch) in line_content[start..end].char_indices() {
+                let absolute_start = start + char_start;
+                let absolute_end = (absolute_start + ch.len_utf8()).min(end);
+                let role = if prefers_latin_text_font(ch) {
+                    latin_role
+                } else {
+                    non_latin_role
+                };
+                for index in absolute_start..absolute_end {
+                    buf_font_roles[index] = role;
+                }
+            }
+        };
 
     // Fence lines (``` or ```lang) always render semi-transparent
     if matches!(decoration.block_type, BlockType::CodeBlockFence) {
         let mut fence_color = theme.text_secondary;
         fence_color.a *= 0.5;
         buf_colors.fill(fence_color);
-        buf_font_roles.fill(FontRole::Monospace);
     }
 
     if is_code_line {
-        buf_font_roles.fill(FontRole::Monospace);
+        assign_font_roles(0..buf_len, FontRole::Monospace, FontRole::BodyCjk);
     } else {
         let is_heading = matches!(decoration.block_type, BlockType::Heading(_));
         for (start, ch) in line_content.char_indices() {
@@ -1922,9 +2009,7 @@ pub(crate) fn build_text_runs_for_display(
                 FontRole::BodyCjk
             };
             let end = start + ch.len_utf8();
-            for idx in start..end.min(buf_len) {
-                buf_font_roles[idx] = role;
-            }
+            assign_font_roles(start..end.min(buf_len), role, role);
         }
     }
 
@@ -2002,7 +2087,6 @@ pub(crate) fn build_text_runs_for_display(
                 InlineKind::InlineCode => {
                     buf_colors[i] = theme.inline_code;
                     buf_bg_colors[i] = Some(theme.bg_code_inline);
-                    buf_font_roles[i] = FontRole::Monospace;
                 }
                 InlineKind::Link => {
                     buf_colors[i] = theme.link;
@@ -2011,6 +2095,10 @@ pub(crate) fn build_text_runs_for_display(
                     buf_colors[i] = theme.link;
                 }
             }
+        }
+
+        if matches!(span.kind, InlineKind::InlineCode) {
+            assign_font_roles(start..end, FontRole::Monospace, FontRole::BodyCjk);
         }
     }
 
@@ -2046,8 +2134,8 @@ pub(crate) fn build_text_runs_for_display(
                     };
                     for i in start..end {
                         buf_colors[i] = syntax_color;
-                        buf_font_roles[i] = FontRole::Monospace;
                     }
+                    assign_font_roles(start..end, FontRole::Monospace, FontRole::BodyCjk);
                 }
             }
         }
@@ -2058,8 +2146,8 @@ pub(crate) fn build_text_runs_for_display(
             let end = sr.range.end.min(buf_len);
             for i in start..end {
                 buf_colors[i] = theme.syntax_marker;
-                buf_font_roles[i] = FontRole::Monospace;
             }
+            assign_font_roles(start..end, FontRole::Monospace, FontRole::BodyCjk);
         }
     }
 

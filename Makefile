@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-APP_NAME := TokiwaNotes
+APP_NAME := markdown-editor
 TARGET ?= x86_64-apple-darwin
 PROFILE ?= release
 VERSION := $(shell awk -F '"' '/^version = / { print $$2; exit }' Cargo.toml)

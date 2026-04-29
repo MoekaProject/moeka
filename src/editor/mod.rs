@@ -688,6 +688,8 @@ pub struct EditorView {
     pub(crate) sidebar_drag_hover_target: Option<PathBuf>,
     /// 拖拽悬停自动展开的延迟 task
     pub(crate) sidebar_drag_expand_task: Option<Task<()>>,
+    /// 拖拽悬停时自动展开、离开后应回折的目录
+    pub(crate) sidebar_drag_auto_expanded_target: Option<PathBuf>,
     pub(crate) sidebar_items_cache: Vec<SidebarItem>,
     pub(crate) sidebar_items_dirty: bool,
     pub(crate) sidebar_scroll_handle: ScrollHandle,
@@ -923,6 +925,7 @@ impl EditorView {
             sidebar_sort_mode: SidebarSortMode::NameAsc,
             sidebar_drag_hover_target: None,
             sidebar_drag_expand_task: None,
+            sidebar_drag_auto_expanded_target: None,
             sidebar_items_cache: Vec::new(),
             sidebar_items_dirty: true,
             sidebar_scroll_handle: ScrollHandle::new(),
@@ -2137,6 +2140,7 @@ impl EditorView {
 
         let mut cursor_offset = self.cursor.offset;
         let mut anchor_offset = self.cursor.anchor;
+        let mut inserted_prefix_cursor_target = None;
         for line in (start_line..=end_line).rev() {
             let line_start = self.buffer.line_start(line);
             let line_end = self.buffer.line_end(line);
@@ -2160,6 +2164,14 @@ impl EditorView {
                 new_line.push_str(body);
                 new_line
             };
+
+            if selection.is_empty()
+                && start_line == end_line
+                && line == start_line
+                && existing_prefix != prefix
+            {
+                inserted_prefix_cursor_target = Some(line_start + leading_ws + prefix.len());
+            }
 
             cursor_offset = Self::adjust_offset_for_replaced_line(
                 cursor_offset,
@@ -2191,8 +2203,14 @@ impl EditorView {
             self.buffer.replace(line_start..line_end, &new_line);
         }
 
-        self.cursor.offset = cursor_offset.min(self.buffer.len());
-        self.cursor.anchor = anchor_offset.min(self.buffer.len());
+        if let Some(target) = inserted_prefix_cursor_target {
+            let target = target.min(self.buffer.len());
+            self.cursor.offset = target;
+            self.cursor.anchor = target;
+        } else {
+            self.cursor.offset = cursor_offset.min(self.buffer.len());
+            self.cursor.anchor = anchor_offset.min(self.buffer.len());
+        }
         self.reparse();
         self.scroll_to_cursor();
     }
@@ -2501,27 +2519,33 @@ impl EditorView {
 
         // Try to find an enclosing inline span the cursor/selection is in
         if let Some(dec) = self.decorations.get(line).cloned() {
-            let enclosing = dec.inline_spans.iter().find(|span| {
-                let kind_prefix_len = match span.kind {
-                    crate::markdown::InlineKind::Bold => 2,
-                    crate::markdown::InlineKind::Italic => 1,
-                    crate::markdown::InlineKind::Strikethrough => 2,
-                    crate::markdown::InlineKind::InlineCode => 1,
-                    _ => return false,
-                };
-                let marker_start = span.range.start.saturating_sub(kind_prefix_len);
-                let kind_suffix_len = kind_prefix_len;
-                let marker_end = (span.range.end + kind_suffix_len).min(line_content.len());
-                if self.cursor.has_selection() {
-                    let sel = self.cursor.selection_range();
-                    let line_start = self.buffer.line_start(line);
-                    let sel_start_col = sel.start.saturating_sub(line_start);
-                    let sel_end_col = sel.end.saturating_sub(line_start);
-                    sel_start_col >= marker_start && sel_end_col <= marker_end
-                } else {
-                    col >= marker_start && col <= marker_end
-                }
-            });
+            let enclosing = dec
+                .inline_spans
+                .iter()
+                .filter_map(|span| {
+                    let kind_prefix_len = match span.kind {
+                        crate::markdown::InlineKind::Bold => 2,
+                        crate::markdown::InlineKind::Italic => 1,
+                        crate::markdown::InlineKind::Strikethrough => 2,
+                        crate::markdown::InlineKind::InlineCode => 1,
+                        _ => return None,
+                    };
+                    let marker_start = span.range.start.saturating_sub(kind_prefix_len);
+                    let marker_end = (span.range.end + kind_prefix_len).min(line_content.len());
+                    let contains_cursor = if self.cursor.has_selection() {
+                        let sel = self.cursor.selection_range();
+                        let line_start = self.buffer.line_start(line);
+                        let sel_start_col = sel.start.saturating_sub(line_start);
+                        let sel_end_col = sel.end.saturating_sub(line_start);
+                        sel_start_col >= marker_start && sel_end_col <= marker_end
+                    } else {
+                        col >= marker_start && col <= marker_end
+                    };
+
+                    contains_cursor.then_some((marker_end - marker_start, span))
+                })
+                .min_by_key(|(span_len, _)| *span_len)
+                .map(|(_, span)| span);
 
             if let Some(span) = enclosing.cloned() {
                 let (existing_prefix, existing_suffix) = match span.kind {

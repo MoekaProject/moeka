@@ -888,19 +888,36 @@ fn detect_wiki_links(decorations: &mut [LineDecoration], text: &str, line_starts
         }
 
         let line_content = get_line_content(text, line_starts, line, line_count);
-        let mut search_start = 0usize;
+        let mut open_stack = Vec::new();
+        let mut pairs = Vec::new();
+        let mut index = 0usize;
 
-        while search_start + 4 <= line_content.len() {
-            let Some(open_rel) = line_content[search_start..].find("[[") else {
+        while index < line_content.len() {
+            if line_content.get(index..index + 2) == Some("[[") {
+                open_stack.push(index);
+                index += 2;
+                continue;
+            }
+
+            if line_content.get(index..index + 2) == Some("]]") {
+                if let Some(open) = open_stack.pop() {
+                    pairs.push((open, index + 2));
+                }
+                index += 2;
+                continue;
+            }
+
+            let Some(ch) = line_content[index..].chars().next() else {
                 break;
             };
-            let open = search_start + open_rel;
+            index += ch.len_utf8();
+        }
+
+        pairs.sort_by_key(|(open, _)| *open);
+
+        for (open, full_end) in pairs {
             let inner_start = open + 2;
-            let Some(close_rel) = line_content[inner_start..].find("]]") else {
-                break;
-            };
-            let close_start = inner_start + close_rel;
-            let full_end = close_start + 2;
+            let close_start = full_end.saturating_sub(2);
             let target_path = &line_content[inner_start..close_start];
 
             if !target_path.trim().is_empty() {
@@ -928,8 +945,6 @@ fn detect_wiki_links(decorations: &mut [LineDecoration], text: &str, line_starts
                     });
                 }
             }
-
-            search_start = full_end;
         }
     }
 }

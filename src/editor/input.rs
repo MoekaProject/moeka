@@ -84,6 +84,22 @@ fn auto_paired_delimiter_matches(open: char, close: char) -> bool {
     )
 }
 
+fn code_block_autocomplete_range(text: &str, cursor_offset: usize, new_text: &str) -> Option<Range<usize>> {
+    if new_text != "`" || cursor_offset < 2 {
+        return None;
+    }
+
+    if text.get(cursor_offset - 2..cursor_offset) != Some("``") {
+        return None;
+    }
+
+    if cursor_offset >= 3 && text.get(cursor_offset - 3..cursor_offset - 2) == Some("`") {
+        return None;
+    }
+
+    Some(cursor_offset - 2..cursor_offset)
+}
+
 fn ime_debug_enabled() -> bool {
     false
 }
@@ -393,7 +409,7 @@ impl EditorView {
             self.cursor.select_to(offset, &self.buffer);
         } else {
             self.cursor.move_to(offset, &self.buffer);
-            self.maybe_auto_select_link_url(prev_offset, true);
+            self.maybe_auto_select_link_url(prev_offset, true, cx);
         }
         cx.notify();
     }
@@ -430,10 +446,12 @@ impl EditorView {
         &mut self,
         prev_offset: usize,
         also_select_desc: bool,
+        cx: &mut Context<Self>,
     ) {
         let new_offset = self.cursor.offset;
         let (line, _) = self.buffer.offset_to_line_col(new_offset);
         let line_start = self.buffer.line_start(line);
+        let mut matched_inline_link = false;
         if let Some(dec) = self.decorations.get(line) {
             let spans: Vec<_> = dec.inline_spans.clone();
             let syntax_ranges: Vec<_> = dec.syntax_ranges.clone();
@@ -468,6 +486,7 @@ impl EditorView {
                         self.cursor.anchor = url_abs_start;
                         self.cursor.offset = url_abs_end;
                         self.is_selecting = false;
+                        matched_inline_link = true;
                         break 'link_check;
                     }
                 }
@@ -479,10 +498,41 @@ impl EditorView {
                         self.cursor.anchor = desc_abs_start;
                         self.cursor.offset = desc_abs_end;
                         self.is_selecting = false;
+                        matched_inline_link = true;
                         break 'link_check;
                     }
                 }
             }
+
+            if !matched_inline_link {
+                for wiki_link in &dec.wiki_links {
+                    let full_abs_start = line_start + wiki_link.full_range.start;
+                    let full_abs_end = line_start + wiki_link.full_range.end;
+                    let inner_abs_start = full_abs_start + 2;
+                    let inner_abs_end = full_abs_end.saturating_sub(2);
+
+                    if new_offset < inner_abs_start || new_offset > inner_abs_end {
+                        continue;
+                    }
+
+                    let entered_from_outside = prev_offset < full_abs_start || prev_offset > full_abs_end;
+                    if entered_from_outside && inner_abs_start < inner_abs_end {
+                        self.cursor.anchor = inner_abs_start;
+                        self.cursor.offset = inner_abs_end;
+                        self.is_selecting = false;
+                    }
+
+                    if self.wiki_link_start != Some(full_abs_start) {
+                        self.open_wiki_link_menu(full_abs_start, cx);
+                    }
+                    self.update_wiki_link_query(cx);
+                    return;
+                }
+            }
+        }
+
+        if self.wiki_link_start.is_some() {
+            self.sync_wiki_link_menu(cx);
         }
     }
 
@@ -1015,18 +1065,19 @@ impl EditorView {
                 configured.into()
             }
         };
+        let body_cjk_fallbacks = |configured: &'static str| {
+            (configured != editor_styles.editor_body_cjk_font_family).then(|| {
+                FontFallbacks::from_fonts(vec![editor_styles.editor_body_cjk_font_family.to_string()])
+            })
+        };
 
         let mut monospace_font = text_style.font();
         monospace_font.family = configured_font_family(editor_styles.editor_monospace_font_family);
-        monospace_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
-            editor_styles.editor_body_cjk_font_family.to_string(),
-        ]));
+        monospace_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_monospace_font_family);
 
         let mut body_font = text_style.font();
         body_font.family = configured_font_family(editor_styles.editor_body_latin_font_family);
-        body_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
-            editor_styles.editor_body_cjk_font_family.to_string(),
-        ]));
+        body_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_body_latin_font_family);
 
         let mut body_cjk_font = text_style.font();
         body_cjk_font.family = configured_font_family(editor_styles.editor_body_cjk_font_family);
@@ -1035,9 +1086,7 @@ impl EditorView {
         let mut heading_font = text_style.font();
         heading_font.family =
             configured_font_family(editor_styles.editor_heading_latin_font_family);
-        heading_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
-            editor_styles.editor_heading_cjk_font_family.to_string(),
-        ]));
+        heading_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_heading_latin_font_family);
 
         let mut heading_cjk_font = text_style.font();
         heading_cjk_font.family =
@@ -1533,9 +1582,19 @@ impl EntityInputHandler for EditorView {
         if range.is_empty()
             && self.marked_range.is_none()
             && range_utf16.is_none()
-            && new_text != "["
-            && let Some((open, close)) = paired_delimiter(new_text)
         {
+            if let Some(code_block_range) = code_block_autocomplete_range(self.buffer.text(), range.start, new_text) {
+                let snippet = "```\n\n```";
+                let cursor_offset = code_block_range.start + "```\n".len();
+                self.buffer.replace(code_block_range, snippet);
+                self.cursor.move_to(cursor_offset, &self.buffer);
+                self.reparse();
+                self.scroll_to_cursor();
+                self.pause_blinking(cx);
+                return;
+            }
+
+            if new_text != "[" && let Some((open, close)) = paired_delimiter(new_text) {
             let mut paired_text = String::with_capacity(open.len() + close.len());
             paired_text.push_str(open);
             paired_text.push_str(close);
@@ -1545,6 +1604,7 @@ impl EntityInputHandler for EditorView {
             self.scroll_to_cursor();
             self.pause_blinking(cx);
             return;
+            }
         }
 
         self.buffer.replace(range.clone(), new_text);
@@ -1785,6 +1845,21 @@ impl EntityInputHandler for EditorView {
             utf16_offset
         ));
         Some(utf16_offset)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::code_block_autocomplete_range;
+
+    #[test]
+    fn third_backtick_triggers_code_block_autocomplete() {
+        assert_eq!(code_block_autocomplete_range("``", 2, "`"), Some(0..2));
+    }
+
+    #[test]
+    fn fourth_backtick_does_not_retrigger_code_block_autocomplete() {
+        assert_eq!(code_block_autocomplete_range("```", 3, "`"), None);
     }
 }
 

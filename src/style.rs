@@ -1004,7 +1004,7 @@ impl Styles {
             },
             code_block: CodeBlockStyles {
                 code_block_bg: theme.bg_code,
-                code_block_radius_px: 10.0,
+                code_block_radius_px: 0.0,
                 code_block_text_padding_left_px: 10.0,
                 code_block_fence_clip_px: 15.0,
             },
@@ -1044,7 +1044,7 @@ impl Styles {
                 table_selection_border_width_px: 2.0,
             },
             gutter: GutterStyles {
-                gutter_line_number_font_size_px: ui_font_size_xs_px,
+                gutter_line_number_font_size_px: ui_font_size_px,
                 gutter_line_number_right_gap_px: 14.0,
                 gutter_line_number_text_color: with_alpha(theme.text_secondary, 0.48),
                 gutter_line_number_active_text_color: theme.text_bright,

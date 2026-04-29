@@ -909,7 +909,8 @@ impl EditorView {
             .on_mouse_move(
                 cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
                     if event.dragging()
-                        && this.tab_drag_candidate_id.as_deref() == Some(hover_tab_id.as_str())
+                        && (this.tab_drag_candidate_id.as_deref() == Some(hover_tab_id.as_str())
+                            || this.tab_dragging_id.is_some())
                     {
                         this.tab_dragging_id = Some(hover_tab_id.clone());
                         window.prevent_default();
@@ -920,8 +921,8 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.tab_drag_candidate_id = Some(press_tab_id.clone());
                     window.prevent_default();
+                    this.tab_drag_candidate_id = Some(press_tab_id.clone());
                     this.switch_to_tab(&tab_id, cx);
                     if event.click_count >= 2 {
                         this.promote_tab_to_permanent(&tab_id, cx);
@@ -1038,6 +1039,15 @@ impl EditorView {
             .border_b(px(ts.tab_bar_border_width_px))
             .border_color(ts.tab_bar_border_color)
             .overflow_x_scroll()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if this.tab_drag_candidate_id.is_some() || this.tab_dragging_id.is_some() {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 if event.dragging()
                     && (this.tab_drag_candidate_id.is_some() || this.tab_dragging_id.is_some())

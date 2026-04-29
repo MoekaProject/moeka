@@ -273,7 +273,7 @@ impl EditorView {
                     .move_to(line_start + cell_ranges[0].start, &self.buffer);
             }
         }
-        self.maybe_auto_select_link_url(prev_offset, false);
+        self.maybe_auto_select_link_url(prev_offset, false, cx);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
         if self.wiki_link_start.is_some() {
@@ -314,7 +314,7 @@ impl EditorView {
                 }
             }
         }
-        self.maybe_auto_select_link_url(prev_offset, false);
+        self.maybe_auto_select_link_url(prev_offset, false, cx);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
         if self.wiki_link_start.is_some() {
@@ -354,7 +354,7 @@ impl EditorView {
             self.cursor.move_up(&self.buffer);
         }
         self.snap_cursor_to_content();
-        self.maybe_auto_select_link_url(prev_offset, false);
+        self.maybe_auto_select_link_url(prev_offset, false, cx);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -393,7 +393,7 @@ impl EditorView {
             self.cursor.move_down(&self.buffer);
         }
         self.snap_cursor_to_content();
-        self.maybe_auto_select_link_url(prev_offset, false);
+        self.maybe_auto_select_link_url(prev_offset, false, cx);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
