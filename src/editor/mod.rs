@@ -2090,7 +2090,9 @@ impl EditorView {
 
     fn code_block_group_end(&self, start_line: usize) -> Option<usize> {
         if !matches!(
-            self.decorations.get(start_line).map(|decoration| &decoration.block_type),
+            self.decorations
+                .get(start_line)
+                .map(|decoration| &decoration.block_type),
             Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
         ) {
             return None;
@@ -2114,7 +2116,9 @@ impl EditorView {
         let mut lines = Vec::new();
         for line_idx in start_line..=end_line {
             if matches!(
-                self.decorations.get(line_idx).map(|decoration| &decoration.block_type),
+                self.decorations
+                    .get(line_idx)
+                    .map(|decoration| &decoration.block_type),
                 Some(BlockType::CodeBlock)
             ) {
                 lines.push(self.buffer.line_content(line_idx).to_string());
