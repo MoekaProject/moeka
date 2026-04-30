@@ -47,6 +47,8 @@ pub(crate) struct EditorPrepaintState {
     link_underlines: Vec<PaintQuad>,
     /// Per-cell shaped texts for table block rendering.
     table_cell_texts: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
+    code_block_copy_buttons: Vec<CodeBlockCopyButtonPaint>,
+    code_block_copy_hitboxes: Vec<Hitbox>,
 }
 
 /// Per-cell shape info for cursor/selection positioning in table rows.
@@ -55,6 +57,20 @@ struct TableCellShape {
     origin: Point<Pixels>,
     /// Byte range of this cell within its source line (in the buffer).
     cell_range: Range<usize>,
+}
+
+struct CodeBlockGroupBounds {
+    left: f32,
+    top: f32,
+    width: f32,
+    bottom: f32,
+}
+
+struct CodeBlockCopyButtonPaint {
+    quad: PaintQuad,
+    label: WrappedLine,
+    origin: Point<Pixels>,
+    line_height: Pixels,
 }
 
 struct PrepaintLine {
@@ -376,7 +392,9 @@ impl Element for EditorElement {
         };
         let text_width = (editor_width - editor.padding_left() - editor.padding_right())
             .max(editor.scaled(120.0));
-        let wrap_width = text_width;
+        let wrap_width =
+            (text_width - editor.scaled(editor.styles.editor.editor_wrap_right_padding_px))
+                .max(editor.scaled(120.0));
         let gutter_right_x = origin_x
             + editor.scaled(editor.styles.gutter.gutter_line_number_left_padding_px);
 
@@ -432,6 +450,10 @@ impl Element for EditorElement {
         let mut image_edit_icons: Vec<(Bounds<Pixels>, usize, f32)> = Vec::new();
         let mut image_edit_hit_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut gutter_fold_hit_areas_local: Vec<(Bounds<Pixels>, usize, bool)> = Vec::new();
+        let mut code_block_group_bounds: HashMap<usize, CodeBlockGroupBounds> = HashMap::new();
+        let mut code_block_hover_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
+        let mut code_block_copy_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
+        let mut code_block_copy_buttons: Vec<CodeBlockCopyButtonPaint> = Vec::new();
 
         let hidden_lines: HashSet<usize> = {
             let mut set = HashSet::new();
@@ -1138,10 +1160,20 @@ impl Element for EditorElement {
 
             let letter_spacing = editor_styles.editor_letter_spacing_px;
 
+            let base_wrap_width =
+                if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
+                    (text_width
+                        - editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
+                        - editor.scaled(editor.styles.code_block.code_block_wrap_right_padding_px))
+                        .max(editor.scaled(80.0))
+                } else {
+                    wrap_width
+                };
+
             let effective_wrap_width = if indent_px > 0.0 {
-                (wrap_width - indent_px).max(wrap_width * 0.3)
+                (base_wrap_width - indent_px).max(base_wrap_width * 0.3)
             } else {
-                wrap_width
+                base_wrap_width
             };
 
             let effective_wrap_width = if letter_spacing > 0.0 {
@@ -1376,9 +1408,23 @@ impl Element for EditorElement {
                 let is_group_end = line_idx == group_end;
                 let has_top_corner = is_group_start;
                 let has_bottom_corner = is_group_end;
+                let background_left = editor_left + editor.padding_left();
+                let background_bottom = line_top + total_line_height;
+                code_block_group_bounds
+                    .entry(group_start)
+                    .and_modify(|group| {
+                        group.top = group.top.min(line_top);
+                        group.bottom = group.bottom.max(background_bottom);
+                    })
+                    .or_insert(CodeBlockGroupBounds {
+                        left: background_left,
+                        top: line_top,
+                        width: text_width,
+                        bottom: background_bottom,
+                    });
                 code_block_bgs.push(quad(
                     Bounds::new(
-                        point(px(editor_left + editor.padding_left()), px(line_top)),
+                        point(px(background_left), px(line_top)),
                         size(px(text_width), px(total_line_height)),
                     ),
                     Corners {
@@ -2672,12 +2718,115 @@ impl Element for EditorElement {
             y += total_line_height;
         }
 
+        let mut code_block_copy_hitboxes = Vec::new();
+        let code_block_styles = &editor.styles.code_block;
+        let button_font_size = editor.scaled(code_block_styles.code_block_copy_button_font_size_px);
+        let button_padding_x = editor.scaled(code_block_styles.code_block_copy_button_padding_x_px);
+        let button_padding_y = editor.scaled(code_block_styles.code_block_copy_button_padding_y_px);
+        let button_text_line_height = button_font_size * 1.2;
+        let button_right = editor.scaled(code_block_styles.code_block_copy_button_right_px);
+        let button_top = editor.scaled(code_block_styles.code_block_copy_button_top_px);
+        let button_radius = px(editor.scaled(code_block_styles.code_block_copy_button_radius_px));
+        let button_border_width = px(editor.scaled(
+            code_block_styles.code_block_copy_button_border_width_px,
+        ));
+        let button_min_left = editor.scaled(code_block_styles.code_block_text_padding_left_px);
+        let mut button_font = text_style.font();
+        button_font.family = configured_font_family(editor.styles.ui_font_family);
+        for (start_line, group) in &code_block_group_bounds {
+            let group_bounds = Bounds::new(
+                point(px(group.left), px(group.top)),
+                size(px(group.width), px(group.bottom - group.top)),
+            );
+            code_block_hover_areas_local.push((group_bounds, *start_line));
+
+            let is_copied = editor.copied_code_block_start == Some(*start_line);
+            let is_visible = editor.hovering_code_block_start == Some(*start_line) || is_copied;
+            if !is_visible {
+                continue;
+            }
+
+            let is_button_hovered = editor.hovering_code_block_copy_start == Some(*start_line);
+            let (label_text, button_bg, button_text_color, button_border_color) = if is_copied {
+                (
+                    "已复制",
+                    code_block_styles.code_block_copy_button_copied_bg,
+                    code_block_styles.code_block_copy_button_copied_text_color,
+                    code_block_styles.code_block_copy_button_copied_border_color,
+                )
+            } else if is_button_hovered {
+                (
+                    "复制",
+                    code_block_styles.code_block_copy_button_hover_bg,
+                    code_block_styles.code_block_copy_button_hover_text_color,
+                    code_block_styles.code_block_copy_button_hover_border_color,
+                )
+            } else {
+                (
+                    "复制",
+                    code_block_styles.code_block_copy_button_bg,
+                    code_block_styles.code_block_copy_button_text_color,
+                    code_block_styles.code_block_copy_button_border_color,
+                )
+            };
+
+            let label_run = TextRun {
+                len: label_text.len(),
+                font: button_font.clone(),
+                color: button_text_color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let Ok(label_lines) = window.text_system().shape_text(
+                label_text.into(),
+                px(button_font_size),
+                &[label_run],
+                None,
+                None,
+            ) else {
+                continue;
+            };
+            let Some(label) = label_lines.into_iter().next() else {
+                continue;
+            };
+
+            let button_width = f32::from(label.width()) + button_padding_x * 2.0;
+            let button_height = button_text_line_height + button_padding_y * 2.0;
+            let button_x = (group.left + group.width - button_right - button_width)
+                .max(group.left + button_min_left);
+            let button_y = group.top + button_top;
+            let button_bounds = Bounds::new(
+                point(px(button_x), px(button_y)),
+                size(px(button_width), px(button_height)),
+            );
+
+            code_block_copy_areas_local.push((button_bounds, *start_line));
+            code_block_copy_hitboxes
+                .push(window.insert_hitbox(button_bounds, HitboxBehavior::Normal));
+            code_block_copy_buttons.push(CodeBlockCopyButtonPaint {
+                quad: quad(
+                    button_bounds,
+                    Corners::all(button_radius),
+                    button_bg,
+                    button_border_width,
+                    button_border_color,
+                    BorderStyle::default(),
+                ),
+                label,
+                origin: point(px(button_x + button_padding_x), px(button_y + button_padding_y)),
+                line_height: px(button_text_line_height),
+            });
+        }
+
         self.editor.update(cx, |editor, _| {
             editor.line_display_info = display_info_cache;
             editor.last_viewport_height = viewport_height;
             editor.last_viewport_width = viewport_width;
             editor.checkbox_areas = checkbox_hit_areas.clone();
             editor.image_click_areas = image_hit_areas.clone();
+            editor.code_block_hover_areas = code_block_hover_areas_local.clone();
+            editor.code_block_copy_areas = code_block_copy_areas_local.clone();
             editor.table_click_areas = table_click_areas_local.clone();
             editor.table_col_handle_areas = table_col_handle_areas_local.clone();
             editor.table_row_handle_areas = table_row_handle_areas_local.clone();
@@ -2731,6 +2880,8 @@ impl Element for EditorElement {
             table_borders,
             table_bgs,
             table_cell_texts,
+            code_block_copy_buttons,
+            code_block_copy_hitboxes,
             image_edit_icons,
             link_underlines,
         }
@@ -2754,6 +2905,9 @@ impl Element for EditorElement {
             None => CursorStyle::IBeam,
         };
         window.set_cursor_style(cursor_style, &prepaint.hitbox);
+        for hitbox in &prepaint.code_block_copy_hitboxes {
+            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        }
         for link_hitbox in &prepaint.link_hitboxes {
             window.set_cursor_style(CursorStyle::PointingHand, link_hitbox);
         }
@@ -2891,6 +3045,21 @@ impl Element for EditorElement {
                     .ok();
             }
         }
+
+            for button in &prepaint.code_block_copy_buttons {
+                window.paint_quad(button.quad.clone());
+                button
+                    .label
+                    .paint(
+                        button.origin,
+                        button.line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    )
+                    .ok();
+            }
 
         // Image previews
         for (img_bounds, img_data) in &prepaint.image_previews {

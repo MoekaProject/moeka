@@ -201,6 +201,16 @@ impl EditorView {
         if self.context_menu.is_some() {
             return;
         }
+
+        if let Some(&(_, start_line)) = self
+            .code_block_copy_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+        {
+            self.copy_code_block_group_to_clipboard(start_line, cx);
+            return;
+        }
+
         self.selected_handle = None;
         if let Some(&(_, line_idx, is_image_fold)) = self
             .gutter_fold_areas
@@ -812,6 +822,27 @@ impl EditorView {
             }
             return;
         }
+
+        let hovering_code_block = self
+            .code_block_hover_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(_, start_line)| *start_line);
+        if hovering_code_block != self.hovering_code_block_start {
+            self.hovering_code_block_start = hovering_code_block;
+            cx.notify();
+        }
+
+        let hovering_code_block_copy = self
+            .code_block_copy_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(_, start_line)| *start_line);
+        if hovering_code_block_copy != self.hovering_code_block_copy_start {
+            self.hovering_code_block_copy_start = hovering_code_block_copy;
+            cx.notify();
+        }
+
         let hovering_checkbox = self
             .checkbox_areas
             .iter()

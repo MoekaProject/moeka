@@ -37,6 +37,8 @@ use crate::cursor::Cursor;
 use crate::markdown::{self, BlockType, LineDecoration};
 use crate::theme::{Theme, ThemeKind};
 
+const CODE_BLOCK_COPY_FEEDBACK_MS: u64 = 1200;
+
 // ── Persistent settings ─────────────────────────────────────────────
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -618,6 +620,12 @@ pub struct EditorView {
     pub(crate) checkbox_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_checkbox: bool,
     pub(crate) image_click_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
+    pub(crate) code_block_hover_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
+    pub(crate) code_block_copy_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
+    pub(crate) hovering_code_block_start: Option<usize>,
+    pub(crate) hovering_code_block_copy_start: Option<usize>,
+    pub(crate) copied_code_block_start: Option<usize>,
+    pub(crate) code_block_copy_feedback_epoch: usize,
     /// Table cell click areas: (bounds, table_start_line, visual_row, col)
     pub(crate) table_click_areas: Vec<(gpui::Bounds<Pixels>, usize, usize, usize)>,
     /// Table column handle areas: (bounds, table_start_line, col_index)
@@ -829,6 +837,12 @@ impl EditorView {
             checkbox_areas: Vec::new(),
             hovering_checkbox: false,
             image_click_areas: Vec::new(),
+            code_block_hover_areas: Vec::new(),
+            code_block_copy_areas: Vec::new(),
+            hovering_code_block_start: None,
+            hovering_code_block_copy_start: None,
+            copied_code_block_start: None,
+            code_block_copy_feedback_epoch: 0,
             table_click_areas: Vec::new(),
             table_col_handle_areas: Vec::new(),
             table_row_handle_areas: Vec::new(),
@@ -2067,6 +2081,78 @@ impl EditorView {
             let text = self.buffer.text()[range].to_string();
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+    }
+
+    fn next_code_block_copy_feedback_epoch(&mut self) -> usize {
+        self.code_block_copy_feedback_epoch += 1;
+        self.code_block_copy_feedback_epoch
+    }
+
+    fn code_block_group_end(&self, start_line: usize) -> Option<usize> {
+        if !matches!(
+            self.decorations.get(start_line).map(|decoration| &decoration.block_type),
+            Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
+        ) {
+            return None;
+        }
+
+        let mut end_line = start_line;
+        while end_line + 1 < self.decorations.len()
+            && matches!(
+                self.decorations[end_line + 1].block_type,
+                BlockType::CodeBlock | BlockType::CodeBlockFence
+            )
+        {
+            end_line += 1;
+        }
+
+        Some(end_line)
+    }
+
+    fn code_block_text_for_group(&self, start_line: usize) -> Option<String> {
+        let end_line = self.code_block_group_end(start_line)?;
+        let mut lines = Vec::new();
+        for line_idx in start_line..=end_line {
+            if matches!(
+                self.decorations.get(line_idx).map(|decoration| &decoration.block_type),
+                Some(BlockType::CodeBlock)
+            ) {
+                lines.push(self.buffer.line_content(line_idx).to_string());
+            }
+        }
+
+        Some(lines.join("\n"))
+    }
+
+    pub(crate) fn copy_code_block_group_to_clipboard(
+        &mut self,
+        start_line: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = self.code_block_text_for_group(start_line) else {
+            return;
+        };
+
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.copied_code_block_start = Some(start_line);
+        let epoch = self.next_code_block_copy_feedback_epoch();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(CODE_BLOCK_COPY_FEEDBACK_MS))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.code_block_copy_feedback_epoch == epoch
+                    && this.copied_code_block_start == Some(start_line)
+                {
+                    this.copied_code_block_start = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn cut_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
