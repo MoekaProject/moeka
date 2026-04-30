@@ -173,7 +173,7 @@ fn build_precise_table_layout(
                     theme.link,
                     FontWeight::BOLD,
                 );
-                if layout.is_header.get(vi).copied().unwrap_or(false) {
+                if layout.is_header.get(vi).copied().unwrap_or(false) && !layout.is_front_matter {
                     for run in &mut cell_runs {
                         run.font.weight = gpui::FontWeight::BOLD;
                     }
@@ -284,7 +284,7 @@ fn push_gutter_line_number_label(
     is_active: bool,
     font: &Font,
     font_size: f32,
-    content_x: f32,
+    gutter_right_x: f32,
     text_line_top: f32,
     line_height: f32,
     right_gap: f32,
@@ -310,7 +310,7 @@ fn push_gutter_line_number_label(
         &[line_number_run],
         None,
     );
-    let label_x = content_x - right_gap - f32::from(shaped.width);
+    let label_x = gutter_right_x - right_gap - f32::from(shaped.width);
     let metrics_height = f32::from(shaped.ascent + shaped.descent);
     let label_y = text_line_top + (line_height - metrics_height) / 2.0 - 2.0;
     gutter_labels.push((shaped, point(px(label_x), px(label_y)), px(line_height)));
@@ -362,7 +362,6 @@ impl Element for EditorElement {
         let viewport_width: f32 = bounds.size.width.into();
         let origin_x: f32 = bounds.origin.x.into();
         let origin_y: f32 = bounds.origin.y.into();
-        let width_independent_layout = editor.active_tab_is_non_markdown_text();
         let expanded_layout = editor.editor_left_aligned;
         let editor_width = if expanded_layout {
             viewport_width
@@ -378,6 +377,8 @@ impl Element for EditorElement {
         let text_width = (editor_width - editor.padding_left() - editor.padding_right())
             .max(editor.scaled(120.0));
         let wrap_width = text_width;
+        let gutter_right_x = origin_x
+            + editor.scaled(editor.styles.gutter.gutter_line_number_left_padding_px);
 
         let mut lines = Vec::new();
         let mut selection_quads = Vec::new();
@@ -417,7 +418,7 @@ impl Element for EditorElement {
         let mut image_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut display_info_cache: Vec<Option<LineDisplayInfo>> = Vec::with_capacity(line_count);
         let has_valid_cache = editor.line_display_info.len() == line_count
-            && (width_independent_layout || (editor.last_text_width - text_width).abs() < 0.5);
+            && (editor.last_text_width - text_width).abs() < 0.5;
         let mut hr_lines: Vec<(f32, f32, f32)> = Vec::new();
         let mut image_previews: Vec<(Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
         let mut image_borders: Vec<PaintQuad> = Vec::new();
@@ -696,9 +697,13 @@ impl Element for EditorElement {
             // Hide all non-first-row table lines (rendered as block on the first row)
             let hide_table_line = matches!(block_type, BlockType::Table)
                 && decoration.table_info.as_ref().is_some_and(|ti| {
-                    // Hide separator rows and all data rows
-                    // Only the first row (header) is kept as anchor for the table block
-                    ti.is_separator || !ti.is_header
+                    if ti.is_front_matter {
+                        line_idx != ti.table_start_line
+                    } else {
+                        // Hide separator rows and all data rows
+                        // Only the first row (header) is kept as anchor for the table block
+                        ti.is_separator || !ti.is_header
+                    }
                 });
             if hide_table_line {
                 let blank_run = TextRun {
@@ -829,7 +834,7 @@ impl Element for EditorElement {
                     is_cursor_line,
                     &monospace_font,
                     editor.scaled(gutter_styles.gutter_line_number_font_size_px),
-                    content_x,
+                    gutter_right_x,
                     text_line_top,
                     line_height,
                     editor.scaled(gutter_styles.gutter_line_number_right_gap_px),
@@ -1145,7 +1150,7 @@ impl Element for EditorElement {
                 effective_wrap_width
             };
 
-            let wrap_width_param = if *block_type == BlockType::Table || width_independent_layout {
+            let wrap_width_param = if *block_type == BlockType::Table {
                 None
             } else {
                 Some(px(effective_wrap_width))
@@ -1217,7 +1222,7 @@ impl Element for EditorElement {
             // Compute table block extra height for header line (table rendered as block below)
             let table_extra_height = if *block_type == BlockType::Table {
                 if let Some(ref ti) = decoration.table_info {
-                    if ti.is_header {
+                    if ti.is_header || (ti.is_front_matter && line_idx == ti.table_start_line) {
                         let layout = table_layout_cache
                             .entry(ti.table_start_line)
                             .or_insert_with(|| {
@@ -1392,7 +1397,7 @@ impl Element for EditorElement {
             // Table rendering (independent visual block on header line)
             if *block_type == BlockType::Table {
                 if let Some(ref ti) = decoration.table_info {
-                    if ti.is_header {
+                    if ti.is_header || (ti.is_front_matter && line_idx == ti.table_start_line) {
                         let table_styles = &editor.styles.table;
                         let border_color = table_styles.table_border_color;
                         let border_w = table_styles.table_border_width_px;
@@ -2111,7 +2116,7 @@ impl Element for EditorElement {
                     is_cursor_line,
                     &monospace_font,
                     editor.scaled(gutter_styles.gutter_line_number_font_size_px),
-                    content_x,
+                    gutter_right_x,
                     text_line_top,
                     line_height,
                     editor.scaled(gutter_styles.gutter_line_number_right_gap_px),
@@ -2227,13 +2232,14 @@ impl Element for EditorElement {
             // Gutter fold icon
             if !hidden_lines.contains(&line_idx) {
                 let fi_size = editor.scaled(editor.styles.gutter.gutter_fold_icon_size_px);
-                let fi_x = content_x
+                let fi_x = gutter_right_x
                     - fi_size
                     - editor.scaled(editor.styles.gutter.gutter_fold_icon_offset_px);
 
                 if let Some(_) = editor.fold_range_for_line(line_idx) {
                     let is_folded = editor.folded_sections.contains(&line_idx);
-                    let is_hovered = editor.hovering_fold_line == Some(line_idx);
+                    let is_hovered = editor.hovering_gutter_fold_area
+                        || editor.hovering_fold_line == Some(line_idx);
                     let fi_y = if *block_type == BlockType::CodeBlockFence && !is_folded {
                         text_line_top + line_height + (line_height - fi_size) / 2.0
                     } else {
@@ -2264,7 +2270,7 @@ impl Element for EditorElement {
                     }
                     gutter_fold_hit_areas_local.push((
                         Bounds::new(
-                            point(px(content_x - fi_size - editor.scaled(10.0)), px(line_top)),
+                            point(px(gutter_right_x - fi_size - editor.scaled(10.0)), px(line_top)),
                             size(px(fi_size + editor.scaled(15.0)), px(total_line_height)),
                         ),
                         line_idx,
@@ -2279,7 +2285,8 @@ impl Element for EditorElement {
                     .is_some_and(|p| image_cache.get(p).is_some_and(|v| v.is_some()))
                 {
                     let is_img_folded = editor.folded_image_previews.contains(&line_idx);
-                    let is_hovered = editor.hovering_fold_line == Some(line_idx);
+                    let is_hovered = editor.hovering_gutter_fold_area
+                        || editor.hovering_fold_line == Some(line_idx);
                     let preview_center_y = if is_img_folded {
                         line_top + line_height / 2.0
                     } else {

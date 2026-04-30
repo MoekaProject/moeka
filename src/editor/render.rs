@@ -270,6 +270,12 @@ impl Render for EditorView {
                                     )
                                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                                     .on_scroll_wheel(cx.listener(Self::on_scroll))
+                                    .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)
+                                    .on_drop(cx.listener(|this, dragged: &DraggedSidebarItems, _, cx| {
+                                        this.clear_sidebar_drag_state(cx);
+                                        this.focused_sidebar_path = None;
+                                        this.insert_sidebar_items_as_wiki_links(&dragged.paths, cx);
+                                    }))
                                     .child(if self.active_tab_is_image() {
                                         image_view::ImageViewElement {
                                             editor: cx.entity().clone(),

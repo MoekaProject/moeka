@@ -11,11 +11,7 @@ use gpui::{
 use super::*;
 
 impl EditorView {
-    fn update_sidebar_drag_target(
-        &mut self,
-        new_target: Option<PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
+    fn update_sidebar_drag_target(&mut self, new_target: Option<PathBuf>, cx: &mut Context<Self>) {
         let previous_target = self.sidebar_drag_hover_target.clone();
         let previous_auto_expanded = self.sidebar_drag_auto_expanded_target.clone();
         self.sidebar_drag_hover_target = new_target.clone();
@@ -34,7 +30,7 @@ impl EditorView {
         }
     }
 
-    fn clear_sidebar_drag_state(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn clear_sidebar_drag_state(&mut self, cx: &mut Context<Self>) {
         self.sidebar_drag_expand_task = None;
         self.update_sidebar_drag_target(None, cx);
     }
@@ -857,7 +853,11 @@ impl EditorView {
         div()
             .w_full()
             .h(px(self.scaled(ss.sidebar_header_height_px)))
-            .bg(if root_drag_over { header_drag_over_bg } else { ss.sidebar_header_bg })
+            .bg(if root_drag_over {
+                header_drag_over_bg
+            } else {
+                ss.sidebar_header_bg
+            })
             .px(px(self.scaled(ss.sidebar_header_padding_right_px)))
             .pl(px(self.scaled(ss.sidebar_header_padding_left_px)))
             .flex()
@@ -939,11 +939,13 @@ impl EditorView {
             })
             .on_drag_move({
                 let root = self.sidebar_root.clone();
-                cx.listener(move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
-                    if event.bounds.contains(&event.event.position) {
-                        this.update_sidebar_drag_target(Some(root.clone()), cx);
-                    }
-                })
+                cx.listener(
+                    move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
+                        if event.bounds.contains(&event.event.position) {
+                            this.update_sidebar_drag_target(Some(root.clone()), cx);
+                        }
+                    },
+                )
             })
             .into_any_element()
     }
@@ -1337,11 +1339,13 @@ impl EditorView {
                         if path.is_dir() {
                             this.toggle_sidebar_directory(path.clone(), cx);
                         } else if event.click_count() >= 2 {
+                            this.focused_sidebar_path = None;
                             this.open_path_in_permanent_tab(path.clone(), true, cx);
                             this.move_cursor_to_first_line_end();
+                            this.request_editor_focus(cx);
                         } else {
-                            if !this.switch_to_existing_editor_tab_for_path(&path, true, cx) {
-                                this.open_path_in_preview_tab(path.clone(), true, cx);
+                            if !this.switch_to_existing_editor_tab_for_path(&path, false, cx) {
+                                this.open_path_in_preview_tab(path.clone(), false, cx);
                             }
                         }
                     }
@@ -1675,25 +1679,25 @@ impl EditorView {
                                     cx.notify();
                                 }),
                             )
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                {
-                                    let root = self.sidebar_root.clone();
-                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                        this.open_sidebar_context_menu(
-                                            root.clone(),
-                                            true,
-                                            event.position,
-                                            cx,
-                                        );
-                                    })
-                                },
-                            )
+                            .on_mouse_down(MouseButton::Right, {
+                                let root = self.sidebar_root.clone();
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.open_sidebar_context_menu(
+                                        root.clone(),
+                                        true,
+                                        event.position,
+                                        cx,
+                                    );
+                                })
+                            })
                             .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)
                             .on_drag_move({
                                 let root = self.sidebar_root.clone();
                                 cx.listener(
-                                    move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
+                                    move |this,
+                                          event: &DragMoveEvent<DraggedSidebarItems>,
+                                          _,
+                                          cx| {
                                         if event.bounds.contains(&event.event.position) {
                                             this.update_sidebar_drag_target(Some(root.clone()), cx);
                                         }
@@ -1786,16 +1790,16 @@ impl EditorView {
                     this.open_workspace_menu(menu_pos, cx);
                 }),
             )
-            .drag_over::<DraggedSidebarItems>(move |style, _, _, _| {
-                style.bg(hover_bg)
-            })
+            .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style.bg(hover_bg))
             .on_drag_move({
                 let root = self.sidebar_root.clone();
-                cx.listener(move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
-                    if event.bounds.contains(&event.event.position) {
-                        this.update_sidebar_drag_target(Some(root.clone()), cx);
-                    }
-                })
+                cx.listener(
+                    move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
+                        if event.bounds.contains(&event.event.position) {
+                            this.update_sidebar_drag_target(Some(root.clone()), cx);
+                        }
+                    },
+                )
             })
             .on_drop({
                 let root = self.sidebar_root.clone();

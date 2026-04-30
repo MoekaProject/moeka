@@ -419,6 +419,7 @@ pub struct TableStyles {
 
 pub struct GutterStyles {
     // Line numbers
+    pub gutter_line_number_left_padding_px: f32,
     pub gutter_line_number_font_size_px: f32,
     pub gutter_line_number_right_gap_px: f32,
     pub gutter_line_number_text_color: Hsla,
@@ -1004,7 +1005,7 @@ impl Styles {
             },
             code_block: CodeBlockStyles {
                 code_block_bg: theme.bg_code,
-                code_block_radius_px: 0.0,
+                code_block_radius_px: 3.0,
                 code_block_text_padding_left_px: 10.0,
                 code_block_fence_clip_px: 15.0,
             },
@@ -1044,6 +1045,7 @@ impl Styles {
                 table_selection_border_width_px: 2.0,
             },
             gutter: GutterStyles {
+                gutter_line_number_left_padding_px: 40.0,
                 gutter_line_number_font_size_px: ui_font_size_px,
                 gutter_line_number_right_gap_px: 14.0,
                 gutter_line_number_text_color: with_alpha(theme.text_secondary, 0.48),

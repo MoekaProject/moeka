@@ -247,6 +247,86 @@ pub fn move_column(lines: &[String], from: usize, to: usize) -> Vec<String> {
     serialize_table(&model)
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FrontMatterEntry {
+    pub key: String,
+    pub value: String,
+}
+
+pub fn parse_front_matter_block(lines: &[String]) -> Vec<FrontMatterEntry> {
+    let inner = if lines.len() >= 2
+        && lines.first().is_some_and(|line| line.trim() == "---")
+        && lines.last().is_some_and(|line| line.trim() == "---")
+    {
+        &lines[1..lines.len() - 1]
+    } else {
+        lines
+    };
+
+    inner
+        .iter()
+        .map(|line| {
+            if let Some((key, value)) = line.split_once(':') {
+                FrontMatterEntry {
+                    key: key.trim().to_string(),
+                    value: value.trim().to_string(),
+                }
+            } else {
+                FrontMatterEntry {
+                    key: line.trim().to_string(),
+                    value: String::new(),
+                }
+            }
+        })
+        .collect()
+}
+
+pub fn serialize_front_matter(entries: &[FrontMatterEntry]) -> Vec<String> {
+    let mut result = Vec::with_capacity(entries.len() + 2);
+    result.push("---".to_string());
+    let normalized = if entries.is_empty() {
+        vec![FrontMatterEntry::default()]
+    } else {
+        entries.to_vec()
+    };
+    for entry in normalized {
+        result.push(format!("{}: {}", entry.key, entry.value));
+    }
+    result.push("---".to_string());
+    result
+}
+
+pub fn insert_front_matter_row(lines: &[String], insert_at: usize) -> Vec<String> {
+    let mut entries = parse_front_matter_block(lines);
+    let clamped = insert_at.min(entries.len());
+    entries.insert(clamped, FrontMatterEntry::default());
+    serialize_front_matter(&entries)
+}
+
+pub fn delete_front_matter_row(lines: &[String], row_index: usize) -> Vec<String> {
+    let mut entries = parse_front_matter_block(lines);
+    if row_index < entries.len() {
+        if entries.len() == 1 {
+            entries[0] = FrontMatterEntry::default();
+        } else {
+            entries.remove(row_index);
+        }
+    }
+    serialize_front_matter(&entries)
+}
+
+pub fn move_front_matter_row(lines: &[String], from: usize, to: usize) -> Vec<String> {
+    let mut entries = parse_front_matter_block(lines);
+    if from >= entries.len() || to > entries.len() || from == to {
+        return serialize_front_matter(&entries);
+    }
+
+    let row = entries.remove(from);
+    let adjusted_to = if to > from { to.saturating_sub(1) } else { to };
+    entries.insert(adjusted_to.min(entries.len()), row);
+    serialize_front_matter(&entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +416,27 @@ mod tests {
         assert_eq!(model.col_count, 2);
         assert_eq!(model.header_cells, vec!["A", "C"]);
         assert_eq!(model.data_rows[0], vec!["1", "3"]);
+    }
+
+    #[test]
+    fn test_front_matter_insert_row() {
+        let input = lines(&["---", "title: Hello", "---"]);
+        let result = insert_front_matter_row(&input, 1);
+        assert_eq!(result, lines(&["---", "title: Hello", ": ", "---"]));
+    }
+
+    #[test]
+    fn test_front_matter_delete_last_row_keeps_editable_block() {
+        let input = lines(&["---", "title: Hello", "---"]);
+        let result = delete_front_matter_row(&input, 0);
+        assert_eq!(result, lines(&["---", ": ", "---"]));
+    }
+
+    #[test]
+    fn test_front_matter_move_row() {
+        let input = lines(&["---", "title: Hello", "tags: Rust", "---"]);
+        let result = move_front_matter_row(&input, 0, 2);
+        assert_eq!(result, lines(&["---", "tags: Rust", "title: Hello", "---"]));
     }
 
     #[test]

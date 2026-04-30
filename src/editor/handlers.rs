@@ -104,6 +104,20 @@ impl EditorView {
             return;
         }
 
+        if let Some((table_start_line, is_column, index)) = self.selected_handle.take() {
+            if is_column && self.block_is_front_matter(table_start_line) {
+                self.pause_blinking(cx);
+                return;
+            }
+            if is_column {
+                self.table_delete_column(table_start_line, index, cx);
+            } else {
+                self.table_delete_row(table_start_line, index, cx);
+            }
+            self.pause_blinking(cx);
+            return;
+        }
+
         if !self.cursor.has_selection() {
             let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
             let line_start = self.buffer.line_start(line);
@@ -190,9 +204,13 @@ impl EditorView {
             return;
         }
         if let Some((table_start_line, is_column, index)) = self.selected_handle.take() {
+            if is_column && self.block_is_front_matter(table_start_line) {
+                self.pause_blinking(cx);
+                return;
+            }
             if is_column {
                 self.table_delete_column(table_start_line, index, cx);
-            } else if index > 0 {
+            } else {
                 self.table_delete_row(table_start_line, index, cx);
             }
             self.pause_blinking(cx);

@@ -658,6 +658,7 @@ pub struct EditorView {
     pub(crate) image_edit_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_image_edit_line: Option<usize>,
     pub(crate) hovering_fold_line: Option<usize>,
+    pub(crate) hovering_gutter_fold_area: bool,
     pub(crate) image_drag_state: Option<ImageDragState>,
     pub(crate) command_held: bool,
     pub(crate) sidebar_custom_width: Option<f32>,
@@ -899,6 +900,7 @@ impl EditorView {
             image_edit_areas: Vec::new(),
             hovering_image_edit_line: None,
             hovering_fold_line: None,
+            hovering_gutter_fold_area: false,
             image_drag_state: None,
             command_held: false,
             sidebar_custom_width: None,
@@ -2622,6 +2624,43 @@ impl EditorView {
         self.scroll_to_cursor();
     }
 
+    pub(crate) fn insert_sidebar_items_as_wiki_links(
+        &mut self,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        if !self.active_tab_is_markdown() || paths.is_empty() {
+            return;
+        }
+
+        let links: Vec<String> = paths
+            .iter()
+            .map(|path| {
+                let relative = path
+                    .strip_prefix(&self.sidebar_root)
+                    .unwrap_or(path.as_path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                format!("[[{relative}]]")
+            })
+            .collect();
+        if links.is_empty() {
+            return;
+        }
+
+        let insertion = links.join("\n");
+        self.checkpoint();
+        let range = self.cursor.selection_range();
+        let new_offset = range.start + insertion.len();
+        self.buffer.replace(range, &insertion);
+        self.cursor.move_to(new_offset, &self.buffer);
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+        self.mark_active_tab_dirty();
+        self.request_editor_focus(cx);
+    }
+
     /// Auto-align table pipes so `|` characters line up vertically across rows.
     pub(crate) fn auto_align_table(&mut self) {
         let cursor_line = self.cursor_line();
@@ -2780,6 +2819,13 @@ impl EditorView {
         Some((start, end, lines))
     }
 
+    pub(crate) fn block_is_front_matter(&self, table_start_line: usize) -> bool {
+        self.decorations
+            .get(table_start_line)
+            .and_then(|dec| dec.table_info.as_ref())
+            .is_some_and(|ti| ti.is_front_matter)
+    }
+
     fn replace_table_block(&mut self, table_start: usize, table_end: usize, new_lines: &[String]) {
         let text_start = self.buffer.line_start(table_start);
         let text_end = self.buffer.line_end(table_end.saturating_sub(1));
@@ -2803,7 +2849,11 @@ impl EditorView {
             return;
         };
         let insert_at = if above { visual_row } else { visual_row + 1 };
-        let new_lines = crate::table_ops::insert_row(&lines, insert_at);
+        let new_lines = if self.block_is_front_matter(table_start_line) {
+            crate::table_ops::insert_front_matter_row(&lines, insert_at)
+        } else {
+            crate::table_ops::insert_row(&lines, insert_at)
+        };
         self.replace_table_block(start, end, &new_lines);
         cx.notify();
     }
@@ -2819,7 +2869,11 @@ impl EditorView {
             cx.notify();
             return;
         };
-        let new_lines = crate::table_ops::delete_row(&lines, visual_row);
+        let new_lines = if self.block_is_front_matter(table_start_line) {
+            crate::table_ops::delete_front_matter_row(&lines, visual_row)
+        } else {
+            crate::table_ops::delete_row(&lines, visual_row)
+        };
         self.replace_table_block(start, end, &new_lines);
         cx.notify();
     }
@@ -2832,6 +2886,10 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.context_menu = None;
+        if self.block_is_front_matter(table_start_line) {
+            cx.notify();
+            return;
+        }
         let Some((start, end, lines)) = self.table_lines_for_block(table_start_line) else {
             cx.notify();
             return;
@@ -2849,6 +2907,10 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.context_menu = None;
+        if self.block_is_front_matter(table_start_line) {
+            cx.notify();
+            return;
+        }
         let Some((start, end, lines)) = self.table_lines_for_block(table_start_line) else {
             cx.notify();
             return;

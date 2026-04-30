@@ -84,7 +84,11 @@ fn auto_paired_delimiter_matches(open: char, close: char) -> bool {
     )
 }
 
-fn code_block_autocomplete_range(text: &str, cursor_offset: usize, new_text: &str) -> Option<Range<usize>> {
+fn code_block_autocomplete_range(
+    text: &str,
+    cursor_offset: usize,
+    new_text: &str,
+) -> Option<Range<usize>> {
     if new_text != "`" || cursor_offset < 2 {
         return None;
     }
@@ -230,11 +234,13 @@ impl EditorView {
             self.marked_range = None;
             self.clear_extra_cursors();
             self.is_selecting = false;
-            self.table_drag = Some(TableDragState::DraggingColumn {
-                table_start_line: table_start,
-                source_col: col,
-                current_x: f32::from(event.position.x),
-            });
+            if !self.block_is_front_matter(table_start) {
+                self.table_drag = Some(TableDragState::DraggingColumn {
+                    table_start_line: table_start,
+                    source_col: col,
+                    current_x: f32::from(event.position.x),
+                });
+            }
             cx.notify();
             return;
         }
@@ -515,7 +521,8 @@ impl EditorView {
                         continue;
                     }
 
-                    let entered_from_outside = prev_offset < full_abs_start || prev_offset > full_abs_end;
+                    let entered_from_outside =
+                        prev_offset < full_abs_start || prev_offset > full_abs_end;
                     if entered_from_outside && inner_abs_start < inner_abs_end {
                         self.cursor.anchor = inner_abs_start;
                         self.cursor.offset = inner_abs_end;
@@ -563,6 +570,11 @@ impl EditorView {
             ) {
                 self.cursor.move_to(offset, &self.buffer);
             }
+            let is_front_matter = self
+                .decorations
+                .get(table_start)
+                .and_then(|dec| dec.table_info.as_ref())
+                .is_some_and(|ti| ti.is_front_matter);
             self.context_menu = Some(ContextMenu {
                 position: event.position,
                 kind: ContextMenuKind::Table {
@@ -571,6 +583,9 @@ impl EditorView {
                     col,
                 },
             });
+            if is_front_matter {
+                self.selected_handle = Some((table_start, false, visual_row));
+            }
             cx.notify();
             return;
         }
@@ -716,8 +731,15 @@ impl EditorView {
                             if let Some((start, end, lines)) =
                                 self.table_lines_for_block(table_start_line)
                             {
-                                let new_lines =
-                                    crate::table_ops::move_row(&lines, source_row, insert_visual);
+                                let new_lines = if self.block_is_front_matter(table_start_line) {
+                                    crate::table_ops::move_front_matter_row(
+                                        &lines,
+                                        source_row,
+                                        insert_visual,
+                                    )
+                                } else {
+                                    crate::table_ops::move_row(&lines, source_row, insert_visual)
+                                };
                                 self.replace_table_block(start, end, &new_lines);
                                 let selected_row = if insert_visual > source_row {
                                     insert_visual.saturating_sub(1)
@@ -816,6 +838,12 @@ impl EditorView {
             .map(|(_, line, _)| *line);
         if hovering_fold != self.hovering_fold_line {
             self.hovering_fold_line = hovering_fold;
+            cx.notify();
+        }
+
+        let hovering_gutter_fold_area = f32::from(event.position.x) <= self.last_content_left;
+        if hovering_gutter_fold_area != self.hovering_gutter_fold_area {
+            self.hovering_gutter_fold_area = hovering_gutter_fold_area;
             cx.notify();
         }
 
@@ -1067,7 +1095,9 @@ impl EditorView {
         };
         let body_cjk_fallbacks = |configured: &'static str| {
             (configured != editor_styles.editor_body_cjk_font_family).then(|| {
-                FontFallbacks::from_fonts(vec![editor_styles.editor_body_cjk_font_family.to_string()])
+                FontFallbacks::from_fonts(vec![
+                    editor_styles.editor_body_cjk_font_family.to_string(),
+                ])
             })
         };
 
@@ -1579,11 +1609,10 @@ impl EntityInputHandler for EditorView {
         ));
         let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
 
-        if range.is_empty()
-            && self.marked_range.is_none()
-            && range_utf16.is_none()
-        {
-            if let Some(code_block_range) = code_block_autocomplete_range(self.buffer.text(), range.start, new_text) {
+        if range.is_empty() && self.marked_range.is_none() && range_utf16.is_none() {
+            if let Some(code_block_range) =
+                code_block_autocomplete_range(self.buffer.text(), range.start, new_text)
+            {
                 let snippet = "```\n\n```";
                 let cursor_offset = code_block_range.start + "```\n".len();
                 self.buffer.replace(code_block_range, snippet);
@@ -1594,16 +1623,18 @@ impl EntityInputHandler for EditorView {
                 return;
             }
 
-            if new_text != "[" && let Some((open, close)) = paired_delimiter(new_text) {
-            let mut paired_text = String::with_capacity(open.len() + close.len());
-            paired_text.push_str(open);
-            paired_text.push_str(close);
-            self.buffer.replace(range.clone(), &paired_text);
-            self.cursor.move_to(range.start + open.len(), &self.buffer);
-            self.reparse();
-            self.scroll_to_cursor();
-            self.pause_blinking(cx);
-            return;
+            if new_text != "["
+                && let Some((open, close)) = paired_delimiter(new_text)
+            {
+                let mut paired_text = String::with_capacity(open.len() + close.len());
+                paired_text.push_str(open);
+                paired_text.push_str(close);
+                self.buffer.replace(range.clone(), &paired_text);
+                self.cursor.move_to(range.start + open.len(), &self.buffer);
+                self.reparse();
+                self.scroll_to_cursor();
+                self.pause_blinking(cx);
+                return;
             }
         }
 

@@ -602,6 +602,7 @@ pub(crate) struct TableLayout {
     pub visual_row_to_line: Vec<usize>,
     /// The cell text color for styling.
     pub is_header: Vec<bool>,
+    pub is_front_matter: bool,
 }
 
 /// Compute the full table layout from decoration data of all lines in the table block.
@@ -640,6 +641,9 @@ pub(crate) fn compute_table_layout(
         .first()
         .map(|(_, ti)| ti.cells.len())
         .unwrap_or(1);
+    let is_front_matter = visual_rows
+        .first()
+        .is_some_and(|(_, ti)| ti.is_front_matter);
 
     // Measure desired column widths based on content
     let mut desired_col_widths_chars = vec![3usize; col_count];
@@ -661,13 +665,20 @@ pub(crate) fn compute_table_layout(
         .sum();
 
     let col_widths: Vec<f32> = if desired_total <= content_width {
-        // Enough space: use desired widths + distribute remaining space
-        let extra = content_width - desired_total;
-        let extra_per_col = extra / col_count as f32;
-        desired_col_widths_chars
+        let mut widths: Vec<f32> = desired_col_widths_chars
             .iter()
-            .map(|&w| w as f32 * base_char_width + extra_per_col)
-            .collect()
+            .map(|&w| w as f32 * base_char_width)
+            .collect();
+        let extra = content_width - desired_total;
+        if is_front_matter && widths.len() == 2 {
+            widths[1] += extra;
+        } else {
+            let extra_per_col = extra / col_count as f32;
+            for width in &mut widths {
+                *width += extra_per_col;
+            }
+        }
+        widths
     } else {
         let min_col = 28.0_f32;
         let mut widths: Vec<f32> = desired_col_widths_chars
@@ -808,6 +819,7 @@ pub(crate) fn compute_table_layout(
         cell_padding_y,
         visual_row_to_line,
         is_header: is_header_vec,
+        is_front_matter,
     }
 }
 
@@ -2031,7 +2043,7 @@ pub(crate) fn build_text_runs_for_display(
             if decoration
                 .table_info
                 .as_ref()
-                .is_some_and(|ti| ti.is_header)
+                .is_some_and(|ti| ti.is_header && !ti.is_front_matter)
             {
                 for w in buf_weights.iter_mut() {
                     *w = FontWeight::BOLD;

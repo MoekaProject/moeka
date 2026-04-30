@@ -94,6 +94,7 @@ pub struct TableLineInfo {
     pub cell_ranges: Vec<Range<usize>>,
     pub is_header: bool,
     pub is_separator: bool,
+    pub is_front_matter: bool,
     pub table_start_line: usize,
     pub table_end_line: usize,
     pub column_widths: Vec<usize>,
@@ -478,6 +479,8 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
     // ``` of an existing code block below.
     revalidate_code_fences(&mut decorations, text, &line_starts);
 
+    detect_front_matter(&mut decorations, text, &line_starts);
+
     // Second pass: detect table lines
     detect_tables(&mut decorations, text, &line_starts);
 
@@ -485,6 +488,96 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
     detect_wiki_links(&mut decorations, text, &line_starts);
 
     decorations
+}
+
+fn parse_front_matter_entry(content: &str) -> (Vec<String>, Vec<Range<usize>>) {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return (vec![String::new(), String::new()], vec![0..0, 0..0]);
+    }
+
+    if let Some(colon) = content.find(':') {
+        let key_end = content[..colon].trim_end().len();
+        let value_start = content[colon + 1..]
+            .find(|ch: char| !ch.is_whitespace())
+            .map(|offset| colon + 1 + offset)
+            .unwrap_or(content.len());
+        let key = content[..colon].trim().to_string();
+        let value = content[value_start..].trim_end().to_string();
+        (
+            vec![key, value],
+            vec![0..key_end, value_start..content.len()],
+        )
+    } else {
+        (
+            vec![content.trim().to_string(), String::new()],
+            vec![0..content.trim_end().len(), content.len()..content.len()],
+        )
+    }
+}
+
+fn detect_front_matter(decorations: &mut [LineDecoration], text: &str, line_starts: &[usize]) {
+    let line_count = decorations.len();
+    if line_count < 2 {
+        return;
+    }
+
+    let opening = get_line_content(text, line_starts, 0, line_count).trim();
+    if opening != "---" {
+        return;
+    }
+
+    let Some(closing_line) = (1..line_count)
+        .find(|&line| get_line_content(text, line_starts, line, line_count).trim() == "---")
+    else {
+        return;
+    };
+
+    let table_start = 0;
+    let table_end = closing_line + 1;
+    let mut parsed_rows: Vec<(Vec<String>, Vec<Range<usize>>, bool)> = Vec::new();
+    let mut key_width = 3usize;
+    let mut value_width = 3usize;
+
+    for line in table_start..table_end {
+        let content = get_line_content(text, line_starts, line, line_count);
+        if line == table_start || line == closing_line {
+            parsed_rows.push((Vec::new(), Vec::new(), true));
+            continue;
+        }
+
+        let (cells, ranges) = parse_front_matter_entry(content);
+        key_width = key_width.max(
+            cell_display_width(cells.first().map(|cell| cell.trim()).unwrap_or("")),
+        );
+        value_width = value_width.max(
+            cell_display_width(cells.get(1).map(|cell| cell.trim()).unwrap_or("")),
+        );
+        parsed_rows.push((cells, ranges, false));
+    }
+
+    let column_widths = vec![key_width, value_width];
+    let aligns = vec![TableAlign::Left, TableAlign::Left];
+    for (row_index, line) in (table_start..table_end).enumerate() {
+        let content = get_line_content(text, line_starts, line, line_count);
+        let (cells, cell_ranges, is_separator) = &parsed_rows[row_index];
+        decorations[line].block_type = BlockType::Table;
+        decorations[line].table_info = Some(TableLineInfo {
+            cells: cells.clone(),
+            cell_ranges: cell_ranges.clone(),
+            is_header: false,
+            is_separator: *is_separator,
+            is_front_matter: true,
+            table_start_line: table_start,
+            table_end_line: table_end,
+            column_widths: column_widths.clone(),
+            aligns: aligns.clone(),
+        });
+        decorations[line].syntax_ranges.push(SyntaxRange {
+            range: 0..content.len(),
+            trigger_range: 0..content.len(),
+        });
+    }
 }
 
 fn add_inline_span(
@@ -792,6 +885,10 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
     let mut line_idx = 0;
 
     while line_idx < line_count {
+        if decorations[line_idx].table_info.is_some() {
+            line_idx += 1;
+            continue;
+        }
         let content = get_line_content(text, line_starts, line_idx, line_count);
         if is_table_line(content) {
             let table_start = line_idx;
@@ -857,6 +954,7 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
                             .collect(),
                         is_header: ri == 0,
                         is_separator: is_sep,
+                        is_front_matter: false,
                         table_start_line: table_start,
                         table_end_line: table_end,
                         column_widths: col_widths.clone(),

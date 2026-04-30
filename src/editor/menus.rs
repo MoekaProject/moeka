@@ -2054,6 +2054,11 @@ impl EditorView {
                 let tsl = *table_start_line;
                 let r = *row;
                 let c = *col;
+                let is_front_matter = self
+                    .decorations
+                    .get(tsl)
+                    .and_then(|dec| dec.table_info.as_ref())
+                    .is_some_and(|ti| ti.is_front_matter);
                 {
                     let tsl = tsl;
                     let r = r;
@@ -2078,29 +2083,31 @@ impl EditorView {
                         },
                     ));
                 }
-                {
-                    let tsl = tsl;
-                    let c = c;
-                    items.push(self.render_context_menu_item(
-                        "左侧新增列",
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.table_insert_column(tsl, c, true, cx);
-                        },
-                    ));
-                }
-                {
-                    let tsl = tsl;
-                    let c = c;
-                    items.push(self.render_context_menu_item(
-                        "右侧新增列",
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.table_insert_column(tsl, c, false, cx);
-                        },
-                    ));
+                if !is_front_matter {
+                    {
+                        let tsl = tsl;
+                        let c = c;
+                        items.push(self.render_context_menu_item(
+                            "左侧新增列",
+                            false,
+                            cx,
+                            move |this, _, cx| {
+                                this.table_insert_column(tsl, c, true, cx);
+                            },
+                        ));
+                    }
+                    {
+                        let tsl = tsl;
+                        let c = c;
+                        items.push(self.render_context_menu_item(
+                            "右侧新增列",
+                            false,
+                            cx,
+                            move |this, _, cx| {
+                                this.table_insert_column(tsl, c, false, cx);
+                            },
+                        ));
+                    }
                 }
                 items.push(self.render_context_menu_separator());
                 {
@@ -2115,23 +2122,25 @@ impl EditorView {
                         },
                     ));
                 }
-                {
-                    let tsl = tsl;
-                    let c = c;
-                    items.push(self.render_context_menu_item(
-                        "删除列",
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.table_delete_column(tsl, c, cx);
-                        },
-                    ));
+                if !is_front_matter {
+                    {
+                        let tsl = tsl;
+                        let c = c;
+                        items.push(self.render_context_menu_item(
+                            "删除列",
+                            false,
+                            cx,
+                            move |this, _, cx| {
+                                this.table_delete_column(tsl, c, cx);
+                            },
+                        ));
+                    }
                 }
                 items.push(self.render_context_menu_separator());
                 {
                     let tsl = tsl;
                     items.push(self.render_context_menu_item(
-                        "删除表格",
+                        if is_front_matter { "删除 Front Matter" } else { "删除表格" },
                         false,
                         cx,
                         move |this, _, cx| {

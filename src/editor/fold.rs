@@ -63,8 +63,91 @@ impl EditorView {
                     .unwrap_or(line_count);
                 if end > start { Some(start..end) } else { None }
             }
-            _ => None,
+            _ => {
+                if self.active_tab_is_non_markdown_text() {
+                    self.generic_code_fold_range_for_line(line)
+                } else {
+                    None
+                }
+            }
         }
+    }
+
+    fn generic_code_fold_range_for_line(&self, line: usize) -> Option<std::ops::Range<usize>> {
+        let line_count = self.buffer.line_count();
+        if line + 1 >= line_count {
+            return None;
+        }
+
+        let content = self.buffer.line_content(line);
+        let trimmed = content.trim_end();
+        if trimmed.trim().is_empty() {
+            return None;
+        }
+
+        if let Some(range) = self.brace_fold_range_for_line(line, trimmed) {
+            return Some(range);
+        }
+
+        let indent = content.len() - content.trim_start_matches([' ', '\t']).len();
+        let next_line = (line + 1..line_count).find(|&idx| {
+            let next = self.buffer.line_content(idx);
+            !next.trim().is_empty()
+        })?;
+        let next_content = self.buffer.line_content(next_line);
+        let next_indent = next_content.len() - next_content.trim_start_matches([' ', '\t']).len();
+        if next_indent <= indent {
+            return None;
+        }
+
+        let end = (next_line..line_count)
+            .find(|&idx| {
+                let candidate = self.buffer.line_content(idx);
+                if candidate.trim().is_empty() {
+                    return false;
+                }
+                let candidate_indent =
+                    candidate.len() - candidate.trim_start_matches([' ', '\t']).len();
+                candidate_indent <= indent
+            })
+            .unwrap_or(line_count);
+
+        (end > line + 1).then_some(line + 1..end)
+    }
+
+    fn brace_fold_range_for_line(
+        &self,
+        line: usize,
+        trimmed: &str,
+    ) -> Option<std::ops::Range<usize>> {
+        let (open, close) = if trimmed.ends_with('{') {
+            ('{', '}')
+        } else if trimmed.ends_with('[') {
+            ('[', ']')
+        } else if trimmed.ends_with('(') {
+            ('(', ')')
+        } else {
+            return None;
+        };
+
+        let mut depth = 1usize;
+        let line_count = self.buffer.line_count();
+        for candidate_line in line + 1..line_count {
+            let candidate = self.buffer.line_content(candidate_line);
+            for ch in candidate.chars() {
+                if ch == open {
+                    depth += 1;
+                } else if ch == close {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return (candidate_line + 1 > line + 1)
+                            .then_some(line + 1..candidate_line + 1);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     pub(crate) fn toggle_fold(&mut self, line: usize, cx: &mut Context<Self>) {
