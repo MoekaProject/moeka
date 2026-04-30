@@ -392,11 +392,11 @@ impl Element for EditorElement {
         };
         let text_width = (editor_width - editor.padding_left() - editor.padding_right())
             .max(editor.scaled(120.0));
-        let wrap_width =
-            (text_width - editor.scaled(editor.styles.editor.editor_wrap_right_padding_px))
-                .max(editor.scaled(120.0));
-        let gutter_right_x = origin_x
-            + editor.scaled(editor.styles.gutter.gutter_line_number_left_padding_px);
+        let wrap_width = (text_width
+            - editor.scaled(editor.styles.editor.editor_wrap_right_padding_px))
+        .max(editor.scaled(120.0));
+        let gutter_right_x =
+            origin_x + editor.scaled(editor.styles.gutter.gutter_line_number_left_padding_px);
 
         let mut lines = Vec::new();
         let mut selection_quads = Vec::new();
@@ -478,7 +478,9 @@ impl Element for EditorElement {
         };
         let body_cjk_fallbacks = |configured: &'static str| {
             (configured != editor_styles.editor_body_cjk_font_family).then(|| {
-                FontFallbacks::from_fonts(vec![editor_styles.editor_body_cjk_font_family.to_string()])
+                FontFallbacks::from_fonts(vec![
+                    editor_styles.editor_body_cjk_font_family.to_string(),
+                ])
             })
         };
         let mut monospace_font = text_style.font();
@@ -654,7 +656,11 @@ impl Element for EditorElement {
                     marked.end.min(line_end_offset)
                 };
 
-                Some(anchor.saturating_sub(line_start_offset).min(line_content.len()))
+                Some(
+                    anchor
+                        .saturating_sub(line_start_offset)
+                        .min(line_content.len()),
+                )
             });
             let cursor_col = if editor.cursor.has_selection()
                 && matches!(decoration.block_type, BlockType::Heading(_))
@@ -706,7 +712,12 @@ impl Element for EditorElement {
                 }
             } else if ime_active_on_line {
                 ime_cursor_col.or_else(|| {
-                    Some(cursor.offset.saturating_sub(line_start_offset).min(line_content.len()))
+                    Some(
+                        cursor
+                            .offset
+                            .saturating_sub(line_start_offset)
+                            .min(line_content.len()),
+                    )
                 })
             } else if is_cursor_line {
                 Some(cursor.offset.saturating_sub(line_start_offset))
@@ -1165,7 +1176,7 @@ impl Element for EditorElement {
                     (text_width
                         - editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
                         - editor.scaled(editor.styles.code_block.code_block_wrap_right_padding_px))
-                        .max(editor.scaled(80.0))
+                    .max(editor.scaled(80.0))
                 } else {
                     wrap_width
                 };
@@ -2316,7 +2327,10 @@ impl Element for EditorElement {
                     }
                     gutter_fold_hit_areas_local.push((
                         Bounds::new(
-                            point(px(gutter_right_x - fi_size - editor.scaled(10.0)), px(line_top)),
+                            point(
+                                px(gutter_right_x - fi_size - editor.scaled(10.0)),
+                                px(line_top),
+                            ),
                             size(px(fi_size + editor.scaled(15.0)), px(total_line_height)),
                         ),
                         line_idx,
@@ -2727,9 +2741,8 @@ impl Element for EditorElement {
         let button_right = editor.scaled(code_block_styles.code_block_copy_button_right_px);
         let button_top = editor.scaled(code_block_styles.code_block_copy_button_top_px);
         let button_radius = px(editor.scaled(code_block_styles.code_block_copy_button_radius_px));
-        let button_border_width = px(editor.scaled(
-            code_block_styles.code_block_copy_button_border_width_px,
-        ));
+        let button_border_width =
+            px(editor.scaled(code_block_styles.code_block_copy_button_border_width_px));
         let button_min_left = editor.scaled(code_block_styles.code_block_text_padding_left_px);
         let mut button_font = text_style.font();
         button_font.family = configured_font_family(editor.styles.ui_font_family);
@@ -2740,6 +2753,14 @@ impl Element for EditorElement {
             );
             code_block_hover_areas_local.push((group_bounds, *start_line));
 
+            let language_label = editor
+                .decorations
+                .get(*start_line)
+                .and_then(|decoration| decoration.code_language.as_deref())
+                .filter(|language| !language.trim().is_empty())
+                .map(|language| language.to_uppercase())
+                .unwrap_or_else(|| "CODE".to_string());
+
             let is_copied = editor.copied_code_block_start == Some(*start_line);
             let is_visible = editor.hovering_code_block_start == Some(*start_line) || is_copied;
             if !is_visible {
@@ -2749,21 +2770,21 @@ impl Element for EditorElement {
             let is_button_hovered = editor.hovering_code_block_copy_start == Some(*start_line);
             let (label_text, button_bg, button_text_color, button_border_color) = if is_copied {
                 (
-                    "已复制",
+                    "已复制".to_string(),
                     code_block_styles.code_block_copy_button_copied_bg,
                     code_block_styles.code_block_copy_button_copied_text_color,
                     code_block_styles.code_block_copy_button_copied_border_color,
                 )
             } else if is_button_hovered {
                 (
-                    "复制",
+                    language_label.clone(),
                     code_block_styles.code_block_copy_button_hover_bg,
                     code_block_styles.code_block_copy_button_hover_text_color,
                     code_block_styles.code_block_copy_button_hover_border_color,
                 )
             } else {
                 (
-                    "复制",
+                    language_label,
                     code_block_styles.code_block_copy_button_bg,
                     code_block_styles.code_block_copy_button_text_color,
                     code_block_styles.code_block_copy_button_border_color,
@@ -2779,7 +2800,7 @@ impl Element for EditorElement {
                 strikethrough: None,
             };
             let Ok(label_lines) = window.text_system().shape_text(
-                label_text.into(),
+                label_text.clone().into(),
                 px(button_font_size),
                 &[label_run],
                 None,
@@ -2814,7 +2835,10 @@ impl Element for EditorElement {
                     BorderStyle::default(),
                 ),
                 label,
-                origin: point(px(button_x + button_padding_x), px(button_y + button_padding_y)),
+                origin: point(
+                    px(button_x + button_padding_x),
+                    px(button_y + button_padding_y),
+                ),
                 line_height: px(button_text_line_height),
             });
         }
@@ -3046,20 +3070,20 @@ impl Element for EditorElement {
             }
         }
 
-            for button in &prepaint.code_block_copy_buttons {
-                window.paint_quad(button.quad.clone());
-                button
-                    .label
-                    .paint(
-                        button.origin,
-                        button.line_height,
-                        TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    )
-                    .ok();
-            }
+        for button in &prepaint.code_block_copy_buttons {
+            window.paint_quad(button.quad.clone());
+            button
+                .label
+                .paint(
+                    button.origin,
+                    button.line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                )
+                .ok();
+        }
 
         // Image previews
         for (img_bounds, img_data) in &prepaint.image_previews {

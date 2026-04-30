@@ -1997,10 +1997,15 @@ pub(crate) fn build_text_runs_for_display(
             }
         };
 
-    // Fence lines (``` or ```lang) always render semi-transparent
+    // Fence lines stay in layout, but become fully transparent when inactive.
     if matches!(decoration.block_type, BlockType::CodeBlockFence) {
-        let mut fence_color = theme.text_secondary;
-        fence_color.a *= 0.5;
+        let fence_color = if code_block_syntax_active {
+            let mut active = theme.text_secondary;
+            active.a *= 0.5;
+            active
+        } else {
+            gpui::transparent_black()
+        };
         buf_colors.fill(fence_color);
     }
 
