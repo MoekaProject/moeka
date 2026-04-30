@@ -677,6 +677,15 @@ impl EditorView {
         };
         let icon_size = px(self.scaled(ts.tab_item_icon_size_px));
 
+        if tab.is_pinned {
+            return svg()
+                .path("assets/icons/format/pin.svg")
+                .size(px(self.scaled(ts.tab_pin_icon_size_px)))
+                .text_color(ts.tab_pin_icon_color)
+                .opacity(opacity)
+                .into_any_element();
+        }
+
         if let Some(path) = tab.path.as_ref()
             && let Some(label) = file_kind_badge_text(path)
         {
@@ -720,7 +729,6 @@ impl EditorView {
         let is_active = self.active_tab_id.as_deref() == Some(tab.id.as_str());
         let is_dirty = tab.is_dirty;
         let is_deleted = tab.is_deleted;
-        let is_pinned = tab.is_pinned;
         let is_preview = tab.is_preview;
         let tab_kind = tab.kind;
         let tab_index = self
@@ -744,21 +752,13 @@ impl EditorView {
         let drop_indicator_width = ts.tab_drop_indicator_width_px;
         let source_opacity = ts.tab_drag_source_opacity;
         let is_being_dragged = self.tab_dragging_id.as_deref() == Some(tab.id.as_str());
-        let pin_icon_size = self.scaled(ts.tab_pin_icon_size_px);
-        let pin_icon_color = ts.tab_pin_icon_color;
-
         div()
             .id(SharedString::from(format!("tab-{}", tab.id)))
             .group("tab-item")
             .relative()
             .h(px(self.tab_bar_height()))
-            .when(is_pinned, |this: gpui::Stateful<gpui::Div>| {
-                this.w(px(self.scaled(ts.tab_pinned_width_px)))
-            })
-            .when(!is_pinned, |this: gpui::Stateful<gpui::Div>| {
-                this.min_w(px(self.scaled(ts.tab_item_min_width_px)))
-                    .max_w(px(self.scaled(ts.tab_item_max_width_px)))
-            })
+            .min_w(px(self.scaled(ts.tab_item_min_width_px)))
+            .max_w(px(self.scaled(ts.tab_item_max_width_px)))
             .pl(px(self.scaled(ts.tab_item_padding_left_px)))
             .pr(px(self.scaled(ts.tab_item_padding_right_px)))
             .flex()
@@ -811,17 +811,7 @@ impl EditorView {
                 this.tab_drag_candidate_id = None;
                 this.tab_dragging_id = None;
             }))
-            // Pinned tab: show pin icon, hide title/close
-            .when(is_pinned, |this: gpui::Stateful<gpui::Div>| {
-                this.justify_center().child(
-                    svg()
-                        .path("assets/icons/format/pin.svg")
-                        .size(px(pin_icon_size))
-                        .text_color(pin_icon_color),
-                )
-            })
-            // Normal (non-pinned) tab content
-            .when(!is_pinned, |this: gpui::Stateful<gpui::Div>| {
+            .when(true, |this: gpui::Stateful<gpui::Div>| {
                 this.when(tab_kind == TabKind::Editor, |this| {
                     this.child(self.render_tab_file_indicator(tab, is_active))
                 })

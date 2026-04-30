@@ -1398,7 +1398,7 @@ impl EditorView {
             (
                 "分割线",
                 "horizontal rule divider",
-                None,
+                Some(FMT_SPLIT_SVG),
                 Some("---"),
                 FormatMenuAction::HorizontalRule,
             ),
@@ -1440,7 +1440,7 @@ impl EditorView {
             (
                 "双向链接",
                 "wiki link backlink bidirectional",
-                Some(FMT_LINK_SVG),
+                Some(FMT_WIKI_LINK_SVG),
                 Some("[["),
                 FormatMenuAction::WikiLink,
             ),
@@ -1454,7 +1454,7 @@ impl EditorView {
             (
                 "表格",
                 "table grid 2x2",
-                None,
+                Some(FMT_TABLE_SVG),
                 Some("2×2"),
                 FormatMenuAction::Table,
             ),
@@ -1895,6 +1895,17 @@ impl EditorView {
                 // Copy path if tab has a file
                 if let Some(tab) = self.tabs.iter().find(|t| t.id == *tab_id) {
                     if let Some(path) = &tab.path {
+                        let reveal_path = path.clone();
+                        items.push(self.render_context_menu_item(
+                            "定位到文件树",
+                            false,
+                            cx,
+                            move |this, _, cx| {
+                                this.reveal_path_in_sidebar(reveal_path.clone(), cx);
+                            },
+                        ));
+                        items.push(self.render_context_menu_separator());
+
                         let path_str = path.display().to_string();
                         items.push(self.render_context_menu_item(
                             "复制路径",

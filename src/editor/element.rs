@@ -848,16 +848,22 @@ impl Element for EditorElement {
                     );
                 }
                 let origin = point(px(content_x), px(text_line_top));
-                push_whitespace_dot_quads(
-                    &mut whitespace_dots,
-                    &cached.display_text,
-                    &cached.wrapped_line,
-                    origin,
-                    line_height,
-                    editor.scaled(editor.styles.editor.editor_whitespace_dot_size_px),
-                    editor.styles.editor.editor_whitespace_dot_color,
-                    0,
-                );
+                let skip_front_matter_anchor_dots = decoration
+                    .table_info
+                    .as_ref()
+                    .is_some_and(|ti| ti.is_front_matter && line_idx == ti.table_start_line);
+                if !skip_front_matter_anchor_dots {
+                    push_whitespace_dot_quads(
+                        &mut whitespace_dots,
+                        &cached.display_text,
+                        &cached.wrapped_line,
+                        origin,
+                        line_height,
+                        editor.scaled(editor.styles.editor.editor_whitespace_dot_size_px),
+                        editor.styles.editor.editor_whitespace_dot_color,
+                        0,
+                    );
+                }
 
                 let gutter_styles = &editor.styles.gutter;
                 push_gutter_line_number_label(
@@ -1388,10 +1394,9 @@ impl Element for EditorElement {
 
             let origin = point(px(content_x), px(text_line_top));
             let is_table_source_row = *block_type == BlockType::Table
-                && decoration
-                    .table_info
-                    .as_ref()
-                    .is_some_and(|ti| !ti.is_separator);
+                && decoration.table_info.as_ref().is_some_and(|ti| {
+                    !ti.is_separator || (ti.is_front_matter && line_idx == ti.table_start_line)
+                });
             if !is_table_source_row {
                 let whitespace_skip_prefix_bytes = if matches!(block_type, BlockType::TaskList(_)) {
                     prefix_bytes
@@ -1492,6 +1497,7 @@ impl Element for EditorElement {
                         let table_width = layout.total_width.min(text_width);
                         // Table block starts at text_line_top (header text is hidden)
                         let table_top = text_line_top;
+                        let outer_radius = px(table_styles.table_outer_radius_px);
 
                         // Selection highlight: blue border when selection covers table
                         let table_block_start_offset = buffer.line_start(ti.table_start_line);
@@ -1515,7 +1521,7 @@ impl Element for EditorElement {
                                         px(layout.total_height + sel_border_w * 2.0),
                                     ),
                                 ),
-                                Corners::all(px(4.0)),
+                                Corners::all(outer_radius),
                                 gpui::transparent_black(),
                                 px(sel_border_w),
                                 theme.cursor,
@@ -1524,36 +1530,16 @@ impl Element for EditorElement {
                         }
 
                         // Draw outer table border once.
-                        table_borders.push(fill(
+                        table_borders.push(quad(
                             Bounds::new(
                                 point(px(table_left), px(table_top)),
-                                size(px(table_width), px(border_w)),
+                                size(px(table_width), px(layout.total_height)),
                             ),
+                            Corners::all(outer_radius),
+                            gpui::transparent_black(),
+                            px(border_w),
                             border_color,
-                        ));
-                        table_borders.push(fill(
-                            Bounds::new(
-                                point(
-                                    px(table_left),
-                                    px(table_top + layout.total_height - border_w),
-                                ),
-                                size(px(table_width), px(border_w)),
-                            ),
-                            border_color,
-                        ));
-                        table_borders.push(fill(
-                            Bounds::new(
-                                point(px(table_left), px(table_top)),
-                                size(px(border_w), px(layout.total_height)),
-                            ),
-                            border_color,
-                        ));
-                        table_borders.push(fill(
-                            Bounds::new(
-                                point(px(table_left + table_width - border_w), px(table_top)),
-                                size(px(border_w), px(layout.total_height)),
-                            ),
-                            border_color,
+                            BorderStyle::default(),
                         ));
 
                         // Draw internal horizontal separators once.
@@ -1612,10 +1598,28 @@ impl Element for EditorElement {
                             let row_ti = decorations
                                 .get(source_line)
                                 .and_then(|d| d.table_info.as_ref());
+                            let is_front_matter_row =
+                                row_ti.is_some_and(|ti| ti.is_front_matter && !ti.is_separator);
+                            let front_matter_key_bg = table_styles.table_header_bg;
 
                             // Per-cell text shaping
                             if let Some(row_cells) = layout.cells.get(vi) {
                                 for cell_layout in row_cells {
+                                    if is_front_matter_row {
+                                        if cell_layout.col == 0 {
+                                            table_bgs.push(fill(
+                                                Bounds::new(
+                                                    point(
+                                                        px(table_left + cell_layout.x),
+                                                        px(row_y),
+                                                    ),
+                                                    size(px(cell_layout.width), px(row_h)),
+                                                ),
+                                                front_matter_key_bg,
+                                            ));
+                                        }
+                                    }
+
                                     let cell_content = row_ti
                                         .and_then(|t| t.cells.get(cell_layout.col))
                                         .cloned()
@@ -1666,6 +1670,14 @@ impl Element for EditorElement {
                                                 .into_iter()
                                                 .map(|mut r| {
                                                     r.font.weight = gpui::FontWeight::BOLD;
+                                                    r
+                                                })
+                                                .collect()
+                                        } else if is_front_matter_row && cell_layout.col == 0 {
+                                            cell_runs
+                                                .into_iter()
+                                                .map(|mut r| {
+                                                    r.font.weight = FontWeight::BOLD;
                                                     r
                                                 })
                                                 .collect()
@@ -1830,21 +1842,26 @@ impl Element for EditorElement {
                                                 }
                                             }
 
-                                            push_whitespace_dot_quads(
-                                                &mut whitespace_dots,
-                                                &cell_layout.display_text,
-                                                &shaped,
-                                                point(px(cell_x), px(cell_text_y)),
-                                                line_height,
-                                                editor.scaled(
+                                            if !is_front_matter_row {
+                                                push_whitespace_dot_quads(
+                                                    &mut whitespace_dots,
+                                                    &cell_layout.display_text,
+                                                    &shaped,
+                                                    point(px(cell_x), px(cell_text_y)),
+                                                    line_height,
+                                                    editor.scaled(
+                                                        editor
+                                                            .styles
+                                                            .editor
+                                                            .editor_whitespace_dot_size_px,
+                                                    ),
                                                     editor
                                                         .styles
                                                         .editor
-                                                        .editor_whitespace_dot_size_px,
-                                                ),
-                                                editor.styles.editor.editor_whitespace_dot_color,
-                                                0,
-                                            );
+                                                        .editor_whitespace_dot_color,
+                                                    0,
+                                                );
+                                            }
 
                                             table_cell_texts.push((
                                                 shaped,
@@ -2930,7 +2947,7 @@ impl Element for EditorElement {
         };
         window.set_cursor_style(cursor_style, &prepaint.hitbox);
         for hitbox in &prepaint.code_block_copy_hitboxes {
-            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+            window.set_cursor_style(CursorStyle::Arrow, hitbox);
         }
         for link_hitbox in &prepaint.link_hitboxes {
             window.set_cursor_style(CursorStyle::PointingHand, link_hitbox);

@@ -213,6 +213,9 @@ pub(crate) const FMT_LIST_SVG: &str = "assets/icons/format/list.svg";
 pub(crate) const FMT_ORDER_LIST_SVG: &str = "assets/icons/format/order-list.svg";
 pub(crate) const FMT_TODO_SVG: &str = "assets/icons/format/todo.svg";
 pub(crate) const FMT_LINK_SVG: &str = "assets/icons/format/link.svg";
+pub(crate) const FMT_SPLIT_SVG: &str = "assets/icons/format/split.svg";
+pub(crate) const FMT_WIKI_LINK_SVG: &str = "assets/icons/format/wiki-link.svg";
+pub(crate) const FMT_TABLE_SVG: &str = "assets/icons/format/table.svg";
 pub(crate) const FMT_IMAGE_SVG: &str = "assets/icons/format/image.svg";
 
 // ── UI constants ────────────────────────────────────────────────────

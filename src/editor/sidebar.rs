@@ -11,6 +11,18 @@ use gpui::{
 use super::*;
 
 impl EditorView {
+    fn workspace_root_for_path(&self, path: &Path) -> Option<PathBuf> {
+        self.workspaces
+            .iter()
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .cloned()
+            .or_else(|| {
+                path.starts_with(&self.sidebar_root)
+                    .then(|| self.sidebar_root.clone())
+            })
+    }
+
     fn update_sidebar_drag_target(&mut self, new_target: Option<PathBuf>, cx: &mut Context<Self>) {
         let previous_target = self.sidebar_drag_hover_target.clone();
         let previous_auto_expanded = self.sidebar_drag_auto_expanded_target.clone();
@@ -33,6 +45,68 @@ impl EditorView {
     pub(crate) fn clear_sidebar_drag_state(&mut self, cx: &mut Context<Self>) {
         self.sidebar_drag_expand_task = None;
         self.update_sidebar_drag_target(None, cx);
+    }
+
+    pub(crate) fn reveal_path_in_sidebar(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(root) = self.workspace_root_for_path(&path) else {
+            return;
+        };
+
+        if self.sidebar_root != root {
+            self.switch_workspace(root.clone(), cx);
+        } else {
+            self.sidebar_visible = true;
+        }
+
+        self.expanded_dirs.insert(root.clone());
+        let mut ancestor = path.parent();
+        while let Some(dir) = ancestor {
+            if !dir.starts_with(&root) {
+                break;
+            }
+            self.expanded_dirs.insert(dir.to_path_buf());
+            if dir == root {
+                break;
+            }
+            ancestor = dir.parent();
+        }
+
+        self.invalidate_sidebar_items_cache();
+        let items = self.sidebar_items();
+        if let Some(index) = items.iter().position(|item| item.path == path) {
+            if index + 1 > self.sidebar_render_limit {
+                self.sidebar_render_limit = (index + 32).min(items.len().max(index + 1));
+            }
+            self.selected_sidebar_paths.clear();
+            self.selected_sidebar_paths.insert(path.clone());
+            self.focused_sidebar_path = Some(path);
+            self.sidebar_selection_anchor = self.focused_sidebar_path.clone();
+            self.sidebar_scroll_handle.scroll_to_item(index);
+
+            let reveal_path = self.focused_sidebar_path.clone();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1))
+                    .await;
+                this.update(cx, |editor, cx| {
+                    if let Some(path) = reveal_path.as_ref() {
+                        let items = editor.sidebar_items();
+                        if let Some(index) = items.iter().position(|item| &item.path == path) {
+                            if index + 1 > editor.sidebar_render_limit {
+                                editor.sidebar_render_limit =
+                                    (index + 32).min(items.len().max(index + 1));
+                            }
+                            editor.sidebar_scroll_handle.scroll_to_item(index);
+                            cx.notify();
+                        }
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+
+        cx.notify();
     }
 
     pub(crate) fn invalidate_sidebar_items_cache(&mut self) {
@@ -525,6 +599,7 @@ impl EditorView {
                         eprintln!("Create file failed: {e}");
                     } else {
                         self.invalidate_sidebar_items_cache();
+                        self.reveal_path_in_sidebar(new_path.clone(), cx);
                         self.open_sidebar_file(new_path, cx);
                         return;
                     }
@@ -537,8 +612,9 @@ impl EditorView {
                     if let Err(e) = std::fs::create_dir(&new_path) {
                         eprintln!("Create folder failed: {e}");
                     } else {
-                        self.expanded_dirs.insert(new_path);
+                        self.expanded_dirs.insert(new_path.clone());
                         self.invalidate_sidebar_items_cache();
+                        self.reveal_path_in_sidebar(new_path, cx);
                     }
                 }
             }
@@ -830,6 +906,45 @@ impl EditorView {
                     .path(icon_path)
                     .size(px(self.scaled(ss.sidebar_header_action_icon_size_px)))
                     .text_color(ss.sidebar_header_icon_color),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    handler(this, event, window, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_sidebar_top_button(
+        &self,
+        id: &'static str,
+        icon_path: &'static str,
+        is_active: bool,
+        cx: &mut Context<Self>,
+        handler: impl Fn(&mut Self, &MouseDownEvent, &mut gpui::Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let ss = &self.styles.sidebar;
+        let icon_color = if is_active {
+            ss.sidebar_top_button_active_color
+        } else {
+            ss.sidebar_top_button_inactive_color
+        };
+        div()
+            .id(id)
+            .w(px(self.scaled(ss.sidebar_top_button_size_px)))
+            .h(px(self.scaled(ss.sidebar_top_button_size_px)))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .cursor(CursorStyle::Arrow)
+            .child(
+                svg()
+                    .path(icon_path)
+                    .size(px(self.scaled(ss.sidebar_top_button_icon_size_px)))
+                    .text_color(icon_color),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -1390,7 +1505,16 @@ impl EditorView {
                         return;
                     }
 
+                    cx.stop_propagation();
+
                     if !is_dir {
+                        if this
+                            .sidebar_drag_hover_target
+                            .as_ref()
+                            .is_some_and(|target| path.starts_with(target))
+                        {
+                            return;
+                        }
                         this.update_sidebar_drag_target(None, cx);
                         return;
                     }
@@ -1427,6 +1551,7 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
                     // If right-clicking on an unselected item, select only that item
                     if !this.selected_sidebar_paths.contains(&path) {
                         this.sidebar_select_item(&path, false, false);
@@ -1454,6 +1579,41 @@ impl EditorView {
             .w_full()
             .h(px(self.scaled(ss.sidebar_top_spacer_height_px)))
             .flex_none()
+            .flex()
+            .items_center()
+            .justify_end()
+            .when(ss.sidebar_top_buttons_visible, |this| {
+                this.pr(px(self.scaled(ss.sidebar_top_button_padding_right_px)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(self.scaled(ss.sidebar_top_button_gap_px)))
+                            .child(self.render_sidebar_top_button(
+                                "sidebar-top-filetree",
+                                "assets/icons/filetree.svg",
+                                !self.workspace_search_visible,
+                                cx,
+                                |this, _event, window, cx| {
+                                    this.sidebar_visible = true;
+                                    if this.workspace_search_visible {
+                                        this.close_workspace_search(window, cx);
+                                    } else {
+                                        cx.notify();
+                                    }
+                                },
+                            ))
+                            .child(self.render_sidebar_top_button(
+                                "sidebar-top-search",
+                                "assets/icons/search.svg",
+                                self.workspace_search_visible,
+                                cx,
+                                |this, _event, window, cx| {
+                                    this.toggle_workspace_search(window, cx);
+                                },
+                            )),
+                    )
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
@@ -1699,6 +1859,13 @@ impl EditorView {
                                           _,
                                           cx| {
                                         if event.bounds.contains(&event.event.position) {
+                                            if this
+                                                .sidebar_drag_hover_target
+                                                .as_ref()
+                                                .is_some_and(|target| target != &root)
+                                            {
+                                                return;
+                                            }
                                             this.update_sidebar_drag_target(Some(root.clone()), cx);
                                         }
                                     },
