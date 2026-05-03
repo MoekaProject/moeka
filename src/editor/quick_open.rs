@@ -186,6 +186,8 @@ impl EditorView {
         let path_font = self.scaled(styles.quick_open_result_path_font_size_px);
         let name_font = self.scaled(styles.quick_open_result_name_font_size_px);
         let max_results_h = self.scaled(styles.quick_open_results_max_height_px);
+        let workspace_name = self.sidebar_root_name();
+        let workspace_name_char_len = workspace_name.chars().count();
 
         let mut result_children: Vec<AnyElement> = Vec::new();
         if self.quick_open_results.is_empty() {
@@ -222,22 +224,31 @@ impl EditorView {
                     .unwrap_or(path.as_path())
                     .display()
                     .to_string();
-                let directory_path = Path::new(&relative_path)
+                let relative_directory = Path::new(&relative_path)
                     .parent()
                     .filter(|parent| !parent.as_os_str().is_empty())
-                    .map(|parent| parent.display().to_string())
-                    .unwrap_or_else(|| ".".to_string());
+                    .map(|parent| parent.display().to_string());
                 let file_name = path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| relative_path.clone());
-                let directory_char_len = directory_path.chars().count();
-                let path_match_indices = result
-                    .path_match_indices
-                    .iter()
-                    .copied()
-                    .filter(|index| *index < directory_char_len)
-                    .collect::<Vec<_>>();
+                let (directory_path, path_match_indices) =
+                    if let Some(relative_directory) = relative_directory {
+                        let prefix_offset = workspace_name_char_len + 1;
+                        let relative_directory_char_len = relative_directory.chars().count();
+                        (
+                            format!("{workspace_name}/{relative_directory}"),
+                            result
+                                .path_match_indices
+                                .iter()
+                                .copied()
+                                .filter(|index| *index < relative_directory_char_len)
+                                .map(|index| index + prefix_offset)
+                                .collect::<Vec<_>>(),
+                        )
+                    } else {
+                        (workspace_name.clone(), Vec::new())
+                    };
                 let file_name_el = render_highlighted_text(
                     &file_name,
                     &result.file_name_match_indices,

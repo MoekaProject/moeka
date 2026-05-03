@@ -234,6 +234,18 @@ pub(crate) struct EditorSnapshot {
     pub extra_cursors: Vec<(usize, usize)>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WrapBoundaryAffinityKind {
+    Upstream,
+    Downstream,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WrapBoundaryAffinity {
+    pub offset: usize,
+    pub kind: WrapBoundaryAffinityKind,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TabKind {
     Editor,
@@ -599,6 +611,7 @@ pub(crate) struct LineDisplayInfo {
     pub line_height: f32,
     pub visual_line_count: usize,
     pub wrapped_line: WrappedLine,
+    pub wrap_boundary_upstream_xs: HashMap<usize, f32>,
     pub extra_height: f32,
     pub indent_px: f32,
     pub content_x: f32,
@@ -663,6 +676,8 @@ pub struct EditorView {
     pub(crate) decorations: Vec<LineDecoration>,
     pub(crate) scroll_offset: f32,
     pub(crate) is_selecting: bool,
+    pub(crate) vertical_move_goal_x: Option<f32>,
+    pub(crate) wrap_boundary_affinity: Option<WrapBoundaryAffinity>,
     pub(crate) line_display_info: Vec<Option<LineDisplayInfo>>,
     pub(crate) layout_dirty: bool,
     pub(crate) pending_scroll_to_cursor: bool,
@@ -752,12 +767,14 @@ pub struct EditorView {
     /// 多选锚点（shift 连续选择的起点）
     pub(crate) sidebar_selection_anchor: Option<PathBuf>,
     pub(crate) sidebar_sort_mode: SidebarSortMode,
-    /// 拖拽悬停的目标目录（用于高亮和自动展开）
+    /// 拖拽悬停的目标目录（仅用于高亮）
     pub(crate) sidebar_drag_hover_target: Option<PathBuf>,
+    /// 拖拽悬停的目录（用于延迟自动展开）
+    pub(crate) sidebar_drag_expand_hover_dir: Option<PathBuf>,
     /// 拖拽悬停自动展开的延迟 task
     pub(crate) sidebar_drag_expand_task: Option<Task<()>>,
-    /// 拖拽悬停时自动展开、离开后应回折的目录
-    pub(crate) sidebar_drag_auto_expanded_target: Option<PathBuf>,
+    /// 拖拽悬停时自动展开、离开后可回折的目录集合
+    pub(crate) sidebar_drag_auto_expanded_dirs: HashSet<PathBuf>,
     pub(crate) sidebar_items_cache: Vec<SidebarItem>,
     pub(crate) sidebar_items_dirty: bool,
     pub(crate) sidebar_scroll_handle: ScrollHandle,
@@ -902,6 +919,8 @@ impl EditorView {
             decorations,
             scroll_offset: 0.0,
             is_selecting: false,
+            vertical_move_goal_x: None,
+            wrap_boundary_affinity: None,
             line_display_info: Vec::new(),
             layout_dirty: false,
             pending_scroll_to_cursor: false,
@@ -1020,8 +1039,9 @@ impl EditorView {
             sidebar_selection_anchor: None,
             sidebar_sort_mode: SidebarSortMode::NameAsc,
             sidebar_drag_hover_target: None,
+            sidebar_drag_expand_hover_dir: None,
             sidebar_drag_expand_task: None,
-            sidebar_drag_auto_expanded_target: None,
+            sidebar_drag_auto_expanded_dirs: HashSet::new(),
             sidebar_items_cache: Vec::new(),
             sidebar_items_dirty: true,
             sidebar_scroll_handle: ScrollHandle::new(),
@@ -1296,6 +1316,7 @@ impl EditorView {
                         self.buffer = crate::buffer::Buffer::from_text(&snapshot.text);
                         self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
                         self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());
+                        self.reset_cursor_visual_targeting();
                         self.reparse();
                     }
                 }
@@ -1777,11 +1798,15 @@ impl EditorView {
     pub(crate) fn snap_cursor_to_content(&mut self) {
         let line = self.cursor_line();
         let line_start = self.buffer.line_start(line);
+        let previous_offset = self.cursor.offset;
         let cursor_col = self.cursor.offset - line_start;
         let content_start = self.line_content_start_col(line);
         if content_start > 0 && cursor_col < content_start {
             self.cursor
                 .move_to(line_start + content_start, &self.buffer);
+            if self.cursor.offset != previous_offset {
+                self.clear_wrap_boundary_affinity();
+            }
         }
     }
 
@@ -1798,6 +1823,27 @@ impl EditorView {
     pub(crate) fn clear_marked_ranges(&mut self) {
         self.marked_range = None;
         self.extra_marked_ranges.clear();
+    }
+
+    pub(crate) fn clear_vertical_move_goal_x(&mut self) {
+        self.vertical_move_goal_x = None;
+    }
+
+    pub(crate) fn set_wrap_boundary_affinity(
+        &mut self,
+        offset: usize,
+        kind: WrapBoundaryAffinityKind,
+    ) {
+        self.wrap_boundary_affinity = Some(WrapBoundaryAffinity { offset, kind });
+    }
+
+    pub(crate) fn clear_wrap_boundary_affinity(&mut self) {
+        self.wrap_boundary_affinity = None;
+    }
+
+    pub(crate) fn reset_cursor_visual_targeting(&mut self) {
+        self.clear_vertical_move_goal_x();
+        self.clear_wrap_boundary_affinity();
     }
 
     pub(crate) fn clear_extra_cursors(&mut self) {
@@ -2322,6 +2368,7 @@ impl EditorView {
             .collect();
         self.scroll_offset = snapshot.scroll_offset;
         self.clear_marked_ranges();
+        self.reset_cursor_visual_targeting();
         self.ime_composition_snapshot = None;
         self.dedup_cursors();
         self.reparse();

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use gpui::{
     App, BorderStyle, Bounds, Corners, CursorStyle, Element, ElementId, ElementInputHandler,
     Entity, Font, FontFallbacks, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
-    IntoElement, LayoutId, PaintQuad, Pixels, Point, ShapedLine, Style, TextAlign, TextRun,
-    TransformationMatrix, Window, WrappedLine, fill, point, px, quad, relative, size,
+    IntoElement, LayoutId, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextAlign,
+    TextRun, TransformationMatrix, Window, WrappedLine, fill, point, px, quad, relative, size,
 };
 
 use crate::markdown::BlockType;
@@ -291,6 +291,83 @@ fn push_whitespace_dot_quads(
             BorderStyle::default(),
         ));
     }
+}
+
+fn compute_wrap_boundary_upstream_xs(
+    window: &mut Window,
+    wrapped: &WrappedLine,
+    display_text: &str,
+    runs: &[TextRun],
+    font_size: f32,
+    line_height: f32,
+    letter_spacing: f32,
+) -> HashMap<usize, f32> {
+    let mut upstream_xs = HashMap::new();
+    let mut segment_start = 0;
+
+    for boundary in helpers::wrap_boundary_byte_indices(wrapped) {
+        let segment_text = &display_text[segment_start..boundary];
+        let segment_runs = helpers::extract_runs_for_range(runs, segment_start, boundary);
+        let segment_shared: SharedString = if segment_text.is_empty() {
+            " ".into()
+        } else {
+            segment_text.to_string().into()
+        };
+
+        if let Ok(segment_lines) = window.text_system().shape_text(
+            segment_shared,
+            px(font_size),
+            &segment_runs,
+            None,
+            None,
+        ) && let Some(mut segment_wrapped) = segment_lines.into_iter().next()
+        {
+            if letter_spacing != 0.0 {
+                helpers::apply_letter_spacing(&mut segment_wrapped, letter_spacing);
+            }
+            let segment_end_x = segment_wrapped
+                .position_for_index(segment_text.len(), px(line_height))
+                .map(|pos| f32::from(pos.x))
+                .unwrap_or(0.0);
+            upstream_xs.insert(boundary, segment_end_x);
+        }
+
+        segment_start = boundary;
+    }
+
+    upstream_xs
+}
+
+fn upstream_wrap_boundary_position(
+    wrapped: &WrappedLine,
+    display_text: &str,
+    disp_col: usize,
+    upstream_xs: &HashMap<usize, f32>,
+    line_height: f32,
+) -> Option<Point<Pixels>> {
+    let upstream_x = *upstream_xs.get(&disp_col)?;
+    let previous_boundary = display_text[..disp_col]
+        .char_indices()
+        .next_back()
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let previous_pos = wrapped.position_for_index(previous_boundary, px(line_height))?;
+    Some(point(px(upstream_x), previous_pos.y))
+}
+
+fn downstream_wrap_boundary_position(
+    wrapped: &WrappedLine,
+    disp_col: usize,
+    line_height: f32,
+) -> Option<Point<Pixels>> {
+    let downstream_visual_idx = helpers::wrap_boundary_byte_indices(wrapped)
+        .iter()
+        .position(|boundary| *boundary == disp_col)?
+        + 1;
+    Some(point(
+        px(0.0),
+        px(downstream_visual_idx as f32 * line_height),
+    ))
 }
 
 fn push_gutter_line_number_label(
@@ -625,6 +702,7 @@ impl Element for EditorElement {
                     line_height: 0.0,
                     visual_line_count: 0,
                     wrapped_line: wl,
+                    wrap_boundary_upstream_xs: HashMap::new(),
                     extra_height: 0.0,
                     indent_px: 0.0,
                     content_x: editor_left + editor.padding_left(),
@@ -778,6 +856,7 @@ impl Element for EditorElement {
                     line_height: 0.0,
                     visual_line_count: 0,
                     wrapped_line,
+                    wrap_boundary_upstream_xs: HashMap::new(),
                     extra_height: 0.0,
                     indent_px: 0.0,
                     content_x: editor_left + editor.padding_left(),
@@ -814,6 +893,7 @@ impl Element for EditorElement {
                     line_height,
                     visual_line_count,
                     wrapped_line: cached.wrapped_line.clone(),
+                    wrap_boundary_upstream_xs: cached.wrap_boundary_upstream_xs.clone(),
                     extra_height: cached.extra_height,
                     indent_px: cached.indent_px,
                     content_x,
@@ -1106,6 +1186,31 @@ impl Element for EditorElement {
                             .wrapped_line
                             .position_for_index(disp_cursor_col, px(line_height))
                             .unwrap_or_default();
+                        let cursor_pos = match editor.wrap_boundary_affinity {
+                            Some(WrapBoundaryAffinity {
+                                offset: affinity_offset,
+                                kind: WrapBoundaryAffinityKind::Upstream,
+                            }) if affinity_offset == cur_offset => upstream_wrap_boundary_position(
+                                &cached.wrapped_line,
+                                &cached.display_text,
+                                disp_cursor_col,
+                                &cached.wrap_boundary_upstream_xs,
+                                line_height,
+                            )
+                            .unwrap_or(cursor_pos),
+                            Some(WrapBoundaryAffinity {
+                                offset: affinity_offset,
+                                kind: WrapBoundaryAffinityKind::Downstream,
+                            }) if affinity_offset == cur_offset => {
+                                downstream_wrap_boundary_position(
+                                    &cached.wrapped_line,
+                                    disp_cursor_col,
+                                    line_height,
+                                )
+                                .unwrap_or(cursor_pos)
+                            }
+                            _ => cursor_pos,
+                        };
                         let cursor_height =
                             line_height * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
                         let cursor_top = text_line_top
@@ -1412,6 +1517,15 @@ impl Element for EditorElement {
                 } else {
                     editor_left + editor.padding_left()
                 };
+            let wrap_boundary_upstream_xs = compute_wrap_boundary_upstream_xs(
+                window,
+                wrapped,
+                &display_text,
+                &runs,
+                font_size,
+                line_height,
+                letter_spacing,
+            );
 
             display_info_cache.push(Some(LineDisplayInfo {
                 display_text: display_text.clone(),
@@ -1421,6 +1535,7 @@ impl Element for EditorElement {
                 line_height,
                 visual_line_count,
                 wrapped_line: wrapped.clone(),
+                wrap_boundary_upstream_xs: wrap_boundary_upstream_xs.clone(),
                 extra_height,
                 indent_px,
                 content_x,
@@ -2709,6 +2824,27 @@ impl Element for EditorElement {
                     let cursor_pos = wrapped
                         .position_for_index(disp_cursor_col, px(line_height))
                         .unwrap_or_default();
+                    let cursor_pos = match editor.wrap_boundary_affinity {
+                        Some(WrapBoundaryAffinity {
+                            offset: affinity_offset,
+                            kind: WrapBoundaryAffinityKind::Upstream,
+                        }) if affinity_offset == cur_offset => upstream_wrap_boundary_position(
+                            wrapped,
+                            &display_text,
+                            disp_cursor_col,
+                            &wrap_boundary_upstream_xs,
+                            line_height,
+                        )
+                        .unwrap_or(cursor_pos),
+                        Some(WrapBoundaryAffinity {
+                            offset: affinity_offset,
+                            kind: WrapBoundaryAffinityKind::Downstream,
+                        }) if affinity_offset == cur_offset => {
+                            downstream_wrap_boundary_position(wrapped, disp_cursor_col, line_height)
+                                .unwrap_or(cursor_pos)
+                        }
+                        _ => cursor_pos,
+                    };
 
                     let cursor_indent = helpers::indent_for_y(indent_px, cursor_pos.y, line_height);
                     let cursor_height =

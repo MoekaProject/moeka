@@ -237,32 +237,47 @@ impl EditorView {
     pub(crate) fn offset_for_visual_up(&self, current_offset: usize) -> Option<usize> {
         let (line, col) = self.buffer.offset_to_line_col(current_offset);
         let info = self.line_display_info.get(line)?.as_ref()?;
-        let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
-        let pos = info
-            .wrapped_line
-            .position_for_index(disp_col, gpui::px(info.line_height))
-            .unwrap_or_default();
-        let cur_visual = (f32::from(pos.y) / info.line_height) as usize;
-        let cur_x = pos.x;
+        let _disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
+        let (cur_visual, current_x) = self.cursor_visual_position(current_offset)?;
+        let goal_x = self.vertical_move_goal_x.unwrap_or(current_x);
 
         if cur_visual > 0 {
+            let target_visual = cur_visual - 1;
             let target_y = gpui::px((cur_visual as f32 - 0.5) * info.line_height);
-            let new_disp = match info.wrapped_line.closest_index_for_position(
-                gpui::point(cur_x, target_y),
-                gpui::px(info.line_height),
-            ) {
-                Ok(idx) | Err(idx) => idx,
+            let target_indent = if target_visual > 0 { info.indent_px } else { 0.0 };
+            let target_x = (goal_x - target_indent).max(0.0);
+            let new_disp = if target_x <= 0.5 {
+                Self::wrap_boundary_display_index_for_visual_line(info, target_visual)
+                    .unwrap_or_default()
+            } else {
+                match info.wrapped_line.closest_index_for_position(
+                    gpui::point(gpui::px(target_x), target_y),
+                    gpui::px(info.line_height),
+                ) {
+                    Ok(idx) | Err(idx) => idx,
+                }
             };
             Some(self.disp_to_buffer_offset(info, line, new_disp))
         } else if line > 0 {
             let prev_info = self.line_display_info.get(line - 1)?.as_ref()?;
             let last_visual = prev_info.visual_line_count.saturating_sub(1);
             let target_y = gpui::px((last_visual as f32 + 0.5) * prev_info.line_height);
-            let new_disp = match prev_info.wrapped_line.closest_index_for_position(
-                gpui::point(cur_x, target_y),
-                gpui::px(prev_info.line_height),
-            ) {
-                Ok(idx) | Err(idx) => idx,
+            let target_indent = if last_visual > 0 {
+                prev_info.indent_px
+            } else {
+                0.0
+            };
+            let target_x = (goal_x - target_indent).max(0.0);
+            let new_disp = if target_x <= 0.5 {
+                Self::wrap_boundary_display_index_for_visual_line(prev_info, last_visual)
+                    .unwrap_or_default()
+            } else {
+                match prev_info.wrapped_line.closest_index_for_position(
+                    gpui::point(gpui::px(target_x), target_y),
+                    gpui::px(prev_info.line_height),
+                ) {
+                    Ok(idx) | Err(idx) => idx,
+                }
             };
             Some(self.disp_to_buffer_offset(prev_info, line - 1, new_disp))
         } else {
@@ -273,31 +288,40 @@ impl EditorView {
     pub(crate) fn offset_for_visual_down(&self, current_offset: usize) -> Option<usize> {
         let (line, col) = self.buffer.offset_to_line_col(current_offset);
         let info = self.line_display_info.get(line)?.as_ref()?;
-        let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
-        let pos = info
-            .wrapped_line
-            .position_for_index(disp_col, gpui::px(info.line_height))
-            .unwrap_or_default();
-        let cur_visual = (f32::from(pos.y) / info.line_height) as usize;
-        let cur_x = pos.x;
+        let _disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
+        let (cur_visual, current_x) = self.cursor_visual_position(current_offset)?;
+        let goal_x = self.vertical_move_goal_x.unwrap_or(current_x);
 
         if cur_visual + 1 < info.visual_line_count {
+            let target_visual = cur_visual + 1;
             let target_y = gpui::px((cur_visual as f32 + 1.5) * info.line_height);
-            let new_disp = match info.wrapped_line.closest_index_for_position(
-                gpui::point(cur_x, target_y),
-                gpui::px(info.line_height),
-            ) {
-                Ok(idx) | Err(idx) => idx,
+            let target_indent = if target_visual > 0 { info.indent_px } else { 0.0 };
+            let target_x = (goal_x - target_indent).max(0.0);
+            let new_disp = if target_x <= 0.5 {
+                Self::wrap_boundary_display_index_for_visual_line(info, target_visual)
+                    .unwrap_or_default()
+            } else {
+                match info.wrapped_line.closest_index_for_position(
+                    gpui::point(gpui::px(target_x), target_y),
+                    gpui::px(info.line_height),
+                ) {
+                    Ok(idx) | Err(idx) => idx,
+                }
             };
             Some(self.disp_to_buffer_offset(info, line, new_disp))
         } else if line + 1 < self.buffer.line_count() {
             let next_info = self.line_display_info.get(line + 1)?.as_ref()?;
             let target_y = gpui::px(0.5 * next_info.line_height);
-            let new_disp = match next_info.wrapped_line.closest_index_for_position(
-                gpui::point(cur_x, target_y),
-                gpui::px(next_info.line_height),
-            ) {
-                Ok(idx) | Err(idx) => idx,
+            let target_x = goal_x.max(0.0);
+            let new_disp = if target_x <= 0.5 {
+                0
+            } else {
+                match next_info.wrapped_line.closest_index_for_position(
+                    gpui::point(gpui::px(target_x), target_y),
+                    gpui::px(next_info.line_height),
+                ) {
+                    Ok(idx) | Err(idx) => idx,
+                }
             };
             Some(self.disp_to_buffer_offset(next_info, line + 1, new_disp))
         } else {

@@ -290,6 +290,8 @@ impl EditorView {
             self.sidebar_nav_left(cx);
             return;
         }
+        let had_selection = self.cursor.has_selection();
+        self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_move_left();
             self.scroll_to_cursor();
@@ -325,6 +327,15 @@ impl EditorView {
                     .move_to(line_start + cell_ranges[0].start, &self.buffer);
             }
         }
+        if !had_selection
+            && self.cursor.offset != prev_offset
+            && self.is_wrap_boundary_offset(self.cursor.offset)
+        {
+            self.set_wrap_boundary_affinity(
+                self.cursor.offset,
+                WrapBoundaryAffinityKind::Downstream,
+            );
+        }
         self.maybe_auto_select_link_url(prev_offset, false, cx);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -338,6 +349,7 @@ impl EditorView {
             self.sidebar_nav_right(cx);
             return;
         }
+        self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_move_right();
             self.scroll_to_cursor();
@@ -394,18 +406,24 @@ impl EditorView {
             return;
         }
         if self.has_extra_cursors() {
+            self.reset_cursor_visual_targeting();
             self.multi_cursor_move_up();
             self.scroll_to_cursor();
             self.pause_blinking(cx);
             return;
         }
         let prev_offset = self.cursor.offset;
+        if self.vertical_move_goal_x.is_none() {
+            self.vertical_move_goal_x = self.cursor_visual_x(self.cursor.offset);
+        }
+        let goal_x = self.vertical_move_goal_x.unwrap_or_default();
         if let Some(offset) = self.offset_for_visual_up(self.cursor.offset) {
             self.cursor.move_to(offset, &self.buffer);
         } else {
             self.cursor.move_up(&self.buffer);
         }
         self.snap_cursor_to_content();
+        self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
         self.maybe_auto_select_link_url(prev_offset, false, cx);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -433,18 +451,24 @@ impl EditorView {
             return;
         }
         if self.has_extra_cursors() {
+            self.reset_cursor_visual_targeting();
             self.multi_cursor_move_down();
             self.scroll_to_cursor();
             self.pause_blinking(cx);
             return;
         }
         let prev_offset = self.cursor.offset;
+        if self.vertical_move_goal_x.is_none() {
+            self.vertical_move_goal_x = self.cursor_visual_x(self.cursor.offset);
+        }
+        let goal_x = self.vertical_move_goal_x.unwrap_or_default();
         if let Some(offset) = self.offset_for_visual_down(self.cursor.offset) {
             self.cursor.move_to(offset, &self.buffer);
         } else {
             self.cursor.move_down(&self.buffer);
         }
         self.snap_cursor_to_content();
+        self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
         self.maybe_auto_select_link_url(prev_offset, false, cx);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -456,6 +480,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_select_left();
         } else {
@@ -471,6 +496,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_select_right();
         } else {
@@ -482,11 +508,19 @@ impl EditorView {
 
     pub(crate) fn on_select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
         if self.has_extra_cursors() {
+            self.reset_cursor_visual_targeting();
             self.multi_cursor_select_up();
-        } else if let Some(offset) = self.offset_for_visual_up(self.cursor.offset) {
-            self.cursor.select_to(offset, &self.buffer);
         } else {
-            self.cursor.select_up(&self.buffer);
+            if self.vertical_move_goal_x.is_none() {
+                self.vertical_move_goal_x = self.cursor_visual_x(self.cursor.offset);
+            }
+            let goal_x = self.vertical_move_goal_x.unwrap_or_default();
+            if let Some(offset) = self.offset_for_visual_up(self.cursor.offset) {
+                self.cursor.select_to(offset, &self.buffer);
+            } else {
+                self.cursor.select_up(&self.buffer);
+            }
+            self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
         }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -499,11 +533,19 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         if self.has_extra_cursors() {
+            self.reset_cursor_visual_targeting();
             self.multi_cursor_select_down();
-        } else if let Some(offset) = self.offset_for_visual_down(self.cursor.offset) {
-            self.cursor.select_to(offset, &self.buffer);
         } else {
-            self.cursor.select_down(&self.buffer);
+            if self.vertical_move_goal_x.is_none() {
+                self.vertical_move_goal_x = self.cursor_visual_x(self.cursor.offset);
+            }
+            let goal_x = self.vertical_move_goal_x.unwrap_or_default();
+            if let Some(offset) = self.offset_for_visual_down(self.cursor.offset) {
+                self.cursor.select_to(offset, &self.buffer);
+            } else {
+                self.cursor.select_down(&self.buffer);
+            }
+            self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
         }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -515,6 +557,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
+        self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_move_to_line_start();
         } else {
@@ -525,6 +568,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_move_to_line_end();
         } else {

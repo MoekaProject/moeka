@@ -465,6 +465,8 @@ impl EditorView {
             return;
         }
 
+        self.clear_vertical_move_goal_x();
+
         // Table cell click: position cursor at the correct cell offset
         if event.button == MouseButton::Left {
             if let Some(&(bounds, table_start, visual_row, col)) = self
@@ -491,13 +493,16 @@ impl EditorView {
                     ));
                     if event.click_count >= 2 {
                         self.clear_extra_cursors();
+                        self.clear_wrap_boundary_affinity();
                         self.select_word_at_offset(offset);
                         self.is_selecting = false;
                     } else if event.modifiers.shift {
                         self.cursor.select_to(offset, &self.buffer);
+                        self.clear_wrap_boundary_affinity();
                         self.is_selecting = false;
                     } else {
                         self.cursor.move_to(offset, &self.buffer);
+                        self.clear_wrap_boundary_affinity();
                         self.is_selecting = true;
                     }
                     cx.notify();
@@ -508,6 +513,7 @@ impl EditorView {
 
         if event.button == MouseButton::Left && event.click_count >= 2 {
             self.clear_extra_cursors();
+            self.clear_wrap_boundary_affinity();
             let offset = self.offset_for_position(event.position);
             self.select_word_at_offset(offset);
             self.is_selecting = false;
@@ -518,6 +524,7 @@ impl EditorView {
         self.is_selecting = true;
         let prev_offset = self.cursor.offset;
         let offset = self.offset_for_position(event.position);
+        self.update_wrap_boundary_affinity_for_position(offset, event.position);
         if event.modifiers.platform {
             // Cmd+click: open link if cursor is on a link span
             let (line, col) = self.buffer.offset_to_line_col(offset);
@@ -1121,6 +1128,7 @@ impl EditorView {
             } else {
                 self.offset_for_position(event.position)
             };
+            self.update_wrap_boundary_affinity_for_position(offset, event.position);
             self.cursor.select_to(offset, &self.buffer);
             cx.notify();
         } else if toolbar_hover_changed {
@@ -1845,19 +1853,9 @@ impl EditorView {
             let local_x = (pos_x - info.content_x - indent_adjust).max(0.0);
 
             if visual_line_idx > 0 && local_x <= 0.0 {
-                let target_y = visual_line_idx as f32 * info.line_height;
-                let display_index = info
-                    .display_text
-                    .char_indices()
-                    .map(|(index, _)| index)
-                    .chain(std::iter::once(info.display_text.len()))
-                    .find(|display_index| {
-                        info.wrapped_line
-                            .position_for_index(*display_index, px(info.line_height))
-                            .map(|pos| f32::from(pos.y) >= target_y)
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(info.display_text.len());
+                let display_index =
+                    Self::wrap_boundary_display_index_for_visual_line(info, visual_line_idx)
+                        .unwrap_or(info.display_text.len());
 
                 let buffer_col = if display_index < info.display_to_buffer.len() {
                     info.display_to_buffer[display_index]
@@ -1970,6 +1968,152 @@ impl EditorView {
         let approx_char_width = self.base_font_size() * 0.6;
         let col = (x / approx_char_width) as usize;
         self.buffer.line_col_to_offset(line, col)
+    }
+
+    pub(crate) fn wrap_boundary_display_index_for_visual_line(
+        info: &LineDisplayInfo,
+        visual_line_idx: usize,
+    ) -> Option<usize> {
+        if visual_line_idx == 0 {
+            return Some(0);
+        }
+        helpers::wrap_boundary_byte_indices(&info.wrapped_line)
+            .get(visual_line_idx - 1)
+            .copied()
+    }
+
+    fn wrap_boundary_visual_indices(
+        info: &LineDisplayInfo,
+        disp_col: usize,
+    ) -> Option<(usize, usize)> {
+        helpers::wrap_boundary_byte_indices(&info.wrapped_line)
+            .iter()
+            .position(|boundary| *boundary == disp_col)
+            .map(|upstream_visual_idx| (upstream_visual_idx, upstream_visual_idx + 1))
+    }
+
+    fn wrap_boundary_visual_x_pair(info: &LineDisplayInfo, disp_col: usize) -> Option<(f32, f32)> {
+        let (upstream_visual_idx, downstream_visual_idx) =
+            Self::wrap_boundary_visual_indices(info, disp_col)?;
+        let upstream_x = info.wrap_boundary_upstream_xs.get(&disp_col).copied()?
+            + if upstream_visual_idx > 0 {
+                info.indent_px
+            } else {
+                0.0
+            };
+        let downstream_x = if downstream_visual_idx > 0 {
+            info.indent_px
+        } else {
+            0.0
+        };
+        Some((upstream_x, downstream_x))
+    }
+
+    pub(crate) fn cursor_visual_position(&self, offset: usize) -> Option<(usize, f32)> {
+        let (line, col) = self.buffer.offset_to_line_col(offset);
+        let info = self.line_display_info.get(line)?.as_ref()?;
+        let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
+
+        if let Some((upstream_visual_idx, downstream_visual_idx)) =
+            Self::wrap_boundary_visual_indices(info, disp_col)
+        {
+            if self.wrap_boundary_affinity
+                == Some(WrapBoundaryAffinity {
+                    offset,
+                    kind: WrapBoundaryAffinityKind::Downstream,
+                })
+            {
+                let downstream_x = if downstream_visual_idx > 0 {
+                    info.indent_px
+                } else {
+                    0.0
+                };
+                return Some((downstream_visual_idx, downstream_x));
+            }
+
+            if let Some((upstream_x, _)) = Self::wrap_boundary_visual_x_pair(info, disp_col) {
+                return Some((upstream_visual_idx, upstream_x));
+            }
+        }
+
+        let pos = info
+            .wrapped_line
+            .position_for_index(disp_col, px(info.line_height))
+            .unwrap_or_default();
+        Some((
+            (f32::from(pos.y) / info.line_height) as usize,
+            f32::from(pos.x) + helpers::indent_for_y(info.indent_px, pos.y, info.line_height),
+        ))
+    }
+
+    pub(crate) fn cursor_visual_x(&self, offset: usize) -> Option<f32> {
+        self.cursor_visual_position(offset).map(|(_, x)| x)
+    }
+
+    pub(crate) fn is_wrap_boundary_offset(&self, offset: usize) -> bool {
+        let (line, col) = self.buffer.offset_to_line_col(offset);
+        let Some(Some(info)) = self.line_display_info.get(line) else {
+            return false;
+        };
+
+        let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
+        Self::wrap_boundary_visual_indices(info, disp_col).is_some()
+    }
+
+    fn update_wrap_boundary_affinity_for_position(
+        &mut self,
+        offset: usize,
+        position: Point<Pixels>,
+    ) {
+        let (line, col) = self.buffer.offset_to_line_col(offset);
+        let Some(Some(info)) = self.line_display_info.get(line) else {
+            self.clear_wrap_boundary_affinity();
+            return;
+        };
+
+        let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
+        let Some((upstream_visual_idx, downstream_visual_idx)) =
+            Self::wrap_boundary_visual_indices(info, disp_col)
+        else {
+            self.clear_wrap_boundary_affinity();
+            return;
+        };
+
+        let pos_y: f32 = position.y.into();
+        let origin_y: f32 = self.content_origin.y.into();
+        let y = (pos_y - origin_y) + self.scroll_offset;
+        let line_top_y = self.line_y_offset(line);
+        let local_y = (y - line_top_y).max(0.0);
+        let visual_line_idx = (local_y / info.line_height) as usize;
+
+        if visual_line_idx >= downstream_visual_idx {
+            self.set_wrap_boundary_affinity(offset, WrapBoundaryAffinityKind::Downstream);
+        } else if visual_line_idx <= upstream_visual_idx {
+            self.set_wrap_boundary_affinity(offset, WrapBoundaryAffinityKind::Upstream);
+        } else {
+            self.set_wrap_boundary_affinity(offset, WrapBoundaryAffinityKind::Downstream);
+        }
+    }
+
+    pub(crate) fn update_wrap_boundary_affinity_for_goal_x(&mut self, offset: usize, goal_x: f32) {
+        let (line, col) = self.buffer.offset_to_line_col(offset);
+        let Some(Some(info)) = self.line_display_info.get(line) else {
+            self.clear_wrap_boundary_affinity();
+            return;
+        };
+
+        let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
+        let Some((upstream_x, downstream_x)) = Self::wrap_boundary_visual_x_pair(info, disp_col)
+        else {
+            self.clear_wrap_boundary_affinity();
+            return;
+        };
+
+        if (goal_x - downstream_x).abs() <= (goal_x - upstream_x).abs() {
+            self.set_wrap_boundary_affinity(offset, WrapBoundaryAffinityKind::Downstream);
+        } else {
+            self.set_wrap_boundary_affinity(offset, WrapBoundaryAffinityKind::Upstream);
+        }
     }
 
     // ── UTF-16 helpers ──────────────────────────────────────────────
