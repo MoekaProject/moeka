@@ -80,12 +80,23 @@ pub(crate) fn restore_session(editor: &mut EditorView) {
             editor.buffer = Buffer::from_text(&active_tab.snapshot.text);
             editor.cursor.offset = active_tab.snapshot.cursor_offset.min(editor.buffer.len());
             editor.cursor.anchor = active_tab.snapshot.cursor_anchor.min(editor.buffer.len());
+            editor.extra_cursors = active_tab
+                .snapshot
+                .extra_cursors
+                .iter()
+                .map(|(offset, anchor)| Cursor {
+                    offset: (*offset).min(editor.buffer.len()),
+                    anchor: (*anchor).min(editor.buffer.len()),
+                })
+                .collect();
         } else {
             editor.buffer = Buffer::from_text("");
             editor.cursor.offset = 0;
             editor.cursor.anchor = 0;
+            editor.extra_cursors.clear();
         }
         editor.scroll_offset = active_tab.snapshot.scroll_offset;
+        editor.extra_marked_ranges.clear();
         editor.reparse();
     }
 }
@@ -103,6 +114,7 @@ fn tab_to_record(tab: &OpenTab) -> TabSessionRecord {
             cursor_offset: tab.snapshot.cursor_offset,
             cursor_anchor: tab.snapshot.cursor_anchor,
             scroll_offset: tab.snapshot.scroll_offset,
+            extra_cursors: tab.snapshot.extra_cursors.clone(),
         },
         recovery: tab.recovery.clone(),
         history: TabHistoryIndex {
@@ -169,12 +181,28 @@ fn resolve_snapshot(
                         snapshot.cursor_offset = record.view.cursor_offset.min(snapshot.text.len());
                         snapshot.cursor_anchor = record.view.cursor_anchor.min(snapshot.text.len());
                         snapshot.scroll_offset = record.view.scroll_offset;
+                        snapshot.extra_cursors = record
+                            .view
+                            .extra_cursors
+                            .iter()
+                            .map(|(offset, anchor)| {
+                                ((*offset).min(snapshot.text.len()), (*anchor).min(snapshot.text.len()))
+                            })
+                            .collect();
                         return Some((Some(path.clone()), snapshot, true));
                     }
                 }
                 snapshot.cursor_offset = record.view.cursor_offset.min(snapshot.text.len());
                 snapshot.cursor_anchor = record.view.cursor_anchor.min(snapshot.text.len());
                 snapshot.scroll_offset = record.view.scroll_offset;
+                snapshot.extra_cursors = record
+                    .view
+                    .extra_cursors
+                    .iter()
+                    .map(|(offset, anchor)| {
+                        ((*offset).min(snapshot.text.len()), (*anchor).min(snapshot.text.len()))
+                    })
+                    .collect();
                 Some((Some(path.clone()), snapshot, false))
             } else {
                 snapshot.scroll_offset = record.view.scroll_offset;
@@ -186,6 +214,12 @@ fn resolve_snapshot(
                 cursor_offset: record.view.cursor_offset.min(text.len()),
                 cursor_anchor: record.view.cursor_anchor.min(text.len()),
                 scroll_offset: record.view.scroll_offset,
+                extra_cursors: record
+                    .view
+                    .extra_cursors
+                    .iter()
+                    .map(|(offset, anchor)| ((*offset).min(text.len()), (*anchor).min(text.len())))
+                    .collect(),
                 text,
             };
             (None, snapshot, true)
@@ -195,6 +229,12 @@ fn resolve_snapshot(
                 cursor_offset: record.view.cursor_offset.min(text.len()),
                 cursor_anchor: record.view.cursor_anchor.min(text.len()),
                 scroll_offset: record.view.scroll_offset,
+                extra_cursors: record
+                    .view
+                    .extra_cursors
+                    .iter()
+                    .map(|(offset, anchor)| ((*offset).min(text.len()), (*anchor).min(text.len())))
+                    .collect(),
                 text,
             };
             (None, snapshot, true)
@@ -218,6 +258,7 @@ fn load_file_snapshot(path: &Path) -> Option<(EditorSnapshot, FileKind)> {
             cursor_offset: first_line_end,
             cursor_anchor: first_line_end,
             scroll_offset: 0.0,
+            extra_cursors: Vec::new(),
         },
         file_kind,
     ))
@@ -273,6 +314,7 @@ fn settings_tab(id: String) -> OpenTab {
             cursor_offset: 0,
             cursor_anchor: 0,
             scroll_offset: 0.0,
+            extra_cursors: Vec::new(),
         },
         image_view: ImageViewState::default(),
         is_preview: false,
@@ -305,6 +347,7 @@ mod tests {
             cursor_offset,
             cursor_anchor: cursor_offset,
             scroll_offset: cursor_offset as f32,
+            extra_cursors: Vec::new(),
         }
     }
 
@@ -333,6 +376,7 @@ mod tests {
                     cursor_offset: 0,
                     cursor_anchor: 0,
                     scroll_offset: 0.0,
+                    extra_cursors: Vec::new(),
                 },
                 image_view: ImageViewState::default(),
                 is_preview: false,

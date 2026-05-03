@@ -45,6 +45,8 @@ pub(crate) struct SnapshotViewState {
     pub cursor_offset: usize,
     pub cursor_anchor: usize,
     pub scroll_offset: f32,
+    #[serde(default)]
+    pub extra_cursors: Vec<(usize, usize)>,
 }
 
 impl TabHistory {
@@ -289,6 +291,7 @@ fn apply_edit(
         cursor_offset: after_view.cursor_offset,
         cursor_anchor: after_view.cursor_anchor,
         scroll_offset: after_view.scroll_offset,
+        extra_cursors: after_view.extra_cursors.clone(),
     })
 }
 
@@ -355,6 +358,7 @@ impl From<&EditorSnapshot> for SnapshotViewState {
             cursor_offset: snapshot.cursor_offset,
             cursor_anchor: snapshot.cursor_anchor,
             scroll_offset: snapshot.scroll_offset,
+            extra_cursors: snapshot.extra_cursors.clone(),
         }
     }
 }
@@ -369,6 +373,7 @@ mod tests {
             cursor_offset,
             cursor_anchor: cursor_offset,
             scroll_offset: cursor_offset as f32,
+            extra_cursors: Vec::new(),
         }
     }
 

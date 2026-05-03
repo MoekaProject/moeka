@@ -108,6 +108,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_quick_open))
             .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(Self::on_toggle_outline))
+            .on_action(cx.listener(Self::on_toggle_theme_debugger))
             .on_action(cx.listener(Self::on_add_cursor_above))
             .on_action(cx.listener(Self::on_add_cursor_below))
             .on_action(cx.listener(Self::on_select_next_occurrence))
@@ -486,60 +487,103 @@ impl Render for EditorView {
                         },
                     ),
             )
-            .when(self.outline_visible && !self.tabs.is_empty(), |this| {
+            .when(
+                (self.outline_visible || self.theme_debugger_visible) && !self.tabs.is_empty(),
+                |this| {
                 let os = &self.styles.outline;
                 let outline_w = self.outline_width();
                 let hover_indicator_color = os.outline_resize_active_indicator_color;
                 let hover_indicator_width =
                     self.scaled(os.outline_resize_active_indicator_width_px);
                 let handle_width = self.scaled(os.outline_resize_handle_width_px);
-                this.child(self.render_outline(cx)).child(
+                this.child(
                     div()
-                        .id("outline-resize-handle")
-                        .absolute()
-                        .right(px(outline_w - handle_width / 2.0))
-                        .top_0()
-                        .w(px(handle_width))
+                        .id("right-panels")
                         .h_full()
-                        .cursor(CursorStyle::ResizeLeftRight)
-                        .hover(move |style| {
-                            style
-                                .border_r(px(hover_indicator_width))
-                                .border_color(hover_indicator_color)
+                        .flex()
+                        .flex_row()
+                        .when(self.outline_visible, |this| {
+                            this.child(
+                                div()
+                                    .id("outline-panel-wrap")
+                                    .relative()
+                                    .h_full()
+                                    .w(px(outline_w))
+                                    .flex_shrink_0()
+                                    .child(self.render_outline(cx))
+                                    .child(
+                                        div()
+                                            .id("outline-resize-handle")
+                                            .absolute()
+                                            .left(px(-handle_width / 2.0))
+                                            .top_0()
+                                            .w(px(handle_width))
+                                            .h_full()
+                                            .cursor(CursorStyle::ResizeLeftRight)
+                                            .hover(move |style| {
+                                                style
+                                                    .border_l(px(hover_indicator_width))
+                                                    .border_color(hover_indicator_color)
+                                            })
+                                            .on_mouse_move(cx.listener(
+                                                |this, event: &MouseMoveEvent, window, cx| {
+                                                    if this.outline_resizing {
+                                                        let window_width =
+                                                            f32::from(window.bounds().size.width);
+                                                        let trailing_width = if this
+                                                            .theme_debugger_visible
+                                                            && !this.tabs.is_empty()
+                                                        {
+                                                            this.theme_debugger_width()
+                                                        } else {
+                                                            0.0
+                                                        };
+                                                        let new_width = window_width
+                                                            - trailing_width
+                                                            - f32::from(event.position.x);
+                                                        let min_w = this.scaled(
+                                                            this.styles
+                                                                .outline
+                                                                .outline_resize_min_width_px,
+                                                        );
+                                                        let max_w = this.scaled(
+                                                            this.styles
+                                                                .outline
+                                                                .outline_resize_max_width_px,
+                                                        );
+                                                        this.outline_custom_width =
+                                                            Some(new_width.clamp(min_w, max_w));
+                                                        cx.notify();
+                                                    }
+                                                },
+                                            ))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                                    this.outline_resizing = true;
+                                                    cx.notify();
+                                                }),
+                                            )
+                                            .on_mouse_up(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.outline_resizing = false;
+                                                    cx.notify();
+                                                }),
+                                            )
+                                            .on_mouse_up_out(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.outline_resizing = false;
+                                                    cx.notify();
+                                                }),
+                                            ),
+                                    ),
+                            )
                         })
-                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                            if this.outline_resizing {
-                                let window_width = f32::from(window.bounds().size.width);
-                                let new_width = window_width - f32::from(event.position.x);
-                                let min_w =
-                                    this.scaled(this.styles.outline.outline_resize_min_width_px);
-                                let max_w =
-                                    this.scaled(this.styles.outline.outline_resize_max_width_px);
-                                this.outline_custom_width = Some(new_width.clamp(min_w, max_w));
-                                cx.notify();
-                            }
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                this.outline_resizing = true;
-                                cx.notify();
-                            }),
-                        )
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.outline_resizing = false;
-                                cx.notify();
-                            }),
-                        )
-                        .on_mouse_up_out(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.outline_resizing = false;
-                                cx.notify();
-                            }),
-                        ),
+                        .when(self.theme_debugger_visible, |this| {
+                            this.child(self.render_theme_debugger(cx))
+                        }),
                 )
             })
             .when(resizing, |this| {
@@ -562,11 +606,11 @@ impl Render for EditorView {
                     let iw =
                         self.scaled(self.styles.outline.outline_resize_active_indicator_width_px);
                     let ic = self.styles.outline.outline_resize_active_indicator_color;
-                    let ow = self.outline_width();
+                    let right_w = self.right_panel_width();
                     Some(
                         div()
                             .absolute()
-                            .right(px(ow - iw))
+                            .right(px(right_w - iw))
                             .top_0()
                             .w(px(iw))
                             .h_full()

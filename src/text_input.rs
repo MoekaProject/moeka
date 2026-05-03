@@ -118,6 +118,11 @@ impl TextInput {
         cx.notify();
     }
 
+    pub fn set_styles(&mut self, styles: TextInputStyles, cx: &mut Context<Self>) {
+        self.styles = styles;
+        cx.notify();
+    }
+
     pub fn set_selection(&mut self, anchor: usize, offset: usize, cx: &mut Context<Self>) {
         self.selection_anchor = anchor.min(self.text.len());
         self.cursor_offset = offset.min(self.text.len());

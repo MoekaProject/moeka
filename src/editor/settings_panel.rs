@@ -1100,12 +1100,8 @@ impl EditorView {
         } else {
             0.0
         };
-        let outline_w = if self.outline_visible {
-            self.outline_width()
-        } else {
-            0.0
-        };
-        let pane_w = self.last_window_width - sidebar_w - outline_w - 2.0 * border_w;
+        let right_panel_w = self.right_panel_width();
+        let pane_w = self.last_window_width - sidebar_w - right_panel_w - 2.0 * border_w;
         let settings_content_max_w = self.scaled(560.0);
         let settings_px = self.scaled(40.0);
         let settings_content_w = settings_content_max_w.min(pane_w);

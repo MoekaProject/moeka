@@ -1,6 +1,7 @@
 use crate::buffer::Buffer;
 use unicode_segmentation::UnicodeSegmentation;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Cursor {
     pub offset: usize,
     pub anchor: usize,

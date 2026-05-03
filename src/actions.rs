@@ -65,6 +65,7 @@ actions!(
         Quit,
         Escape,
         ToggleOutline,
+        ToggleThemeDebugger,
         AddCursorAbove,
         AddCursorBelow,
         SelectNextOccurrence,

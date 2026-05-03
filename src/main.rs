@@ -11,7 +11,11 @@ mod text_input;
 mod theme;
 
 use std::borrow::Cow;
+#[cfg(target_os = "macos")]
+use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::sync::Once;
 
 use gpui::*;
 
@@ -81,6 +85,69 @@ fn runtime_search_roots() -> Vec<PathBuf> {
     }
 
     roots
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn class_replaceMethod(
+        cls: *mut objc::runtime::Class,
+        name: objc::runtime::Sel,
+        imp: objc::runtime::Imp,
+        types: *const c_char,
+    ) -> objc::runtime::Imp;
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn gpui_view_mouse_down_can_move_window(
+    _: &objc::runtime::Object,
+    _: objc::runtime::Sel,
+) -> objc::runtime::BOOL {
+    objc::runtime::NO
+}
+
+#[cfg(target_os = "macos")]
+fn disable_gpui_content_view_window_drag(ns_view: *mut objc::runtime::Object) {
+    use objc::runtime::{Class, Imp, Object, Sel};
+    use objc::{msg_send, sel, sel_impl};
+
+    fn replace_mouse_down_can_move_window(class: &Class) {
+        let selector = Sel::register("mouseDownCanMoveWindow");
+        let implementation = gpui_view_mouse_down_can_move_window
+            as extern "C" fn(&Object, Sel) -> objc::runtime::BOOL;
+        let encoding = if cfg!(target_arch = "aarch64") {
+            b"B@:\0".as_ptr()
+        } else {
+            b"c@:\0".as_ptr()
+        };
+
+        unsafe {
+            let _ = class_replaceMethod(
+                class as *const Class as *mut Class,
+                selector,
+                std::mem::transmute::<extern "C" fn(&Object, Sel) -> objc::runtime::BOOL, Imp>(
+                    implementation,
+                ),
+                encoding.cast(),
+            );
+        }
+    }
+
+    static INSTALL: Once = Once::new();
+
+    INSTALL.call_once(|| {
+        let Some(class) = Class::get("GPUIView") else {
+            return;
+        };
+        replace_mouse_down_can_move_window(class);
+    });
+
+    unsafe {
+        let mut current_view = ns_view;
+        while !current_view.is_null() {
+            replace_mouse_down_can_move_window((*current_view).class());
+            current_view = msg_send![current_view, superview];
+        }
+    }
 }
 
 fn main() {
@@ -154,6 +221,7 @@ fn main() {
             KeyBinding::new("cmd-n", NewTab, Some("MarkdownEditor")),
             KeyBinding::new("cmd-q", Quit, Some("MarkdownEditor")),
             KeyBinding::new("escape", Escape, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-alt-y", ToggleThemeDebugger, Some("MarkdownEditor")),
             KeyBinding::new("alt-cmd-up", AddCursorAbove, Some("MarkdownEditor")),
             KeyBinding::new("alt-cmd-down", AddCursorBelow, Some("MarkdownEditor")),
             KeyBinding::new("cmd-d", SelectNextOccurrence, Some("MarkdownEditor")),
@@ -277,11 +345,13 @@ fn main() {
                 {
                     use objc::{class, msg_send, sel, sel_impl};
                     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
                     if let Ok(handle) = window.window_handle() {
                         if let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
                             unsafe {
                                 let ns_view =
                                     appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
+                                disable_gpui_content_view_window_drag(ns_view);
                                 let ns_window: *mut objc::runtime::Object =
                                     msg_send![ns_view, window];
                                 // NSTitlebarSeparatorStyleNone = 0

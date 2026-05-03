@@ -79,7 +79,16 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.checkpoint();
+        let cursor_line_before = self.cursor_line();
+        let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
         let selection = self.cursor.selection_range();
+        let selection_spans_multiple_lines = if self.cursor.has_selection() {
+            let (start_line, _) = self.buffer.offset_to_line_col(selection.start);
+            let (end_line, _) = self.buffer.offset_to_line_col(selection.end);
+            start_line != end_line
+        } else {
+            false
+        };
         let touched_ordered_prefix = if self.cursor.has_selection() {
             self.ordered_list_prefix_touched_by_range(&selection)
         } else {
@@ -155,7 +164,9 @@ impl EditorView {
                 self.buffer.replace(del_start..del_end, "");
                 self.cursor.move_to(del_start, &self.buffer);
                 self.reparse();
-                self.scroll_to_cursor();
+                if !cursor_had_inline_headroom || self.cursor_line() != cursor_line_before {
+                    self.scroll_to_cursor();
+                }
                 self.pause_blinking(cx);
                 return;
             }
@@ -164,7 +175,9 @@ impl EditorView {
                 self.buffer.delete(delete_range.clone());
                 self.cursor.move_to(delete_range.start, &self.buffer);
                 self.reparse();
-                self.scroll_to_cursor();
+                if !cursor_had_inline_headroom || self.cursor_line() != cursor_line_before {
+                    self.scroll_to_cursor();
+                }
                 self.pause_blinking(cx);
                 if self.wiki_link_start.is_some() {
                     self.sync_wiki_link_menu(cx);
@@ -181,7 +194,13 @@ impl EditorView {
             self.normalize_ordered_list_near_line(self.cursor_line(), false);
             self.reparse();
         }
-        self.scroll_to_cursor();
+        if !cursor_had_inline_headroom
+            || self.cursor_line() != cursor_line_before
+            || removes_line_break
+            || selection_spans_multiple_lines
+        {
+            self.scroll_to_cursor();
+        }
         self.pause_blinking(cx);
 
         if let Some(start) = self.slash_menu_start {
@@ -217,7 +236,16 @@ impl EditorView {
             return;
         }
         self.checkpoint();
+        let cursor_line_before = self.cursor_line();
+        let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
         let selection = self.cursor.selection_range();
+        let selection_spans_multiple_lines = if self.cursor.has_selection() {
+            let (start_line, _) = self.buffer.offset_to_line_col(selection.start);
+            let (end_line, _) = self.buffer.offset_to_line_col(selection.end);
+            start_line != end_line
+        } else {
+            false
+        };
         let touched_ordered_prefix = if self.cursor.has_selection() {
             self.ordered_list_prefix_touched_by_range(&selection)
         } else {
@@ -244,7 +272,13 @@ impl EditorView {
             self.normalize_ordered_list_near_line(self.cursor_line(), false);
             self.reparse();
         }
-        self.scroll_to_cursor();
+        if !cursor_had_inline_headroom
+            || self.cursor_line() != cursor_line_before
+            || removes_line_break
+            || selection_spans_multiple_lines
+        {
+            self.scroll_to_cursor();
+        }
         self.pause_blinking(cx);
         if self.wiki_link_start.is_some() {
             self.sync_wiki_link_menu(cx);
@@ -548,6 +582,13 @@ impl EditorView {
         }
         self.checkpoint();
 
+        if self.has_extra_cursors() {
+            self.multi_cursor_enter();
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
+        }
+
         let cursor_line = self.cursor_line();
         let line_start = self.buffer.line_start(cursor_line);
         let line_end = self.buffer.line_end(cursor_line);
@@ -647,6 +688,13 @@ impl EditorView {
 
     pub(crate) fn on_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
         self.checkpoint();
+        if self.has_extra_cursors() {
+            self.multi_cursor_insert("  ");
+            self.reparse();
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
+        }
         let (start_line, end_line) = self.selected_line_span();
         let has_list =
             (start_line..=end_line).any(|line| self.list_indent_width_for_line(line).is_some());
@@ -704,7 +752,11 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cursor.move_word_left(&self.buffer);
+        if self.has_extra_cursors() {
+            self.multi_cursor_move_word_left();
+        } else {
+            self.cursor.move_word_left(&self.buffer);
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -715,7 +767,11 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cursor.move_word_right(&self.buffer);
+        if self.has_extra_cursors() {
+            self.multi_cursor_move_word_right();
+        } else {
+            self.cursor.move_word_right(&self.buffer);
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -727,9 +783,17 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.checkpoint();
-        self.cursor.delete_word_left(&mut self.buffer);
+        let cursor_line_before = self.cursor_line();
+        let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
+        if self.has_extra_cursors() {
+            self.multi_cursor_delete_word_left();
+        } else {
+            self.cursor.delete_word_left(&mut self.buffer);
+        }
         self.reparse();
-        self.scroll_to_cursor();
+        if !cursor_had_inline_headroom || self.cursor_line() != cursor_line_before {
+            self.scroll_to_cursor();
+        }
         self.pause_blinking(cx);
     }
 
@@ -1010,6 +1074,15 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.toggle_outline_visibility(cx);
+    }
+
+    pub(crate) fn on_toggle_theme_debugger(
+        &mut self,
+        _: &ToggleThemeDebugger,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_theme_debugger_visibility(cx);
     }
 
     pub(crate) fn on_toggle_editor_left_align(
@@ -1326,13 +1399,20 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
-        if line == 0 {
-            return;
+        let cursors = self.all_cursors_snapshot();
+        let mut added = false;
+        for cursor in cursors {
+            let (line, col) = self.buffer.offset_to_line_col(cursor.offset);
+            if line == 0 {
+                continue;
+            }
+            let new_offset = self.buffer.line_col_to_offset(line - 1, col);
+            self.add_cursor_at(new_offset, new_offset);
+            added = true;
         }
-        let new_offset = self.buffer.line_col_to_offset(line - 1, col);
-        self.add_cursor_at(new_offset, new_offset);
-        self.pause_blinking(cx);
+        if added {
+            self.pause_blinking(cx);
+        }
     }
 
     pub(crate) fn on_add_cursor_below(
@@ -1341,13 +1421,20 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
-        if line + 1 >= self.buffer.line_count() {
-            return;
+        let cursors = self.all_cursors_snapshot();
+        let mut added = false;
+        for cursor in cursors {
+            let (line, col) = self.buffer.offset_to_line_col(cursor.offset);
+            if line + 1 >= self.buffer.line_count() {
+                continue;
+            }
+            let new_offset = self.buffer.line_col_to_offset(line + 1, col);
+            self.add_cursor_at(new_offset, new_offset);
+            added = true;
         }
-        let new_offset = self.buffer.line_col_to_offset(line + 1, col);
-        self.add_cursor_at(new_offset, new_offset);
-        self.pause_blinking(cx);
+        if added {
+            self.pause_blinking(cx);
+        }
     }
 
     pub(crate) fn on_select_next_occurrence(

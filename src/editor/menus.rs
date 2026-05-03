@@ -68,6 +68,38 @@ impl EditorView {
         self.scroll_to_cursor();
     }
 
+    fn copy_text_to_clipboard(&mut self, text: String, cx: &mut Context<Self>) {
+        self.context_menu = None;
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        cx.notify();
+    }
+
+    fn path_copy_text(&self, path: &Path, relative: bool) -> Option<String> {
+        if relative {
+            self.relative_path_for_path(path)
+        } else {
+            Some(path.display().to_string())
+        }
+    }
+
+    fn sidebar_context_paths(&self, path: &Path) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = if self.selected_sidebar_paths.contains(path) {
+            self.selected_sidebar_paths.iter().cloned().collect()
+        } else {
+            vec![path.to_path_buf()]
+        };
+        paths.sort();
+        paths
+    }
+
+    fn sidebar_paths_copy_text(&self, path: &Path, relative: bool) -> Option<String> {
+        let mut lines = Vec::new();
+        for item_path in self.sidebar_context_paths(path) {
+            lines.push(self.path_copy_text(&item_path, relative)?);
+        }
+        Some(lines.join("\n"))
+    }
+
     fn replace_image_url_on_line_with_text(
         &mut self,
         line: usize,
@@ -1031,6 +1063,27 @@ impl EditorView {
                 },
             ));
             items.push(self.render_context_menu_separator());
+            if let Some(copy_path_text) = self.sidebar_paths_copy_text(&path, false) {
+                items.push(self.render_context_menu_item(
+                    "复制路径",
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.copy_text_to_clipboard(copy_path_text.clone(), cx);
+                    },
+                ));
+            }
+            if let Some(copy_relative_path_text) = self.sidebar_paths_copy_text(&path, true) {
+                items.push(self.render_context_menu_item(
+                    "复制相对路径",
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.copy_text_to_clipboard(copy_relative_path_text.clone(), cx);
+                    },
+                ));
+            }
+            items.push(self.render_context_menu_separator());
             {
                 let p = path.clone();
                 items.push(self.render_context_menu_item(
@@ -1169,6 +1222,27 @@ impl EditorView {
                     this.paste_into_dir(pd.clone(), cx);
                 }),
             );
+        }
+        items.push(self.render_context_menu_separator());
+        if let Some(copy_path_text) = self.sidebar_paths_copy_text(&path, false) {
+            items.push(self.render_context_menu_item(
+                "复制路径",
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.copy_text_to_clipboard(copy_path_text.clone(), cx);
+                },
+            ));
+        }
+        if let Some(copy_relative_path_text) = self.sidebar_paths_copy_text(&path, true) {
+            items.push(self.render_context_menu_item(
+                "复制相对路径",
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.copy_text_to_clipboard(copy_relative_path_text.clone(), cx);
+                },
+            ));
         }
         items.push(self.render_context_menu_separator());
         // Collapse / Expand all
@@ -1733,7 +1807,7 @@ impl EditorView {
 
         svg()
             .path(MARKDOWN_SVG_PATH)
-            .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
+            .size(px(self.scaled(ss.sidebar_item_icon_size_px + 4.0)))
             .text_color(ss.sidebar_item_icon_color)
             .into_any_element()
     }
@@ -1904,28 +1978,37 @@ impl EditorView {
                                 this.reveal_path_in_sidebar(reveal_path.clone(), cx);
                             },
                         ));
+                        {
+                            let reveal_path = path.clone();
+                            items.push(self.render_context_menu_item(
+                                "在访达中显示",
+                                false,
+                                cx,
+                                move |this, _, cx| {
+                                    this.context_menu = None;
+                                    this.reveal_in_finder(&reveal_path);
+                                    cx.notify();
+                                },
+                            ));
+                        }
                         items.push(self.render_context_menu_separator());
-
-                        let path_str = path.display().to_string();
+                        if let Some(relative_path_text) = self.path_copy_text(path, true) {
+                            items.push(self.render_context_menu_item(
+                                "复制相对路径",
+                                false,
+                                cx,
+                                move |this, _, cx| {
+                                    this.copy_text_to_clipboard(relative_path_text.clone(), cx);
+                                },
+                            ));
+                        }
+                        let path_text = path.display().to_string();
                         items.push(self.render_context_menu_item(
                             "复制路径",
                             false,
                             cx,
-                            move |this, _, _cx| {
-                                this.context_menu = None;
-                                if let Err(e) = std::process::Command::new("pbcopy")
-                                    .stdin(std::process::Stdio::piped())
-                                    .spawn()
-                                    .and_then(|mut child| {
-                                        use std::io::Write;
-                                        if let Some(stdin) = child.stdin.as_mut() {
-                                            stdin.write_all(path_str.as_bytes())?;
-                                        }
-                                        child.wait()
-                                    })
-                                {
-                                    eprintln!("failed to copy to clipboard: {e}");
-                                }
+                            move |this, _, cx| {
+                                this.copy_text_to_clipboard(path_text.clone(), cx);
                             },
                         ));
                     }
@@ -2151,7 +2234,11 @@ impl EditorView {
                 {
                     let tsl = tsl;
                     items.push(self.render_context_menu_item(
-                        if is_front_matter { "删除 Front Matter" } else { "删除表格" },
+                        if is_front_matter {
+                            "删除 Front Matter"
+                        } else {
+                            "删除表格"
+                        },
                         false,
                         cx,
                         move |this, _, cx| {

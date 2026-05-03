@@ -11,7 +11,7 @@ use gpui::{
 use super::*;
 
 impl EditorView {
-    fn workspace_root_for_path(&self, path: &Path) -> Option<PathBuf> {
+    pub(crate) fn workspace_root_for_path(&self, path: &Path) -> Option<PathBuf> {
         self.workspaces
             .iter()
             .filter(|root| path.starts_with(root))
@@ -21,6 +21,16 @@ impl EditorView {
                 path.starts_with(&self.sidebar_root)
                     .then(|| self.sidebar_root.clone())
             })
+    }
+
+    pub(crate) fn relative_path_for_path(&self, path: &Path) -> Option<String> {
+        let root = self.workspace_root_for_path(path)?;
+        let relative = path.strip_prefix(&root).ok()?;
+        if relative.as_os_str().is_empty() {
+            Some(".".to_string())
+        } else {
+            Some(relative.to_string_lossy().into_owned())
+        }
     }
 
     fn update_sidebar_drag_target(&mut self, new_target: Option<PathBuf>, cx: &mut Context<Self>) {
@@ -327,6 +337,32 @@ impl EditorView {
         result
     }
 
+    fn normalize_sidebar_path(path: &Path) -> PathBuf {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            normalized.push(component.as_os_str());
+        }
+        if normalized.as_os_str().is_empty() && !path.as_os_str().is_empty() {
+            path.to_path_buf()
+        } else {
+            normalized
+        }
+    }
+
+    fn sidebar_drop_destination(src: &Path, target_dir: &Path) -> Option<PathBuf> {
+        let src = Self::normalize_sidebar_path(src);
+        let target_dir = Self::normalize_sidebar_path(target_dir);
+        let name = src.file_name()?;
+        let destination = target_dir.join(name);
+        (src != destination && !destination.starts_with(&src)).then_some(destination)
+    }
+
+    fn sidebar_drop_would_move(paths: &[PathBuf], target_dir: &Path) -> bool {
+        paths
+            .iter()
+            .any(|src| Self::sidebar_drop_destination(src, target_dir).is_some())
+    }
+
     /// Move sidebar items to target directory (for drag-and-drop).
     pub(crate) fn move_sidebar_items(
         &mut self,
@@ -334,23 +370,27 @@ impl EditorView {
         target_dir: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        for src in &paths {
-            let Some(name) = src.file_name() else {
+        let mut first_revealed_path = None;
+        let target_dir = Self::normalize_sidebar_path(&target_dir);
+        for src in paths.iter().map(|path| Self::normalize_sidebar_path(path)) {
+            let Some(dst) = Self::sidebar_drop_destination(&src, &target_dir) else {
                 continue;
             };
-            let dst = target_dir.join(name);
-            if src == &dst || dst.starts_with(src) {
-                continue; // skip self or descendant
-            }
-            if let Err(e) = std::fs::rename(src, &dst) {
-                eprintln!("Move failed: {e}");
+            if let Err(e) = std::fs::rename(&src, &dst) {
+                eprintln!("Move {:?} -> {:?} failed: {e}", src, dst);
                 continue;
+            }
+            if first_revealed_path.is_none() {
+                first_revealed_path = Some(dst.clone());
             }
             // Update open tabs
             for tab in &mut self.tabs {
                 if let Some(ref tab_path) = tab.path {
-                    if tab_path.starts_with(src) {
-                        let relative = tab_path.strip_prefix(src).unwrap_or(tab_path.as_path());
+                    let normalized_tab_path = Self::normalize_sidebar_path(tab_path);
+                    if normalized_tab_path.starts_with(&src) {
+                        let relative = normalized_tab_path
+                            .strip_prefix(&src)
+                            .unwrap_or(normalized_tab_path.as_path());
                         let new_tab_path = dst.join(relative);
                         tab.title = Self::title_for_path(&new_tab_path);
                         tab.path = Some(new_tab_path);
@@ -361,28 +401,56 @@ impl EditorView {
             let old_selected: Vec<PathBuf> = self
                 .selected_sidebar_paths
                 .iter()
-                .filter(|p| p.starts_with(src))
+                .filter(|path| Self::normalize_sidebar_path(path).starts_with(&src))
                 .cloned()
                 .collect();
             for old in old_selected {
                 self.selected_sidebar_paths.remove(&old);
-                let relative = old.strip_prefix(src).unwrap_or(old.as_path());
+                let normalized_old = Self::normalize_sidebar_path(&old);
+                let relative = normalized_old
+                    .strip_prefix(&src)
+                    .unwrap_or(normalized_old.as_path());
                 self.selected_sidebar_paths.insert(dst.join(relative));
             }
             if self
                 .current_file_path
                 .as_ref()
-                .is_some_and(|p| p.starts_with(src))
+                .is_some_and(|path| Self::normalize_sidebar_path(path).starts_with(&src))
             {
                 if let Some(ref p) = self.current_file_path {
-                    let relative = p.strip_prefix(src).unwrap_or(p.as_path());
+                    let normalized_path = Self::normalize_sidebar_path(p);
+                    let relative = normalized_path
+                        .strip_prefix(&src)
+                        .unwrap_or(normalized_path.as_path());
                     self.current_file_path = Some(dst.join(relative));
                 }
+            }
+            if self
+                .sidebar_selection_anchor
+                .as_ref()
+                .is_some_and(|path| Self::normalize_sidebar_path(path).starts_with(&src))
+                && let Some(anchor) = self.sidebar_selection_anchor.as_ref()
+            {
+                let normalized_anchor = Self::normalize_sidebar_path(anchor);
+                let relative = normalized_anchor
+                    .strip_prefix(&src)
+                    .unwrap_or(normalized_anchor.as_path());
+                self.sidebar_selection_anchor = Some(dst.join(relative));
             }
         }
         self.context_menu = None;
         self.invalidate_sidebar_items_cache();
         self.clear_sidebar_drag_state(cx);
+        if let Some(reveal_path) = first_revealed_path {
+            let mut moved_selection = self.selected_sidebar_paths.clone();
+            if !moved_selection.contains(&reveal_path) {
+                moved_selection.insert(reveal_path.clone());
+            }
+            self.reveal_path_in_sidebar(reveal_path.clone(), cx);
+            self.selected_sidebar_paths = moved_selection;
+            self.focused_sidebar_path = Some(reveal_path.clone());
+            self.sidebar_selection_anchor = Some(reveal_path);
+        }
         cx.notify();
     }
 
@@ -668,7 +736,7 @@ impl EditorView {
             let dst = target_dir.join(name);
             if clipboard.is_cut {
                 if let Err(e) = std::fs::rename(src, &dst) {
-                    eprintln!("Move failed: {e}");
+                    eprintln!("Move {:?} -> {:?} failed: {e}", src, dst);
                 } else {
                     for tab in &mut self.tabs {
                         if tab.path.as_deref() == Some(src.as_path()) {
@@ -869,14 +937,14 @@ impl EditorView {
         if !file_kind_has_indicator_for_name(name) {
             return svg()
                 .path(MARKDOWN_SVG_PATH)
-                .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
+                .size(px(self.scaled(ss.sidebar_item_icon_size_px + 4.0)))
                 .text_color(color)
                 .into_any_element();
         }
 
         svg()
             .path(MARKDOWN_SVG_PATH)
-            .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
+            .size(px(self.scaled(ss.sidebar_item_icon_size_px + 4.0)))
             .text_color(color)
             .into_any_element()
     }
@@ -1043,7 +1111,16 @@ impl EditorView {
                     );
                 }),
             )
-            .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style.bg(header_drag_over_bg))
+            .drag_over::<DraggedSidebarItems>({
+                let root = self.sidebar_root.clone();
+                move |style, dragged, _, _| {
+                    if Self::sidebar_drop_would_move(&dragged.paths, &root) {
+                        style.bg(header_drag_over_bg)
+                    } else {
+                        style
+                    }
+                }
+            })
             .on_drop({
                 let root = self.sidebar_root.clone();
                 cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
@@ -1057,7 +1134,11 @@ impl EditorView {
                 cx.listener(
                     move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
                         if event.bounds.contains(&event.event.position) {
-                            this.update_sidebar_drag_target(Some(root.clone()), cx);
+                            if Self::sidebar_drop_would_move(&event.drag(cx).paths, &root) {
+                                this.update_sidebar_drag_target(Some(root.clone()), cx);
+                            } else if this.sidebar_drag_hover_target.as_ref() == Some(&root) {
+                                this.update_sidebar_drag_target(None, cx);
+                            }
                         }
                     },
                 )
@@ -1379,7 +1460,7 @@ impl EditorView {
         } else {
             svg()
                 .path(MARKDOWN_SVG_PATH)
-                .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
+                .size(px(self.scaled(ss.sidebar_item_icon_size_px + 4.0)))
                 .text_color(icon_color)
                 .into_any_element()
         };
@@ -1474,11 +1555,12 @@ impl EditorView {
                     let label = drag_label;
                     let count = drag_count;
                     let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
-                    move |_dragged, _offset, _window, cx| {
+                    move |_dragged, offset, _window, cx| {
                         cx.new(|_cx| DraggedSidebarItemsView {
                             label: label.clone(),
                             count,
                             font_size_px: ghost_font_size_px,
+                            cursor_offset: offset,
                         })
                     }
                 })
@@ -1486,8 +1568,15 @@ impl EditorView {
             // Drop target: only directories accept drops
             .when(is_dir, |el| {
                 let drop_path = path.clone();
-                el.drag_over::<DraggedSidebarItems>(move |style, _dragged, _, _| {
-                    style.bg(drag_over_bg)
+                el.drag_over::<DraggedSidebarItems>({
+                    let drop_path = drop_path.clone();
+                    move |style, dragged, _, _| {
+                        if Self::sidebar_drop_would_move(&dragged.paths, &drop_path) {
+                            style.bg(drag_over_bg)
+                        } else {
+                            style
+                        }
+                    }
                 })
                 .on_drop(cx.listener(
                     move |this, dragged: &DraggedSidebarItems, _, cx| {
@@ -1507,6 +1596,8 @@ impl EditorView {
 
                     cx.stop_propagation();
 
+                    let dragged = event.drag(cx);
+
                     if !is_dir {
                         if this
                             .sidebar_drag_hover_target
@@ -1519,32 +1610,33 @@ impl EditorView {
                         return;
                     }
 
-                    if is_dir {
-                        let new_target = Some(path.clone());
-                        if this.sidebar_drag_hover_target != new_target {
-                            this.update_sidebar_drag_target(new_target, cx);
-                            // Start auto-expand timer
-                            let expand_path = path.clone();
-                            this.sidebar_drag_expand_task =
-                                Some(cx.spawn(async move |this, cx| {
-                                    cx.background_executor()
-                                        .timer(Duration::from_millis(500))
-                                        .await;
-                                    this.update(cx, |editor, cx| {
-                                        if editor.sidebar_drag_hover_target.as_ref()
-                                            == Some(&expand_path)
-                                        {
-                                            editor.expanded_dirs.insert(expand_path.clone());
-                                            editor.sidebar_drag_auto_expanded_target =
-                                                Some(expand_path);
-                                            editor.invalidate_sidebar_items_cache();
-                                            cx.notify();
-                                        }
-                                    })
-                                    .ok();
-                                }));
-                            cx.notify();
+                    if !Self::sidebar_drop_would_move(&dragged.paths, &path) {
+                        if this.sidebar_drag_hover_target.as_ref() == Some(&path) {
+                            this.update_sidebar_drag_target(None, cx);
                         }
+                        return;
+                    }
+
+                    let new_target = Some(path.clone());
+                    if this.sidebar_drag_hover_target != new_target {
+                        this.update_sidebar_drag_target(new_target, cx);
+                        // Start auto-expand timer
+                        let expand_path = path.clone();
+                        this.sidebar_drag_expand_task = Some(cx.spawn(async move |this, cx| {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(500))
+                                .await;
+                            this.update(cx, |editor, cx| {
+                                if editor.sidebar_drag_hover_target.as_ref() == Some(&expand_path) {
+                                    editor.expanded_dirs.insert(expand_path.clone());
+                                    editor.sidebar_drag_auto_expanded_target = Some(expand_path);
+                                    editor.invalidate_sidebar_items_cache();
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                        }));
+                        cx.notify();
                     }
                 }
             }))
@@ -1859,6 +1951,17 @@ impl EditorView {
                                           _,
                                           cx| {
                                         if event.bounds.contains(&event.event.position) {
+                                            if !Self::sidebar_drop_would_move(
+                                                &event.drag(cx).paths,
+                                                &root,
+                                            ) {
+                                                if this.sidebar_drag_hover_target.as_ref()
+                                                    == Some(&root)
+                                                {
+                                                    this.update_sidebar_drag_target(None, cx);
+                                                }
+                                                return;
+                                            }
                                             if this
                                                 .sidebar_drag_hover_target
                                                 .as_ref()
@@ -1957,13 +2060,26 @@ impl EditorView {
                     this.open_workspace_menu(menu_pos, cx);
                 }),
             )
-            .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style.bg(hover_bg))
+            .drag_over::<DraggedSidebarItems>({
+                let root = self.sidebar_root.clone();
+                move |style, dragged, _, _| {
+                    if Self::sidebar_drop_would_move(&dragged.paths, &root) {
+                        style.bg(hover_bg)
+                    } else {
+                        style
+                    }
+                }
+            })
             .on_drag_move({
                 let root = self.sidebar_root.clone();
                 cx.listener(
                     move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
                         if event.bounds.contains(&event.event.position) {
-                            this.update_sidebar_drag_target(Some(root.clone()), cx);
+                            if Self::sidebar_drop_would_move(&event.drag(cx).paths, &root) {
+                                this.update_sidebar_drag_target(Some(root.clone()), cx);
+                            } else if this.sidebar_drag_hover_target.as_ref() == Some(&root) {
+                                this.update_sidebar_drag_target(None, cx);
+                            }
                         }
                     },
                 )

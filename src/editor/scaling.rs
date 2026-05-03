@@ -182,6 +182,12 @@ impl EditorView {
     }
 
     pub(crate) fn scroll_to_cursor(&mut self) {
+        if self.layout_dirty {
+            self.pending_scroll_to_cursor = true;
+            return;
+        }
+
+        self.pending_scroll_to_cursor = false;
         let cursor_line = self.cursor_line();
         let cursor_y = self.line_y_offset(cursor_line);
         let cursor_line_height = self.visual_height_for_line(cursor_line);

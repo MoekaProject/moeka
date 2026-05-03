@@ -14,6 +14,87 @@ pub(crate) struct OutlineHeading {
 }
 
 impl EditorView {
+    fn flash_outline_heading_line(&mut self, target_line: usize, cx: &mut Context<Self>) {
+        let Some(path) = self.current_file_path.clone() else {
+            return;
+        };
+
+        let start = self.buffer.line_start(target_line);
+        let end = self.buffer.line_end(target_line);
+        if start >= end {
+            return;
+        }
+
+        let range = start..end;
+        let outline_styles = &self.styles.outline;
+        let initial_delay_ms = std::time::Duration::from_millis(
+            outline_styles.outline_flash_initial_delay_ms,
+        );
+        let show_ms = std::time::Duration::from_millis(
+            outline_styles.outline_flash_show_duration_ms,
+        );
+        let gap_ms = std::time::Duration::from_millis(outline_styles.outline_flash_gap_duration_ms);
+        self.outline_flash_epoch += 1;
+        let epoch = self.outline_flash_epoch;
+        self.outline_flash_highlight_path = Some(path.clone());
+        self.outline_flash_highlight_ranges = vec![range.clone()];
+        self.outline_flash_highlight_current_index = Some(0);
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(initial_delay_ms).await;
+            let continue_flash = this
+                .update(cx, |this, cx| {
+                    if this.outline_flash_epoch != epoch {
+                        return false;
+                    }
+                    this.outline_flash_highlight_path = Some(path.clone());
+                    this.outline_flash_highlight_ranges = vec![range.clone()];
+                    this.outline_flash_highlight_current_index = Some(0);
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !continue_flash {
+                return;
+            }
+
+            cx.background_executor().timer(show_ms).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.outline_flash_epoch != epoch {
+                    return;
+                }
+                this.outline_flash_highlight_path = None;
+                this.outline_flash_highlight_ranges.clear();
+                this.outline_flash_highlight_current_index = None;
+                cx.notify();
+            });
+
+            cx.background_executor().timer(gap_ms).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.outline_flash_epoch != epoch {
+                    return;
+                }
+                this.outline_flash_highlight_path = Some(path.clone());
+                this.outline_flash_highlight_ranges = vec![range.clone()];
+                this.outline_flash_highlight_current_index = Some(0);
+                cx.notify();
+            });
+
+            cx.background_executor().timer(show_ms).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.outline_flash_epoch != epoch {
+                    return;
+                }
+                this.outline_flash_highlight_path = None;
+                this.outline_flash_highlight_ranges.clear();
+                this.outline_flash_highlight_current_index = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn collect_outline_headings(&self) -> Vec<OutlineHeading> {
         let mut headings = Vec::new();
         for (line_idx, dec) in self.decorations.iter().enumerate() {
@@ -107,6 +188,10 @@ impl EditorView {
         let padding_left = self.scaled(os.outline_item_padding_left_px);
         let padding_right = self.scaled(os.outline_item_padding_right_px);
         let font_size = self.scaled(os.outline_item_font_size_px);
+        let item_line_height = (font_size * os.outline_item_line_height_factor)
+            .max(font_size + self.scaled(1.0));
+        let item_padding_y = ((item_height - item_line_height).max(0.0) / 2.0)
+            .max(self.scaled(2.0));
         let header_font_size = self.scaled(os.outline_header_font_size_px);
         let text_color = os.outline_item_text_color;
         let active_text_color = os.outline_item_active_text_color;
@@ -171,52 +256,49 @@ impl EditorView {
 
             let guide_color = os.outline_indent_guide_color;
             let guide_width = os.outline_indent_guide_width_px;
-            let dash_len = self.scaled(os.outline_indent_guide_dash_length_px);
-            let gap_len = self.scaled(os.outline_indent_guide_gap_length_px);
 
             let guides: Vec<AnyElement> = (1..heading.level)
                 .filter(|level| active_guide_levels.contains(level))
-                .flat_map(|level| {
+                .map(|level| {
                     let guide_x = padding_left + (level as f32 - 1.0) * indent_step;
-                    let segment_step = dash_len + gap_len;
-                    let count = (item_height / segment_step).ceil() as usize;
-                    (0..count).map(move |i| {
-                        let y = i as f32 * segment_step;
-                        let h = dash_len.min(item_height - y);
-                        div()
-                            .absolute()
-                            .left(px(guide_x))
-                            .top(px(y))
-                            .w(px(guide_width))
-                            .h(px(h))
-                            .bg(guide_color)
-                            .into_any_element()
-                    })
+                    div()
+                        .absolute()
+                        .left(px(guide_x))
+                        .top(px(0.0))
+                        .bottom(px(0.0))
+                        .w(px(guide_width))
+                        .bg(guide_color)
+                        .into_any_element()
                 })
                 .collect();
 
             items.push(
                 div()
                     .id(SharedString::from(format!("outline-{}", target_line)))
-                    .h(px(item_height))
+                    .min_h(px(item_height))
+                    .w_full()
                     .flex_shrink_0()
                     .relative()
-                    .flex()
-                    .items_center()
                     .pl(px(indent))
                     .pr(px(padding_right))
+                    .py(px(item_padding_y))
                     .text_size(px(font_size))
                     .text_color(item_text_color)
                     .bg(item_bg)
                     .cursor(CursorStyle::Arrow)
                     .hover(move |s| s.bg(hover_bg))
-                    .whitespace_nowrap()
                     .children(guides)
-                    .child(title)
+                    .child(
+                        div()
+                            .w_full()
+                            .line_height(px(item_line_height))
+                            .child(title),
+                    )
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                             this.scroll_to_line(target_line, cx);
+                            this.flash_outline_heading_line(target_line, cx);
                         }),
                     )
                     .into_any_element(),

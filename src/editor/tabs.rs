@@ -1,11 +1,19 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyElement, Context, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
-    SharedString, div, prelude::*, px, svg,
+    SharedString, Window, div, prelude::*, px, svg,
 };
 
 use super::*;
+
+#[derive(Clone, Copy)]
+enum TabDropTarget<'a> {
+    Before(&'a str),
+    After(&'a str),
+    End,
+}
 
 impl EditorView {
     fn ensure_settings_tab_first(&mut self) {
@@ -51,10 +59,103 @@ impl EditorView {
         cx.notify();
     }
 
+    fn on_tab_bar_drag_space_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tab_drag_candidate_id.is_some() || self.tab_dragging_id.is_some() {
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
+
+        self.focused_sidebar_path = None;
+        window.prevent_default();
+        cx.stop_propagation();
+
+        if event.click_count >= 2 {
+            window.titlebar_double_click();
+        } else {
+            Self::start_native_window_drag(window);
+        }
+
+        cx.notify();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_native_window_drag(window: &mut Window) {
+        use objc::{class, msg_send, sel, sel_impl};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        if let Ok(handle) = window.window_handle() {
+            if let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
+                unsafe {
+                    let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
+                    let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
+                    let app: *mut objc::runtime::Object =
+                        msg_send![class!(NSApplication), sharedApplication];
+                    let event: *mut objc::runtime::Object = msg_send![app, currentEvent];
+                    if !ns_window.is_null() && !event.is_null() {
+                        let () = msg_send![ns_window, performWindowDragWithEvent: event];
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn start_native_window_drag(window: &mut Window) {
+        window.start_window_move();
+    }
+
     fn preview_tab_index(&self) -> Option<usize> {
         self.tabs
             .iter()
             .position(|tab| tab.kind == TabKind::Editor && tab.is_preview)
+    }
+
+    fn tab_drop_changes_order_for(
+        current_tab_ids: &[String],
+        settings_tab_id: Option<&str>,
+        from_id: &str,
+        target: TabDropTarget<'_>,
+    ) -> bool {
+        let Some(from_idx) = current_tab_ids.iter().position(|tab_id| tab_id == from_id) else {
+            return false;
+        };
+
+        let mut reordered = current_tab_ids.to_vec();
+        let moved = reordered.remove(from_idx);
+
+        match target {
+            TabDropTarget::Before(to_id) => {
+                let Some(to_idx) = reordered.iter().position(|tab_id| tab_id == to_id) else {
+                    return false;
+                };
+                reordered.insert(to_idx, moved);
+            }
+            TabDropTarget::After(to_id) => {
+                let Some(to_idx) = reordered.iter().position(|tab_id| tab_id == to_id) else {
+                    return false;
+                };
+                reordered.insert((to_idx + 1).min(reordered.len()), moved);
+            }
+            TabDropTarget::End => reordered.push(moved),
+        }
+
+        if let Some(settings_tab_id) = settings_tab_id
+            && let Some(settings_idx) = reordered
+                .iter()
+                .position(|tab_id| tab_id == settings_tab_id)
+            && settings_idx != 0
+        {
+            let settings_tab = reordered.remove(settings_idx);
+            reordered.insert(0, settings_tab);
+        }
+
+        reordered != current_tab_ids
     }
 
     fn editor_tab_index_for_path(&self, path: &Path) -> Option<usize> {
@@ -95,6 +196,7 @@ impl EditorView {
                 cursor_offset: first_line_end,
                 cursor_anchor: first_line_end,
                 scroll_offset: 0.0,
+                extra_cursors: Vec::new(),
             },
             file_kind,
         ))
@@ -261,6 +363,9 @@ impl EditorView {
             }
             self.clamp_scroll();
             self.pause_blinking(cx);
+        }
+        if let Some(path) = tab.path.clone() {
+            self.reveal_path_in_sidebar(path, cx);
         }
         cx.notify();
     }
@@ -532,11 +637,47 @@ impl EditorView {
             .unwrap_or_else(|| path.display().to_string())
     }
 
+    fn untitled_display_index(title: &str) -> Option<usize> {
+        if title == "Untitled" {
+            return Some(1);
+        }
+
+        title
+            .strip_prefix("Untitled ")?
+            .parse::<usize>()
+            .ok()
+            .filter(|index| *index > 1)
+    }
+
+    fn next_untitled_title(&self) -> String {
+        let mut used_indices = HashSet::new();
+        for tab in &self.tabs {
+            if tab.kind != TabKind::Editor || tab.path.is_some() {
+                continue;
+            }
+            if let Some(index) = Self::untitled_display_index(&tab.title) {
+                used_indices.insert(index);
+            }
+        }
+
+        let mut next_index = 1;
+        while used_indices.contains(&next_index) {
+            next_index += 1;
+        }
+
+        if next_index == 1 {
+            "Untitled".to_string()
+        } else {
+            format!("Untitled {next_index}")
+        }
+    }
+
     pub(crate) fn create_scratch_tab(&mut self, cx: &mut Context<Self>) {
         self.persist_active_tab_state();
-        let title = format!("Untitled {}", self.next_tab_id);
+        let title = self.next_untitled_title();
+        let tab_id = self.next_tab_identity();
         let tab = OpenTab {
-            id: self.next_tab_identity(),
+            id: tab_id.clone(),
             title,
             kind: TabKind::Editor,
             path: None,
@@ -546,6 +687,7 @@ impl EditorView {
                 cursor_offset: 0,
                 cursor_anchor: 0,
                 scroll_offset: 0.0,
+                extra_cursors: Vec::new(),
             },
             image_view: ImageViewState::default(),
             is_preview: false,
@@ -554,14 +696,8 @@ impl EditorView {
             is_pinned: false,
             recovery: config_store::TabRecoveryState::default(),
             history: history_store::TabHistory::new(
-                Some(history_store::default_source_identity(
-                    &format!("tab-{}", self.next_tab_id),
-                    None,
-                )),
-                Some(history_store::default_journal_path(
-                    &format!("tab-{}", self.next_tab_id),
-                    None,
-                )),
+                Some(history_store::default_source_identity(&tab_id, None)),
+                Some(history_store::default_journal_path(&tab_id, None)),
             ),
         };
         self.tabs.push(tab);
@@ -596,6 +732,7 @@ impl EditorView {
                 cursor_offset: 0,
                 cursor_anchor: 0,
                 scroll_offset: 0.0,
+                extra_cursors: Vec::new(),
             },
             image_view: ImageViewState::default(),
             is_preview: false,
@@ -752,6 +889,16 @@ impl EditorView {
         let drop_indicator_width = ts.tab_drop_indicator_width_px;
         let source_opacity = ts.tab_drag_source_opacity;
         let is_being_dragged = self.tab_dragging_id.as_deref() == Some(tab.id.as_str());
+        let current_tab_ids: Vec<String> = self
+            .tabs
+            .iter()
+            .map(|candidate| candidate.id.clone())
+            .collect();
+        let settings_tab_id = self
+            .tabs
+            .iter()
+            .find(|candidate| candidate.kind == TabKind::Settings)
+            .map(|candidate| candidate.id.clone());
         div()
             .id(SharedString::from(format!("tab-{}", tab.id)))
             .group("tab-item")
@@ -778,17 +925,33 @@ impl EditorView {
                 this.opacity(source_opacity)
             })
             // Drop indicator: show a single insertion line on the side where the tab will land.
-            .drag_over::<DraggedTab>(move |style, dragged, _, _| {
-                if tab_index <= dragged.source_index {
-                    style
-                        .border_l(px(drop_indicator_width))
-                        .border_r(px(0.0))
-                        .border_color(drop_indicator_color)
-                } else {
-                    style
-                        .border_l(px(0.0))
-                        .border_r(px(drop_indicator_width))
-                        .border_color(drop_indicator_color)
+            .drag_over::<DraggedTab>({
+                let drop_tab_id = drop_tab_id.clone();
+                move |style, dragged, _, _| {
+                    let drop_target = if tab_index <= dragged.source_index {
+                        TabDropTarget::Before(drop_tab_id.as_str())
+                    } else {
+                        TabDropTarget::After(drop_tab_id.as_str())
+                    };
+                    if !Self::tab_drop_changes_order_for(
+                        &current_tab_ids,
+                        settings_tab_id.as_deref(),
+                        &dragged.tab_id,
+                        drop_target,
+                    ) {
+                        return style;
+                    }
+                    if matches!(drop_target, TabDropTarget::Before(_)) {
+                        style
+                            .border_l(px(drop_indicator_width))
+                            .border_r(px(0.0))
+                            .border_color(drop_indicator_color)
+                    } else {
+                        style
+                            .border_l(px(0.0))
+                            .border_r(px(drop_indicator_width))
+                            .border_color(drop_indicator_color)
+                    }
                 }
             })
             // Handle drop: reorder on the indicated side of the hovered tab.
@@ -803,6 +966,31 @@ impl EditorView {
                             .position(|candidate| candidate.id == drop_tab_id),
                     )
                     .is_some_and(|(from_idx, to_idx)| from_idx < to_idx);
+                let current_tab_ids: Vec<String> = this
+                    .tabs
+                    .iter()
+                    .map(|candidate| candidate.id.clone())
+                    .collect();
+                let settings_tab_id = this
+                    .tabs
+                    .iter()
+                    .find(|candidate| candidate.kind == TabKind::Settings)
+                    .map(|candidate| candidate.id.clone());
+                let drop_target = if place_after {
+                    TabDropTarget::After(drop_tab_id.as_str())
+                } else {
+                    TabDropTarget::Before(drop_tab_id.as_str())
+                };
+                if !Self::tab_drop_changes_order_for(
+                    &current_tab_ids,
+                    settings_tab_id.as_deref(),
+                    &dragged.tab_id,
+                    drop_target,
+                ) {
+                    this.tab_drag_candidate_id = None;
+                    this.tab_dragging_id = None;
+                    return;
+                }
                 if place_after {
                     this.reorder_tab_after(&dragged.tab_id, &drop_tab_id, cx);
                 } else {
@@ -880,10 +1068,11 @@ impl EditorView {
                 },
                 {
                     let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
-                    move |_dragged, _offset, _window, cx| {
+                    move |dragged, offset, _window, cx| {
                         cx.new(|_cx| DraggedTabView {
-                            title: _dragged.title.clone(),
+                            title: dragged.title.clone(),
                             font_size_px: ghost_font_size_px,
+                            cursor_offset: offset,
                         })
                     }
                 },
@@ -942,6 +1131,12 @@ impl EditorView {
         let ts = &self.styles.tab_bar;
         let end_drop_indicator_color = ts.tab_drop_indicator_color;
         let end_drop_indicator_width = ts.tab_drop_indicator_width_px;
+        let current_tab_ids: Vec<String> = self.tabs.iter().map(|tab| tab.id.clone()).collect();
+        let settings_tab_id = self
+            .tabs
+            .iter()
+            .find(|tab| tab.kind == TabKind::Settings)
+            .map(|tab| tab.id.clone());
         let mut tab_items: Vec<AnyElement> = self
             .tabs
             .iter()
@@ -952,17 +1147,23 @@ impl EditorView {
             tab_items.insert(
                 0,
                 div()
+                    .id("tab-bar-leading-spacer")
                     .h(px(self.tab_bar_height()))
                     .w(px(self.scaled(ts.tab_spacer_width_px)))
                     .flex_none()
                     .border_r(px(ts.tab_bar_border_width_px))
                     .border_color(ts.tab_bar_border_color)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+                    )
                     .into_any_element(),
             );
         }
 
         let new_hover_color = ts.tab_new_hover_text_color;
         let new_hover_bg = ts.tab_item_hover_bg;
+        let tab_plus_gap_width = self.scaled(ts.tab_spacer_width_px);
         tab_items.push(
             div()
                 .h(px(self.tab_bar_height()))
@@ -984,6 +1185,18 @@ impl EditorView {
                 )
                 .into_any_element(),
         );
+        tab_items.push(
+            div()
+                .id("tab-bar-plus-spacer")
+                .h(px(self.tab_bar_height()))
+                .w(px(tab_plus_gap_width))
+                .flex_none()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+                )
+                .into_any_element(),
+        );
 
         // Trailing spacer that fills remaining tab-bar space and supports drop-to-end.
         tab_items.push(
@@ -992,29 +1205,42 @@ impl EditorView {
                 .flex_1()
                 .h_full()
                 .min_w(px(0.0))
-                .drag_over::<DraggedTab>(move |style, _, _, _| {
-                    style
-                        .border_l(px(end_drop_indicator_width))
-                        .border_color(end_drop_indicator_color)
+                .drag_over::<DraggedTab>(move |style, dragged, _, _| {
+                    if Self::tab_drop_changes_order_for(
+                        &current_tab_ids,
+                        settings_tab_id.as_deref(),
+                        &dragged.tab_id,
+                        TabDropTarget::End,
+                    ) {
+                        style
+                            .border_l(px(end_drop_indicator_width))
+                            .border_color(end_drop_indicator_color)
+                    } else {
+                        style
+                    }
                 })
                 .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
-                    this.reorder_tab_to_end(&dragged.tab_id, cx);
+                    let current_tab_ids: Vec<String> =
+                        this.tabs.iter().map(|tab| tab.id.clone()).collect();
+                    let settings_tab_id = this
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.kind == TabKind::Settings)
+                        .map(|tab| tab.id.clone());
+                    if Self::tab_drop_changes_order_for(
+                        &current_tab_ids,
+                        settings_tab_id.as_deref(),
+                        &dragged.tab_id,
+                        TabDropTarget::End,
+                    ) {
+                        this.reorder_tab_to_end(&dragged.tab_id, cx);
+                    }
                     this.tab_drag_candidate_id = None;
                     this.tab_dragging_id = None;
                 }))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                        if this.tab_drag_candidate_id.is_some() || this.tab_dragging_id.is_some() {
-                            cx.stop_propagation();
-                            return;
-                        }
-                        this.focused_sidebar_path = None;
-                        if event.click_count >= 2 {
-                            window.zoom_window();
-                        }
-                        cx.notify();
-                    }),
+                    cx.listener(Self::on_tab_bar_drag_space_mouse_down),
                 )
                 .into_any_element(),
         );

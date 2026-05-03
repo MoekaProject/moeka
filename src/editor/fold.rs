@@ -161,6 +161,7 @@ impl EditorView {
                 self.cursor.move_to(new_offset, &self.buffer);
             }
         }
+        self.line_display_info.clear();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -169,6 +170,7 @@ impl EditorView {
         if !self.folded_image_previews.remove(&line) {
             self.folded_image_previews.insert(line);
         }
+        self.line_display_info.clear();
         cx.notify();
     }
 

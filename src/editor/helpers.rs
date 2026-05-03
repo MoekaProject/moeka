@@ -72,11 +72,37 @@ pub(crate) fn task_visual_indent_chars(
     indent_levels * visual_indent_step_chars.max(1) + remainder
 }
 
+fn active_range_intersects_target(active_range: &Range<usize>, target: &Range<usize>) -> bool {
+    if active_range.start == active_range.end {
+        active_range.start >= target.start && active_range.start < target.end
+    } else {
+        active_range.start < target.end && active_range.end > target.start
+    }
+}
+
+pub(crate) fn active_ranges_intersect(
+    active_ranges: &[Range<usize>],
+    target: &Range<usize>,
+) -> bool {
+    active_ranges
+        .iter()
+        .any(|active_range| active_range_intersects_target(active_range, target))
+}
+
+pub(crate) fn active_ranges_have_non_eol_position(
+    active_ranges: &[Range<usize>],
+    line_len: usize,
+) -> bool {
+    active_ranges.iter().any(|active_range| {
+        active_range.start.min(line_len) < line_len || active_range.end.min(line_len) < line_len
+    })
+}
+
 /// Build display text by selectively hiding syntax ranges.
 pub(crate) fn build_display_text(
     line_content: &str,
     decoration: &LineDecoration,
-    cursor_col: Option<usize>,
+    active_ranges: &[Range<usize>],
     code_block_syntax_active: bool,
     table_width_chars: Option<usize>,
     table_cell_padding_chars: usize,
@@ -95,7 +121,7 @@ pub(crate) fn build_display_text(
             return build_table_display_text(
                 line_content,
                 table_info,
-                cursor_col,
+                active_ranges,
                 code_block_syntax_active,
                 table_width_chars,
                 table_cell_padding_chars,
@@ -142,24 +168,29 @@ pub(crate) fn build_display_text(
                 && sr.trigger_range.start == leading_ws
                 && sr.trigger_range.end <= leading_ws + task_fold_len.max(task_core_len)
             {
-                return task_prefix_is_folded(line_content, leading_ws, task_core_len, cursor_col);
+                return task_prefix_is_folded(
+                    line_content,
+                    leading_ws,
+                    task_core_len,
+                    active_ranges,
+                );
             }
-            cursor_col.map_or(true, |col| {
-                let at_eol = col >= len;
-                // For headings: always expand syntax when cursor is on the line and not at EOL;
-                // collapse when cursor is at EOL or selection merely passes through.
-                if matches!(decoration.block_type, BlockType::Heading(_)) {
-                    return at_eol;
-                }
-                if at_eol {
-                    !matches!(
-                        decoration.block_type,
-                        BlockType::HorizontalRule | BlockType::CodeBlockFence
-                    )
-                } else {
-                    col < sr.trigger_range.start || col >= sr.trigger_range.end
-                }
-            })
+            if active_ranges.is_empty() {
+                return true;
+            }
+            if matches!(decoration.block_type, BlockType::Heading(_)) {
+                return !active_ranges_have_non_eol_position(active_ranges, len);
+            }
+            if active_ranges_intersect(active_ranges, &sr.trigger_range) {
+                return false;
+            }
+            if active_ranges_have_non_eol_position(active_ranges, len) {
+                return true;
+            }
+            !matches!(
+                decoration.block_type,
+                BlockType::HorizontalRule | BlockType::CodeBlockFence
+            )
         })
         .collect();
 
@@ -196,12 +227,12 @@ pub(crate) fn build_display_text(
             } else {
                 0
             };
-            (fold_len > 0 && prefix_is_folded(leading_ws, fold_len, cursor_col))
+            (fold_len > 0 && prefix_is_folded(leading_ws, fold_len, active_ranges))
                 .then_some((leading_ws..leading_ws + fold_len, "• ".to_string()))
         }
         BlockType::OrderedList => {
             let prefix_len = markdown::ordered_list_prefix_len(trimmed);
-            (prefix_len > 0 && prefix_is_folded(leading_ws, prefix_len, cursor_col)).then_some((
+            (prefix_len > 0 && prefix_is_folded(leading_ws, prefix_len, active_ranges)).then_some((
                 leading_ws..leading_ws + prefix_len,
                 trimmed[..prefix_len].to_string(),
             ))
@@ -215,7 +246,7 @@ pub(crate) fn build_display_text(
             );
             let replacement = " ".repeat(visual_indent + collapsed_task_prefix_chars.max(1));
             (fold_len > 0
-                && task_prefix_is_folded(line_content, leading_ws, task_core_len, cursor_col))
+                && task_prefix_is_folded(line_content, leading_ws, task_core_len, active_ranges))
             .then_some((0..leading_ws + fold_len, replacement))
         }
         _ => None,
@@ -325,7 +356,7 @@ pub(crate) fn build_display_text(
 pub(crate) fn build_table_display_text(
     line_content: &str,
     info: &TableLineInfo,
-    _cursor_col: Option<usize>,
+    _active_ranges: &[Range<usize>],
     _code_block_syntax_active: bool,
     available_chars: Option<usize>,
     table_cell_padding_chars: usize,
@@ -376,7 +407,7 @@ pub(crate) fn build_table_display_text(
         let (folded_cell_raw, cell_d2b_raw, cell_b2d_raw, _) = build_display_text(
             cell,
             &cell_decoration,
-            None,
+            &[],
             false,
             None,
             0,
@@ -442,34 +473,35 @@ pub(crate) fn build_table_display_text(
     (display, d2b, b2d, false)
 }
 
-pub(crate) fn active_table_cell_cursor_col(
+pub(crate) fn active_table_cell_ranges(
     line_start_offset: usize,
     cell_range: &Range<usize>,
     cursor_offsets: &[usize],
     marked_range: Option<&Range<usize>>,
-) -> Option<usize> {
+) -> Vec<Range<usize>> {
     let cell_start = line_start_offset + cell_range.start;
     let cell_end = line_start_offset + cell_range.end;
+    let cell_len = cell_range.len();
 
-    if let Some(cursor_offset) = cursor_offsets
+    let mut active_ranges = cursor_offsets
         .iter()
         .copied()
-        .find(|offset| *offset >= cell_start && *offset <= cell_end)
+        .filter(|offset| *offset >= cell_start && *offset <= cell_end)
+        .map(|offset| {
+            let col = (offset - cell_start).min(cell_len);
+            col..col
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(marked_range) = marked_range
+        && !(marked_range.end < cell_start || marked_range.start > cell_end)
     {
-        return Some((cursor_offset - cell_start).min(cell_range.len()));
+        let start = marked_range.start.saturating_sub(cell_start).min(cell_len);
+        let end = marked_range.end.saturating_sub(cell_start).min(cell_len);
+        active_ranges.push(start..end);
     }
 
-    let marked_range = marked_range?;
-    if marked_range.end < cell_start || marked_range.start > cell_end {
-        return None;
-    }
-
-    Some(
-        marked_range
-            .end
-            .saturating_sub(cell_start)
-            .min(cell_range.len()),
-    )
+    active_ranges
 }
 
 pub(crate) fn compute_table_render_widths(
@@ -767,7 +799,7 @@ pub(crate) fn compute_table_layout(
             let (folded_raw, d2b_raw, b2d_raw, _) = build_display_text(
                 &cell_content,
                 &cell_decoration,
-                None,
+                &[],
                 false,
                 None,
                 0,
@@ -1041,9 +1073,10 @@ pub(crate) fn compute_display_prefix_bytes(
 pub(crate) fn prefix_is_folded(
     leading_ws: usize,
     prefix_len: usize,
-    cursor_col: Option<usize>,
+    active_ranges: &[Range<usize>],
 ) -> bool {
-    cursor_col.is_none_or(|col| col < leading_ws || col >= leading_ws + prefix_len)
+    active_ranges.is_empty()
+        || !active_ranges_intersect(active_ranges, &(leading_ws..leading_ws + prefix_len))
 }
 
 fn task_prefix_len(trimmed: &str) -> usize {
@@ -1068,9 +1101,21 @@ fn task_prefix_is_folded(
     line_content: &str,
     leading_ws: usize,
     task_core_len: usize,
-    cursor_col: Option<usize>,
+    active_ranges: &[Range<usize>],
 ) -> bool {
-    cursor_col.is_none_or(|col| {
+    if active_ranges.is_empty() {
+        return true;
+    }
+
+    active_ranges.iter().all(|active_range| {
+        if active_range.start != active_range.end {
+            return !active_range_intersects_target(
+                active_range,
+                &(leading_ws..leading_ws + task_core_len),
+            );
+        }
+
+        let col = active_range.start;
         let core_end = leading_ws + task_core_len;
         if col < leading_ws {
             return true;
@@ -1919,7 +1964,7 @@ pub(crate) fn build_text_runs_for_display(
     line_content: &str,
     display_to_buffer: &[usize],
     decoration: &LineDecoration,
-    cursor_col: Option<usize>,
+    active_ranges: &[Range<usize>],
     code_block_syntax_active: bool,
     prefix_collapsed: bool,
     body_font: &Font,
@@ -2128,17 +2173,18 @@ pub(crate) fn build_text_runs_for_display(
         }
     }
 
-    if let Some(col) = cursor_col {
+    if !active_ranges.is_empty() {
         if !matches!(decoration.block_type, BlockType::Table) {
             for sr in &decoration.syntax_ranges {
-                let syntax_is_active = if matches!(decoration.block_type, BlockType::CodeBlockFence)
-                {
+                let syntax_is_active = if matches!(decoration.block_type, BlockType::Heading(_)) {
+                    true
+                } else if matches!(decoration.block_type, BlockType::CodeBlockFence) {
                     // Fence lines always have syntax visible; use active code block check
                     // to determine if markers should get syntax_marker color
                     code_block_syntax_active
-                        || (col >= sr.trigger_range.start && col < sr.trigger_range.end)
+                        || active_ranges_intersect(active_ranges, &sr.trigger_range)
                 } else {
-                    col >= sr.trigger_range.start && col < sr.trigger_range.end
+                    active_ranges_intersect(active_ranges, &sr.trigger_range)
                 };
                 if syntax_is_active {
                     let start = sr.range.start.min(buf_len);
@@ -2246,7 +2292,6 @@ pub(crate) fn build_text_runs_for_display(
             && weights[run_end] == weight
             && font_styles[run_end] == style
             && bg_colors[run_end] == bg
-            && strikethroughs[run_end] == strike
             && font_roles[run_end] == font_roles[run_start]
         {
             run_end += 1;
@@ -2331,12 +2376,11 @@ pub(crate) fn apply_search_match_text_styles(
         let mut cursor = run_start;
 
         while cursor < run_end {
-            let next = display_text[cursor..]
+            let next = display_text[cursor..run_end]
                 .chars()
                 .next()
                 .map(|ch| cursor + ch.len_utf8())
-                .unwrap_or(run_end)
-                .min(run_end);
+                .unwrap_or(run_end);
             let next_color = if next < run_end {
                 byte_colors
                     .get(next)
@@ -2346,7 +2390,6 @@ pub(crate) fn apply_search_match_text_styles(
             } else {
                 segment_color
             };
-
             if next < run_end && next_color != segment_color {
                 let mut segment_run = run.clone();
                 segment_run.len = next - segment_start;
@@ -2378,7 +2421,6 @@ pub(crate) fn apply_letter_spacing(wrapped: &mut WrappedLine, spacing_px: f32) {
 
     let old_layout = &**wrapped;
     let old_line = &old_layout.unwrapped_layout;
-
     let mut new_runs: Vec<ShapedRun> = Vec::with_capacity(old_line.runs.len());
     let mut glyph_count: usize = 0;
 

@@ -24,7 +24,11 @@ impl EditorView {
         }
 
         if self.quick_open_editor.is_none() {
-            let styles = self.styles.text_input.clone();
+            let mut styles = self.styles.text_input.clone();
+            styles.text_input_padding_left_px =
+                self.styles.quick_open.quick_open_input_text_padding_left_px;
+            styles.text_input_cursor_height_ratio =
+                self.styles.quick_open.quick_open_input_cursor_height_ratio;
             let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "搜索文件...", cx));
             cx.subscribe(
                 &editor,
@@ -173,12 +177,8 @@ impl EditorView {
         } else {
             0.0
         };
-        let outline_w = if self.outline_visible && !self.tabs.is_empty() {
-            self.outline_width()
-        } else {
-            0.0
-        };
-        let editor_w = (self.last_window_width - sidebar_w - outline_w).max(panel_w);
+        let right_panel_w = self.right_panel_width();
+        let editor_w = (self.last_window_width - sidebar_w - right_panel_w).max(panel_w);
         let panel_left = sidebar_w + (editor_w - panel_w) / 2.0;
         let panel_top =
             (self.last_window_height / 5.0).max(self.scaled(styles.quick_open_panel_top_offset_px));
@@ -217,15 +217,27 @@ impl EditorView {
             {
                 let is_selected = index == self.quick_open_selected_index;
                 let path = result.path.clone();
-                let file_name = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
                 let relative_path = path
                     .strip_prefix(&self.sidebar_root)
                     .unwrap_or(path.as_path())
                     .display()
                     .to_string();
+                let directory_path = Path::new(&relative_path)
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .map(|parent| parent.display().to_string())
+                    .unwrap_or_else(|| ".".to_string());
+                let file_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| relative_path.clone());
+                let directory_char_len = directory_path.chars().count();
+                let path_match_indices = result
+                    .path_match_indices
+                    .iter()
+                    .copied()
+                    .filter(|index| *index < directory_char_len)
+                    .collect::<Vec<_>>();
                 let file_name_el = render_highlighted_text(
                     &file_name,
                     &result.file_name_match_indices,
@@ -234,8 +246,8 @@ impl EditorView {
                     name_font,
                 );
                 let path_el = render_highlighted_text(
-                    &relative_path,
-                    &result.path_match_indices,
+                    &directory_path,
+                    &path_match_indices,
                     text_secondary,
                     match_color,
                     path_font,
@@ -258,7 +270,6 @@ impl EditorView {
                                 .min_w(px(0.0))
                                 .flex()
                                 .flex_col()
-                                .justify_center()
                                 .gap(px(self.scaled(styles.quick_open_result_gap_y_px)))
                                 .child(file_name_el)
                                 .child(path_el),

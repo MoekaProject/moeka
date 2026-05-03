@@ -139,7 +139,7 @@ fn build_precise_table_layout(
                     .get(cell_layout.col)
                     .cloned()
                     .unwrap_or_default();
-                let cell_cursor_col = helpers::active_table_cell_cursor_col(
+                let cell_active_ranges = helpers::active_table_cell_ranges(
                     line_start_offset,
                     &cell_layout.cell_range,
                     cursor_offsets,
@@ -152,7 +152,7 @@ fn build_precise_table_layout(
                 let (folded_raw, d2b_raw, b2d_raw, _) = helpers::build_display_text(
                     &cell_content,
                     &cell_decoration,
-                    cell_cursor_col,
+                    &cell_active_ranges,
                     false,
                     None,
                     0,
@@ -175,7 +175,7 @@ fn build_precise_table_layout(
                     &cell_content,
                     &cell_layout.display_to_buffer,
                     &cell_decoration,
-                    cell_cursor_col,
+                    &cell_active_ranges,
                     false,
                     false,
                     body_font,
@@ -636,31 +636,13 @@ impl Element for EditorElement {
             let line_content = buffer.line_content(line_idx);
             let line_start_offset = buffer.line_start(line_idx);
             let line_end_offset = buffer.line_end(line_idx);
-
             let cursor_in_table = if let Some(ref ti) = decoration.table_info {
                 cursor_line >= ti.table_start_line && cursor_line < ti.table_end_line
             } else {
                 false
             };
             let ime_active_on_line = editor.marked_range.as_ref().is_some_and(|marked| {
-                marked.start < line_end_offset && marked.end >= line_start_offset
-            });
-            let ime_cursor_col = editor.marked_range.as_ref().and_then(|marked| {
-                if marked.end < line_start_offset || marked.start > line_end_offset {
-                    return None;
-                }
-
-                let anchor = if marked.start >= line_start_offset {
-                    marked.start
-                } else {
-                    marked.end.min(line_end_offset)
-                };
-
-                Some(
-                    anchor
-                        .saturating_sub(line_start_offset)
-                        .min(line_content.len()),
-                )
+                marked.start < line_end_offset && marked.end > line_start_offset
             });
             let cursor_col = if editor.cursor.has_selection()
                 && matches!(decoration.block_type, BlockType::Heading(_))
@@ -711,14 +693,7 @@ impl Element for EditorElement {
                     None
                 }
             } else if ime_active_on_line {
-                ime_cursor_col.or_else(|| {
-                    Some(
-                        cursor
-                            .offset
-                            .saturating_sub(line_start_offset)
-                            .min(line_content.len()),
-                    )
-                })
+                Some(line_content.len())
             } else if is_cursor_line {
                 Some(cursor.offset.saturating_sub(line_start_offset))
             } else if cursor_in_table {
@@ -726,6 +701,49 @@ impl Element for EditorElement {
             } else {
                 None
             };
+            let mut active_ranges: Vec<std::ops::Range<usize>> = all_sel_ranges
+                .iter()
+                .filter(|range| range.start != range.end)
+                .filter_map(|range| {
+                    if range.end <= line_start_offset || range.start >= line_end_offset {
+                        return None;
+                    }
+                    let start = range
+                        .start
+                        .saturating_sub(line_start_offset)
+                        .min(line_content.len());
+                    let end = range
+                        .end
+                        .saturating_sub(line_start_offset)
+                        .min(line_content.len());
+                    Some(start..end)
+                })
+                .collect();
+            for marked in editor.marked_ranges() {
+                if marked.end <= line_start_offset || marked.start >= line_end_offset {
+                    continue;
+                }
+                if matches!(decoration.block_type, BlockType::Heading(_))
+                    && marked.end >= line_end_offset
+                {
+                    continue;
+                }
+                let start = marked
+                    .start
+                    .saturating_sub(line_start_offset)
+                    .min(line_content.len());
+                let end = marked
+                    .end
+                    .saturating_sub(line_start_offset)
+                    .min(line_content.len());
+                active_ranges.push(start..end);
+            }
+            if active_ranges.is_empty()
+                && let Some(col) = cursor_col
+            {
+                let clamped = col.min(line_content.len());
+                active_ranges.push(clamped..clamped);
+            }
 
             // Hide all non-first-row table lines (rendered as block on the first row)
             let hide_table_line = matches!(block_type, BlockType::Table)
@@ -811,7 +829,7 @@ impl Element for EditorElement {
                     line_content,
                     &cached.display_to_buffer,
                     &decoration,
-                    cursor_col,
+                    &active_ranges,
                     false,
                     false,
                     &body_font,
@@ -847,11 +865,27 @@ impl Element for EditorElement {
                         editor.styles.search.search_match_active_text_color,
                     );
                 }
+                if editor.current_file_path == editor.outline_flash_highlight_path {
+                    helpers::apply_search_match_text_styles(
+                        &mut runs,
+                        &cached.display_text,
+                        &cached.display_to_buffer,
+                        line_start_offset,
+                        &editor.outline_flash_highlight_ranges,
+                        editor.outline_flash_highlight_current_index,
+                        editor.styles.search.search_match_text_color,
+                        editor.styles.search.search_match_active_text_color,
+                    );
+                }
                 let origin = point(px(content_x), px(text_line_top));
                 let skip_front_matter_anchor_dots = decoration
                     .table_info
                     .as_ref()
                     .is_some_and(|ti| ti.is_front_matter && line_idx == ti.table_start_line);
+                let skip_block_line_highlight = decoration
+                    .table_info
+                    .as_ref()
+                    .is_some_and(|ti| line_idx == ti.table_start_line);
                 if !skip_front_matter_anchor_dots {
                     push_whitespace_dot_quads(
                         &mut whitespace_dots,
@@ -885,6 +919,7 @@ impl Element for EditorElement {
                     && is_cursor_line
                     && !any_selection
                     && editor.extra_cursors.is_empty()
+                    && !skip_block_line_highlight
                 {
                     line_highlight = Some(fill(
                         Bounds::new(
@@ -976,6 +1011,44 @@ impl Element for EditorElement {
                     {
                         let is_active =
                             editor.workspace_search_highlight_current_index == Some(match_idx);
+                        let sel_start_on_line = sr.start.max(line_start_offset);
+                        let sel_end_on_line = sr.end.min(line_end_offset);
+                        if sel_start_on_line < sel_end_on_line {
+                            let buf_start_col = sel_start_on_line - line_start_offset;
+                            let buf_end_col = sel_end_on_line - line_start_offset;
+                            let disp_start = helpers::buffer_to_display_offset(
+                                &cached.buffer_to_display,
+                                buf_start_col,
+                            );
+                            let disp_end = helpers::buffer_to_display_offset(
+                                &cached.buffer_to_display,
+                                buf_end_col,
+                            );
+                            search_match_quads.extend(helpers::build_selection_quads(
+                                &cached.display_text,
+                                &runs,
+                                &cached.wrapped_line,
+                                disp_start,
+                                disp_end,
+                                content_x,
+                                line_top,
+                                line_height,
+                                font_size,
+                                cached.indent_px,
+                                if is_active { active_bg } else { match_bg },
+                                editor_styles.editor_letter_spacing_px,
+                                window,
+                            ));
+                        }
+                    }
+                }
+                if editor.current_file_path == editor.outline_flash_highlight_path {
+                    let match_bg = editor.styles.search.search_match_bg;
+                    let active_bg = editor.styles.search.search_match_active_bg;
+                    for (match_idx, sr) in editor.outline_flash_highlight_ranges.iter().enumerate()
+                    {
+                        let is_active =
+                            editor.outline_flash_highlight_current_index == Some(match_idx);
                         let sel_start_on_line = sr.start.max(line_start_offset);
                         let sel_end_on_line = sr.end.min(line_end_offset);
                         if sel_start_on_line < sel_end_on_line {
@@ -1102,7 +1175,7 @@ impl Element for EditorElement {
                 helpers::build_display_text(
                     line_content,
                     &decoration,
-                    cursor_col,
+                    &active_ranges,
                     code_block_syntax_active,
                     table_width_chars,
                     table_cell_padding_chars,
@@ -1116,7 +1189,7 @@ impl Element for EditorElement {
                 line_content,
                 &display_to_buffer,
                 &decoration,
-                cursor_col,
+                &active_ranges,
                 code_block_syntax_active,
                 prefix_collapsed,
                 &body_font,
@@ -1152,6 +1225,18 @@ impl Element for EditorElement {
                     editor.styles.search.search_match_active_text_color,
                 );
             }
+            if editor.current_file_path == editor.outline_flash_highlight_path {
+                helpers::apply_search_match_text_styles(
+                    &mut runs,
+                    &display_text,
+                    &display_to_buffer,
+                    line_start_offset,
+                    &editor.outline_flash_highlight_ranges,
+                    editor.outline_flash_highlight_current_index,
+                    editor.styles.search.search_match_text_color,
+                    editor.styles.search.search_match_active_text_color,
+                );
+            }
 
             let display_shared: SharedString = if display_text.is_empty() {
                 " ".into()
@@ -1174,7 +1259,6 @@ impl Element for EditorElement {
                 0
             };
             let indent_px = 0.0;
-
             let letter_spacing = editor_styles.editor_letter_spacing_px;
 
             let base_wrap_width =
@@ -1643,7 +1727,7 @@ impl Element for EditorElement {
                                         &cell_content,
                                         &cell_layout.display_to_buffer,
                                         &cell_decoration,
-                                        helpers::active_table_cell_cursor_col(
+                                        &helpers::active_table_cell_ranges(
                                             buffer.line_start(source_line),
                                             &cell_layout.cell_range,
                                             &all_cursor_offsets,
@@ -2422,10 +2506,15 @@ impl Element for EditorElement {
             }
 
             // Line highlight
+            let skip_block_line_highlight = decoration
+                .table_info
+                .as_ref()
+                .is_some_and(|ti| line_idx == ti.table_start_line);
             if editor.selected_handle.is_none()
                 && is_cursor_line
                 && !any_selection
                 && editor.extra_cursors.is_empty()
+                && !skip_block_line_highlight
             {
                 line_highlight = Some(fill(
                     Bounds::new(
@@ -2531,6 +2620,38 @@ impl Element for EditorElement {
                 for (match_idx, sr) in editor.workspace_search_highlight_ranges.iter().enumerate() {
                     let is_active =
                         editor.workspace_search_highlight_current_index == Some(match_idx);
+                    let sel_start_on_line = sr.start.max(line_start_offset);
+                    let sel_end_on_line = sr.end.min(line_end_offset);
+                    if sel_start_on_line < sel_end_on_line {
+                        let buf_start_col = sel_start_on_line - line_start_offset;
+                        let buf_end_col = sel_end_on_line - line_start_offset;
+                        let disp_start =
+                            helpers::buffer_to_display_offset(&buffer_to_display, buf_start_col);
+                        let disp_end =
+                            helpers::buffer_to_display_offset(&buffer_to_display, buf_end_col);
+                        search_match_quads.extend(helpers::build_selection_quads(
+                            &display_text,
+                            &runs,
+                            wrapped,
+                            disp_start,
+                            disp_end,
+                            content_x,
+                            line_top,
+                            line_height,
+                            font_size,
+                            indent_px,
+                            if is_active { active_bg } else { match_bg },
+                            letter_spacing,
+                            window,
+                        ));
+                    }
+                }
+            }
+            if editor.current_file_path == editor.outline_flash_highlight_path {
+                let match_bg = editor.styles.search.search_match_bg;
+                let active_bg = editor.styles.search.search_match_active_bg;
+                for (match_idx, sr) in editor.outline_flash_highlight_ranges.iter().enumerate() {
+                    let is_active = editor.outline_flash_highlight_current_index == Some(match_idx);
                     let sel_start_on_line = sr.start.max(line_start_offset);
                     let sel_end_on_line = sr.end.min(line_end_offset);
                     if sel_start_on_line < sel_end_on_line {
@@ -2688,9 +2809,8 @@ impl Element for EditorElement {
                     else {
                         continue;
                     };
-                    let is_collapsed = cursor_col.is_none_or(|col| {
-                        col < wiki_link.full_range.start || col >= wiki_link.full_range.end
-                    });
+                    let is_collapsed =
+                        !helpers::active_ranges_intersect(&active_ranges, &wiki_link.full_range);
                     let visible_range = if is_collapsed {
                         wiki_link.collapsed_range.clone()
                     } else {
@@ -2860,7 +2980,7 @@ impl Element for EditorElement {
             });
         }
 
-        self.editor.update(cx, |editor, _| {
+        self.editor.update(cx, |editor, cx| {
             editor.line_display_info = display_info_cache;
             editor.last_viewport_height = viewport_height;
             editor.last_viewport_width = viewport_width;
@@ -2878,6 +2998,11 @@ impl Element for EditorElement {
             editor.last_content_left = editor_left + editor.padding_left();
             editor.last_text_width = text_width;
             editor.content_origin = bounds.origin;
+            editor.layout_dirty = false;
+            if editor.pending_scroll_to_cursor {
+                editor.scroll_to_cursor();
+                cx.notify();
+            }
         });
 
         // Trigger loading for any image paths not yet in cache

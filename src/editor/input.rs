@@ -3,7 +3,7 @@ use std::ops::Range;
 use gpui::{
     App, Bounds, Context, EntityInputHandler, Focusable, FontFallbacks, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent, SharedString,
-    UTF16Selection, Window, WrappedLine, point, px, size,
+    TextRun, UTF16Selection, Window, WrappedLine, point, px, size,
 };
 
 use crate::markdown::{BlockType, InlineKind};
@@ -17,6 +17,24 @@ struct TableCellDisplayInfo {
     buffer_to_display: Vec<usize>,
     cell_range: Range<usize>,
     cell_content_len: usize,
+}
+
+struct InlineLineDisplayInfo {
+    buffer_to_display: Vec<usize>,
+    font_size: f32,
+    line_height: f32,
+    wrapped_line: WrappedLine,
+    indent_px: f32,
+    content_x: f32,
+}
+
+struct MultiCursorImeEdit {
+    start: usize,
+    selection_start: usize,
+    selection_end: usize,
+    marked_range: Option<Range<usize>>,
+    is_primary: bool,
+    delta: isize,
 }
 
 fn paired_delimiter(input: &str) -> Option<(&'static str, &'static str)> {
@@ -157,6 +175,127 @@ impl EditorView {
         }
     }
 
+    fn collect_multi_cursor_ime_targets_desc(
+        &self,
+        primary_override_range: Option<Range<usize>>,
+    ) -> Vec<(Range<usize>, bool)> {
+        let primary_range = primary_override_range
+            .or_else(|| self.marked_range.clone())
+            .unwrap_or_else(|| self.cursor.selection_range());
+
+        let mut all = Vec::with_capacity(1 + self.extra_cursors.len());
+        all.push((
+            primary_range.start.min(primary_range.end)..primary_range.end.max(primary_range.start),
+            true,
+        ));
+
+        for (index, cursor) in self.extra_cursors.iter().enumerate() {
+            let range = self
+                .extra_marked_ranges
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| {
+                    cursor.offset.min(cursor.anchor)..cursor.offset.max(cursor.anchor)
+                });
+            all.push((
+                range.start.min(range.end)..range.end.max(range.start),
+                false,
+            ));
+        }
+
+        all.sort_by(|a, b| {
+            b.0.start
+                .cmp(&a.0.start)
+                .then_with(|| b.0.end.cmp(&a.0.end))
+        });
+        all
+    }
+
+    fn apply_multi_cursor_ime_replace(
+        &mut self,
+        primary_override_range: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<&Range<usize>>,
+        keep_marked_ranges: bool,
+    ) -> bool {
+        let selection_relative = new_selected_range_utf16
+            .map(|range_utf16| {
+                (
+                    Self::utf8_offset_in_text_for_utf16(new_text, range_utf16.start),
+                    Self::utf8_offset_in_text_for_utf16(new_text, range_utf16.end),
+                )
+            })
+            .unwrap_or((new_text.len(), new_text.len()));
+
+        let mut range_spans_multiple_lines = false;
+        let mut edits = Vec::with_capacity(1 + self.extra_cursors.len());
+
+        for (range, is_primary) in
+            self.collect_multi_cursor_ime_targets_desc(primary_override_range)
+        {
+            let (start_line, _) = self.buffer.offset_to_line_col(range.start);
+            let (end_line, _) = self.buffer.offset_to_line_col(range.end);
+            range_spans_multiple_lines |= start_line != end_line;
+
+            let before_len = self.buffer.len();
+            self.buffer.replace(range.clone(), new_text);
+            let after_len = self.buffer.len();
+
+            let mark_start = range.start;
+            let mark_end = mark_start + new_text.len();
+            edits.push(MultiCursorImeEdit {
+                start: range.start,
+                selection_start: mark_start + selection_relative.0,
+                selection_end: mark_start + selection_relative.1,
+                marked_range: if keep_marked_ranges && !new_text.is_empty() {
+                    Some(mark_start..mark_end)
+                } else {
+                    None
+                },
+                is_primary,
+                delta: after_len as isize - before_len as isize,
+            });
+        }
+
+        edits.sort_by_key(|edit| edit.start);
+        self.clear_marked_ranges();
+        self.extra_cursors.clear();
+
+        let mut cumulative_delta = 0isize;
+        for edit in edits {
+            let anchor = self
+                .buffer
+                .clamp_offset(apply_offset_delta(edit.selection_start, cumulative_delta));
+            let offset = self
+                .buffer
+                .clamp_offset(apply_offset_delta(edit.selection_end, cumulative_delta));
+            let marked_range = edit.marked_range.map(|range| {
+                let start = self
+                    .buffer
+                    .clamp_offset(apply_offset_delta(range.start, cumulative_delta));
+                let end = self
+                    .buffer
+                    .clamp_offset(apply_offset_delta(range.end, cumulative_delta));
+                start..end
+            });
+
+            if edit.is_primary {
+                self.cursor.anchor = anchor;
+                self.cursor.offset = offset;
+                self.marked_range = marked_range;
+            } else {
+                self.extra_cursors.push(Cursor { offset, anchor });
+                if let Some(marked_range) = marked_range {
+                    self.extra_marked_ranges.push(marked_range);
+                }
+            }
+
+            cumulative_delta += edit.delta;
+        }
+
+        range_spans_multiple_lines
+    }
+
     fn finish_ime_composition(&mut self) {
         let Some(snapshot) = self.ime_composition_snapshot.take() else {
             return;
@@ -164,10 +303,36 @@ impl EditorView {
 
         let changed = snapshot.text != self.buffer.text()
             || snapshot.cursor_offset != self.cursor.offset
-            || snapshot.cursor_anchor != self.cursor.anchor;
+            || snapshot.cursor_anchor != self.cursor.anchor
+            || snapshot.extra_cursors
+                != self
+                    .extra_cursors
+                    .iter()
+                    .map(|cursor| (cursor.offset, cursor.anchor))
+                    .collect::<Vec<_>>();
         if changed {
             self.push_undo_snapshot(snapshot);
         }
+    }
+
+    pub(crate) fn primary_cursor_has_inline_edit_headroom(&self) -> bool {
+        let cursor_line = self.cursor_line();
+        let cursor_y = self.line_y_offset(cursor_line);
+        let cursor_line_height = self.visual_height_for_line(cursor_line);
+        let viewport_top = self.scroll_offset + self.padding_top();
+        let viewport_bottom = self.scroll_offset + self.last_viewport_height - self.padding_top();
+
+        if cursor_y < viewport_top || cursor_y + cursor_line_height > viewport_bottom {
+            return false;
+        }
+
+        let next_visual_line_height = self
+            .decorations
+            .get(cursor_line)
+            .map(|decoration| self.line_height_for_block(&decoration.block_type))
+            .unwrap_or_else(|| self.line_height_for_block(&BlockType::Normal));
+
+        cursor_y + cursor_line_height + next_visual_line_height <= viewport_bottom
     }
 
     // ── Mouse handlers ──────────────────────────────────────────────
@@ -1085,7 +1250,7 @@ impl EditorView {
         let cursor_offsets = std::iter::once(self.cursor.offset)
             .chain(self.extra_cursors.iter().map(|cursor| cursor.offset))
             .collect::<Vec<_>>();
-        let cell_cursor_col = helpers::active_table_cell_cursor_col(
+        let cell_active_ranges = helpers::active_table_cell_ranges(
             line_start,
             &cell_range,
             &cursor_offsets,
@@ -1098,7 +1263,7 @@ impl EditorView {
         let (folded_raw, d2b_raw, b2d_raw, _) = helpers::build_display_text(
             &cell_content,
             &cell_decoration,
-            cell_cursor_col,
+            &cell_active_ranges,
             false,
             None,
             0,
@@ -1160,7 +1325,7 @@ impl EditorView {
             &cell_content,
             &display_to_buffer,
             &cell_decoration,
-            cell_cursor_col,
+            &cell_active_ranges,
             false,
             false,
             &body_font,
@@ -1205,6 +1370,374 @@ impl EditorView {
             buffer_to_display,
             cell_range,
             cell_content_len: cell_content.len(),
+        })
+    }
+
+    fn inline_line_display_info(
+        &self,
+        window: &mut Window,
+        line_idx: usize,
+        bounds: Bounds<Pixels>,
+    ) -> Option<InlineLineDisplayInfo> {
+        let decoration = self.decorations.get(line_idx)?.clone();
+        if matches!(decoration.block_type, BlockType::Table) {
+            return None;
+        }
+
+        let viewport_width: f32 = bounds.size.width.into();
+        let origin_x: f32 = bounds.origin.x.into();
+        let expanded_layout = self.editor_left_aligned;
+        let editor_width = if expanded_layout {
+            viewport_width
+        } else {
+            viewport_width.min(self.max_editor_width())
+        };
+        let centered_left = origin_x + ((viewport_width - editor_width) / 2.0).max(0.0);
+        let editor_left = if expanded_layout {
+            origin_x
+        } else {
+            centered_left
+        };
+        let text_width =
+            (editor_width - self.padding_left() - self.padding_right()).max(self.scaled(120.0));
+        let wrap_width = (text_width
+            - self.scaled(self.styles.editor.editor_wrap_right_padding_px))
+        .max(self.scaled(120.0));
+
+        let text_style = window.text_style();
+        let editor_styles = &self.styles.editor;
+        let configured_font_family = |configured: &'static str| {
+            if configured == ".SystemUIFont" {
+                text_style.font().family.clone()
+            } else {
+                configured.into()
+            }
+        };
+        let body_cjk_fallbacks = |configured: &'static str| {
+            (configured != editor_styles.editor_body_cjk_font_family).then(|| {
+                FontFallbacks::from_fonts(vec![
+                    editor_styles.editor_body_cjk_font_family.to_string(),
+                ])
+            })
+        };
+
+        let mut monospace_font = text_style.font();
+        monospace_font.family = configured_font_family(editor_styles.editor_monospace_font_family);
+        monospace_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_monospace_font_family);
+
+        let mut body_font = text_style.font();
+        body_font.family = configured_font_family(editor_styles.editor_body_latin_font_family);
+        body_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_body_latin_font_family);
+
+        let mut body_cjk_font = text_style.font();
+        body_cjk_font.family = configured_font_family(editor_styles.editor_body_cjk_font_family);
+        body_cjk_font.fallbacks = None;
+
+        let mut heading_font = text_style.font();
+        heading_font.family =
+            configured_font_family(editor_styles.editor_heading_latin_font_family);
+        heading_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_heading_latin_font_family);
+
+        let mut heading_cjk_font = text_style.font();
+        heading_cjk_font.family =
+            configured_font_family(editor_styles.editor_heading_cjk_font_family);
+        heading_cjk_font.fallbacks = None;
+
+        let base_char_width = {
+            let test_run = TextRun {
+                len: 1,
+                font: monospace_font.clone(),
+                color: gpui::transparent_black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            if let Ok(test_lines) = window.text_system().shape_text(
+                "x".into(),
+                px(self.base_font_size()),
+                &[test_run],
+                None,
+                None,
+            ) {
+                f32::from(test_lines[0].width())
+            } else {
+                self.base_font_size() * 0.6
+            }
+        };
+
+        let table_cell_padding_px = self.scaled(self.styles.table.table_cell_padding_px);
+        let table_cell_padding_chars = if table_cell_padding_px <= 0.0 {
+            0
+        } else {
+            (table_cell_padding_px / base_char_width).ceil().max(1.0) as usize
+        };
+        let collapsed_task_prefix_chars = ((self.base_font_size()
+            * self.styles.checkbox.checkbox_size_factor
+            + self.scaled(self.styles.checkbox.checkbox_text_gap_px))
+            / base_char_width)
+            .ceil()
+            .max(3.0) as usize;
+        let checkbox_indent_step_chars = (self.scaled(self.styles.checkbox.checkbox_indent_step_px)
+            / base_char_width)
+            .ceil()
+            .max(1.0) as usize;
+
+        let is_code_block_type = |index: usize| {
+            matches!(
+                self.decorations.get(index).map(|d| &d.block_type),
+                Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
+            )
+        };
+
+        let active_code_fence_group = if self.cursor_line() < self.buffer.line_count()
+            && matches!(
+                self.decorations
+                    .get(self.cursor_line())
+                    .map(|d| &d.block_type),
+                Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
+            ) {
+            let mut start = self.cursor_line();
+            while start > 0 && is_code_block_type(start - 1) {
+                start -= 1;
+            }
+
+            let mut end = self.cursor_line();
+            while end + 1 < self.buffer.line_count() && is_code_block_type(end + 1) {
+                end += 1;
+            }
+
+            Some((start, end))
+        } else {
+            None
+        };
+
+        let line_content = self.buffer.line_content(line_idx);
+        let line_start_offset = self.buffer.line_start(line_idx);
+        let line_end_offset = self.buffer.line_end(line_idx);
+        let is_cursor_line = line_idx == self.cursor_line();
+        let font_size = self.font_size_for_block(&decoration.block_type);
+        let line_height = self.line_height_for_block(&decoration.block_type);
+        let ime_active_on_line = self
+            .marked_range
+            .as_ref()
+            .is_some_and(|marked| marked.start < line_end_offset && marked.end > line_start_offset);
+        let cursor_col = if self.cursor.has_selection()
+            && matches!(decoration.block_type, BlockType::Heading(_))
+        {
+            if is_cursor_line {
+                Some(self.cursor.offset.saturating_sub(line_start_offset))
+            } else {
+                None
+            }
+        } else if self.is_selecting && self.cursor.has_selection() {
+            let sel = self.cursor.selection_range();
+            if sel.start >= line_start_offset && sel.end <= line_end_offset {
+                let sel_start_col = sel.start - line_start_offset;
+                let sel_end_col = sel.end - line_start_offset;
+                let within_syntax = decoration.inline_spans.iter().any(|span| {
+                    let prefix_len = match span.kind {
+                        crate::markdown::InlineKind::Bold => 2,
+                        crate::markdown::InlineKind::Italic => 1,
+                        crate::markdown::InlineKind::Strikethrough => 2,
+                        crate::markdown::InlineKind::InlineCode => 1,
+                        crate::markdown::InlineKind::Link | crate::markdown::InlineKind::Image => {
+                            if span.kind == crate::markdown::InlineKind::Image {
+                                2
+                            } else {
+                                1
+                            }
+                        }
+                    };
+                    let full_start = span.range.start.saturating_sub(prefix_len);
+                    let full_end = decoration
+                        .syntax_ranges
+                        .iter()
+                        .filter(|syntax_range| syntax_range.range.end > span.range.end)
+                        .map(|syntax_range| syntax_range.range.end)
+                        .max()
+                        .unwrap_or(span.range.end);
+                    sel_start_col >= full_start && sel_end_col <= full_end
+                });
+                if within_syntax {
+                    Some(self.cursor.offset.saturating_sub(line_start_offset))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else if ime_active_on_line {
+            Some(line_content.len())
+        } else if is_cursor_line {
+            Some(self.cursor.offset.saturating_sub(line_start_offset))
+        } else {
+            None
+        };
+
+        let all_sel_ranges: Vec<Range<usize>> = self
+            .all_cursor_ranges()
+            .into_iter()
+            .map(|(offset, anchor)| offset.min(anchor)..offset.max(anchor))
+            .collect();
+        let mut active_ranges: Vec<Range<usize>> = all_sel_ranges
+            .iter()
+            .filter(|range| range.start != range.end)
+            .filter_map(|range| {
+                if range.end <= line_start_offset || range.start >= line_end_offset {
+                    return None;
+                }
+                let start = range
+                    .start
+                    .saturating_sub(line_start_offset)
+                    .min(line_content.len());
+                let end = range
+                    .end
+                    .saturating_sub(line_start_offset)
+                    .min(line_content.len());
+                Some(start..end)
+            })
+            .collect();
+        for marked in self.marked_ranges() {
+            if marked.end <= line_start_offset || marked.start >= line_end_offset {
+                continue;
+            }
+            if matches!(decoration.block_type, BlockType::Heading(_))
+                && marked.end >= line_end_offset
+            {
+                continue;
+            }
+            let start = marked
+                .start
+                .saturating_sub(line_start_offset)
+                .min(line_content.len());
+            let end = marked
+                .end
+                .saturating_sub(line_start_offset)
+                .min(line_content.len());
+            active_ranges.push(start..end);
+        }
+        if active_ranges.is_empty()
+            && let Some(col) = cursor_col
+        {
+            active_ranges.push(col.min(line_content.len())..col.min(line_content.len()));
+        }
+
+        let code_block_syntax_active = active_code_fence_group
+            .is_some_and(|(start, end)| line_idx >= start && line_idx <= end);
+        let (display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
+            helpers::build_display_text(
+                line_content,
+                &decoration,
+                &active_ranges,
+                code_block_syntax_active,
+                None,
+                table_cell_padding_chars,
+                collapsed_task_prefix_chars,
+                checkbox_indent_step_chars,
+                self.styles.checkbox.checkbox_parent_prefix_chars as usize,
+            );
+
+        let runs = helpers::build_text_runs_for_display(
+            &display_text,
+            line_content,
+            &display_to_buffer,
+            &decoration,
+            &active_ranges,
+            code_block_syntax_active,
+            prefix_collapsed,
+            &body_font,
+            &body_cjk_font,
+            &monospace_font,
+            &heading_font,
+            &heading_cjk_font,
+            collapsed_task_prefix_chars,
+            font_size,
+            &self.theme,
+            self.styles.wiki_link.wiki_link_text_color,
+            self.styles.wiki_link.wiki_link_text_weight,
+        );
+
+        let display_shared: SharedString = if display_text.is_empty() {
+            " ".into()
+        } else {
+            display_text.clone().into()
+        };
+
+        let is_list_type = matches!(
+            decoration.block_type,
+            BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_)
+        );
+        let prefix_bytes = if is_list_type {
+            helpers::compute_display_prefix_bytes(
+                &display_text,
+                &decoration.block_type,
+                prefix_collapsed,
+                collapsed_task_prefix_chars,
+            )
+        } else {
+            0
+        };
+        let letter_spacing = editor_styles.editor_letter_spacing_px;
+        let base_wrap_width = if matches!(
+            decoration.block_type,
+            BlockType::CodeBlock | BlockType::CodeBlockFence
+        ) {
+            (text_width
+                - self.scaled(self.styles.code_block.code_block_text_padding_left_px)
+                - self.scaled(self.styles.code_block.code_block_wrap_right_padding_px))
+            .max(self.scaled(80.0))
+        } else {
+            wrap_width
+        };
+        let effective_wrap_width = if letter_spacing > 0.0 {
+            base_wrap_width * font_size / (font_size + letter_spacing)
+        } else {
+            base_wrap_width
+        };
+
+        let Ok(mut wrapped_lines) = window.text_system().shape_text(
+            display_shared,
+            px(font_size),
+            &runs,
+            Some(px(effective_wrap_width)),
+            None,
+        ) else {
+            return None;
+        };
+
+        if letter_spacing != 0.0 {
+            for wrapped in &mut wrapped_lines {
+                helpers::apply_letter_spacing(wrapped, letter_spacing);
+            }
+        }
+
+        let wrapped_line = wrapped_lines.into_iter().next()?;
+        let indent_px = if is_list_type && prefix_bytes > 0 && prefix_bytes <= display_text.len() {
+            wrapped_line
+                .position_for_index(prefix_bytes, px(line_height))
+                .map(|pos| f32::from(pos.x))
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let content_x = if matches!(
+            decoration.block_type,
+            BlockType::CodeBlock | BlockType::CodeBlockFence
+        ) {
+            editor_left
+                + self.padding_left()
+                + self.scaled(self.styles.code_block.code_block_text_padding_left_px)
+        } else {
+            editor_left + self.padding_left()
+        };
+
+        Some(InlineLineDisplayInfo {
+            buffer_to_display,
+            font_size,
+            line_height,
+            wrapped_line,
+            indent_px,
+            content_x,
         })
     }
 
@@ -1559,7 +2092,7 @@ impl EntityInputHandler for EditorView {
         if !self.active_tab_supports_text_buffer() {
             return;
         }
-        self.marked_range = None;
+        self.clear_marked_ranges();
         self.finish_ime_composition();
     }
 
@@ -1573,6 +2106,8 @@ impl EntityInputHandler for EditorView {
         if !self.active_tab_supports_text_buffer() {
             return;
         }
+        let cursor_line_before = self.cursor_line();
+        let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
         if !self.cursor.has_selection()
             && self.marked_range.is_none()
             && range_utf16.is_none()
@@ -1581,7 +2116,6 @@ impl EntityInputHandler for EditorView {
         {
             self.cursor
                 .move_to(self.cursor.offset + new_text.len(), &self.buffer);
-            self.scroll_to_cursor();
             self.pause_blinking(cx);
             if self.wiki_link_start.is_some() {
                 self.sync_wiki_link_menu(cx);
@@ -1598,6 +2132,41 @@ impl EntityInputHandler for EditorView {
         let had_ime_composition = self.ime_composition_snapshot.is_some();
         if !had_ime_composition {
             self.checkpoint();
+        }
+
+        if self.has_extra_cursors()
+            && (had_ime_composition
+                || range_utf16.is_some()
+                || self.marked_range.is_some()
+                || !self.extra_marked_ranges.is_empty())
+        {
+            let range_spans_multiple_lines = self.apply_multi_cursor_ime_replace(
+                range_utf16
+                    .as_ref()
+                    .map(|range_utf16| self.range_from_utf16(range_utf16)),
+                new_text,
+                None,
+                false,
+            );
+            self.reparse();
+            if !cursor_had_inline_headroom
+                || self.cursor_line() != cursor_line_before
+                || range_spans_multiple_lines
+                || new_text.contains('\n')
+            {
+                self.scroll_to_cursor();
+            }
+            self.pause_blinking(cx);
+            if had_ime_composition {
+                self.finish_ime_composition();
+            }
+            ime_debug_log(format!(
+                "replace_text_in_range multi-cursor end cursor={} marked_after={:?} extra_marked_count={}",
+                self.cursor.offset,
+                self.marked_range,
+                self.extra_marked_ranges.len()
+            ));
+            return;
         }
 
         // When text is selected and user types a formatting character, wrap selection
@@ -1638,6 +2207,9 @@ impl EntityInputHandler for EditorView {
             "replace_text_in_range resolved range_utf8={:?}",
             range
         ));
+        let (range_start_line, _) = self.buffer.offset_to_line_col(range.start);
+        let (range_end_line, _) = self.buffer.offset_to_line_col(range.end);
+        let range_spans_multiple_lines = range_start_line != range_end_line;
         let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
 
         if range.is_empty() && self.marked_range.is_none() && range_utf16.is_none() {
@@ -1663,7 +2235,9 @@ impl EntityInputHandler for EditorView {
                 self.buffer.replace(range.clone(), &paired_text);
                 self.cursor.move_to(range.start + open.len(), &self.buffer);
                 self.reparse();
-                self.scroll_to_cursor();
+                if !cursor_had_inline_headroom || self.cursor_line() != cursor_line_before {
+                    self.scroll_to_cursor();
+                }
                 self.pause_blinking(cx);
                 return;
             }
@@ -1672,13 +2246,19 @@ impl EntityInputHandler for EditorView {
         self.buffer.replace(range.clone(), new_text);
         let new_offset = range.start + new_text.len();
         self.cursor.move_to(new_offset, &self.buffer);
-        self.marked_range = None;
+        self.clear_marked_ranges();
         self.reparse();
         if let Some(line) = touched_ordered_prefix {
             self.normalize_ordered_list_near_line(line, true);
             self.reparse();
         }
-        self.scroll_to_cursor();
+        if !cursor_had_inline_headroom
+            || self.cursor_line() != cursor_line_before
+            || range_spans_multiple_lines
+            || new_text.contains('\n')
+        {
+            self.scroll_to_cursor();
+        }
         self.pause_blinking(cx);
         if had_ime_composition {
             self.finish_ime_composition();
@@ -1723,6 +2303,8 @@ impl EntityInputHandler for EditorView {
         if !self.active_tab_supports_text_buffer() {
             return;
         }
+        let cursor_line_before = self.cursor_line();
+        let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
         ime_debug_log(format!(
             "replace_and_mark_text_in_range start range_utf16={:?} new_text={:?} new_selected_range_utf16={:?} marked_before={:?} selection_before={:?}",
             range_utf16,
@@ -1732,6 +2314,35 @@ impl EntityInputHandler for EditorView {
             self.cursor.selection_range()
         ));
         self.begin_ime_composition();
+
+        if self.has_extra_cursors() {
+            let range_spans_multiple_lines = self.apply_multi_cursor_ime_replace(
+                range_utf16
+                    .as_ref()
+                    .map(|range_utf16| self.range_from_utf16(range_utf16)),
+                new_text,
+                new_selected_range_utf16.as_ref(),
+                true,
+            );
+            self.reparse();
+            if !cursor_had_inline_headroom
+                || self.cursor_line() != cursor_line_before
+                || range_spans_multiple_lines
+                || new_text.contains('\n')
+            {
+                self.scroll_to_cursor();
+            }
+            self.pause_blinking(cx);
+            ime_debug_log(format!(
+                "replace_and_mark_text_in_range multi-cursor end selection=({},{}) marked_after={:?} extra_marked_count={}",
+                self.cursor.anchor,
+                self.cursor.offset,
+                self.marked_range,
+                self.extra_marked_ranges.len()
+            ));
+            return;
+        }
+
         let range = range_utf16
             .as_ref()
             .map(|r| self.range_from_utf16(r))
@@ -1741,12 +2352,16 @@ impl EntityInputHandler for EditorView {
             "replace_and_mark_text_in_range resolved range_utf8={:?}",
             range
         ));
+        let (range_start_line, _) = self.buffer.offset_to_line_col(range.start);
+        let (range_end_line, _) = self.buffer.offset_to_line_col(range.end);
+        let range_spans_multiple_lines = range_start_line != range_end_line;
         let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
 
         self.buffer.replace(range.clone(), new_text);
 
         let mark_start = range.start;
         let mark_end = range.start + new_text.len();
+        self.extra_marked_ranges.clear();
         if !new_text.is_empty() {
             self.marked_range = Some(mark_start..mark_end);
         } else {
@@ -1768,7 +2383,13 @@ impl EntityInputHandler for EditorView {
             self.normalize_ordered_list_near_line(line, true);
             self.reparse();
         }
-        self.scroll_to_cursor();
+        if !cursor_had_inline_headroom
+            || self.cursor_line() != cursor_line_before
+            || range_spans_multiple_lines
+            || new_text.contains('\n')
+        {
+            self.scroll_to_cursor();
+        }
         self.pause_blinking(cx);
         ime_debug_log(format!(
             "replace_and_mark_text_in_range end selection=({},{}) marked_after={:?}",
@@ -1779,7 +2400,7 @@ impl EntityInputHandler for EditorView {
     fn bounds_for_range(
         &mut self,
         range_utf16: Range<usize>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
@@ -1790,9 +2411,16 @@ impl EntityInputHandler for EditorView {
             "bounds_for_range start range_utf16={:?}",
             range_utf16
         ));
-        let range = self.range_from_utf16(&range_utf16);
-        let (line, col) = self.buffer.offset_to_line_col(range.start);
-        let origin_y: f32 = self.content_origin.y.into();
+        let queried_range = self.range_from_utf16(&range_utf16);
+        let anchor_offset = if self.marked_range.as_ref().is_some_and(|marked| {
+            queried_range.start >= marked.start && queried_range.end <= marked.end
+        }) {
+            self.buffer.clamp_offset(self.cursor.offset)
+        } else {
+            queried_range.start
+        };
+        let (line, col) = self.buffer.offset_to_line_col(anchor_offset);
+        let origin_y: f32 = bounds.origin.y.into();
         let line_top_y = origin_y + self.line_y_offset(line) - self.scroll_offset;
 
         if let Some(table_info) = self
@@ -1828,8 +2456,7 @@ impl EntityInputHandler for EditorView {
                 let inner_width = (f32::from(cell_bounds.size.width) - padding_x * 2.0)
                     .max(self.base_font_size() * 0.5);
                 let info = self.table_cell_display_info(window, line, cell_col, inner_width)?;
-                let cell_offset = range
-                    .start
+                let cell_offset = anchor_offset
                     .saturating_sub(self.buffer.line_start(line) + info.cell_range.start);
                 let disp_col = if cell_offset >= info.buffer_to_display.len() {
                     info.display_text.len()
@@ -1844,13 +2471,21 @@ impl EntityInputHandler for EditorView {
                             * self.styles.editor.editor_paragraph_line_height_factor),
                     )
                     .unwrap_or_default();
-                let x = f32::from(cell_bounds.origin.x) + padding_x + f32::from(pos.x);
-                let y = f32::from(cell_bounds.origin.y) + padding_y + f32::from(pos.y);
                 let line_height =
                     self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
+                let x = f32::from(cell_bounds.origin.x) + padding_x + f32::from(pos.x);
+                let y = f32::from(cell_bounds.origin.y) + padding_y + f32::from(pos.y);
                 ime_debug_log(format!(
-                    "bounds_for_range table line={} col={} cell_col={} visual_row={} range_utf8={:?} -> x={} y={} h={}",
-                    line, col, cell_col, visual_row, range, x, y, line_height
+                    "bounds_for_range table line={} col={} cell_col={} visual_row={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",
+                    line,
+                    col,
+                    cell_col,
+                    visual_row,
+                    queried_range,
+                    anchor_offset,
+                    x,
+                    y,
+                    line_height
                 ));
                 return Some(Bounds::new(
                     point(px(x), px(y)),
@@ -1859,7 +2494,39 @@ impl EntityInputHandler for EditorView {
             }
         }
 
-        if let Some(Some(info)) = self.line_display_info.get(line) {
+        let line_info = if self.layout_dirty {
+            self.inline_line_display_info(window, line, bounds)
+                .or_else(|| {
+                    self.line_display_info
+                        .get(line)
+                        .cloned()
+                        .flatten()
+                        .map(|info| InlineLineDisplayInfo {
+                            buffer_to_display: info.buffer_to_display,
+                            font_size: info.font_size,
+                            line_height: info.line_height,
+                            wrapped_line: info.wrapped_line,
+                            indent_px: info.indent_px,
+                            content_x: info.content_x,
+                        })
+                })
+        } else {
+            self.line_display_info
+                .get(line)
+                .cloned()
+                .flatten()
+                .map(|info| InlineLineDisplayInfo {
+                    buffer_to_display: info.buffer_to_display,
+                    font_size: info.font_size,
+                    line_height: info.line_height,
+                    wrapped_line: info.wrapped_line,
+                    indent_px: info.indent_px,
+                    content_x: info.content_x,
+                })
+                .or_else(|| self.inline_line_display_info(window, line, bounds))
+        };
+
+        if let Some(info) = line_info {
             let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
             let pos = info
                 .wrapped_line
@@ -1869,8 +2536,8 @@ impl EntityInputHandler for EditorView {
             let x = info.content_x + indent_adjust + f32::from(pos.x);
             let y = line_top_y + f32::from(pos.y);
             ime_debug_log(format!(
-                "bounds_for_range normal line={} col={} range_utf8={:?} -> x={} y={} h={}",
-                line, col, range, x, y, info.line_height
+                "bounds_for_range normal line={} col={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",
+                line, col, queried_range, anchor_offset, x, y, info.line_height
             ));
             Some(Bounds::new(
                 point(px(x), px(y)),

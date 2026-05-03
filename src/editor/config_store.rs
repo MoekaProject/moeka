@@ -69,6 +69,8 @@ pub(crate) struct TabViewState {
     pub cursor_anchor: usize,
     #[serde(default)]
     pub scroll_offset: f32,
+    #[serde(default)]
+    pub extra_cursors: Vec<(usize, usize)>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]

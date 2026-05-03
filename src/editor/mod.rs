@@ -18,6 +18,7 @@ pub(crate) mod settings_panel;
 mod sidebar;
 mod tabs;
 mod temp_store;
+mod theme_debugger;
 mod workspace_search;
 
 use std::collections::{HashMap, HashSet};
@@ -35,7 +36,7 @@ use crate::actions::*;
 use crate::buffer::Buffer;
 use crate::cursor::Cursor;
 use crate::markdown::{self, BlockType, LineDecoration};
-use crate::theme::{Theme, ThemeKind};
+use crate::theme::{Theme, ThemeColorField, ThemeKind};
 
 const CODE_BLOCK_COPY_FEEDBACK_MS: u64 = 1200;
 
@@ -229,6 +230,8 @@ pub(crate) struct EditorSnapshot {
     pub cursor_offset: usize,
     pub cursor_anchor: usize,
     pub scroll_offset: f32,
+    #[serde(default)]
+    pub extra_cursors: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -463,6 +466,7 @@ pub(crate) struct DraggedSidebarItemsView {
     pub label: String,
     pub count: usize,
     pub font_size_px: f32,
+    pub cursor_offset: gpui::Point<gpui::Pixels>,
 }
 
 impl Render for DraggedSidebarItemsView {
@@ -478,14 +482,19 @@ impl Render for DraggedSidebarItemsView {
             self.label.clone()
         };
         div()
-            .px(px(8.0))
-            .py(px(4.0))
-            .bg(gpui::rgb(0x2d2d2d))
-            .text_color(gpui::rgb(0xcccccc))
-            .text_size(px(self.font_size_px))
-            .rounded(px(4.0))
-            .shadow_md()
-            .child(text)
+            .pl(self.cursor_offset.x + px(16.0))
+            .pt(self.cursor_offset.y + px(16.0))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(gpui::rgb(0x2d2d2d))
+                    .text_color(gpui::rgb(0xcccccc))
+                    .text_size(px(self.font_size_px))
+                    .rounded(px(4.0))
+                    .shadow_md()
+                    .child(text),
+            )
     }
 }
 
@@ -532,6 +541,7 @@ pub(crate) struct DraggedTab {
 pub(crate) struct DraggedTabView {
     pub title: String,
     pub font_size_px: f32,
+    pub cursor_offset: gpui::Point<gpui::Pixels>,
 }
 
 impl Render for DraggedTabView {
@@ -542,15 +552,20 @@ impl Render for DraggedTabView {
     ) -> impl gpui::IntoElement {
         use gpui::{div, prelude::*, px};
         div()
-            .px(px(10.0))
-            .py(px(4.0))
-            .bg(gpui::rgb(0x2d2d2d))
-            .text_color(gpui::rgb(0xcccccc))
-            .text_size(px(self.font_size_px))
-            .rounded(px(4.0))
-            .shadow_md()
-            .opacity(0.85)
-            .child(self.title.clone())
+            .pl(self.cursor_offset.x + px(16.0))
+            .pt(self.cursor_offset.y + px(16.0))
+            .child(
+                div()
+                    .px(px(10.0))
+                    .py(px(4.0))
+                    .bg(gpui::rgb(0x2d2d2d))
+                    .text_color(gpui::rgb(0xcccccc))
+                    .text_size(px(self.font_size_px))
+                    .rounded(px(4.0))
+                    .shadow_md()
+                    .opacity(0.85)
+                    .child(self.title.clone()),
+            )
     }
 }
 
@@ -597,6 +612,44 @@ pub(crate) enum WordCharClass {
     Other,
 }
 
+#[derive(Clone, Copy)]
+struct MultiCursorResolvedEdit {
+    start: usize,
+    cursor_after: usize,
+    delta: isize,
+    is_primary: bool,
+    ordered_list_update: Option<bool>,
+}
+
+fn apply_offset_delta(offset: usize, delta: isize) -> usize {
+    if delta >= 0 {
+        offset.saturating_add(delta as usize)
+    } else {
+        offset.saturating_sub((-delta) as usize)
+    }
+}
+
+fn finalize_multi_cursor_edits(
+    mut edits: Vec<MultiCursorResolvedEdit>,
+) -> (Vec<(usize, bool)>, Vec<(usize, bool)>) {
+    edits.sort_by(|a, b| a.start.cmp(&b.start));
+
+    let mut cumulative_delta = 0isize;
+    let mut cursor_positions = Vec::with_capacity(edits.len());
+    let mut ordered_list_updates = Vec::new();
+
+    for edit in edits {
+        let final_pos = apply_offset_delta(edit.cursor_after, cumulative_delta);
+        cursor_positions.push((final_pos, edit.is_primary));
+        if let Some(preserve_current_number) = edit.ordered_list_update {
+            ordered_list_updates.push((final_pos, preserve_current_number));
+        }
+        cumulative_delta += edit.delta;
+    }
+
+    (cursor_positions, ordered_list_updates)
+}
+
 // ── EditorView ──────────────────────────────────────────────────────
 
 pub struct EditorView {
@@ -611,6 +664,8 @@ pub struct EditorView {
     pub(crate) scroll_offset: f32,
     pub(crate) is_selecting: bool,
     pub(crate) line_display_info: Vec<Option<LineDisplayInfo>>,
+    pub(crate) layout_dirty: bool,
+    pub(crate) pending_scroll_to_cursor: bool,
     pub(crate) last_viewport_height: f32,
     pub(crate) last_viewport_width: f32,
     // Cursor blink state
@@ -619,6 +674,7 @@ pub struct EditorView {
     pub(crate) blink_epoch: usize,
     // IME preedit state
     pub(crate) marked_range: Option<Range<usize>>,
+    pub(crate) extra_marked_ranges: Vec<Range<usize>>,
     pub(crate) ime_composition_snapshot: Option<EditorSnapshot>,
     pub(crate) checkbox_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_checkbox: bool,
@@ -714,6 +770,18 @@ pub struct EditorView {
     pub(crate) outline_custom_width: Option<f32>,
     pub(crate) outline_resizing: bool,
     pub(crate) outline_scroll_handle: ScrollHandle,
+    pub(crate) theme_debugger_visible: bool,
+    pub(crate) theme_debugger_scroll_handle: ScrollHandle,
+    pub(crate) theme_debugger_selected_field: ThemeColorField,
+    pub(crate) theme_debugger_hex_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) theme_debugger_alpha_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) theme_debugger_drag_target: Option<theme_debugger::ThemeDebuggerDragTarget>,
+    pub(crate) theme_debugger_sv_bounds:
+        std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    pub(crate) theme_debugger_hue_bounds:
+        std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    pub(crate) theme_debugger_alpha_bounds:
+        std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     pub(crate) scroll_anim_epoch: usize,
     pub(crate) toolbar_hidden_by_scroll: bool,
     pub(crate) toolbar_corner_hovered: bool,
@@ -745,6 +813,10 @@ pub struct EditorView {
     pub(crate) workspace_search_highlight_path: Option<PathBuf>,
     pub(crate) workspace_search_highlight_ranges: Vec<std::ops::Range<usize>>,
     pub(crate) workspace_search_highlight_current_index: Option<usize>,
+    pub(crate) outline_flash_highlight_path: Option<PathBuf>,
+    pub(crate) outline_flash_highlight_ranges: Vec<std::ops::Range<usize>>,
+    pub(crate) outline_flash_highlight_current_index: Option<usize>,
+    pub(crate) outline_flash_epoch: usize,
     pub(crate) workspace_search_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) workspace_search_blur_sub: Option<gpui::Subscription>,
     pub(crate) workspace_search_task: Option<Task<()>>,
@@ -793,6 +865,7 @@ impl EditorView {
             cursor_offset: first_line_end,
             cursor_anchor: first_line_end,
             scroll_offset: 0.0,
+            extra_cursors: Vec::new(),
         };
         // Load persisted settings
         let app_settings = AppSettings::load();
@@ -830,12 +903,15 @@ impl EditorView {
             scroll_offset: 0.0,
             is_selecting: false,
             line_display_info: Vec::new(),
+            layout_dirty: false,
+            pending_scroll_to_cursor: false,
             last_viewport_height: 600.0,
             last_viewport_width: init_max_width,
             cursor_opacity: init_cursor_opacity,
             cursor_opacity_direction: -1.0,
             blink_epoch: 0,
             marked_range: None,
+            extra_marked_ranges: Vec::new(),
             ime_composition_snapshot: None,
             checkbox_areas: Vec::new(),
             hovering_checkbox: false,
@@ -889,6 +965,7 @@ impl EditorView {
                         cursor_offset: 0,
                         cursor_anchor: 0,
                         scroll_offset: 0.0,
+                        extra_cursors: Vec::new(),
                     },
                     image_view: ImageViewState::default(),
                     is_preview: false,
@@ -957,6 +1034,15 @@ impl EditorView {
             outline_custom_width: None,
             outline_resizing: false,
             outline_scroll_handle: ScrollHandle::new(),
+            theme_debugger_visible: false,
+            theme_debugger_scroll_handle: ScrollHandle::new(),
+            theme_debugger_selected_field: ThemeColorField::TextPrimary,
+            theme_debugger_hex_editor: None,
+            theme_debugger_alpha_editor: None,
+            theme_debugger_drag_target: None,
+            theme_debugger_sv_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
+            theme_debugger_hue_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
+            theme_debugger_alpha_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
             scroll_anim_epoch: 0,
             toolbar_hidden_by_scroll: false,
             toolbar_corner_hovered: false,
@@ -986,6 +1072,10 @@ impl EditorView {
             workspace_search_highlight_path: None,
             workspace_search_highlight_ranges: Vec::new(),
             workspace_search_highlight_current_index: None,
+            outline_flash_highlight_path: None,
+            outline_flash_highlight_ranges: Vec::new(),
+            outline_flash_highlight_current_index: None,
+            outline_flash_epoch: 0,
             workspace_search_editor: None,
             workspace_search_blur_sub: None,
             workspace_search_task: None,
@@ -1089,34 +1179,10 @@ impl EditorView {
         self.theme_kind = kind;
         self.settings_theme_dark_mode = kind.is_dark();
         self.theme = self.theme_kind.build();
-        self.styles = crate::style::Styles::from_theme(&self.theme);
-        // Re-apply font overrides from settings since from_theme resets to defaults
-        self.styles.editor.editor_font_size_px = self.app_settings.font_size;
-        self.styles.editor.editor_paragraph_line_height_factor = self.app_settings.line_height;
-        self.styles.editor.editor_heading_line_height_factor = self.app_settings.line_height;
-        self.styles.editor.editor_letter_spacing_px = self.app_settings.letter_spacing;
-        self.styles.ui_font_family = Box::leak(self.app_settings.ui_font.clone().into_boxed_str());
-        self.styles.editor.editor_body_latin_font_family =
-            Box::leak(self.app_settings.body_latin_font.clone().into_boxed_str());
-        self.styles.editor.editor_body_cjk_font_family =
-            Box::leak(self.app_settings.body_cjk_font.clone().into_boxed_str());
-        self.styles.editor.editor_heading_latin_font_family =
-            self.styles.editor.editor_body_latin_font_family;
-        self.styles.editor.editor_heading_cjk_font_family =
-            self.styles.editor.editor_body_cjk_font_family;
-        self.styles.editor.editor_monospace_font_family =
-            Box::leak(self.app_settings.code_font.clone().into_boxed_str());
+        self.refresh_theme_styles(true, cx);
         // Persist
         self.app_settings.theme = theme_kind_to_string(kind);
         self.app_settings.save();
-        self.line_display_info.clear();
-        // Recreate font size editor with new theme styles
-        self.settings_font_size_editor = None;
-        self.settings_ui_font_size_editor = None;
-        self.settings_line_height_editor = None;
-        self.settings_letter_spacing_editor = None;
-        self.ensure_font_size_editor(cx);
-        self.ensure_ui_font_size_editor(cx);
         cx.notify();
     }
 
@@ -1564,6 +1630,7 @@ impl EditorView {
             .cloned()
             .unwrap_or(FileKind::Markdown);
         self.decorations = parse_decorations_for_file_kind(self.buffer.text(), &file_kind);
+        self.layout_dirty = true;
     }
 
     pub(crate) fn active_file_kind(&self) -> Option<&FileKind> {
@@ -1722,8 +1789,61 @@ impl EditorView {
         !self.extra_cursors.is_empty()
     }
 
+    pub(crate) fn marked_ranges(&self) -> impl Iterator<Item = &Range<usize>> {
+        self.marked_range
+            .iter()
+            .chain(self.extra_marked_ranges.iter())
+    }
+
+    pub(crate) fn clear_marked_ranges(&mut self) {
+        self.marked_range = None;
+        self.extra_marked_ranges.clear();
+    }
+
     pub(crate) fn clear_extra_cursors(&mut self) {
         self.extra_cursors.clear();
+        self.extra_marked_ranges.clear();
+    }
+
+    fn collect_multi_cursor_targets_desc(&self) -> Vec<(usize, usize, bool)> {
+        let mut all: Vec<(usize, usize, bool)> = Vec::with_capacity(1 + self.extra_cursors.len());
+        all.push((self.cursor.offset, self.cursor.anchor, true));
+        for cursor in &self.extra_cursors {
+            all.push((cursor.offset, cursor.anchor, false));
+        }
+        all.sort_by(|a, b| {
+            let a_start = a.0.min(a.1);
+            let b_start = b.0.min(b.1);
+            b_start.cmp(&a_start)
+        });
+        all
+    }
+
+    fn apply_multi_cursor_resolved_edits(
+        &mut self,
+        edits: Vec<MultiCursorResolvedEdit>,
+    ) -> Vec<(usize, bool)> {
+        let (cursor_positions, ordered_list_updates) = finalize_multi_cursor_edits(edits);
+
+        self.extra_cursors.clear();
+        for (pos, is_primary) in cursor_positions {
+            let clamped = pos.min(self.buffer.len());
+            if is_primary {
+                self.cursor.offset = clamped;
+                self.cursor.anchor = clamped;
+            } else {
+                self.extra_cursors.push(Cursor {
+                    offset: clamped,
+                    anchor: clamped,
+                });
+            }
+        }
+
+        if !self.extra_cursors.is_empty() {
+            self.dedup_cursors();
+        }
+
+        ordered_list_updates
     }
 
     /// Collect all cursor offsets+anchors sorted by offset (ascending).
@@ -1735,6 +1855,13 @@ impl EditorView {
         }
         ranges.sort_by_key(|&(offset, _)| offset);
         ranges
+    }
+
+    pub(crate) fn all_cursors_snapshot(&self) -> Vec<Cursor> {
+        let mut cursors = Vec::with_capacity(1 + self.extra_cursors.len());
+        cursors.push(self.cursor);
+        cursors.extend(self.extra_cursors.iter().copied());
+        cursors
     }
 
     /// Add a new cursor at the given offset, deduplicating if one already exists there.
@@ -1769,45 +1896,25 @@ impl EditorView {
             self.cursor.insert(&mut self.buffer, text);
             return;
         }
-        let mut all: Vec<(usize, usize, bool)> = Vec::with_capacity(1 + self.extra_cursors.len());
-        all.push((self.cursor.offset, self.cursor.anchor, true));
-        for c in self.extra_cursors.iter() {
-            all.push((c.offset, c.anchor, false));
-        }
-        // Sort by selection start, descending
-        all.sort_by(|a, b| {
-            let a_start = a.0.min(a.1);
-            let b_start = b.0.min(b.1);
-            b_start.cmp(&a_start)
-        });
+        let all = self.collect_multi_cursor_targets_desc();
 
         let text_len = text.len();
-        let mut new_positions: Vec<(usize, bool)> = Vec::new();
+        let mut edits = Vec::with_capacity(all.len());
 
         for (offset, anchor, is_primary) in &all {
             let range_start = (*offset).min(*anchor);
             let range_end = (*offset).max(*anchor);
             self.buffer.replace(range_start..range_end, text);
-            new_positions.push((range_start + text_len, *is_primary));
+            edits.push(MultiCursorResolvedEdit {
+                start: range_start,
+                cursor_after: range_start + text_len,
+                delta: text_len as isize - (range_end - range_start) as isize,
+                is_primary: *is_primary,
+                ordered_list_update: None,
+            });
         }
 
-        // Reverse to go ascending order for offset adjustments
-        new_positions.reverse();
-
-        // Assign positions back
-        self.extra_cursors.clear();
-        for (pos, is_primary) in &new_positions {
-            let clamped = (*pos).min(self.buffer.len());
-            if *is_primary {
-                self.cursor.offset = clamped;
-                self.cursor.anchor = clamped;
-            } else {
-                self.extra_cursors.push(Cursor {
-                    offset: clamped,
-                    anchor: clamped,
-                });
-            }
-        }
+        self.apply_multi_cursor_resolved_edits(edits);
     }
 
     /// Apply backspace across all cursors.
@@ -1816,54 +1923,27 @@ impl EditorView {
             self.cursor.backspace(&mut self.buffer);
             return;
         }
-        let mut all: Vec<(usize, usize, bool)> = Vec::with_capacity(1 + self.extra_cursors.len());
-        all.push((self.cursor.offset, self.cursor.anchor, true));
-        for c in &self.extra_cursors {
-            all.push((c.offset, c.anchor, false));
-        }
-        all.sort_by(|a, b| {
-            let a_start = a.0.min(a.1);
-            let b_start = b.0.min(b.1);
-            b_start.cmp(&a_start)
-        });
-
-        let mut new_positions: Vec<(usize, bool)> = Vec::new();
+        let all = self.collect_multi_cursor_targets_desc();
+        let mut edits = Vec::with_capacity(all.len());
 
         for (offset, anchor, is_primary) in &all {
-            if *offset != *anchor {
-                let start = (*offset).min(*anchor);
-                let end = (*offset).max(*anchor);
-                self.buffer.delete(start..end);
-                new_positions.push((start, *is_primary));
-            } else if *offset > 0 {
-                let text = self.buffer.text().to_string();
-                let prev = text[..*offset]
-                    .char_indices()
-                    .next_back()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                self.buffer.delete(prev..*offset);
-                new_positions.push((prev, *is_primary));
-            } else {
-                new_positions.push((0, *is_primary));
-            }
+            let before_len = self.buffer.len();
+            let mut cursor = Cursor {
+                offset: *offset,
+                anchor: *anchor,
+            };
+            cursor.backspace(&mut self.buffer);
+            let after_len = self.buffer.len();
+            edits.push(MultiCursorResolvedEdit {
+                start: cursor.offset,
+                cursor_after: cursor.offset,
+                delta: after_len as isize - before_len as isize,
+                is_primary: *is_primary,
+                ordered_list_update: None,
+            });
         }
 
-        new_positions.reverse();
-
-        self.extra_cursors.clear();
-        for (pos, is_primary) in &new_positions {
-            let clamped = (*pos).min(self.buffer.len());
-            if *is_primary {
-                self.cursor.offset = clamped;
-                self.cursor.anchor = clamped;
-            } else {
-                self.extra_cursors.push(Cursor {
-                    offset: clamped,
-                    anchor: clamped,
-                });
-            }
-        }
+        self.apply_multi_cursor_resolved_edits(edits);
     }
 
     /// Apply delete (forward) across all cursors.
@@ -1872,54 +1952,27 @@ impl EditorView {
             self.cursor.delete(&mut self.buffer);
             return;
         }
-        let mut all: Vec<(usize, usize, bool)> = Vec::with_capacity(1 + self.extra_cursors.len());
-        all.push((self.cursor.offset, self.cursor.anchor, true));
-        for c in &self.extra_cursors {
-            all.push((c.offset, c.anchor, false));
-        }
-        all.sort_by(|a, b| {
-            let a_start = a.0.min(a.1);
-            let b_start = b.0.min(b.1);
-            b_start.cmp(&a_start)
-        });
-
-        let mut new_positions: Vec<(usize, bool)> = Vec::new();
+        let all = self.collect_multi_cursor_targets_desc();
+        let mut edits = Vec::with_capacity(all.len());
 
         for (offset, anchor, is_primary) in &all {
-            if *offset != *anchor {
-                let start = (*offset).min(*anchor);
-                let end = (*offset).max(*anchor);
-                self.buffer.delete(start..end);
-                new_positions.push((start, *is_primary));
-            } else if *offset < self.buffer.len() {
-                let text = self.buffer.text().to_string();
-                let next = text[*offset..]
-                    .char_indices()
-                    .nth(1)
-                    .map(|(i, _)| *offset + i)
-                    .unwrap_or(text.len());
-                self.buffer.delete(*offset..next);
-                new_positions.push((*offset, *is_primary));
-            } else {
-                new_positions.push((*offset, *is_primary));
-            }
+            let before_len = self.buffer.len();
+            let mut cursor = Cursor {
+                offset: *offset,
+                anchor: *anchor,
+            };
+            cursor.delete(&mut self.buffer);
+            let after_len = self.buffer.len();
+            edits.push(MultiCursorResolvedEdit {
+                start: cursor.offset,
+                cursor_after: cursor.offset,
+                delta: after_len as isize - before_len as isize,
+                is_primary: *is_primary,
+                ordered_list_update: None,
+            });
         }
 
-        new_positions.reverse();
-
-        self.extra_cursors.clear();
-        for (pos, is_primary) in &new_positions {
-            let clamped = (*pos).min(self.buffer.len());
-            if *is_primary {
-                self.cursor.offset = clamped;
-                self.cursor.anchor = clamped;
-            } else {
-                self.extra_cursors.push(Cursor {
-                    offset: clamped,
-                    anchor: clamped,
-                });
-            }
-        }
+        self.apply_multi_cursor_resolved_edits(edits);
     }
 
     /// Move all cursors left.
@@ -2012,6 +2065,201 @@ impl EditorView {
         self.dedup_cursors();
     }
 
+    pub(crate) fn multi_cursor_move_word_left(&mut self) {
+        self.cursor.move_word_left(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.move_word_left(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    pub(crate) fn multi_cursor_move_word_right(&mut self) {
+        self.cursor.move_word_right(&self.buffer);
+        for c in &mut self.extra_cursors {
+            c.move_word_right(&self.buffer);
+        }
+        self.dedup_cursors();
+    }
+
+    pub(crate) fn multi_cursor_delete_word_left(&mut self) {
+        if self.extra_cursors.is_empty() {
+            self.cursor.delete_word_left(&mut self.buffer);
+            return;
+        }
+
+        let all = self.collect_multi_cursor_targets_desc();
+        let mut edits = Vec::with_capacity(all.len());
+        for (offset, anchor, is_primary) in &all {
+            let before_len = self.buffer.len();
+            let mut cursor = Cursor {
+                offset: *offset,
+                anchor: *anchor,
+            };
+            cursor.delete_word_left(&mut self.buffer);
+            let after_len = self.buffer.len();
+            edits.push(MultiCursorResolvedEdit {
+                start: cursor.offset,
+                cursor_after: cursor.offset,
+                delta: after_len as isize - before_len as isize,
+                is_primary: *is_primary,
+                ordered_list_update: None,
+            });
+        }
+
+        self.apply_multi_cursor_resolved_edits(edits);
+    }
+
+    pub(crate) fn multi_cursor_enter(&mut self) {
+        if self.extra_cursors.is_empty() {
+            self.cursor.insert(&mut self.buffer, "\n");
+            return;
+        }
+
+        let all = self.collect_multi_cursor_targets_desc();
+        let mut edits = Vec::with_capacity(all.len());
+
+        for (offset, anchor, is_primary) in &all {
+            let mut cursor = Cursor {
+                offset: *offset,
+                anchor: *anchor,
+            };
+            let before_len = self.buffer.len();
+            let mut edit_start = (*offset).min(*anchor);
+            let mut ordered_list_update = None;
+            let cursor_line = self.buffer.offset_to_line_col(cursor.offset).0;
+            let line_start = self.buffer.line_start(cursor_line);
+            let line_end = self.buffer.line_end(cursor_line);
+            let line_content = self.buffer.line_content(cursor_line).to_string();
+            let block_type = self
+                .decorations
+                .get(cursor_line)
+                .map(|d| d.block_type.clone())
+                .unwrap_or(BlockType::Normal);
+            let leading_ws =
+                line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+            let trimmed = &line_content[leading_ws..];
+            let ws_str = " ".repeat(leading_ws);
+
+            match block_type {
+                BlockType::UnorderedList => {
+                    let marker_len = if trimmed.starts_with("- ")
+                        || trimmed.starts_with("* ")
+                        || trimmed.starts_with("+ ")
+                    {
+                        2
+                    } else {
+                        0
+                    };
+                    if marker_len > 0 && cursor.offset >= line_start + leading_ws + marker_len {
+                        let text_after_marker = &line_content[leading_ws + marker_len..];
+                        if text_after_marker.trim().is_empty() {
+                            edit_start = line_start;
+                            self.buffer.replace(line_start..line_end, "");
+                            cursor.move_to(line_start, &self.buffer);
+                            cursor.insert(&mut self.buffer, "\n");
+                        } else {
+                            let marker = &trimmed[..marker_len];
+                            let continuation = format!("\n{}{}", ws_str, marker);
+                            cursor.insert(&mut self.buffer, &continuation);
+                        }
+                        let after_len = self.buffer.len();
+                        edits.push(MultiCursorResolvedEdit {
+                            start: edit_start,
+                            cursor_after: cursor.offset,
+                            delta: after_len as isize - before_len as isize,
+                            is_primary: *is_primary,
+                            ordered_list_update,
+                        });
+                        continue;
+                    }
+                }
+                BlockType::TaskList(_) => {
+                    let prefix_len = task_prefix_len(trimmed);
+                    if prefix_len > 0 && cursor.offset >= line_start + leading_ws + prefix_len {
+                        let text_after_marker = &line_content[leading_ws + prefix_len..];
+                        if text_after_marker.trim().is_empty() {
+                            edit_start = line_start;
+                            self.buffer.replace(line_start..line_end, "");
+                            cursor.move_to(line_start, &self.buffer);
+                            cursor.insert(&mut self.buffer, "\n");
+                        } else {
+                            let bullet = if trimmed.starts_with("- ") {
+                                "- "
+                            } else if trimmed.starts_with("* ") {
+                                "* "
+                            } else {
+                                "+ "
+                            };
+                            let continuation = format!("\n{}{}[ ] ", ws_str, bullet);
+                            cursor.insert(&mut self.buffer, &continuation);
+                        }
+                        let after_len = self.buffer.len();
+                        edits.push(MultiCursorResolvedEdit {
+                            start: edit_start,
+                            cursor_after: cursor.offset,
+                            delta: after_len as isize - before_len as isize,
+                            is_primary: *is_primary,
+                            ordered_list_update,
+                        });
+                        continue;
+                    }
+                }
+                BlockType::OrderedList => {
+                    let prefix_len = markdown::ordered_list_prefix_len(trimmed);
+                    if prefix_len > 0 && cursor.offset >= line_start + leading_ws + prefix_len {
+                        let number: u32 =
+                            trimmed[..prefix_len.saturating_sub(2)].parse().unwrap_or(1);
+                        let text_after_marker = &line_content[leading_ws + prefix_len..];
+                        if text_after_marker.trim().is_empty() {
+                            edit_start = line_start;
+                            self.buffer.replace(line_start..line_end, "");
+                            cursor.move_to(line_start, &self.buffer);
+                            cursor.insert(&mut self.buffer, "\n");
+                            ordered_list_update = Some(false);
+                        } else {
+                            let continuation = format!("\n{}{}. ", ws_str, number + 1);
+                            cursor.insert(&mut self.buffer, &continuation);
+                            ordered_list_update = Some(true);
+                        }
+                        let after_len = self.buffer.len();
+                        edits.push(MultiCursorResolvedEdit {
+                            start: edit_start,
+                            cursor_after: cursor.offset,
+                            delta: after_len as isize - before_len as isize,
+                            is_primary: *is_primary,
+                            ordered_list_update,
+                        });
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+
+            cursor.insert(&mut self.buffer, "\n");
+            let after_len = self.buffer.len();
+            edits.push(MultiCursorResolvedEdit {
+                start: edit_start,
+                cursor_after: cursor.offset,
+                delta: after_len as isize - before_len as isize,
+                is_primary: *is_primary,
+                ordered_list_update,
+            });
+        }
+
+        let ordered_list_updates = self.apply_multi_cursor_resolved_edits(edits);
+
+        self.reparse();
+        for (offset, preserve_current_number) in ordered_list_updates {
+            let (line, _) = self
+                .buffer
+                .offset_to_line_col(offset.min(self.buffer.len()));
+            self.normalize_ordered_list_near_line(line, preserve_current_number);
+        }
+        if !self.extra_cursors.is_empty() {
+            self.reparse();
+        }
+    }
+
     /// Select to line start for all cursors.
     pub(crate) fn multi_cursor_select_to_line_start(&mut self) {
         self.cursor.select_to_line_start(&self.buffer);
@@ -2052,6 +2300,11 @@ impl EditorView {
             cursor_offset: self.cursor.offset,
             cursor_anchor: self.cursor.anchor,
             scroll_offset: self.scroll_offset,
+            extra_cursors: self
+                .extra_cursors
+                .iter()
+                .map(|cursor| (cursor.offset, cursor.anchor))
+                .collect(),
         }
     }
 
@@ -2059,9 +2312,18 @@ impl EditorView {
         self.buffer = Buffer::from_text(&snapshot.text);
         self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
         self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());
+        self.extra_cursors = snapshot
+            .extra_cursors
+            .into_iter()
+            .map(|(offset, anchor)| Cursor {
+                offset: offset.min(self.buffer.len()),
+                anchor: anchor.min(self.buffer.len()),
+            })
+            .collect();
         self.scroll_offset = snapshot.scroll_offset;
-        self.marked_range = None;
+        self.clear_marked_ranges();
         self.ime_composition_snapshot = None;
+        self.dedup_cursors();
         self.reparse();
         self.scroll_to_cursor();
     }
@@ -2178,7 +2440,11 @@ impl EditorView {
     pub(crate) fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.checkpoint();
-            self.cursor.insert(&mut self.buffer, &text);
+            if self.has_extra_cursors() {
+                self.multi_cursor_insert(&text);
+            } else {
+                self.cursor.insert(&mut self.buffer, &text);
+            }
             self.reparse();
             self.scroll_to_cursor();
             self.pause_blinking(cx);
