@@ -1292,8 +1292,9 @@ impl EditorView {
             ..removed_color
         };
 
-        let row_height = 22.0;
-        let header_height = 52.0;
+        let row_height =
+            self.scaled(self.styles.utility_panel.utility_panel_item_font_size_px * 1.8);
+        let header_height = self.scaled(self.styles.utility_panel.utility_panel_header_height_px);
         let prefix_height = header_height;
         let (visible_start, visible_end, top_spacer_height, bottom_spacer_height) = self
             .visible_uniform_list_range(
