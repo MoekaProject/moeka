@@ -1120,6 +1120,24 @@ impl EditorView {
         self.toggle_outline_visibility(cx);
     }
 
+    pub(crate) fn on_toggle_info_panel(
+        &mut self,
+        _: &ToggleInfoPanel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_info_panel(cx);
+    }
+
+    pub(crate) fn on_toggle_git_history(
+        &mut self,
+        _: &ToggleGitHistory,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_git_history_panel(cx);
+    }
+
     pub(crate) fn on_toggle_theme(
         &mut self,
         _: &ToggleTheme,

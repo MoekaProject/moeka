@@ -1363,7 +1363,25 @@ impl Element for EditorElement {
             } else {
                 0
             };
-            let indent_px = 0.0;
+            let wrap_indent_px =
+                if is_list_type && prefix_bytes > 0 && prefix_bytes <= display_text.len() {
+                    let prefix_text = &display_text[..prefix_bytes];
+                    let prefix_runs = helpers::extract_runs_for_range(&runs, 0, prefix_bytes);
+                    let prefix_shared: SharedString = if prefix_text.is_empty() {
+                        " ".into()
+                    } else {
+                        prefix_text.to_string().into()
+                    };
+                    window
+                        .text_system()
+                        .shape_text(prefix_shared, px(font_size), &prefix_runs, None, None)
+                        .ok()
+                        .and_then(|lines| lines.into_iter().next())
+                        .map(|line| f32::from(line.width()))
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
             let letter_spacing = editor_styles.editor_letter_spacing_px;
 
             let base_wrap_width =
@@ -1376,8 +1394,8 @@ impl Element for EditorElement {
                     wrap_width
                 };
 
-            let effective_wrap_width = if indent_px > 0.0 {
-                (base_wrap_width - indent_px).max(base_wrap_width * 0.3)
+            let effective_wrap_width = if wrap_indent_px > 0.0 {
+                (base_wrap_width - wrap_indent_px).max(base_wrap_width * 0.3)
             } else {
                 base_wrap_width
             };
@@ -2504,10 +2522,12 @@ impl Element for EditorElement {
 
             // Gutter fold icon
             if !hidden_lines.contains(&line_idx) {
-                let fi_size = editor.scaled(editor.styles.gutter.gutter_fold_icon_size_px);
-                let fi_x = gutter_right_x
-                    - fi_size
-                    - editor.scaled(editor.styles.gutter.gutter_fold_icon_offset_px);
+                let gs = &editor.styles.gutter;
+                let fi_size = editor.scaled(gs.gutter_fold_icon_size_px);
+                let fi_offset = editor.scaled(gs.gutter_fold_icon_offset_px);
+                let fi_hit_padding = editor.scaled(gs.gutter_fold_hit_padding_px);
+                let fold_gutter_right_x = editor_left + editor.padding_left();
+                let fi_x = fold_gutter_right_x - fi_size - fi_offset;
 
                 if let Some(_) = editor.fold_range_for_line(line_idx) {
                     let is_folded = editor.folded_sections.contains(&line_idx);
@@ -2518,7 +2538,6 @@ impl Element for EditorElement {
                     } else {
                         text_line_top + (line_height - fi_size) / 2.0
                     };
-                    let gs = &editor.styles.gutter;
                     let fi_alpha = if is_folded {
                         gs.gutter_fold_folded_opacity
                     } else if is_hovered {
@@ -2543,11 +2562,11 @@ impl Element for EditorElement {
                     }
                     gutter_fold_hit_areas_local.push((
                         Bounds::new(
-                            point(
-                                px(gutter_right_x - fi_size - editor.scaled(10.0)),
-                                px(line_top),
+                            point(px(fi_x - fi_hit_padding), px(line_top)),
+                            size(
+                                px(fi_size + fi_hit_padding * 2.0 + fi_offset),
+                                px(total_line_height),
                             ),
-                            size(px(fi_size + editor.scaled(15.0)), px(total_line_height)),
                         ),
                         line_idx,
                         false,

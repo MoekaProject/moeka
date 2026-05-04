@@ -949,7 +949,7 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let toolbar_hover_changed = self.update_toolbar_corner_hover(event.position);
+        let toolbar_hover_changed = self.update_toolbar_corner_hover(event.position, cx);
         if self.active_tab_is_image() {
             if let Some(drag) = self.image_drag_state {
                 if let Some(image_view) = self.active_image_view_state_mut() {
@@ -1044,27 +1044,14 @@ impl EditorView {
             cx.notify();
         }
 
-        let hovering_gutter_fold_area = self
-            .gutter_fold_areas
-            .iter()
-            .fold(None::<Bounds<Pixels>>, |band, (bounds, _, _)| {
-                Some(match band {
-                    Some(band) => Bounds::from_corners(
-                        point(
-                            band.origin.x.min(bounds.origin.x),
-                            band.origin.y.min(bounds.origin.y),
-                        ),
-                        point(
-                            (band.origin.x + band.size.width)
-                                .max(bounds.origin.x + bounds.size.width),
-                            (band.origin.y + band.size.height)
-                                .max(bounds.origin.y + bounds.size.height),
-                        ),
-                    ),
-                    None => *bounds,
-                })
-            })
-            .is_some_and(|bounds| bounds.contains(&event.position));
+        let gutter_styles = &self.styles.gutter;
+        let fold_size = self.scaled(gutter_styles.gutter_fold_icon_size_px);
+        let fold_offset = self.scaled(gutter_styles.gutter_fold_icon_offset_px);
+        let fold_hit_padding = self.scaled(gutter_styles.gutter_fold_hit_padding_px);
+        let pane_left = self.last_content_left - fold_size - fold_offset - fold_hit_padding;
+        let hover_x = f32::from(event.position.x);
+        let hovering_gutter_fold_area =
+            hover_x >= pane_left && hover_x <= self.last_content_left + fold_hit_padding;
         if hovering_gutter_fold_area != self.hovering_gutter_fold_area {
             self.hovering_gutter_fold_area = hovering_gutter_fold_area;
             cx.notify();
@@ -1847,6 +1834,7 @@ impl EditorView {
         if self.toolbar_hidden_by_scroll {
             self.toolbar_corner_hovered = false;
         }
+        self.sync_toolbar_opacity(cx);
         cx.notify();
     }
 

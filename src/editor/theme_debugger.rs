@@ -1,7 +1,7 @@
 use gpui::{
-    AnyElement, Bounds, Context, CursorStyle, Hsla, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Window, div, linear_color_stop,
-    linear_gradient, prelude::*, px,
+    AnyElement, Bounds, Context, CursorStyle, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, SharedString, Window, div, linear_color_stop, linear_gradient,
+    prelude::*, px,
 };
 
 use crate::theme::{self, ThemeColorField};
@@ -77,8 +77,8 @@ impl EditorView {
         }
 
         let mut width = 0.0;
-        if self.outline_visible {
-            width += self.outline_width();
+        if self.utility_panel.is_some() {
+            width += self.utility_panel_width();
         }
         if self.theme_debugger_visible {
             width += self.theme_debugger_width();
@@ -118,9 +118,7 @@ impl EditorView {
     fn ensure_theme_debugger_editors(&mut self, cx: &mut Context<Self>) {
         if self.theme_debugger_hex_editor.is_none() {
             let styles = self.theme_debugger_text_input_styles();
-            let editor = cx.new(|cx| {
-                crate::text_input::TextInput::new(styles, "#RRGGBBAA", cx)
-            });
+            let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "#RRGGBBAA", cx));
             cx.subscribe(
                 &editor,
                 |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -397,9 +395,8 @@ impl EditorView {
 
         let hue_segments: Vec<AnyElement> = (0..THEME_DEBUGGER_HUE_SEGMENTS)
             .map(|index| {
-                let from = theme_debugger_hue_color(
-                    index as f32 / THEME_DEBUGGER_HUE_SEGMENTS as f32,
-                );
+                let from =
+                    theme_debugger_hue_color(index as f32 / THEME_DEBUGGER_HUE_SEGMENTS as f32);
                 let to = theme_debugger_hue_color(
                     (index + 1) as f32 / THEME_DEBUGGER_HUE_SEGMENTS as f32,
                 );
@@ -998,7 +995,11 @@ fn hsla_to_hsva(color: Hsla) -> ThemeDebuggerHsva {
 
     ThemeDebuggerHsva {
         h: hue.clamp(0.0, 1.0),
-        s: if max <= f32::EPSILON { 0.0 } else { delta / max },
+        s: if max <= f32::EPSILON {
+            0.0
+        } else {
+            delta / max
+        },
         v: max,
         a: color.a.clamp(0.0, 1.0),
     }
@@ -1064,7 +1065,12 @@ fn rgb_to_hsla(r: f32, g: f32, b: f32, a: f32) -> Hsla {
     let l = (max + min) / 2.0;
 
     if (max - min).abs() <= f32::EPSILON {
-        return Hsla { h: 0.0, s: 0.0, l, a };
+        return Hsla {
+            h: 0.0,
+            s: 0.0,
+            l,
+            a,
+        };
     }
 
     let delta = max - min;

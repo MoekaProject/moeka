@@ -18,7 +18,12 @@ pub(crate) fn persist_session(editor: &EditorView) {
     config.session = SessionConfig {
         active_tab_id: editor.active_tab_id.clone(),
         next_tab_id: Some(editor.next_tab_id),
-        tabs: editor.tabs.iter().map(tab_to_record).collect(),
+        tabs: editor
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind != TabKind::Diff)
+            .map(tab_to_record)
+            .collect(),
     };
     config_store::save_config(&config);
 }
@@ -152,6 +157,7 @@ fn restore_tab_from_record(record: &TabSessionRecord) -> Option<OpenTab> {
         file_kind,
         snapshot,
         image_view: ImageViewState::default(),
+        git_diff: None,
         is_preview: record.is_preview,
         is_dirty,
         is_deleted: false,
@@ -186,7 +192,10 @@ fn resolve_snapshot(
                             .extra_cursors
                             .iter()
                             .map(|(offset, anchor)| {
-                                ((*offset).min(snapshot.text.len()), (*anchor).min(snapshot.text.len()))
+                                (
+                                    (*offset).min(snapshot.text.len()),
+                                    (*anchor).min(snapshot.text.len()),
+                                )
                             })
                             .collect();
                         return Some((Some(path.clone()), snapshot, true));
@@ -200,7 +209,10 @@ fn resolve_snapshot(
                     .extra_cursors
                     .iter()
                     .map(|(offset, anchor)| {
-                        ((*offset).min(snapshot.text.len()), (*anchor).min(snapshot.text.len()))
+                        (
+                            (*offset).min(snapshot.text.len()),
+                            (*anchor).min(snapshot.text.len()),
+                        )
                     })
                     .collect();
                 Some((Some(path.clone()), snapshot, false))
@@ -267,6 +279,7 @@ fn load_file_snapshot(path: &Path) -> Option<(EditorSnapshot, FileKind)> {
 fn serialize_tab_kind(kind: TabKind) -> String {
     match kind {
         TabKind::Editor => "editor",
+        TabKind::Diff => "diff",
         TabKind::Settings => "settings",
     }
     .to_string()
@@ -275,6 +288,7 @@ fn serialize_tab_kind(kind: TabKind) -> String {
 fn deserialize_tab_kind(value: &str) -> Option<TabKind> {
     match value {
         "editor" => Some(TabKind::Editor),
+        "diff" => Some(TabKind::Diff),
         "settings" => Some(TabKind::Settings),
         _ => None,
     }
@@ -317,6 +331,7 @@ fn settings_tab(id: String) -> OpenTab {
             extra_cursors: Vec::new(),
         },
         image_view: ImageViewState::default(),
+        git_diff: None,
         is_preview: false,
         is_dirty: false,
         is_deleted: false,
@@ -379,6 +394,7 @@ mod tests {
                     extra_cursors: Vec::new(),
                 },
                 image_view: ImageViewState::default(),
+                git_diff: None,
                 is_preview: false,
                 is_dirty: false,
                 is_deleted: false,

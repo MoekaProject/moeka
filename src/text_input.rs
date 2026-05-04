@@ -1060,9 +1060,10 @@ impl Element for TextElement {
         window: &mut Window,
         _cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        let height = px(self.input.read(_cx).styles.text_input_height_px);
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = window.line_height().into();
+        style.size.height = height.into();
         (window.request_layout(style, [], _cx), ())
     }
 
@@ -1258,8 +1259,7 @@ impl Element for TextElement {
             return;
         };
         let text_origin = bounds.origin + point(center_offset, Pixels::ZERO);
-        line.paint(text_origin, window.line_height(), window, cx)
-            .ok();
+        line.paint(text_origin, bounds.size.height, window, cx).ok();
 
         // Paint cursor (only when focused)
         if focus_handle.is_focused(window) {

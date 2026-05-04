@@ -244,7 +244,11 @@ impl EditorView {
         if cur_visual > 0 {
             let target_visual = cur_visual - 1;
             let target_y = gpui::px((cur_visual as f32 - 0.5) * info.line_height);
-            let target_indent = if target_visual > 0 { info.indent_px } else { 0.0 };
+            let target_indent = if target_visual > 0 {
+                info.indent_px
+            } else {
+                0.0
+            };
             let target_x = (goal_x - target_indent).max(0.0);
             let new_disp = if target_x <= 0.5 {
                 Self::wrap_boundary_display_index_for_visual_line(info, target_visual)
@@ -295,7 +299,11 @@ impl EditorView {
         if cur_visual + 1 < info.visual_line_count {
             let target_visual = cur_visual + 1;
             let target_y = gpui::px((cur_visual as f32 + 1.5) * info.line_height);
-            let target_indent = if target_visual > 0 { info.indent_px } else { 0.0 };
+            let target_indent = if target_visual > 0 {
+                info.indent_px
+            } else {
+                0.0
+            };
             let target_x = (goal_x - target_indent).max(0.0);
             let new_disp = if target_x <= 0.5 {
                 Self::wrap_boundary_display_index_for_visual_line(info, target_visual)
@@ -348,15 +356,33 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn outline_width(&self) -> f32 {
-        self.outline_custom_width
-            .unwrap_or_else(|| self.scaled(self.styles.outline.outline_width_px))
+    pub(crate) fn utility_panel_width(&self) -> f32 {
+        self.utility_panel_custom_width
+            .unwrap_or_else(|| self.scaled(self.styles.utility_panel.utility_panel_width_px))
     }
 
     pub(crate) fn toggle_outline_visibility(&mut self, cx: &mut Context<Self>) {
-        self.outline_visible = !self.outline_visible;
-        if !self.outline_visible {
-            self.outline_resizing = false;
+        self.toggle_utility_panel(RightUtilityPanel::Outline, cx);
+    }
+
+    pub(crate) fn toggle_info_panel(&mut self, cx: &mut Context<Self>) {
+        self.toggle_utility_panel(RightUtilityPanel::Info, cx);
+    }
+
+    pub(crate) fn toggle_git_history_panel(&mut self, cx: &mut Context<Self>) {
+        self.toggle_utility_panel(RightUtilityPanel::GitHistory, cx);
+    }
+
+    pub(crate) fn toggle_utility_panel(
+        &mut self,
+        panel: RightUtilityPanel,
+        cx: &mut Context<Self>,
+    ) {
+        if self.utility_panel == Some(panel) {
+            self.utility_panel = None;
+            self.utility_panel_resizing = false;
+        } else {
+            self.utility_panel = Some(panel);
         }
         cx.notify();
     }

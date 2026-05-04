@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -31,7 +32,8 @@ impl EditorView {
         root: &Path,
     ) -> bool {
         let handled = self.sidebar_drag_has_child_target(root)
-            && self.sidebar_drag_child_hover_position == Some(Self::sidebar_drag_position_key(position));
+            && self.sidebar_drag_child_hover_position
+                == Some(Self::sidebar_drag_position_key(position));
         self.sidebar_drag_child_hover_position = None;
         handled
     }
@@ -127,6 +129,161 @@ impl EditorView {
             Some(".".to_string())
         } else {
             Some(relative.to_string_lossy().into_owned())
+        }
+    }
+
+    fn sidebar_git_status_refresh_due(&self) -> bool {
+        if self.sidebar_git_statuses_dirty {
+            return true;
+        }
+
+        match self.sidebar_git_statuses_scanned_at {
+            Some(scanned_at) => SystemTime::now()
+                .duration_since(scanned_at)
+                .map(|age| age >= Duration::from_secs(1))
+                .unwrap_or(true),
+            None => true,
+        }
+    }
+
+    fn sidebar_git_repo_root(&self) -> Option<PathBuf> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&self.sidebar_root)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+
+        Some(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string()))
+    }
+
+    fn merge_sidebar_git_status(
+        current: Option<SidebarGitStatus>,
+        next: SidebarGitStatus,
+    ) -> SidebarGitStatus {
+        match (current, next) {
+            (Some(SidebarGitStatus::Modified), _) | (_, SidebarGitStatus::Modified) => {
+                SidebarGitStatus::Modified
+            }
+            _ => SidebarGitStatus::Added,
+        }
+    }
+
+    fn parse_sidebar_git_status_line(line: &str) -> Option<(String, SidebarGitStatus)> {
+        if line.len() < 4 {
+            return None;
+        }
+
+        let status_code = &line[..2];
+        let raw_path = line[3..].trim();
+        let normalized_path = raw_path
+            .rsplit(" -> ")
+            .next()
+            .unwrap_or(raw_path)
+            .trim_matches('"')
+            .replace('\\', "/");
+        let status = if status_code == "??" || status_code.contains('A') {
+            SidebarGitStatus::Added
+        } else if status_code.contains('M')
+            || status_code.contains('D')
+            || status_code.contains('R')
+            || status_code.contains('C')
+            || status_code.contains('U')
+        {
+            SidebarGitStatus::Modified
+        } else {
+            return None;
+        };
+
+        Some((normalized_path, status))
+    }
+
+    fn refresh_sidebar_git_statuses_if_needed(&mut self) {
+        if !self.sidebar_git_status_refresh_due() {
+            return;
+        }
+
+        let Some(repo_root) = self.sidebar_git_repo_root() else {
+            self.sidebar_git_statuses.clear();
+            self.sidebar_git_statuses_dirty = false;
+            self.sidebar_git_statuses_scanned_at = Some(SystemTime::now());
+            return;
+        };
+
+        let relative_root = self
+            .sidebar_root
+            .strip_prefix(&repo_root)
+            .ok()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| path.to_string_lossy().replace('\\', "/"));
+
+        let mut args = vec![
+            "status".to_string(),
+            "--porcelain=v1".to_string(),
+            "--untracked-files=all".to_string(),
+        ];
+        if let Some(relative_root) = relative_root {
+            args.push("--".to_string());
+            args.push(relative_root);
+        }
+
+        let mut statuses = HashMap::new();
+        if let Ok(output) = Command::new("git")
+            .arg("-C")
+            .arg(&repo_root)
+            .args(&args)
+            .output()
+        {
+            if output.status.success() {
+                for line in String::from_utf8_lossy(&output.stdout).lines() {
+                    let Some((relative_path, status)) = Self::parse_sidebar_git_status_line(line)
+                    else {
+                        continue;
+                    };
+
+                    let absolute_path = repo_root.join(relative_path);
+                    if !absolute_path.starts_with(&self.sidebar_root) {
+                        continue;
+                    }
+
+                    let mut current = Some(absolute_path);
+                    while let Some(path) = current {
+                        if !path.starts_with(&self.sidebar_root) {
+                            break;
+                        }
+
+                        let merged = Self::merge_sidebar_git_status(
+                            statuses.get(&path).copied(),
+                            status,
+                        );
+                        statuses.insert(path.clone(), merged);
+
+                        if path == self.sidebar_root {
+                            break;
+                        }
+                        current = path.parent().map(Path::to_path_buf);
+                    }
+                }
+            }
+        }
+
+        self.sidebar_git_statuses = statuses;
+        self.sidebar_git_statuses_dirty = false;
+        self.sidebar_git_statuses_scanned_at = Some(SystemTime::now());
+    }
+
+    fn sidebar_git_status_color(&self, status: Option<SidebarGitStatus>) -> Option<gpui::Hsla> {
+        match status {
+            Some(SidebarGitStatus::Added) => {
+                Some(self.styles.sidebar.sidebar_item_git_added_text_color)
+            }
+            Some(SidebarGitStatus::Modified) => {
+                Some(self.styles.sidebar.sidebar_item_git_modified_text_color)
+            }
+            None => None,
         }
     }
 
@@ -265,6 +422,7 @@ impl EditorView {
 
     pub(crate) fn invalidate_sidebar_items_cache(&mut self) {
         self.sidebar_items_dirty = true;
+        self.sidebar_git_statuses_dirty = true;
     }
 
     fn reset_sidebar_render_limit(&mut self) {
@@ -1424,11 +1582,22 @@ impl EditorView {
     ) -> AnyElement {
         let ss = &self.styles.sidebar;
         let shift = ss.sidebar_item_left_shift_px;
-        let left_padding = self.scaled(
-            (ss.sidebar_item_indent_base_px + depth as f32 * ss.sidebar_item_indent_step_px
-                - shift)
-                .max(0.0),
-        );
+        let is_root_level = depth == 0;
+        let left_padding = if is_root_level {
+            self.scaled(self.styles.workspace_switcher.ws_bar_padding_x_px)
+        } else {
+            self.scaled(
+                (ss.sidebar_item_indent_base_px + depth as f32 * ss.sidebar_item_indent_step_px
+                    - shift)
+                    .max(0.0),
+            )
+        };
+        let show_fold_icon = is_dir && !is_root_level;
+        let fold_slot_width = if show_fold_icon {
+            self.scaled(ss.sidebar_item_fold_container_width_px)
+        } else {
+            0.0
+        };
         let current_name = editor.read(cx).text().to_string();
 
         div()
@@ -1449,13 +1618,13 @@ impl EditorView {
                     .gap(px(self.scaled(ss.sidebar_item_gap_px)))
                     .child(
                         div()
-                            .w(px(self.scaled(ss.sidebar_item_fold_container_width_px)))
+                            .w(px(fold_slot_width))
                             .h(px(self.scaled(ss.sidebar_item_fold_container_height_px)))
                             .flex()
                             .flex_none()
                             .items_center()
                             .justify_center()
-                            .child(if is_dir {
+                            .child(if show_fold_icon {
                                 svg()
                                     .path(FILETREE_FOLD_SVG_PATH)
                                     .size(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))
@@ -1498,27 +1667,40 @@ impl EditorView {
         let path = item.path.clone();
         let is_dir = item.is_dir;
         let ss = &self.styles.sidebar;
+        let git_status_color = self.sidebar_git_status_color(self.sidebar_git_statuses.get(&path).copied());
         let shift = ss.sidebar_item_left_shift_px;
-        let left_padding = self.scaled(
-            (ss.sidebar_item_indent_base_px + item.depth as f32 * ss.sidebar_item_indent_step_px
-                - shift)
-                .max(0.0),
-        );
+        let is_root_level = item.depth == 0;
+        let left_padding = if is_root_level {
+            self.scaled(self.styles.workspace_switcher.ws_bar_padding_x_px)
+        } else {
+            self.scaled(
+                (ss.sidebar_item_indent_base_px
+                    + item.depth as f32 * ss.sidebar_item_indent_step_px
+                    - shift)
+                    .max(0.0),
+            )
+        };
+        let show_fold_icon = item.is_dir && !is_root_level;
+        let fold_slot_width = if show_fold_icon {
+            self.scaled(ss.sidebar_item_fold_container_width_px)
+        } else {
+            0.0
+        };
         let row_bg = if is_selected {
             ss.sidebar_item_selected_bg
         } else {
             gpui::transparent_black()
         };
-        let icon_color = if is_selected {
+        let icon_color = git_status_color.unwrap_or(if is_selected {
             ss.sidebar_item_selected_icon_color
         } else {
             ss.sidebar_item_icon_color
-        };
-        let label_color = if is_selected {
+        });
+        let label_color = git_status_color.unwrap_or(if is_selected {
             ss.sidebar_item_selected_text_color
         } else {
             ss.sidebar_item_text_color
-        };
+        });
         let is_focused = self.focused_sidebar_path.as_deref() == Some(path.as_path());
         let focus_border_color = ss.sidebar_item_focus_border_color;
         let active_border_color = ss.sidebar_item_active_border_color;
@@ -1652,13 +1834,13 @@ impl EditorView {
                     .gap(px(self.scaled(ss.sidebar_item_gap_px)))
                     .child(
                         div()
-                            .w(px(self.scaled(ss.sidebar_item_fold_container_width_px)))
+                            .w(px(fold_slot_width))
                             .h(px(self.scaled(ss.sidebar_item_fold_container_height_px)))
                             .flex()
                             .flex_none()
                             .items_center()
                             .justify_center()
-                            .child(if item.is_dir {
+                            .child(if show_fold_icon {
                                 svg()
                                     .path(FILETREE_FOLD_SVG_PATH)
                                     .size(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))
@@ -1788,6 +1970,9 @@ impl EditorView {
 
     pub(crate) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let has_root = self.sidebar_root.exists() && self.sidebar_error.is_none();
+        if has_root {
+            self.refresh_sidebar_git_statuses_if_needed();
+        }
         let show_workspace_bar = true;
         let items = if has_root {
             Some(self.sidebar_items())
@@ -2082,7 +2267,10 @@ impl EditorView {
                                           _,
                                           cx| {
                                         if event.bounds.contains(&event.event.position) {
-                                            this.update_sidebar_drag_autoscroll(event.event.position, cx);
+                                            this.update_sidebar_drag_autoscroll(
+                                                event.event.position,
+                                                cx,
+                                            );
 
                                             if this.sidebar_drag_child_handled_same_event(
                                                 event.event.position,
@@ -2092,8 +2280,10 @@ impl EditorView {
                                             }
 
                                             let dragged = event.drag(cx);
-                                            let valid_move =
-                                                Self::sidebar_drop_would_move(&dragged.paths, &root);
+                                            let valid_move = Self::sidebar_drop_would_move(
+                                                &dragged.paths,
+                                                &root,
+                                            );
                                             if !valid_move {
                                                 this.clear_sidebar_drag_hover(cx);
                                                 return;

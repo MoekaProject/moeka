@@ -296,8 +296,16 @@ impl EditorView {
 
     fn search_query_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
-        styles.text_input_padding_left_px = self.styles.search.search_input_left_inset_px;
-        styles.text_input_padding_right_px = self.styles.search.search_input_right_inset_px;
+        styles.text_input_height_px = self.scaled(self.styles.text_input.text_input_height_px);
+        styles.text_input_padding_left_px =
+            self.scaled(self.styles.search.search_input_left_inset_px);
+        styles.text_input_padding_right_px =
+            self.scaled(self.styles.search.search_input_right_inset_px);
+        styles.text_input_font_size_px =
+            self.scaled(self.styles.text_input.text_input_font_size_px);
+        styles.text_input_radius_px = self.scaled(self.styles.text_input.text_input_radius_px);
+        styles.text_input_cursor_width_px =
+            self.scaled(self.styles.text_input.text_input_cursor_width_px);
         styles.text_input_bg = gpui::transparent_black();
         styles.text_input_focus_bg = self.styles.search.search_input_focus_bg;
         styles.text_input_cursor_height_ratio = self.styles.search.search_input_cursor_height_ratio;
@@ -306,6 +314,16 @@ impl EditorView {
 
     fn search_replace_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
+        styles.text_input_height_px = self.scaled(self.styles.text_input.text_input_height_px);
+        styles.text_input_padding_left_px =
+            self.scaled(self.styles.text_input.text_input_padding_left_px);
+        styles.text_input_padding_right_px =
+            self.scaled(self.styles.text_input.text_input_padding_right_px);
+        styles.text_input_font_size_px =
+            self.scaled(self.styles.text_input.text_input_font_size_px);
+        styles.text_input_radius_px = self.scaled(self.styles.text_input.text_input_radius_px);
+        styles.text_input_cursor_width_px =
+            self.scaled(self.styles.text_input.text_input_cursor_width_px);
         styles.text_input_bg = gpui::transparent_black();
         styles.text_input_focus_bg = gpui::transparent_black();
         styles.text_input_cursor_height_ratio = self.styles.search.search_input_cursor_height_ratio;

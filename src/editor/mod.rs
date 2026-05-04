@@ -6,6 +6,7 @@ mod handlers;
 mod helpers;
 mod history_store;
 mod image_view;
+mod info_panel;
 mod input;
 mod menus;
 mod outline;
@@ -27,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use gpui::{
     ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point, Render, RenderImage,
@@ -204,6 +205,9 @@ pub(crate) const FOLDER_CLOSED_SVG_PATH: &str = "assets/icons/filetree/folder-cl
 pub(crate) const MARKDOWN_SVG_PATH: &str = "assets/icons/filetree/markdown.svg";
 pub(crate) const WORKSPACE_EXPAND_SVG_PATH: &str = "assets/icons/filetree/workspace-expand.svg";
 pub(crate) const OUTLINE_TOGGLE_SVG_PATH: &str = "assets/icons/outline-toggle.svg";
+pub(crate) const INFO_PANEL_SVG_PATH: &str = "assets/icons/info.svg";
+pub(crate) const GIT_HISTORY_SVG_PATH: &str = "assets/icons/history.svg";
+pub(crate) const SHARE_SVG_PATH: &str = "assets/icons/share.svg";
 
 // ── Format menu SVG icons ───────────────────────────────────────────
 pub(crate) const FMT_BOLD_SVG: &str = "assets/icons/format/bold.svg";
@@ -251,7 +255,15 @@ pub(crate) struct WrapBoundaryAffinity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TabKind {
     Editor,
+    Diff,
     Settings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RightUtilityPanel {
+    Outline,
+    Info,
+    GitHistory,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -322,12 +334,41 @@ pub(crate) struct OpenTab {
     pub file_kind: Option<FileKind>,
     pub snapshot: EditorSnapshot,
     pub image_view: ImageViewState,
+    pub git_diff: Option<GitDiffState>,
     pub is_preview: bool,
     pub is_dirty: bool,
     pub is_deleted: bool,
     pub is_pinned: bool,
     pub recovery: config_store::TabRecoveryState,
     pub history: history_store::TabHistory,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct GitDiffState {
+    pub source_label: String,
+    pub target_label: String,
+    pub rows: Vec<GitDiffRow>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct GitDiffRow {
+    pub kind: GitDiffRowKind,
+    pub old_line_number: Option<usize>,
+    pub new_line_number: Option<usize>,
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitDiffRowKind {
+    Context,
+    Added,
+    Removed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SidebarGitStatus {
+    Added,
+    Modified,
 }
 
 #[derive(Clone, Debug)]
@@ -785,14 +826,18 @@ pub struct EditorView {
     pub(crate) sidebar_items_dirty: bool,
     pub(crate) sidebar_scroll_handle: ScrollHandle,
     pub(crate) sidebar_render_limit: usize,
+    pub(crate) sidebar_git_statuses: HashMap<PathBuf, SidebarGitStatus>,
+    pub(crate) sidebar_git_statuses_dirty: bool,
+    pub(crate) sidebar_git_statuses_scanned_at: Option<SystemTime>,
     pub(crate) workspaces: Vec<PathBuf>,
     pub(crate) _watcher_task: Option<Task<()>>,
     pub(crate) temp_save_tasks: HashMap<String, Task<()>>,
     pub(crate) temp_save_epochs: HashMap<String, usize>,
-    pub(crate) outline_visible: bool,
-    pub(crate) outline_custom_width: Option<f32>,
     pub(crate) outline_resizing: bool,
     pub(crate) outline_scroll_handle: ScrollHandle,
+    pub(crate) utility_panel: Option<RightUtilityPanel>,
+    pub(crate) utility_panel_custom_width: Option<f32>,
+    pub(crate) utility_panel_resizing: bool,
     pub(crate) theme_debugger_visible: bool,
     pub(crate) theme_debugger_scroll_handle: ScrollHandle,
     pub(crate) theme_debugger_selected_field: ThemeColorField,
@@ -808,6 +853,10 @@ pub struct EditorView {
     pub(crate) scroll_anim_epoch: usize,
     pub(crate) toolbar_hidden_by_scroll: bool,
     pub(crate) toolbar_corner_hovered: bool,
+    pub(crate) toolbar_opacity: f32,
+    pub(crate) toolbar_opacity_target: f32,
+    pub(crate) toolbar_opacity_epoch: usize,
+    pub(crate) toolbar_opacity_task: Option<Task<()>>,
     pub(crate) tooltip_pending: Option<tooltip::TooltipState>,
     pub(crate) tooltip_visible: Option<tooltip::TooltipState>,
     pub(crate) tooltip_task: Option<Task<()>>,
@@ -972,6 +1021,7 @@ impl EditorView {
                     file_kind: Some(FileKind::Markdown),
                     snapshot: initial_snapshot,
                     image_view: ImageViewState::default(),
+                    git_diff: None,
                     is_preview: false,
                     is_dirty: false,
                     is_deleted: false,
@@ -996,6 +1046,7 @@ impl EditorView {
                         extra_cursors: Vec::new(),
                     },
                     image_view: ImageViewState::default(),
+                    git_diff: None,
                     is_preview: false,
                     is_dirty: false,
                     is_deleted: false,
@@ -1057,14 +1108,18 @@ impl EditorView {
             sidebar_items_dirty: true,
             sidebar_scroll_handle: ScrollHandle::new(),
             sidebar_render_limit: 200,
+            sidebar_git_statuses: HashMap::new(),
+            sidebar_git_statuses_dirty: true,
+            sidebar_git_statuses_scanned_at: None,
             workspaces: Vec::new(),
             _watcher_task: None,
             temp_save_tasks: HashMap::new(),
             temp_save_epochs: HashMap::new(),
-            outline_visible: false,
-            outline_custom_width: None,
             outline_resizing: false,
             outline_scroll_handle: ScrollHandle::new(),
+            utility_panel: None,
+            utility_panel_custom_width: None,
+            utility_panel_resizing: false,
             theme_debugger_visible: false,
             theme_debugger_scroll_handle: ScrollHandle::new(),
             theme_debugger_selected_field: ThemeColorField::TextPrimary,
@@ -1077,6 +1132,10 @@ impl EditorView {
             scroll_anim_epoch: 0,
             toolbar_hidden_by_scroll: false,
             toolbar_corner_hovered: false,
+            toolbar_opacity: 1.0,
+            toolbar_opacity_target: 1.0,
+            toolbar_opacity_epoch: 0,
+            toolbar_opacity_task: None,
             tooltip_pending: None,
             tooltip_visible: None,
             tooltip_task: None,
@@ -1146,6 +1205,8 @@ impl EditorView {
         }
         this.ensure_font_size_editor(cx);
         this.ensure_ui_font_size_editor(cx);
+        this.toolbar_opacity = this.desired_toolbar_opacity();
+        this.toolbar_opacity_target = this.toolbar_opacity;
 
         this
     }
@@ -1157,7 +1218,68 @@ impl EditorView {
                 || self.toolbar_corner_hovered)
     }
 
-    pub(crate) fn update_toolbar_corner_hover(&mut self, position: Point<Pixels>) -> bool {
+    fn toolbar_base_visible(&self) -> bool {
+        !self.tabs.is_empty() && !self.active_tab_is_settings() && !self.active_tab_is_binary()
+    }
+
+    fn desired_toolbar_opacity(&self) -> f32 {
+        if self.should_show_editor_toolbar(self.toolbar_base_visible()) {
+            1.0
+        } else {
+            self.styles.toolbar.toolbar_hidden_opacity
+        }
+    }
+
+    pub(crate) fn sync_toolbar_opacity(&mut self, cx: &mut Context<Self>) {
+        let target = self.desired_toolbar_opacity();
+        if (self.toolbar_opacity_target - target).abs() <= 0.001 {
+            return;
+        }
+
+        self.toolbar_opacity_target = target;
+        self.toolbar_opacity_epoch += 1;
+        let epoch = self.toolbar_opacity_epoch;
+        let duration_ms = self.styles.toolbar.toolbar_opacity_animation_ms.max(1);
+        let step = (16.0 / duration_ms as f32).clamp(0.08, 1.0);
+
+        self.toolbar_opacity_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.toolbar_opacity_epoch != epoch {
+                            return true;
+                        }
+
+                        let diff = this.toolbar_opacity_target - this.toolbar_opacity;
+                        if diff.abs() <= 0.01 {
+                            this.toolbar_opacity = this.toolbar_opacity_target;
+                            this.toolbar_opacity_task = None;
+                            cx.notify();
+                            return true;
+                        }
+
+                        this.toolbar_opacity += diff * step;
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+
+                if done {
+                    return;
+                }
+
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+            }
+        }));
+    }
+
+    pub(crate) fn update_toolbar_corner_hover(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let toolbar_styles = &self.styles.toolbar;
         let corner_width = self.scaled(toolbar_styles.toolbar_corner_reveal_width_px);
         let corner_height = self.scaled(toolbar_styles.toolbar_corner_reveal_height_px);
@@ -1169,6 +1291,9 @@ impl EditorView {
             y <= corner_height && (x <= left + corner_width || x >= right - corner_width);
         let changed = hovering != self.toolbar_corner_hovered;
         self.toolbar_corner_hovered = hovering;
+        if changed {
+            self.sync_toolbar_opacity(cx);
+        }
         changed
     }
 
@@ -1704,6 +1829,13 @@ impl EditorView {
 
     pub(crate) fn active_tab_is_binary(&self) -> bool {
         self.active_file_kind().is_some_and(FileKind::is_binary)
+    }
+
+    pub(crate) fn active_tab_is_diff(&self) -> bool {
+        self.active_tab_id
+            .as_ref()
+            .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
+            .is_some_and(|tab| tab.kind == TabKind::Diff)
     }
 
     pub(crate) fn active_image_view_state(&self) -> Option<ImageViewState> {

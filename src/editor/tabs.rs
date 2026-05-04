@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, Context, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
-    SharedString, Window, div, prelude::*, px, svg,
+    AnyElement, Context, CursorStyle, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent,
+    MouseMoveEvent, SharedString, Window, div, img, prelude::*, px, svg,
 };
 
 use super::*;
@@ -52,6 +52,13 @@ impl EditorView {
             .as_ref()
             .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
             .is_some_and(|tab| tab.kind == TabKind::Settings)
+    }
+
+    pub(crate) fn active_git_diff_state(&self) -> Option<&GitDiffState> {
+        self.active_tab_id
+            .as_ref()
+            .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
+            .and_then(|tab| tab.git_diff.as_ref())
     }
 
     pub(crate) fn request_editor_focus(&mut self, cx: &mut Context<Self>) {
@@ -214,6 +221,7 @@ impl EditorView {
             file_kind: Some(file_kind),
             snapshot,
             image_view: ImageViewState::default(),
+            git_diff: None,
             is_preview,
             is_dirty: false,
             is_deleted: false,
@@ -302,7 +310,7 @@ impl EditorView {
     }
 
     fn should_track_in_recently_closed(tab: &OpenTab) -> bool {
-        tab.path.is_some() && !tab.is_preview
+        tab.kind == TabKind::Editor && tab.path.is_some() && !tab.is_preview
     }
 
     pub(crate) fn persist_active_tab_state(&mut self) {
@@ -353,8 +361,9 @@ impl EditorView {
             self.marked_range = None;
             self.scroll_offset = tab.snapshot.scroll_offset;
             self.image_drag_state = None;
-            self.toolbar_hidden_by_scroll = false;
+            self.toolbar_hidden_by_scroll = self.scroll_offset > 0.5;
             self.toolbar_corner_hovered = false;
+            self.sync_toolbar_opacity(cx);
             self.reparse();
             if tab.file_kind.as_ref().is_some_and(FileKind::is_image)
                 && let Some(path) = tab.path.as_ref()
@@ -461,6 +470,7 @@ impl EditorView {
                 file_kind: closed_tab.file_kind,
                 snapshot: closed_tab.snapshot,
                 image_view: closed_tab.image_view,
+                git_diff: None,
                 is_preview: false,
                 is_dirty: false,
                 is_deleted: false,
@@ -690,6 +700,7 @@ impl EditorView {
                 extra_cursors: Vec::new(),
             },
             image_view: ImageViewState::default(),
+            git_diff: None,
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -735,6 +746,7 @@ impl EditorView {
                 extra_cursors: Vec::new(),
             },
             image_view: ImageViewState::default(),
+            git_diff: None,
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -813,6 +825,23 @@ impl EditorView {
             ts.tab_item_icon_inactive_opacity
         };
         let icon_size = px(self.scaled(ts.tab_item_icon_size_px));
+
+        if tab.kind == TabKind::Diff {
+            return div()
+                .min_w(px(self.scaled(ts.tab_item_badge_min_width_px)))
+                .h(px(self.scaled(ts.tab_item_badge_height_px)))
+                .px(px(self.scaled(ts.tab_item_badge_padding_x_px)))
+                .rounded(px(self.scaled(ts.tab_item_badge_radius_px)))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(ts.tab_item_badge_bg)
+                .text_size(px(self.scaled(ts.tab_item_badge_font_size_px)))
+                .text_color(ts.tab_item_badge_text_color)
+                .opacity(opacity)
+                .child("Diff")
+                .into_any_element();
+        }
 
         if tab.is_pinned {
             return svg()
@@ -1003,6 +1032,9 @@ impl EditorView {
                 this.when(tab_kind == TabKind::Editor, |this| {
                     this.child(self.render_tab_file_indicator(tab, is_active))
                 })
+                .when(tab_kind == TabKind::Diff, |this| {
+                    this.child(self.render_tab_file_indicator(tab, is_active))
+                })
                 .when(tab_kind == TabKind::Settings, |this| {
                     this.child(
                         svg()
@@ -1127,6 +1159,54 @@ impl EditorView {
             .into_any_element()
     }
 
+    fn render_tab_bar_action_button(
+        &self,
+        id: &'static str,
+        icon_path: &'static str,
+        is_active: bool,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let button_size = (self.tab_bar_height() - self.scaled(6.0)).max(18.0);
+        let icon_size = self.scaled(ts.tab_item_icon_size_px);
+
+        div()
+            .id(id)
+            .w(px(button_size))
+            .h(px(button_size))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(self.scaled(ts.tab_item_badge_radius_px)))
+            .bg(if is_active {
+                ts.tab_item_active_bg
+            } else {
+                gpui::transparent_black()
+            })
+            .hover(move |style| style.bg(ts.tab_item_hover_bg))
+            .cursor(CursorStyle::Arrow)
+            .child(
+                img(helpers::resolve_asset_image_path(icon_path))
+                    .w(px(icon_size))
+                    .h(px(icon_size))
+                    .opacity(if is_active {
+                        ts.tab_item_icon_active_opacity
+                    } else {
+                        ts.tab_item_icon_inactive_opacity
+                    }),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    on_click(this, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let ts = &self.styles.tab_bar;
         let end_drop_indicator_color = ts.tab_drop_indicator_color;
@@ -1245,6 +1325,45 @@ impl EditorView {
                 .into_any_element(),
         );
 
+        let outline_active = self.utility_panel == Some(RightUtilityPanel::Outline);
+        let info_active = self.utility_panel == Some(RightUtilityPanel::Info);
+        let git_active = self.utility_panel == Some(RightUtilityPanel::GitHistory);
+        let action_buttons = div()
+            .id("tab-bar-actions")
+            .h(px(self.tab_bar_height()))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(ts.tab_item_gap_px)))
+            .pr(px(self.scaled(ts.tab_item_padding_right_px)))
+            .child(self.render_tab_bar_action_button(
+                "tab-bar-outline-toggle",
+                OUTLINE_TOGGLE_SVG_PATH,
+                outline_active,
+                cx,
+                |this, cx| {
+                    this.toggle_outline_visibility(cx);
+                },
+            ))
+            .child(self.render_tab_bar_action_button(
+                "tab-bar-info-toggle",
+                INFO_PANEL_SVG_PATH,
+                info_active,
+                cx,
+                |this, cx| {
+                    this.toggle_info_panel(cx);
+                },
+            ))
+            .child(self.render_tab_bar_action_button(
+                "tab-bar-git-toggle",
+                GIT_HISTORY_SVG_PATH,
+                git_active,
+                cx,
+                |this, cx| {
+                    this.toggle_git_history_panel(cx);
+                },
+            ));
+
         div()
             .id("tab-bar")
             .w_full()
@@ -1254,7 +1373,6 @@ impl EditorView {
             .bg(ts.tab_bar_bg)
             .border_b(px(ts.tab_bar_border_width_px))
             .border_color(ts.tab_bar_border_color)
-            .overflow_x_scroll()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -1290,7 +1408,18 @@ impl EditorView {
                     }
                 }),
             )
-            .children(tab_items)
+            .child(
+                div()
+                    .id("tab-bar-scroll")
+                    .flex_1()
+                    .h_full()
+                    .min_w(px(0.0))
+                    .flex()
+                    .items_center()
+                    .overflow_x_scroll()
+                    .children(tab_items),
+            )
+            .child(action_buttons)
             .into_any_element()
     }
 }

@@ -547,12 +547,12 @@ fn detect_front_matter(decorations: &mut [LineDecoration], text: &str, line_star
         }
 
         let (cells, ranges) = parse_front_matter_entry(content);
-        key_width = key_width.max(
-            cell_display_width(cells.first().map(|cell| cell.trim()).unwrap_or("")),
-        );
-        value_width = value_width.max(
-            cell_display_width(cells.get(1).map(|cell| cell.trim()).unwrap_or("")),
-        );
+        key_width = key_width.max(cell_display_width(
+            cells.first().map(|cell| cell.trim()).unwrap_or(""),
+        ));
+        value_width = value_width.max(cell_display_width(
+            cells.get(1).map(|cell| cell.trim()).unwrap_or(""),
+        ));
         parsed_rows.push((cells, ranges, false));
     }
 

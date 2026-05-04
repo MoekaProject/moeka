@@ -947,11 +947,6 @@ impl EditorView {
             font_size_px: self.scaled(ms.menu_shortcut_font_size_px),
             text_color: ms.menu_shortcut_text_color,
             gap_px: self.scaled(ms.menu_shortcut_gap_px),
-            key_min_width_px: self.scaled(ms.menu_shortcut_key_min_width_px),
-            key_height_px: self.scaled(ms.menu_shortcut_key_height_px),
-            key_padding_x_px: self.scaled(ms.menu_shortcut_key_padding_x_px),
-            key_radius_px: self.scaled(ms.menu_shortcut_key_radius_px),
-            key_bg: ms.menu_shortcut_key_bg,
         };
         div()
             .w_full()

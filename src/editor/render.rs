@@ -3,13 +3,12 @@ use gpui::{
     SharedString, Window, deferred, div, img, prelude::*, px,
 };
 
-use super::*;
 use super::tooltip::{TooltipState, toolbar_anchor_bounds};
+use super::*;
 
 const TOOLBAR_SIDEBAR_TOOLTIP: (&str, Option<&str>) = ("显示或隐藏边栏", Some("⌘\\"));
 const TOOLBAR_ALIGN_TOOLTIP: (&str, Option<&str>) = ("切换左对齐", Some("⌘⇧L"));
 const TOOLBAR_THEME_TOOLTIP: (&str, Option<&str>) = ("切换浅色或深色主题", Some("⌘⌥\\"));
-const TOOLBAR_OUTLINE_TOOLTIP: (&str, Option<&str>) = ("显示或隐藏大纲", Some("⌘⇧\\"));
 
 impl EditorView {
     fn render_toolbar_button(
@@ -60,12 +59,19 @@ impl EditorView {
                     });
                 }
             })
-            .child(img(helpers::resolve_asset_image_path(icon_path)).w(px(icon_size)).h(px(icon_size)))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                this.clear_tooltip(cx);
-                cx.stop_propagation();
-                on_click(this, cx);
-            }))
+            .child(
+                img(helpers::resolve_asset_image_path(icon_path))
+                    .w(px(icon_size))
+                    .h(px(icon_size)),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.clear_tooltip(cx);
+                    cx.stop_propagation();
+                    on_click(this, cx);
+                }),
+            )
             .into_any_element()
     }
 }
@@ -76,7 +82,7 @@ impl Render for EditorView {
             window.focus(&self.focus_handle(cx));
             self.pending_editor_focus = false;
         }
-        let resizing = self.sidebar_resizing || self.outline_resizing;
+        let resizing = self.sidebar_resizing || self.utility_panel_resizing;
         let show_editor_toolbar =
             self.tabs.len() > 0 && !self.active_tab_is_settings() && !self.active_tab_is_binary();
         let ws = &self.styles.window;
@@ -174,6 +180,8 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_quick_open))
             .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(Self::on_toggle_outline))
+            .on_action(cx.listener(Self::on_toggle_info_panel))
+            .on_action(cx.listener(Self::on_toggle_git_history))
             .on_action(cx.listener(Self::on_toggle_theme_debugger))
             .on_action(cx.listener(Self::on_add_cursor_above))
             .on_action(cx.listener(Self::on_add_cursor_below))
@@ -302,6 +310,28 @@ impl Render for EditorView {
                     .when(
                         !self.tabs.is_empty() && !self.active_tab_is_settings(),
                         |this| {
+                            let sidebar_width = if self.sidebar_visible {
+                                self.sidebar_width()
+                            } else {
+                                0.0
+                            };
+                            let trailing_width = if !self.tabs.is_empty() {
+                                let theme_debugger_width = if self.theme_debugger_visible {
+                                    self.theme_debugger_width()
+                                } else {
+                                    0.0
+                                };
+                                let utility_panel_width = if self.utility_panel.is_some() {
+                                    self.utility_panel_width()
+                                } else {
+                                    0.0
+                                };
+                                theme_debugger_width + utility_panel_width
+                            } else {
+                                0.0
+                            };
+                            let editor_pane_width =
+                                (self.last_window_width - sidebar_width - trailing_width).max(1.0);
                             this.child(
                                 div()
                                     .id("editor-pane")
@@ -311,6 +341,7 @@ impl Render for EditorView {
                                     .cursor(
                                         if self.active_tab_is_image()
                                             || self.active_tab_is_binary()
+                                            || self.active_tab_is_diff()
                                             || self.hovering_checkbox
                                             || self.hovering_image_edit_line.is_some()
                                         {
@@ -319,24 +350,29 @@ impl Render for EditorView {
                                             CursorStyle::IBeam
                                         },
                                     )
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, event, window, cx| {
-                                            this.focused_sidebar_path = None;
-                                            this.on_mouse_down(event, window, cx);
-                                        }),
-                                    )
-                                    .on_mouse_down(
-                                        MouseButton::Right,
-                                        cx.listener(Self::on_editor_context_menu),
-                                    )
-                                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                                    .on_mouse_up_out(
-                                        MouseButton::Left,
-                                        cx.listener(Self::on_mouse_up),
-                                    )
-                                    .on_mouse_move(cx.listener(Self::on_mouse_move))
-                                    .on_scroll_wheel(cx.listener(Self::on_scroll))
+                                    .when(!self.active_tab_is_diff(), |this| {
+                                        this.on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, event, window, cx| {
+                                                this.focused_sidebar_path = None;
+                                                this.on_mouse_down(event, window, cx);
+                                            }),
+                                        )
+                                        .on_mouse_down(
+                                            MouseButton::Right,
+                                            cx.listener(Self::on_editor_context_menu),
+                                        )
+                                        .on_mouse_up(
+                                            MouseButton::Left,
+                                            cx.listener(Self::on_mouse_up),
+                                        )
+                                        .on_mouse_up_out(
+                                            MouseButton::Left,
+                                            cx.listener(Self::on_mouse_up),
+                                        )
+                                        .on_mouse_move(cx.listener(Self::on_mouse_move))
+                                        .on_scroll_wheel(cx.listener(Self::on_scroll))
+                                    })
                                     .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)
                                     .on_drop(cx.listener(
                                         |this, dragged: &DraggedSidebarItems, _, cx| {
@@ -353,6 +389,8 @@ impl Render for EditorView {
                                             editor: cx.entity().clone(),
                                         }
                                         .into_any_element()
+                                    } else if self.active_tab_is_diff() {
+                                        self.render_git_diff_view(cx)
                                     } else if self.active_tab_is_binary() {
                                         self.render_binary_placeholder(cx)
                                     } else {
@@ -362,40 +400,66 @@ impl Render for EditorView {
                                         .into_any_element()
                                     })
                                     .child({
-                                        let tb = &self.styles.toolbar;
-                                        let primary_hover = tb.toolbar_primary_hover_opacity;
-                                        let secondary_hover = tb.toolbar_secondary_hover_opacity;
-                                        let toolbar_top = self.scaled(tb.toolbar_offset_top_px);
-                                        let toolbar_left = self.scaled(tb.toolbar_offset_left_px);
-                                        let primary_btn_size = self.scaled(tb.toolbar_primary_btn_size_px);
-                                        let secondary_btn_size = self.scaled(tb.toolbar_secondary_btn_size_px);
-                                        let toolbar_gap = self.scaled(tb.toolbar_gap_px);
-                                        let toolbar_opacity = if self
-                                            .should_show_editor_toolbar(show_editor_toolbar)
-                                        {
-                                            1.0
+                                        let primary_hover =
+                                            self.styles.toolbar.toolbar_primary_hover_opacity;
+                                        let secondary_hover =
+                                            self.styles.toolbar.toolbar_secondary_hover_opacity;
+                                        let toolbar_top =
+                                            self.scaled(self.styles.toolbar.toolbar_offset_top_px);
+                                        let toolbar_left =
+                                            self.scaled(self.styles.toolbar.toolbar_offset_left_px);
+                                        let primary_btn_size = self.scaled(
+                                            self.styles.toolbar.toolbar_primary_btn_size_px,
+                                        );
+                                        let secondary_btn_size = self.scaled(
+                                            self.styles.toolbar.toolbar_secondary_btn_size_px,
+                                        );
+                                        let toolbar_gap =
+                                            self.scaled(self.styles.toolbar.toolbar_gap_px);
+                                        let primary_icon_size = self.scaled(
+                                            self.styles.toolbar.toolbar_primary_icon_size_px,
+                                        );
+                                        let secondary_icon_size = self.scaled(
+                                            self.styles.toolbar.toolbar_secondary_icon_size_px,
+                                        );
+                                        let sidebar_anchor = toolbar_anchor_bounds(
+                                            toolbar_left,
+                                            toolbar_top,
+                                            primary_btn_size,
+                                        );
+                                        let align_anchor = toolbar_anchor_bounds(
+                                            toolbar_left + primary_btn_size + toolbar_gap,
+                                            toolbar_top,
+                                            secondary_btn_size,
+                                        );
+                                        self.sync_tooltip_anchor(
+                                            "toolbar-sidebar-toggle",
+                                            sidebar_anchor,
+                                        );
+                                        self.sync_tooltip_anchor(
+                                            "toolbar-align-toggle",
+                                            align_anchor,
+                                        );
+                                        let toolbar_opacity = if show_editor_toolbar {
+                                            self.toolbar_opacity
                                         } else {
-                                            tb.toolbar_hidden_opacity
+                                            self.styles.toolbar.toolbar_hidden_opacity
                                         };
                                         div()
                                             .absolute()
-                                            .left(px(self.scaled(tb.toolbar_offset_left_px)))
-                                            .top(px(self.scaled(tb.toolbar_offset_top_px)))
+                                            .left(px(toolbar_left))
+                                            .top(px(toolbar_top))
                                             .flex()
                                             .items_center()
-                                            .gap(px(self.scaled(tb.toolbar_gap_px)))
+                                            .gap(px(toolbar_gap))
                                             .opacity(toolbar_opacity)
                                             .child(self.render_toolbar_button(
                                                 "toolbar-sidebar-toggle",
                                                 primary_btn_size,
-                                                self.scaled(tb.toolbar_primary_icon_size_px),
+                                                primary_icon_size,
                                                 primary_hover,
                                                 SIDEBAR_TOGGLE_SVG_PATH,
-                                                toolbar_anchor_bounds(
-                                                    toolbar_left,
-                                                    toolbar_top,
-                                                    primary_btn_size,
-                                                ),
+                                                sidebar_anchor,
                                                 TOOLBAR_SIDEBAR_TOOLTIP.0,
                                                 TOOLBAR_SIDEBAR_TOOLTIP.1,
                                                 cx,
@@ -410,14 +474,10 @@ impl Render for EditorView {
                                             .child(self.render_toolbar_button(
                                                 "toolbar-align-toggle",
                                                 secondary_btn_size,
-                                                self.scaled(tb.toolbar_secondary_icon_size_px),
+                                                secondary_icon_size,
                                                 secondary_hover,
                                                 EDITOR_ALIGN_LEFT_SVG_PATH,
-                                                toolbar_anchor_bounds(
-                                                    toolbar_left + primary_btn_size + toolbar_gap,
-                                                    toolbar_top,
-                                                    secondary_btn_size,
-                                                ),
+                                                align_anchor,
                                                 TOOLBAR_ALIGN_TOOLTIP.0,
                                                 TOOLBAR_ALIGN_TOOLTIP.1,
                                                 cx,
@@ -427,44 +487,52 @@ impl Render for EditorView {
                                             ))
                                     })
                                     .child({
-                                        let tb = &self.styles.toolbar;
-                                        let secondary_hover = tb.toolbar_secondary_hover_opacity;
-                                        let toolbar_top = self.scaled(tb.toolbar_offset_top_px);
-                                        let toolbar_right = self.scaled(tb.toolbar_offset_left_px);
-                                        let secondary_btn_size = self.scaled(tb.toolbar_secondary_btn_size_px);
-                                        let toolbar_gap = self.scaled(tb.toolbar_gap_px);
-                                        let outline_x = self.last_editor_width - toolbar_right - secondary_btn_size;
-                                        let theme_x = outline_x - toolbar_gap - secondary_btn_size;
-                                        let toolbar_opacity = if self
-                                            .should_show_editor_toolbar(show_editor_toolbar)
-                                        {
-                                            1.0
+                                        let secondary_hover =
+                                            self.styles.toolbar.toolbar_secondary_hover_opacity;
+                                        let toolbar_top =
+                                            self.scaled(self.styles.toolbar.toolbar_offset_top_px);
+                                        let toolbar_right =
+                                            self.scaled(self.styles.toolbar.toolbar_offset_left_px);
+                                        let secondary_btn_size = self.scaled(
+                                            self.styles.toolbar.toolbar_secondary_btn_size_px,
+                                        );
+                                        let secondary_icon_size = self.scaled(
+                                            self.styles.toolbar.toolbar_secondary_icon_size_px,
+                                        );
+                                        let theme_x =
+                                            editor_pane_width - toolbar_right - secondary_btn_size;
+                                        let theme_anchor = toolbar_anchor_bounds(
+                                            theme_x,
+                                            toolbar_top,
+                                            secondary_btn_size,
+                                        );
+                                        self.sync_tooltip_anchor(
+                                            "toolbar-theme-toggle",
+                                            theme_anchor,
+                                        );
+                                        let toolbar_opacity = if show_editor_toolbar {
+                                            self.toolbar_opacity
                                         } else {
-                                            tb.toolbar_hidden_opacity
+                                            self.styles.toolbar.toolbar_hidden_opacity
                                         };
                                         div()
                                             .absolute()
-                                            .right(px(self.scaled(tb.toolbar_offset_left_px)))
-                                            .top(px(self.scaled(tb.toolbar_offset_top_px)))
+                                            .right(px(toolbar_right))
+                                            .top(px(toolbar_top))
                                             .flex()
                                             .items_center()
-                                            .gap(px(self.scaled(tb.toolbar_gap_px)))
                                             .opacity(toolbar_opacity)
                                             .child(self.render_toolbar_button(
                                                 "toolbar-theme-toggle",
                                                 secondary_btn_size,
-                                                self.scaled(tb.toolbar_secondary_icon_size_px),
+                                                secondary_icon_size,
                                                 secondary_hover,
                                                 if self.theme_kind.is_dark() {
                                                     THEME_DARK_SVG_PATH
                                                 } else {
                                                     THEME_LIGHT_SVG_PATH
                                                 },
-                                                toolbar_anchor_bounds(
-                                                    theme_x,
-                                                    toolbar_top,
-                                                    secondary_btn_size,
-                                                ),
+                                                theme_anchor,
                                                 TOOLBAR_THEME_TOOLTIP.0,
                                                 TOOLBAR_THEME_TOOLTIP.1,
                                                 cx,
@@ -472,28 +540,11 @@ impl Render for EditorView {
                                                     this.toggle_theme(cx);
                                                 },
                                             ))
-                                            .child(self.render_toolbar_button(
-                                                "toolbar-outline-toggle",
-                                                secondary_btn_size,
-                                                self.scaled(tb.toolbar_secondary_icon_size_px),
-                                                secondary_hover,
-                                                OUTLINE_TOGGLE_SVG_PATH,
-                                                toolbar_anchor_bounds(
-                                                    outline_x,
-                                                    toolbar_top,
-                                                    secondary_btn_size,
-                                                ),
-                                                TOOLBAR_OUTLINE_TOOLTIP.0,
-                                                TOOLBAR_OUTLINE_TOOLTIP.1,
-                                                cx,
-                                                |this, cx| {
-                                                    this.toggle_outline_visibility(cx);
-                                                },
-                                            ))
                                     })
-                                    .when_some(self.render_tooltip_overlay(), |this, tooltip| {
-                                        this.child(tooltip)
-                                    })
+                                    .when_some(
+                                        self.render_tooltip_overlay(editor_pane_width),
+                                        |this, tooltip| this.child(tooltip),
+                                    )
                                     .when(
                                         self.search_visible
                                             && self.active_tab_supports_text_search(),
@@ -506,104 +557,103 @@ impl Render for EditorView {
                     ),
             )
             .when(
-                (self.outline_visible || self.theme_debugger_visible) && !self.tabs.is_empty(),
+                (self.theme_debugger_visible || self.utility_panel.is_some()) && !self.tabs.is_empty(),
                 |this| {
-                let os = &self.styles.outline;
-                let outline_w = self.outline_width();
-                let hover_indicator_color = os.outline_resize_active_indicator_color;
-                let hover_indicator_width =
-                    self.scaled(os.outline_resize_active_indicator_width_px);
-                let handle_width = self.scaled(os.outline_resize_handle_width_px);
-                this.child(
-                    div()
-                        .id("right-panels")
-                        .h_full()
-                        .flex()
-                        .flex_row()
-                        .when(self.outline_visible, |this| {
-                            this.child(
-                                div()
-                                    .id("outline-panel-wrap")
-                                    .relative()
-                                    .h_full()
-                                    .w(px(outline_w))
-                                    .flex_shrink_0()
-                                    .child(self.render_outline(cx))
-                                    .child(
-                                        div()
-                                            .id("outline-resize-handle")
-                                            .absolute()
-                                            .left(px(-handle_width / 2.0))
-                                            .top_0()
-                                            .w(px(handle_width))
-                                            .h_full()
-                                            .cursor(CursorStyle::ResizeLeftRight)
-                                            .hover(move |style| {
-                                                style
-                                                    .border_l(px(hover_indicator_width))
-                                                    .border_color(hover_indicator_color)
-                                            })
-                                            .on_mouse_move(cx.listener(
-                                                |this, event: &MouseMoveEvent, window, cx| {
-                                                    if this.outline_resizing {
-                                                        let window_width =
-                                                            f32::from(window.bounds().size.width);
-                                                        let trailing_width = if this
-                                                            .theme_debugger_visible
-                                                            && !this.tabs.is_empty()
-                                                        {
-                                                            this.theme_debugger_width()
-                                                        } else {
-                                                            0.0
-                                                        };
-                                                        let new_width = window_width
-                                                            - trailing_width
-                                                            - f32::from(event.position.x);
-                                                        let min_w = this.scaled(
-                                                            this.styles
-                                                                .outline
-                                                                .outline_resize_min_width_px,
-                                                        );
-                                                        let max_w = this.scaled(
-                                                            this.styles
-                                                                .outline
-                                                                .outline_resize_max_width_px,
-                                                        );
-                                                        this.outline_custom_width =
-                                                            Some(new_width.clamp(min_w, max_w));
+                    this.child(
+                        div()
+                            .id("right-panels")
+                            .h_full()
+                            .flex()
+                            .flex_row()
+                            .when(self.theme_debugger_visible, |this| {
+                                this.child(self.render_theme_debugger(cx))
+                            })
+                            .when_some(self.utility_panel, |this, _panel| {
+                                let ups = &self.styles.utility_panel;
+                                let panel_w = self.utility_panel_width();
+                                let hover_indicator_color =
+                                    ups.utility_panel_resize_active_indicator_color;
+                                let hover_indicator_width = self.scaled(
+                                    ups.utility_panel_resize_active_indicator_width_px,
+                                );
+                                let handle_width =
+                                    self.scaled(ups.utility_panel_resize_handle_width_px);
+                                this.child(
+                                    div()
+                                        .id("utility-panel-wrap")
+                                        .relative()
+                                        .h_full()
+                                        .w(px(panel_w))
+                                        .flex_shrink_0()
+                                        .child(self.render_utility_panel(cx))
+                                        .child(
+                                            div()
+                                                .id("utility-panel-resize-handle")
+                                                .absolute()
+                                                .left(px(-handle_width / 2.0))
+                                                .top_0()
+                                                .w(px(handle_width))
+                                                .h_full()
+                                                .cursor(CursorStyle::ResizeLeftRight)
+                                                .hover(move |style| {
+                                                    style
+                                                        .border_l(px(hover_indicator_width))
+                                                        .border_color(hover_indicator_color)
+                                                })
+                                                .on_mouse_move(cx.listener(
+                                                    |this, event: &MouseMoveEvent, window, cx| {
+                                                        if this.utility_panel_resizing {
+                                                            let window_width = f32::from(
+                                                                window.bounds().size.width,
+                                                            );
+                                                            let min_w = this.scaled(
+                                                                this.styles
+                                                                    .utility_panel
+                                                                    .utility_panel_resize_min_width_px,
+                                                            );
+                                                            let max_w = this.scaled(
+                                                                this.styles
+                                                                    .utility_panel
+                                                                    .utility_panel_resize_max_width_px,
+                                                            );
+                                                            let new_width =
+                                                                window_width - f32::from(event.position.x);
+                                                            this.utility_panel_custom_width = Some(
+                                                                new_width.clamp(min_w, max_w),
+                                                            );
+                                                            cx.notify();
+                                                        }
+                                                    },
+                                                ))
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(
+                                                        |this, _: &MouseDownEvent, _, cx| {
+                                                            this.utility_panel_resizing = true;
+                                                            cx.notify();
+                                                        },
+                                                    ),
+                                                )
+                                                .on_mouse_up(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.utility_panel_resizing = false;
                                                         cx.notify();
-                                                    }
-                                                },
-                                            ))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                                    this.outline_resizing = true;
-                                                    cx.notify();
-                                                }),
-                                            )
-                                            .on_mouse_up(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, _, cx| {
-                                                    this.outline_resizing = false;
-                                                    cx.notify();
-                                                }),
-                                            )
-                                            .on_mouse_up_out(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, _, cx| {
-                                                    this.outline_resizing = false;
-                                                    cx.notify();
-                                                }),
-                                            ),
-                                    ),
-                            )
-                        })
-                        .when(self.theme_debugger_visible, |this| {
-                            this.child(self.render_theme_debugger(cx))
-                        }),
-                )
-            })
+                                                    }),
+                                                )
+                                                .on_mouse_up_out(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.utility_panel_resizing = false;
+                                                        cx.notify();
+                                                    }),
+                                                ),
+                                        ),
+                                )
+                            }),
+                    )
+                },
+            )
             .when(resizing, |this| {
                 let indicator_line = if self.sidebar_resizing {
                     let iw =
@@ -614,21 +664,6 @@ impl Render for EditorView {
                         div()
                             .absolute()
                             .left(px(x))
-                            .top_0()
-                            .w(px(iw))
-                            .h_full()
-                            .bg(ic)
-                            .into_any_element(),
-                    )
-                } else if self.outline_resizing {
-                    let iw =
-                        self.scaled(self.styles.outline.outline_resize_active_indicator_width_px);
-                    let ic = self.styles.outline.outline_resize_active_indicator_color;
-                    let right_w = self.right_panel_width();
-                    Some(
-                        div()
-                            .absolute()
-                            .right(px(right_w - iw))
                             .top_0()
                             .w(px(iw))
                             .h_full()
@@ -648,7 +683,7 @@ impl Render for EditorView {
                         .h_full()
                         .cursor(CursorStyle::ResizeLeftRight)
                         .children(indicator_line)
-                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                             if this.sidebar_resizing {
                                 let new_width = f32::from(event.position.x);
                                 let min_w =
@@ -658,22 +693,11 @@ impl Render for EditorView {
                                 this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
                                 cx.notify();
                             }
-                            if this.outline_resizing {
-                                let window_width = f32::from(window.bounds().size.width);
-                                let new_width = window_width - f32::from(event.position.x);
-                                let min_w =
-                                    this.scaled(this.styles.outline.outline_resize_min_width_px);
-                                let max_w =
-                                    this.scaled(this.styles.outline.outline_resize_max_width_px);
-                                this.outline_custom_width = Some(new_width.clamp(min_w, max_w));
-                                cx.notify();
-                            }
                         }))
                         .on_mouse_up(
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| {
                                 this.sidebar_resizing = false;
-                                this.outline_resizing = false;
                                 cx.notify();
                             }),
                         )

@@ -337,13 +337,19 @@ impl EditorView {
     fn workspace_search_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
         let workspace_styles = &self.styles.workspace_search;
-        styles.text_input_height_px = workspace_styles.ws_search_input_height_px;
-        styles.text_input_padding_left_px = workspace_styles.ws_search_input_left_inset_px;
-        styles.text_input_padding_right_px = workspace_styles.ws_search_input_right_inset_px;
+        styles.text_input_height_px = self.scaled(workspace_styles.ws_search_input_height_px);
+        styles.text_input_padding_left_px =
+            self.scaled(workspace_styles.ws_search_input_left_inset_px);
+        styles.text_input_padding_right_px =
+            self.scaled(workspace_styles.ws_search_input_right_inset_px);
+        styles.text_input_font_size_px =
+            self.scaled(self.styles.text_input.text_input_font_size_px);
         styles.text_input_bg = workspace_styles.ws_search_input_bg;
         styles.text_input_focus_bg = workspace_styles.ws_search_input_focus_bg;
-        styles.text_input_radius_px = workspace_styles.ws_search_input_radius_px;
+        styles.text_input_radius_px = self.scaled(workspace_styles.ws_search_input_radius_px);
         styles.text_input_border_width_px = 0.0;
+        styles.text_input_cursor_width_px =
+            self.scaled(self.styles.text_input.text_input_cursor_width_px);
         styles.text_input_cursor_height_ratio =
             workspace_styles.ws_search_input_cursor_height_ratio;
         styles
@@ -358,12 +364,11 @@ impl EditorView {
         let button_gap = self.scaled(workspace_styles.ws_search_input_icon_gap_px);
         let icon_size = self.scaled(workspace_styles.ws_search_input_icon_size_px);
         let input_left_inset = self.scaled(workspace_styles.ws_search_input_left_inset_px);
-        let input_right_inset = self.scaled(workspace_styles.ws_search_input_right_inset_px);
         let input_left = (input_left_inset - icon_size).max(0.0) / 2.0;
-        let trailing_group_width = button_size * 4.0 + button_gap * 3.0;
-        let trailing_group_right = (input_right_inset - trailing_group_width).max(0.0) / 2.0;
         let icon_top = (input_height - icon_size).max(0.0) / 2.0;
-        let button_top = (input_height - button_size).max(0.0) / 2.0;
+        let button_inset = (input_height - button_size).max(0.0) / 2.0;
+        let trailing_group_right = button_inset;
+        let button_top = button_inset;
         let button_radius = self.scaled(4.0);
         let button_hover_bg = workspace_styles.ws_search_btn_hover_bg;
         let button_active_bg = workspace_styles.ws_search_btn_active_bg;

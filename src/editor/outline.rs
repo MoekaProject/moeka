@@ -27,12 +27,10 @@ impl EditorView {
 
         let range = start..end;
         let outline_styles = &self.styles.outline;
-        let initial_delay_ms = std::time::Duration::from_millis(
-            outline_styles.outline_flash_initial_delay_ms,
-        );
-        let show_ms = std::time::Duration::from_millis(
-            outline_styles.outline_flash_show_duration_ms,
-        );
+        let initial_delay_ms =
+            std::time::Duration::from_millis(outline_styles.outline_flash_initial_delay_ms);
+        let show_ms =
+            std::time::Duration::from_millis(outline_styles.outline_flash_show_duration_ms);
         let gap_ms = std::time::Duration::from_millis(outline_styles.outline_flash_gap_duration_ms);
         self.outline_flash_epoch += 1;
         let epoch = self.outline_flash_epoch;
@@ -188,10 +186,10 @@ impl EditorView {
         let padding_left = self.scaled(os.outline_item_padding_left_px);
         let padding_right = self.scaled(os.outline_item_padding_right_px);
         let font_size = self.scaled(os.outline_item_font_size_px);
-        let item_line_height = (font_size * os.outline_item_line_height_factor)
-            .max(font_size + self.scaled(1.0));
-        let item_padding_y = ((item_height - item_line_height).max(0.0) / 2.0)
-            .max(self.scaled(2.0));
+        let item_line_height =
+            (font_size * os.outline_item_line_height_factor).max(font_size + self.scaled(1.0));
+        let item_padding_y =
+            ((item_height - item_line_height).max(0.0) / 2.0).max(self.scaled(2.0));
         let header_font_size = self.scaled(os.outline_header_font_size_px);
         let text_color = os.outline_item_text_color;
         let active_text_color = os.outline_item_active_text_color;
@@ -315,21 +313,15 @@ impl EditorView {
         div()
             .id("outline-panel")
             .h_full()
-            .w(px(self.outline_width()))
+            .w_full()
             .flex_shrink_0()
             .flex()
             .flex_col()
             .overflow_y_scroll()
             .track_scroll(&self.outline_scroll_handle)
             .bg(os.outline_bg)
-            .when(self.outline_resizing, |this| {
-                this.border_l(px(self.scaled(os.outline_resize_active_indicator_width_px)))
-                    .border_color(os.outline_resize_active_indicator_color)
-            })
-            .when(!self.outline_resizing, |this| {
-                this.border_l(px(self.scaled(os.outline_border_width_px)))
-                    .border_color(os.outline_border_color)
-            })
+            .border_l(px(self.scaled(os.outline_border_width_px)))
+            .border_color(os.outline_border_color)
             .children(items)
             .into_any_element()
     }

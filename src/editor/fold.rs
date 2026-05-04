@@ -63,6 +63,18 @@ impl EditorView {
                     .unwrap_or(line_count);
                 if end > start { Some(start..end) } else { None }
             }
+            BlockType::Blockquote => {
+                let start = line + 1;
+                let end = (start..line_count)
+                    .find(|&l| {
+                        !matches!(
+                            self.decorations.get(l).map(|d| &d.block_type),
+                            Some(BlockType::Blockquote)
+                        )
+                    })
+                    .unwrap_or(line_count);
+                if end > start { Some(start..end) } else { None }
+            }
             _ => {
                 if self.active_tab_is_non_markdown_text() {
                     self.generic_code_fold_range_for_line(line)

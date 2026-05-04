@@ -66,6 +66,8 @@ actions!(
         Quit,
         Escape,
         ToggleOutline,
+        ToggleInfoPanel,
+        ToggleGitHistory,
         ToggleThemeDebugger,
         AddCursorAbove,
         AddCursorBelow,
