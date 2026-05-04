@@ -1581,6 +1581,7 @@ impl EditorView {
     }
 
     pub(crate) fn render_git_history_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let history_items = self.cached_git_history_items();
         let ups = &self.styles.utility_panel;
         let top_spacer = self.scaled(ups.utility_panel_top_spacer_height_px);
         let bottom_spacer = self.scaled(ups.utility_panel_bottom_spacer_height_px);
@@ -1590,8 +1591,6 @@ impl EditorView {
         let section_gap = self.scaled(ups.utility_panel_section_gap_px);
         let section_padding_x = self.scaled(ups.utility_panel_section_padding_x_px);
         let empty_font_size = self.scaled(ups.utility_panel_empty_font_size_px);
-
-        let history_items = self.cached_git_history_items();
         let mut children: Vec<AnyElement> = vec![
             div().h(px(top_spacer)).flex_shrink_0().into_any_element(),
             div()
