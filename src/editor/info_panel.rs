@@ -58,7 +58,7 @@ struct PendingPanelReference {
 }
 
 #[derive(Clone)]
-struct GitHistoryItem {
+pub(crate) struct GitHistoryItem {
     commit_hash: Option<String>,
     short_hash: String,
     message: String,
@@ -424,6 +424,22 @@ fn build_git_diff_rows(base_text: &str, target_text: &str) -> Vec<GitDiffRow> {
 }
 
 impl EditorView {
+    fn cached_git_history_items(&mut self) -> Option<Vec<GitHistoryItem>> {
+        let cache_fresh = self
+            .git_history_cache_scanned_at
+            .and_then(|scanned_at| SystemTime::now().duration_since(scanned_at).ok())
+            .is_some_and(|age| age < Duration::from_secs(1));
+        let current_path = self.current_file_path.clone();
+        if cache_fresh && self.git_history_cache_path == current_path {
+            return self.git_history_cache_result.clone().flatten();
+        }
+
+        self.git_history_cache_path = current_path;
+        self.git_history_cache_result = Some(self.collect_git_history_items());
+        self.git_history_cache_scanned_at = Some(SystemTime::now());
+        self.git_history_cache_result.clone().flatten()
+    }
+
     fn git_repo_context(&self) -> Option<GitRepoContext> {
         let file_path = self.current_file_path.clone()?;
         let file_dir = file_path.parent()?;
@@ -533,6 +549,8 @@ impl EditorView {
             self.tabs[index].title = diff_title;
             self.tabs[index].path = Some(path);
             self.tabs[index].git_diff = Some(diff);
+            self.git_diff_scroll_handle
+                .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
             self.activate_tab_by_index(index, cx);
             return;
         }
@@ -565,6 +583,8 @@ impl EditorView {
             history: history_store::TabHistory::default(),
         };
         self.tabs.insert(insert_index, tab);
+        self.git_diff_scroll_handle
+            .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         self.activate_tab_by_index(insert_index, cx);
     }
 
@@ -1193,13 +1213,17 @@ impl EditorView {
     fn render_git_history_item(&self, item: &GitHistoryItem, cx: &mut Context<Self>) -> AnyElement {
         let ups = &self.styles.utility_panel;
         let history_item = item.clone();
+        let row_height = self.scaled(ups.utility_panel_item_font_size_px * 3.4);
         div()
             .px(px(self.scaled(ups.utility_panel_section_padding_x_px)))
             .py(px(self.scaled(ups.utility_panel_item_gap_px)))
             .w_full()
+            .h(px(row_height))
             .flex()
             .flex_col()
+            .justify_center()
             .gap(px(self.scaled(ups.utility_panel_item_gap_px) * 0.5))
+            .overflow_hidden()
             .cursor(CursorStyle::Arrow)
             .hover(move |style| style.bg(ups.utility_panel_button_hover_bg))
             .on_mouse_down(
@@ -1218,19 +1242,28 @@ impl EditorView {
                     .text_size(px(self.scaled(ups.utility_panel_item_font_size_px)))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w(px(0.0))
                             .text_color(ups.utility_panel_item_value_text_color)
+                            .whitespace_nowrap()
+                            .truncate()
                             .child(SharedString::from(item.short_hash.clone())),
                     )
                     .child(
                         div()
+                            .flex_none()
                             .text_color(ups.utility_panel_item_label_text_color)
+                            .whitespace_nowrap()
                             .child(SharedString::from(item.time_label.clone())),
                     ),
             )
             .child(
                 div()
+                    .w_full()
                     .text_size(px(self.scaled(ups.utility_panel_item_font_size_px)))
                     .text_color(ups.utility_panel_item_value_text_color)
+                    .whitespace_nowrap()
+                    .truncate()
                     .child(SharedString::from(item.message.clone())),
             )
             .into_any_element()
@@ -1259,12 +1292,24 @@ impl EditorView {
             ..removed_color
         };
 
+        let row_height = 22.0;
+        let header_height = 52.0;
+        let prefix_height = header_height;
+        let (visible_start, visible_end, top_spacer_height, bottom_spacer_height) = self
+            .visible_uniform_list_range(
+                &self.git_diff_scroll_handle,
+                prefix_height,
+                row_height,
+                diff.rows.len(),
+                16,
+            );
         let mut children = vec![
             div()
                 .px(px(16.0))
-                .py(px(12.0))
+                .h(px(header_height))
                 .flex()
                 .flex_col()
+                .justify_center()
                 .gap(px(4.0))
                 .border_b(px(1.0))
                 .border_color(self.styles.utility_panel.utility_panel_border_color)
@@ -1279,7 +1324,17 @@ impl EditorView {
                 .into_any_element(),
         ];
 
-        for row in &diff.rows {
+        if top_spacer_height > 0.0 {
+            children.push(
+                div()
+                    .w_full()
+                    .h(px(top_spacer_height))
+                    .flex_none()
+                    .into_any_element(),
+            );
+        }
+
+        for row in diff.rows[visible_start..visible_end].iter() {
             let background = match row.kind {
                 GitDiffRowKind::Context => gpui::transparent_black(),
                 GitDiffRowKind::Added => added_bg,
@@ -1302,28 +1357,34 @@ impl EditorView {
             children.push(
                 div()
                     .px(px(16.0))
-                    .py(px(4.0))
+                    .h(px(row_height))
                     .w_full()
                     .flex()
-                    .items_start()
+                    .items_center()
                     .gap(px(10.0))
                     .bg(background)
+                    .overflow_hidden()
                     .font_family("Menlo")
                     .text_size(px(12.0))
                     .child(
                         div()
+                            .flex_none()
                             .w(px(34.0))
                             .text_color(line_number_color)
+                            .whitespace_nowrap()
                             .child(old_number),
                     )
                     .child(
                         div()
+                            .flex_none()
                             .w(px(34.0))
                             .text_color(line_number_color)
+                            .whitespace_nowrap()
                             .child(new_number),
                     )
                     .child(
                         div()
+                            .flex_none()
                             .w(px(12.0))
                             .text_color(match row.kind {
                                 GitDiffRowKind::Added => added_color,
@@ -1335,7 +1396,9 @@ impl EditorView {
                     .child(
                         div()
                             .flex_1()
+                            .min_w(px(0.0))
                             .text_color(text_color)
+                            .whitespace_nowrap()
                             .child(if row.text.is_empty() {
                                 SharedString::from(" ")
                             } else {
@@ -1346,12 +1409,24 @@ impl EditorView {
             );
         }
 
+        if bottom_spacer_height > 0.0 {
+            children.push(
+                div()
+                    .w_full()
+                    .h(px(bottom_spacer_height))
+                    .flex_none()
+                    .into_any_element(),
+            );
+        }
+
         div()
             .id("git-diff-view")
             .h_full()
             .w_full()
             .bg(self.styles.editor.editor_bg)
             .overflow_y_scroll()
+            .overflow_x_scroll()
+            .track_scroll(&self.git_diff_scroll_handle)
             .flex()
             .flex_col()
             .children(children)
@@ -1516,7 +1591,7 @@ impl EditorView {
         let section_padding_x = self.scaled(ups.utility_panel_section_padding_x_px);
         let empty_font_size = self.scaled(ups.utility_panel_empty_font_size_px);
 
-        let history_items = self.collect_git_history_items();
+        let history_items = self.cached_git_history_items();
         let mut children: Vec<AnyElement> = vec![
             div().h(px(top_spacer)).flex_shrink_0().into_any_element(),
             div()
@@ -1534,8 +1609,24 @@ impl EditorView {
         match history_items {
             Some(items) if !items.is_empty() => {
                 children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                for item in &items {
+                let item_height = self.scaled(ups.utility_panel_item_font_size_px * 3.4);
+                let prefix_height = top_spacer + header_height + section_gap;
+                let (visible_start, visible_end, top_gap, bottom_gap) = self
+                    .visible_uniform_list_range(
+                        &self.git_history_scroll_handle,
+                        prefix_height,
+                        item_height,
+                        items.len(),
+                        12,
+                    );
+                if top_gap > 0.0 {
+                    children.push(div().h(px(top_gap)).flex_shrink_0().into_any_element());
+                }
+                for item in &items[visible_start..visible_end] {
                     children.push(self.render_git_history_item(item, cx));
+                }
+                if bottom_gap > 0.0 {
+                    children.push(div().h(px(bottom_gap)).flex_shrink_0().into_any_element());
                 }
             }
             Some(_) => {
@@ -1575,6 +1666,7 @@ impl EditorView {
             .w_full()
             .bg(ups.utility_panel_bg)
             .overflow_y_scroll()
+            .track_scroll(&self.git_history_scroll_handle)
             .border_l(px(ups.utility_panel_border_width_px))
             .border_color(ups.utility_panel_border_color)
             .flex()

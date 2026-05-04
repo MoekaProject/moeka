@@ -1269,31 +1269,53 @@ fn syntax_lookup_candidates(language: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+
     use super::{prefix_is_folded, task_prefix_is_folded};
 
     #[test]
     fn regular_prefix_hides_at_trailing_edge() {
-        assert!(prefix_is_folded(0, 2, Some(2)));
+        assert!(prefix_is_folded(0, 2, &[Range { start: 2, end: 2 }]));
     }
 
     #[test]
     fn task_prefix_stays_visible_without_trailing_space() {
-        assert!(!task_prefix_is_folded("- [ ]", 0, 5, Some(5)));
+        assert!(!task_prefix_is_folded(
+            "- [ ]",
+            0,
+            5,
+            &[Range { start: 5, end: 5 }],
+        ));
     }
 
     #[test]
     fn task_prefix_stays_visible_before_non_space_suffix() {
-        assert!(!task_prefix_is_folded("- [ ]a", 0, 5, Some(5)));
+        assert!(!task_prefix_is_folded(
+            "- [ ]a",
+            0,
+            5,
+            &[Range { start: 5, end: 5 }],
+        ));
     }
 
     #[test]
     fn task_prefix_hides_when_trailing_space_exists() {
-        assert!(task_prefix_is_folded("- [ ] ", 0, 5, Some(5)));
+        assert!(task_prefix_is_folded(
+            "- [ ] ",
+            0,
+            5,
+            &[Range { start: 5, end: 5 }],
+        ));
     }
 
     #[test]
     fn task_prefix_hides_after_content_gap() {
-        assert!(task_prefix_is_folded("- [ ] text", 0, 5, Some(6)));
+        assert!(task_prefix_is_folded(
+            "- [ ] text",
+            0,
+            5,
+            &[Range { start: 6, end: 6 }],
+        ));
     }
 }
 

@@ -164,7 +164,6 @@ pub(crate) fn perform_window_drag(window: &gpui::Window) {
     }
 }
 
-#[cfg(target_os = "macos")]
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn perform_window_drag(_window: &gpui::Window) {}
 
@@ -650,6 +649,7 @@ pub(crate) struct LineDisplayInfo {
     pub display_text: String,
     pub display_to_buffer: Vec<usize>,
     pub buffer_to_display: Vec<usize>,
+    pub base_runs: Vec<gpui::TextRun>,
     pub font_size: f32,
     pub line_height: f32,
     pub visual_line_count: usize,
@@ -835,6 +835,11 @@ pub struct EditorView {
     pub(crate) temp_save_epochs: HashMap<String, usize>,
     pub(crate) outline_resizing: bool,
     pub(crate) outline_scroll_handle: ScrollHandle,
+    pub(crate) git_history_scroll_handle: ScrollHandle,
+    pub(crate) git_diff_scroll_handle: ScrollHandle,
+    pub(crate) git_history_cache_path: Option<PathBuf>,
+    pub(crate) git_history_cache_result: Option<Option<Vec<info_panel::GitHistoryItem>>>,
+    pub(crate) git_history_cache_scanned_at: Option<SystemTime>,
     pub(crate) utility_panel: Option<RightUtilityPanel>,
     pub(crate) utility_panel_custom_width: Option<f32>,
     pub(crate) utility_panel_resizing: bool,
@@ -1117,6 +1122,11 @@ impl EditorView {
             temp_save_epochs: HashMap::new(),
             outline_resizing: false,
             outline_scroll_handle: ScrollHandle::new(),
+            git_history_scroll_handle: ScrollHandle::new(),
+            git_diff_scroll_handle: ScrollHandle::new(),
+            git_history_cache_path: None,
+            git_history_cache_result: None,
+            git_history_cache_scanned_at: None,
             utility_panel: None,
             utility_panel_custom_width: None,
             utility_panel_resizing: false,
@@ -1812,6 +1822,48 @@ impl EditorView {
     pub(crate) fn active_tab_supports_text_search(&self) -> bool {
         self.active_file_kind()
             .is_some_and(FileKind::supports_text_search)
+    }
+
+    pub(crate) fn visible_uniform_list_range(
+        &self,
+        scroll_handle: &ScrollHandle,
+        prefix_height: f32,
+        item_height: f32,
+        item_count: usize,
+        overscan: usize,
+    ) -> (usize, usize, f32, f32) {
+        if item_count == 0 || item_height <= 0.0 {
+            return (0, 0, 0.0, 0.0);
+        }
+
+        let viewport_height: f32 = scroll_handle.bounds().size.height.into();
+        let viewport_height = if viewport_height > 0.0 {
+            viewport_height
+        } else {
+            self.last_window_height.max(item_height)
+        };
+        let scroll_y = (-f32::from(scroll_handle.offset().y)).max(0.0);
+        let content_start = (scroll_y - prefix_height).max(0.0);
+        let content_end = (scroll_y + viewport_height - prefix_height).max(0.0);
+        let start = ((content_start / item_height).floor() as usize).saturating_sub(overscan);
+        let end = ((content_end / item_height).ceil() as usize)
+            .saturating_add(overscan)
+            .min(item_count)
+            .max(start);
+        let top_spacer_height = start as f32 * item_height;
+        let bottom_spacer_height = item_count.saturating_sub(end) as f32 * item_height;
+        (start, end, top_spacer_height, bottom_spacer_height)
+    }
+
+    pub(crate) fn scroll_uniform_list_item_to_top(
+        scroll_handle: &ScrollHandle,
+        prefix_height: f32,
+        item_height: f32,
+        index: usize,
+    ) {
+        let offset = scroll_handle.offset();
+        let target_y = -(prefix_height + index as f32 * item_height);
+        scroll_handle.set_offset(gpui::point(offset.x, gpui::px(target_y)));
     }
 
     pub(crate) fn active_tab_supports_persistent_save(&self) -> bool {

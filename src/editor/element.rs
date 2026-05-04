@@ -698,6 +698,7 @@ impl Element for EditorElement {
                     display_text: String::new(),
                     display_to_buffer: Vec::new(),
                     buffer_to_display: vec![0; line_content.len()],
+                    base_runs: Vec::new(),
                     font_size,
                     line_height: 0.0,
                     visual_line_count: 0,
@@ -852,6 +853,7 @@ impl Element for EditorElement {
                     display_text: String::new(),
                     display_to_buffer: Vec::new(),
                     buffer_to_display: vec![0; line_content.len()],
+                    base_runs: Vec::new(),
                     font_size,
                     line_height: 0.0,
                     visual_line_count: 0,
@@ -889,6 +891,7 @@ impl Element for EditorElement {
                     display_text: cached.display_text.clone(),
                     display_to_buffer: cached.display_to_buffer.clone(),
                     buffer_to_display: cached.buffer_to_display.clone(),
+                    base_runs: cached.base_runs.clone(),
                     font_size,
                     line_height,
                     visual_line_count,
@@ -904,25 +907,7 @@ impl Element for EditorElement {
                     continue;
                 }
 
-                let mut runs = helpers::build_text_runs_for_display(
-                    &cached.display_text,
-                    line_content,
-                    &cached.display_to_buffer,
-                    &decoration,
-                    &active_ranges,
-                    false,
-                    false,
-                    &body_font,
-                    &body_cjk_font,
-                    &monospace_font,
-                    &heading_font,
-                    &heading_cjk_font,
-                    collapsed_task_prefix_chars,
-                    font_size,
-                    theme,
-                    editor.styles.wiki_link.wiki_link_text_color,
-                    editor.styles.wiki_link.wiki_link_text_weight,
-                );
+                let mut runs = cached.base_runs.clone();
                 helpers::apply_search_match_text_styles(
                     &mut runs,
                     &cached.display_text,
@@ -1549,6 +1534,7 @@ impl Element for EditorElement {
                 display_text: display_text.clone(),
                 display_to_buffer: display_to_buffer.clone(),
                 buffer_to_display: buffer_to_display.clone(),
+                base_runs: runs.clone(),
                 font_size,
                 line_height,
                 visual_line_count,

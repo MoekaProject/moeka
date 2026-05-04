@@ -435,6 +435,7 @@ mod tests {
                 cursor_offset: 7,
                 cursor_anchor: 7,
                 scroll_offset: 7.0,
+                extra_cursors: Vec::new(),
             },
             recovery: TabRecoveryState::default(),
             history: TabHistoryIndex {

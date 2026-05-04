@@ -12,6 +12,20 @@ use gpui::{
 use super::*;
 
 impl EditorView {
+    fn sidebar_item_height_px(&self) -> f32 {
+        self.scaled(self.styles.sidebar.sidebar_item_height_px)
+    }
+
+    fn sidebar_scroll_prefix_height(&self, has_root: bool) -> f32 {
+        let ss = &self.styles.sidebar;
+        let logo_height = self.scaled(ss.sidebar_logo_size_px + 2.0 * ss.sidebar_logo_padding_y_px);
+        if has_root {
+            logo_height + self.scaled(ss.sidebar_header_height_px)
+        } else {
+            logo_height
+        }
+    }
+
     fn sidebar_drag_position_key(position: gpui::Point<Pixels>) -> (f32, f32) {
         (position.x.into(), position.y.into())
     }
@@ -157,7 +171,9 @@ impl EditorView {
             return None;
         }
 
-        Some(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string()))
+        Some(PathBuf::from(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ))
     }
 
     fn merge_sidebar_git_status(
@@ -255,10 +271,8 @@ impl EditorView {
                             break;
                         }
 
-                        let merged = Self::merge_sidebar_git_status(
-                            statuses.get(&path).copied(),
-                            status,
-                        );
+                        let merged =
+                            Self::merge_sidebar_git_status(statuses.get(&path).copied(), status);
                         statuses.insert(path.clone(), merged);
 
                         if path == self.sidebar_root {
@@ -385,14 +399,16 @@ impl EditorView {
         self.invalidate_sidebar_items_cache();
         let items = self.sidebar_items();
         if let Some(index) = items.iter().position(|item| item.path == path) {
-            if index + 1 > self.sidebar_render_limit {
-                self.sidebar_render_limit = (index + 32).min(items.len().max(index + 1));
-            }
             self.selected_sidebar_paths.clear();
             self.selected_sidebar_paths.insert(path.clone());
             self.focused_sidebar_path = Some(path);
             self.sidebar_selection_anchor = self.focused_sidebar_path.clone();
-            self.sidebar_scroll_handle.scroll_to_item(index);
+            Self::scroll_uniform_list_item_to_top(
+                &self.sidebar_scroll_handle,
+                self.sidebar_scroll_prefix_height(true),
+                self.sidebar_item_height_px(),
+                index,
+            );
 
             let reveal_path = self.focused_sidebar_path.clone();
             cx.spawn(async move |this, cx| {
@@ -403,11 +419,12 @@ impl EditorView {
                     if let Some(path) = reveal_path.as_ref() {
                         let items = editor.sidebar_items();
                         if let Some(index) = items.iter().position(|item| &item.path == path) {
-                            if index + 1 > editor.sidebar_render_limit {
-                                editor.sidebar_render_limit =
-                                    (index + 32).min(items.len().max(index + 1));
-                            }
-                            editor.sidebar_scroll_handle.scroll_to_item(index);
+                            Self::scroll_uniform_list_item_to_top(
+                                &editor.sidebar_scroll_handle,
+                                editor.sidebar_scroll_prefix_height(true),
+                                editor.sidebar_item_height_px(),
+                                index,
+                            );
                             cx.notify();
                         }
                     }
@@ -430,15 +447,7 @@ impl EditorView {
     }
 
     fn maybe_extend_sidebar_items(&mut self, total_items: usize, cx: &mut Context<Self>) {
-        if self.sidebar_edit.is_some() || total_items <= self.sidebar_render_limit {
-            return;
-        }
-
-        let bottom_item = self.sidebar_scroll_handle.bottom_item();
-        if bottom_item + 12 >= self.sidebar_render_limit.saturating_sub(1) {
-            self.sidebar_render_limit = (self.sidebar_render_limit + 200).min(total_items);
-            cx.notify();
-        }
+        let _ = (total_items, cx);
     }
 
     fn sidebar_edit_text_input_styles(&self) -> crate::style::TextInputStyles {
@@ -1667,7 +1676,8 @@ impl EditorView {
         let path = item.path.clone();
         let is_dir = item.is_dir;
         let ss = &self.styles.sidebar;
-        let git_status_color = self.sidebar_git_status_color(self.sidebar_git_statuses.get(&path).copied());
+        let git_status_color =
+            self.sidebar_git_status_color(self.sidebar_git_statuses.get(&path).copied());
         let shift = ss.sidebar_item_left_shift_px;
         let is_root_level = item.depth == 0;
         let left_padding = if is_root_level {
@@ -2103,11 +2113,6 @@ impl EditorView {
 
             let items = items.unwrap_or_default();
             let render_all_items = self.sidebar_edit.is_some();
-            let item_limit = if render_all_items {
-                items.len()
-            } else {
-                self.sidebar_render_limit.min(items.len())
-            };
 
             // Pre-compute which indent levels have a sibling below for each item.
             // A guide at level L is shown for item[i] if there exists a later item[j] (j > i)
@@ -2131,37 +2136,79 @@ impl EditorView {
                 item_guide_levels[i] = levels;
             }
 
-            let mut injected = false;
-            if create_parent.as_ref() == Some(&self.sidebar_root) {
-                if let Some(ref editor) = create_editor {
-                    tree_items.push(self.render_sidebar_edit_row(editor, 1, create_is_dir, cx));
-                    injected = true;
+            if render_all_items {
+                let mut injected = false;
+                if create_parent.as_ref() == Some(&self.sidebar_root) {
+                    if let Some(ref editor) = create_editor {
+                        tree_items.push(self.render_sidebar_edit_row(editor, 1, create_is_dir, cx));
+                        injected = true;
+                    }
                 }
-            }
-            for (idx, item) in items.iter().take(item_limit).enumerate() {
-                tree_items.push(self.render_sidebar_item(
-                    item.clone(),
-                    &item_guide_levels[idx],
-                    cx,
-                ));
-                if let Some(ref parent) = create_parent {
-                    if !injected && item.is_dir && &item.path == parent {
-                        if let Some(ref editor) = create_editor {
-                            let depth = create_depth.unwrap_or(1);
-                            tree_items.push(self.render_sidebar_edit_row(
-                                editor,
-                                depth,
-                                create_is_dir,
-                                cx,
-                            ));
-                            injected = true;
+                for (idx, item) in items.iter().enumerate() {
+                    tree_items.push(self.render_sidebar_item(
+                        item.clone(),
+                        &item_guide_levels[idx],
+                        cx,
+                    ));
+                    if let Some(ref parent) = create_parent {
+                        if !injected && item.is_dir && &item.path == parent {
+                            if let Some(ref editor) = create_editor {
+                                let depth = create_depth.unwrap_or(1);
+                                tree_items.push(self.render_sidebar_edit_row(
+                                    editor,
+                                    depth,
+                                    create_is_dir,
+                                    cx,
+                                ));
+                                injected = true;
+                            }
                         }
                     }
                 }
-            }
-            if render_all_items && !injected {
-                if let (Some(depth), Some(editor)) = (create_depth, &create_editor) {
-                    tree_items.push(self.render_sidebar_edit_row(editor, depth, create_is_dir, cx));
+                if !injected {
+                    if let (Some(depth), Some(editor)) = (create_depth, &create_editor) {
+                        tree_items.push(self.render_sidebar_edit_row(
+                            editor,
+                            depth,
+                            create_is_dir,
+                            cx,
+                        ));
+                    }
+                }
+            } else {
+                let item_height = self.sidebar_item_height_px();
+                let (visible_start, visible_end, top_spacer_height, bottom_spacer_height) = self
+                    .visible_uniform_list_range(
+                        &self.sidebar_scroll_handle,
+                        self.sidebar_scroll_prefix_height(true),
+                        item_height,
+                        items.len(),
+                        12,
+                    );
+                if top_spacer_height > 0.0 {
+                    tree_items.push(
+                        div()
+                            .w_full()
+                            .h(px(top_spacer_height))
+                            .flex_none()
+                            .into_any_element(),
+                    );
+                }
+                for idx in visible_start..visible_end {
+                    tree_items.push(self.render_sidebar_item(
+                        items[idx].clone(),
+                        &item_guide_levels[idx],
+                        cx,
+                    ));
+                }
+                if bottom_spacer_height > 0.0 {
+                    tree_items.push(
+                        div()
+                            .w_full()
+                            .h(px(bottom_spacer_height))
+                            .flex_none()
+                            .into_any_element(),
+                    );
                 }
             }
         }
