@@ -1044,7 +1044,27 @@ impl EditorView {
             cx.notify();
         }
 
-        let hovering_gutter_fold_area = f32::from(event.position.x) <= self.last_content_left;
+        let hovering_gutter_fold_area = self
+            .gutter_fold_areas
+            .iter()
+            .fold(None::<Bounds<Pixels>>, |band, (bounds, _, _)| {
+                Some(match band {
+                    Some(band) => Bounds::from_corners(
+                        point(
+                            band.origin.x.min(bounds.origin.x),
+                            band.origin.y.min(bounds.origin.y),
+                        ),
+                        point(
+                            (band.origin.x + band.size.width)
+                                .max(bounds.origin.x + bounds.size.width),
+                            (band.origin.y + band.size.height)
+                                .max(bounds.origin.y + bounds.size.height),
+                        ),
+                    ),
+                    None => *bounds,
+                })
+            })
+            .is_some_and(|bounds| bounds.contains(&event.position));
         if hovering_gutter_fold_area != self.hovering_gutter_fold_area {
             self.hovering_gutter_fold_area = hovering_gutter_fold_area;
             cx.notify();

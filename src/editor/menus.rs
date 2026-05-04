@@ -8,6 +8,7 @@ use gpui::{
 
 use crate::markdown::{BlockType, InlineKind};
 
+use super::shortcut::{ShortcutRenderStyle, render_shortcut};
 use super::*;
 
 #[derive(Clone)]
@@ -942,6 +943,16 @@ impl EditorView {
         let icon_gap = self.scaled(ms.menu_format_icon_gap_px);
         let icon_shared: Option<SharedString> =
             icon_path.map(|p| SharedString::from(p.to_string()));
+        let shortcut_style = ShortcutRenderStyle {
+            font_size_px: self.scaled(ms.menu_shortcut_font_size_px),
+            text_color: ms.menu_shortcut_text_color,
+            gap_px: self.scaled(ms.menu_shortcut_gap_px),
+            key_min_width_px: self.scaled(ms.menu_shortcut_key_min_width_px),
+            key_height_px: self.scaled(ms.menu_shortcut_key_height_px),
+            key_padding_x_px: self.scaled(ms.menu_shortcut_key_padding_x_px),
+            key_radius_px: self.scaled(ms.menu_shortcut_key_radius_px),
+            key_bg: ms.menu_shortcut_key_bg,
+        };
         div()
             .w_full()
             .h(px(self.scaled(ms.menu_item_height_px)))
@@ -976,12 +987,7 @@ impl EditorView {
                     .child(label.to_string()),
             )
             .when_some(shortcut, |this, shortcut| {
-                this.child(
-                    div()
-                        .text_size(px(self.scaled(ms.menu_shortcut_font_size_px)))
-                        .text_color(ms.menu_shortcut_text_color)
-                        .child(shortcut.to_string()),
-                )
+                this.child(div().child(render_shortcut(shortcut, shortcut_style)))
             })
             .on_mouse_down(
                 MouseButton::Left,

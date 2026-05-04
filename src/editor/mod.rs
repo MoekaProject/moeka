@@ -15,10 +15,12 @@ mod scaling;
 mod search;
 mod session_store;
 pub(crate) mod settings_panel;
+mod shortcut;
 mod sidebar;
 mod tabs;
 mod temp_store;
 mod theme_debugger;
+mod tooltip;
 mod workspace_search;
 
 use std::collections::{HashMap, HashSet};
@@ -771,6 +773,10 @@ pub struct EditorView {
     pub(crate) sidebar_drag_hover_target: Option<PathBuf>,
     /// 拖拽悬停的目录（用于延迟自动展开）
     pub(crate) sidebar_drag_expand_hover_dir: Option<PathBuf>,
+    /// 当前 drag move 是否已被子 item 命中；tree 容器据此避免同帧清空 child hover。
+    pub(crate) sidebar_drag_child_hover_position: Option<(f32, f32)>,
+    /// 拖拽接近 sidebar 可见区域边缘时的自动滚动任务。
+    pub(crate) sidebar_drag_scroll_task: Option<Task<()>>,
     /// 拖拽悬停自动展开的延迟 task
     pub(crate) sidebar_drag_expand_task: Option<Task<()>>,
     /// 拖拽悬停时自动展开、离开后可回折的目录集合
@@ -802,6 +808,9 @@ pub struct EditorView {
     pub(crate) scroll_anim_epoch: usize,
     pub(crate) toolbar_hidden_by_scroll: bool,
     pub(crate) toolbar_corner_hovered: bool,
+    pub(crate) tooltip_pending: Option<tooltip::TooltipState>,
+    pub(crate) tooltip_visible: Option<tooltip::TooltipState>,
+    pub(crate) tooltip_task: Option<Task<()>>,
     pub(crate) last_window_width: f32,
     pub(crate) last_window_height: f32,
 
@@ -1040,6 +1049,8 @@ impl EditorView {
             sidebar_sort_mode: SidebarSortMode::NameAsc,
             sidebar_drag_hover_target: None,
             sidebar_drag_expand_hover_dir: None,
+            sidebar_drag_child_hover_position: None,
+            sidebar_drag_scroll_task: None,
             sidebar_drag_expand_task: None,
             sidebar_drag_auto_expanded_dirs: HashSet::new(),
             sidebar_items_cache: Vec::new(),
@@ -1066,6 +1077,9 @@ impl EditorView {
             scroll_anim_epoch: 0,
             toolbar_hidden_by_scroll: false,
             toolbar_corner_hovered: false,
+            tooltip_pending: None,
+            tooltip_visible: None,
+            tooltip_task: None,
             last_window_width: 1360.0,
             last_window_height: 820.0,
 

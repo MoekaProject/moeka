@@ -11,6 +11,103 @@ use gpui::{
 use super::*;
 
 impl EditorView {
+    fn sidebar_drag_position_key(position: gpui::Point<Pixels>) -> (f32, f32) {
+        (position.x.into(), position.y.into())
+    }
+
+    fn sidebar_drag_has_child_target(&self, root: &Path) -> bool {
+        self.sidebar_drag_expand_hover_dir
+            .as_ref()
+            .is_some_and(|target| target != root)
+            || self
+                .sidebar_drag_hover_target
+                .as_ref()
+                .is_some_and(|target| target != root)
+    }
+
+    fn sidebar_drag_child_handled_same_event(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        root: &Path,
+    ) -> bool {
+        let handled = self.sidebar_drag_has_child_target(root)
+            && self.sidebar_drag_child_hover_position == Some(Self::sidebar_drag_position_key(position));
+        self.sidebar_drag_child_hover_position = None;
+        handled
+    }
+
+    fn clear_sidebar_drag_hover(&mut self, cx: &mut Context<Self>) {
+        self.update_sidebar_drag_expand_hover_dir(None, cx);
+        self.update_sidebar_drag_target(None, cx);
+    }
+
+    fn update_sidebar_drag_autoscroll(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_drag_scroll_task = None;
+
+        let bounds = self.sidebar_scroll_handle.bounds();
+        if !bounds.contains(&position) {
+            return;
+        }
+
+        let panel_height = bounds.size.height;
+        if panel_height <= px(0.) {
+            return;
+        }
+
+        let event_offset = position.y - bounds.origin.y;
+        let hovered_region_offset = event_offset / panel_height;
+        let vertical_scroll_offset = if hovered_region_offset <= 0.05 {
+            8.0
+        } else if hovered_region_offset <= 0.15 {
+            5.0
+        } else if hovered_region_offset >= 0.95 {
+            -8.0
+        } else if hovered_region_offset >= 0.85 {
+            -5.0
+        } else {
+            return;
+        };
+
+        let adjustment = px(vertical_scroll_offset);
+        self.sidebar_drag_scroll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let did_scroll = this
+                    .update(cx, |this, cx| {
+                        this.sidebar_drag_scroll_task.as_ref()?;
+
+                        let offset = this.sidebar_scroll_handle.offset();
+                        let max_offset = this.sidebar_scroll_handle.max_offset();
+                        let next_y = (offset.y + adjustment).clamp(-max_offset.height, px(0.));
+                        if next_y == offset.y {
+                            return None;
+                        }
+
+                        this.sidebar_scroll_handle
+                            .set_offset(gpui::point(offset.x, next_y));
+                        let total_items = this.sidebar_items().len();
+                        this.maybe_extend_sidebar_items(total_items, cx);
+                        cx.notify();
+                        Some(())
+                    })
+                    .ok()
+                    .flatten()
+                    .is_some();
+
+                if !did_scroll {
+                    return;
+                }
+
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+            }
+        }));
+    }
+
     pub(crate) fn workspace_root_for_path(&self, path: &Path) -> Option<PathBuf> {
         self.workspaces
             .iter()
@@ -36,20 +133,6 @@ impl EditorView {
     fn update_sidebar_drag_target(&mut self, new_target: Option<PathBuf>, cx: &mut Context<Self>) {
         let previous_target = self.sidebar_drag_hover_target.clone();
         self.sidebar_drag_hover_target = new_target.clone();
-
-        let mut collapsed_any = false;
-        self.sidebar_drag_auto_expanded_dirs.retain(|path| {
-            let keep = new_target
-                .as_ref()
-                .is_some_and(|target| target == path || target.starts_with(path));
-            if !keep && self.expanded_dirs.remove(path) {
-                collapsed_any = true;
-            }
-            keep
-        });
-        if collapsed_any {
-            self.invalidate_sidebar_items_cache();
-        }
 
         if previous_target != new_target {
             cx.notify();
@@ -96,9 +179,26 @@ impl EditorView {
         }));
     }
 
+    fn collapse_sidebar_drag_auto_expanded_dirs(&mut self) -> bool {
+        let auto_expanded_dirs: Vec<PathBuf> =
+            self.sidebar_drag_auto_expanded_dirs.drain().collect();
+        let mut collapsed_any = false;
+        for path in auto_expanded_dirs {
+            if self.expanded_dirs.remove(&path) {
+                collapsed_any = true;
+            }
+        }
+        collapsed_any
+    }
+
     pub(crate) fn clear_sidebar_drag_state(&mut self, cx: &mut Context<Self>) {
-        self.update_sidebar_drag_expand_hover_dir(None, cx);
-        self.update_sidebar_drag_target(None, cx);
+        self.sidebar_drag_child_hover_position = None;
+        self.sidebar_drag_scroll_task = None;
+        self.clear_sidebar_drag_hover(cx);
+        if self.collapse_sidebar_drag_auto_expanded_dirs() {
+            self.invalidate_sidebar_items_cache();
+            cx.notify();
+        }
     }
 
     pub(crate) fn reveal_path_in_sidebar(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -1178,11 +1278,14 @@ impl EditorView {
                 cx.listener(
                     move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
                         if event.bounds.contains(&event.event.position) {
-                            this.update_sidebar_drag_expand_hover_dir(None, cx);
-                            if Self::sidebar_drop_would_move(&event.drag(cx).paths, &root) {
+                            this.update_sidebar_drag_autoscroll(event.event.position, cx);
+                            let dragged = event.drag(cx);
+                            let valid_move = Self::sidebar_drop_would_move(&dragged.paths, &root);
+                            if valid_move {
+                                this.update_sidebar_drag_expand_hover_dir(None, cx);
                                 this.update_sidebar_drag_target(Some(root.clone()), cx);
                             } else {
-                                this.update_sidebar_drag_target(None, cx);
+                                this.clear_sidebar_drag_hover(cx);
                             }
                         }
                     },
@@ -1646,12 +1749,17 @@ impl EditorView {
                     }
 
                     cx.stop_propagation();
-
-                    this.update_sidebar_drag_expand_hover_dir(is_dir.then(|| path.clone()), cx);
+                    this.sidebar_drag_child_hover_position =
+                        Some(Self::sidebar_drag_position_key(event.event.position));
+                    this.update_sidebar_drag_autoscroll(event.event.position, cx);
 
                     let dragged = event.drag(cx);
+                    let valid_move = Self::sidebar_drop_would_move(&dragged.paths, &drop_path);
+                    let desired_expand_hover = is_dir.then(|| path.clone());
 
-                    if !Self::sidebar_drop_would_move(&dragged.paths, &drop_path) {
+                    this.update_sidebar_drag_expand_hover_dir(desired_expand_hover, cx);
+
+                    if !valid_move {
                         this.update_sidebar_drag_target(None, cx);
                         return;
                     }
@@ -1974,19 +2082,23 @@ impl EditorView {
                                           _,
                                           cx| {
                                         if event.bounds.contains(&event.event.position) {
-                                            if !Self::sidebar_drop_would_move(
-                                                &event.drag(cx).paths,
+                                            this.update_sidebar_drag_autoscroll(event.event.position, cx);
+
+                                            if this.sidebar_drag_child_handled_same_event(
+                                                event.event.position,
                                                 &root,
                                             ) {
-                                                this.update_sidebar_drag_expand_hover_dir(None, cx);
-                                                this.update_sidebar_drag_target(None, cx);
                                                 return;
                                             }
-                                            if this
-                                                .sidebar_drag_hover_target
-                                                .as_ref()
-                                                .is_some_and(|target| target != &root)
-                                            {
+
+                                            let dragged = event.drag(cx);
+                                            let valid_move =
+                                                Self::sidebar_drop_would_move(&dragged.paths, &root);
+                                            if !valid_move {
+                                                this.clear_sidebar_drag_hover(cx);
+                                                return;
+                                            }
+                                            if this.sidebar_drag_has_child_target(&root) {
                                                 return;
                                             }
                                             this.update_sidebar_drag_expand_hover_dir(None, cx);
@@ -2096,11 +2208,14 @@ impl EditorView {
                 cx.listener(
                     move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
                         if event.bounds.contains(&event.event.position) {
-                            this.update_sidebar_drag_expand_hover_dir(None, cx);
-                            if Self::sidebar_drop_would_move(&event.drag(cx).paths, &root) {
+                            this.update_sidebar_drag_autoscroll(event.event.position, cx);
+                            let dragged = event.drag(cx);
+                            let valid_move = Self::sidebar_drop_would_move(&dragged.paths, &root);
+                            if valid_move {
+                                this.update_sidebar_drag_expand_hover_dir(None, cx);
                                 this.update_sidebar_drag_target(Some(root.clone()), cx);
                             } else {
-                                this.update_sidebar_drag_target(None, cx);
+                                this.clear_sidebar_drag_hover(cx);
                             }
                         }
                     },

@@ -52,6 +52,7 @@ actions!(
         ZoomOut,
         ZoomReset,
         ToggleSidebar,
+        ToggleTheme,
         ToggleEditorLeftAlign,
         SelectLine,
         InsertLineBelow,

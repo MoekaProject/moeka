@@ -1120,6 +1120,15 @@ impl EditorView {
         self.toggle_outline_visibility(cx);
     }
 
+    pub(crate) fn on_toggle_theme(
+        &mut self,
+        _: &ToggleTheme,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_theme(cx);
+    }
+
     pub(crate) fn on_toggle_theme_debugger(
         &mut self,
         _: &ToggleThemeDebugger,

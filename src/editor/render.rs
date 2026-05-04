@@ -1,9 +1,74 @@
 use gpui::{
-    CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Render, SharedString, Window,
-    deferred, div, img, prelude::*, px,
+    AnyElement, App, Bounds, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Render,
+    SharedString, Window, deferred, div, img, prelude::*, px,
 };
 
 use super::*;
+use super::tooltip::{TooltipState, toolbar_anchor_bounds};
+
+const TOOLBAR_SIDEBAR_TOOLTIP: (&str, Option<&str>) = ("显示或隐藏边栏", Some("⌘\\"));
+const TOOLBAR_ALIGN_TOOLTIP: (&str, Option<&str>) = ("切换左对齐", Some("⌘⇧L"));
+const TOOLBAR_THEME_TOOLTIP: (&str, Option<&str>) = ("切换浅色或深色主题", Some("⌘⌥\\"));
+const TOOLBAR_OUTLINE_TOOLTIP: (&str, Option<&str>) = ("显示或隐藏大纲", Some("⌘⇧\\"));
+
+impl EditorView {
+    fn render_toolbar_button(
+        &self,
+        id: &'static str,
+        button_size: f32,
+        icon_size: f32,
+        hover_opacity: f32,
+        icon_path: &'static str,
+        anchor_bounds: Bounds<gpui::Pixels>,
+        tooltip_title: &'static str,
+        tooltip_subtitle: Option<&'static str>,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let editor = cx.entity().clone();
+        let title = SharedString::from(tooltip_title);
+        let subtitle = tooltip_subtitle.map(SharedString::from);
+
+        div()
+            .id(id)
+            .w(px(button_size))
+            .h(px(button_size))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor(CursorStyle::Arrow)
+            .hover(move |style| style.opacity(hover_opacity))
+            .on_hover({
+                let editor = editor.clone();
+                let title = title.clone();
+                let subtitle = subtitle.clone();
+                move |hovering: &bool, _: &mut Window, cx: &mut App| {
+                    let _ = editor.update(cx, |this, cx| {
+                        if *hovering {
+                            this.begin_tooltip_hover(
+                                TooltipState {
+                                    id,
+                                    title: title.clone(),
+                                    subtitle: subtitle.clone(),
+                                    anchor_bounds,
+                                },
+                                cx,
+                            );
+                        } else {
+                            this.end_tooltip_hover(id, cx);
+                        }
+                    });
+                }
+            })
+            .child(img(helpers::resolve_asset_image_path(icon_path)).w(px(icon_size)).h(px(icon_size)))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                this.clear_tooltip(cx);
+                cx.stop_propagation();
+                on_click(this, cx);
+            }))
+            .into_any_element()
+    }
+}
 
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -83,6 +148,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_zoom_out))
             .on_action(cx.listener(Self::on_zoom_reset))
             .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_toggle_editor_left_align))
             .on_action(cx.listener(Self::on_select_line))
             .on_action(cx.listener(Self::on_insert_line_below))
@@ -299,6 +365,11 @@ impl Render for EditorView {
                                         let tb = &self.styles.toolbar;
                                         let primary_hover = tb.toolbar_primary_hover_opacity;
                                         let secondary_hover = tb.toolbar_secondary_hover_opacity;
+                                        let toolbar_top = self.scaled(tb.toolbar_offset_top_px);
+                                        let toolbar_left = self.scaled(tb.toolbar_offset_left_px);
+                                        let primary_btn_size = self.scaled(tb.toolbar_primary_btn_size_px);
+                                        let secondary_btn_size = self.scaled(tb.toolbar_secondary_btn_size_px);
+                                        let toolbar_gap = self.scaled(tb.toolbar_gap_px);
                                         let toolbar_opacity = if self
                                             .should_show_editor_toolbar(show_editor_toolbar)
                                         {
@@ -314,82 +385,56 @@ impl Render for EditorView {
                                             .items_center()
                                             .gap(px(self.scaled(tb.toolbar_gap_px)))
                                             .opacity(toolbar_opacity)
-                                            .child(
-                                                div()
-                                                    .id("toolbar-sidebar-toggle")
-                                                    .w(px(
-                                                        self.scaled(tb.toolbar_primary_btn_size_px)
-                                                    ))
-                                                    .h(px(
-                                                        self.scaled(tb.toolbar_primary_btn_size_px)
-                                                    ))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .cursor(CursorStyle::Arrow)
-                                                    .hover(move |style| {
-                                                        style.opacity(primary_hover)
-                                                    })
-                                                    .child(
-                                                        img(helpers::resolve_asset_image_path(
-                                                            SIDEBAR_TOGGLE_SVG_PATH,
-                                                        ))
-                                                        .w(px(self.scaled(
-                                                            tb.toolbar_primary_icon_size_px,
-                                                        )))
-                                                        .h(px(self.scaled(
-                                                            tb.toolbar_primary_icon_size_px,
-                                                        ))),
-                                                    )
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener(|this, _, _, cx| {
-                                                            cx.stop_propagation();
-                                                            if this.workspaces.is_empty() {
-                                                                this.pick_workspace_folder(cx);
-                                                            } else {
-                                                                this.toggle_sidebar_visibility(cx);
-                                                            }
-                                                        }),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("toolbar-align-toggle")
-                                                    .w(px(self
-                                                        .scaled(tb.toolbar_secondary_btn_size_px)))
-                                                    .h(px(self
-                                                        .scaled(tb.toolbar_secondary_btn_size_px)))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .cursor(CursorStyle::Arrow)
-                                                    .hover(move |style| {
-                                                        style.opacity(secondary_hover)
-                                                    })
-                                                    .child(
-                                                        img(helpers::resolve_asset_image_path(
-                                                            EDITOR_ALIGN_LEFT_SVG_PATH,
-                                                        ))
-                                                        .w(px(self.scaled(
-                                                            tb.toolbar_secondary_icon_size_px,
-                                                        )))
-                                                        .h(px(self.scaled(
-                                                            tb.toolbar_secondary_icon_size_px,
-                                                        ))),
-                                                    )
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener(|this, _, _, cx| {
-                                                            cx.stop_propagation();
-                                                            this.toggle_editor_alignment(cx);
-                                                        }),
-                                                    ),
-                                            )
+                                            .child(self.render_toolbar_button(
+                                                "toolbar-sidebar-toggle",
+                                                primary_btn_size,
+                                                self.scaled(tb.toolbar_primary_icon_size_px),
+                                                primary_hover,
+                                                SIDEBAR_TOGGLE_SVG_PATH,
+                                                toolbar_anchor_bounds(
+                                                    toolbar_left,
+                                                    toolbar_top,
+                                                    primary_btn_size,
+                                                ),
+                                                TOOLBAR_SIDEBAR_TOOLTIP.0,
+                                                TOOLBAR_SIDEBAR_TOOLTIP.1,
+                                                cx,
+                                                |this, cx| {
+                                                    if this.workspaces.is_empty() {
+                                                        this.pick_workspace_folder(cx);
+                                                    } else {
+                                                        this.toggle_sidebar_visibility(cx);
+                                                    }
+                                                },
+                                            ))
+                                            .child(self.render_toolbar_button(
+                                                "toolbar-align-toggle",
+                                                secondary_btn_size,
+                                                self.scaled(tb.toolbar_secondary_icon_size_px),
+                                                secondary_hover,
+                                                EDITOR_ALIGN_LEFT_SVG_PATH,
+                                                toolbar_anchor_bounds(
+                                                    toolbar_left + primary_btn_size + toolbar_gap,
+                                                    toolbar_top,
+                                                    secondary_btn_size,
+                                                ),
+                                                TOOLBAR_ALIGN_TOOLTIP.0,
+                                                TOOLBAR_ALIGN_TOOLTIP.1,
+                                                cx,
+                                                |this, cx| {
+                                                    this.toggle_editor_alignment(cx);
+                                                },
+                                            ))
                                     })
                                     .child({
                                         let tb = &self.styles.toolbar;
                                         let secondary_hover = tb.toolbar_secondary_hover_opacity;
+                                        let toolbar_top = self.scaled(tb.toolbar_offset_top_px);
+                                        let toolbar_right = self.scaled(tb.toolbar_offset_left_px);
+                                        let secondary_btn_size = self.scaled(tb.toolbar_secondary_btn_size_px);
+                                        let toolbar_gap = self.scaled(tb.toolbar_gap_px);
+                                        let outline_x = self.last_editor_width - toolbar_right - secondary_btn_size;
+                                        let theme_x = outline_x - toolbar_gap - secondary_btn_size;
                                         let toolbar_opacity = if self
                                             .should_show_editor_toolbar(show_editor_toolbar)
                                         {
@@ -405,76 +450,49 @@ impl Render for EditorView {
                                             .items_center()
                                             .gap(px(self.scaled(tb.toolbar_gap_px)))
                                             .opacity(toolbar_opacity)
-                                            .child(
-                                                div()
-                                                    .id("toolbar-theme-toggle")
-                                                    .w(px(self
-                                                        .scaled(tb.toolbar_secondary_btn_size_px)))
-                                                    .h(px(self
-                                                        .scaled(tb.toolbar_secondary_btn_size_px)))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .cursor(CursorStyle::Arrow)
-                                                    .hover(move |style| {
-                                                        style.opacity(secondary_hover)
-                                                    })
-                                                    .child(
-                                                        img(helpers::resolve_asset_image_path(
-                                                            if self.theme_kind.is_dark() {
-                                                                THEME_DARK_SVG_PATH
-                                                            } else {
-                                                                THEME_LIGHT_SVG_PATH
-                                                            },
-                                                        ))
-                                                        .w(px(self.scaled(
-                                                            tb.toolbar_secondary_icon_size_px,
-                                                        )))
-                                                        .h(px(self.scaled(
-                                                            tb.toolbar_secondary_icon_size_px,
-                                                        ))),
-                                                    )
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener(|this, _, _, cx| {
-                                                            cx.stop_propagation();
-                                                            this.toggle_theme(cx);
-                                                        }),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("toolbar-outline-toggle")
-                                                    .w(px(self
-                                                        .scaled(tb.toolbar_secondary_btn_size_px)))
-                                                    .h(px(self
-                                                        .scaled(tb.toolbar_secondary_btn_size_px)))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .cursor(CursorStyle::Arrow)
-                                                    .hover(move |style| {
-                                                        style.opacity(secondary_hover)
-                                                    })
-                                                    .child(
-                                                        img(helpers::resolve_asset_image_path(
-                                                            OUTLINE_TOGGLE_SVG_PATH,
-                                                        ))
-                                                        .w(px(self.scaled(
-                                                            tb.toolbar_secondary_icon_size_px,
-                                                        )))
-                                                        .h(px(self.scaled(
-                                                            tb.toolbar_secondary_icon_size_px,
-                                                        ))),
-                                                    )
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener(|this, _, _, cx| {
-                                                            cx.stop_propagation();
-                                                            this.toggle_outline_visibility(cx);
-                                                        }),
-                                                    ),
-                                            )
+                                            .child(self.render_toolbar_button(
+                                                "toolbar-theme-toggle",
+                                                secondary_btn_size,
+                                                self.scaled(tb.toolbar_secondary_icon_size_px),
+                                                secondary_hover,
+                                                if self.theme_kind.is_dark() {
+                                                    THEME_DARK_SVG_PATH
+                                                } else {
+                                                    THEME_LIGHT_SVG_PATH
+                                                },
+                                                toolbar_anchor_bounds(
+                                                    theme_x,
+                                                    toolbar_top,
+                                                    secondary_btn_size,
+                                                ),
+                                                TOOLBAR_THEME_TOOLTIP.0,
+                                                TOOLBAR_THEME_TOOLTIP.1,
+                                                cx,
+                                                |this, cx| {
+                                                    this.toggle_theme(cx);
+                                                },
+                                            ))
+                                            .child(self.render_toolbar_button(
+                                                "toolbar-outline-toggle",
+                                                secondary_btn_size,
+                                                self.scaled(tb.toolbar_secondary_icon_size_px),
+                                                secondary_hover,
+                                                OUTLINE_TOGGLE_SVG_PATH,
+                                                toolbar_anchor_bounds(
+                                                    outline_x,
+                                                    toolbar_top,
+                                                    secondary_btn_size,
+                                                ),
+                                                TOOLBAR_OUTLINE_TOOLTIP.0,
+                                                TOOLBAR_OUTLINE_TOOLTIP.1,
+                                                cx,
+                                                |this, cx| {
+                                                    this.toggle_outline_visibility(cx);
+                                                },
+                                            ))
+                                    })
+                                    .when_some(self.render_tooltip_overlay(), |this, tooltip| {
+                                        this.child(tooltip)
                                     })
                                     .when(
                                         self.search_visible

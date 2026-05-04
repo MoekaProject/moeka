@@ -23,6 +23,7 @@ pub struct Styles {
     pub outline: OutlineStyles,
     pub tab_bar: TabBarStyles,
     pub toolbar: ToolbarStyles,
+    pub tooltip: TooltipStyles,
     pub cursor: CursorStyles,
     pub code_block: CodeBlockStyles,
     pub wiki_link: WikiLinkStyles,
@@ -341,6 +342,32 @@ pub struct ToolbarStyles {
     pub toolbar_btn_radius_px: f32,
 }
 
+// ── Tooltip ─────────────────────────────────────────────────────────
+
+pub struct TooltipStyles {
+    pub tooltip_delay_ms: u64,
+    pub tooltip_offset_px: f32,
+    pub tooltip_max_width_px: f32,
+    pub tooltip_padding_x_px: f32,
+    pub tooltip_padding_y_px: f32,
+    pub tooltip_gap_px: f32,
+    pub tooltip_radius_px: f32,
+    pub tooltip_border_width_px: f32,
+    pub tooltip_bg: Hsla,
+    pub tooltip_border_color: Hsla,
+    pub tooltip_title_font_size_px: f32,
+    pub tooltip_title_text_color: Hsla,
+    pub tooltip_subtitle_font_size_px: f32,
+    pub tooltip_subtitle_text_color: Hsla,
+    pub tooltip_subtitle_opacity: f32,
+    pub tooltip_shortcut_gap_px: f32,
+    pub tooltip_shortcut_key_min_width_px: f32,
+    pub tooltip_shortcut_key_height_px: f32,
+    pub tooltip_shortcut_key_padding_x_px: f32,
+    pub tooltip_shortcut_key_radius_px: f32,
+    pub tooltip_shortcut_key_bg: Hsla,
+}
+
 // ── Cursor ──────────────────────────────────────────────────────────
 
 pub struct CursorStyles {
@@ -568,6 +595,12 @@ pub struct ContextMenuStyles {
     // Shortcut label
     pub menu_shortcut_font_size_px: f32,
     pub menu_shortcut_text_color: Hsla,
+    pub menu_shortcut_gap_px: f32,
+    pub menu_shortcut_key_min_width_px: f32,
+    pub menu_shortcut_key_height_px: f32,
+    pub menu_shortcut_key_padding_x_px: f32,
+    pub menu_shortcut_key_radius_px: f32,
+    pub menu_shortcut_key_bg: Hsla,
     // Format menu icon
     pub menu_format_icon_size_px: f32,
     pub menu_format_icon_gap_px: f32,
@@ -1035,6 +1068,29 @@ impl Styles {
                 toolbar_btn_bg: with_alpha(theme.bg_elevated, 0.85),
                 toolbar_btn_radius_px: 8.0,
             },
+            tooltip: TooltipStyles {
+                tooltip_delay_ms: 1000,
+                tooltip_offset_px: 10.0,
+                tooltip_max_width_px: 240.0,
+                tooltip_padding_x_px: 10.0,
+                tooltip_padding_y_px: 7.0,
+                tooltip_gap_px: 8.0,
+                tooltip_radius_px: 8.0,
+                tooltip_border_width_px: 1.0,
+                tooltip_bg: with_alpha(theme.bg_elevated, 0.96),
+                tooltip_border_color: with_alpha(theme.border_primary, 0.9),
+                tooltip_title_font_size_px: ui_font_size_sm_px,
+                tooltip_title_text_color: theme.text_primary,
+                tooltip_subtitle_font_size_px: ui_font_size_xs_px,
+                tooltip_subtitle_text_color: theme.text_secondary,
+                tooltip_subtitle_opacity: 0.72,
+                tooltip_shortcut_gap_px: 4.0,
+                tooltip_shortcut_key_min_width_px: 16.0,
+                tooltip_shortcut_key_height_px: 18.0,
+                tooltip_shortcut_key_padding_x_px: 5.0,
+                tooltip_shortcut_key_radius_px: 5.0,
+                tooltip_shortcut_key_bg: with_alpha(theme.bg_hover, 0.95),
+            },
             cursor: CursorStyles {
                 cursor_color: theme.cursor,
                 cursor_width_px: 2.0,
@@ -1171,6 +1227,12 @@ impl Styles {
                 menu_item_selected_bg: theme.bg_hover,
                 menu_shortcut_font_size_px: ui_font_size_sm_px - 0.5,
                 menu_shortcut_text_color: theme.text_secondary,
+                menu_shortcut_gap_px: 4.0,
+                menu_shortcut_key_min_width_px: 16.0,
+                menu_shortcut_key_height_px: 18.0,
+                menu_shortcut_key_padding_x_px: 5.0,
+                menu_shortcut_key_radius_px: 5.0,
+                menu_shortcut_key_bg: with_alpha(theme.bg_hover, 0.95),
                 menu_format_icon_size_px: 14.0,
                 menu_format_icon_gap_px: 8.0,
                 menu_format_icon_color: theme.text_secondary,
