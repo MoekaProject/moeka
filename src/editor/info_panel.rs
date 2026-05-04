@@ -12,12 +12,14 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::*;
 
+#[derive(Clone)]
 struct InfoPanelRow {
     label: String,
     value: String,
 }
 
-struct InfoPanelData {
+#[derive(Clone)]
+pub(crate) struct InfoPanelData {
     primary_rows: Vec<InfoPanelRow>,
     front_matter_rows: Vec<InfoPanelRow>,
     attachment_items: Vec<InfoPanelResourceItem>,
@@ -424,14 +426,47 @@ fn build_git_diff_rows(base_text: &str, target_text: &str) -> Vec<GitDiffRow> {
 }
 
 impl EditorView {
+    pub(crate) fn invalidate_info_panel_cache(&mut self) {
+        self.info_panel_cache_tab_id = None;
+        self.info_panel_cache_result = None;
+    }
+
+    pub(crate) fn invalidate_git_history_cache(&mut self) {
+        self.git_history_cache_path = None;
+        self.git_history_cache_result = None;
+        self.git_history_cache_scanned_at = None;
+    }
+
+    pub(crate) fn invalidate_active_file_panel_caches(&mut self) {
+        self.invalidate_info_panel_cache();
+        self.invalidate_git_history_cache();
+    }
+
+    fn cached_info_panel_data(&mut self) -> Option<InfoPanelData> {
+        let current_tab_id = self.active_tab_id.clone();
+        if self.info_panel_cache_tab_id == current_tab_id {
+            return self.info_panel_cache_result.clone().flatten();
+        }
+
+        let mut profile_scope = profile::ProfileScope::new("utility_panel.info_panel_refresh");
+        if let Some(tab_id) = current_tab_id.as_deref() {
+            profile_scope.set_note(format!("tab_id={tab_id}"));
+        }
+
+        self.info_panel_cache_tab_id = current_tab_id;
+        self.info_panel_cache_result = Some(self.collect_info_panel_data());
+        self.info_panel_cache_result.clone().flatten()
+    }
+
     fn cached_git_history_items(&mut self) -> Option<Vec<GitHistoryItem>> {
-        let cache_fresh = self
-            .git_history_cache_scanned_at
-            .and_then(|scanned_at| SystemTime::now().duration_since(scanned_at).ok())
-            .is_some_and(|age| age < Duration::from_secs(1));
         let current_path = self.current_file_path.clone();
-        if cache_fresh && self.git_history_cache_path == current_path {
+        if self.git_history_cache_path == current_path && self.git_history_cache_result.is_some() {
             return self.git_history_cache_result.clone().flatten();
+        }
+
+        let mut profile_scope = profile::ProfileScope::new("utility_panel.git_history_refresh");
+        if let Some(path) = current_path.as_ref() {
+            profile_scope.set_note(format!("path={}", path.display()));
         }
 
         self.git_history_cache_path = current_path;
@@ -1444,7 +1479,7 @@ impl EditorView {
     }
 
     pub(crate) fn render_info_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let data = self.collect_info_panel_data();
+        let data = self.cached_info_panel_data();
         let ups = &self.styles.utility_panel;
         let top_spacer = self.scaled(ups.utility_panel_top_spacer_height_px);
         let bottom_spacer = self.scaled(ups.utility_panel_bottom_spacer_height_px);

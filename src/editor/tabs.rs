@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent,
-    MouseMoveEvent, SharedString, Window, div, img, prelude::*, px, svg,
+    MouseMoveEvent, SharedString, Window, div, prelude::*, px, svg,
 };
 
 use super::*;
@@ -342,6 +342,7 @@ impl EditorView {
             return;
         }
         let tab = self.tabs[index].clone();
+        self.invalidate_active_file_panel_caches();
         self.active_tab_id = Some(tab.id.clone());
         self.current_file_path = tab.path.clone();
         if tab.kind == TabKind::Editor {
@@ -1170,6 +1171,16 @@ impl EditorView {
         let ts = &self.styles.tab_bar;
         let button_size = (self.tab_bar_height() - self.scaled(6.0)).max(18.0);
         let icon_size = self.scaled(ts.tab_item_icon_size_px);
+        let button_opacity = if is_active {
+            ts.tab_item_icon_active_opacity
+        } else {
+            ts.tab_item_icon_inactive_opacity
+        };
+        let icon_color = if is_active {
+            ts.tab_item_active_text_color
+        } else {
+            ts.tab_item_icon_color
+        };
 
         div()
             .id(id)
@@ -1179,23 +1190,14 @@ impl EditorView {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(self.scaled(ts.tab_item_badge_radius_px)))
-            .bg(if is_active {
-                ts.tab_item_active_bg
-            } else {
-                gpui::transparent_black()
-            })
-            .hover(move |style| style.bg(ts.tab_item_hover_bg))
+            .opacity(button_opacity)
+            .hover(move |style| style.opacity(ts.tab_item_icon_active_opacity))
             .cursor(CursorStyle::Arrow)
             .child(
-                img(helpers::resolve_asset_image_path(icon_path))
-                    .w(px(icon_size))
-                    .h(px(icon_size))
-                    .opacity(if is_active {
-                        ts.tab_item_icon_active_opacity
-                    } else {
-                        ts.tab_item_icon_inactive_opacity
-                    }),
+                svg()
+                    .path(icon_path)
+                    .size(px(icon_size))
+                    .text_color(icon_color),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -1325,7 +1327,6 @@ impl EditorView {
                 .into_any_element(),
         );
 
-        let outline_active = self.utility_panel == Some(RightUtilityPanel::Outline);
         let info_active = self.utility_panel == Some(RightUtilityPanel::Info);
         let git_active = self.utility_panel == Some(RightUtilityPanel::GitHistory);
         let action_buttons = div()
@@ -1336,15 +1337,6 @@ impl EditorView {
             .items_center()
             .gap(px(self.scaled(ts.tab_item_gap_px)))
             .pr(px(self.scaled(ts.tab_item_padding_right_px)))
-            .child(self.render_tab_bar_action_button(
-                "tab-bar-outline-toggle",
-                OUTLINE_TOGGLE_SVG_PATH,
-                outline_active,
-                cx,
-                |this, cx| {
-                    this.toggle_outline_visibility(cx);
-                },
-            ))
             .child(self.render_tab_bar_action_button(
                 "tab-bar-info-toggle",
                 INFO_PANEL_SVG_PATH,

@@ -8,7 +8,7 @@ use gpui::{
 
 use crate::markdown::{BlockType, InlineKind};
 
-use super::*;
+use super::{profile, *};
 
 struct TableCellDisplayInfo {
     wrapped: WrappedLine,
@@ -343,6 +343,8 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.last_mouse_down_target = None;
+
         if self.active_tab_is_image() && event.button == MouseButton::Left {
             if event.click_count >= 2 {
                 self.reset_active_image_view();
@@ -482,6 +484,7 @@ impl EditorView {
                     &bounds,
                     event.position,
                 ) {
+                    self.last_mouse_down_target = Some((event.position, offset));
                     ime_debug_log(format!(
                         "table cell mouse_down table_start={} visual_row={} col={} offset={} shift={} click_count={}",
                         table_start,
@@ -515,6 +518,7 @@ impl EditorView {
             self.clear_extra_cursors();
             self.clear_wrap_boundary_affinity();
             let offset = self.offset_for_position(event.position);
+            self.last_mouse_down_target = Some((event.position, offset));
             self.select_word_at_offset(offset);
             self.is_selecting = false;
             cx.notify();
@@ -524,6 +528,7 @@ impl EditorView {
         self.is_selecting = true;
         let prev_offset = self.cursor.offset;
         let offset = self.offset_for_position(event.position);
+        self.last_mouse_down_target = Some((event.position, offset));
         self.update_wrap_boundary_affinity_for_position(offset, event.position);
         if event.modifiers.platform {
             // Cmd+click: open link if cursor is on a link span
@@ -1842,8 +1847,37 @@ impl EditorView {
         let pos_y: f32 = position.y.into();
         let pos_x: f32 = position.x.into();
         let origin_y: f32 = self.content_origin.y.into();
+        if self.layout_dirty {
+            profile::log_event("cursor.offset_for_position.layout_dirty", || {
+                format!(
+                    "pos=({pos_x:.1},{pos_y:.1}) origin_y={origin_y:.1} scroll={:.1}",
+                    self.scroll_offset
+                )
+            });
+            return self.cursor.offset;
+        }
+
+        let content_top = origin_y + self.padding_top();
+        if pos_y + 0.5 < content_top {
+            profile::log_event("cursor.offset_for_position.above_content", || {
+                format!(
+                    "pos=({pos_x:.1},{pos_y:.1}) content_top={content_top:.1} origin_y={origin_y:.1} scroll={:.1}",
+                    self.scroll_offset
+                )
+            });
+            return self.cursor.offset;
+        }
+
         let y = (pos_y - origin_y) + self.scroll_offset;
         let line = self.line_at_y(y);
+        if line == 0 && y > self.padding_top() + self.visual_height_for_line(0) {
+            profile::log_event("cursor.offset_for_position.suspect_line0", || {
+                format!(
+                    "pos=({pos_x:.1},{pos_y:.1}) y={y:.1} content_top={content_top:.1} scroll={:.1}",
+                    self.scroll_offset
+                )
+            });
+        }
         let line_content = self.buffer.line_content(line);
         if line_content.is_empty() {
             return self.buffer.line_start(line);
@@ -2716,6 +2750,24 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
+        if let Some((target_point, target_offset)) = self.last_mouse_down_target.take() {
+            let dx = (f32::from(target_point.x) - f32::from(point.x)).abs();
+            let dy = (f32::from(target_point.y) - f32::from(point.y)).abs();
+            let utf16_offset = self.offset_to_utf16(target_offset);
+            ime_debug_log(format!(
+                "character_index_for_point consumed_latch point=({}, {}) target=({}, {}) dx={} dy={} -> utf8={} utf16={}",
+                f32::from(point.x),
+                f32::from(point.y),
+                f32::from(target_point.x),
+                f32::from(target_point.y),
+                dx,
+                dy,
+                target_offset,
+                utf16_offset
+            ));
+            return Some(utf16_offset);
+        }
+
         let utf8_offset = self.offset_for_position(point);
         let utf16_offset = self.offset_to_utf16(utf8_offset);
         ime_debug_log(format!(

@@ -12,7 +12,7 @@ use gpui::{
 use crate::markdown::BlockType;
 
 use super::helpers;
-use super::*;
+use super::{profile, *};
 
 pub(crate) struct EditorElement {
     pub editor: Entity<EditorView>,
@@ -443,6 +443,7 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let _profile_scope = profile::ProfileScope::new("editor.prepaint");
         let editor = self.editor.read(cx);
         let theme = &editor.theme;
         let buffer = &editor.buffer;

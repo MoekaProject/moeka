@@ -383,6 +383,11 @@ impl EditorView {
             self.utility_panel_resizing = false;
         } else {
             self.utility_panel = Some(panel);
+            match panel {
+                RightUtilityPanel::Info => self.invalidate_info_panel_cache(),
+                RightUtilityPanel::GitHistory => self.invalidate_git_history_cache(),
+                RightUtilityPanel::Outline => {}
+            }
         }
         cx.notify();
     }

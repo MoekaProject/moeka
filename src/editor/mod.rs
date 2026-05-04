@@ -10,6 +10,7 @@ mod info_panel;
 mod input;
 mod menus;
 mod outline;
+mod profile;
 mod quick_open;
 mod render;
 mod scaling;
@@ -772,6 +773,7 @@ pub struct EditorView {
     pub(crate) last_content_left: f32,
     pub(crate) last_text_width: f32,
     pub(crate) content_origin: Point<Pixels>,
+    pub(crate) last_mouse_down_target: Option<(Point<Pixels>, usize)>,
     pub(crate) context_menu: Option<ContextMenu>,
     pub(crate) sidebar_edit: Option<SidebarEditMode>,
     pub(crate) sidebar_edit_blur_sub: Option<gpui::Subscription>,
@@ -837,6 +839,8 @@ pub struct EditorView {
     pub(crate) outline_scroll_handle: ScrollHandle,
     pub(crate) git_history_scroll_handle: ScrollHandle,
     pub(crate) git_diff_scroll_handle: ScrollHandle,
+    pub(crate) info_panel_cache_tab_id: Option<String>,
+    pub(crate) info_panel_cache_result: Option<Option<info_panel::InfoPanelData>>,
     pub(crate) git_history_cache_path: Option<PathBuf>,
     pub(crate) git_history_cache_result: Option<Option<Vec<info_panel::GitHistoryItem>>>,
     pub(crate) git_history_cache_scanned_at: Option<SystemTime>,
@@ -1067,6 +1071,7 @@ impl EditorView {
             last_content_left: init_padding_left,
             last_text_width: init_max_width - init_padding_left - init_padding_right,
             content_origin: Point::default(),
+            last_mouse_down_target: None,
             context_menu: None,
             sidebar_edit: None,
             sidebar_edit_blur_sub: None,
@@ -1124,6 +1129,8 @@ impl EditorView {
             outline_scroll_handle: ScrollHandle::new(),
             git_history_scroll_handle: ScrollHandle::new(),
             git_diff_scroll_handle: ScrollHandle::new(),
+            info_panel_cache_tab_id: None,
+            info_panel_cache_result: None,
             git_history_cache_path: None,
             git_history_cache_result: None,
             git_history_cache_scanned_at: None,
@@ -1418,25 +1425,123 @@ impl EditorView {
         }));
     }
 
+    fn is_internal_temp_change_path(&self, path: &Path) -> bool {
+        if path
+            .components()
+            .any(|component| component.as_os_str().to_str() == Some(".markdown-editor-cache"))
+        {
+            return true;
+        }
+
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with('.') && (name.ends_with(".temp") || name.ends_with(".temp.tmp"))
+            })
+        {
+            return true;
+        }
+
+        self.tabs
+            .iter()
+            .filter_map(|tab| tab.recovery.temp_path.as_deref())
+            .any(|temp_path| {
+                if path == temp_path {
+                    return true;
+                }
+
+                let Some(file_name) = temp_path.file_name().and_then(|name| name.to_str()) else {
+                    return false;
+                };
+                let writer_temp_path = temp_path.with_file_name(format!(".{file_name}.tmp"));
+                path == writer_temp_path.as_path()
+            })
+    }
+
+    fn path_contains_ignored_workspace_component(&self, path: &Path) -> bool {
+        let Ok(relative_path) = path.strip_prefix(&self.sidebar_root) else {
+            return false;
+        };
+
+        relative_path.components().any(|component| {
+            let Some(name) = component.as_os_str().to_str() else {
+                return false;
+            };
+            !name.is_empty()
+                && name != "."
+                && (name.starts_with('.')
+                    || matches!(
+                        name,
+                        "node_modules" | "target" | "dist" | "build" | "coverage"
+                    ))
+        })
+    }
+
+    fn should_ignore_fs_change_path(&self, path: &Path) -> bool {
+        if !path.starts_with(&self.sidebar_root) {
+            return true;
+        }
+
+        self.is_internal_temp_change_path(path)
+            || self.path_contains_ignored_workspace_component(path)
+    }
+
+    fn fs_change_affects_git_status(&self, path: &Path) -> bool {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => !metadata.is_dir(),
+            Err(_) => true,
+        }
+    }
+
     pub(crate) fn handle_fs_events(&mut self, changed_paths: &[PathBuf], cx: &mut Context<Self>) {
+        let changed_paths: Vec<&Path> = changed_paths
+            .iter()
+            .map(PathBuf::as_path)
+            .filter(|path| !self.should_ignore_fs_change_path(path))
+            .collect();
+        if changed_paths.is_empty() {
+            return;
+        }
+
+        let active_tab_id = self.active_tab_id.clone();
+        let current_file_hit = self.current_file_path.as_ref().is_some_and(|current_path| {
+            changed_paths
+                .iter()
+                .any(|path| *path == current_path || current_path.starts_with(path))
+        });
         let mut needs_notify = true;
+        let mut active_tab_needs_reload = false;
         self.invalidate_sidebar_items_cache();
+        if changed_paths
+            .iter()
+            .any(|path| self.fs_change_affects_git_status(path))
+        {
+            self.invalidate_sidebar_git_statuses();
+        }
+        if current_file_hit {
+            self.invalidate_active_file_panel_caches();
+        }
 
         for tab in &mut self.tabs {
             if let Some(ref tab_path) = tab.path {
                 if changed_paths
                     .iter()
-                    .any(|p| p == tab_path || tab_path.starts_with(p))
+                    .any(|path| *path == tab_path || tab_path.starts_with(path))
                 {
                     if !tab_path.exists() {
                         if !tab.is_deleted {
                             tab.is_deleted = true;
                             needs_notify = true;
+                            active_tab_needs_reload |=
+                                active_tab_id.as_deref() == Some(tab.id.as_str());
                         }
                     } else {
                         if tab.is_deleted {
                             tab.is_deleted = false;
                             needs_notify = true;
+                            active_tab_needs_reload |=
+                                active_tab_id.as_deref() == Some(tab.id.as_str());
                         }
                         if !tab.is_dirty {
                             if let Ok(bytes) = std::fs::read(tab_path) {
@@ -1448,6 +1553,8 @@ impl EditorView {
                                     tab.snapshot.cursor_anchor =
                                         tab.snapshot.cursor_anchor.min(new_text.len());
                                     needs_notify = true;
+                                    active_tab_needs_reload |=
+                                        active_tab_id.as_deref() == Some(tab.id.as_str());
                                 }
                             }
                         }
@@ -1457,7 +1564,7 @@ impl EditorView {
         }
 
         // Reload the active tab's buffer if it was externally modified
-        if needs_notify {
+        if active_tab_needs_reload {
             if let Some(ref active_id) = self.active_tab_id {
                 if let Some(tab) = self.tabs.iter().find(|t| &t.id == active_id) {
                     if !tab.is_dirty && !tab.is_deleted {
@@ -1470,6 +1577,9 @@ impl EditorView {
                     }
                 }
             }
+        }
+
+        if needs_notify {
             cx.notify();
         }
     }
@@ -1801,6 +1911,7 @@ impl EditorView {
             .unwrap_or(FileKind::Markdown);
         self.decorations = parse_decorations_for_file_kind(self.buffer.text(), &file_kind);
         self.layout_dirty = true;
+        self.invalidate_info_panel_cache();
     }
 
     pub(crate) fn active_file_kind(&self) -> Option<&FileKind> {
@@ -1853,17 +1964,6 @@ impl EditorView {
         let top_spacer_height = start as f32 * item_height;
         let bottom_spacer_height = item_count.saturating_sub(end) as f32 * item_height;
         (start, end, top_spacer_height, bottom_spacer_height)
-    }
-
-    pub(crate) fn scroll_uniform_list_item_to_top(
-        scroll_handle: &ScrollHandle,
-        prefix_height: f32,
-        item_height: f32,
-        index: usize,
-    ) {
-        let offset = scroll_handle.offset();
-        let target_y = -(prefix_height + index as f32 * item_height);
-        scroll_handle.set_offset(gpui::point(offset.x, gpui::px(target_y)));
     }
 
     pub(crate) fn active_tab_supports_persistent_save(&self) -> bool {

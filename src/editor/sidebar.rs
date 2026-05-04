@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 use std::time::SystemTime;
 
 use gpui::{
@@ -9,7 +8,7 @@ use gpui::{
     SharedString, Transformation, div, img, prelude::*, px, radians, svg,
 };
 
-use super::*;
+use super::{profile, *};
 
 impl EditorView {
     fn sidebar_item_height_px(&self) -> f32 {
@@ -24,6 +23,36 @@ impl EditorView {
         } else {
             logo_height
         }
+    }
+
+    fn ensure_sidebar_item_visible(&self, index: usize) -> bool {
+        let bounds = self.sidebar_scroll_handle.bounds();
+        let viewport_height = f32::from(bounds.size.height);
+        if viewport_height <= 0.0 {
+            return false;
+        }
+
+        let offset = self.sidebar_scroll_handle.offset();
+        let scroll_y = -f32::from(offset.y);
+        let item_height = self.sidebar_item_height_px();
+        let item_top = self.sidebar_scroll_prefix_height(true) + index as f32 * item_height;
+        let item_bottom = item_top + item_height;
+
+        let target_top = if item_top < scroll_y {
+            Some(item_top)
+        } else if item_bottom > scroll_y + viewport_height {
+            Some((item_bottom - viewport_height).max(0.0))
+        } else {
+            None
+        };
+
+        let Some(target_top) = target_top else {
+            return false;
+        };
+
+        self.sidebar_scroll_handle
+            .set_offset(gpui::point(offset.x, px(-target_top)));
+        true
     }
 
     fn sidebar_drag_position_key(position: gpui::Point<Pixels>) -> (f32, f32) {
@@ -147,17 +176,7 @@ impl EditorView {
     }
 
     fn sidebar_git_status_refresh_due(&self) -> bool {
-        if self.sidebar_git_statuses_dirty {
-            return true;
-        }
-
-        match self.sidebar_git_statuses_scanned_at {
-            Some(scanned_at) => SystemTime::now()
-                .duration_since(scanned_at)
-                .map(|age| age >= Duration::from_secs(1))
-                .unwrap_or(true),
-            None => true,
-        }
+        self.sidebar_git_statuses_dirty || self.sidebar_git_statuses_scanned_at.is_none()
     }
 
     fn sidebar_git_repo_root(&self) -> Option<PathBuf> {
@@ -222,10 +241,13 @@ impl EditorView {
             return;
         }
 
+        let mut profile_scope = profile::ProfileScope::new("sidebar.git_status_refresh");
+
         let Some(repo_root) = self.sidebar_git_repo_root() else {
             self.sidebar_git_statuses.clear();
             self.sidebar_git_statuses_dirty = false;
             self.sidebar_git_statuses_scanned_at = Some(SystemTime::now());
+            profile_scope.set_note("repo_root=none entries=0");
             return;
         };
 
@@ -282,6 +304,15 @@ impl EditorView {
                     }
                 }
             }
+        }
+
+        if profile::enabled() {
+            profile_scope.set_note(format!(
+                "repo_root={} entries={} dirty_was={}",
+                repo_root.display(),
+                statuses.len(),
+                self.sidebar_git_statuses_dirty
+            ));
         }
 
         self.sidebar_git_statuses = statuses;
@@ -377,19 +408,22 @@ impl EditorView {
             return;
         };
 
+        let switched_workspace = self.sidebar_root != root;
+
         if self.sidebar_root != root {
             self.switch_workspace(root.clone(), cx);
         } else {
             self.sidebar_visible = true;
         }
 
-        self.expanded_dirs.insert(root.clone());
+        let mut expanded_changed = switched_workspace;
+        expanded_changed |= self.expanded_dirs.insert(root.clone());
         let mut ancestor = path.parent();
         while let Some(dir) = ancestor {
             if !dir.starts_with(&root) {
                 break;
             }
-            self.expanded_dirs.insert(dir.to_path_buf());
+            expanded_changed |= self.expanded_dirs.insert(dir.to_path_buf());
             if dir == root {
                 break;
             }
@@ -403,35 +437,27 @@ impl EditorView {
             self.selected_sidebar_paths.insert(path.clone());
             self.focused_sidebar_path = Some(path);
             self.sidebar_selection_anchor = self.focused_sidebar_path.clone();
-            Self::scroll_uniform_list_item_to_top(
-                &self.sidebar_scroll_handle,
-                self.sidebar_scroll_prefix_height(true),
-                self.sidebar_item_height_px(),
-                index,
-            );
-
-            let reveal_path = self.focused_sidebar_path.clone();
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(1))
-                    .await;
-                this.update(cx, |editor, cx| {
-                    if let Some(path) = reveal_path.as_ref() {
-                        let items = editor.sidebar_items();
-                        if let Some(index) = items.iter().position(|item| &item.path == path) {
-                            Self::scroll_uniform_list_item_to_top(
-                                &editor.sidebar_scroll_handle,
-                                editor.sidebar_scroll_prefix_height(true),
-                                editor.sidebar_item_height_px(),
-                                index,
-                            );
-                            cx.notify();
+            let scrolled = self.ensure_sidebar_item_visible(index);
+            if switched_workspace || expanded_changed || scrolled {
+                let reveal_path = self.focused_sidebar_path.clone();
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(1))
+                        .await;
+                    this.update(cx, |editor, cx| {
+                        if let Some(path) = reveal_path.as_ref() {
+                            let items = editor.sidebar_items();
+                            if let Some(index) = items.iter().position(|item| &item.path == path)
+                                && editor.ensure_sidebar_item_visible(index)
+                            {
+                                cx.notify();
+                            }
                         }
-                    }
+                    })
+                    .ok();
                 })
-                .ok();
-            })
-            .detach();
+                .detach();
+            }
         }
 
         cx.notify();
@@ -439,7 +465,11 @@ impl EditorView {
 
     pub(crate) fn invalidate_sidebar_items_cache(&mut self) {
         self.sidebar_items_dirty = true;
+    }
+
+    pub(crate) fn invalidate_sidebar_git_statuses(&mut self) {
         self.sidebar_git_statuses_dirty = true;
+        self.sidebar_git_statuses_scanned_at = None;
     }
 
     fn reset_sidebar_render_limit(&mut self) {
@@ -1109,6 +1139,8 @@ impl EditorView {
         self.sidebar_selection_anchor = None;
         self.sidebar_error = None;
         self.invalidate_sidebar_items_cache();
+        self.sidebar_git_statuses.clear();
+        self.invalidate_sidebar_git_statuses();
         self.reset_sidebar_render_limit();
         self.context_menu = None;
         self.start_watching(cx);
@@ -1130,6 +1162,9 @@ impl EditorView {
             self.sidebar_selection_anchor = None;
             self.sidebar_error = None;
             self.invalidate_sidebar_items_cache();
+            self.sidebar_git_statuses.clear();
+            self.sidebar_git_statuses_dirty = false;
+            self.sidebar_git_statuses_scanned_at = None;
             self.context_menu = None;
             self._watcher_task = None;
             cx.notify();
