@@ -132,6 +132,7 @@ pub fn serialize_table(model: &TableModel) -> Vec<String> {
     result
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn update_cell(
     lines: &[String],
     line_offset: usize,

@@ -10,38 +10,47 @@ A macOS-native Markdown WYSIWYG editor built with [gpui](https://crates.io/crate
 
 ```
 src/
-├── main.rs              # Application setup, keybindings, window creation (315 lines)
-├── actions.rs           # gpui actions (keyboard shortcuts → handler dispatch) (160 lines)
-├── buffer.rs            # Buffer: text storage with line_starts index (140 lines)
-├── cursor.rs            # Cursor: offset + anchor, selection helpers (235 lines)
-├── markdown.rs          # parse_decorations(): pulldown-cmark → LineDecoration[] (750 lines)
-├── text_input.rs        # Reusable text input component with IME, selection, events (1271 lines)
-├── theme.rs             # ThemeKind enum, 6 color themes, hex_to_hsla() (477 lines)
-├── style.rs             # Styles struct: per-component style config from Theme (1136 lines)
+├── main.rs              # Application setup, keybindings, window creation
+├── actions.rs           # gpui actions (keyboard shortcuts → handler dispatch)
+├── buffer.rs            # Buffer: text storage with line_starts index
+├── cursor.rs            # Cursor: offset + anchor, selection helpers
+├── markdown.rs          # parse_decorations(): pulldown-cmark → LineDecoration[]
+├── text_input.rs        # Reusable text input component with IME, selection, events
+├── theme.rs             # ThemeKind enum, 6 color themes, hex_to_hsla()
+├── style.rs             # Styles struct: per-component style config from Theme
 └── editor/
-    ├── mod.rs           # EditorView struct, AppSettings, data types, shared utils (2378 lines)
-    ├── scaling.rs       # UI scaling: scaled(), font_size_for_block(), layout calcs (330 lines)
-    ├── tabs.rs          # Tab management + tab bar rendering (831 lines)
-    ├── sidebar.rs       # File tree sidebar ops + rendering (1370 lines)
-    ├── fold.rs          # Section/image folding logic (143 lines)
-    ├── menus.rs         # Context menu, format menu, slash menu (1196 lines)
-    ├── handlers.rs      # All on_* action handlers (keyboard shortcuts) (1269 lines)
-    ├── input.rs         # Mouse/scroll events, EntityInputHandler (IME) (711 lines)
-    ├── render.rs        # Render trait impl (main UI div tree) (617 lines)
-    ├── element.rs       # EditorElement: custom gpui Element (prepaint/paint) (1519 lines)
-    ├── helpers.rs       # Display text, highlighting, images, table rendering (1568 lines)
-    ├── search.rs        # Find/replace UI within current buffer (721 lines)
-    ├── quick_open.rs    # File picker (fuzzy search across workspace) (638 lines)
-    ├── outline.rs       # Document outline (heading hierarchy navigation) (254 lines)
-    ├── settings_panel.rs # Settings UI, font picker with directional dropdown (971 lines)
-    └── workspace_search.rs # Workspace-wide search across multiple files (842 lines)
+    ├── mod.rs           # EditorView struct, shared state wiring, module re-exports
+    ├── app_settings.rs  # Persistent settings load/save + ThemeKind mapping
+    ├── assets.rs        # Shared SVG/icon asset path constants
+    ├── types.rs         # Shared editor/tab/sidebar data types
+    ├── scaling.rs       # UI scaling: scaled(), font_size_for_block(), layout calcs
+    ├── tabs.rs          # Tab management + tab bar rendering + right-panel toggles
+    ├── sidebar.rs       # Sidebar shared coordination helpers and git/sidebar utilities
+    ├── sidebar_render.rs # Sidebar render tree and render-time interaction nodes
+    ├── sidebar_ops.rs   # Sidebar selection, drag/drop targeting, move logic
+    ├── sidebar_files.rs # Sidebar rename/create/delete/paste + workspace switching
+    ├── sidebar_nav.rs   # Sidebar keyboard navigation + focused-item actions
+    ├── sidebar_tree.rs  # Sidebar tree sorting, expand/collapse, item collection/cache
+    ├── fold.rs          # Section/image folding logic
+    ├── menus.rs         # Context menu, format menu, slash menu
+    ├── handlers.rs      # All on_* action handlers (keyboard shortcuts)
+    ├── input.rs         # Mouse/scroll events, EntityInputHandler (IME), remaining control flow
+    ├── input_table.rs   # Pure table hit-testing and visual/source row mapping helpers
+    ├── input_wrap.rs    # Wrap-boundary cursor helpers + UTF-16/UTF-8 conversion
+    ├── render.rs        # Render trait impl (main UI div tree)
+    ├── element.rs       # EditorElement: custom gpui Element (prepaint/paint)
+    ├── helpers.rs       # Display text, highlighting, images, table rendering
+    ├── info_panel.rs    # Outline / Info / Git history utility panels + cached data
+    ├── search.rs        # Find/replace UI within current buffer
+    ├── quick_open.rs    # File picker (fuzzy search across workspace)
+    ├── outline.rs       # Document outline (heading hierarchy navigation)
+    ├── settings_panel.rs # Settings UI, font picker, shared numeric steppers
+    └── workspace_search.rs # Workspace-wide search across multiple files
 ```
-
-Total: ~19,800 lines of Rust.
 
 ## Key Types
 
-### AppSettings (`editor/mod.rs`)
+### AppSettings (`editor/app_settings.rs`)
 
 Persistent user settings, serialized to `~/.config/markdown-editor/settings.json`:
 
@@ -63,6 +72,15 @@ The central model. Owns:
 - `tabs: Vec<OpenTab>` — open file tabs
 - `focus_handle: FocusHandle` — gpui focus management
 - `app_settings: AppSettings` — persistent user preferences
+
+### Shared Editor Types (`editor/types.rs`)
+
+Reusable editor model types are defined outside `mod.rs` and re-exported back through it:
+
+- `EditorSnapshot` — persisted text/cursor/scroll snapshot for tabs and undo history
+- `OpenTab`, `TabKind`, `FileKind` — tab/session model shared by tabs, session restore, info panels
+- `RightUtilityPanel` — right-side panel selector (`Outline`, `Info`, `GitHistory`)
+- `GitDiffState`, `SidebarItem`, `SidebarGitStatus` — shared sidebar and diff presentation types
 
 ### Buffer (`buffer.rs`)
 
@@ -94,16 +112,17 @@ Per-line parse output:
 
 6 themes organized in light/dark pairs:
 
-| Theme Kind | Label | Dark? |
-|------------|-------|-------|
-| `OneDark` | One Dark | ✓ |
-| `OneLight` | One Light | |
-| `AyuDark` | Ayu Dark | ✓ |
-| `AyuLight` | Ayu Light | |
-| `Milky` | Milky | |
-| `MilkyDark` | Milky Dark | ✓ |
+| Theme Kind  | Label      | Dark? |
+| ----------- | ---------- | ----- |
+| `OneDark`   | One Dark   | ✓     |
+| `OneLight`  | One Light  |       |
+| `AyuDark`   | Ayu Dark   | ✓     |
+| `AyuLight`  | Ayu Light  |       |
+| `Milky`     | Milky      |       |
+| `MilkyDark` | Milky Dark | ✓     |
 
 `ThemeKind` enum provides:
+
 - `build(self) -> Theme` — constructs the full color palette
 - `is_dark(self) -> bool` — used for theme-conditional rendering
 - `paired_appearance(self) -> ThemeKind` — returns the light↔dark counterpart
@@ -199,11 +218,18 @@ sidebar_item_active_bg: Hsla,
 
 ## Rendering Pipeline
 
-1. **Render trait** (`render.rs`): Builds the gpui div tree (sidebar + tab bar + editor pane + context menu backdrop)
+1. **Render trait** (`render.rs`): Builds the gpui div tree (sidebar + tab bar + utility panel strip + editor pane + overlays)
 2. **EditorElement** (`element.rs`): Custom `Element` impl for the main text area
    - `request_layout()` — requests full-size layout
    - `prepaint()` — ~1000 lines: iterates all buffer lines, shapes text via `shape_text()`, computes cursor/selection quads, gutter decorations, image previews, table borders
    - `paint()` — paints all computed quads, SVG icons, shaped text, images
+
+### Right Utility Panels
+
+- `tabs.rs` owns the tab-strip actions that toggle the right utility panels.
+- `render.rs` places the active utility panel below the tab bar, not beside it.
+- `info_panel.rs` renders the panel bodies for `Outline`, `Info`, and `GitHistory`.
+- Any layout math that reserves right-side space must account for the currently visible utility panel width, not just outline state.
 
 ### Display Text Pipeline (`helpers.rs`)
 
@@ -230,6 +256,8 @@ Typing `/` at line start triggers a popup with 4 items: Todo, CodeBlock, Link, I
 
 Cmd+click adds cursors at clicked positions. `extra_cursors: Vec<Cursor>` stores additional cursors beyond the primary. All text operations (insert, delete, format) apply to all cursors. Cursors are not guaranteed sorted — sort by offset before multi-cursor edits that shift offsets.
 
+`input.rs` should stay focused on event/control flow. Pure table geometry and wrap/UTF conversion helpers belong in `input_table.rs` and `input_wrap.rs` so they can be validated independently.
+
 ### Search & Replace (`search.rs`)
 
 Buffer-local find/replace with case sensitivity, whole word, and regex toggles. Match highlighting painted as background quads in `element.rs`. Active match scrolled into view.
@@ -244,18 +272,28 @@ Collects heading hierarchy from `decorations`. Displays as a navigable tree in t
 
 ### Settings Panel (`settings_panel.rs`)
 
-Font picker with directional dropdown (auto-detects above/below based on available space). Theme selector, font size, UI scale controls. Changes persisted via `AppSettings::save()`.
+Font picker with directional dropdown (auto-detects above/below based on available space). Theme selector, UI scale controls, line height and letter spacing controls. Inline numeric steppers share one TextInput styling/sync helper so value clamping, persistence, and UI refresh stay consistent across controls.
+
+### Info / Git History Panels (`info_panel.rs`)
+
+- Expensive panel data must be cached outside render.
+- Use the existing invalidation entry points (`invalidate_info_panel_cache()`, `invalidate_git_history_cache()`, `invalidate_active_file_panel_caches()`) when file state, git state, or active tab context changes.
+- Do not add polling, git commands, or filesystem work directly inside render methods.
 
 ### Heading Syntax Folding (`markdown.rs`, `element.rs`, `helpers.rs`)
 
 Markdown heading prefixes (e.g. `## `) are collapsed when the cursor is not near them:
+
 - `markdown.rs` emits `SyntaxRange { range: 0..prefix_len, trigger_range: 0..prefix_len }`
 - `element.rs` computes `cursor_col` — when the cursor is on a heading line with text selected, returns `Some(0)` to force expansion
 - `helpers.rs` `build_display_text()` hides syntax characters when `cursor_col` falls outside `trigger_range`
 
 ## Coding Conventions
 
-- All editor submodule files use `use super::*;` for shared imports from mod.rs
+- `editor/mod.rs` is the re-export boundary for shared editor modules; prefer moving pure settings/constants/types out first before splitting behavior-heavy files.
+- Editor submodules may use `use super::*;`, but shared definitions that fan out broadly should live in dedicated modules like `app_settings.rs`, `assets.rs`, or `types.rs`.
+- For sidebar work, keep rendering in `sidebar_render.rs`, selection/drag logic in `sidebar_ops.rs`, filesystem/workspace actions in `sidebar_files.rs`, keyboard navigation in `sidebar_nav.rs`, and tree state/sorting in `sidebar_tree.rs` instead of growing `sidebar.rs` again.
+- For input work, keep reusable table helpers in `input_table.rs` and wrap-boundary or UTF conversion helpers in `input_wrap.rs`; reserve `input.rs` for IME and pointer/selection orchestration.
 - Cross-module helper calls: `helpers::build_display_text()`, `helpers::pick_folder_blocking()`
 - EditorView fields are `pub(crate)` for cross-module access within the editor crate
 - Constants in `editor/mod.rs` are `pub(crate)` — only SVG paths and `KNOWLEDGE_BASE_ROOT` remain; all numeric style constants live in `style.rs`

@@ -51,14 +51,6 @@ pub(crate) struct EditorPrepaintState {
     code_block_copy_hitboxes: Vec<Hitbox>,
 }
 
-/// Per-cell shape info for cursor/selection positioning in table rows.
-struct TableCellShape {
-    shaped: WrappedLine,
-    origin: Point<Pixels>,
-    /// Byte range of this cell within its source line (in the buffer).
-    cell_range: Range<usize>,
-}
-
 struct CodeBlockGroupBounds {
     left: f32,
     top: f32,
@@ -81,8 +73,6 @@ struct PrepaintLine {
     segments: Option<Vec<(WrappedLine, Point<Pixels>)>>,
     /// True if this line is a table row rendered via per-cell block mode.
     is_table_block: bool,
-    /// Per-cell shapes for cursor/selection on table rows.
-    table_cells: Option<Vec<TableCellShape>>,
 }
 
 fn build_precise_table_layout(
@@ -1254,7 +1244,6 @@ impl Element for EditorElement {
                     line_height: px(line_height),
                     segments: None,
                     is_table_block: false,
-                    table_cells: None,
                 });
 
                 y += total_line_height;
@@ -3005,7 +2994,6 @@ impl Element for EditorElement {
                 line_height: px(line_height),
                 segments,
                 is_table_block: is_table_block_line,
-                table_cells: None,
             });
 
             y += total_line_height;

@@ -1,3 +1,5 @@
+mod app_settings;
+mod assets;
 mod config_paths;
 mod config_store;
 mod element;
@@ -8,6 +10,8 @@ mod history_store;
 mod image_view;
 mod info_panel;
 mod input;
+mod input_table;
+mod input_wrap;
 mod menus;
 mod outline;
 mod profile;
@@ -19,11 +23,21 @@ mod session_store;
 pub(crate) mod settings_panel;
 mod shortcut;
 mod sidebar;
+mod sidebar_files;
+mod sidebar_nav;
+mod sidebar_ops;
+mod sidebar_render;
+mod sidebar_tree;
 mod tabs;
 mod temp_store;
 mod theme_debugger;
 mod tooltip;
+mod types;
 mod workspace_search;
+
+pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
+pub(crate) use assets::*;
+pub(crate) use types::*;
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -43,107 +57,6 @@ use crate::markdown::{self, BlockType, LineDecoration};
 use crate::theme::{Theme, ThemeColorField, ThemeKind};
 
 const CODE_BLOCK_COPY_FEEDBACK_MS: u64 = 1200;
-
-// ── Persistent settings ─────────────────────────────────────────────
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
-pub(crate) struct AppSettings {
-    #[serde(default = "default_theme")]
-    pub theme: String,
-    #[serde(default = "default_ui_font")]
-    pub ui_font: String,
-    #[serde(default = "default_ui_scale")]
-    pub ui_scale: f32,
-    #[serde(default = "default_body_latin_font")]
-    pub body_latin_font: String,
-    #[serde(default = "default_body_cjk_font")]
-    pub body_cjk_font: String,
-    #[serde(default = "default_code_font")]
-    pub code_font: String,
-    #[serde(default = "default_font_size")]
-    pub font_size: f32,
-    #[serde(default = "default_line_height")]
-    pub line_height: f32,
-    #[serde(default = "default_letter_spacing")]
-    pub letter_spacing: f32,
-}
-
-fn default_theme() -> String {
-    "OneDark".to_string()
-}
-fn default_ui_font() -> String {
-    ".SystemUIFont".to_string()
-}
-fn default_ui_scale() -> f32 {
-    1.0
-}
-fn default_body_latin_font() -> String {
-    "Menlo".to_string()
-}
-fn default_body_cjk_font() -> String {
-    "PingFang SC".to_string()
-}
-fn default_code_font() -> String {
-    "Menlo".to_string()
-}
-fn default_font_size() -> f32 {
-    15.0
-}
-fn default_line_height() -> f32 {
-    1.5
-}
-fn default_letter_spacing() -> f32 {
-    1.0
-}
-
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            theme: default_theme(),
-            ui_font: default_ui_font(),
-            ui_scale: default_ui_scale(),
-            body_latin_font: default_body_latin_font(),
-            body_cjk_font: default_body_cjk_font(),
-            code_font: default_code_font(),
-            font_size: default_font_size(),
-            line_height: default_line_height(),
-            letter_spacing: default_letter_spacing(),
-        }
-    }
-}
-
-impl AppSettings {
-    pub fn load() -> Self {
-        config_store::load_settings()
-    }
-
-    pub fn save(&self) {
-        config_store::save_settings(self);
-    }
-
-    fn theme_kind(&self) -> ThemeKind {
-        match self.theme.as_str() {
-            "OneLight" => ThemeKind::OneLight,
-            "AyuDark" => ThemeKind::AyuDark,
-            "AyuLight" => ThemeKind::AyuLight,
-            "Milky" => ThemeKind::Milky,
-            "MilkyDark" => ThemeKind::MilkyDark,
-            _ => ThemeKind::OneDark,
-        }
-    }
-}
-
-fn theme_kind_to_string(kind: ThemeKind) -> String {
-    match kind {
-        ThemeKind::OneDark => "OneDark",
-        ThemeKind::OneLight => "OneLight",
-        ThemeKind::AyuDark => "AyuDark",
-        ThemeKind::AyuLight => "AyuLight",
-        ThemeKind::Milky => "Milky",
-        ThemeKind::MilkyDark => "MilkyDark",
-    }
-    .to_string()
-}
 
 // ── Platform helpers ────────────────────────────────────────────────
 
@@ -178,207 +91,8 @@ pub(crate) fn perform_window_drag(_window: &gpui::Window) {}
 // ── Editor element constants ────────────────────────────────────────
 // NOTE: Element layout constants are now in style.rs.
 
-// ── SVG asset paths ─────────────────────────────────────────────────
-
-pub(crate) const COMMENT_SVG_PATH: &str = "assets/icons/comment.svg";
-pub(crate) const HEADING_1_SVG_PATH: &str = "assets/icons/format/heading-1.svg";
-pub(crate) const HEADING_2_SVG_PATH: &str = "assets/icons/format/heading-2.svg";
-pub(crate) const HEADING_3_SVG_PATH: &str = "assets/icons/format/heading-3.svg";
-pub(crate) const HEADING_4_SVG_PATH: &str = "assets/icons/format/heading-4.svg";
-pub(crate) const HEADING_5_SVG_PATH: &str = "assets/icons/format/heading-5.svg";
-pub(crate) const HEADING_6_SVG_PATH: &str = "assets/icons/format/heading-6.svg";
-pub(crate) const CHECK_SVG_PATH: &str = "assets/icons/check.svg";
-pub(crate) const FOLD_SVG_PATH: &str = "assets/icons/fold.svg";
-pub(crate) const OPEN_SVG_PATH: &str = "assets/icons/open.svg";
-pub(crate) const LOGO_SVG_PATH: &str = "assets/icons/logo.svg";
-pub(crate) const ROOT_SVG_PATH: &str = "assets/icons/filetree/all.svg";
-pub(crate) const FILETREE_SEARCH_SVG_PATH: &str = "assets/icons/filetree/search.svg";
-pub(crate) const FILETREE_SORT_SVG_PATH: &str = "assets/icons/filetree/sort.svg";
-pub(crate) const FILETREE_ADD_SVG_PATH: &str = "assets/icons/filetree/add.svg";
-pub(crate) const FILETREE_FOLD_SVG_PATH: &str = "assets/icons/filetree/fold.svg";
-pub(crate) const SIDEBAR_TOGGLE_SVG_PATH: &str = "assets/icons/sidebar-toggle.svg";
-pub(crate) const EDITOR_ALIGN_LEFT_SVG_PATH: &str = "assets/icons/editor-align-left.svg";
-pub(crate) const THEME_LIGHT_SVG_PATH: &str = "assets/icons/theme-light.svg";
-pub(crate) const THEME_DARK_SVG_PATH: &str = "assets/icons/theme-dark.svg";
-pub(crate) const FOLDER_OPEN_SVG_PATH: &str = "assets/icons/filetree/folder-open.svg";
-pub(crate) const FOLDER_CLOSED_SVG_PATH: &str = "assets/icons/filetree/folder-closed.svg";
-pub(crate) const MARKDOWN_SVG_PATH: &str = "assets/icons/filetree/markdown.svg";
-pub(crate) const WORKSPACE_EXPAND_SVG_PATH: &str = "assets/icons/filetree/workspace-expand.svg";
-pub(crate) const OUTLINE_TOGGLE_SVG_PATH: &str = "assets/icons/outline-toggle.svg";
-pub(crate) const INFO_PANEL_SVG_PATH: &str = "assets/icons/info.svg";
-pub(crate) const GIT_HISTORY_SVG_PATH: &str = "assets/icons/history.svg";
-pub(crate) const SHARE_SVG_PATH: &str = "assets/icons/share.svg";
-
-// ── Format menu SVG icons ───────────────────────────────────────────
-pub(crate) const FMT_BOLD_SVG: &str = "assets/icons/format/bold.svg";
-pub(crate) const FMT_ITALIC_SVG: &str = "assets/icons/format/italic.svg";
-pub(crate) const FMT_STRIKETHROUGH_SVG: &str = "assets/icons/format/strikethrough.svg";
-pub(crate) const FMT_INLINE_CODE_SVG: &str = "assets/icons/format/inline-code.svg";
-pub(crate) const FMT_CODE_SVG: &str = "assets/icons/format/code.svg";
-pub(crate) const FMT_QUOTE_SVG: &str = "assets/icons/format/quote.svg";
-pub(crate) const FMT_LIST_SVG: &str = "assets/icons/format/list.svg";
-pub(crate) const FMT_ORDER_LIST_SVG: &str = "assets/icons/format/order-list.svg";
-pub(crate) const FMT_TODO_SVG: &str = "assets/icons/format/todo.svg";
-pub(crate) const FMT_LINK_SVG: &str = "assets/icons/format/link.svg";
-pub(crate) const FMT_SPLIT_SVG: &str = "assets/icons/format/split.svg";
-pub(crate) const FMT_WIKI_LINK_SVG: &str = "assets/icons/format/wiki-link.svg";
-pub(crate) const FMT_TABLE_SVG: &str = "assets/icons/format/table.svg";
-pub(crate) const FMT_IMAGE_SVG: &str = "assets/icons/format/image.svg";
-
 // ── UI constants ────────────────────────────────────────────────────
 // NOTE: UI dimension constants are now in style.rs.
-
-// ── Data types ──────────────────────────────────────────────────────
-
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct EditorSnapshot {
-    pub text: String,
-    pub cursor_offset: usize,
-    pub cursor_anchor: usize,
-    pub scroll_offset: f32,
-    #[serde(default)]
-    pub extra_cursors: Vec<(usize, usize)>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WrapBoundaryAffinityKind {
-    Upstream,
-    Downstream,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct WrapBoundaryAffinity {
-    pub offset: usize,
-    pub kind: WrapBoundaryAffinityKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TabKind {
-    Editor,
-    Diff,
-    Settings,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RightUtilityPanel {
-    Outline,
-    Info,
-    GitHistory,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum FileKind {
-    Markdown,
-    Code { language: String },
-    Text,
-    Image,
-    Binary,
-}
-
-impl FileKind {
-    pub(crate) fn supports_text_buffer(&self) -> bool {
-        matches!(self, Self::Markdown | Self::Code { .. } | Self::Text)
-    }
-
-    pub(crate) fn supports_text_search(&self) -> bool {
-        self.supports_text_buffer()
-    }
-
-    pub(crate) fn supports_persistent_save(&self) -> bool {
-        self.supports_text_buffer()
-    }
-
-    pub(crate) fn is_markdown(&self) -> bool {
-        matches!(self, Self::Markdown)
-    }
-
-    pub(crate) fn is_image(&self) -> bool {
-        matches!(self, Self::Image)
-    }
-
-    pub(crate) fn is_binary(&self) -> bool {
-        matches!(self, Self::Binary)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ImageViewState {
-    pub zoom_factor: f32,
-    pub pan_x: f32,
-    pub pan_y: f32,
-}
-
-impl Default for ImageViewState {
-    fn default() -> Self {
-        Self {
-            zoom_factor: 1.0,
-            pan_x: 0.0,
-            pan_y: 0.0,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ImageDragState {
-    pub start_position: Point<Pixels>,
-    pub start_pan_x: f32,
-    pub start_pan_y: f32,
-}
-
-#[derive(Clone)]
-pub(crate) struct OpenTab {
-    pub id: String,
-    pub title: String,
-    pub kind: TabKind,
-    pub path: Option<PathBuf>,
-    pub file_kind: Option<FileKind>,
-    pub snapshot: EditorSnapshot,
-    pub image_view: ImageViewState,
-    pub git_diff: Option<GitDiffState>,
-    pub is_preview: bool,
-    pub is_dirty: bool,
-    pub is_deleted: bool,
-    pub is_pinned: bool,
-    pub recovery: config_store::TabRecoveryState,
-    pub history: history_store::TabHistory,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct GitDiffState {
-    pub source_label: String,
-    pub target_label: String,
-    pub rows: Vec<GitDiffRow>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct GitDiffRow {
-    pub kind: GitDiffRowKind,
-    pub old_line_number: Option<usize>,
-    pub new_line_number: Option<usize>,
-    pub text: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GitDiffRowKind {
-    Context,
-    Added,
-    Removed,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SidebarGitStatus {
-    Added,
-    Modified,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct SidebarItem {
-    pub path: PathBuf,
-    pub name: String,
-    pub depth: usize,
-    pub is_dir: bool,
-    pub is_expanded: bool,
-}
 
 #[derive(Clone)]
 pub(crate) struct ContextMenu {
@@ -3363,148 +3077,6 @@ impl EditorView {
         self.pause_blinking(cx);
         self.mark_active_tab_dirty();
         self.request_editor_focus(cx);
-    }
-
-    /// Auto-align table pipes so `|` characters line up vertically across rows.
-    pub(crate) fn auto_align_table(&mut self) {
-        let cursor_line = self.cursor_line();
-        let decoration = match self.decorations.get(cursor_line) {
-            Some(d) if d.block_type == BlockType::Table => d,
-            _ => return,
-        };
-        let table_info = match &decoration.table_info {
-            Some(ti) => ti.clone(),
-            None => return,
-        };
-
-        let table_start = table_info.table_start_line;
-        let table_end = table_info.table_end_line;
-
-        let mut all_rows: Vec<Vec<String>> = Vec::new();
-        let mut separator_indices: Vec<usize> = Vec::new();
-        for line_idx in table_start..table_end {
-            let content = self.buffer.line_content(line_idx).to_string();
-            let cells = markdown::parse_table_cells(&content);
-            if markdown::is_separator_row(&cells) {
-                separator_indices.push(line_idx - table_start);
-            }
-            all_rows.push(cells);
-        }
-
-        if all_rows.is_empty() {
-            return;
-        }
-
-        let max_cols = all_rows.iter().map(|r| r.len()).max().unwrap_or(0);
-        let mut col_widths = vec![0usize; max_cols];
-        for (ri, row) in all_rows.iter().enumerate() {
-            if separator_indices.contains(&ri) {
-                continue;
-            }
-            for (ci, cell) in row.iter().enumerate() {
-                let trimmed_len = cell.trim().len();
-                if ci < max_cols {
-                    col_widths[ci] = col_widths[ci].max(trimmed_len);
-                }
-            }
-        }
-        for w in col_widths.iter_mut() {
-            *w = (*w).max(3);
-        }
-
-        let cursor_offset = self.cursor.offset;
-        let cursor_line_start = self.buffer.line_start(cursor_line);
-        let cursor_col_in_line = cursor_offset - cursor_line_start;
-        let cursor_row_content = self.buffer.line_content(cursor_line).to_string();
-
-        let (cursor_cell_idx, cursor_pos_in_cell) = {
-            let mut cell_idx = 0;
-            let mut pos_in_cell = 0;
-            let trimmed = cursor_row_content.trim();
-            let offset = cursor_row_content.len() - cursor_row_content.trim_start().len();
-            let scanning = if trimmed.starts_with('|') {
-                offset + 1
-            } else {
-                offset
-            };
-            let mut in_cell_start = scanning;
-            for (i, ch) in cursor_row_content[scanning..].char_indices() {
-                let abs_pos = scanning + i;
-                if ch == '|' {
-                    if cursor_col_in_line >= in_cell_start && cursor_col_in_line <= abs_pos {
-                        pos_in_cell = cursor_col_in_line - in_cell_start;
-                        break;
-                    }
-                    cell_idx += 1;
-                    in_cell_start = abs_pos + 1;
-                }
-            }
-            if cursor_col_in_line >= in_cell_start {
-                pos_in_cell = cursor_col_in_line - in_cell_start;
-            }
-            (cell_idx, pos_in_cell)
-        };
-
-        let table_text_start = self.buffer.line_start(table_start);
-        let table_text_end = self.buffer.line_end(table_end.saturating_sub(1));
-
-        let mut new_lines: Vec<String> = Vec::new();
-        for (ri, row) in all_rows.iter().enumerate() {
-            let is_sep = separator_indices.contains(&ri);
-            let mut line = String::from("|");
-            for ci in 0..max_cols {
-                if is_sep {
-                    line.push_str(&"-".repeat(col_widths[ci] + 2));
-                } else {
-                    let cell = row.get(ci).map(|s| s.trim()).unwrap_or("");
-                    line.push(' ');
-                    line.push_str(&format!("{:width$}", cell, width = col_widths[ci]));
-                    line.push(' ');
-                }
-                line.push('|');
-            }
-            new_lines.push(line);
-        }
-
-        let new_table_text = new_lines.join("\n");
-        let old_table_text = &self.buffer.text()[table_text_start..table_text_end];
-        if new_table_text == old_table_text {
-            return;
-        }
-
-        let cursor_row_in_table = cursor_line - table_start;
-        let new_cursor_line_start = {
-            let mut offset = table_text_start;
-            for i in 0..cursor_row_in_table {
-                offset += new_lines[i].len() + 1;
-            }
-            offset
-        };
-
-        let new_line = &new_lines[cursor_row_in_table];
-        let new_cursor_offset = {
-            let mut cell_count = 0;
-            let mut cell_start = 1;
-            let mut found_offset = new_cursor_line_start + new_line.len();
-            for (i, ch) in new_line[1..].char_indices() {
-                if ch == '|' {
-                    if cell_count == cursor_cell_idx {
-                        let cell_pos = cursor_pos_in_cell.min(i - (cell_start - 1));
-                        found_offset = new_cursor_line_start + cell_start + cell_pos;
-                        break;
-                    }
-                    cell_count += 1;
-                    cell_start = 1 + i + 1;
-                }
-            }
-            found_offset
-        };
-
-        self.buffer
-            .replace(table_text_start..table_text_end, &new_table_text);
-        self.cursor.offset = new_cursor_offset.min(self.buffer.len());
-        self.cursor.anchor = self.cursor.offset;
-        self.decorations = markdown::parse_decorations(self.buffer.text());
     }
 
     // ── Table context menu operations ──────────────────────────────

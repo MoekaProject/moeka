@@ -4,6 +4,35 @@ use crate::markdown::BlockType;
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UtilityPanelToggleOutcome {
+    next_panel: Option<RightUtilityPanel>,
+    clear_resizing: bool,
+    invalidate_info: bool,
+    invalidate_git_history: bool,
+}
+
+fn utility_panel_toggle_outcome(
+    current_panel: Option<RightUtilityPanel>,
+    requested_panel: RightUtilityPanel,
+) -> UtilityPanelToggleOutcome {
+    if current_panel == Some(requested_panel) {
+        return UtilityPanelToggleOutcome {
+            next_panel: None,
+            clear_resizing: true,
+            invalidate_info: false,
+            invalidate_git_history: false,
+        };
+    }
+
+    UtilityPanelToggleOutcome {
+        next_panel: Some(requested_panel),
+        clear_resizing: false,
+        invalidate_info: requested_panel == RightUtilityPanel::Info,
+        invalidate_git_history: requested_panel == RightUtilityPanel::GitHistory,
+    }
+}
+
 impl EditorView {
     pub(crate) fn scaled(&self, value: f32) -> f32 {
         value * self.ui_scale
@@ -378,17 +407,86 @@ impl EditorView {
         panel: RightUtilityPanel,
         cx: &mut Context<Self>,
     ) {
-        if self.utility_panel == Some(panel) {
-            self.utility_panel = None;
+        let outcome = utility_panel_toggle_outcome(self.utility_panel, panel);
+        self.utility_panel = outcome.next_panel;
+        if outcome.clear_resizing {
             self.utility_panel_resizing = false;
-        } else {
-            self.utility_panel = Some(panel);
-            match panel {
-                RightUtilityPanel::Info => self.invalidate_info_panel_cache(),
-                RightUtilityPanel::GitHistory => self.invalidate_git_history_cache(),
-                RightUtilityPanel::Outline => {}
-            }
+        }
+        if outcome.invalidate_info {
+            self.invalidate_info_panel_cache();
+        }
+        if outcome.invalidate_git_history {
+            self.invalidate_git_history_cache();
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RightUtilityPanel, UtilityPanelToggleOutcome, utility_panel_toggle_outcome};
+
+    #[test]
+    fn toggling_same_panel_closes_and_clears_resizing() {
+        let outcome =
+            utility_panel_toggle_outcome(Some(RightUtilityPanel::Info), RightUtilityPanel::Info);
+
+        assert_eq!(
+            outcome,
+            UtilityPanelToggleOutcome {
+                next_panel: None,
+                clear_resizing: true,
+                invalidate_info: false,
+                invalidate_git_history: false,
+            }
+        );
+    }
+
+    #[test]
+    fn opening_info_panel_requests_info_invalidation_only() {
+        let outcome = utility_panel_toggle_outcome(None, RightUtilityPanel::Info);
+
+        assert_eq!(
+            outcome,
+            UtilityPanelToggleOutcome {
+                next_panel: Some(RightUtilityPanel::Info),
+                clear_resizing: false,
+                invalidate_info: true,
+                invalidate_git_history: false,
+            }
+        );
+    }
+
+    #[test]
+    fn switching_to_git_history_requests_git_invalidation_only() {
+        let outcome = utility_panel_toggle_outcome(
+            Some(RightUtilityPanel::Info),
+            RightUtilityPanel::GitHistory,
+        );
+
+        assert_eq!(
+            outcome,
+            UtilityPanelToggleOutcome {
+                next_panel: Some(RightUtilityPanel::GitHistory),
+                clear_resizing: false,
+                invalidate_info: false,
+                invalidate_git_history: true,
+            }
+        );
+    }
+
+    #[test]
+    fn opening_outline_keeps_cache_invalidations_off() {
+        let outcome = utility_panel_toggle_outcome(None, RightUtilityPanel::Outline);
+
+        assert_eq!(
+            outcome,
+            UtilityPanelToggleOutcome {
+                next_panel: Some(RightUtilityPanel::Outline),
+                clear_resizing: false,
+                invalidate_info: false,
+                invalidate_git_history: false,
+            }
+        );
     }
 }

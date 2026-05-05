@@ -592,8 +592,6 @@ pub(crate) struct TableCellLayout {
     pub y: f32,
     pub width: f32,
     pub height: f32,
-    /// Row index (0 = header, 1+ = data rows; separator rows skipped in visual layout).
-    pub visual_row: usize,
     /// Column index.
     pub col: usize,
     /// The display text for this cell (with inline markdown folded).
@@ -604,8 +602,6 @@ pub(crate) struct TableCellLayout {
     pub buffer_to_display: Vec<usize>,
     /// The original cell byte range within its source line.
     pub cell_range: Range<usize>,
-    /// Source line index in the buffer.
-    pub source_line: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -614,8 +610,6 @@ pub(crate) struct TableLayout {
     pub total_width: f32,
     /// Total pixel height of the table (excluding handles).
     pub total_height: f32,
-    /// Pixel widths for each column.
-    pub col_widths: Vec<f32>,
     /// Pixel heights for each visual row.
     pub row_heights: Vec<f32>,
     /// Cell layouts indexed as [visual_row][col].
@@ -782,7 +776,7 @@ pub(crate) fn compute_table_layout(
     let mut is_header_vec = Vec::new();
 
     let mut current_y = 0.0_f32;
-    for (vi, (line_idx, ti)) in visual_rows.iter().enumerate() {
+    for (line_idx, ti) in visual_rows.iter() {
         visual_row_to_line.push(*line_idx);
         is_header_vec.push(ti.is_header);
         let mut row_cells = Vec::new();
@@ -824,13 +818,11 @@ pub(crate) fn compute_table_layout(
                 y: current_y,
                 width: cell_w,
                 height: row_height,
-                visual_row: vi,
                 col: ci,
                 display_text,
                 display_to_buffer: d2b,
                 buffer_to_display: b2d,
                 cell_range,
-                source_line: *line_idx,
             });
             current_x += cell_w;
         }
@@ -841,7 +833,6 @@ pub(crate) fn compute_table_layout(
     TableLayout {
         total_width,
         total_height,
-        col_widths,
         row_heights,
         cells: all_cells,
         visual_row_count: visual_rows.len(),

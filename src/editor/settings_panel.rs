@@ -93,6 +93,51 @@ impl EditorView {
             .into_any_element()
     }
 
+    fn inline_stepper_input_styles(&self) -> crate::style::TextInputStyles {
+        let mut styles = self.styles.text_input.clone();
+        styles.text_input_bg = gpui::Hsla::transparent_black();
+        styles.text_input_focus_bg = gpui::Hsla::transparent_black();
+        styles.text_input_border_width_px = 0.0;
+        styles.text_input_padding_left_px = 2.0;
+        styles.text_input_padding_right_px = 2.0;
+        styles.text_input_height_px = 28.0;
+        styles.text_input_center = true;
+        styles.text_input_cursor_height_ratio = 0.6;
+        styles
+    }
+
+    fn build_inline_stepper_editor(
+        &self,
+        initial_value: String,
+        cx: &mut Context<Self>,
+    ) -> gpui::Entity<crate::text_input::TextInput> {
+        let styles = self.inline_stepper_input_styles();
+        cx.new(move |cx| {
+            let mut ti = crate::text_input::TextInput::new(styles, "", cx);
+            ti.set_text(&initial_value, cx);
+            ti
+        })
+    }
+
+    fn sync_inline_stepper_editor(
+        &self,
+        editor: &gpui::Entity<crate::text_input::TextInput>,
+        display: String,
+        cx: &mut Context<Self>,
+    ) {
+        editor.update(cx, |ti, cx| {
+            if ti.text() != display {
+                ti.set_text(&display, cx);
+            }
+        });
+    }
+
+    fn finalize_settings_change(&mut self, cx: &mut Context<Self>) {
+        self.app_settings.save();
+        self.line_display_info.clear();
+        cx.notify();
+    }
+
     // ── Theme section ───────────────────────────────────────────
 
     fn render_theme_section(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -426,42 +471,20 @@ impl EditorView {
         let size = size.clamp(10.0, 30.0);
         self.styles.editor.editor_font_size_px = size;
         self.app_settings.font_size = size;
-        self.app_settings.save();
-        self.line_display_info.clear();
-        // Sync the text input display
         if let Some(editor) = &self.settings_font_size_editor {
-            editor.update(cx, |ti, cx| {
-                let display = format!("{:.0}", size);
-                if ti.text() != display {
-                    ti.set_text(&display, cx);
-                }
-            });
+            self.sync_inline_stepper_editor(editor, format!("{size:.0}"), cx);
         }
-        cx.notify();
+        self.finalize_settings_change(cx);
     }
 
     pub(crate) fn ensure_font_size_editor(&mut self, cx: &mut Context<Self>) {
         if self.settings_font_size_editor.is_some() {
             return;
         }
-        let mut styles = self.styles.text_input.clone();
-        // Customize for inline stepper: no border, transparent bg, centered text
-        styles.text_input_bg = gpui::Hsla::transparent_black();
-        styles.text_input_focus_bg = gpui::Hsla::transparent_black();
-        styles.text_input_border_width_px = 0.0;
-        styles.text_input_padding_left_px = 2.0;
-        styles.text_input_padding_right_px = 2.0;
-        styles.text_input_height_px = 28.0;
-        styles.text_input_center = true;
-        styles.text_input_cursor_height_ratio = 0.6;
-        let editor = cx.new(|cx| {
-            let mut ti = crate::text_input::TextInput::new(styles, "", cx);
-            ti.set_text(
-                &format!("{:.0}", self.styles.editor.editor_font_size_px),
-                cx,
-            );
-            ti
-        });
+        let editor = self.build_inline_stepper_editor(
+            format!("{:.0}", self.styles.editor.editor_font_size_px),
+            cx,
+        );
         cx.subscribe(
             &editor,
             |this, editor, event: &crate::text_input::TextInputEvent, cx| {
@@ -473,11 +496,8 @@ impl EditorView {
                         }
                     }
                     crate::text_input::TextInputEvent::Escape => {
-                        // Revert to current value
                         let current = this.styles.editor.editor_font_size_px;
-                        editor.update(cx, |ti, cx| {
-                            ti.set_text(&format!("{:.0}", current), cx);
-                        });
+                        this.sync_inline_stepper_editor(&editor, format!("{current:.0}"), cx);
                     }
                     crate::text_input::TextInputEvent::Changed => {}
                     _ => {}
@@ -582,38 +602,17 @@ impl EditorView {
         let scale = (scale * 10.0).round() / 10.0; // Round to 0.1
         self.set_ui_scale(scale, cx);
         self.app_settings.ui_scale = self.ui_scale;
-        self.app_settings.save();
-        self.line_display_info.clear();
         if let Some(editor) = &self.settings_ui_font_size_editor {
-            let current = self.ui_scale;
-            editor.update(cx, |ti, cx| {
-                let display = format!("{:.1}", current);
-                if ti.text() != display {
-                    ti.set_text(&display, cx);
-                }
-            });
+            self.sync_inline_stepper_editor(editor, format!("{:.1}", self.ui_scale), cx);
         }
-        cx.notify();
+        self.finalize_settings_change(cx);
     }
 
     pub(crate) fn ensure_ui_font_size_editor(&mut self, cx: &mut Context<Self>) {
         if self.settings_ui_font_size_editor.is_some() {
             return;
         }
-        let mut styles = self.styles.text_input.clone();
-        styles.text_input_bg = gpui::Hsla::transparent_black();
-        styles.text_input_focus_bg = gpui::Hsla::transparent_black();
-        styles.text_input_border_width_px = 0.0;
-        styles.text_input_padding_left_px = 2.0;
-        styles.text_input_padding_right_px = 2.0;
-        styles.text_input_height_px = 28.0;
-        styles.text_input_center = true;
-        styles.text_input_cursor_height_ratio = 0.6;
-        let editor = cx.new(|cx| {
-            let mut ti = crate::text_input::TextInput::new(styles, "", cx);
-            ti.set_text(&format!("{:.1}", self.ui_scale), cx);
-            ti
-        });
+        let editor = self.build_inline_stepper_editor(format!("{:.1}", self.ui_scale), cx);
         cx.subscribe(
             &editor,
             |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -625,9 +624,7 @@ impl EditorView {
                 }
                 crate::text_input::TextInputEvent::Escape => {
                     let current = this.ui_scale;
-                    editor.update(cx, |ti, cx| {
-                        ti.set_text(&format!("{:.1}", current), cx);
-                    });
+                    this.sync_inline_stepper_editor(&editor, format!("{current:.1}"), cx);
                 }
                 crate::text_input::TextInputEvent::Changed => {}
                 _ => {}
@@ -734,37 +731,20 @@ impl EditorView {
         self.styles.editor.editor_paragraph_line_height_factor = value;
         self.styles.editor.editor_heading_line_height_factor = value;
         self.app_settings.line_height = value;
-        self.app_settings.save();
-        self.line_display_info.clear();
         if let Some(editor) = &self.settings_line_height_editor {
-            editor.update(cx, |ti, cx| {
-                let display = format!("{:.1}", value);
-                if ti.text() != display {
-                    ti.set_text(&display, cx);
-                }
-            });
+            self.sync_inline_stepper_editor(editor, format!("{value:.1}"), cx);
         }
-        cx.notify();
+        self.finalize_settings_change(cx);
     }
 
     fn ensure_line_height_editor(&mut self, cx: &mut Context<Self>) {
         if self.settings_line_height_editor.is_some() {
             return;
         }
-        let mut styles = self.styles.text_input.clone();
-        styles.text_input_bg = gpui::Hsla::transparent_black();
-        styles.text_input_focus_bg = gpui::Hsla::transparent_black();
-        styles.text_input_border_width_px = 0.0;
-        styles.text_input_padding_left_px = 2.0;
-        styles.text_input_padding_right_px = 2.0;
-        styles.text_input_height_px = 28.0;
-        styles.text_input_center = true;
-        styles.text_input_cursor_height_ratio = 0.6;
-        let editor = cx.new(|cx| {
-            let mut ti = crate::text_input::TextInput::new(styles, "", cx);
-            ti.set_text(&format!("{:.1}", self.app_settings.line_height), cx);
-            ti
-        });
+        let editor = self.build_inline_stepper_editor(
+            format!("{:.1}", self.app_settings.line_height),
+            cx,
+        );
         cx.subscribe(
             &editor,
             |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -776,9 +756,7 @@ impl EditorView {
                 }
                 crate::text_input::TextInputEvent::Escape => {
                     let current = this.app_settings.line_height;
-                    editor.update(cx, |ti, cx| {
-                        ti.set_text(&format!("{:.1}", current), cx);
-                    });
+                    this.sync_inline_stepper_editor(&editor, format!("{current:.1}"), cx);
                 }
                 _ => {}
             },
@@ -884,37 +862,20 @@ impl EditorView {
         let value = ((value * 2.0).round() / 2.0).clamp(-2.0, 10.0);
         self.styles.editor.editor_letter_spacing_px = value;
         self.app_settings.letter_spacing = value;
-        self.app_settings.save();
-        self.line_display_info.clear();
         if let Some(editor) = &self.settings_letter_spacing_editor {
-            editor.update(cx, |ti, cx| {
-                let display = format!("{:.1}", value);
-                if ti.text() != display {
-                    ti.set_text(&display, cx);
-                }
-            });
+            self.sync_inline_stepper_editor(editor, format!("{value:.1}"), cx);
         }
-        cx.notify();
+        self.finalize_settings_change(cx);
     }
 
     fn ensure_letter_spacing_editor(&mut self, cx: &mut Context<Self>) {
         if self.settings_letter_spacing_editor.is_some() {
             return;
         }
-        let mut styles = self.styles.text_input.clone();
-        styles.text_input_bg = gpui::Hsla::transparent_black();
-        styles.text_input_focus_bg = gpui::Hsla::transparent_black();
-        styles.text_input_border_width_px = 0.0;
-        styles.text_input_padding_left_px = 2.0;
-        styles.text_input_padding_right_px = 2.0;
-        styles.text_input_height_px = 28.0;
-        styles.text_input_center = true;
-        styles.text_input_cursor_height_ratio = 0.6;
-        let editor = cx.new(|cx| {
-            let mut ti = crate::text_input::TextInput::new(styles, "", cx);
-            ti.set_text(&format!("{:.1}", self.app_settings.letter_spacing), cx);
-            ti
-        });
+        let editor = self.build_inline_stepper_editor(
+            format!("{:.1}", self.app_settings.letter_spacing),
+            cx,
+        );
         cx.subscribe(
             &editor,
             |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -926,9 +887,7 @@ impl EditorView {
                 }
                 crate::text_input::TextInputEvent::Escape => {
                     let current = this.app_settings.letter_spacing;
-                    editor.update(cx, |ti, cx| {
-                        ti.set_text(&format!("{:.1}", current), cx);
-                    });
+                    this.sync_inline_stepper_editor(&editor, format!("{current:.1}"), cx);
                 }
                 _ => {}
             },

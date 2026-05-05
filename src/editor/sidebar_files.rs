@@ -1,0 +1,329 @@
+use std::path::{Path, PathBuf};
+
+use gpui::{AppContext, Context, Window};
+
+use super::*;
+
+impl EditorView {
+    pub(crate) fn start_rename(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let styles = self.sidebar_edit_text_input_styles();
+        let editor = cx.new(|cx| {
+            let mut text_input = crate::text_input::TextInput::new(styles, "名称...", cx);
+            text_input.set_text(&current_name, cx);
+            let dot_pos = current_name.rfind('.').unwrap_or(current_name.len());
+            text_input.set_selection(0, dot_pos, cx);
+            text_input
+        });
+        cx.subscribe(
+            &editor,
+            |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Submit => this.commit_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Escape => this.cancel_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Changed => {}
+                _ => {}
+            },
+        )
+        .detach();
+        let focus_handle = editor.read(cx).focus_handle.clone();
+        let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.cancel_sidebar_edit(cx);
+        });
+        window.focus(&focus_handle);
+        self.sidebar_edit = Some(SidebarEditMode::Rename { path, editor });
+        self.sidebar_edit_blur_sub = Some(blur_sub);
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    pub(crate) fn start_create_file(
+        &mut self,
+        parent: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.expanded_dirs.insert(parent.clone());
+        self.invalidate_sidebar_items_cache();
+        let styles = self.sidebar_edit_text_input_styles();
+        let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "文件名...", cx));
+        cx.subscribe(
+            &editor,
+            |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Submit => this.commit_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Escape => this.cancel_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Changed => {}
+                _ => {}
+            },
+        )
+        .detach();
+        let focus_handle = editor.read(cx).focus_handle.clone();
+        let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.cancel_sidebar_edit(cx);
+        });
+        window.focus(&focus_handle);
+        self.sidebar_edit = Some(SidebarEditMode::CreateFile { parent, editor });
+        self.sidebar_edit_blur_sub = Some(blur_sub);
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    pub(crate) fn start_create_dir(
+        &mut self,
+        parent: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.expanded_dirs.insert(parent.clone());
+        self.invalidate_sidebar_items_cache();
+        let styles = self.sidebar_edit_text_input_styles();
+        let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "目录名...", cx));
+        cx.subscribe(
+            &editor,
+            |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Submit => this.commit_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Escape => this.cancel_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Changed => {}
+                _ => {}
+            },
+        )
+        .detach();
+        let focus_handle = editor.read(cx).focus_handle.clone();
+        let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.cancel_sidebar_edit(cx);
+        });
+        window.focus(&focus_handle);
+        self.sidebar_edit = Some(SidebarEditMode::CreateDir { parent, editor });
+        self.sidebar_edit_blur_sub = Some(blur_sub);
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    pub(crate) fn commit_sidebar_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.sidebar_edit.take() else {
+            return;
+        };
+        self.sidebar_edit_blur_sub = None;
+        let value = edit.text(cx);
+        match &edit {
+            SidebarEditMode::Rename { path, .. } => {
+                let trimmed = value.trim();
+                if !trimmed.is_empty()
+                    && trimmed != path.file_name().and_then(|name| name.to_str()).unwrap_or("")
+                {
+                    let new_path = path.with_file_name(trimmed);
+                    if let Err(error) = std::fs::rename(path, &new_path) {
+                        eprintln!("Rename failed: {error}");
+                    } else {
+                        self.invalidate_sidebar_items_cache();
+                        for tab in &mut self.tabs {
+                            if tab.path.as_deref() == Some(path.as_path()) {
+                                tab.path = Some(new_path.clone());
+                                tab.title = Self::title_for_path(&new_path);
+                            }
+                        }
+                        if self.selected_sidebar_paths.contains(path) {
+                            self.selected_sidebar_paths.remove(path);
+                            self.selected_sidebar_paths.insert(new_path.clone());
+                        }
+                        if self.current_file_path.as_deref() == Some(path.as_path()) {
+                            self.current_file_path = Some(new_path);
+                        }
+                    }
+                }
+            }
+            SidebarEditMode::CreateFile { parent, .. } => {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    let file_name = if Path::new(trimmed)
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| !ext.is_empty())
+                    {
+                        trimmed.to_string()
+                    } else {
+                        format!("{trimmed}.md")
+                    };
+                    let new_path = parent.join(file_name);
+                    if let Err(error) = std::fs::File::create(&new_path) {
+                        eprintln!("Create file failed: {error}");
+                    } else {
+                        self.invalidate_sidebar_items_cache();
+                        self.reveal_path_in_sidebar(new_path.clone(), cx);
+                        self.open_sidebar_file(new_path, cx);
+                        return;
+                    }
+                }
+            }
+            SidebarEditMode::CreateDir { parent, .. } => {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    let new_path = parent.join(trimmed);
+                    if let Err(error) = std::fs::create_dir(&new_path) {
+                        eprintln!("Create folder failed: {error}");
+                    } else {
+                        self.expanded_dirs.insert(new_path.clone());
+                        self.invalidate_sidebar_items_cache();
+                        self.reveal_path_in_sidebar(new_path, cx);
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_sidebar_edit(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_edit.take().is_some() {
+            self.sidebar_edit_blur_sub = None;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn delete_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if let Err(error) = result {
+            eprintln!("Delete failed: {error}");
+        } else {
+            self.invalidate_sidebar_items_cache();
+            self.tabs
+                .retain(|tab| tab.path.as_ref().is_none_or(|candidate| !candidate.starts_with(&path)));
+            if self.tabs.is_empty() {
+                self.create_scratch_tab(cx);
+                return;
+            }
+            let active_still_exists = self
+                .active_tab_id
+                .as_ref()
+                .is_some_and(|id| self.tabs.iter().any(|tab| &tab.id == id));
+            if !active_still_exists {
+                self.activate_tab_by_index(0, cx);
+            }
+        }
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    pub(crate) fn paste_into_dir(&mut self, target_dir: PathBuf, cx: &mut Context<Self>) {
+        let Some(clipboard) = self.file_clipboard.take() else {
+            return;
+        };
+        for src in &clipboard.paths {
+            let Some(name) = src.file_name() else {
+                continue;
+            };
+            let dst = target_dir.join(name);
+            if clipboard.is_cut {
+                if let Err(error) = std::fs::rename(src, &dst) {
+                    eprintln!("Move {:?} -> {:?} failed: {error}", src, dst);
+                } else {
+                    for tab in &mut self.tabs {
+                        if tab.path.as_deref() == Some(src.as_path()) {
+                            tab.path = Some(dst.clone());
+                            tab.title = Self::title_for_path(&dst);
+                        }
+                    }
+                }
+            } else if src.is_file() && let Err(error) = std::fs::copy(src, &dst) {
+                eprintln!("Copy failed: {error}");
+            }
+        }
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    pub(crate) fn reveal_in_finder(&self, path: &Path) {
+        if let Err(error) = std::process::Command::new("open")
+            .arg("--reveal")
+            .arg(path)
+            .spawn()
+        {
+            eprintln!("failed to reveal in Finder: {error}");
+        }
+    }
+
+    pub(crate) fn pick_workspace_folder(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let maybe_path = cx
+                .background_executor()
+                .spawn(async move { helpers::pick_folder_blocking() })
+                .await;
+            if let Some(path) = maybe_path {
+                this.update(cx, |editor, cx| {
+                    if !editor.workspaces.contains(&path) {
+                        editor.workspaces.push(path.clone());
+                    }
+                    editor.switch_workspace(path, cx);
+                    session_store::persist_session(editor);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn switch_workspace(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.sidebar_root = path.clone();
+        self.sidebar_visible = true;
+        self.sidebar_resizing = false;
+        self.expanded_dirs.clear();
+        self.expanded_dirs.insert(path);
+        self.selected_sidebar_paths.clear();
+        self.focused_sidebar_path = None;
+        self.sidebar_selection_anchor = None;
+        self.sidebar_error = None;
+        self.invalidate_sidebar_items_cache();
+        self.sidebar_git_statuses.clear();
+        self.invalidate_sidebar_git_statuses();
+        self.reset_sidebar_render_limit();
+        self.context_menu = None;
+        self.start_watching(cx);
+        cx.notify();
+        session_store::persist_session(self);
+    }
+
+    pub(crate) fn close_workspace(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let closing_idx = self.workspaces.iter().position(|workspace| workspace == path);
+        self.workspaces.retain(|workspace| workspace != path);
+        if self.workspaces.is_empty() {
+            self.sidebar_root = PathBuf::new();
+            self.sidebar_visible = false;
+            self.sidebar_resizing = false;
+            self.expanded_dirs.clear();
+            self.selected_sidebar_paths.clear();
+            self.focused_sidebar_path = None;
+            self.sidebar_selection_anchor = None;
+            self.sidebar_error = None;
+            self.invalidate_sidebar_items_cache();
+            self.sidebar_git_statuses.clear();
+            self.sidebar_git_statuses_dirty = false;
+            self.sidebar_git_statuses_scanned_at = None;
+            self.context_menu = None;
+            self._watcher_task = None;
+            cx.notify();
+            session_store::persist_session(self);
+            return;
+        }
+        if self.sidebar_root == path {
+            let next_idx = closing_idx
+                .unwrap_or(0)
+                .min(self.workspaces.len().saturating_sub(1));
+            let next = self.workspaces[next_idx].clone();
+            self.switch_workspace(next, cx);
+        } else {
+            self.context_menu = None;
+            cx.notify();
+        }
+        session_store::persist_session(self);
+    }
+}
