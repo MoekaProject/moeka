@@ -163,6 +163,7 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_fold(&mut self, line: usize, cx: &mut Context<Self>) {
+        let mut cursor_moved = false;
         if self.folded_sections.contains(&line) {
             self.folded_sections.remove(&line);
         } else if let Some(range) = self.fold_range_for_line(line) {
@@ -171,10 +172,15 @@ impl EditorView {
             if range.contains(&cursor_line) {
                 let new_offset = self.buffer.line_end(line);
                 self.cursor.move_to(new_offset, &self.buffer);
+                cursor_moved = true;
             }
         }
         self.line_display_info.clear();
-        self.scroll_to_cursor();
+        if cursor_moved {
+            self.scroll_to_cursor();
+        } else {
+            cx.notify();
+        }
         self.pause_blinking(cx);
     }
 

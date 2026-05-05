@@ -55,7 +55,7 @@ impl EditorView {
         self.styles.editor.editor_monospace_font_family =
             Box::leak(self.app_settings.code_font.clone().into_boxed_str());
         self.line_display_info.clear();
-        self.update_theme_debugger_input_styles(cx);
+        self.sync_overlay_text_input_styles(cx);
 
         if recreate_settings_editors {
             self.settings_font_size_editor = None;
@@ -104,7 +104,7 @@ impl EditorView {
         styles
     }
 
-    fn update_theme_debugger_input_styles(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn update_theme_debugger_input_styles(&mut self, cx: &mut Context<Self>) {
         let input_styles = self.theme_debugger_text_input_styles();
         if let Some(editor) = &self.theme_debugger_hex_editor {
             let styles = input_styles.clone();

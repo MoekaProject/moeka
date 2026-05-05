@@ -443,7 +443,12 @@ pub(crate) fn collect_wiki_link_recent_files(
             .cmp(&left.0)
             .then_with(|| left.1.relative_path.cmp(&right.1.relative_path))
     });
-    ranked.into_iter().map(|(_, candidate)| candidate).collect()
+    ranked
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .filter(|candidate| is_markdown_file(&candidate.path))
+        .take(limit)
+        .collect()
 }
 
 pub(crate) fn collect_wiki_link_search_results(
@@ -452,6 +457,7 @@ pub(crate) fn collect_wiki_link_search_results(
     limit: usize,
 ) -> Vec<QuickOpenResult> {
     let mut results = collect_quick_open_results(root, query);
+    results.retain(|result| is_markdown_file(&result.path));
     results.truncate(limit);
     results
 }
@@ -474,6 +480,9 @@ fn collect_recent_openable_files(
         }
         if is_dir {
             collect_recent_openable_files(root, &path, limit, ranked);
+            continue;
+        }
+        if !is_markdown_file(&path) {
             continue;
         }
 

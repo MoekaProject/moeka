@@ -995,7 +995,7 @@ impl EditorView {
             return;
         }
         self.checkpoint();
-        self.apply_wrap("```\n", "\n```");
+        self.wrap_current_lines_as_code_block();
         self.pause_blinking(cx);
     }
 

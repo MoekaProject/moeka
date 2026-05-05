@@ -71,7 +71,7 @@ impl EditorView {
         result
     }
 
-    fn normalize_sidebar_path(path: &Path) -> PathBuf {
+    pub(crate) fn normalize_sidebar_path(path: &Path) -> PathBuf {
         let mut normalized = PathBuf::new();
         for component in path.components() {
             normalized.push(component.as_os_str());

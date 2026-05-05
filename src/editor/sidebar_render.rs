@@ -400,6 +400,14 @@ impl EditorView {
         } else {
             gpui::transparent_black()
         };
+        let is_cut_item = self.file_clipboard.as_ref().is_some_and(|clipboard| {
+            clipboard.is_cut
+                && clipboard.paths.first().is_some_and(|cut_path| {
+                    let cut_path = Self::normalize_sidebar_path(cut_path);
+                    let current_path = Self::normalize_sidebar_path(&path);
+                    current_path == cut_path || current_path.starts_with(&cut_path)
+                })
+        });
         let icon_color = git_status_color.unwrap_or(if is_selected {
             ss.sidebar_item_selected_icon_color
         } else {
@@ -517,6 +525,7 @@ impl EditorView {
             .relative()
             .flex()
             .items_center()
+            .opacity(if is_cut_item { 0.48 } else { 1.0 })
             .bg(if is_drag_over { drag_over_bg } else { row_bg })
             .border_1()
             .border_color(if is_selected {

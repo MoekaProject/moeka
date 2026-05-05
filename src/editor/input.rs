@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::time::Duration;
 
 use gpui::{
     Bounds, Context, FontFallbacks, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -38,6 +39,80 @@ pub(super) fn ime_debug_log(_message: impl AsRef<str>) {
 }
 
 impl EditorView {
+    fn selection_drag_scroll_delta_for_position(&self, position: Point<Pixels>) -> Option<f32> {
+        let pos_y: f32 = position.y.into();
+        let origin_y: f32 = self.content_origin.y.into();
+        let rel_pos_y = pos_y - origin_y;
+        let scroll_margin = 48.0;
+
+        if rel_pos_y < scroll_margin {
+            let intensity = ((scroll_margin - rel_pos_y) / scroll_margin).max(0.0);
+            Some(-(6.0 + intensity * intensity * 42.0))
+        } else if rel_pos_y > self.last_viewport_height - scroll_margin {
+            let intensity = ((rel_pos_y - (self.last_viewport_height - scroll_margin))
+                / scroll_margin)
+                .max(0.0);
+            Some(6.0 + intensity * intensity * 42.0)
+        } else {
+            None
+        }
+    }
+
+    fn sync_selection_drag_scroll_task(&mut self, cx: &mut Context<Self>) {
+        if !self.is_selecting || self.selection_drag_position.is_none() {
+            self.selection_drag_scroll_task = None;
+            return;
+        }
+
+        let Some(position) = self.selection_drag_position else {
+            self.selection_drag_scroll_task = None;
+            return;
+        };
+        if self
+            .selection_drag_scroll_delta_for_position(position)
+            .is_none()
+        {
+            self.selection_drag_scroll_task = None;
+            return;
+        }
+        if self.selection_drag_scroll_task.is_some() {
+            return;
+        }
+
+        self.selection_drag_scroll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let did_scroll = this
+                    .update(cx, |editor, cx| {
+                        editor.selection_drag_scroll_task.as_ref()?;
+                        let position = editor.selection_drag_position?;
+                        let delta = editor.selection_drag_scroll_delta_for_position(position)?;
+                        let previous_scroll = editor.scroll_offset;
+                        editor.scroll_offset += delta;
+                        editor.clamp_scroll();
+                        if (editor.scroll_offset - previous_scroll).abs() < f32::EPSILON {
+                            return None;
+                        }
+                        let offset = editor.offset_for_position(position);
+                        editor.update_wrap_boundary_affinity_for_position(offset, position);
+                        editor.cursor.select_to(offset, &editor.buffer);
+                        cx.notify();
+                        Some(())
+                    })
+                    .ok()
+                    .flatten()
+                    .is_some();
+
+                if !did_scroll {
+                    return;
+                }
+
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+            }
+        }));
+    }
+
     pub(crate) fn primary_cursor_has_inline_edit_headroom(&self) -> bool {
         let cursor_line = self.cursor_line();
         let cursor_y = self.line_y_offset(cursor_line);
@@ -226,6 +301,8 @@ impl EditorView {
                         self.cursor.move_to(offset, &self.buffer);
                         self.clear_wrap_boundary_affinity();
                         self.is_selecting = true;
+                        self.selection_drag_position = Some(event.position);
+                        self.sync_selection_drag_scroll_task(cx);
                     }
                     cx.notify();
                     return;
@@ -247,6 +324,8 @@ impl EditorView {
         self.is_selecting = true;
         let prev_offset = self.cursor.offset;
         let offset = self.offset_for_position(event.position);
+        self.selection_drag_position = Some(event.position);
+        self.sync_selection_drag_scroll_task(cx);
         self.last_mouse_down_target = Some((event.position, offset));
         self.update_wrap_boundary_affinity_for_position(offset, event.position);
         if event.modifiers.platform {
@@ -404,7 +483,12 @@ impl EditorView {
                 if also_select_desc {
                     let desc_abs_start = line_start + span.range.start;
                     let desc_abs_end = line_start + span.range.end;
-                    if new_offset >= desc_abs_start && new_offset <= desc_abs_end {
+                    let came_from_outside_desc =
+                        prev_offset < desc_abs_start || prev_offset > desc_abs_end;
+                    if came_from_outside_desc
+                        && new_offset >= desc_abs_start
+                        && new_offset <= desc_abs_end
+                    {
                         self.cursor.anchor = desc_abs_start;
                         self.cursor.offset = desc_abs_end;
                         self.is_selecting = false;
@@ -421,22 +505,23 @@ impl EditorView {
                     let inner_abs_start = full_abs_start + 2;
                     let inner_abs_end = full_abs_end.saturating_sub(2);
 
-                    if new_offset < inner_abs_start || new_offset > inner_abs_end {
+                    if new_offset < full_abs_start || new_offset > full_abs_end {
                         continue;
                     }
 
                     let entered_from_outside =
                         prev_offset < full_abs_start || prev_offset > full_abs_end;
-                    if entered_from_outside && inner_abs_start < inner_abs_end {
+                    if entered_from_outside
+                        && new_offset >= inner_abs_start
+                        && new_offset <= inner_abs_end
+                        && inner_abs_start < inner_abs_end
+                    {
                         self.cursor.anchor = inner_abs_start;
                         self.cursor.offset = inner_abs_end;
                         self.is_selecting = false;
                     }
 
-                    if self.wiki_link_start != Some(full_abs_start) {
-                        self.open_wiki_link_menu(full_abs_start, cx);
-                    }
-                    self.update_wiki_link_query(cx);
+                    self.ensure_wiki_link_menu_for_cursor(cx);
                     return;
                 }
             }
@@ -661,6 +746,8 @@ impl EditorView {
             return;
         }
         self.is_selecting = false;
+        self.selection_drag_position = None;
+        self.selection_drag_scroll_task = None;
     }
 
     pub(crate) fn on_mouse_move(
@@ -759,19 +846,19 @@ impl EditorView {
             .map(|(_, line, _)| *line);
         if hovering_fold != self.hovering_fold_line {
             self.hovering_fold_line = hovering_fold;
+            self.sync_gutter_fold_reveal(cx);
             cx.notify();
         }
 
         let gutter_styles = &self.styles.gutter;
-        let fold_size = self.scaled(gutter_styles.gutter_fold_icon_size_px);
-        let fold_offset = self.scaled(gutter_styles.gutter_fold_icon_offset_px);
         let fold_hit_padding = self.scaled(gutter_styles.gutter_fold_hit_padding_px);
-        let pane_left = self.last_content_left - fold_size - fold_offset - fold_hit_padding;
+        let pane_left = f32::from(self.content_origin.x);
         let hover_x = f32::from(event.position.x);
         let hovering_gutter_fold_area =
             hover_x >= pane_left && hover_x <= self.last_content_left + fold_hit_padding;
         if hovering_gutter_fold_area != self.hovering_gutter_fold_area {
             self.hovering_gutter_fold_area = hovering_gutter_fold_area;
+            self.sync_gutter_fold_reveal(cx);
             cx.notify();
         }
 
@@ -814,6 +901,8 @@ impl EditorView {
         }
 
         if self.is_selecting {
+            self.selection_drag_position = Some(event.position);
+            self.sync_selection_drag_scroll_task(cx);
             let pos_y: f32 = event.position.y.into();
             let origin_y: f32 = self.content_origin.y.into();
             let rel_pos_y = pos_y - origin_y;
@@ -892,6 +981,7 @@ impl EditorView {
             0,
             0,
             0,
+            0,
         );
         let trim_start = folded_raw.len() - folded_raw.trim_start().len();
         let trim_end = folded_raw.len() - folded_raw.trim_end().len();
@@ -960,6 +1050,7 @@ impl EditorView {
             &self.theme,
             self.styles.wiki_link.wiki_link_text_color,
             self.styles.wiki_link.wiki_link_text_weight,
+            None,
         );
         if ti.is_header {
             for run in &mut cell_runs {
@@ -1086,6 +1177,27 @@ impl EditorView {
                 self.base_font_size() * 0.6
             }
         };
+        let body_space_width = {
+            let test_run = TextRun {
+                len: 1,
+                font: body_font.clone(),
+                color: gpui::transparent_black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            if let Ok(test_lines) = window.text_system().shape_text(
+                " ".into(),
+                px(self.base_font_size()),
+                &[test_run],
+                None,
+                None,
+            ) {
+                f32::from(test_lines[0].width()).max(1.0)
+            } else {
+                base_char_width.max(1.0)
+            }
+        };
 
         let table_cell_padding_px = self.scaled(self.styles.table.table_cell_padding_px);
         let table_cell_padding_chars = if table_cell_padding_px <= 0.0 {
@@ -1093,16 +1205,15 @@ impl EditorView {
         } else {
             (table_cell_padding_px / base_char_width).ceil().max(1.0) as usize
         };
-        let collapsed_task_prefix_chars = ((self.base_font_size()
-            * self.styles.checkbox.checkbox_size_factor
-            + self.scaled(self.styles.checkbox.checkbox_text_gap_px))
-            / base_char_width)
-            .ceil()
-            .max(3.0) as usize;
-        let checkbox_indent_step_chars = (self.scaled(self.styles.checkbox.checkbox_indent_step_px)
-            / base_char_width)
-            .ceil()
-            .max(1.0) as usize;
+        let checkbox_text_gap_px = self.scaled(self.styles.checkbox.checkbox_text_gap_px);
+        let task_source_indent_step_chars =
+            self.styles.checkbox.checkbox_parent_prefix_chars as usize;
+        let collapsed_task_prefix_display_columns = helpers::task_prefix_display_columns(
+            body_space_width,
+            self.base_font_size() * self.styles.checkbox.checkbox_size_factor,
+            checkbox_text_gap_px,
+        );
+        let checkbox_indent_step_display_columns = collapsed_task_prefix_display_columns;
 
         let is_code_block_type = |index: usize| {
             matches!(
@@ -1132,6 +1243,17 @@ impl EditorView {
         } else {
             None
         };
+        let active_front_matter_group = self
+            .decorations
+            .get(self.cursor_line())
+            .and_then(|decoration| decoration.table_info.as_ref())
+            .filter(|table_info| table_info.is_front_matter)
+            .map(|table_info| {
+                (
+                    table_info.table_start_line,
+                    table_info.table_end_line.saturating_sub(1),
+                )
+            });
 
         let line_content = self.buffer.line_content(line_idx);
         let line_start_offset = self.buffer.line_start(line_idx);
@@ -1245,7 +1367,13 @@ impl EditorView {
         }
 
         let code_block_syntax_active = active_code_fence_group
-            .is_some_and(|(start, end)| line_idx >= start && line_idx <= end);
+            .is_some_and(|(start, end)| line_idx >= start && line_idx <= end)
+            || active_front_matter_group
+                .is_some_and(|(start, end)| line_idx >= start && line_idx <= end);
+        let is_front_matter_line = decoration
+            .table_info
+            .as_ref()
+            .is_some_and(|ti| ti.is_front_matter);
         let (display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
             helpers::build_display_text(
                 line_content,
@@ -1254,9 +1382,10 @@ impl EditorView {
                 code_block_syntax_active,
                 None,
                 table_cell_padding_chars,
-                collapsed_task_prefix_chars,
-                checkbox_indent_step_chars,
+                collapsed_task_prefix_display_columns,
+                checkbox_indent_step_display_columns,
                 self.styles.checkbox.checkbox_parent_prefix_chars as usize,
+                0,
             );
 
         let runs = helpers::build_text_runs_for_display(
@@ -1272,11 +1401,12 @@ impl EditorView {
             &monospace_font,
             &heading_font,
             &heading_cjk_font,
-            collapsed_task_prefix_chars,
+            collapsed_task_prefix_display_columns,
             font_size,
             &self.theme,
             self.styles.wiki_link.wiki_link_text_color,
             self.styles.wiki_link.wiki_link_text_weight,
+            Some(self.styles.table.front_matter_key_text_color),
         );
 
         let display_shared: SharedString = if display_text.is_empty() {
@@ -1294,7 +1424,7 @@ impl EditorView {
                 &display_text,
                 &decoration.block_type,
                 prefix_collapsed,
-                collapsed_task_prefix_chars,
+                collapsed_task_prefix_display_columns,
             )
         } else {
             0
@@ -1303,7 +1433,8 @@ impl EditorView {
         let base_wrap_width = if matches!(
             decoration.block_type,
             BlockType::CodeBlock | BlockType::CodeBlockFence
-        ) {
+        ) || is_front_matter_line
+        {
             (text_width
                 - self.scaled(self.styles.code_block.code_block_text_padding_left_px)
                 - self.scaled(self.styles.code_block.code_block_wrap_right_padding_px))
@@ -1342,16 +1473,30 @@ impl EditorView {
         } else {
             0.0
         };
-        let content_x = if matches!(
+        let base_content_x = if matches!(
             decoration.block_type,
             BlockType::CodeBlock | BlockType::CodeBlockFence
-        ) {
+        ) || is_front_matter_line
+        {
             editor_left
                 + self.padding_left()
                 + self.scaled(self.styles.code_block.code_block_text_padding_left_px)
         } else {
             editor_left + self.padding_left()
         };
+        let content_x =
+            if matches!(decoration.block_type, BlockType::TaskList(_)) && prefix_collapsed {
+                let target_prefix_width = helpers::task_prefix_target_width_px(
+                    line_content,
+                    font_size * self.styles.checkbox.checkbox_size_factor,
+                    checkbox_text_gap_px,
+                    task_source_indent_step_chars,
+                )
+                .unwrap_or(indent_px);
+                base_content_x + (target_prefix_width - indent_px)
+            } else {
+                base_content_x
+            };
 
         Some(InlineLineDisplayInfo {
             buffer_to_display,

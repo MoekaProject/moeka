@@ -294,7 +294,7 @@ impl EditorView {
         self.run_search(cx);
     }
 
-    fn search_query_text_input_styles(&self) -> crate::style::TextInputStyles {
+    pub(crate) fn search_query_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
         styles.text_input_height_px = self.scaled(self.styles.text_input.text_input_height_px);
         styles.text_input_padding_left_px =
@@ -312,7 +312,7 @@ impl EditorView {
         styles
     }
 
-    fn search_replace_text_input_styles(&self) -> crate::style::TextInputStyles {
+    pub(crate) fn search_replace_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
         styles.text_input_height_px = self.scaled(self.styles.text_input.text_input_height_px);
         styles.text_input_padding_left_px =

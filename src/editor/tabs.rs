@@ -172,6 +172,158 @@ impl EditorView {
         })
     }
 
+    fn tab_navigation_target_for_tab(tab: &OpenTab) -> TabNavigationTarget {
+        match tab.kind {
+            TabKind::Settings => TabNavigationTarget::Settings,
+            _ => tab
+                .path
+                .as_ref()
+                .map(|path| TabNavigationTarget::File(path.clone()))
+                .unwrap_or_else(|| TabNavigationTarget::LiveTab(tab.id.clone())),
+        }
+    }
+
+    fn active_tab_navigation_target(&self) -> Option<TabNavigationTarget> {
+        self.active_tab_id
+            .as_ref()
+            .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
+            .map(Self::tab_navigation_target_for_tab)
+    }
+
+    fn record_active_tab_navigation_target(&mut self) {
+        if self.tab_navigation_suspended {
+            return;
+        }
+        let Some(target) = self.active_tab_navigation_target() else {
+            return;
+        };
+        if self.tab_navigation_history.get(self.tab_navigation_index) == Some(&target) {
+            return;
+        }
+
+        if self.tab_navigation_index + 1 < self.tab_navigation_history.len() {
+            self.tab_navigation_history
+                .truncate(self.tab_navigation_index + 1);
+        }
+
+        if let Some(existing_index) = self
+            .tab_navigation_history
+            .iter()
+            .position(|entry| entry == &target)
+        {
+            self.tab_navigation_history.remove(existing_index);
+            if existing_index < self.tab_navigation_index {
+                self.tab_navigation_index = self.tab_navigation_index.saturating_sub(1);
+            }
+        }
+
+        self.tab_navigation_history.push(target);
+        self.tab_navigation_index = self.tab_navigation_history.len().saturating_sub(1);
+    }
+
+    fn restore_closed_tab(&mut self, closed_tab: OpenTab, cx: &mut Context<Self>) {
+        let tab = OpenTab {
+            id: self.next_tab_identity(),
+            title: closed_tab.title,
+            kind: TabKind::Editor,
+            path: closed_tab.path,
+            file_kind: closed_tab.file_kind,
+            snapshot: closed_tab.snapshot,
+            image_view: closed_tab.image_view,
+            git_diff: None,
+            is_preview: false,
+            is_dirty: false,
+            is_deleted: false,
+            is_pinned: false,
+            recovery: closed_tab.recovery,
+            history: closed_tab.history,
+        };
+        self.tabs.push(tab);
+        let index = self.tabs.len() - 1;
+        self.activate_tab_by_index(index, cx);
+    }
+
+    fn activate_tab_navigation_target(
+        &mut self,
+        target: &TabNavigationTarget,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match target {
+            TabNavigationTarget::Settings => {
+                self.open_settings_tab(cx);
+                true
+            }
+            TabNavigationTarget::File(path) => {
+                if let Some(index) = self.editor_tab_index_for_path(path) {
+                    self.activate_tab_by_index(index, cx);
+                    return true;
+                }
+
+                if let Some(closed_index) = self
+                    .recently_closed_tabs
+                    .iter()
+                    .rposition(|tab| tab.path.as_ref() == Some(path))
+                {
+                    let closed_tab = self.recently_closed_tabs.remove(closed_index);
+                    self.restore_closed_tab(closed_tab, cx);
+                    return true;
+                }
+
+                self.open_path_in_permanent_tab(path.clone(), true, cx);
+                self.editor_tab_index_for_path(path).is_some()
+            }
+            TabNavigationTarget::LiveTab(tab_id) => {
+                if let Some(index) = self.tabs.iter().position(|tab| &tab.id == tab_id) {
+                    self.activate_tab_by_index(index, cx);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    pub(crate) fn can_navigate_tab_history_back(&self) -> bool {
+        self.tab_navigation_index > 0
+    }
+
+    pub(crate) fn can_navigate_tab_history_forward(&self) -> bool {
+        self.tab_navigation_index + 1 < self.tab_navigation_history.len()
+    }
+
+    pub(crate) fn navigate_tab_history_back(&mut self, cx: &mut Context<Self>) {
+        while self.tab_navigation_index > 0 {
+            let target_index = self.tab_navigation_index - 1;
+            let target = self.tab_navigation_history[target_index].clone();
+            self.tab_navigation_suspended = true;
+            let activated = self.activate_tab_navigation_target(&target, cx);
+            self.tab_navigation_suspended = false;
+            if activated {
+                self.tab_navigation_index = target_index;
+                return;
+            }
+
+            self.tab_navigation_history.remove(target_index);
+            self.tab_navigation_index = self.tab_navigation_index.saturating_sub(1);
+        }
+    }
+
+    pub(crate) fn navigate_tab_history_forward(&mut self, cx: &mut Context<Self>) {
+        while self.tab_navigation_index + 1 < self.tab_navigation_history.len() {
+            let target_index = self.tab_navigation_index + 1;
+            let target = self.tab_navigation_history[target_index].clone();
+            self.tab_navigation_suspended = true;
+            let activated = self.activate_tab_navigation_target(&target, cx);
+            self.tab_navigation_suspended = false;
+            if activated {
+                self.tab_navigation_index = target_index;
+                return;
+            }
+
+            self.tab_navigation_history.remove(target_index);
+        }
+    }
+
     pub(crate) fn switch_to_existing_editor_tab_for_path(
         &mut self,
         path: &Path,
@@ -377,6 +529,7 @@ impl EditorView {
         if let Some(path) = tab.path.clone() {
             self.reveal_path_in_sidebar(path, cx);
         }
+        self.record_active_tab_navigation_target();
         cx.notify();
     }
 
@@ -462,26 +615,7 @@ impl EditorView {
 
     pub(crate) fn reopen_closed_tab(&mut self, cx: &mut Context<Self>) {
         if let Some(closed_tab) = self.recently_closed_tabs.pop() {
-            // Re-open the tab
-            let tab = OpenTab {
-                id: self.next_tab_identity(),
-                title: closed_tab.title,
-                kind: TabKind::Editor,
-                path: closed_tab.path,
-                file_kind: closed_tab.file_kind,
-                snapshot: closed_tab.snapshot,
-                image_view: closed_tab.image_view,
-                git_diff: None,
-                is_preview: false,
-                is_dirty: false,
-                is_deleted: false,
-                is_pinned: false,
-                recovery: closed_tab.recovery,
-                history: closed_tab.history,
-            };
-            self.tabs.push(tab);
-            let index = self.tabs.len() - 1;
-            self.activate_tab_by_index(index, cx);
+            self.restore_closed_tab(closed_tab, cx);
             session_store::persist_session(self);
         }
     }
@@ -716,7 +850,29 @@ impl EditorView {
         if let Some(index) = self.tabs.len().checked_sub(1) {
             self.activate_tab_by_index(index, cx);
         }
+        self.scroll_tab_bar_to_end(cx);
         session_store::persist_session(self);
+    }
+
+    fn scroll_tab_bar_to_end(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(16))
+                .await;
+
+            this.update(cx, |this, _| {
+                let offset = this.tab_bar_scroll_handle.offset();
+                let max_offset = this.tab_bar_scroll_handle.max_offset();
+                let trailing_reserved = this.scaled(
+                    this.styles.tab_bar.tab_new_width_px + this.styles.tab_bar.tab_spacer_width_px,
+                );
+                let target_x = -((max_offset.width - px(trailing_reserved)).max(px(0.0)));
+                this.tab_bar_scroll_handle
+                    .set_offset(gpui::point(target_x, offset.y));
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn next_tab_identity(&mut self) -> String {
@@ -1165,6 +1321,7 @@ impl EditorView {
         id: &'static str,
         icon_path: &'static str,
         is_active: bool,
+        is_enabled: bool,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
@@ -1191,7 +1348,9 @@ impl EditorView {
             .items_center()
             .justify_center()
             .opacity(button_opacity)
-            .hover(move |style| style.opacity(ts.tab_item_icon_active_opacity))
+            .when(is_enabled, |this| {
+                this.hover(move |style| style.opacity(ts.tab_item_icon_active_opacity))
+            })
             .cursor(CursorStyle::Arrow)
             .child(
                 svg()
@@ -1199,13 +1358,15 @@ impl EditorView {
                     .size(px(icon_size))
                     .text_color(icon_color),
             )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    on_click(this, cx);
-                }),
-            )
+            .when(is_enabled, |this| {
+                this.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        on_click(this, cx);
+                    }),
+                )
+            })
             .into_any_element()
     }
 
@@ -1224,24 +1385,6 @@ impl EditorView {
             .iter()
             .map(|tab| self.render_tab(tab, cx))
             .collect();
-
-        if !self.sidebar_visible {
-            tab_items.insert(
-                0,
-                div()
-                    .id("tab-bar-leading-spacer")
-                    .h(px(self.tab_bar_height()))
-                    .w(px(self.scaled(ts.tab_spacer_width_px)))
-                    .flex_none()
-                    .border_r(px(ts.tab_bar_border_width_px))
-                    .border_color(ts.tab_bar_border_color)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(Self::on_tab_bar_drag_space_mouse_down),
-                    )
-                    .into_any_element(),
-            );
-        }
 
         let new_hover_color = ts.tab_new_hover_text_color;
         let new_hover_bg = ts.tab_item_hover_bg;
@@ -1329,6 +1472,86 @@ impl EditorView {
 
         let info_active = self.utility_panel == Some(RightUtilityPanel::Info);
         let git_active = self.utility_panel == Some(RightUtilityPanel::GitHistory);
+        let can_nav_back = self.can_navigate_tab_history_back();
+        let can_nav_forward = self.can_navigate_tab_history_forward();
+        let history_button_size = self.tab_bar_height();
+        let history_icon_size = self.scaled(ts.tab_history_btn_icon_size_px);
+        let history_button =
+            |id: &'static str,
+             icon_path: &'static str,
+             enabled: bool,
+             handler: fn(&mut Self, &mut Context<Self>)| {
+                div()
+                    .id(id)
+                    .w(px(history_button_size))
+                    .h_full()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(ts.tab_history_btn_bg)
+                    .opacity(if enabled {
+                        ts.tab_history_btn_enabled_opacity
+                    } else {
+                        ts.tab_history_btn_disabled_opacity
+                    })
+                    .cursor(CursorStyle::Arrow)
+                    .when(enabled, |this| {
+                        this.hover(move |style| style.bg(ts.tab_history_btn_hover_bg))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    handler(this, cx);
+                                }),
+                            )
+                    })
+                    .child(
+                        svg()
+                            .path(icon_path)
+                            .size(px(history_icon_size))
+                            .text_color(if enabled {
+                                ts.tab_history_btn_icon_color
+                            } else {
+                                ts.tab_history_btn_icon_disabled_color
+                            }),
+                    )
+            };
+        let left_controls = div()
+            .id("tab-bar-left-controls")
+            .h_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(0.0))
+            .border_r(px(self.scaled(ts.tab_history_group_border_width_px)))
+            .border_color(ts.tab_history_group_border_color)
+            .child(history_button(
+                "tab-bar-history-back",
+                "assets/icons/arrow-left.svg",
+                can_nav_back,
+                Self::navigate_tab_history_back,
+            ))
+            .child(history_button(
+                "tab-bar-history-forward",
+                "assets/icons/arrow-right.svg",
+                can_nav_forward,
+                Self::navigate_tab_history_forward,
+            ))
+            .into_any_element();
+        let leading_left_margin = if self.sidebar_visible {
+            0.0
+        } else {
+            self.scaled(ts.tab_history_hidden_sidebar_margin_px)
+        };
+        let left_controls_group = div()
+            .id("tab-bar-left-group")
+            .h_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .ml(px(leading_left_margin))
+            .child(left_controls);
         let action_buttons = div()
             .id("tab-bar-actions")
             .h(px(self.tab_bar_height()))
@@ -1341,6 +1564,7 @@ impl EditorView {
                 "tab-bar-info-toggle",
                 INFO_PANEL_SVG_PATH,
                 info_active,
+                true,
                 cx,
                 |this, cx| {
                     this.toggle_info_panel(cx);
@@ -1350,6 +1574,7 @@ impl EditorView {
                 "tab-bar-git-toggle",
                 GIT_HISTORY_SVG_PATH,
                 git_active,
+                true,
                 cx,
                 |this, cx| {
                     this.toggle_git_history_panel(cx);
@@ -1400,6 +1625,7 @@ impl EditorView {
                     }
                 }),
             )
+            .child(left_controls_group)
             .child(
                 div()
                     .id("tab-bar-scroll")
@@ -1409,6 +1635,7 @@ impl EditorView {
                     .flex()
                     .items_center()
                     .overflow_x_scroll()
+                    .track_scroll(&self.tab_bar_scroll_handle)
                     .children(tab_items),
             )
             .child(action_buttons)

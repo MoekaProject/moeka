@@ -468,6 +468,13 @@ impl Render for EditorView {
                                                     MouseButton::Left,
                                                     cx.listener(Self::on_mouse_up),
                                                 )
+                                                .on_hover(cx.listener(
+                                                    |this, hovering: &bool, _window, cx| {
+                                                        if !*hovering {
+                                                            this.clear_gutter_fold_hover(cx);
+                                                        }
+                                                    },
+                                                ))
                                                 .on_mouse_move(cx.listener(Self::on_mouse_move))
                                                 .on_scroll_wheel(cx.listener(Self::on_scroll))
                                             })

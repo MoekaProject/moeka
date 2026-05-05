@@ -230,6 +230,18 @@ impl EditorView {
             self.scroll_offset =
                 cursor_y + cursor_line_height - self.last_viewport_height + self.padding_top();
         }
+
+        if self.utility_panel == Some(RightUtilityPanel::Outline)
+            && let Some(active_line) = self.active_outline_heading_line()
+        {
+            let headings = self.collect_outline_headings();
+            if let Some(index) = headings
+                .iter()
+                .position(|heading| heading.line == active_line)
+            {
+                self.outline_scroll_handle.scroll_to_item(index + 2);
+            }
+        }
     }
 
     pub(crate) fn clamp_scroll(&mut self) {

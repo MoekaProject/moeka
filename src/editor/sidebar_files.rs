@@ -5,6 +5,66 @@ use gpui::{AppContext, Context, Window};
 use super::*;
 
 impl EditorView {
+    fn move_path_to_trash(path: &Path) -> anyhow::Result<()> {
+        trash::delete(path).map_err(anyhow::Error::from)
+    }
+
+    pub(crate) fn delete_paths_to_trash(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let mut deleted_any = false;
+        for path in paths {
+            match Self::move_path_to_trash(path) {
+                Ok(()) => deleted_any = true,
+                Err(error) => eprintln!("Delete failed for {:?}: {error}", path),
+            }
+        }
+
+        if !deleted_any {
+            self.context_menu = None;
+            cx.notify();
+            return;
+        }
+
+        self.invalidate_sidebar_items_cache();
+        self.tabs.retain(|tab| {
+            tab.path
+                .as_ref()
+                .is_none_or(|candidate| !paths.iter().any(|path| candidate.starts_with(path)))
+        });
+        self.selected_sidebar_paths
+            .retain(|selected| !paths.iter().any(|path| selected.starts_with(path)));
+
+        if self
+            .focused_sidebar_path
+            .as_ref()
+            .is_some_and(|focused| paths.iter().any(|path| focused.starts_with(path)))
+        {
+            self.focused_sidebar_path = None;
+        }
+        if self
+            .sidebar_selection_anchor
+            .as_ref()
+            .is_some_and(|anchor| paths.iter().any(|path| anchor.starts_with(path)))
+        {
+            self.sidebar_selection_anchor = None;
+        }
+
+        if self.tabs.is_empty() {
+            self.create_scratch_tab(cx);
+            return;
+        }
+
+        let active_still_exists = self
+            .active_tab_id
+            .as_ref()
+            .is_some_and(|id| self.tabs.iter().any(|tab| &tab.id == id));
+        if !active_still_exists {
+            self.activate_tab_by_index(0, cx);
+        }
+
+        self.context_menu = None;
+        cx.notify();
+    }
+
     pub(crate) fn start_rename(
         &mut self,
         path: PathBuf,
@@ -116,7 +176,11 @@ impl EditorView {
             SidebarEditMode::Rename { path, .. } => {
                 let trimmed = value.trim();
                 if !trimmed.is_empty()
-                    && trimmed != path.file_name().and_then(|name| name.to_str()).unwrap_or("")
+                    && trimmed
+                        != path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("")
                 {
                     let new_path = path.with_file_name(trimmed);
                     if let Err(error) = std::fs::rename(path, &new_path) {
@@ -187,44 +251,22 @@ impl EditorView {
     }
 
     pub(crate) fn delete_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let result = if path.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        if let Err(error) = result {
-            eprintln!("Delete failed: {error}");
-        } else {
-            self.invalidate_sidebar_items_cache();
-            self.tabs
-                .retain(|tab| tab.path.as_ref().is_none_or(|candidate| !candidate.starts_with(&path)));
-            if self.tabs.is_empty() {
-                self.create_scratch_tab(cx);
-                return;
-            }
-            let active_still_exists = self
-                .active_tab_id
-                .as_ref()
-                .is_some_and(|id| self.tabs.iter().any(|tab| &tab.id == id));
-            if !active_still_exists {
-                self.activate_tab_by_index(0, cx);
-            }
-        }
-        self.context_menu = None;
-        cx.notify();
+        self.delete_paths_to_trash(&[path], cx);
     }
 
     pub(crate) fn paste_into_dir(&mut self, target_dir: PathBuf, cx: &mut Context<Self>) {
         let Some(clipboard) = self.file_clipboard.take() else {
             return;
         };
+        let target_dir = Self::normalize_sidebar_path(&target_dir);
         for src in &clipboard.paths {
+            let src = Self::normalize_sidebar_path(src);
             let Some(name) = src.file_name() else {
                 continue;
             };
             let dst = target_dir.join(name);
             if clipboard.is_cut {
-                if let Err(error) = std::fs::rename(src, &dst) {
+                if let Err(error) = std::fs::rename(&src, &dst) {
                     eprintln!("Move {:?} -> {:?} failed: {error}", src, dst);
                 } else {
                     for tab in &mut self.tabs {
@@ -234,7 +276,9 @@ impl EditorView {
                         }
                     }
                 }
-            } else if src.is_file() && let Err(error) = std::fs::copy(src, &dst) {
+            } else if src.is_file()
+                && let Err(error) = std::fs::copy(src, &dst)
+            {
                 eprintln!("Copy failed: {error}");
             }
         }
@@ -293,7 +337,10 @@ impl EditorView {
     }
 
     pub(crate) fn close_workspace(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let closing_idx = self.workspaces.iter().position(|workspace| workspace == path);
+        let closing_idx = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace == path);
         self.workspaces.retain(|workspace| workspace != path);
         if self.workspaces.is_empty() {
             self.sidebar_root = PathBuf::new();

@@ -11,6 +11,45 @@ use crate::markdown::{BlockType, InlineKind};
 use super::shortcut::{ShortcutRenderStyle, render_shortcut};
 use super::*;
 
+fn current_raw_wiki_link_range(
+    line_content: &str,
+    cursor_col: usize,
+    selection_start_col: usize,
+    selection_end_col: usize,
+) -> Option<Range<usize>> {
+    let mut open_stack = Vec::new();
+    let mut pairs = Vec::new();
+    let mut index = 0usize;
+
+    while index < line_content.len() {
+        if line_content.get(index..index + 2) == Some("[[") {
+            open_stack.push(index);
+            index += 2;
+            continue;
+        }
+
+        if line_content.get(index..index + 2) == Some("]]") {
+            if let Some(open) = open_stack.pop() {
+                pairs.push(open..index + 2);
+            }
+            index += 2;
+            continue;
+        }
+
+        let Some(ch) = line_content[index..].chars().next() else {
+            break;
+        };
+        index += ch.len_utf8();
+    }
+
+    pairs.into_iter().find(|range| {
+        let cursor_in_range = cursor_col >= range.start && cursor_col <= range.end;
+        let selection_in_range =
+            selection_start_col >= range.start && selection_end_col <= range.end;
+        cursor_in_range || selection_in_range
+    })
+}
+
 #[derive(Clone)]
 struct ImageMenuTarget {
     line: usize,
@@ -20,6 +59,46 @@ struct ImageMenuTarget {
 }
 
 impl EditorView {
+    fn current_wiki_link_target(&self) -> Option<Range<usize>> {
+        let line = self.cursor_line();
+        let decoration = self.decorations.get(line)?;
+        let line_start = self.buffer.line_start(line);
+        let selection = self.cursor.selection_range();
+        let cursor_offset = self.cursor.offset;
+
+        decoration
+            .wiki_links
+            .iter()
+            .find_map(|wiki_link| {
+                let full_start = line_start + wiki_link.full_range.start;
+                let full_end = line_start + wiki_link.full_range.end;
+                let cursor_in_link = cursor_offset >= full_start && cursor_offset <= full_end;
+                let selection_in_link = selection.start >= full_start && selection.end <= full_end;
+                (cursor_in_link || selection_in_link).then_some(full_start..full_end)
+            })
+            .or_else(|| {
+                let line_content = self.buffer.line_content(line);
+                let cursor_col = cursor_offset
+                    .saturating_sub(line_start)
+                    .min(line_content.len());
+                let selection_start_col = selection
+                    .start
+                    .saturating_sub(line_start)
+                    .min(line_content.len());
+                let selection_end_col = selection
+                    .end
+                    .saturating_sub(line_start)
+                    .min(line_content.len());
+                current_raw_wiki_link_range(
+                    line_content,
+                    cursor_col,
+                    selection_start_col,
+                    selection_end_col,
+                )
+                .map(|range| line_start + range.start..line_start + range.end)
+            })
+    }
+
     fn current_heading_action(&self) -> Option<FormatMenuAction> {
         match self.decorations.get(self.cursor_line())?.block_type {
             BlockType::Heading(1) => Some(FormatMenuAction::Heading1),
@@ -355,7 +434,15 @@ impl EditorView {
 
     pub(crate) fn open_wiki_link_menu(&mut self, start: usize, cx: &mut Context<Self>) {
         self.wiki_link_start = Some(start);
-        self.wiki_link_query.clear();
+        let query_end = self
+            .wiki_link_query_end(start)
+            .unwrap_or(self.cursor.offset);
+        let query_start = start + 2;
+        self.wiki_link_query = if query_start <= query_end && query_end <= self.buffer.len() {
+            self.buffer.text()[query_start..query_end].to_string()
+        } else {
+            String::new()
+        };
         self.wiki_link_search_results.clear();
         self.menu_selected_index = 0;
         let pos = self.wiki_link_menu_position(start);
@@ -363,8 +450,29 @@ impl EditorView {
             position: pos,
             kind: ContextMenuKind::WikiLink,
         });
-        self.run_wiki_link_recent_search(cx);
+        if self.wiki_link_query.trim().is_empty() {
+            self.run_wiki_link_recent_search(cx);
+        } else {
+            self.run_wiki_link_search(cx);
+        }
         cx.notify();
+    }
+
+    pub(crate) fn ensure_wiki_link_menu_for_cursor(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(target) = self.current_wiki_link_target() else {
+            return false;
+        };
+
+        if self.wiki_link_start != Some(target.start)
+            || !matches!(
+                self.context_menu.as_ref().map(|menu| &menu.kind),
+                Some(ContextMenuKind::WikiLink)
+            )
+        {
+            self.open_wiki_link_menu(target.start, cx);
+        }
+        self.sync_wiki_link_menu(cx);
+        true
     }
 
     pub(crate) fn update_slash_filter(&mut self, cx: &mut Context<Self>) {
@@ -391,8 +499,12 @@ impl EditorView {
     pub(crate) fn update_wiki_link_query(&mut self, cx: &mut Context<Self>) {
         if let Some(start) = self.wiki_link_start {
             self.menu_selected_index = 0;
-            let end = self.cursor.offset;
             let query_start = start + 2;
+            let query_end = self
+                .wiki_link_query_end(start)
+                .unwrap_or(self.cursor.offset)
+                .min(self.buffer.len());
+            let end = self.cursor.offset.clamp(query_start, query_end);
             if query_start <= end && end <= self.buffer.len() {
                 let text = self.buffer.text();
                 self.wiki_link_query = text[query_start..end].to_string();
@@ -511,9 +623,19 @@ impl EditorView {
             self.close_context_menu(cx);
             return;
         };
+        let full_end = query_end + 2;
         let query_start = start + 2;
-        if self.cursor.offset < query_start || self.cursor.offset > query_end {
+        if self.cursor.offset < start || self.cursor.offset > full_end {
             self.close_context_menu(cx);
+            return;
+        }
+        if self.cursor.offset < query_start {
+            self.menu_selected_index = 0;
+            let pos = self.wiki_link_menu_position(start);
+            if let Some(menu) = &mut self.context_menu {
+                menu.position = pos;
+            }
+            cx.notify();
             return;
         }
         self.update_wiki_link_query(cx);
@@ -628,7 +750,7 @@ impl EditorView {
             }
             FormatMenuAction::CodeBlock => {
                 self.checkpoint();
-                self.apply_wrap("```\n", "\n```");
+                self.wrap_current_lines_as_code_block();
                 self.pause_blinking(cx);
             }
             FormatMenuAction::HorizontalRule => {
@@ -649,6 +771,8 @@ impl EditorView {
             FormatMenuAction::OrderedList => {
                 self.checkpoint();
                 self.toggle_current_line_prefix("1. ");
+                self.normalize_ordered_list_near_line(self.cursor_line(), true);
+                self.reparse();
                 self.pause_blinking(cx);
             }
             FormatMenuAction::Todo => {
@@ -670,10 +794,7 @@ impl EditorView {
                 let cursor_offset = range.start + 2 + selected_text.len();
                 self.cursor.move_to(cursor_offset, &self.buffer);
                 self.reparse();
-                self.open_wiki_link_menu(range.start, cx);
-                if !selected_text.is_empty() {
-                    self.update_wiki_link_query(cx);
-                }
+                self.ensure_wiki_link_menu_for_cursor(cx);
                 self.scroll_to_cursor();
                 self.pause_blinking(cx);
                 return;
@@ -798,6 +919,7 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
+                    cx.stop_propagation();
                     handler(this, window, cx);
                 }),
             )
@@ -855,6 +977,7 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
+                    cx.stop_propagation();
                     handler(this, window, cx);
                 }),
             )
@@ -906,6 +1029,7 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
+                    cx.stop_propagation();
                     handler(this, window, cx);
                 }),
             )
@@ -987,6 +1111,7 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
+                    cx.stop_propagation();
                     handler(this, window, cx);
                 }),
             )
@@ -1151,36 +1276,7 @@ impl EditorView {
                     if selected.len() == 1 {
                         this.delete_path(selected[0].clone(), cx);
                     } else {
-                        // Delete all selected paths
-                        for p in &selected {
-                            let result = if p.is_dir() {
-                                std::fs::remove_dir_all(p)
-                            } else {
-                                std::fs::remove_file(p)
-                            };
-                            if let Err(e) = result {
-                                eprintln!("Delete failed: {e}");
-                            }
-                        }
-                        this.tabs.retain(|tab| {
-                            tab.path
-                                .as_ref()
-                                .is_none_or(|tp| !selected.iter().any(|sp| tp.starts_with(sp)))
-                        });
-                        if this.tabs.is_empty() {
-                            this.create_scratch_tab(cx);
-                            return;
-                        }
-                        let active_still_exists = this
-                            .active_tab_id
-                            .as_ref()
-                            .is_some_and(|id| this.tabs.iter().any(|t| &t.id == id));
-                        if !active_still_exists {
-                            this.activate_tab_by_index(0, cx);
-                        }
-                        this.selected_sidebar_paths.clear();
-                        this.context_menu = None;
-                        cx.notify();
+                        this.delete_paths_to_trash(&selected, cx);
                     }
                 },
             ));
@@ -1194,11 +1290,11 @@ impl EditorView {
             } else {
                 selected
             };
-            let cut_paths = paths.clone();
+            let cut_path = path.clone();
             items.push(
                 self.render_context_menu_item("剪切", false, cx, move |this, _, cx| {
                     this.file_clipboard = Some(FileClipboard {
-                        paths: cut_paths.clone(),
+                        paths: vec![Self::normalize_sidebar_path(&cut_path)],
                         is_cut: true,
                     });
                     this.context_menu = None;
@@ -1343,7 +1439,7 @@ impl EditorView {
     }
 
     fn render_image_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        [
+        let mut items: Vec<AnyElement> = [
             (
                 "修改描述",
                 None,
@@ -1373,7 +1469,50 @@ impl EditorView {
                 },
             )
         })
-        .collect()
+        .collect();
+
+        if let Some(target) = self.current_image_menu_target()
+            && let Some(raw_image_path) = self
+                .decorations
+                .get(target.line)
+                .and_then(|decoration| decoration.image_path.as_ref())
+            && !helpers::is_remote_image_url(raw_image_path)
+        {
+            let reveal_path = if let Some(stripped) = raw_image_path.strip_prefix("file://") {
+                PathBuf::from(stripped)
+            } else {
+                let image_path = PathBuf::from(raw_image_path);
+                if image_path.is_absolute() {
+                    image_path
+                } else if let Some(file_dir) = self
+                    .current_file_path
+                    .as_ref()
+                    .and_then(|path| path.parent().map(PathBuf::from))
+                {
+                    file_dir.join(image_path)
+                } else {
+                    self.sidebar_root.join(image_path)
+                }
+            };
+
+            if reveal_path.exists() {
+                items.push(self.render_format_context_menu_item(
+                    "在访达中显示",
+                    None,
+                    None,
+                    false,
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.context_menu = None;
+                        this.reveal_in_finder(&reveal_path);
+                        cx.notify();
+                    },
+                ));
+            }
+        }
+
+        items
     }
 
     fn render_format_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {

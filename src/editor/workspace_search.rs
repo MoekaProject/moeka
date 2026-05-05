@@ -334,7 +334,7 @@ impl EditorView {
         self.workspace_search_task = Some(task);
     }
 
-    fn workspace_search_text_input_styles(&self) -> crate::style::TextInputStyles {
+    pub(crate) fn workspace_search_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
         let workspace_styles = &self.styles.workspace_search;
         styles.text_input_height_px = self.scaled(workspace_styles.ws_search_input_height_px);
@@ -366,9 +366,8 @@ impl EditorView {
         let input_left_inset = self.scaled(workspace_styles.ws_search_input_left_inset_px);
         let input_left = (input_left_inset - icon_size).max(0.0) / 2.0;
         let icon_top = (input_height - icon_size).max(0.0) / 2.0;
-        let button_inset = (input_height - button_size).max(0.0) / 2.0;
+        let button_inset = ((input_height - button_size).max(0.0) / 2.0).round();
         let trailing_group_right = button_inset;
-        let button_top = button_inset;
         let button_radius = self.scaled(4.0);
         let button_hover_bg = workspace_styles.ws_search_btn_hover_bg;
         let button_active_bg = workspace_styles.ws_search_btn_active_bg;
@@ -378,7 +377,6 @@ impl EditorView {
         let search_border_width = self.styles.search.search_bar_border_width_px;
         let search_border_color = self.styles.search.search_bar_border_color;
         let result_selected_bg = self.styles.sidebar.sidebar_item_selected_bg;
-        let result_focus_border = self.styles.sidebar.sidebar_item_focus_border_color;
 
         let mut children: Vec<AnyElement> = Vec::new();
         children.push(
@@ -416,7 +414,8 @@ impl EditorView {
                             div()
                                 .absolute()
                                 .right(px(trailing_group_right))
-                                .top(px(button_top))
+                                .top(px(0.0))
+                                .bottom(px(0.0))
                                 .flex()
                                 .items_center()
                                 .gap(px(button_gap))

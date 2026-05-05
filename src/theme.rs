@@ -506,7 +506,7 @@ impl Theme {
             selection: with_alpha(crate::hex_hsla!("#5496ff"), 0.15),
             line_highlight: with_alpha(crate::hex_hsla!("#1f2430"), 0.7),
             heading: crate::hex_hsla!("#bfbdb6"),
-            bold: crate::hex_hsla!("#4F92FF"),
+            bold: crate::hex_hsla!("#8bb7ff"),
             italic: crate::hex_hsla!("#fe8f40"),
             strikethrough: crate::hex_hsla!("#5c6773"),
             inline_code: crate::hex_hsla!("#a9d94b"),

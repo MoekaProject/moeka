@@ -7,6 +7,7 @@ pub(crate) const HEADING_5_SVG_PATH: &str = "assets/icons/format/heading-5.svg";
 pub(crate) const HEADING_6_SVG_PATH: &str = "assets/icons/format/heading-6.svg";
 pub(crate) const CHECK_SVG_PATH: &str = "assets/icons/check.svg";
 pub(crate) const FOLD_SVG_PATH: &str = "assets/icons/fold.svg";
+pub(crate) const FOLD_EXPANDED_SVG_PATH: &str = "assets/icons/fold-expanded.svg";
 pub(crate) const OPEN_SVG_PATH: &str = "assets/icons/open.svg";
 pub(crate) const LOGO_SVG_PATH: &str = "assets/icons/logo.svg";
 pub(crate) const ROOT_SVG_PATH: &str = "assets/icons/filetree/all.svg";

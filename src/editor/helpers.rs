@@ -58,18 +58,46 @@ fn prefers_latin_text_font(ch: char) -> bool {
     )
 }
 
-pub(crate) fn task_visual_indent_chars(
+pub(crate) fn task_visual_indent_display_columns(
     leading_ws: usize,
-    visual_indent_step_chars: usize,
+    visual_indent_step_display_columns: usize,
     task_source_indent_step_chars: usize,
 ) -> usize {
-    if visual_indent_step_chars == 0 || task_source_indent_step_chars == 0 {
-        return leading_ws;
+    if visual_indent_step_display_columns == 0 || task_source_indent_step_chars == 0 {
+        return 0;
     }
 
     let indent_levels = leading_ws / task_source_indent_step_chars;
-    let remainder = leading_ws % task_source_indent_step_chars;
-    indent_levels * visual_indent_step_chars.max(1) + remainder
+    indent_levels * visual_indent_step_display_columns.max(1)
+}
+
+pub(crate) fn task_prefix_display_columns(
+    body_space_width: f32,
+    checkbox_size_px: f32,
+    checkbox_text_gap_px: f32,
+) -> usize {
+    if body_space_width <= 0.0 {
+        return 1;
+    }
+
+    ((checkbox_size_px + checkbox_text_gap_px) / body_space_width)
+        .round()
+        .max(1.0) as usize
+}
+
+pub(crate) fn task_prefix_target_width_px(
+    line_content: &str,
+    checkbox_size_px: f32,
+    checkbox_text_gap_px: f32,
+    task_source_indent_step_chars: usize,
+) -> Option<f32> {
+    if task_source_indent_step_chars == 0 {
+        return None;
+    }
+
+    let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+    let indent_levels = leading_ws / task_source_indent_step_chars;
+    Some((indent_levels + 1) as f32 * (checkbox_size_px + checkbox_text_gap_px))
 }
 
 fn active_range_intersects_target(active_range: &Range<usize>, target: &Range<usize>) -> bool {
@@ -107,14 +135,29 @@ pub(crate) fn build_display_text(
     table_width_chars: Option<usize>,
     table_cell_padding_chars: usize,
     collapsed_task_prefix_chars: usize,
-    task_indent_step_chars: usize,
+    task_indent_step_display_columns: usize,
     task_source_indent_step_chars: usize,
+    front_matter_key_padding_chars: usize,
 ) -> (String, Vec<usize>, Vec<usize>, bool) {
     let len = line_content.len();
     let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
     let trimmed = &line_content[leading_ws..];
     let task_core_len = task_core_syntax_len(trimmed);
     let task_fold_len = task_prefix_len(trimmed);
+
+    if let Some(table_info) = decoration.table_info.as_ref()
+        && table_info.is_front_matter
+    {
+        let display_to_buffer: Vec<usize> = (0..len).collect();
+        let mut buffer_to_display: Vec<usize> = (0..len).collect();
+        buffer_to_display.push(len);
+        return (
+            line_content.to_string(),
+            display_to_buffer,
+            buffer_to_display,
+            false,
+        );
+    }
 
     if decoration.block_type == BlockType::Table {
         if let Some(ref table_info) = decoration.table_info {
@@ -126,8 +169,9 @@ pub(crate) fn build_display_text(
                 table_width_chars,
                 table_cell_padding_chars,
                 collapsed_task_prefix_chars,
-                task_indent_step_chars,
+                task_indent_step_display_columns,
                 task_source_indent_step_chars,
+                front_matter_key_padding_chars,
             );
         }
     }
@@ -239,9 +283,9 @@ pub(crate) fn build_display_text(
         }
         BlockType::TaskList(_) => {
             let fold_len = task_fold_len;
-            let visual_indent = task_visual_indent_chars(
+            let visual_indent = task_visual_indent_display_columns(
                 leading_ws,
-                task_indent_step_chars,
+                task_indent_step_display_columns,
                 task_source_indent_step_chars,
             );
             let replacement = " ".repeat(visual_indent + collapsed_task_prefix_chars.max(1));
@@ -361,8 +405,9 @@ pub(crate) fn build_table_display_text(
     available_chars: Option<usize>,
     table_cell_padding_chars: usize,
     collapsed_task_prefix_chars: usize,
-    task_indent_step_chars: usize,
+    task_indent_step_display_columns: usize,
     task_source_indent_step_chars: usize,
+    front_matter_key_padding_chars: usize,
 ) -> (String, Vec<usize>, Vec<usize>, bool) {
     let len = line_content.len();
     let cell_padding = table_cell_padding_chars;
@@ -412,8 +457,9 @@ pub(crate) fn build_table_display_text(
             None,
             0,
             collapsed_task_prefix_chars,
-            task_indent_step_chars,
+            task_indent_step_display_columns,
             task_source_indent_step_chars,
+            front_matter_key_padding_chars,
         );
         let trimmed_start = folded_cell_raw.len() - folded_cell_raw.trim_start().len();
         let trimmed_end = folded_cell_raw.len() - folded_cell_raw.trim_end().len();
@@ -796,6 +842,7 @@ pub(crate) fn compute_table_layout(
                 &[],
                 false,
                 None,
+                0,
                 0,
                 0,
                 0,
@@ -1262,7 +1309,11 @@ fn syntax_lookup_candidates(language: &str) -> Vec<String> {
 mod tests {
     use std::ops::Range;
 
-    use super::{prefix_is_folded, task_prefix_is_folded};
+    use crate::markdown;
+
+    use super::{
+        build_display_text, compute_display_prefix_bytes, prefix_is_folded, task_prefix_is_folded,
+    };
 
     #[test]
     fn regular_prefix_hides_at_trailing_edge() {
@@ -1307,6 +1358,43 @@ mod tests {
             5,
             &[Range { start: 6, end: 6 }],
         ));
+    }
+
+    #[test]
+    fn nested_task_display_absorbs_parent_prefix_width() {
+        let text = "- [ ] parent\n  - [ ] child";
+        let line = "  - [ ] child";
+        let decoration = markdown::parse_decorations(text)
+            .into_iter()
+            .nth(1)
+            .unwrap_or_default();
+        let collapsed_task_prefix_chars = 3;
+        let (display_text, _, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &[Range {
+                start: line.len(),
+                end: line.len(),
+            }],
+            false,
+            None,
+            0,
+            collapsed_task_prefix_chars,
+            collapsed_task_prefix_chars,
+            2,
+            0,
+        );
+
+        assert!(prefix_collapsed);
+        assert_eq!(
+            compute_display_prefix_bytes(
+                &display_text,
+                &decoration.block_type,
+                prefix_collapsed,
+                collapsed_task_prefix_chars,
+            ),
+            collapsed_task_prefix_chars * 2,
+        );
     }
 }
 
@@ -1990,6 +2078,7 @@ pub(crate) fn build_text_runs_for_display(
     theme: &Theme,
     wiki_link_text_color: Hsla,
     wiki_link_text_weight: FontWeight,
+    front_matter_key_text_color: Option<Hsla>,
 ) -> Vec<TextRun> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FontRole {
@@ -2000,10 +2089,18 @@ pub(crate) fn build_text_runs_for_display(
         Monospace,
     }
 
+    let is_front_matter_line = decoration
+        .table_info
+        .as_ref()
+        .is_some_and(|table_info| table_info.is_front_matter);
+    let is_front_matter_separator = decoration
+        .table_info
+        .as_ref()
+        .is_some_and(|table_info| table_info.is_front_matter && table_info.is_separator);
     let is_code_line = matches!(
         decoration.block_type,
         BlockType::CodeBlock | BlockType::CodeBlockFence
-    );
+    ) || is_front_matter_line;
     let default_font = if matches!(decoration.block_type, BlockType::Heading(_)) {
         heading_font
     } else {
@@ -2056,7 +2153,7 @@ pub(crate) fn build_text_runs_for_display(
         };
 
     // Fence lines stay in layout, but become fully transparent when inactive.
-    if matches!(decoration.block_type, BlockType::CodeBlockFence) {
+    if matches!(decoration.block_type, BlockType::CodeBlockFence) || is_front_matter_separator {
         let fence_color = if code_block_syntax_active {
             let mut active = theme.text_secondary;
             active.a *= 0.5;
@@ -2071,20 +2168,36 @@ pub(crate) fn build_text_runs_for_display(
         assign_font_roles(0..buf_len, FontRole::Monospace, FontRole::BodyCjk);
     } else {
         let is_heading = matches!(decoration.block_type, BlockType::Heading(_));
-        for (start, ch) in line_content.char_indices() {
-            let role = if prefers_latin_text_font(ch) {
-                if is_heading {
-                    FontRole::HeadingLatin
-                } else {
-                    FontRole::BodyLatin
-                }
-            } else if is_heading {
+        let has_latin_text = line_content
+            .chars()
+            .any(|ch| !ch.is_whitespace() && prefers_latin_text_font(ch));
+        let has_non_latin_text = line_content
+            .chars()
+            .any(|ch| !ch.is_whitespace() && !prefers_latin_text_font(ch));
+
+        if has_latin_text && has_non_latin_text {
+            let role = if is_heading {
                 FontRole::HeadingCjk
             } else {
                 FontRole::BodyCjk
             };
-            let end = start + ch.len_utf8();
-            assign_font_roles(start..end.min(buf_len), role, role);
+            assign_font_roles(0..buf_len, role, role);
+        } else {
+            for (start, ch) in line_content.char_indices() {
+                let role = if prefers_latin_text_font(ch) {
+                    if is_heading {
+                        FontRole::HeadingLatin
+                    } else {
+                        FontRole::BodyLatin
+                    }
+                } else if is_heading {
+                    FontRole::HeadingCjk
+                } else {
+                    FontRole::BodyCjk
+                };
+                let end = start + ch.len_utf8();
+                assign_font_roles(start..end.min(buf_len), role, role);
+            }
         }
     }
 
@@ -2110,6 +2223,18 @@ pub(crate) fn build_text_runs_for_display(
             {
                 for w in buf_weights.iter_mut() {
                     *w = FontWeight::BOLD;
+                }
+            } else if let Some(table_info) = decoration.table_info.as_ref()
+                && table_info.is_front_matter
+                && !table_info.is_separator
+                && let Some(key_range) = table_info.cell_ranges.first()
+            {
+                let key_color = front_matter_key_text_color.unwrap_or(theme.inline_code);
+                let start = key_range.start.min(buf_len);
+                let end = key_range.end.min(buf_len);
+                for index in start..end {
+                    buf_colors[index] = key_color;
+                    buf_weights[index] = FontWeight::BOLD;
                 }
             }
         }

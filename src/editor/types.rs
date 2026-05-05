@@ -41,6 +41,13 @@ pub(crate) enum RightUtilityPanel {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TabNavigationTarget {
+    Settings,
+    File(PathBuf),
+    LiveTab(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FileKind {
     Markdown,
     Code { language: String },

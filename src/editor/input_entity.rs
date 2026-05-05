@@ -264,7 +264,7 @@ impl EntityInputHandler for EditorView {
                     self.reparse();
                 }
                 self.cursor.move_to(new_offset, &self.buffer);
-                self.open_wiki_link_menu(new_offset - 2, cx);
+                self.ensure_wiki_link_menu_for_cursor(cx);
             }
         } else if new_text == "/" {
             let (line, col) = self.buffer.offset_to_line_col(new_offset);

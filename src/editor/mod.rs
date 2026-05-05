@@ -503,6 +503,10 @@ pub struct EditorView {
     pub(crate) hovering_image_edit_line: Option<usize>,
     pub(crate) hovering_fold_line: Option<usize>,
     pub(crate) hovering_gutter_fold_area: bool,
+    pub(crate) gutter_fold_reveal: f32,
+    pub(crate) gutter_fold_reveal_target: f32,
+    pub(crate) gutter_fold_reveal_epoch: usize,
+    pub(crate) gutter_fold_reveal_task: Option<Task<()>>,
     pub(crate) image_drag_state: Option<ImageDragState>,
     pub(crate) command_held: bool,
     pub(crate) sidebar_custom_width: Option<f32>,
@@ -522,6 +526,9 @@ pub struct EditorView {
     pub(crate) tab_drag_candidate_id: Option<String>,
     pub(crate) tab_dragging_id: Option<String>,
     pub(crate) recently_closed_tabs: Vec<OpenTab>,
+    pub(crate) tab_navigation_history: Vec<TabNavigationTarget>,
+    pub(crate) tab_navigation_index: usize,
+    pub(crate) tab_navigation_suspended: bool,
     pub(crate) dialog: Option<Dialog>,
     pub(crate) pending_close_tab_ids: Vec<String>,
     /// 多选：最后一个选中的 focus 路径
@@ -537,6 +544,8 @@ pub struct EditorView {
     pub(crate) sidebar_drag_child_hover_position: Option<(f32, f32)>,
     /// 拖拽接近 sidebar 可见区域边缘时的自动滚动任务。
     pub(crate) sidebar_drag_scroll_task: Option<Task<()>>,
+    pub(crate) selection_drag_scroll_task: Option<Task<()>>,
+    pub(crate) selection_drag_position: Option<Point<Pixels>>,
     /// 拖拽悬停自动展开的延迟 task
     pub(crate) sidebar_drag_expand_task: Option<Task<()>>,
     /// 拖拽悬停时自动展开、离开后可回折的目录集合
@@ -544,6 +553,7 @@ pub struct EditorView {
     pub(crate) sidebar_items_cache: Vec<SidebarItem>,
     pub(crate) sidebar_items_dirty: bool,
     pub(crate) sidebar_scroll_handle: ScrollHandle,
+    pub(crate) tab_bar_scroll_handle: ScrollHandle,
     pub(crate) sidebar_render_limit: usize,
     pub(crate) sidebar_git_statuses: HashMap<PathBuf, SidebarGitStatus>,
     pub(crate) sidebar_git_statuses_dirty: bool,
@@ -801,6 +811,10 @@ impl EditorView {
             hovering_image_edit_line: None,
             hovering_fold_line: None,
             hovering_gutter_fold_area: false,
+            gutter_fold_reveal: 0.0,
+            gutter_fold_reveal_target: 0.0,
+            gutter_fold_reveal_epoch: 0,
+            gutter_fold_reveal_task: None,
             image_drag_state: None,
             command_held: false,
             sidebar_custom_width: None,
@@ -820,6 +834,9 @@ impl EditorView {
             tab_drag_candidate_id: None,
             tab_dragging_id: None,
             recently_closed_tabs: Vec::new(),
+            tab_navigation_history: vec![TabNavigationTarget::Settings],
+            tab_navigation_index: 0,
+            tab_navigation_suspended: false,
             dialog: None,
             pending_close_tab_ids: Vec::new(),
             focused_sidebar_path: None,
@@ -829,11 +846,14 @@ impl EditorView {
             sidebar_drag_expand_hover_dir: None,
             sidebar_drag_child_hover_position: None,
             sidebar_drag_scroll_task: None,
+            selection_drag_scroll_task: None,
+            selection_drag_position: None,
             sidebar_drag_expand_task: None,
             sidebar_drag_auto_expanded_dirs: HashSet::new(),
             sidebar_items_cache: Vec::new(),
             sidebar_items_dirty: true,
             sidebar_scroll_handle: ScrollHandle::new(),
+            tab_bar_scroll_handle: ScrollHandle::new(),
             sidebar_render_limit: 200,
             sidebar_git_statuses: HashMap::new(),
             sidebar_git_statuses_dirty: true,
@@ -1066,6 +1086,28 @@ impl EditorView {
 
     pub(crate) fn toggle_theme(&mut self, cx: &mut Context<Self>) {
         self.set_theme(self.theme_kind.paired_appearance(), cx);
+    }
+
+    pub(crate) fn sync_overlay_text_input_styles(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.search_query_editor {
+            let styles = self.search_query_text_input_styles();
+            editor.update(cx, |input, cx| input.set_styles(styles, cx));
+        }
+        if let Some(editor) = &self.search_replace_editor {
+            let styles = self.search_replace_text_input_styles();
+            editor.update(cx, |input, cx| input.set_styles(styles, cx));
+        }
+        if let Some(editor) = &self.workspace_search_editor {
+            let styles = self.workspace_search_text_input_styles();
+            editor.update(cx, |input, cx| input.set_styles(styles, cx));
+        }
+        if let Some(sidebar_edit) = &self.sidebar_edit {
+            let styles = self.sidebar_edit_text_input_styles();
+            sidebar_edit
+                .editor()
+                .update(cx, |input, cx| input.set_styles(styles, cx));
+        }
+        self.update_theme_debugger_input_styles(cx);
     }
 
     pub(crate) fn set_theme(&mut self, kind: ThemeKind, cx: &mut Context<Self>) {
@@ -2355,6 +2397,74 @@ impl EditorView {
         });
     }
 
+    fn desired_gutter_fold_reveal(&self) -> f32 {
+        if self.hovering_gutter_fold_area || self.hovering_fold_line.is_some() {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    pub(crate) fn sync_gutter_fold_reveal(&mut self, cx: &mut Context<Self>) {
+        let target = self.desired_gutter_fold_reveal();
+        if (self.gutter_fold_reveal_target - target).abs() <= 0.001 {
+            return;
+        }
+
+        self.gutter_fold_reveal_target = target;
+        self.gutter_fold_reveal_epoch += 1;
+        let epoch = self.gutter_fold_reveal_epoch;
+        let duration_ms = self.styles.gutter.gutter_fold_animation_ms.max(1);
+        let step = (16.0 / duration_ms as f32).clamp(0.08, 1.0);
+
+        self.gutter_fold_reveal_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.gutter_fold_reveal_epoch != epoch {
+                            return true;
+                        }
+
+                        let diff = this.gutter_fold_reveal_target - this.gutter_fold_reveal;
+                        if diff.abs() <= 0.01 {
+                            this.gutter_fold_reveal = this.gutter_fold_reveal_target;
+                            this.gutter_fold_reveal_task = None;
+                            cx.notify();
+                            return true;
+                        }
+
+                        this.gutter_fold_reveal += diff * step;
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+
+                if done {
+                    break;
+                }
+
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+            }
+        }));
+    }
+
+    pub(crate) fn clear_gutter_fold_hover(&mut self, cx: &mut Context<Self>) {
+        let mut changed = false;
+        if self.hovering_fold_line.take().is_some() {
+            changed = true;
+        }
+        if self.hovering_gutter_fold_area {
+            self.hovering_gutter_fold_area = false;
+            changed = true;
+        }
+        if changed {
+            self.sync_gutter_fold_reveal(cx);
+            cx.notify();
+        }
+    }
+
     pub(crate) fn current_snapshot(&self) -> EditorSnapshot {
         EditorSnapshot {
             text: self.buffer.text().to_string(),
@@ -2563,7 +2673,6 @@ impl EditorView {
 
         let mut cursor_offset = self.cursor.offset;
         let mut anchor_offset = self.cursor.anchor;
-        let mut inserted_prefix_cursor_target = None;
         for line in (start_line..=end_line).rev() {
             let line_start = self.buffer.line_start(line);
             let line_end = self.buffer.line_end(line);
@@ -2587,14 +2696,6 @@ impl EditorView {
                 new_line.push_str(body);
                 new_line
             };
-
-            if selection.is_empty()
-                && start_line == end_line
-                && line == start_line
-                && existing_prefix != prefix
-            {
-                inserted_prefix_cursor_target = Some(line_start + leading_ws + prefix.len());
-            }
 
             cursor_offset = Self::adjust_offset_for_replaced_line(
                 cursor_offset,
@@ -2626,14 +2727,8 @@ impl EditorView {
             self.buffer.replace(line_start..line_end, &new_line);
         }
 
-        if let Some(target) = inserted_prefix_cursor_target {
-            let target = target.min(self.buffer.len());
-            self.cursor.offset = target;
-            self.cursor.anchor = target;
-        } else {
-            self.cursor.offset = cursor_offset.min(self.buffer.len());
-            self.cursor.anchor = anchor_offset.min(self.buffer.len());
-        }
+        self.cursor.offset = cursor_offset.min(self.buffer.len());
+        self.cursor.anchor = anchor_offset.min(self.buffer.len());
         self.reparse();
         self.scroll_to_cursor();
     }
@@ -2699,6 +2794,7 @@ impl EditorView {
             *w = *w * (clamped / self.ui_scale);
         }
         self.ui_scale = clamped;
+        self.sync_overlay_text_input_styles(cx);
         self.clamp_scroll();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -2933,6 +3029,49 @@ impl EditorView {
             self.buffer
                 .replace(line_start + pos..line_start + pos + 3, "[ ]");
         }
+    }
+
+    pub(crate) fn wrap_current_lines_as_code_block(&mut self) {
+        let selection = self.cursor.selection_range();
+        let (start_line, end_line) = self.selected_line_span();
+        let block_start = self.buffer.line_start(start_line);
+        let block_end = if end_line + 1 < self.buffer.line_count() {
+            self.buffer.line_start(end_line + 1)
+        } else {
+            self.buffer.len()
+        };
+        let block_text = self.buffer.text()[block_start..block_end].to_string();
+        let replacement = if block_text.ends_with('\n') {
+            format!("```\n{block_text}```")
+        } else {
+            format!("```\n{block_text}\n```")
+        };
+        let prefix_len = "```\n".len();
+        let replaced_len = block_end.saturating_sub(block_start);
+        let replacement_len = replacement.len();
+        let adjust_offset = |offset: usize| {
+            if offset <= block_start {
+                offset
+            } else if offset <= block_end {
+                block_start + prefix_len + (offset - block_start).min(block_text.len())
+            } else if replacement_len >= replaced_len {
+                offset + (replacement_len - replaced_len)
+            } else {
+                offset.saturating_sub(replaced_len - replacement_len)
+            }
+        };
+
+        self.buffer.replace(block_start..block_end, &replacement);
+        if selection.is_empty() {
+            let target = adjust_offset(self.cursor.offset).min(self.buffer.len());
+            self.cursor.offset = target;
+            self.cursor.anchor = target;
+        } else {
+            self.cursor.anchor = adjust_offset(self.cursor.anchor).min(self.buffer.len());
+            self.cursor.offset = adjust_offset(self.cursor.offset).min(self.buffer.len());
+        }
+        self.reparse();
+        self.scroll_to_cursor();
     }
 
     pub(crate) fn apply_wrap(&mut self, prefix: &str, suffix: &str) {
@@ -3234,8 +3373,11 @@ impl EditorView {
             }
             let lc = self.buffer.line_content(line).to_string();
             let lws = lc.len() - lc.trim_start_matches([' ', '\t']).len();
-            if lws != indent {
+            if lws < indent {
                 break;
+            }
+            if lws > indent {
+                continue;
             }
             let trimmed = &lc[lws..];
             let plen = markdown::ordered_list_prefix_len(trimmed);
@@ -3328,8 +3470,11 @@ impl EditorView {
             }
             let lc = self.buffer.line_content(line).to_string();
             let lws = lc.len() - lc.trim_start_matches([' ', '\t']).len();
-            if lws != indent {
+            if lws < indent {
                 break;
+            }
+            if lws > indent {
+                continue;
             }
             let trimmed = &lc[lws..];
             let plen = markdown::ordered_list_prefix_len(trimmed);
