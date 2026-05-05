@@ -2671,8 +2671,12 @@ impl EditorView {
             }
         }
 
+        let original_cursor_offset = self.cursor.offset;
+        let original_anchor_offset = self.cursor.anchor;
+        let should_snap_single_cursor_to_line_end = selection.is_empty() && start_line == end_line;
         let mut cursor_offset = self.cursor.offset;
         let mut anchor_offset = self.cursor.anchor;
+        let mut forced_cursor_line_end = None;
         for line in (start_line..=end_line).rev() {
             let line_start = self.buffer.line_start(line);
             let line_end = self.buffer.line_end(line);
@@ -2681,6 +2685,8 @@ impl EditorView {
             let leading_ws = line_text.len() - trimmed.len();
             let existing_prefix_len = Self::detect_block_prefix_len(trimmed);
             let existing_prefix = &trimmed[..existing_prefix_len];
+            let old_content_start = line_start + leading_ws + existing_prefix_len;
+            let is_adding_prefix = existing_prefix != prefix;
 
             let new_line = if existing_prefix == prefix {
                 let body = &trimmed[existing_prefix_len..];
@@ -2724,7 +2730,21 @@ impl EditorView {
                 new_line.len(),
             );
 
+            if should_snap_single_cursor_to_line_end
+                && line == start_line
+                && is_adding_prefix
+                && original_cursor_offset <= old_content_start
+                && original_anchor_offset <= old_content_start
+            {
+                forced_cursor_line_end = Some(line_start + new_line.len());
+            }
+
             self.buffer.replace(line_start..line_end, &new_line);
+        }
+
+        if let Some(line_end) = forced_cursor_line_end {
+            cursor_offset = line_end;
+            anchor_offset = line_end;
         }
 
         self.cursor.offset = cursor_offset.min(self.buffer.len());
@@ -3041,19 +3061,30 @@ impl EditorView {
             self.buffer.len()
         };
         let block_text = self.buffer.text()[block_start..block_end].to_string();
+        let has_blank_line_before = start_line == 0
+            || self
+                .buffer
+                .line_content(start_line.saturating_sub(1))
+                .trim()
+                .is_empty();
+        let has_blank_line_after = end_line + 1 < self.buffer.line_count()
+            && self.buffer.line_content(end_line + 1).trim().is_empty();
+        let leading_gap = if has_blank_line_before { "" } else { "\n" };
+        let trailing_gap = if has_blank_line_after { "" } else { "\n\n" };
         let replacement = if block_text.ends_with('\n') {
-            format!("```\n{block_text}```")
+            format!("{leading_gap}```\n{block_text}```{trailing_gap}")
         } else {
-            format!("```\n{block_text}\n```")
+            format!("{leading_gap}```\n{block_text}\n```{trailing_gap}")
         };
         let prefix_len = "```\n".len();
+        let body_start = block_start + leading_gap.len() + prefix_len;
         let replaced_len = block_end.saturating_sub(block_start);
         let replacement_len = replacement.len();
         let adjust_offset = |offset: usize| {
-            if offset <= block_start {
+            if offset < block_start {
                 offset
             } else if offset <= block_end {
-                block_start + prefix_len + (offset - block_start).min(block_text.len())
+                body_start + (offset - block_start).min(block_text.len())
             } else if replacement_len >= replaced_len {
                 offset + (replacement_len - replaced_len)
             } else {
@@ -3063,7 +3094,9 @@ impl EditorView {
 
         self.buffer.replace(block_start..block_end, &replacement);
         if selection.is_empty() {
-            let target = adjust_offset(self.cursor.offset).min(self.buffer.len());
+            let target = adjust_offset(self.cursor.offset)
+                .max(body_start)
+                .min(self.buffer.len());
             self.cursor.offset = target;
             self.cursor.anchor = target;
         } else {

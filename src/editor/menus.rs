@@ -2043,6 +2043,7 @@ impl EditorView {
                         false,
                         cx,
                         move |this, _, cx| {
+                            this.close_context_menu(cx);
                             this.request_close_tab(&id, cx);
                         },
                     ));
@@ -2054,6 +2055,7 @@ impl EditorView {
                         false,
                         cx,
                         move |this, _, cx| {
+                            this.close_context_menu(cx);
                             this.close_other_tabs(&id, cx);
                         },
                     ));
@@ -2065,6 +2067,7 @@ impl EditorView {
                         false,
                         cx,
                         move |this, _, cx| {
+                            this.close_context_menu(cx);
                             this.close_left_tabs(&id, cx);
                         },
                     ));
@@ -2076,6 +2079,7 @@ impl EditorView {
                         false,
                         cx,
                         move |this, _, cx| {
+                            this.close_context_menu(cx);
                             this.close_right_tabs(&id, cx);
                         },
                     ));
@@ -2086,6 +2090,7 @@ impl EditorView {
                     false,
                     cx,
                     move |this, _, cx| {
+                        this.close_context_menu(cx);
                         this.close_saved_tabs(cx);
                     },
                 ));
@@ -2102,6 +2107,7 @@ impl EditorView {
                         false,
                         cx,
                         move |this, _, cx| {
+                            this.close_context_menu(cx);
                             this.toggle_pin_tab(&id, cx);
                         },
                     ));
@@ -2115,6 +2121,7 @@ impl EditorView {
                             false,
                             cx,
                             move |this, _, cx| {
+                                this.close_context_menu(cx);
                                 this.reveal_path_in_sidebar(reveal_path.clone(), cx);
                             },
                         ));
@@ -2125,9 +2132,8 @@ impl EditorView {
                                 false,
                                 cx,
                                 move |this, _, cx| {
-                                    this.context_menu = None;
+                                    this.close_context_menu(cx);
                                     this.reveal_in_finder(&reveal_path);
-                                    cx.notify();
                                 },
                             ));
                         }
@@ -2138,6 +2144,7 @@ impl EditorView {
                                 false,
                                 cx,
                                 move |this, _, cx| {
+                                    this.close_context_menu(cx);
                                     this.copy_text_to_clipboard(relative_path_text.clone(), cx);
                                 },
                             ));
@@ -2148,6 +2155,7 @@ impl EditorView {
                             false,
                             cx,
                             move |this, _, cx| {
+                                this.close_context_menu(cx);
                                 this.copy_text_to_clipboard(path_text.clone(), cx);
                             },
                         ));
