@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui::{AnyElement, Context, CursorStyle, MouseButton, SharedString, div, img, prelude::*, px};
+use gpui::{
+    AnyElement, Context, CursorStyle, FontWeight, MouseButton, SharedString, div, img, prelude::*,
+    px,
+};
 use printpdf::{Mm, PdfDocument};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, html::push_html};
 use similar::{ChangeTag, TextDiff};
@@ -936,7 +939,7 @@ impl EditorView {
         Some(InfoPanelData {
             primary_rows: vec![
                 InfoPanelRow {
-                    label: "文件".to_string(),
+                    label: "名称".to_string(),
                     value: relative_path,
                 },
                 InfoPanelRow {
@@ -1063,6 +1066,7 @@ impl EditorView {
             .px(px(self.scaled(ups.utility_panel_section_padding_x_px)))
             .text_size(px(self.scaled(ups.utility_panel_section_title_font_size_px)))
             .text_color(ups.utility_panel_section_title_text_color)
+            .font_weight(FontWeight::BOLD)
             .child(title)
             .into_any_element()
     }
@@ -1354,6 +1358,7 @@ impl EditorView {
                         .text_size(px(self.scaled(
                             self.styles.utility_panel.utility_panel_header_font_size_px,
                         )))
+                        .font_weight(FontWeight::BOLD)
                         .text_color(self.styles.utility_panel.utility_panel_header_text_color)
                         .child(format!("{} -> {}", diff.source_label, diff.target_label)),
                 )
@@ -1501,7 +1506,7 @@ impl EditorView {
                 .px(px(header_padding_x))
                 .text_size(px(header_font_size))
                 .text_color(ups.utility_panel_header_text_color)
-                .child("当前文件信息")
+                .child("文件信息")
                 .into_any_element(),
         ];
 

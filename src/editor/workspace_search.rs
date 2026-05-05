@@ -577,6 +577,7 @@ impl EditorView {
                     .text_size(px(
                         self.scaled(workspace_styles.ws_search_summary_font_size_px)
                     ))
+                    .opacity(0.6)
                     .text_color(workspace_styles.ws_search_summary_text_color)
                     .child(message)
                     .into_any_element(),
@@ -601,6 +602,7 @@ impl EditorView {
                     .text_size(px(
                         self.scaled(workspace_styles.ws_search_summary_font_size_px)
                     ))
+                    .opacity(0.6)
                     .text_color(workspace_styles.ws_search_summary_text_color)
                     .child(summary_text)
                     .into_any_element(),
@@ -630,13 +632,16 @@ impl EditorView {
                         .items_center()
                         .gap(px(self.scaled(4.0)))
                         .bg(workspace_styles.ws_search_file_header_bg)
+                        .border_t(px(1.0))
+                        .border_b(px(1.0))
+                        .border_color(self.theme.border_primary)
                         .child(
                             div()
                                 .flex_1()
                                 .text_size(px(self
                                     .scaled(workspace_styles.ws_search_file_header_font_size_px)))
                                 .text_color(workspace_styles.ws_search_file_header_text_color)
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::BOLD)
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
@@ -648,6 +653,7 @@ impl EditorView {
                                     workspace_styles.ws_search_file_header_count_font_size_px,
                                 )))
                                 .text_color(workspace_styles.ws_search_file_header_count_text_color)
+                                .opacity(0.4)
                                 .child(format!("{match_count}")),
                         )
                         .into_any_element(),
@@ -693,8 +699,6 @@ impl EditorView {
                             .px(px(
                                 self.scaled(workspace_styles.ws_search_match_padding_x_px)
                             ))
-                            .border_l(px(if is_selected { 2.0 } else { 0.0 }))
-                            .border_color(result_focus_border)
                             .flex()
                             .items_center()
                             .gap(px(self.scaled(4.0)))
@@ -708,6 +712,7 @@ impl EditorView {
                                         self.scaled(workspace_styles.ws_search_match_font_size_px)
                                     ))
                                     .text_color(workspace_styles.ws_search_match_line_number_color)
+                                    .opacity(0.4)
                                     .child(format!("{line_num}")),
                             )
                             .child(
