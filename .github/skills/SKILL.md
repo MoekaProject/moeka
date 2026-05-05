@@ -25,16 +25,19 @@ src/
     ├── types.rs         # Shared editor/tab/sidebar data types
     ├── scaling.rs       # UI scaling: scaled(), font_size_for_block(), layout calcs
     ├── tabs.rs          # Tab management + tab bar rendering + right-panel toggles
-    ├── sidebar.rs       # Sidebar shared coordination helpers and git/sidebar utilities
     ├── sidebar_render.rs # Sidebar render tree and render-time interaction nodes
     ├── sidebar_ops.rs   # Sidebar selection, drag/drop targeting, move logic
     ├── sidebar_files.rs # Sidebar rename/create/delete/paste + workspace switching
     ├── sidebar_nav.rs   # Sidebar keyboard navigation + focused-item actions
+    ├── sidebar_state.rs # Sidebar git state, reveal, drag hover/autoscroll coordination
     ├── sidebar_tree.rs  # Sidebar tree sorting, expand/collapse, item collection/cache
+    ├── sidebar_ui.rs    # Sidebar menu wiring, edit-input styles, shared render helpers
     ├── fold.rs          # Section/image folding logic
     ├── menus.rs         # Context menu, format menu, slash menu
     ├── handlers.rs      # All on_* action handlers (keyboard shortcuts)
-    ├── input.rs         # Mouse/scroll events, EntityInputHandler (IME), remaining control flow
+    ├── input.rs         # Mouse/scroll events, pointer hit-testing, shared display helpers, remaining control flow
+    ├── input_entity.rs  # EntityInputHandler + Focusable impls and IME-visible range/bounds conversion
+    ├── input_ime.rs     # Delimiter pairing, IME composition helpers, code-block autocomplete
     ├── input_table.rs   # Pure table hit-testing and visual/source row mapping helpers
     ├── input_wrap.rs    # Wrap-boundary cursor helpers + UTF-16/UTF-8 conversion
     ├── render.rs        # Render trait impl (main UI div tree)
@@ -244,7 +247,7 @@ For each line:
 
 1. Keyboard: keybinding → gpui action → `on_action(cx.listener(Self::on_*))` in render.rs → handler in `handlers.rs`
 2. Mouse: `on_mouse_down/move/up` in render.rs → handler in `input.rs` → `offset_for_position()` hit-test
-3. IME: `EntityInputHandler` in `input.rs` — `replace_text_in_range()`, `replace_and_mark_text_in_range()`
+3. IME: macOS text input enters through `EntityInputHandler` in `input_entity.rs`, which delegates shared offset/display helpers in `input.rs`
 
 ## Key Subsystems
 
@@ -292,8 +295,8 @@ Markdown heading prefixes (e.g. `## `) are collapsed when the cursor is not near
 
 - `editor/mod.rs` is the re-export boundary for shared editor modules; prefer moving pure settings/constants/types out first before splitting behavior-heavy files.
 - Editor submodules may use `use super::*;`, but shared definitions that fan out broadly should live in dedicated modules like `app_settings.rs`, `assets.rs`, or `types.rs`.
-- For sidebar work, keep rendering in `sidebar_render.rs`, selection/drag logic in `sidebar_ops.rs`, filesystem/workspace actions in `sidebar_files.rs`, keyboard navigation in `sidebar_nav.rs`, and tree state/sorting in `sidebar_tree.rs` instead of growing `sidebar.rs` again.
-- For input work, keep reusable table helpers in `input_table.rs` and wrap-boundary or UTF conversion helpers in `input_wrap.rs`; reserve `input.rs` for IME and pointer/selection orchestration.
+- For sidebar work, keep rendering in `sidebar_render.rs`, selection/drag logic in `sidebar_ops.rs`, filesystem/workspace actions in `sidebar_files.rs`, keyboard navigation in `sidebar_nav.rs`, reveal/drag/git state in `sidebar_state.rs`, tree state/sorting in `sidebar_tree.rs`, and shared menu/UI helpers in `sidebar_ui.rs`.
+- For input work, keep `EntityInputHandler` and `Focusable` in `input_entity.rs`, delimiter and IME composition helpers in `input_ime.rs`, reusable table helpers in `input_table.rs`, and wrap-boundary or UTF conversion helpers in `input_wrap.rs`; reserve `input.rs` for pointer/selection control flow plus shared display-hit-testing helpers used by the entity bridge.
 - Cross-module helper calls: `helpers::build_display_text()`, `helpers::pick_folder_blocking()`
 - EditorView fields are `pub(crate)` for cross-module access within the editor crate
 - Constants in `editor/mod.rs` are `pub(crate)` — only SVG paths and `KNOWLEDGE_BASE_ROOT` remain; all numeric style constants live in `style.rs`

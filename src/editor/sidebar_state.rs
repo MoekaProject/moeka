@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-use gpui::{Context, px};
+use gpui::{Context, Pixels, px};
 
 use super::{profile, *};
 
@@ -13,10 +13,12 @@ impl EditorView {
     }
 
     pub(super) fn sidebar_scroll_prefix_height(&self, has_root: bool) -> f32 {
-        let ss = &self.styles.sidebar;
-        let logo_height = self.scaled(ss.sidebar_logo_size_px + 2.0 * ss.sidebar_logo_padding_y_px);
+        let sidebar_styles = &self.styles.sidebar;
+        let logo_height = self.scaled(
+            sidebar_styles.sidebar_logo_size_px + 2.0 * sidebar_styles.sidebar_logo_padding_y_px,
+        );
         if has_root {
-            logo_height + self.scaled(ss.sidebar_header_height_px)
+            logo_height + self.scaled(sidebar_styles.sidebar_header_height_px)
         } else {
             logo_height
         }
@@ -118,20 +120,21 @@ impl EditorView {
         self.sidebar_drag_scroll_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 let did_scroll = this
-                    .update(cx, |this, cx| {
-                        this.sidebar_drag_scroll_task.as_ref()?;
+                    .update(cx, |editor, cx| {
+                        editor.sidebar_drag_scroll_task.as_ref()?;
 
-                        let offset = this.sidebar_scroll_handle.offset();
-                        let max_offset = this.sidebar_scroll_handle.max_offset();
+                        let offset = editor.sidebar_scroll_handle.offset();
+                        let max_offset = editor.sidebar_scroll_handle.max_offset();
                         let next_y = (offset.y + adjustment).clamp(-max_offset.height, px(0.));
                         if next_y == offset.y {
                             return None;
                         }
 
-                        this.sidebar_scroll_handle
+                        editor
+                            .sidebar_scroll_handle
                             .set_offset(gpui::point(offset.x, next_y));
-                        let total_items = this.sidebar_items().len();
-                        this.maybe_extend_sidebar_items(total_items, cx);
+                        let total_items = editor.sidebar_items().len();
+                        editor.maybe_extend_sidebar_items(total_items, cx);
                         cx.notify();
                         Some(())
                     })
@@ -271,34 +274,33 @@ impl EditorView {
             .arg(&repo_root)
             .args(&args)
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                for line in String::from_utf8_lossy(&output.stdout).lines() {
-                    let Some((relative_path, status)) = Self::parse_sidebar_git_status_line(line)
-                    else {
-                        continue;
-                    };
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let Some((relative_path, status)) = Self::parse_sidebar_git_status_line(line)
+                else {
+                    continue;
+                };
 
-                    let absolute_path = repo_root.join(relative_path);
-                    if !absolute_path.starts_with(&self.sidebar_root) {
-                        continue;
+                let absolute_path = repo_root.join(relative_path);
+                if !absolute_path.starts_with(&self.sidebar_root) {
+                    continue;
+                }
+
+                let mut current = Some(absolute_path);
+                while let Some(path) = current {
+                    if !path.starts_with(&self.sidebar_root) {
+                        break;
                     }
 
-                    let mut current = Some(absolute_path);
-                    while let Some(path) = current {
-                        if !path.starts_with(&self.sidebar_root) {
-                            break;
-                        }
+                    let merged =
+                        Self::merge_sidebar_git_status(statuses.get(&path).copied(), status);
+                    statuses.insert(path.clone(), merged);
 
-                        let merged =
-                            Self::merge_sidebar_git_status(statuses.get(&path).copied(), status);
-                        statuses.insert(path.clone(), merged);
-
-                        if path == self.sidebar_root {
-                            break;
-                        }
-                        current = path.parent().map(Path::to_path_buf);
+                    if path == self.sidebar_root {
+                        break;
                     }
+                    current = path.parent().map(Path::to_path_buf);
                 }
             }
         }
@@ -466,67 +468,4 @@ impl EditorView {
 
         cx.notify();
     }
-
-    pub(super) fn maybe_extend_sidebar_items(&mut self, total_items: usize, cx: &mut Context<Self>) {
-        let _ = (total_items, cx);
-    }
-
-    pub(super) fn sidebar_edit_text_input_styles(&self) -> crate::style::TextInputStyles {
-        let mut styles = self.styles.text_input.clone();
-        let sidebar_styles = &self.styles.sidebar;
-        styles.text_input_height_px = sidebar_styles.sidebar_edit_input_height_px;
-        styles.text_input_padding_left_px = sidebar_styles.sidebar_edit_input_padding_x_px;
-        styles.text_input_padding_right_px = sidebar_styles.sidebar_edit_input_padding_x_px;
-        styles.text_input_font_size_px = sidebar_styles.sidebar_edit_input_font_size_px;
-        styles.text_input_bg = sidebar_styles.sidebar_edit_input_bg;
-        styles.text_input_focus_bg = sidebar_styles.sidebar_edit_input_bg;
-        styles.text_input_border_width_px = sidebar_styles.sidebar_edit_input_border_width_px;
-        styles.text_input_border_color = sidebar_styles.sidebar_edit_input_border_color;
-        styles.text_input_focus_border_color = sidebar_styles.sidebar_edit_input_border_color;
-        styles.text_input_radius_px = sidebar_styles.sidebar_edit_input_radius_px;
-        styles.text_input_text_color = sidebar_styles.sidebar_edit_input_text_color;
-        styles.text_input_placeholder_color = sidebar_styles.sidebar_edit_input_placeholder_color;
-        styles.text_input_cursor_height_ratio =
-            sidebar_styles.sidebar_edit_input_cursor_height_ratio;
-        styles
-    }
-
-    pub(crate) fn open_workspace_menu(
-        &mut self,
-        position: gpui::Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        self.context_menu = Some(ContextMenu {
-            position,
-            kind: ContextMenuKind::Workspace,
-        });
-        cx.notify();
-    }
-
-    pub(crate) fn open_sidebar_sort_menu(
-        &mut self,
-        position: gpui::Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        self.context_menu = Some(ContextMenu {
-            position,
-            kind: ContextMenuKind::SidebarSort,
-        });
-        self.sidebar_edit = None;
-        cx.notify();
-    }
-
-    pub(crate) fn open_sidebar_create_menu(
-        &mut self,
-        position: gpui::Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        self.context_menu = Some(ContextMenu {
-            position,
-            kind: ContextMenuKind::SidebarCreate,
-        });
-        self.sidebar_edit = None;
-        cx.notify();
-    }
-
 }

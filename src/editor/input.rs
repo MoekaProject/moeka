@@ -1,320 +1,43 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, Context, EntityInputHandler, Focusable, FontFallbacks, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent, SharedString,
-    TextRun, UTF16Selection, Window, WrappedLine, point, px, size,
+    Bounds, Context, FontFallbacks, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, ScrollWheelEvent, SharedString, TextRun, Window, WrappedLine, point, px,
 };
 
 use crate::markdown::{BlockType, InlineKind};
 
 use super::{profile, *};
 
-struct TableCellDisplayInfo {
-    wrapped: WrappedLine,
-    display_text: String,
-    display_to_buffer: Vec<usize>,
-    buffer_to_display: Vec<usize>,
-    cell_range: Range<usize>,
-    cell_content_len: usize,
+pub(super) struct TableCellDisplayInfo {
+    pub(super) wrapped: WrappedLine,
+    pub(super) display_text: String,
+    pub(super) display_to_buffer: Vec<usize>,
+    pub(super) buffer_to_display: Vec<usize>,
+    pub(super) cell_range: Range<usize>,
+    pub(super) cell_content_len: usize,
 }
 
-struct InlineLineDisplayInfo {
-    buffer_to_display: Vec<usize>,
-    font_size: f32,
-    line_height: f32,
-    wrapped_line: WrappedLine,
-    indent_px: f32,
-    content_x: f32,
+pub(super) struct InlineLineDisplayInfo {
+    pub(super) buffer_to_display: Vec<usize>,
+    pub(super) font_size: f32,
+    pub(super) line_height: f32,
+    pub(super) wrapped_line: WrappedLine,
+    pub(super) indent_px: f32,
+    pub(super) content_x: f32,
 }
 
-struct MultiCursorImeEdit {
-    start: usize,
-    selection_start: usize,
-    selection_end: usize,
-    marked_range: Option<Range<usize>>,
-    is_primary: bool,
-    delta: isize,
-}
-
-fn paired_delimiter(input: &str) -> Option<(&'static str, &'static str)> {
-    match input {
-        "[" => Some(("[", "]")),
-        "{" => Some(("{", "}")),
-        "(" => Some(("(", ")")),
-        "<" => Some(("<", ">")),
-        "\"" => Some(("\"", "\"")),
-        "'" => Some(("'", "'")),
-        "`" => Some(("`", "`")),
-        "【" => Some(("【", "】")),
-        "｛" => Some(("｛", "｝")),
-        "（" => Some(("（", "）")),
-        "《" => Some(("《", "》")),
-        "〈" => Some(("〈", "〉")),
-        "「" => Some(("「", "」")),
-        "『" => Some(("『", "』")),
-        "“" => Some(("“", "”")),
-        "‘" => Some(("‘", "’")),
-        _ => None,
-    }
-}
-
-fn is_auto_closing_delimiter(input: &str) -> bool {
-    matches!(
-        input,
-        "]" | "}"
-            | ")"
-            | ">"
-            | "\""
-            | "'"
-            | "`"
-            | "】"
-            | "｝"
-            | "）"
-            | "》"
-            | "〉"
-            | "」"
-            | "』"
-            | "”"
-            | "’"
-    )
-}
-
-fn auto_paired_delimiter_matches(open: char, close: char) -> bool {
-    matches!(
-        (open, close),
-        ('[', ']')
-            | ('{', '}')
-            | ('(', ')')
-            | ('<', '>')
-            | ('"', '"')
-            | ('\'', '\'')
-            | ('`', '`')
-            | ('【', '】')
-            | ('｛', '｝')
-            | ('（', '）')
-            | ('《', '》')
-            | ('〈', '〉')
-            | ('「', '」')
-            | ('『', '』')
-            | ('“', '”')
-            | ('‘', '’')
-    )
-}
-
-fn code_block_autocomplete_range(
-    text: &str,
-    cursor_offset: usize,
-    new_text: &str,
-) -> Option<Range<usize>> {
-    if new_text != "`" || cursor_offset < 2 {
-        return None;
-    }
-
-    if text.get(cursor_offset - 2..cursor_offset) != Some("``") {
-        return None;
-    }
-
-    if cursor_offset >= 3 && text.get(cursor_offset - 3..cursor_offset - 2) == Some("`") {
-        return None;
-    }
-
-    Some(cursor_offset - 2..cursor_offset)
-}
-
-fn ime_debug_enabled() -> bool {
+pub(super) fn ime_debug_enabled() -> bool {
     false
 }
 
-fn ime_debug_log(_message: impl AsRef<str>) {
+pub(super) fn ime_debug_log(_message: impl AsRef<str>) {
     if ime_debug_enabled() {
         eprintln!("[ime-debug] logging enabled");
     }
 }
 
 impl EditorView {
-    fn should_skip_auto_closing_delimiter(&self, new_text: &str) -> bool {
-        if !is_auto_closing_delimiter(new_text) {
-            return false;
-        }
-
-        self.buffer
-            .text()
-            .get(self.cursor.offset..self.cursor.offset + new_text.len())
-            == Some(new_text)
-    }
-
-    pub(crate) fn auto_paired_backspace_range(&self) -> Option<Range<usize>> {
-        if self.cursor.has_selection() {
-            return None;
-        }
-
-        let text = self.buffer.text();
-        let offset = self.cursor.offset;
-
-        if offset >= 2
-            && text.get(offset - 2..offset) == Some("[[")
-            && text.get(offset..offset + 2) == Some("]]")
-        {
-            return Some(offset - 2..offset + 2);
-        }
-
-        let (prev_start, prev_char) = text[..offset].char_indices().next_back()?;
-        let next_char = text[offset..].chars().next()?;
-        let next_end = offset + next_char.len_utf8();
-        if auto_paired_delimiter_matches(prev_char, next_char) {
-            Some(prev_start..next_end)
-        } else {
-            None
-        }
-    }
-
-    fn begin_ime_composition(&mut self) {
-        if self.ime_composition_snapshot.is_none() {
-            self.ime_composition_snapshot = Some(self.current_snapshot());
-        }
-    }
-
-    fn collect_multi_cursor_ime_targets_desc(
-        &self,
-        primary_override_range: Option<Range<usize>>,
-    ) -> Vec<(Range<usize>, bool)> {
-        let primary_range = primary_override_range
-            .or_else(|| self.marked_range.clone())
-            .unwrap_or_else(|| self.cursor.selection_range());
-
-        let mut all = Vec::with_capacity(1 + self.extra_cursors.len());
-        all.push((
-            primary_range.start.min(primary_range.end)..primary_range.end.max(primary_range.start),
-            true,
-        ));
-
-        for (index, cursor) in self.extra_cursors.iter().enumerate() {
-            let range = self
-                .extra_marked_ranges
-                .get(index)
-                .cloned()
-                .unwrap_or_else(|| {
-                    cursor.offset.min(cursor.anchor)..cursor.offset.max(cursor.anchor)
-                });
-            all.push((
-                range.start.min(range.end)..range.end.max(range.start),
-                false,
-            ));
-        }
-
-        all.sort_by(|a, b| {
-            b.0.start
-                .cmp(&a.0.start)
-                .then_with(|| b.0.end.cmp(&a.0.end))
-        });
-        all
-    }
-
-    fn apply_multi_cursor_ime_replace(
-        &mut self,
-        primary_override_range: Option<Range<usize>>,
-        new_text: &str,
-        new_selected_range_utf16: Option<&Range<usize>>,
-        keep_marked_ranges: bool,
-    ) -> bool {
-        let selection_relative = new_selected_range_utf16
-            .map(|range_utf16| {
-                (
-                    Self::utf8_offset_in_text_for_utf16(new_text, range_utf16.start),
-                    Self::utf8_offset_in_text_for_utf16(new_text, range_utf16.end),
-                )
-            })
-            .unwrap_or((new_text.len(), new_text.len()));
-
-        let mut range_spans_multiple_lines = false;
-        let mut edits = Vec::with_capacity(1 + self.extra_cursors.len());
-
-        for (range, is_primary) in
-            self.collect_multi_cursor_ime_targets_desc(primary_override_range)
-        {
-            let (start_line, _) = self.buffer.offset_to_line_col(range.start);
-            let (end_line, _) = self.buffer.offset_to_line_col(range.end);
-            range_spans_multiple_lines |= start_line != end_line;
-
-            let before_len = self.buffer.len();
-            self.buffer.replace(range.clone(), new_text);
-            let after_len = self.buffer.len();
-
-            let mark_start = range.start;
-            let mark_end = mark_start + new_text.len();
-            edits.push(MultiCursorImeEdit {
-                start: range.start,
-                selection_start: mark_start + selection_relative.0,
-                selection_end: mark_start + selection_relative.1,
-                marked_range: if keep_marked_ranges && !new_text.is_empty() {
-                    Some(mark_start..mark_end)
-                } else {
-                    None
-                },
-                is_primary,
-                delta: after_len as isize - before_len as isize,
-            });
-        }
-
-        edits.sort_by_key(|edit| edit.start);
-        self.clear_marked_ranges();
-        self.extra_cursors.clear();
-
-        let mut cumulative_delta = 0isize;
-        for edit in edits {
-            let anchor = self
-                .buffer
-                .clamp_offset(apply_offset_delta(edit.selection_start, cumulative_delta));
-            let offset = self
-                .buffer
-                .clamp_offset(apply_offset_delta(edit.selection_end, cumulative_delta));
-            let marked_range = edit.marked_range.map(|range| {
-                let start = self
-                    .buffer
-                    .clamp_offset(apply_offset_delta(range.start, cumulative_delta));
-                let end = self
-                    .buffer
-                    .clamp_offset(apply_offset_delta(range.end, cumulative_delta));
-                start..end
-            });
-
-            if edit.is_primary {
-                self.cursor.anchor = anchor;
-                self.cursor.offset = offset;
-                self.marked_range = marked_range;
-            } else {
-                self.extra_cursors.push(Cursor { offset, anchor });
-                if let Some(marked_range) = marked_range {
-                    self.extra_marked_ranges.push(marked_range);
-                }
-            }
-
-            cumulative_delta += edit.delta;
-        }
-
-        range_spans_multiple_lines
-    }
-
-    fn finish_ime_composition(&mut self) {
-        let Some(snapshot) = self.ime_composition_snapshot.take() else {
-            return;
-        };
-
-        let changed = snapshot.text != self.buffer.text()
-            || snapshot.cursor_offset != self.cursor.offset
-            || snapshot.cursor_anchor != self.cursor.anchor
-            || snapshot.extra_cursors
-                != self
-                    .extra_cursors
-                    .iter()
-                    .map(|cursor| (cursor.offset, cursor.anchor))
-                    .collect::<Vec<_>>();
-        if changed {
-            self.push_undo_snapshot(snapshot);
-        }
-    }
-
     pub(crate) fn primary_cursor_has_inline_edit_headroom(&self) -> bool {
         let cursor_line = self.cursor_line();
         let cursor_y = self.line_y_offset(cursor_line);
@@ -331,11 +54,10 @@ impl EditorView {
             .get(cursor_line)
             .map(|decoration| self.line_height_for_block(&decoration.block_type))
             .unwrap_or_else(|| self.line_height_for_block(&BlockType::Normal));
-
         cursor_y + cursor_line_height + next_visual_line_height <= viewport_bottom
     }
 
-    // ── Mouse handlers ──────────────────────────────────────────────
+    // Mouse handlers
 
     pub(crate) fn on_mouse_down(
         &mut self,
@@ -401,7 +123,6 @@ impl EditorView {
             return;
         }
 
-        // Table column handle drag start
         if let Some(&(_, table_start, col)) = self
             .table_col_handle_areas
             .iter()
@@ -422,7 +143,6 @@ impl EditorView {
             return;
         }
 
-        // Table row handle drag start
         if let Some(&(_, table_start, visual_row)) = self
             .table_row_handle_areas
             .iter()
@@ -469,7 +189,6 @@ impl EditorView {
 
         self.clear_vertical_move_goal_x();
 
-        // Table cell click: position cursor at the correct cell offset
         if event.button == MouseButton::Left {
             if let Some(&(bounds, table_start, visual_row, col)) = self
                 .table_click_areas
@@ -531,7 +250,6 @@ impl EditorView {
         self.last_mouse_down_target = Some((event.position, offset));
         self.update_wrap_boundary_affinity_for_position(offset, event.position);
         if event.modifiers.platform {
-            // Cmd+click: open link if cursor is on a link span
             let (line, col) = self.buffer.offset_to_line_col(offset);
             let wiki_link_path = self.decorations.get(line).and_then(|dec| {
                 dec.wiki_links.iter().find_map(|wiki_link| {
@@ -582,21 +300,20 @@ impl EditorView {
                     || url.starts_with("https://")
                     || url.starts_with("mailto:")
                 {
-                    if let Err(e) = std::process::Command::new("open").arg(&url).spawn() {
-                        eprintln!("failed to open URL: {e}");
+                    if let Err(error) = std::process::Command::new("open").arg(&url).spawn() {
+                        eprintln!("failed to open URL: {error}");
                     }
                 }
                 self.is_selecting = false;
                 cx.notify();
                 return;
             }
-            // Cmd+click: add a new cursor
             self.add_cursor_at(offset, offset);
             self.is_selecting = false;
             cx.notify();
             return;
         }
-        // Clear extra cursors on plain click
+
         self.clear_extra_cursors();
         if event.modifiers.shift {
             self.cursor.select_to(offset, &self.buffer);
@@ -741,7 +458,6 @@ impl EditorView {
         }
         self.is_selecting = false;
 
-        // Check if right-clicking inside a table cell
         if let Some(&(bounds, table_start, visual_row, col)) = self
             .table_click_areas
             .iter()
@@ -818,7 +534,7 @@ impl EditorView {
             probe = line_content
                 .char_indices()
                 .next_back()
-                .map(|(i, _)| i)
+                .map(|(index, _)| index)
                 .unwrap_or(0);
         }
 
@@ -837,7 +553,7 @@ impl EditorView {
             let prev = line_content[..start]
                 .char_indices()
                 .next_back()
-                .map(|(i, _)| i)
+                .map(|(index, _)| index)
                 .unwrap_or(0);
             let Some(prev_ch) = line_content[prev..].chars().next() else {
                 break;
@@ -877,7 +593,6 @@ impl EditorView {
             return;
         }
 
-        // Handle table drag completion
         if let Some(drag) = self.table_drag.take() {
             match drag {
                 TableDragState::DraggingColumn {
@@ -972,14 +687,12 @@ impl EditorView {
             }
         }
 
-        // Track command key from mouse events for link underlines
         let cmd = event.modifiers.platform;
         if cmd != self.command_held {
             self.command_held = cmd;
             cx.notify();
         }
 
-        // Update table drag position
         if let Some(ref mut drag) = self.table_drag {
             match drag {
                 TableDragState::DraggingColumn { current_x, .. } => {
@@ -1062,12 +775,10 @@ impl EditorView {
             cx.notify();
         }
 
-        // Track which table the mouse is hovering near (for handle visibility)
         let hovering_table = self
             .table_click_areas
             .iter()
             .find(|(bounds, _, _, _)| {
-                // Expand bounds slightly to include handle areas
                 let expanded = gpui::Bounds::new(
                     gpui::point(
                         bounds.origin.x - gpui::px(30.0),
@@ -1086,7 +797,6 @@ impl EditorView {
             cx.notify();
         }
 
-        // Track which specific handle the mouse is over
         let hovering_handle = self
             .table_col_handle_areas
             .iter()
@@ -1122,7 +832,6 @@ impl EditorView {
                 self.clamp_scroll();
             }
 
-            // If dragging within a table cell, use table-aware positioning
             let offset = if let Some(&(bounds, table_start, visual_row, col)) = self
                 .table_click_areas
                 .iter()
@@ -1148,7 +857,7 @@ impl EditorView {
         }
     }
 
-    fn table_cell_display_info(
+    pub(super) fn table_cell_display_info(
         &self,
         window: &mut Window,
         source_line: usize,
@@ -1286,7 +995,7 @@ impl EditorView {
         })
     }
 
-    fn inline_line_display_info(
+    pub(super) fn inline_line_display_info(
         &self,
         window: &mut Window,
         line_idx: usize,
@@ -1903,598 +1612,5 @@ impl EditorView {
         let approx_char_width = self.base_font_size() * 0.6;
         let col = (x / approx_char_width) as usize;
         self.buffer.line_col_to_offset(line, col)
-    }
-
-}
-
-impl EntityInputHandler for EditorView {
-    fn text_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        actual_range: &mut Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<String> {
-        if !self.active_tab_supports_text_buffer() {
-            actual_range.take();
-            return None;
-        }
-        let range = self.range_from_utf16(&range_utf16);
-        let clamped_end = range.end.min(self.buffer.len());
-        let clamped_start = range.start.min(clamped_end);
-        let text = &self.buffer.text()[clamped_start..clamped_end];
-        actual_range.replace(self.range_to_utf16(&(clamped_start..clamped_end)));
-        Some(text.to_string())
-    }
-
-    fn selected_text_range(
-        &mut self,
-        _ignore_disabled_input: bool,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<UTF16Selection> {
-        if !self.active_tab_supports_text_buffer() {
-            return None;
-        }
-        if self.selected_handle.is_some() {
-            ime_debug_log("selected_text_range -> None (table handle selected)");
-            return None;
-        }
-        let selection = UTF16Selection {
-            range: self.range_to_utf16(&self.cursor.selection_range()),
-            reversed: self.cursor.offset < self.cursor.anchor,
-        };
-        ime_debug_log(format!(
-            "selected_text_range -> {:?}, cursor=({},{}) marked={:?}",
-            selection.range, self.cursor.anchor, self.cursor.offset, self.marked_range
-        ));
-        Some(selection)
-    }
-
-    fn marked_text_range(
-        &self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Range<usize>> {
-        if !self.active_tab_supports_text_buffer() {
-            return None;
-        }
-        if self.selected_handle.is_some() {
-            ime_debug_log("marked_text_range -> None (table handle selected)");
-            return None;
-        }
-        let marked = self.marked_range.as_ref().map(|r| self.range_to_utf16(r));
-        ime_debug_log(format!(
-            "marked_text_range -> {:?} (utf8={:?})",
-            marked, self.marked_range
-        ));
-        marked
-    }
-
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        if !self.active_tab_supports_text_buffer() {
-            return;
-        }
-        self.clear_marked_ranges();
-        self.finish_ime_composition();
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.active_tab_supports_text_buffer() {
-            return;
-        }
-        let cursor_line_before = self.cursor_line();
-        let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
-        if !self.cursor.has_selection()
-            && self.marked_range.is_none()
-            && range_utf16.is_none()
-            && !self.has_extra_cursors()
-            && self.should_skip_auto_closing_delimiter(new_text)
-        {
-            self.cursor
-                .move_to(self.cursor.offset + new_text.len(), &self.buffer);
-            self.pause_blinking(cx);
-            if self.wiki_link_start.is_some() {
-                self.sync_wiki_link_menu(cx);
-            }
-            return;
-        }
-        ime_debug_log(format!(
-            "replace_text_in_range start range_utf16={:?} new_text={:?} marked_before={:?} selection_before={:?}",
-            range_utf16,
-            new_text,
-            self.marked_range,
-            self.cursor.selection_range()
-        ));
-        let had_ime_composition = self.ime_composition_snapshot.is_some();
-        if !had_ime_composition {
-            self.checkpoint();
-        }
-
-        if self.has_extra_cursors()
-            && (had_ime_composition
-                || range_utf16.is_some()
-                || self.marked_range.is_some()
-                || !self.extra_marked_ranges.is_empty())
-        {
-            let range_spans_multiple_lines = self.apply_multi_cursor_ime_replace(
-                range_utf16
-                    .as_ref()
-                    .map(|range_utf16| self.range_from_utf16(range_utf16)),
-                new_text,
-                None,
-                false,
-            );
-            self.reparse();
-            if !cursor_had_inline_headroom
-                || self.cursor_line() != cursor_line_before
-                || range_spans_multiple_lines
-                || new_text.contains('\n')
-            {
-                self.scroll_to_cursor();
-            }
-            self.pause_blinking(cx);
-            if had_ime_composition {
-                self.finish_ime_composition();
-            }
-            ime_debug_log(format!(
-                "replace_text_in_range multi-cursor end cursor={} marked_after={:?} extra_marked_count={}",
-                self.cursor.offset,
-                self.marked_range,
-                self.extra_marked_ranges.len()
-            ));
-            return;
-        }
-
-        // When text is selected and user types a formatting character, wrap selection
-        if self.cursor.has_selection() && self.marked_range.is_none() && range_utf16.is_none() {
-            if let Some((prefix, suffix)) = paired_delimiter(new_text) {
-                self.apply_wrap(prefix, suffix);
-                self.pause_blinking(cx);
-                return;
-            }
-            let wrap = match new_text {
-                "*" => Some(("**", "**")),
-                "~" => Some(("~~", "~~")),
-                "`" => Some(("`", "`")),
-                _ => None,
-            };
-            if let Some((prefix, suffix)) = wrap {
-                self.apply_wrap(prefix, suffix);
-                self.pause_blinking(cx);
-                return;
-            }
-        }
-
-        // Multi-cursor text input
-        if self.has_extra_cursors() && self.marked_range.is_none() && range_utf16.is_none() {
-            self.multi_cursor_insert(new_text);
-            self.reparse();
-            self.scroll_to_cursor();
-            self.pause_blinking(cx);
-            return;
-        }
-
-        let range = range_utf16
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .or_else(|| self.marked_range.clone())
-            .unwrap_or_else(|| self.cursor.selection_range());
-        ime_debug_log(format!(
-            "replace_text_in_range resolved range_utf8={:?}",
-            range
-        ));
-        let (range_start_line, _) = self.buffer.offset_to_line_col(range.start);
-        let (range_end_line, _) = self.buffer.offset_to_line_col(range.end);
-        let range_spans_multiple_lines = range_start_line != range_end_line;
-        let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
-
-        if range.is_empty() && self.marked_range.is_none() && range_utf16.is_none() {
-            if let Some(code_block_range) =
-                code_block_autocomplete_range(self.buffer.text(), range.start, new_text)
-            {
-                let snippet = "```\n\n```";
-                let cursor_offset = code_block_range.start + "```\n".len();
-                self.buffer.replace(code_block_range, snippet);
-                self.cursor.move_to(cursor_offset, &self.buffer);
-                self.reparse();
-                self.scroll_to_cursor();
-                self.pause_blinking(cx);
-                return;
-            }
-
-            if new_text != "["
-                && let Some((open, close)) = paired_delimiter(new_text)
-            {
-                let mut paired_text = String::with_capacity(open.len() + close.len());
-                paired_text.push_str(open);
-                paired_text.push_str(close);
-                self.buffer.replace(range.clone(), &paired_text);
-                self.cursor.move_to(range.start + open.len(), &self.buffer);
-                self.reparse();
-                if !cursor_had_inline_headroom || self.cursor_line() != cursor_line_before {
-                    self.scroll_to_cursor();
-                }
-                self.pause_blinking(cx);
-                return;
-            }
-        }
-
-        self.buffer.replace(range.clone(), new_text);
-        let new_offset = range.start + new_text.len();
-        self.cursor.move_to(new_offset, &self.buffer);
-        self.clear_marked_ranges();
-        self.reparse();
-        if let Some(line) = touched_ordered_prefix {
-            self.normalize_ordered_list_near_line(line, true);
-            self.reparse();
-        }
-        if !cursor_had_inline_headroom
-            || self.cursor_line() != cursor_line_before
-            || range_spans_multiple_lines
-            || new_text.contains('\n')
-        {
-            self.scroll_to_cursor();
-        }
-        self.pause_blinking(cx);
-        if had_ime_composition {
-            self.finish_ime_composition();
-        }
-        ime_debug_log(format!(
-            "replace_text_in_range end cursor={} marked_after={:?}",
-            self.cursor.offset, self.marked_range
-        ));
-
-        if self.slash_menu_start.is_some() {
-            self.update_slash_filter(cx);
-        } else if self.wiki_link_start.is_some() {
-            self.sync_wiki_link_menu(cx);
-        } else if new_text == "[" && new_offset >= 2 {
-            let text = self.buffer.text();
-            if text.get(new_offset - 2..new_offset) == Some("[[") {
-                if text.get(new_offset..new_offset + 2) != Some("]]") {
-                    self.buffer.replace(new_offset..new_offset, "]]");
-                    self.reparse();
-                }
-                self.cursor.move_to(new_offset, &self.buffer);
-                self.open_wiki_link_menu(new_offset - 2, cx);
-            }
-        } else if new_text == "/" {
-            let (line, col) = self.buffer.offset_to_line_col(new_offset);
-            let line_content = self.buffer.line_content(line);
-            let trimmed = line_content.trim();
-            if trimmed == "/" && col == line_content.len() {
-                self.open_slash_menu(cx);
-            }
-        }
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        new_selected_range_utf16: Option<Range<usize>>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.active_tab_supports_text_buffer() {
-            return;
-        }
-        let cursor_line_before = self.cursor_line();
-        let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
-        ime_debug_log(format!(
-            "replace_and_mark_text_in_range start range_utf16={:?} new_text={:?} new_selected_range_utf16={:?} marked_before={:?} selection_before={:?}",
-            range_utf16,
-            new_text,
-            new_selected_range_utf16,
-            self.marked_range,
-            self.cursor.selection_range()
-        ));
-        self.begin_ime_composition();
-
-        if self.has_extra_cursors() {
-            let range_spans_multiple_lines = self.apply_multi_cursor_ime_replace(
-                range_utf16
-                    .as_ref()
-                    .map(|range_utf16| self.range_from_utf16(range_utf16)),
-                new_text,
-                new_selected_range_utf16.as_ref(),
-                true,
-            );
-            self.reparse();
-            if !cursor_had_inline_headroom
-                || self.cursor_line() != cursor_line_before
-                || range_spans_multiple_lines
-                || new_text.contains('\n')
-            {
-                self.scroll_to_cursor();
-            }
-            self.pause_blinking(cx);
-            ime_debug_log(format!(
-                "replace_and_mark_text_in_range multi-cursor end selection=({},{}) marked_after={:?} extra_marked_count={}",
-                self.cursor.anchor,
-                self.cursor.offset,
-                self.marked_range,
-                self.extra_marked_ranges.len()
-            ));
-            return;
-        }
-
-        let range = range_utf16
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .or_else(|| self.marked_range.clone())
-            .unwrap_or_else(|| self.cursor.selection_range());
-        ime_debug_log(format!(
-            "replace_and_mark_text_in_range resolved range_utf8={:?}",
-            range
-        ));
-        let (range_start_line, _) = self.buffer.offset_to_line_col(range.start);
-        let (range_end_line, _) = self.buffer.offset_to_line_col(range.end);
-        let range_spans_multiple_lines = range_start_line != range_end_line;
-        let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
-
-        self.buffer.replace(range.clone(), new_text);
-
-        let mark_start = range.start;
-        let mark_end = range.start + new_text.len();
-        self.extra_marked_ranges.clear();
-        if !new_text.is_empty() {
-            self.marked_range = Some(mark_start..mark_end);
-        } else {
-            self.marked_range = None;
-        }
-
-        let (selection_start, selection_end) = new_selected_range_utf16
-            .as_ref()
-            .map(|r| {
-                let start = mark_start + Self::utf8_offset_in_text_for_utf16(new_text, r.start);
-                let end = mark_start + Self::utf8_offset_in_text_for_utf16(new_text, r.end);
-                (start, end)
-            })
-            .unwrap_or((mark_end, mark_end));
-        self.cursor.anchor = self.buffer.clamp_offset(selection_start);
-        self.cursor.offset = self.buffer.clamp_offset(selection_end);
-        self.reparse();
-        if let Some(line) = touched_ordered_prefix {
-            self.normalize_ordered_list_near_line(line, true);
-            self.reparse();
-        }
-        if !cursor_had_inline_headroom
-            || self.cursor_line() != cursor_line_before
-            || range_spans_multiple_lines
-            || new_text.contains('\n')
-        {
-            self.scroll_to_cursor();
-        }
-        self.pause_blinking(cx);
-        ime_debug_log(format!(
-            "replace_and_mark_text_in_range end selection=({},{}) marked_after={:?}",
-            self.cursor.anchor, self.cursor.offset, self.marked_range
-        ));
-    }
-
-    fn bounds_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        bounds: Bounds<Pixels>,
-        window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Bounds<Pixels>> {
-        if !self.active_tab_supports_text_buffer() {
-            return None;
-        }
-        ime_debug_log(format!(
-            "bounds_for_range start range_utf16={:?}",
-            range_utf16
-        ));
-        let queried_range = self.range_from_utf16(&range_utf16);
-        let anchor_offset = if self.marked_range.as_ref().is_some_and(|marked| {
-            queried_range.start >= marked.start && queried_range.end <= marked.end
-        }) {
-            self.buffer.clamp_offset(self.cursor.offset)
-        } else {
-            queried_range.start
-        };
-        let (line, col) = self.buffer.offset_to_line_col(anchor_offset);
-        let origin_y: f32 = bounds.origin.y.into();
-        let line_top_y = origin_y + self.line_y_offset(line) - self.scroll_offset;
-
-        if let Some(table_info) = self
-            .decorations
-            .get(line)
-            .and_then(|dec| dec.table_info.as_ref())
-        {
-            if !table_info.is_separator {
-                let table_start_line = table_info.table_start_line;
-                let visual_row = self.table_visual_row_for_source_line(table_start_line, line)?;
-                let cell_col = table_info
-                    .cell_ranges
-                    .iter()
-                    .position(|cell_range| col >= cell_range.start && col <= cell_range.end)
-                    .or_else(|| {
-                        table_info
-                            .cell_ranges
-                            .iter()
-                            .enumerate()
-                            .find(|(_, cell_range)| col == cell_range.end)
-                            .map(|(index, _)| index)
-                    })?;
-                let cell_bounds = self
-                    .table_click_areas
-                    .iter()
-                    .find(|(_, tsl, vr, c)| {
-                        *tsl == table_start_line && *vr == visual_row && *c == cell_col
-                    })
-                    .map(|(bounds, _, _, _)| *bounds)?;
-
-                let padding_x = self.scaled(self.styles.table.table_cell_padding_px);
-                let padding_y = self.scaled(self.styles.table.table_cell_padding_px) * 0.6;
-                let inner_width = (f32::from(cell_bounds.size.width) - padding_x * 2.0)
-                    .max(self.base_font_size() * 0.5);
-                let info = self.table_cell_display_info(window, line, cell_col, inner_width)?;
-                let cell_offset = anchor_offset
-                    .saturating_sub(self.buffer.line_start(line) + info.cell_range.start);
-                let disp_col = if cell_offset >= info.buffer_to_display.len() {
-                    info.display_text.len()
-                } else {
-                    helpers::buffer_to_display_offset(&info.buffer_to_display, cell_offset)
-                };
-                let pos = info
-                    .wrapped
-                    .position_for_index(
-                        disp_col.min(info.display_text.len()),
-                        px(self.base_font_size()
-                            * self.styles.editor.editor_paragraph_line_height_factor),
-                    )
-                    .unwrap_or_default();
-                let line_height =
-                    self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
-                let x = f32::from(cell_bounds.origin.x) + padding_x + f32::from(pos.x);
-                let y = f32::from(cell_bounds.origin.y) + padding_y + f32::from(pos.y);
-                ime_debug_log(format!(
-                    "bounds_for_range table line={} col={} cell_col={} visual_row={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",
-                    line,
-                    col,
-                    cell_col,
-                    visual_row,
-                    queried_range,
-                    anchor_offset,
-                    x,
-                    y,
-                    line_height
-                ));
-                return Some(Bounds::new(
-                    point(px(x), px(y)),
-                    size(px(self.base_font_size() * 0.6), px(line_height)),
-                ));
-            }
-        }
-
-        let line_info = if self.layout_dirty {
-            self.inline_line_display_info(window, line, bounds)
-                .or_else(|| {
-                    self.line_display_info
-                        .get(line)
-                        .cloned()
-                        .flatten()
-                        .map(|info| InlineLineDisplayInfo {
-                            buffer_to_display: info.buffer_to_display,
-                            font_size: info.font_size,
-                            line_height: info.line_height,
-                            wrapped_line: info.wrapped_line,
-                            indent_px: info.indent_px,
-                            content_x: info.content_x,
-                        })
-                })
-        } else {
-            self.line_display_info
-                .get(line)
-                .cloned()
-                .flatten()
-                .map(|info| InlineLineDisplayInfo {
-                    buffer_to_display: info.buffer_to_display,
-                    font_size: info.font_size,
-                    line_height: info.line_height,
-                    wrapped_line: info.wrapped_line,
-                    indent_px: info.indent_px,
-                    content_x: info.content_x,
-                })
-                .or_else(|| self.inline_line_display_info(window, line, bounds))
-        };
-
-        if let Some(info) = line_info {
-            let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
-            let pos = info
-                .wrapped_line
-                .position_for_index(disp_col, px(info.line_height))
-                .unwrap_or_default();
-            let indent_adjust = helpers::indent_for_y(info.indent_px, pos.y, info.line_height);
-            let x = info.content_x + indent_adjust + f32::from(pos.x);
-            let y = line_top_y + f32::from(pos.y);
-            ime_debug_log(format!(
-                "bounds_for_range normal line={} col={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",
-                line, col, queried_range, anchor_offset, x, y, info.line_height
-            ));
-            Some(Bounds::new(
-                point(px(x), px(y)),
-                size(px(info.font_size * 0.6), px(info.line_height)),
-            ))
-        } else {
-            let block_type = if line < self.decorations.len() {
-                &self.decorations[line].block_type
-            } else {
-                &BlockType::Normal
-            };
-            let lh = self.line_height_for_block(block_type);
-            let x = self.last_content_left + col as f32 * self.base_font_size() * 0.6;
-            Some(Bounds::new(
-                point(px(x), px(line_top_y)),
-                size(px(self.base_font_size() * 0.6), px(lh)),
-            ))
-        }
-    }
-
-    fn character_index_for_point(
-        &mut self,
-        point: Point<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<usize> {
-        if let Some((target_point, target_offset)) = self.last_mouse_down_target.take() {
-            let dx = (f32::from(target_point.x) - f32::from(point.x)).abs();
-            let dy = (f32::from(target_point.y) - f32::from(point.y)).abs();
-            let utf16_offset = self.offset_to_utf16(target_offset);
-            ime_debug_log(format!(
-                "character_index_for_point consumed_latch point=({}, {}) target=({}, {}) dx={} dy={} -> utf8={} utf16={}",
-                f32::from(point.x),
-                f32::from(point.y),
-                f32::from(target_point.x),
-                f32::from(target_point.y),
-                dx,
-                dy,
-                target_offset,
-                utf16_offset
-            ));
-            return Some(utf16_offset);
-        }
-
-        let utf8_offset = self.offset_for_position(point);
-        let utf16_offset = self.offset_to_utf16(utf8_offset);
-        ime_debug_log(format!(
-            "character_index_for_point point=({}, {}) -> utf8={} utf16={}",
-            f32::from(point.x),
-            f32::from(point.y),
-            utf8_offset,
-            utf16_offset
-        ));
-        Some(utf16_offset)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::code_block_autocomplete_range;
-
-    #[test]
-    fn third_backtick_triggers_code_block_autocomplete() {
-        assert_eq!(code_block_autocomplete_range("``", 2, "`"), Some(0..2));
-    }
-
-    #[test]
-    fn fourth_backtick_does_not_retrigger_code_block_autocomplete() {
-        assert_eq!(code_block_autocomplete_range("```", 3, "`"), None);
-    }
-}
-
-impl Focusable for EditorView {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
     }
 }

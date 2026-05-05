@@ -1,0 +1,295 @@
+use std::ops::Range;
+
+use crate::cursor::Cursor;
+
+use super::*;
+
+struct MultiCursorImeEdit {
+    start: usize,
+    selection_start: usize,
+    selection_end: usize,
+    marked_range: Option<Range<usize>>,
+    is_primary: bool,
+    delta: isize,
+}
+
+pub(crate) fn paired_delimiter(input: &str) -> Option<(&'static str, &'static str)> {
+    match input {
+        "[" => Some(("[", "]")),
+        "{" => Some(("{", "}")),
+        "(" => Some(("(", ")")),
+        "<" => Some(("<", ">")),
+        "\"" => Some(("\"", "\"")),
+        "'" => Some(("'", "'")),
+        "`" => Some(("`", "`")),
+        "【" => Some(("【", "】")),
+        "｛" => Some(("｛", "｝")),
+        "（" => Some(("（", "）")),
+        "《" => Some(("《", "》")),
+        "〈" => Some(("〈", "〉")),
+        "「" => Some(("「", "」")),
+        "『" => Some(("『", "』")),
+        "“" => Some(("“", "”")),
+        "‘" => Some(("‘", "’")),
+        _ => None,
+    }
+}
+
+pub(crate) fn code_block_autocomplete_range(
+    text: &str,
+    cursor_offset: usize,
+    new_text: &str,
+) -> Option<Range<usize>> {
+    if new_text != "`" || cursor_offset < 2 {
+        return None;
+    }
+
+    if text.get(cursor_offset - 2..cursor_offset) != Some("``") {
+        return None;
+    }
+
+    if cursor_offset >= 3 && text.get(cursor_offset - 3..cursor_offset - 2) == Some("`") {
+        return None;
+    }
+
+    Some(cursor_offset - 2..cursor_offset)
+}
+
+fn is_auto_closing_delimiter(input: &str) -> bool {
+    matches!(
+        input,
+        "]" | "}"
+            | ")"
+            | ">"
+            | "\""
+            | "'"
+            | "`"
+            | "】"
+            | "｝"
+            | "）"
+            | "》"
+            | "〉"
+            | "」"
+            | "』"
+            | "”"
+            | "’"
+    )
+}
+
+fn auto_paired_delimiter_matches(open: char, close: char) -> bool {
+    matches!(
+        (open, close),
+        ('[', ']')
+            | ('{', '}')
+            | ('(', ')')
+            | ('<', '>')
+            | ('"', '"')
+            | ('\'', '\'')
+            | ('`', '`')
+            | ('【', '】')
+            | ('｛', '｝')
+            | ('（', '）')
+            | ('《', '》')
+            | ('〈', '〉')
+            | ('「', '」')
+            | ('『', '』')
+            | ('“', '”')
+            | ('‘', '’')
+    )
+}
+
+impl EditorView {
+    pub(crate) fn should_skip_auto_closing_delimiter(&self, new_text: &str) -> bool {
+        if !is_auto_closing_delimiter(new_text) {
+            return false;
+        }
+
+        self.buffer
+            .text()
+            .get(self.cursor.offset..self.cursor.offset + new_text.len())
+            == Some(new_text)
+    }
+
+    pub(crate) fn auto_paired_backspace_range(&self) -> Option<Range<usize>> {
+        if self.cursor.has_selection() {
+            return None;
+        }
+
+        let text = self.buffer.text();
+        let offset = self.cursor.offset;
+
+        if offset >= 2
+            && text.get(offset - 2..offset) == Some("[[")
+            && text.get(offset..offset + 2) == Some("]]")
+        {
+            return Some(offset - 2..offset + 2);
+        }
+
+        let (prev_start, prev_char) = text[..offset].char_indices().next_back()?;
+        let next_char = text[offset..].chars().next()?;
+        let next_end = offset + next_char.len_utf8();
+        if auto_paired_delimiter_matches(prev_char, next_char) {
+            Some(prev_start..next_end)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn begin_ime_composition(&mut self) {
+        if self.ime_composition_snapshot.is_none() {
+            self.ime_composition_snapshot = Some(self.current_snapshot());
+        }
+    }
+
+    pub(crate) fn collect_multi_cursor_ime_targets_desc(
+        &self,
+        primary_override_range: Option<Range<usize>>,
+    ) -> Vec<(Range<usize>, bool)> {
+        let primary_range = primary_override_range
+            .or_else(|| self.marked_range.clone())
+            .unwrap_or_else(|| self.cursor.selection_range());
+
+        let mut all = Vec::with_capacity(1 + self.extra_cursors.len());
+        all.push((
+            primary_range.start.min(primary_range.end)..primary_range.end.max(primary_range.start),
+            true,
+        ));
+
+        for (index, cursor) in self.extra_cursors.iter().enumerate() {
+            let range = self
+                .extra_marked_ranges
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| cursor.offset.min(cursor.anchor)..cursor.offset.max(cursor.anchor));
+            all.push((range.start.min(range.end)..range.end.max(range.start), false));
+        }
+
+        all.sort_by(|left, right| {
+            right
+                .0
+                .start
+                .cmp(&left.0.start)
+                .then_with(|| right.0.end.cmp(&left.0.end))
+        });
+        all
+    }
+
+    pub(crate) fn apply_multi_cursor_ime_replace(
+        &mut self,
+        primary_override_range: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<&Range<usize>>,
+        keep_marked_ranges: bool,
+    ) -> bool {
+        let selection_relative = new_selected_range_utf16
+            .map(|range_utf16| {
+                (
+                    Self::utf8_offset_in_text_for_utf16(new_text, range_utf16.start),
+                    Self::utf8_offset_in_text_for_utf16(new_text, range_utf16.end),
+                )
+            })
+            .unwrap_or((new_text.len(), new_text.len()));
+
+        let mut range_spans_multiple_lines = false;
+        let mut edits = Vec::with_capacity(1 + self.extra_cursors.len());
+
+        for (range, is_primary) in
+            self.collect_multi_cursor_ime_targets_desc(primary_override_range)
+        {
+            let (start_line, _) = self.buffer.offset_to_line_col(range.start);
+            let (end_line, _) = self.buffer.offset_to_line_col(range.end);
+            range_spans_multiple_lines |= start_line != end_line;
+
+            let before_len = self.buffer.len();
+            self.buffer.replace(range.clone(), new_text);
+            let after_len = self.buffer.len();
+
+            let mark_start = range.start;
+            let mark_end = mark_start + new_text.len();
+            edits.push(MultiCursorImeEdit {
+                start: range.start,
+                selection_start: mark_start + selection_relative.0,
+                selection_end: mark_start + selection_relative.1,
+                marked_range: if keep_marked_ranges && !new_text.is_empty() {
+                    Some(mark_start..mark_end)
+                } else {
+                    None
+                },
+                is_primary,
+                delta: after_len as isize - before_len as isize,
+            });
+        }
+
+        edits.sort_by_key(|edit| edit.start);
+        self.clear_marked_ranges();
+        self.extra_cursors.clear();
+
+        let mut cumulative_delta = 0isize;
+        for edit in edits {
+            let anchor = self
+                .buffer
+                .clamp_offset(apply_offset_delta(edit.selection_start, cumulative_delta));
+            let offset = self
+                .buffer
+                .clamp_offset(apply_offset_delta(edit.selection_end, cumulative_delta));
+            let marked_range = edit.marked_range.map(|range| {
+                let start = self
+                    .buffer
+                    .clamp_offset(apply_offset_delta(range.start, cumulative_delta));
+                let end = self
+                    .buffer
+                    .clamp_offset(apply_offset_delta(range.end, cumulative_delta));
+                start..end
+            });
+
+            if edit.is_primary {
+                self.cursor.anchor = anchor;
+                self.cursor.offset = offset;
+                self.marked_range = marked_range;
+            } else {
+                self.extra_cursors.push(Cursor { offset, anchor });
+                if let Some(marked_range) = marked_range {
+                    self.extra_marked_ranges.push(marked_range);
+                }
+            }
+
+            cumulative_delta += edit.delta;
+        }
+
+        range_spans_multiple_lines
+    }
+
+    pub(crate) fn finish_ime_composition(&mut self) {
+        let Some(snapshot) = self.ime_composition_snapshot.take() else {
+            return;
+        };
+
+        let changed = snapshot.text != self.buffer.text()
+            || snapshot.cursor_offset != self.cursor.offset
+            || snapshot.cursor_anchor != self.cursor.anchor
+            || snapshot.extra_cursors
+                != self
+                    .extra_cursors
+                    .iter()
+                    .map(|cursor| (cursor.offset, cursor.anchor))
+                    .collect::<Vec<_>>();
+        if changed {
+            self.push_undo_snapshot(snapshot);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::code_block_autocomplete_range;
+
+    #[test]
+    fn third_backtick_triggers_code_block_autocomplete() {
+        assert_eq!(code_block_autocomplete_range("``", 2, "`"), Some(0..2));
+    }
+
+    #[test]
+    fn fourth_backtick_does_not_retrigger_code_block_autocomplete() {
+        assert_eq!(code_block_autocomplete_range("```", 3, "`"), None);
+    }
+}
