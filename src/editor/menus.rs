@@ -1979,6 +1979,8 @@ impl EditorView {
                         cx,
                         move |this, _, cx| {
                             this.sidebar_sort_mode = mode;
+                            this.app_settings.set_sidebar_sort_mode(mode);
+                            this.app_settings.save();
                             this.invalidate_sidebar_items_cache();
                             this.context_menu = None;
                             cx.notify();

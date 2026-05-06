@@ -18,12 +18,21 @@ impl EditorView {
             .h_full()
             .flex()
             .flex_row()
-            .when(self.theme_debugger_visible, |this| {
-                this.child(self.render_theme_debugger(cx))
+            .when(self.should_render_theme_debugger_panel(), |this| {
+                this.child(
+                    div()
+                        .id("theme-debugger-wrap")
+                        .h_full()
+                        .w(px(self.theme_debugger_width()))
+                        .overflow_hidden()
+                        .flex_shrink_0()
+                        .child(self.render_theme_debugger(cx)),
+                )
             })
-            .when_some(self.utility_panel, |this, _panel| {
+            .when(self.should_render_utility_panel(), |this| {
                 let ups = &self.styles.utility_panel;
                 let panel_w = self.utility_panel_width();
+                let panel_layout_w = self.utility_panel_layout_width();
                 let hover_indicator_color = ups.utility_panel_resize_active_indicator_color;
                 let hover_indicator_width =
                     self.scaled(ups.utility_panel_resize_active_indicator_width_px);
@@ -34,8 +43,14 @@ impl EditorView {
                         .relative()
                         .h_full()
                         .w(px(panel_w))
+                        .overflow_hidden()
                         .flex_shrink_0()
-                        .child(self.render_utility_panel(cx))
+                        .child(
+                            div()
+                                .h_full()
+                                .w(px(panel_layout_w))
+                                .child(self.render_utility_panel(cx)),
+                        )
                         .child(
                             div()
                                 .id("utility-panel-resize-handle")
@@ -67,8 +82,9 @@ impl EditorView {
                                             );
                                             let new_width =
                                                 window_width - f32::from(event.position.x);
-                                            this.utility_panel_custom_width =
-                                                Some(new_width.clamp(min_w, max_w));
+                                            let new_width = new_width.clamp(min_w, max_w);
+                                            this.utility_panel_custom_width = Some(new_width);
+                                            this.set_utility_panel_width_immediately(new_width);
                                             cx.notify();
                                         }
                                     },
@@ -278,14 +294,28 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_add_cursor_below))
             .on_action(cx.listener(Self::on_select_next_occurrence))
             .on_action(cx.listener(Self::on_select_all_occurrences))
-            .when(self.sidebar_visible, |this| {
+            .when(self.should_render_sidebar_panel(), |this| {
                 let sidebar_w = self.sidebar_width();
+                let sidebar_layout_w = self.sidebar_layout_width();
                 let ss = &self.styles.sidebar;
                 let hover_indicator_color = ss.sidebar_resize_active_indicator_color;
                 let hover_indicator_width =
                     self.scaled(ss.sidebar_resize_active_indicator_width_px);
                 let handle_width = self.scaled(ss.sidebar_resize_handle_width_px);
-                this.child(self.render_sidebar(cx))
+                this.child(
+                    div()
+                        .id("sidebar-wrap")
+                        .w(px(sidebar_w))
+                        .h_full()
+                        .overflow_hidden()
+                        .flex_none()
+                        .child(
+                            div()
+                                .h_full()
+                                .w(px(sidebar_layout_w))
+                                .child(self.render_sidebar(cx)),
+                        ),
+                )
                     // Transparent sensing area for resize drag
                     .child(
                         div()
@@ -308,7 +338,9 @@ impl Render for EditorView {
                                         .scaled(this.styles.sidebar.sidebar_resize_min_width_px);
                                     let max_w = this
                                         .scaled(this.styles.sidebar.sidebar_resize_max_width_px);
-                                    this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
+                                    let new_width = new_width.clamp(min_w, max_w);
+                                    this.sidebar_custom_width = Some(new_width);
+                                    this.set_sidebar_width_immediately(new_width);
                                     cx.notify();
                                 }
                             }))
@@ -401,23 +433,9 @@ impl Render for EditorView {
                     .when(
                         !self.tabs.is_empty() && !self.active_tab_is_settings(),
                         |this| {
-                            let sidebar_width = if self.sidebar_visible {
-                                self.sidebar_width()
-                            } else {
-                                0.0
-                            };
+                            let sidebar_width = self.sidebar_width();
                             let trailing_width = if !self.tabs.is_empty() {
-                                let theme_debugger_width = if self.theme_debugger_visible {
-                                    self.theme_debugger_width()
-                                } else {
-                                    0.0
-                                };
-                                let utility_panel_width = if self.utility_panel.is_some() {
-                                    self.utility_panel_width()
-                                } else {
-                                    0.0
-                                };
-                                theme_debugger_width + utility_panel_width
+                                self.right_panel_width()
                             } else {
                                 0.0
                             };
@@ -449,6 +467,7 @@ impl Render for EditorView {
                                                             || self.active_tab_is_binary()
                                                             || self.active_tab_is_diff()
                                                             || self.hovering_checkbox
+                                                            || self.hovering_fold_line.is_some()
                                                             || self.hovering_image_edit_line.is_some()
                                                         {
                                                             CursorStyle::Arrow
@@ -727,7 +746,7 @@ impl Render for EditorView {
                                             ),
                                     )
                                     .when(
-                                        self.theme_debugger_visible || self.utility_panel.is_some(),
+                                        self.should_render_right_panels(),
                                         |this| this.child(self.render_right_panels(cx)),
                                     ),
                             )
@@ -791,7 +810,9 @@ impl Render for EditorView {
                                     this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
                                 let max_w =
                                     this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
-                                this.sidebar_custom_width = Some(new_width.clamp(min_w, max_w));
+                                let new_width = new_width.clamp(min_w, max_w);
+                                this.sidebar_custom_width = Some(new_width);
+                                this.set_sidebar_width_immediately(new_width);
                                 cx.notify();
                             } else if this.utility_panel_resizing {
                                 let window_width = f32::from(window.bounds().size.width);
@@ -802,8 +823,9 @@ impl Render for EditorView {
                                     this.styles.utility_panel.utility_panel_resize_max_width_px,
                                 );
                                 let new_width = window_width - f32::from(event.position.x);
-                                this.utility_panel_custom_width =
-                                    Some(new_width.clamp(min_w, max_w));
+                                let new_width = new_width.clamp(min_w, max_w);
+                                this.utility_panel_custom_width = Some(new_width);
+                                this.set_utility_panel_width_immediately(new_width);
                                 cx.notify();
                             }
                         }))

@@ -6,7 +6,20 @@ use super::*;
 
 impl EditorView {
     fn move_path_to_trash(path: &Path) -> anyhow::Result<()> {
-        trash::delete(path).map_err(anyhow::Error::from)
+        #[cfg(target_os = "macos")]
+        {
+            use trash::TrashContext;
+            use trash::macos::{DeleteMethod, TrashContextExtMacos};
+
+            let mut trash_context = TrashContext::new();
+            trash_context.set_delete_method(DeleteMethod::NsFileManager);
+            trash_context.delete(path).map_err(anyhow::Error::from)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            trash::delete(path).map_err(anyhow::Error::from)
+        }
     }
 
     pub(crate) fn delete_paths_to_trash(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {

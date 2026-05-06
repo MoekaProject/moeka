@@ -70,6 +70,8 @@ pub(crate) struct TabViewState {
     #[serde(default)]
     pub scroll_offset: f32,
     #[serde(default)]
+    pub editor_left_aligned: bool,
+    #[serde(default)]
     pub extra_cursors: Vec<(usize, usize)>,
 }
 
@@ -195,6 +197,7 @@ mod tests {
             font_size: 17.0,
             line_height: 1.8,
             letter_spacing: 0.5,
+            sidebar_sort_mode: "created_desc".to_string(),
         }
     }
 

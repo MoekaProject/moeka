@@ -209,6 +209,7 @@ pub struct SidebarStyles {
     pub sidebar_resize_active_indicator_color: Hsla,
     pub sidebar_resize_min_width_px: f32,
     pub sidebar_resize_max_width_px: f32,
+    pub sidebar_visibility_animation_ms: u64,
     // Indent alignment guides
     pub sidebar_indent_guide_color: Hsla,
     pub sidebar_indent_guide_width_px: f32,
@@ -303,6 +304,7 @@ pub struct UtilityPanelStyles {
     pub utility_panel_resize_active_indicator_color: Hsla,
     pub utility_panel_resize_min_width_px: f32,
     pub utility_panel_resize_max_width_px: f32,
+    pub utility_panel_visibility_animation_ms: u64,
 }
 
 // ── Tab Bar ─────────────────────────────────────────────────────────
@@ -522,6 +524,8 @@ pub struct CheckboxStyles {
     pub checkbox_checked_bg: Hsla,
     pub checkbox_check_icon_scale: f32,
     pub checkbox_check_icon_color: Hsla,
+    pub checkbox_default_opacity: f32,
+    pub checkbox_hover_opacity: f32,
     pub checkbox_hit_padding_px: f32,
 }
 
@@ -1038,6 +1042,7 @@ impl Styles {
                 sidebar_resize_active_indicator_color: theme.text_accent,
                 sidebar_resize_min_width_px: 140.0,
                 sidebar_resize_max_width_px: 600.0,
+                sidebar_visibility_animation_ms: 220,
                 sidebar_indent_guide_color: with_alpha(theme.border_secondary, 0.5),
                 sidebar_indent_guide_width_px: 1.0,
                 sidebar_indent_guide_dash_length_px: 3.0,
@@ -1118,6 +1123,7 @@ impl Styles {
                 utility_panel_resize_active_indicator_color: theme.text_accent,
                 utility_panel_resize_min_width_px: 220.0,
                 utility_panel_resize_max_width_px: 420.0,
+                utility_panel_visibility_animation_ms: 220,
             },
             tab_bar: TabBarStyles {
                 tab_bar_height_px: 38.0,
@@ -1174,7 +1180,7 @@ impl Styles {
                 tab_overflow_text_color: theme.text_secondary,
                 tab_overflow_bg: theme.bg_tab,
                 tab_overflow_padding_x_px: 6.0,
-                tab_history_hidden_sidebar_margin_px: 100.0,
+                tab_history_hidden_sidebar_margin_px: 80.0,
                 tab_history_padding_x_px: 0.0,
                 tab_history_gap_px: 6.0,
                 tab_history_group_border_width_px: 1.0,
@@ -1245,11 +1251,11 @@ impl Styles {
             },
             code_block: CodeBlockStyles {
                 code_block_bg: theme.bg_code,
-                code_block_radius_px: 5.0,
+                code_block_radius_px: 0.0,
                 code_block_text_padding_left_px: 20.0,
                 code_block_wrap_right_padding_px: 30.0,
                 code_block_fence_clip_px: 15.0,
-                code_block_copy_button_top_px: 1.0,
+                code_block_copy_button_top_px: 3.0,
                 code_block_copy_button_right_px: -4.0,
                 code_block_copy_button_padding_x_px: 10.0,
                 code_block_copy_button_padding_y_px: 4.0,
@@ -1277,7 +1283,7 @@ impl Styles {
             },
             checkbox: CheckboxStyles {
                 checkbox_size_factor: 1.2,
-                checkbox_text_gap_px: 5.0,
+                checkbox_text_gap_px: 10.0,
                 checkbox_parent_prefix_chars: 2.0,
                 checkbox_radius_px: 5.0,
                 checkbox_border_width_px: 1.5,
@@ -1285,6 +1291,8 @@ impl Styles {
                 checkbox_checked_bg: theme.checkbox_checked,
                 checkbox_check_icon_scale: 0.52,
                 checkbox_check_icon_color: gpui::white(),
+                checkbox_default_opacity: 0.9,
+                checkbox_hover_opacity: 1.0,
                 checkbox_hit_padding_px: 2.0,
             },
             table: TableStyles {
@@ -1304,17 +1312,17 @@ impl Styles {
                 table_selection_border_width_px: 2.0,
             },
             gutter: GutterStyles {
-                gutter_line_number_left_padding_px: 50.0,
+                gutter_line_number_left_padding_px: 80.0,
                 gutter_line_number_font_size_px: ui_font_size_px,
-                gutter_line_number_right_gap_px: 14.0,
+                gutter_line_number_right_gap_px: 20.0,
                 gutter_line_number_text_color: with_alpha(theme.text_secondary, 0.48),
                 gutter_line_number_active_text_color: theme.text_bright,
                 gutter_fold_icon_size_px: 16.0,
                 gutter_fold_icon_offset_px: 10.0,
                 gutter_fold_hit_padding_px: 3.0,
-                gutter_fold_default_opacity: 0.2,
+                gutter_fold_default_opacity: 0.9,
                 gutter_fold_folded_opacity: 0.9,
-                gutter_fold_hover_opacity: 0.85,
+                gutter_fold_hover_opacity: 1.0,
                 gutter_fold_animation_ms: 140,
                 gutter_fold_folded_color: theme.text_bright,
                 gutter_fold_hover_color: theme.text_secondary,

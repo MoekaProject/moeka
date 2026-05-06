@@ -76,6 +76,7 @@ pub(crate) fn restore_session(editor: &mut EditorView) {
     };
     let active_tab = editor.tabs[index].clone();
     editor.current_file_path = active_tab.path.clone();
+    editor.editor_left_aligned = active_tab.editor_left_aligned;
     if active_tab.kind == TabKind::Editor {
         if active_tab
             .file_kind
@@ -119,6 +120,7 @@ fn tab_to_record(tab: &OpenTab) -> TabSessionRecord {
             cursor_offset: tab.snapshot.cursor_offset,
             cursor_anchor: tab.snapshot.cursor_anchor,
             scroll_offset: tab.snapshot.scroll_offset,
+            editor_left_aligned: tab.editor_left_aligned,
             extra_cursors: tab.snapshot.extra_cursors.clone(),
         },
         recovery: tab.recovery.clone(),
@@ -155,6 +157,7 @@ fn restore_tab_from_record(record: &TabSessionRecord) -> Option<OpenTab> {
         kind,
         path,
         file_kind,
+        editor_left_aligned: record.view.editor_left_aligned,
         snapshot,
         image_view: ImageViewState::default(),
         git_diff: None,
@@ -323,6 +326,7 @@ fn settings_tab(id: String) -> OpenTab {
         kind: TabKind::Settings,
         path: None,
         file_kind: None,
+        editor_left_aligned: false,
         snapshot: EditorSnapshot {
             text: String::new(),
             cursor_offset: 0,
@@ -386,6 +390,7 @@ mod tests {
                 kind: TabKind::Editor,
                 path: None,
                 file_kind: Some(FileKind::Markdown),
+                editor_left_aligned: false,
                 snapshot: EditorSnapshot {
                     text: String::new(),
                     cursor_offset: 0,
@@ -435,6 +440,7 @@ mod tests {
                 cursor_offset: 7,
                 cursor_anchor: 7,
                 scroll_offset: 7.0,
+                editor_left_aligned: false,
                 extra_cursors: Vec::new(),
             },
             recovery: TabRecoveryState::default(),

@@ -855,15 +855,8 @@ impl EditorView {
                         injected = true;
                     }
                 }
-                if !injected
-                    && let (Some(depth), Some(editor)) = (create_depth, &create_editor)
-                {
-                    tree_items.push(self.render_sidebar_edit_row(
-                        editor,
-                        depth,
-                        create_is_dir,
-                        cx,
-                    ));
+                if !injected && let (Some(depth), Some(editor)) = (create_depth, &create_editor) {
+                    tree_items.push(self.render_sidebar_edit_row(editor, depth, create_is_dir, cx));
                 }
             } else {
                 let item_height = self.sidebar_item_height_px();
@@ -939,7 +932,7 @@ impl EditorView {
 
         div()
             .id("sidebar")
-            .w(px(self.sidebar_width()))
+            .w(px(self.sidebar_layout_width()))
             .h_full()
             .flex_none()
             .flex()
@@ -955,9 +948,10 @@ impl EditorView {
                     .border_color(ss.sidebar_resize_indicator_color)
             })
             .child(top_spacer)
-            .when(self.workspace_search_visible, |this: gpui::Stateful<gpui::Div>| {
-                this.child(self.render_workspace_search(cx))
-            })
+            .when(
+                self.workspace_search_visible,
+                |this: gpui::Stateful<gpui::Div>| this.child(self.render_workspace_search(cx)),
+            )
             .when(
                 !self.workspace_search_visible,
                 |this: gpui::Stateful<gpui::Div>| {
@@ -1080,7 +1074,11 @@ impl EditorView {
             .items_center()
             .px(px(self.scaled(wss.ws_bar_padding_x_px)))
             .gap(px(self.scaled(wss.ws_bar_gap_px)))
-            .bg(if root_drag_over { hover_bg } else { wss.ws_bar_bg })
+            .bg(if root_drag_over {
+                hover_bg
+            } else {
+                wss.ws_bar_bg
+            })
             .border_t(px(1.0))
             .border_color(wss.ws_bar_border_color)
             .cursor(CursorStyle::Arrow)

@@ -66,11 +66,6 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn sidebar_width(&self) -> f32 {
-        self.sidebar_custom_width
-            .unwrap_or_else(|| self.scaled(self.styles.sidebar.sidebar_width_px))
-    }
-
     pub(crate) fn tab_bar_height(&self) -> f32 {
         self.scaled(self.styles.tab_bar.tab_bar_height_px)
     }
@@ -382,6 +377,7 @@ impl EditorView {
         if self.workspaces.is_empty() {
             self.sidebar_visible = false;
             self.sidebar_resizing = false;
+            self.sync_sidebar_width_animation(cx);
             cx.notify();
             return;
         }
@@ -389,17 +385,17 @@ impl EditorView {
         if !self.sidebar_visible {
             self.sidebar_resizing = false;
         }
+        self.sync_sidebar_width_animation(cx);
         cx.notify();
     }
 
     pub(crate) fn toggle_editor_alignment(&mut self, cx: &mut Context<Self>) {
         self.editor_left_aligned = !self.editor_left_aligned;
+        if let Some(index) = self.active_tab_index() {
+            self.tabs[index].editor_left_aligned = self.editor_left_aligned;
+            session_store::persist_session(self);
+        }
         cx.notify();
-    }
-
-    pub(crate) fn utility_panel_width(&self) -> f32 {
-        self.utility_panel_custom_width
-            .unwrap_or_else(|| self.scaled(self.styles.utility_panel.utility_panel_width_px))
     }
 
     pub(crate) fn toggle_outline_visibility(&mut self, cx: &mut Context<Self>) {
@@ -430,6 +426,7 @@ impl EditorView {
         if outcome.invalidate_git_history {
             self.invalidate_git_history_cache();
         }
+        self.sync_utility_panel_width_animation(cx);
         cx.notify();
     }
 }

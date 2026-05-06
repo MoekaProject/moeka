@@ -2483,6 +2483,7 @@ impl Element for EditorElement {
             // Checkbox painting
             if prefix_collapsed {
                 if let BlockType::TaskList(checked) = block_type {
+                    let checkbox_styles = &editor.styles.checkbox;
                     let cb_size = font_size * editor.styles.checkbox.checkbox_size_factor;
                     let prefix_bytes = helpers::compute_display_prefix_bytes(
                         &display_text,
@@ -2500,32 +2501,43 @@ impl Element for EditorElement {
                     let cb_bounds =
                         Bounds::new(point(px(cb_x), px(cb_y)), size(px(cb_size), px(cb_size)));
                     let corner_r = px(editor.scaled(editor.styles.checkbox.checkbox_radius_px));
+                    let checkbox_opacity = if editor.hovering_checkbox_line == Some(line_idx) {
+                        checkbox_styles.checkbox_hover_opacity
+                    } else {
+                        checkbox_styles.checkbox_default_opacity
+                    };
                     if *checked {
+                        let mut checkbox_bg = theme.checkbox_checked;
+                        checkbox_bg.a *= checkbox_opacity;
                         gutter_quads.push(quad(
                             cb_bounds,
                             Corners::all(corner_r),
-                            theme.checkbox_checked,
+                            checkbox_bg,
                             px(0.0),
                             gpui::transparent_black(),
                             BorderStyle::default(),
                         ));
                         let icon_size = cb_size * editor.styles.checkbox.checkbox_check_icon_scale;
                         let icon_offset = (cb_size - icon_size) / 2.0;
+                        let mut icon_color = gpui::white();
+                        icon_color.a *= checkbox_opacity;
                         gutter_svgs.push((
                             Bounds::new(
                                 point(px(cb_x + icon_offset), px(cb_y + icon_offset)),
                                 size(px(icon_size), px(icon_size)),
                             ),
                             CHECK_SVG_PATH,
-                            gpui::white(),
+                            icon_color,
                         ));
                     } else {
+                        let mut border_color = theme.border_tertiary;
+                        border_color.a *= checkbox_opacity;
                         gutter_quads.push(quad(
                             cb_bounds,
                             Corners::all(corner_r),
                             gpui::transparent_black(),
                             px(1.5),
-                            theme.border_tertiary,
+                            border_color,
                             BorderStyle::default(),
                         ));
                     }
@@ -2549,18 +2561,15 @@ impl Element for EditorElement {
 
                 if fold_range.is_some() {
                     let is_folded = editor.folded_sections.contains(&line_idx);
-                    let is_hovered = editor.hovering_gutter_fold_area
-                        || editor.hovering_fold_line == Some(line_idx);
+                    let is_hovered = editor.hovering_fold_line == Some(line_idx);
                     let fi_y = text_line_top + (line_height - fi_size) / 2.0;
-                    let reveal = if is_hovered {
-                        editor.gutter_fold_reveal.max(0.0)
-                    } else {
-                        0.0
-                    };
+                    let reveal = editor.gutter_fold_reveal.max(0.0);
                     let fi_alpha = if is_folded {
                         gs.gutter_fold_folded_opacity
-                    } else {
+                    } else if is_hovered {
                         gs.gutter_fold_hover_opacity * reveal
+                    } else {
+                        gs.gutter_fold_default_opacity * reveal
                     };
                     if fi_alpha > 0.0 {
                         let mut fi_color = if is_folded {
@@ -2599,19 +2608,16 @@ impl Element for EditorElement {
                     .is_some_and(|p| image_cache.get(p).is_some_and(|v| v.is_some()))
                 {
                     let is_img_folded = editor.folded_image_previews.contains(&line_idx);
-                    let is_hovered = editor.hovering_gutter_fold_area
-                        || editor.hovering_fold_line == Some(line_idx);
+                    let is_hovered = editor.hovering_fold_line == Some(line_idx);
                     let fi_y = text_line_top + (line_height - fi_size) / 2.0;
                     let gs = &editor.styles.gutter;
-                    let reveal = if is_hovered {
-                        editor.gutter_fold_reveal.max(0.0)
-                    } else {
-                        0.0
-                    };
+                    let reveal = editor.gutter_fold_reveal.max(0.0);
                     let fi_alpha = if is_img_folded {
                         gs.gutter_fold_folded_opacity
-                    } else {
+                    } else if is_hovered {
                         gs.gutter_fold_hover_opacity * reveal
+                    } else {
+                        gs.gutter_fold_default_opacity * reveal
                     };
                     if fi_alpha > 0.0 {
                         let mut fi_color = if is_img_folded {
@@ -3245,6 +3251,8 @@ impl Element for EditorElement {
         let cursor_style = match editor.hovering_handle {
             Some((_, true, _)) => CursorStyle::ResizeColumn,
             Some((_, false, _)) => CursorStyle::ResizeRow,
+            None if editor.hovering_checkbox_line.is_some() => CursorStyle::Arrow,
+            None if editor.hovering_fold_line.is_some() => CursorStyle::Arrow,
             None => CursorStyle::IBeam,
         };
         window.set_cursor_style(cursor_style, &prepaint.hitbox);

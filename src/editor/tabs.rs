@@ -62,8 +62,22 @@ impl EditorView {
     }
 
     pub(crate) fn request_editor_focus(&mut self, cx: &mut Context<Self>) {
+        self.focused_sidebar_path = None;
         self.pending_editor_focus = true;
         cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(16))
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.focused_sidebar_path = None;
+                this.pending_editor_focus = true;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn on_tab_bar_drag_space_mouse_down(
@@ -228,6 +242,7 @@ impl EditorView {
             kind: TabKind::Editor,
             path: closed_tab.path,
             file_kind: closed_tab.file_kind,
+            editor_left_aligned: closed_tab.editor_left_aligned,
             snapshot: closed_tab.snapshot,
             image_view: closed_tab.image_view,
             git_diff: None,
@@ -371,6 +386,7 @@ impl EditorView {
             kind: TabKind::Editor,
             path: Some(path.to_path_buf()),
             file_kind: Some(file_kind),
+            editor_left_aligned: false,
             snapshot,
             image_view: ImageViewState::default(),
             git_diff: None,
@@ -475,6 +491,7 @@ impl EditorView {
                 {
                     self.tabs[index].snapshot = self.current_snapshot();
                 }
+                self.tabs[index].editor_left_aligned = self.editor_left_aligned;
                 self.current_file_path = self.tabs[index].path.clone();
             }
         }
@@ -497,6 +514,7 @@ impl EditorView {
         self.invalidate_active_file_panel_caches();
         self.active_tab_id = Some(tab.id.clone());
         self.current_file_path = tab.path.clone();
+        self.editor_left_aligned = tab.editor_left_aligned;
         if tab.kind == TabKind::Editor {
             if tab
                 .file_kind
@@ -527,7 +545,7 @@ impl EditorView {
             self.pause_blinking(cx);
         }
         if let Some(path) = tab.path.clone() {
-            self.reveal_path_in_sidebar(path, cx);
+            self.sync_path_in_sidebar_state(path, cx);
         }
         self.record_active_tab_navigation_target();
         cx.notify();
@@ -827,6 +845,7 @@ impl EditorView {
             kind: TabKind::Editor,
             path: None,
             file_kind: Some(FileKind::Markdown),
+            editor_left_aligned: false,
             snapshot: EditorSnapshot {
                 text: String::new(),
                 cursor_offset: 0,
@@ -895,6 +914,7 @@ impl EditorView {
             kind: TabKind::Settings,
             path: None,
             file_kind: None,
+            editor_left_aligned: false,
             snapshot: EditorSnapshot {
                 text: String::new(),
                 cursor_offset: 0,
@@ -1062,7 +1082,8 @@ impl EditorView {
                 }
                 breadcrumb = breadcrumb.child(current);
             } else {
-                breadcrumb = breadcrumb.child(div().flex_none().whitespace_nowrap().child(segment.clone()));
+                breadcrumb =
+                    breadcrumb.child(div().flex_none().whitespace_nowrap().child(segment.clone()));
             }
         }
 

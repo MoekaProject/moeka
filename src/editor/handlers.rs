@@ -1357,6 +1357,22 @@ impl EditorView {
         self.pause_blinking(cx);
     }
 
+    fn normalize_text_for_save(&mut self) -> String {
+        let mut text = self.buffer.text().to_string();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+            self.buffer = Buffer::from_text(&text);
+            self.cursor.offset = self.cursor.offset.min(self.buffer.len());
+            self.cursor.anchor = self.cursor.anchor.min(self.buffer.len());
+            for cursor in &mut self.extra_cursors {
+                cursor.offset = cursor.offset.min(self.buffer.len());
+                cursor.anchor = cursor.anchor.min(self.buffer.len());
+            }
+            self.reparse();
+        }
+        text
+    }
+
     pub(crate) fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         if !self.active_tab_supports_persistent_save() {
             return;
@@ -1364,8 +1380,7 @@ impl EditorView {
         let Some(index) = self.active_tab_index() else {
             return;
         };
-        self.tabs[index].snapshot = self.current_snapshot();
-        let text = self.tabs[index].snapshot.text.clone();
+        let text = self.normalize_text_for_save();
         if let Some(ref path) = self.tabs[index].path.clone() {
             if std::fs::write(path, &text).is_ok() {
                 self.tabs[index].is_dirty = false;

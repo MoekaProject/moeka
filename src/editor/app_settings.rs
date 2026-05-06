@@ -1,6 +1,6 @@
 use crate::theme::ThemeKind;
 
-use super::config_store;
+use super::{SidebarSortMode, config_store};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AppSettings {
@@ -22,6 +22,8 @@ pub(crate) struct AppSettings {
     pub line_height: f32,
     #[serde(default = "default_letter_spacing")]
     pub letter_spacing: f32,
+    #[serde(default = "default_sidebar_sort_mode")]
+    pub sidebar_sort_mode: String,
 }
 
 fn default_theme() -> String {
@@ -60,6 +62,10 @@ fn default_letter_spacing() -> f32 {
     1.0
 }
 
+fn default_sidebar_sort_mode() -> String {
+    "created_desc".to_string()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -72,6 +78,7 @@ impl Default for AppSettings {
             font_size: default_font_size(),
             line_height: default_line_height(),
             letter_spacing: default_letter_spacing(),
+            sidebar_sort_mode: default_sidebar_sort_mode(),
         }
     }
 }
@@ -94,6 +101,27 @@ impl AppSettings {
             "MilkyDark" => ThemeKind::MilkyDark,
             _ => ThemeKind::OneDark,
         }
+    }
+
+    pub(crate) fn sidebar_sort_mode(&self) -> SidebarSortMode {
+        match self.sidebar_sort_mode.as_str() {
+            "created_asc" => SidebarSortMode::CreatedAsc,
+            "name_asc" => SidebarSortMode::NameAsc,
+            "name_desc" => SidebarSortMode::NameDesc,
+            "type" => SidebarSortMode::Type,
+            _ => SidebarSortMode::CreatedDesc,
+        }
+    }
+
+    pub(crate) fn set_sidebar_sort_mode(&mut self, mode: SidebarSortMode) {
+        self.sidebar_sort_mode = match mode {
+            SidebarSortMode::CreatedDesc => "created_desc",
+            SidebarSortMode::CreatedAsc => "created_asc",
+            SidebarSortMode::NameAsc => "name_asc",
+            SidebarSortMode::NameDesc => "name_desc",
+            SidebarSortMode::Type => "type",
+        }
+        .to_string();
     }
 }
 

@@ -258,6 +258,7 @@ impl EditorView {
             self.toggle_checkbox(line);
             self.reparse();
             self.hovering_checkbox = true;
+            self.hovering_checkbox_line = Some(line);
             cx.notify();
             return;
         }
@@ -820,12 +821,14 @@ impl EditorView {
             cx.notify();
         }
 
-        let hovering_checkbox = self
+        let hovering_checkbox_line = self
             .checkbox_areas
             .iter()
-            .any(|(bounds, _)| bounds.contains(&event.position));
-        if hovering_checkbox != self.hovering_checkbox {
-            self.hovering_checkbox = hovering_checkbox;
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(_, line)| *line);
+        if hovering_checkbox_line != self.hovering_checkbox_line {
+            self.hovering_checkbox_line = hovering_checkbox_line;
+            self.hovering_checkbox = self.hovering_checkbox_line.is_some();
             cx.notify();
         }
 
@@ -1616,6 +1619,11 @@ impl EditorView {
         }
 
         let y = (pos_y - origin_y) + self.scroll_offset;
+        let content_bottom = self.total_content_height() - self.padding_bottom();
+        if y >= content_bottom {
+            let last_line = self.buffer.line_count().saturating_sub(1);
+            return self.buffer.line_end(last_line).min(self.buffer.len());
+        }
         let line = self.line_at_y(y);
         if line == 0 && y > self.padding_top() + self.visual_height_for_line(0) {
             profile::log_event("cursor.offset_for_position.suspect_line0", || {

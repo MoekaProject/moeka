@@ -604,6 +604,7 @@ impl EditorView {
             kind: TabKind::Diff,
             path: Some(path),
             file_kind: None,
+            editor_left_aligned: false,
             snapshot: EditorSnapshot {
                 text: String::new(),
                 cursor_offset: 0,
@@ -1091,7 +1092,7 @@ impl EditorView {
                 div()
                     .text_color(ups.utility_panel_item_value_text_color)
                     .text_right()
-                    .max_w(px(self.utility_panel_width() * 0.6))
+                    .max_w(px(self.utility_panel_layout_width() * 0.6))
                     .child(SharedString::from(row.value.clone())),
             )
             .into_any_element()
@@ -1475,7 +1476,7 @@ impl EditorView {
     }
 
     pub(crate) fn render_utility_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        match self.utility_panel {
+        match self.displayed_utility_panel {
             Some(RightUtilityPanel::Outline) => self.render_outline(cx),
             Some(RightUtilityPanel::Info) => self.render_info_panel(cx),
             Some(RightUtilityPanel::GitHistory) => self.render_git_history_panel(cx),

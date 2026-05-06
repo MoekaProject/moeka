@@ -46,7 +46,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
     ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point, Render, RenderImage,
@@ -60,6 +60,15 @@ use crate::markdown::{self, BlockType, LineDecoration};
 use crate::theme::{Theme, ThemeColorField, ThemeKind};
 
 const CODE_BLOCK_COPY_FEEDBACK_MS: u64 = 1200;
+const PANEL_ANIMATION_FRAME_MS: u64 = 8;
+
+fn ease_in_out_cubic(t: f32) -> f32 {
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}
 
 // ── Platform helpers ────────────────────────────────────────────────
 
@@ -454,6 +463,7 @@ pub struct EditorView {
     pub(crate) ime_composition_snapshot: Option<EditorSnapshot>,
     pub(crate) checkbox_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_checkbox: bool,
+    pub(crate) hovering_checkbox_line: Option<usize>,
     pub(crate) image_click_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) code_block_hover_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) code_block_copy_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
@@ -511,6 +521,11 @@ pub struct EditorView {
     pub(crate) command_held: bool,
     pub(crate) sidebar_custom_width: Option<f32>,
     pub(crate) sidebar_resizing: bool,
+    pub(crate) sidebar_display_width: f32,
+    pub(crate) sidebar_layout_width: f32,
+    pub(crate) sidebar_width_target: f32,
+    pub(crate) sidebar_width_epoch: usize,
+    pub(crate) sidebar_width_task: Option<Task<()>>,
     pub(crate) heading_submenu_open: bool,
     pub(crate) slash_menu_start: Option<usize>,
     pub(crate) slash_filter: String,
@@ -572,9 +587,20 @@ pub struct EditorView {
     pub(crate) git_history_cache_result: Option<Option<Vec<info_panel::GitHistoryItem>>>,
     pub(crate) git_history_cache_scanned_at: Option<SystemTime>,
     pub(crate) utility_panel: Option<RightUtilityPanel>,
+    pub(crate) displayed_utility_panel: Option<RightUtilityPanel>,
     pub(crate) utility_panel_custom_width: Option<f32>,
     pub(crate) utility_panel_resizing: bool,
+    pub(crate) utility_panel_display_width: f32,
+    pub(crate) utility_panel_layout_width: f32,
+    pub(crate) utility_panel_width_target: f32,
+    pub(crate) utility_panel_width_epoch: usize,
+    pub(crate) utility_panel_width_task: Option<Task<()>>,
     pub(crate) theme_debugger_visible: bool,
+    pub(crate) displayed_theme_debugger: bool,
+    pub(crate) theme_debugger_display_width: f32,
+    pub(crate) theme_debugger_width_target: f32,
+    pub(crate) theme_debugger_width_epoch: usize,
+    pub(crate) theme_debugger_width_task: Option<Task<()>>,
     pub(crate) theme_debugger_scroll_handle: ScrollHandle,
     pub(crate) theme_debugger_selected_field: ThemeColorField,
     pub(crate) theme_debugger_hex_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
@@ -728,6 +754,7 @@ impl EditorView {
             ime_composition_snapshot: None,
             checkbox_areas: Vec::new(),
             hovering_checkbox: false,
+            hovering_checkbox_line: None,
             image_click_areas: Vec::new(),
             code_block_hover_areas: Vec::new(),
             code_block_copy_areas: Vec::new(),
@@ -755,6 +782,7 @@ impl EditorView {
                     kind: TabKind::Editor,
                     path: None,
                     file_kind: Some(FileKind::Markdown),
+                    editor_left_aligned: false,
                     snapshot: initial_snapshot,
                     image_view: ImageViewState::default(),
                     git_diff: None,
@@ -774,6 +802,7 @@ impl EditorView {
                     kind: TabKind::Settings,
                     path: None,
                     file_kind: None,
+                    editor_left_aligned: false,
                     snapshot: EditorSnapshot {
                         text: String::new(),
                         cursor_offset: 0,
@@ -819,6 +848,11 @@ impl EditorView {
             command_held: false,
             sidebar_custom_width: None,
             sidebar_resizing: false,
+            sidebar_display_width: 0.0,
+            sidebar_layout_width: 0.0,
+            sidebar_width_target: 0.0,
+            sidebar_width_epoch: 0,
+            sidebar_width_task: None,
             heading_submenu_open: false,
             menu_selected_index: 0,
             slash_menu_start: None,
@@ -841,7 +875,7 @@ impl EditorView {
             pending_close_tab_ids: Vec::new(),
             focused_sidebar_path: None,
             sidebar_selection_anchor: None,
-            sidebar_sort_mode: SidebarSortMode::NameAsc,
+            sidebar_sort_mode: app_settings.sidebar_sort_mode(),
             sidebar_drag_hover_target: None,
             sidebar_drag_expand_hover_dir: None,
             sidebar_drag_child_hover_position: None,
@@ -872,9 +906,20 @@ impl EditorView {
             git_history_cache_result: None,
             git_history_cache_scanned_at: None,
             utility_panel: None,
+            displayed_utility_panel: None,
             utility_panel_custom_width: None,
             utility_panel_resizing: false,
+            utility_panel_display_width: 0.0,
+            utility_panel_layout_width: 0.0,
+            utility_panel_width_target: 0.0,
+            utility_panel_width_epoch: 0,
+            utility_panel_width_task: None,
             theme_debugger_visible: false,
+            displayed_theme_debugger: false,
+            theme_debugger_display_width: 0.0,
+            theme_debugger_width_target: 0.0,
+            theme_debugger_width_epoch: 0,
+            theme_debugger_width_task: None,
             theme_debugger_scroll_handle: ScrollHandle::new(),
             theme_debugger_selected_field: ThemeColorField::TextPrimary,
             theme_debugger_hex_editor: None,
@@ -953,6 +998,7 @@ impl EditorView {
             app_settings,
         };
         session_store::restore_session(&mut this);
+        this.sync_panel_display_state();
         this.start_blinking(cx);
         if !this.sidebar_root.as_os_str().is_empty() {
             this.start_watching(cx);
@@ -1024,6 +1070,325 @@ impl EditorView {
 
                 cx.background_executor()
                     .timer(Duration::from_millis(16))
+                    .await;
+            }
+        }));
+    }
+
+    pub(crate) fn sidebar_target_width(&self) -> f32 {
+        self.sidebar_custom_width
+            .unwrap_or_else(|| self.scaled(self.styles.sidebar.sidebar_width_px))
+    }
+
+    pub(crate) fn sidebar_width(&self) -> f32 {
+        self.sidebar_display_width.max(0.0)
+    }
+
+    pub(crate) fn sidebar_layout_width(&self) -> f32 {
+        if self.sidebar_resizing {
+            self.sidebar_display_width.max(0.0)
+        } else if self.sidebar_width_task.is_some() {
+            self.sidebar_layout_width.max(0.0)
+        } else {
+            self.sidebar_display_width.max(0.0)
+        }
+    }
+
+    pub(crate) fn should_render_sidebar_panel(&self) -> bool {
+        self.sidebar_visible || self.sidebar_width_task.is_some() || self.sidebar_width() > 0.5
+    }
+
+    pub(crate) fn utility_panel_target_width(&self) -> f32 {
+        self.utility_panel_custom_width
+            .unwrap_or_else(|| self.scaled(self.styles.utility_panel.utility_panel_width_px))
+    }
+
+    pub(crate) fn utility_panel_width(&self) -> f32 {
+        self.utility_panel_display_width.max(0.0)
+    }
+
+    pub(crate) fn utility_panel_layout_width(&self) -> f32 {
+        if self.utility_panel_resizing {
+            self.utility_panel_display_width.max(0.0)
+        } else if self.utility_panel_width_task.is_some() {
+            self.utility_panel_layout_width.max(0.0)
+        } else {
+            self.utility_panel_display_width.max(0.0)
+        }
+    }
+
+    pub(crate) fn should_render_utility_panel(&self) -> bool {
+        self.displayed_utility_panel.is_some()
+            && (self.utility_panel_width_task.is_some() || self.utility_panel_width() > 0.5)
+    }
+
+    pub(crate) fn theme_debugger_target_width(&self) -> f32 {
+        self.scaled(theme_debugger::THEME_DEBUGGER_WIDTH_PX)
+    }
+
+    pub(crate) fn theme_debugger_width(&self) -> f32 {
+        self.theme_debugger_display_width.max(0.0)
+    }
+
+    pub(crate) fn theme_debugger_layout_width(&self) -> f32 {
+        if self.theme_debugger_width_task.is_some() {
+            self.theme_debugger_width_target.max(0.0)
+        } else {
+            self.theme_debugger_display_width.max(0.0)
+        }
+    }
+
+    pub(crate) fn should_render_theme_debugger_panel(&self) -> bool {
+        self.displayed_theme_debugger
+            && (self.theme_debugger_width_task.is_some() || self.theme_debugger_width() > 0.5)
+    }
+
+    pub(crate) fn should_render_right_panels(&self) -> bool {
+        self.should_render_theme_debugger_panel() || self.should_render_utility_panel()
+    }
+
+    pub(crate) fn set_sidebar_width_immediately(&mut self, width: f32) {
+        self.sidebar_width_epoch += 1;
+        self.sidebar_display_width = width.max(0.0);
+        self.sidebar_layout_width = self.sidebar_display_width;
+        self.sidebar_width_target = self.sidebar_display_width;
+        self.sidebar_width_task = None;
+    }
+
+    pub(crate) fn set_utility_panel_width_immediately(&mut self, width: f32) {
+        self.utility_panel_width_epoch += 1;
+        self.utility_panel_display_width = width.max(0.0);
+        self.utility_panel_layout_width = self.utility_panel_display_width;
+        self.utility_panel_width_target = self.utility_panel_display_width;
+        self.utility_panel_width_task = None;
+    }
+
+    pub(crate) fn sync_panel_display_state(&mut self) {
+        let sidebar_width = if self.sidebar_visible {
+            self.sidebar_target_width()
+        } else {
+            0.0
+        };
+        self.sidebar_display_width = sidebar_width;
+        self.sidebar_layout_width = sidebar_width;
+        self.sidebar_width_target = sidebar_width;
+        self.sidebar_width_task = None;
+
+        self.displayed_utility_panel = self.utility_panel;
+        let utility_width = if self.utility_panel.is_some() {
+            self.utility_panel_target_width()
+        } else {
+            0.0
+        };
+        self.utility_panel_display_width = utility_width;
+        self.utility_panel_layout_width = utility_width;
+        self.utility_panel_width_target = utility_width;
+        self.utility_panel_width_task = None;
+
+        self.displayed_theme_debugger = self.theme_debugger_visible;
+        let theme_debugger_width = if self.theme_debugger_visible {
+            self.theme_debugger_target_width()
+        } else {
+            0.0
+        };
+        self.theme_debugger_display_width = theme_debugger_width;
+        self.theme_debugger_width_target = theme_debugger_width;
+        self.theme_debugger_width_task = None;
+    }
+
+    pub(crate) fn sync_sidebar_width_animation(&mut self, cx: &mut Context<Self>) {
+        let target = if self.sidebar_visible {
+            self.sidebar_target_width()
+        } else {
+            0.0
+        };
+        if (self.sidebar_display_width - target).abs() <= 0.01
+            && (self.sidebar_width_target - target).abs() <= 0.01
+        {
+            self.sidebar_display_width = target;
+            self.sidebar_width_target = target;
+            return;
+        }
+
+        let start = self.sidebar_display_width;
+        self.sidebar_width_target = target;
+        self.sidebar_layout_width = if target > start { target } else { start };
+        self.sidebar_width_epoch += 1;
+        let epoch = self.sidebar_width_epoch;
+        let duration_ms = self.styles.sidebar.sidebar_visibility_animation_ms.max(1);
+        self.sidebar_width_task = Some(cx.spawn(async move |this, cx| {
+            let started_at = Instant::now();
+            loop {
+                let t = (started_at.elapsed().as_secs_f32() * 1000.0 / duration_ms as f32)
+                    .clamp(0.0, 1.0);
+                let ease = ease_in_out_cubic(t);
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.sidebar_width_epoch != epoch {
+                            return true;
+                        }
+
+                        this.sidebar_display_width = start + (target - start) * ease;
+                        if t >= 1.0 {
+                            this.sidebar_display_width = target;
+                            this.sidebar_width_task = None;
+                            cx.notify();
+                            return true;
+                        }
+
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+                if done {
+                    return;
+                }
+
+                cx.background_executor()
+                    .timer(Duration::from_millis(PANEL_ANIMATION_FRAME_MS))
+                    .await;
+            }
+        }));
+    }
+
+    pub(crate) fn sync_utility_panel_width_animation(&mut self, cx: &mut Context<Self>) {
+        if self.utility_panel.is_some() {
+            self.displayed_utility_panel = self.utility_panel;
+        }
+
+        let target = if self.utility_panel.is_some() {
+            self.utility_panel_target_width()
+        } else {
+            0.0
+        };
+
+        if (self.utility_panel_display_width - target).abs() <= 0.01
+            && (self.utility_panel_width_target - target).abs() <= 0.01
+        {
+            self.utility_panel_display_width = target;
+            self.utility_panel_width_target = target;
+            if target <= 0.01 {
+                self.displayed_utility_panel = None;
+            } else {
+                self.displayed_utility_panel = self.utility_panel;
+            }
+            return;
+        }
+
+        let start = self.utility_panel_display_width;
+        self.utility_panel_width_target = target;
+        self.utility_panel_layout_width = if target > start { target } else { start };
+        self.utility_panel_width_epoch += 1;
+        let epoch = self.utility_panel_width_epoch;
+        let duration_ms = self
+            .styles
+            .utility_panel
+            .utility_panel_visibility_animation_ms
+            .max(1);
+        self.utility_panel_width_task = Some(cx.spawn(async move |this, cx| {
+            let started_at = Instant::now();
+            loop {
+                let t = (started_at.elapsed().as_secs_f32() * 1000.0 / duration_ms as f32)
+                    .clamp(0.0, 1.0);
+                let ease = ease_in_out_cubic(t);
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.utility_panel_width_epoch != epoch {
+                            return true;
+                        }
+
+                        this.utility_panel_display_width = start + (target - start) * ease;
+                        if t >= 1.0 {
+                            this.utility_panel_display_width = target;
+                            this.utility_panel_width_task = None;
+                            if target <= 0.01 {
+                                this.displayed_utility_panel = None;
+                            } else {
+                                this.displayed_utility_panel = this.utility_panel;
+                            }
+                            cx.notify();
+                            return true;
+                        }
+
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+                if done {
+                    return;
+                }
+
+                cx.background_executor()
+                    .timer(Duration::from_millis(PANEL_ANIMATION_FRAME_MS))
+                    .await;
+            }
+        }));
+    }
+
+    pub(crate) fn sync_theme_debugger_width_animation(&mut self, cx: &mut Context<Self>) {
+        if self.theme_debugger_visible {
+            self.displayed_theme_debugger = true;
+        }
+
+        let target = if self.theme_debugger_visible {
+            self.theme_debugger_target_width()
+        } else {
+            0.0
+        };
+
+        if (self.theme_debugger_display_width - target).abs() <= 0.01
+            && (self.theme_debugger_width_target - target).abs() <= 0.01
+        {
+            self.theme_debugger_display_width = target;
+            self.theme_debugger_width_target = target;
+            if target <= 0.01 {
+                self.displayed_theme_debugger = false;
+            }
+            return;
+        }
+
+        let start = self.theme_debugger_display_width;
+        self.theme_debugger_width_target = target;
+        self.theme_debugger_width_epoch += 1;
+        let epoch = self.theme_debugger_width_epoch;
+        let duration_ms = self
+            .styles
+            .utility_panel
+            .utility_panel_visibility_animation_ms
+            .max(1);
+        self.theme_debugger_width_task = Some(cx.spawn(async move |this, cx| {
+            let started_at = Instant::now();
+            loop {
+                let t = (started_at.elapsed().as_secs_f32() * 1000.0 / duration_ms as f32)
+                    .clamp(0.0, 1.0);
+                let ease = ease_in_out_cubic(t);
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.theme_debugger_width_epoch != epoch {
+                            return true;
+                        }
+
+                        this.theme_debugger_display_width = start + (target - start) * ease;
+                        if t >= 1.0 {
+                            this.theme_debugger_display_width = target;
+                            this.theme_debugger_width_task = None;
+                            if target <= 0.01 {
+                                this.displayed_theme_debugger = false;
+                            }
+                            cx.notify();
+                            return true;
+                        }
+
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+                if done {
+                    return;
+                }
+
+                cx.background_executor()
+                    .timer(Duration::from_millis(PANEL_ANIMATION_FRAME_MS))
                     .await;
             }
         }));
@@ -3212,7 +3577,17 @@ impl EditorView {
     }
 
     pub(crate) fn move_cursor_to_first_line_end(&mut self) {
-        let target = self.buffer.line_end(0).min(self.buffer.len());
+        let mut target_line = 0;
+        while target_line + 1 < self.buffer.line_count()
+            && self
+                .decorations
+                .get(target_line)
+                .and_then(|decoration| decoration.table_info.as_ref())
+                .is_some_and(|table_info| table_info.is_front_matter)
+        {
+            target_line += 1;
+        }
+        let target = self.buffer.line_end(target_line).min(self.buffer.len());
         self.cursor.move_to(target, &self.buffer);
         self.scroll_to_cursor();
     }

@@ -487,21 +487,19 @@ impl EditorView {
         );
         cx.subscribe(
             &editor,
-            |this, editor, event: &crate::text_input::TextInputEvent, cx| {
-                match event {
-                    crate::text_input::TextInputEvent::Submit => {
-                        let text = editor.read(cx).text().to_string();
-                        if let Ok(size) = text.parse::<f32>() {
-                            this.apply_font_size(size, cx);
-                        }
+            |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Submit => {
+                    let text = editor.read(cx).text().to_string();
+                    if let Ok(size) = text.parse::<f32>() {
+                        this.apply_font_size(size, cx);
                     }
-                    crate::text_input::TextInputEvent::Escape => {
-                        let current = this.styles.editor.editor_font_size_px;
-                        this.sync_inline_stepper_editor(&editor, format!("{current:.0}"), cx);
-                    }
-                    crate::text_input::TextInputEvent::Changed => {}
-                    _ => {}
                 }
+                crate::text_input::TextInputEvent::Escape => {
+                    let current = this.styles.editor.editor_font_size_px;
+                    this.sync_inline_stepper_editor(&editor, format!("{current:.0}"), cx);
+                }
+                crate::text_input::TextInputEvent::Changed => {}
+                _ => {}
             },
         )
         .detach();
@@ -741,10 +739,8 @@ impl EditorView {
         if self.settings_line_height_editor.is_some() {
             return;
         }
-        let editor = self.build_inline_stepper_editor(
-            format!("{:.1}", self.app_settings.line_height),
-            cx,
-        );
+        let editor =
+            self.build_inline_stepper_editor(format!("{:.1}", self.app_settings.line_height), cx);
         cx.subscribe(
             &editor,
             |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -872,10 +868,8 @@ impl EditorView {
         if self.settings_letter_spacing_editor.is_some() {
             return;
         }
-        let editor = self.build_inline_stepper_editor(
-            format!("{:.1}", self.app_settings.letter_spacing),
-            cx,
-        );
+        let editor = self
+            .build_inline_stepper_editor(format!("{:.1}", self.app_settings.letter_spacing), cx);
         cx.subscribe(
             &editor,
             |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -1054,11 +1048,7 @@ impl EditorView {
         // Determine position: left-align with the trigger button's left edge.
         // Layout: sidebar? | [workspace-pane: settings_panel(max_w=560, mx_auto, px=40, font_row: label=120 + gap=12 + button)] | outline?
         let border_w = self.styles.window.window_border_width_px;
-        let sidebar_w = if self.sidebar_visible {
-            self.sidebar_width()
-        } else {
-            0.0
-        };
+        let sidebar_w = self.sidebar_width();
         let right_panel_w = self.right_panel_width();
         let pane_w = self.last_window_width - sidebar_w - right_panel_w - 2.0 * border_w;
         let settings_content_max_w = self.scaled(560.0);

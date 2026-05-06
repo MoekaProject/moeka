@@ -409,17 +409,30 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn reveal_path_in_sidebar(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    fn reveal_path_in_sidebar_internal(
+        &mut self,
+        path: PathBuf,
+        show_sidebar: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = self.workspace_root_for_path(&path) else {
             return;
         };
 
         let switched_workspace = self.sidebar_root != root;
+        let preserve_hidden_sidebar = !show_sidebar && !self.sidebar_visible;
 
-        if self.sidebar_root != root {
+        if switched_workspace {
             self.switch_workspace(root.clone(), cx);
-        } else {
+            if preserve_hidden_sidebar {
+                self.sidebar_visible = false;
+                self.sidebar_resizing = false;
+                self.set_sidebar_width_immediately(0.0);
+                session_store::persist_session(self);
+            }
+        } else if show_sidebar && !self.sidebar_visible {
             self.sidebar_visible = true;
+            self.sync_sidebar_width_animation(cx);
         }
 
         let mut expanded_changed = switched_workspace;
@@ -441,31 +454,45 @@ impl EditorView {
         if let Some(index) = items.iter().position(|item| item.path == path) {
             self.selected_sidebar_paths.clear();
             self.selected_sidebar_paths.insert(path.clone());
-            self.focused_sidebar_path = Some(path);
-            self.sidebar_selection_anchor = self.focused_sidebar_path.clone();
-            let scrolled = self.ensure_sidebar_item_visible(index);
-            if switched_workspace || expanded_changed || scrolled {
-                let reveal_path = self.focused_sidebar_path.clone();
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(1))
-                        .await;
-                    this.update(cx, |editor, cx| {
-                        if let Some(path) = reveal_path.as_ref() {
-                            let items = editor.sidebar_items();
-                            if let Some(index) = items.iter().position(|item| &item.path == path)
-                                && editor.ensure_sidebar_item_visible(index)
-                            {
-                                cx.notify();
+            self.sidebar_selection_anchor = Some(path.clone());
+
+            let sidebar_is_available = show_sidebar || self.sidebar_visible;
+            if sidebar_is_available {
+                self.focused_sidebar_path = Some(path.clone());
+                let scrolled = self.ensure_sidebar_item_visible(index);
+                if switched_workspace || expanded_changed || scrolled {
+                    let reveal_path = self.focused_sidebar_path.clone();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(1))
+                            .await;
+                        this.update(cx, |editor, cx| {
+                            if let Some(path) = reveal_path.as_ref() {
+                                let items = editor.sidebar_items();
+                                if let Some(index) = items.iter().position(|item| &item.path == path)
+                                    && editor.ensure_sidebar_item_visible(index)
+                                {
+                                    cx.notify();
+                                }
                             }
-                        }
+                        })
+                        .ok();
                     })
-                    .ok();
-                })
-                .detach();
+                    .detach();
+                }
+            } else {
+                self.focused_sidebar_path = None;
             }
         }
 
         cx.notify();
+    }
+
+    pub(crate) fn reveal_path_in_sidebar(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.reveal_path_in_sidebar_internal(path, true, cx);
+    }
+
+    pub(crate) fn sync_path_in_sidebar_state(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.reveal_path_in_sidebar_internal(path, false, cx);
     }
 }

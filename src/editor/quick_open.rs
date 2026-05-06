@@ -172,11 +172,7 @@ impl EditorView {
         let backdrop = styles.quick_open_backdrop_bg;
 
         let panel_w = self.scaled(styles.quick_open_panel_width_px);
-        let sidebar_w = if self.sidebar_visible {
-            self.sidebar_width()
-        } else {
-            0.0
-        };
+        let sidebar_w = self.sidebar_width();
         let right_panel_w = self.right_panel_width();
         let editor_w = (self.last_window_width - sidebar_w - right_panel_w).max(panel_w);
         let panel_left = sidebar_w + (editor_w - panel_w) / 2.0;

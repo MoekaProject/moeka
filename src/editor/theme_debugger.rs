@@ -8,7 +8,7 @@ use crate::theme::{self, ThemeColorField};
 
 use super::*;
 
-const THEME_DEBUGGER_WIDTH_PX: f32 = 320.0;
+pub(crate) const THEME_DEBUGGER_WIDTH_PX: f32 = 320.0;
 const THEME_DEBUGGER_HEADER_HEIGHT_PX: f32 = 30.0;
 const THEME_DEBUGGER_DETAIL_SWATCH_SIZE_PX: f32 = 56.0;
 const THEME_DEBUGGER_ROW_HEIGHT_PX: f32 = 30.0;
@@ -67,33 +67,24 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn theme_debugger_width(&self) -> f32 {
-        self.scaled(THEME_DEBUGGER_WIDTH_PX)
-    }
-
     pub(crate) fn right_panel_width(&self) -> f32 {
         if self.tabs.is_empty() {
             return 0.0;
         }
 
-        let mut width = 0.0;
-        if self.utility_panel.is_some() {
-            width += self.utility_panel_width();
-        }
-        if self.theme_debugger_visible {
-            width += self.theme_debugger_width();
-        }
-        width
+        self.utility_panel_width() + self.theme_debugger_width()
     }
 
     pub(crate) fn toggle_theme_debugger_visibility(&mut self, cx: &mut Context<Self>) {
         self.theme_debugger_visible = !self.theme_debugger_visible;
         if self.theme_debugger_visible {
+            self.displayed_theme_debugger = true;
             self.ensure_theme_debugger_editors(cx);
             self.sync_theme_debugger_editors(cx);
         } else {
             self.theme_debugger_drag_target = None;
         }
+        self.sync_theme_debugger_width_animation(cx);
         cx.notify();
     }
 
@@ -337,7 +328,7 @@ impl EditorView {
     pub(crate) fn render_theme_debugger(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_theme_debugger_editors(cx);
 
-        let width = self.theme_debugger_width();
+        let width = self.theme_debugger_layout_width();
         let header_height = self.scaled(THEME_DEBUGGER_HEADER_HEIGHT_PX);
         let swatch_size = self.scaled(THEME_DEBUGGER_DETAIL_SWATCH_SIZE_PX);
         let row_height = self.scaled(THEME_DEBUGGER_ROW_HEIGHT_PX);

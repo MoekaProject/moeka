@@ -113,6 +113,7 @@ pub(crate) struct OpenTab {
     pub kind: TabKind,
     pub path: Option<PathBuf>,
     pub file_kind: Option<FileKind>,
+    pub editor_left_aligned: bool,
     pub snapshot: EditorSnapshot,
     pub image_view: ImageViewState,
     pub git_diff: Option<GitDiffState>,

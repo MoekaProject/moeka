@@ -10,6 +10,7 @@ settings:
   font_size: 15.0
   line_height: 1.5
   letter_spacing: 1.0
+  sidebar_sort_mode: created_desc
 
 workspaces:
   roots:
@@ -32,6 +33,7 @@ session:
       cursor_offset: 0
       cursor_anchor: 0
       scroll_offset: 0.0
+      editor_left_aligned: false
     recovery:
       temp_path: null
       source_path: null
@@ -54,6 +56,7 @@ session:
       cursor_offset: 128
       cursor_anchor: 128
       scroll_offset: 240.0
+      editor_left_aligned: false
     recovery:
       temp_path: /path/to/workspace-a/.note.md.temp
       source_path: /path/to/workspace-a/note.md
