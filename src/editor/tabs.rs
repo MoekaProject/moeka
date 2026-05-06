@@ -974,6 +974,115 @@ impl EditorView {
             .into_any_element()
     }
 
+    fn active_tab_breadcrumb_segments(&self) -> Vec<String> {
+        let Some(tab) = self
+            .active_tab_index()
+            .and_then(|index| self.tabs.get(index))
+        else {
+            return Vec::new();
+        };
+
+        let Some(path) = tab.path.as_ref() else {
+            return vec![tab.title.clone()];
+        };
+
+        let Some(root) = self.workspace_root_for_path(path) else {
+            return vec![tab.title.clone()];
+        };
+
+        let root_name = root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| root.display().to_string());
+
+        let mut segments = vec![root_name];
+        if let Ok(relative_path) = path.strip_prefix(&root) {
+            for component in relative_path.components() {
+                if let std::path::Component::Normal(name) = component {
+                    let segment = name.to_string_lossy().into_owned();
+                    if !segment.is_empty() {
+                        segments.push(segment);
+                    }
+                }
+            }
+        }
+
+        if segments.len() == 1 {
+            segments.push(tab.title.clone());
+        }
+
+        segments
+    }
+
+    pub(crate) fn render_active_tab_path_bar(&self) -> AnyElement {
+        let es = &self.styles.editor;
+        let gap = self.scaled(es.editor_path_bar_gap_px);
+        let separator_size = self.scaled(es.editor_path_bar_separator_size_px);
+        let mut breadcrumb = div()
+            .id("editor-path-bar-content")
+            .w_full()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .gap(px(gap));
+        let segments = self.active_tab_breadcrumb_segments();
+
+        for (index, segment) in segments.iter().enumerate() {
+            if index > 0 {
+                breadcrumb = breadcrumb.child(
+                    svg()
+                        .path("assets/icons/arrow-right.svg")
+                        .size(px(separator_size))
+                        .flex_none()
+                        .text_color(es.editor_path_bar_separator_color),
+                );
+            }
+
+            let is_last = index + 1 == segments.len();
+            if is_last {
+                let (base, suffix) = split_file_name_for_display(segment);
+                let mut current = div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .flex()
+                    .items_center()
+                    .whitespace_nowrap();
+                current = current.child(div().whitespace_nowrap().child(base.to_string()));
+                if let Some(suffix) = suffix {
+                    current = current.child(
+                        div()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .opacity(es.editor_path_bar_suffix_opacity)
+                            .child(suffix.to_string()),
+                    );
+                }
+                breadcrumb = breadcrumb.child(current);
+            } else {
+                breadcrumb = breadcrumb.child(div().flex_none().whitespace_nowrap().child(segment.clone()));
+            }
+        }
+
+        div()
+            .id("editor-path-bar")
+            .w_full()
+            .h(px(self.scaled(es.editor_path_bar_height_px)))
+            .flex_none()
+            .flex()
+            .items_center()
+            .px(px(self.scaled(es.editor_path_bar_padding_x_px)))
+            .bg(es.editor_path_bar_bg)
+            .border_b(px(self.scaled(es.editor_path_bar_border_width_px)))
+            .border_color(es.editor_path_bar_border_color)
+            .text_size(px(self.scaled(es.editor_path_bar_font_size_px)))
+            .text_color(es.editor_path_bar_text_color)
+            .child(breadcrumb)
+            .into_any_element()
+    }
+
     fn render_tab_file_indicator(&self, tab: &OpenTab, is_active: bool) -> AnyElement {
         let ts = &self.styles.tab_bar;
         let opacity = if is_active {
