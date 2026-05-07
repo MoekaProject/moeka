@@ -27,6 +27,9 @@ pub(crate) const OUTLINE_TOGGLE_SVG_PATH: &str = "assets/icons/outline-toggle.sv
 pub(crate) const INFO_PANEL_SVG_PATH: &str = "assets/icons/info.svg";
 pub(crate) const GIT_HISTORY_SVG_PATH: &str = "assets/icons/history.svg";
 pub(crate) const SHARE_SVG_PATH: &str = "assets/icons/share.svg";
+pub(crate) const FILE_INFO_SECTION_INFO_SVG_PATH: &str = "assets/icons/file/info.svg";
+pub(crate) const FILE_INFO_SECTION_EXPORT_SVG_PATH: &str = "assets/icons/file/export.svg";
+pub(crate) const FILE_INFO_SECTION_ATTACHMENT_SVG_PATH: &str = "assets/icons/file/attachment.svg";
 
 pub(crate) const FMT_BOLD_SVG: &str = "assets/icons/format/bold.svg";
 pub(crate) const FMT_ITALIC_SVG: &str = "assets/icons/format/italic.svg";

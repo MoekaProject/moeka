@@ -7,7 +7,7 @@ use gpui::{
 
 use crate::markdown::BlockType;
 
-use super::input::{ime_debug_log, InlineLineDisplayInfo};
+use super::input::{InlineLineDisplayInfo, ime_debug_log};
 use super::*;
 
 impl EntityInputHandler for EditorView {
@@ -66,7 +66,10 @@ impl EntityInputHandler for EditorView {
             ime_debug_log("marked_text_range -> None (table handle selected)");
             return None;
         }
-        let marked = self.marked_range.as_ref().map(|range| self.range_to_utf16(range));
+        let marked = self
+            .marked_range
+            .as_ref()
+            .map(|range| self.range_to_utf16(range));
         ime_debug_log(format!(
             "marked_text_range -> {:?} (utf8={:?})",
             marked, self.marked_range
@@ -260,12 +263,13 @@ impl EntityInputHandler for EditorView {
             let text = self.buffer.text();
             if text.get(new_offset - 2..new_offset) == Some("[[") {
                 if text.get(new_offset..new_offset + 2) != Some("]]") {
-                    self.buffer.replace(new_offset..new_offset, "]]" );
+                    self.buffer.replace(new_offset..new_offset, "]]");
                     self.reparse();
                 }
                 self.cursor.move_to(new_offset, &self.buffer);
                 self.ensure_wiki_link_menu_for_cursor(cx);
             }
+        } else if self.maybe_open_wiki_link_menu_after_edit(cx) {
         } else if new_text == "/" {
             let (line, col) = self.buffer.offset_to_line_col(new_offset);
             let line_content = self.buffer.line_content(line);
@@ -391,7 +395,10 @@ impl EntityInputHandler for EditorView {
         if !self.active_tab_supports_text_buffer() {
             return None;
         }
-        ime_debug_log(format!("bounds_for_range start range_utf16={:?}", range_utf16));
+        ime_debug_log(format!(
+            "bounds_for_range start range_utf16={:?}",
+            range_utf16
+        ));
         let queried_range = self.range_from_utf16(&range_utf16);
         let anchor_offset = if self.marked_range.as_ref().is_some_and(|marked| {
             queried_range.start >= marked.start && queried_range.end <= marked.end
@@ -404,7 +411,10 @@ impl EntityInputHandler for EditorView {
         let origin_y: f32 = bounds.origin.y.into();
         let line_top_y = origin_y + self.line_y_offset(line) - self.scroll_offset;
 
-        if let Some(table_info) = self.decorations.get(line).and_then(|decoration| decoration.table_info.as_ref())
+        if let Some(table_info) = self
+            .decorations
+            .get(line)
+            .and_then(|decoration| decoration.table_info.as_ref())
             && !table_info.is_separator
         {
             let table_start_line = table_info.table_start_line;
@@ -424,16 +434,18 @@ impl EntityInputHandler for EditorView {
             let cell_bounds = self
                 .table_click_areas
                 .iter()
-                .find(|(_, tsl, vr, c)| *tsl == table_start_line && *vr == visual_row && *c == cell_col)
+                .find(|(_, tsl, vr, c)| {
+                    *tsl == table_start_line && *vr == visual_row && *c == cell_col
+                })
                 .map(|(bounds, _, _, _)| *bounds)?;
 
             let padding_x = self.scaled(self.styles.table.table_cell_padding_px);
             let padding_y = self.scaled(self.styles.table.table_cell_padding_px) * 0.6;
-            let inner_width =
-                (f32::from(cell_bounds.size.width) - padding_x * 2.0).max(self.base_font_size() * 0.5);
+            let inner_width = (f32::from(cell_bounds.size.width) - padding_x * 2.0)
+                .max(self.base_font_size() * 0.5);
             let info = self.table_cell_display_info(window, line, cell_col, inner_width)?;
-            let cell_offset = anchor_offset
-                .saturating_sub(self.buffer.line_start(line) + info.cell_range.start);
+            let cell_offset =
+                anchor_offset.saturating_sub(self.buffer.line_start(line) + info.cell_range.start);
             let disp_col = if cell_offset >= info.buffer_to_display.len() {
                 info.display_text.len()
             } else {
@@ -453,15 +465,7 @@ impl EntityInputHandler for EditorView {
             let y = f32::from(cell_bounds.origin.y) + padding_y + f32::from(pos.y);
             ime_debug_log(format!(
                 "bounds_for_range table line={} col={} cell_col={} visual_row={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",
-                line,
-                col,
-                cell_col,
-                visual_row,
-                queried_range,
-                anchor_offset,
-                x,
-                y,
-                line_height
+                line, col, cell_col, visual_row, queried_range, anchor_offset, x, y, line_height
             ));
             return Some(Bounds::new(
                 point(px(x), px(y)),
@@ -470,20 +474,21 @@ impl EntityInputHandler for EditorView {
         }
 
         let line_info = if self.layout_dirty {
-            self.inline_line_display_info(window, line, bounds).or_else(|| {
-                self.line_display_info
-                    .get(line)
-                    .cloned()
-                    .flatten()
-                    .map(|info| InlineLineDisplayInfo {
-                        buffer_to_display: info.buffer_to_display,
-                        font_size: info.font_size,
-                        line_height: info.line_height,
-                        wrapped_line: info.wrapped_line,
-                        indent_px: info.indent_px,
-                        content_x: info.content_x,
-                    })
-            })
+            self.inline_line_display_info(window, line, bounds)
+                .or_else(|| {
+                    self.line_display_info
+                        .get(line)
+                        .cloned()
+                        .flatten()
+                        .map(|info| InlineLineDisplayInfo {
+                            buffer_to_display: info.buffer_to_display,
+                            font_size: info.font_size,
+                            line_height: info.line_height,
+                            wrapped_line: info.wrapped_line,
+                            indent_px: info.indent_px,
+                            content_x: info.content_x,
+                        })
+                })
         } else {
             self.line_display_info
                 .get(line)

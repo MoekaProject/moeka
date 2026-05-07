@@ -4035,20 +4035,6 @@ pub(crate) fn classify_file_kind_for_bytes(path: &Path, bytes: &[u8]) -> FileKin
     }
 }
 
-pub(crate) fn classify_file_kind(path: &Path) -> FileKind {
-    std::fs::read(path)
-        .map(|bytes| classify_file_kind_for_bytes(path, &bytes))
-        .unwrap_or_else(|_| {
-            if is_markdown_file(path) {
-                FileKind::Markdown
-            } else if is_image_file(path) {
-                FileKind::Image
-            } else {
-                FileKind::Text
-            }
-        })
-}
-
 pub(crate) fn file_kind_badge_text(path: &Path) -> Option<String> {
     path.file_name()
         .and_then(|name| name.to_str())

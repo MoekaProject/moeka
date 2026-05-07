@@ -1,17 +1,24 @@
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnyElement, Context, CursorStyle, FontWeight, MouseButton, SharedString, div, img, prelude::*,
-    px,
+    AnyElement, Context, CursorStyle, FontWeight, MouseButton, SharedString, div, prelude::*, px,
+    svg,
 };
+#[cfg(not(target_os = "macos"))]
 use printpdf::{Mm, PdfDocument};
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, html::push_html};
+use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd, html::push_html};
 use similar::{ChangeTag, TextDiff};
 use unicode_segmentation::UnicodeSegmentation;
+
+#[cfg(target_os = "macos")]
+use objc::{class, msg_send, sel, sel_impl};
+
+#[cfg(target_os = "macos")]
+#[link(name = "WebKit", kind = "framework")]
+unsafe extern "C" {}
 
 use super::*;
 
@@ -24,30 +31,30 @@ struct InfoPanelRow {
 #[derive(Clone)]
 pub(crate) struct InfoPanelData {
     primary_rows: Vec<InfoPanelRow>,
-    front_matter_rows: Vec<InfoPanelRow>,
-    attachment_items: Vec<InfoPanelResourceItem>,
-    image_items: Vec<InfoPanelResourceItem>,
-    external_link_items: Vec<InfoPanelExternalLinkItem>,
+    attachment_items: Vec<InfoPanelReferenceItem>,
+    image_items: Vec<InfoPanelReferenceItem>,
+    external_link_items: Vec<InfoPanelReferenceItem>,
+    wiki_link_items: Vec<InfoPanelReferenceItem>,
     supports_text_export: bool,
 }
 
 #[derive(Clone)]
-struct InfoPanelResourceItem {
+struct InfoPanelReferenceItem {
     label: String,
-    path: Option<PathBuf>,
-    action: Option<InfoPanelResourceAction>,
+    source_line: usize,
+    share_action: InfoPanelShareAction,
 }
 
 #[derive(Clone)]
-struct InfoPanelExternalLinkItem {
-    label: String,
-    url: String,
+enum InfoPanelShareAction {
+    RevealPath(PathBuf),
+    OpenUrl(String),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum InfoPanelResourceAction {
-    RevealInFinder,
-    OpenPreviewTab,
+#[derive(Clone)]
+enum InfoPanelReferenceTarget {
+    LocalPath(PathBuf),
+    ExternalUrl(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,6 +67,7 @@ struct PendingPanelReference {
     kind: PendingPanelReferenceKind,
     target: String,
     label: String,
+    source_line: usize,
 }
 
 #[derive(Clone)]
@@ -125,17 +133,6 @@ fn format_unix_timestamp_relative(timestamp: i64) -> String {
     format_relative_time(time)
 }
 
-fn format_file_kind(file_kind: Option<&FileKind>) -> &'static str {
-    match file_kind {
-        Some(FileKind::Markdown) => "Markdown",
-        Some(FileKind::Code { .. }) => "Code",
-        Some(FileKind::Text) => "Text",
-        Some(FileKind::Image) => "Image",
-        Some(FileKind::Binary) => "Binary",
-        None => "Settings",
-    }
-}
-
 fn export_dialog_path(default_name: &str, title: &str) -> Option<std::path::PathBuf> {
     rfd::FileDialog::new()
         .set_title(title)
@@ -143,37 +140,278 @@ fn export_dialog_path(default_name: &str, title: &str) -> Option<std::path::Path
         .save_file()
 }
 
-fn build_html_document(title: &str, markdown: &str) -> String {
+fn html_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn percent_encode_file_url_path(path: &Path) -> String {
+    let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path_text = absolute.to_string_lossy();
+    let mut encoded = String::with_capacity(path_text.len() + 8);
+
+    for byte in path_text.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                encoded.push(*byte as char)
+            }
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        }
+    }
+
+    if !encoded.ends_with('/') {
+        encoded.push('/');
+    }
+
+    encoded
+}
+
+fn html_base_href(source_file_path: Option<&Path>) -> Option<String> {
+    let directory = source_file_path?.parent()?;
+    Some(format!(
+        "file://{}",
+        percent_encode_file_url_path(directory)
+    ))
+}
+
+fn build_html_document(title: &str, markdown: &str, source_file_path: Option<&Path>) -> String {
     let mut html = String::new();
     let parser = Parser::new_ext(markdown, Options::all());
     push_html(&mut html, parser);
+
+    let escaped_title = html_escape(title);
+    let base_href = html_base_href(source_file_path)
+        .map(|href| format!("<base href=\"{}\">", html_escape(&href)))
+        .unwrap_or_default();
 
     format!(
         concat!(
             "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">",
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
             "<title>{}</title>",
+            "{}",
             "<style>",
             ":root{{color-scheme:light dark;}}",
-            "body{{margin:40px auto;max-width:840px;padding:0 24px;font:16px/1.7 -apple-system,BlinkMacSystemFont,'PingFang SC','Segoe UI',sans-serif;}}",
+            "@page{{size:A4;margin:18mm;}}",
+            "body{{margin:40px auto;max-width:840px;padding:0 24px;font:16px/1.7 -apple-system,BlinkMacSystemFont,'PingFang SC','Segoe UI',sans-serif;word-break:break-word;overflow-wrap:anywhere;}}",
             "img{{max-width:100%;height:auto;}}",
             "pre{{overflow:auto;padding:12px;border-radius:8px;background:rgba(127,127,127,.08);}}",
             "code{{font-family:Menlo,Consolas,monospace;}}",
             "table{{border-collapse:collapse;width:100%;}}",
             "th,td{{border:1px solid rgba(127,127,127,.25);padding:8px 10px;text-align:left;}}",
             "blockquote{{margin:0;padding-left:16px;border-left:3px solid rgba(127,127,127,.35);color:rgba(127,127,127,.9);}}",
+            "@media print{{body{{margin:0;max-width:none;padding:0;font-size:12pt;line-height:1.65;}}a{{color:inherit;text-decoration:none;}}pre{{white-space:pre-wrap;word-break:break-word;}}}}",
             "</style></head><body>{}</body></html>"
         ),
-        title, html
+        escaped_title, base_href, html
     )
 }
 
-fn is_external_reference(target: &str) -> bool {
-    let lower = target.trim().to_ascii_lowercase();
-    lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("mailto:")
-        || lower.starts_with("tel:")
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct NSPoint {
+    x: f64,
+    y: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct NSSize {
+    width: f64,
+    height: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct NSRect {
+    origin: NSPoint,
+    size: NSSize,
+}
+
+#[cfg(target_os = "macos")]
+fn nsstring(text: &str) -> *mut objc::runtime::Object {
+    unsafe {
+        let c_string = std::ffi::CString::new(text).expect("NSString input contains interior NUL");
+        msg_send![class!(NSString), stringWithUTF8String: c_string.as_ptr()]
+    }
+}
+
+fn nsurl_from_directory(path: &Path) -> *mut objc::runtime::Object {
+    unsafe {
+        msg_send![
+            class!(NSURL),
+            fileURLWithPath: nsstring(&path.to_string_lossy())
+            isDirectory: true
+        ]
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_current_run_loop_for(seconds: f64) {
+    unsafe {
+        let run_loop: *mut objc::runtime::Object = msg_send![class!(NSRunLoop), currentRunLoop];
+        let until_date: *mut objc::runtime::Object =
+            msg_send![class!(NSDate), dateWithTimeIntervalSinceNow: seconds];
+        let () = msg_send![run_loop, runUntilDate: until_date];
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn build_pdf_document_from_html_macos(
+    html: &str,
+    source_file_path: Option<&Path>,
+) -> anyhow::Result<Vec<u8>> {
+    unsafe {
+        let autorelease_pool: *mut objc::runtime::Object =
+            msg_send![class!(NSAutoreleasePool), new];
+
+        let page_width = 595.0_f64;
+        let page_height = 842.0_f64;
+        let margin = 51.0_f64;
+        let content_width = page_width - margin * 2.0;
+        let frame = NSRect {
+            origin: NSPoint { x: 0.0, y: 0.0 },
+            size: NSSize {
+                width: content_width,
+                height: page_height,
+            },
+        };
+        let nil = std::ptr::null_mut::<objc::runtime::Object>();
+        let web_view: *mut objc::runtime::Object = msg_send![class!(WebView), alloc];
+        let web_view: *mut objc::runtime::Object = msg_send![
+            web_view,
+            initWithFrame: frame
+            frameName: nil
+            groupName: nil
+        ];
+        let () = msg_send![web_view, setMediaStyle: nsstring("print")];
+
+        let main_frame: *mut objc::runtime::Object = msg_send![web_view, mainFrame];
+        let base_url = source_file_path
+            .and_then(Path::parent)
+            .map(nsurl_from_directory)
+            .unwrap_or(nil);
+        let () = msg_send![main_frame, loadHTMLString: nsstring(html) baseURL: base_url];
+
+        let start = std::time::Instant::now();
+        loop {
+            let is_loading: bool = msg_send![web_view, isLoading];
+            if !is_loading {
+                break;
+            }
+            if start.elapsed() > std::time::Duration::from_secs(10) {
+                let () = msg_send![autorelease_pool, drain];
+                anyhow::bail!("timed out waiting for WebKit HTML rendering");
+            }
+            run_current_run_loop_for(0.01);
+        }
+
+        run_current_run_loop_for(0.05);
+
+        let frame_view: *mut objc::runtime::Object = msg_send![main_frame, frameView];
+        if frame_view.is_null() {
+            let () = msg_send![autorelease_pool, drain];
+            anyhow::bail!("WebKit frame view unavailable after HTML load");
+        }
+
+        let document_view: *mut objc::runtime::Object = msg_send![frame_view, documentView];
+        if document_view.is_null() {
+            let () = msg_send![autorelease_pool, drain];
+            anyhow::bail!("WebKit document view unavailable after HTML load");
+        }
+
+        let document_bounds: NSRect = msg_send![document_view, bounds];
+        let total_height = document_bounds.size.height.max(page_height);
+        let full_rect = NSRect {
+            origin: NSPoint { x: 0.0, y: 0.0 },
+            size: NSSize {
+                width: document_bounds.size.width.max(content_width),
+                height: total_height,
+            },
+        };
+        let () = msg_send![web_view, setFrame: full_rect];
+
+        let shared_print_info: *mut objc::runtime::Object =
+            msg_send![class!(NSPrintInfo), sharedPrintInfo];
+        let print_info: *mut objc::runtime::Object = msg_send![shared_print_info, copy];
+        let () =
+            msg_send![print_info, setPaperSize: NSSize { width: page_width, height: page_height }];
+        let () = msg_send![print_info, setTopMargin: margin];
+        let () = msg_send![print_info, setBottomMargin: margin];
+        let () = msg_send![print_info, setLeftMargin: margin];
+        let () = msg_send![print_info, setRightMargin: margin];
+        let () = msg_send![print_info, setHorizontallyCentered: false];
+        let () = msg_send![print_info, setVerticallyCentered: false];
+
+        let pdf_data: *mut objc::runtime::Object = msg_send![class!(NSMutableData), data];
+        let print_operation: *mut objc::runtime::Object = msg_send![
+            class!(NSPrintOperation),
+            PDFOperationWithView: web_view
+            insideRect: full_rect
+            toData: pdf_data
+            printInfo: print_info
+        ];
+        let () = msg_send![print_operation, setShowsPrintPanel: false];
+        let () = msg_send![print_operation, setShowsProgressPanel: false];
+        let did_run: bool = msg_send![print_operation, runOperation];
+        if !did_run {
+            let () = msg_send![autorelease_pool, drain];
+            anyhow::bail!("failed to run AppKit PDF print operation");
+        }
+
+        let length: usize = msg_send![pdf_data, length];
+        let bytes_ptr: *const u8 = msg_send![pdf_data, bytes];
+        let bytes = std::slice::from_raw_parts(bytes_ptr, length).to_vec();
+
+        let () = msg_send![autorelease_pool, drain];
+        Ok(bytes)
+    }
+}
+
+fn compact_panel_label(label: &str) -> Option<String> {
+    let compact = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!compact.is_empty()).then_some(compact)
+}
+
+fn reference_scheme(target: &str) -> Option<&str> {
+    let trimmed = target.trim();
+    let scheme_end = trimmed.find(':')?;
+    let first_separator = trimmed
+        .find(|ch| matches!(ch, '/' | '\\' | '?' | '#'))
+        .unwrap_or(trimmed.len());
+    if scheme_end > first_separator {
+        return None;
+    }
+
+    let scheme = &trimmed[..scheme_end];
+    if scheme.len() == 1 && scheme.as_bytes()[0].is_ascii_alphabetic() {
+        return None;
+    }
+
+    let mut chars = scheme.chars();
+    let first = chars.next()?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    chars
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+        .then_some(scheme)
 }
 
 fn decode_file_url_path(target: &str) -> String {
@@ -201,20 +439,69 @@ fn decode_file_url_path(target: &str) -> String {
     }
 }
 
-fn normalize_panel_label(label: &str, target: &str) -> String {
-    let compact = label.split_whitespace().collect::<Vec<_>>().join(" ");
-    if !compact.is_empty() {
-        return compact;
+fn external_reference_host(target: &str) -> Option<String> {
+    let trimmed = target.trim();
+    if let Some(rest) = trimmed.strip_prefix("mailto:") {
+        return rest
+            .rsplit_once('@')
+            .map(|(_, domain)| domain.to_string())
+            .filter(|domain| !domain.is_empty());
     }
 
-    Path::new(target)
-        .file_name()
+    let authority = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .or_else(|| trimmed.strip_prefix("//"))?;
+    let host_port = authority.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = host_port
+        .rsplit('@')
+        .next()
+        .unwrap_or_default()
+        .trim_matches(['[', ']']);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.split(':').next().unwrap_or(host).to_string())
+    }
+}
+
+fn path_reference_name(path: &Path, fallback_target: &str) -> String {
+    path.file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .map(ToString::to_string)
-        .unwrap_or_else(|| target.to_string())
+        .or_else(|| {
+            Path::new(fallback_target)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| fallback_target.to_string())
 }
 
+fn fallback_reference_label(
+    label: &str,
+    raw_target: &str,
+    target: &InfoPanelReferenceTarget,
+) -> String {
+    if let Some(compact) = compact_panel_label(label) {
+        return compact;
+    }
+
+    match target {
+        InfoPanelReferenceTarget::LocalPath(path) => path_reference_name(path, raw_target),
+        InfoPanelReferenceTarget::ExternalUrl(url) => external_reference_host(url)
+            .filter(|host| !host.is_empty())
+            .unwrap_or_else(|| raw_target.to_string()),
+    }
+}
+
+fn count_document_words(text: &str) -> usize {
+    UnicodeSegmentation::unicode_words(text).count()
+}
+
+#[cfg(not(target_os = "macos"))]
 fn pdf_display_width(text: &str) -> usize {
     text.chars()
         .map(|ch| {
@@ -238,6 +525,7 @@ fn pdf_display_width(text: &str) -> usize {
         .sum()
 }
 
+#[cfg(not(target_os = "macos"))]
 fn wrap_text_for_pdf(text: &str, max_units: usize) -> Vec<String> {
     let mut wrapped = Vec::new();
 
@@ -272,6 +560,7 @@ fn wrap_text_for_pdf(text: &str, max_units: usize) -> Vec<String> {
     wrapped
 }
 
+#[cfg(not(target_os = "macos"))]
 fn pdf_font_candidates() -> Vec<PathBuf> {
     let mut candidates = vec![
         PathBuf::from("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
@@ -288,11 +577,13 @@ fn pdf_font_candidates() -> Vec<PathBuf> {
     candidates
 }
 
+#[cfg(not(target_os = "macos"))]
 fn find_pdf_font_path() -> Option<PathBuf> {
     pdf_font_candidates().into_iter().find(|path| path.exists())
 }
 
-fn build_pdf_document(title: &str, markdown: &str) -> anyhow::Result<Vec<u8>> {
+#[cfg(not(target_os = "macos"))]
+fn build_pdf_document_with_printpdf(title: &str, markdown: &str) -> anyhow::Result<Vec<u8>> {
     let font_path = find_pdf_font_path()
         .ok_or_else(|| anyhow::anyhow!("could not find a usable system font for PDF export"))?;
     let (document, first_page, first_layer) =
@@ -338,6 +629,21 @@ fn build_pdf_document(title: &str, markdown: &str) -> anyhow::Result<Vec<u8>> {
     }
 
     Ok(bytes)
+}
+
+fn build_pdf_document(
+    title: &str,
+    markdown: &str,
+    source_file_path: Option<&Path>,
+) -> anyhow::Result<Vec<u8>> {
+    #[cfg(target_os = "macos")]
+    {
+        let html = build_html_document(title, markdown, source_file_path);
+        return build_pdf_document_from_html_macos(&html, source_file_path);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    build_pdf_document_with_printpdf(title, markdown)
 }
 
 fn run_git_command(repo_root: &Path, args: &[&str]) -> Option<String> {
@@ -677,7 +983,7 @@ impl EditorView {
     fn resolve_info_panel_reference_path(&self, raw: &str) -> Option<PathBuf> {
         let decoded = decode_file_url_path(raw);
         let raw = decoded.trim();
-        if raw.is_empty() || raw.starts_with('#') || is_external_reference(raw) {
+        if raw.is_empty() || raw.starts_with('#') {
             return None;
         }
 
@@ -720,86 +1026,137 @@ impl EditorView {
         Some(expanded)
     }
 
+    fn classify_info_panel_reference_target(&self, raw: &str) -> Option<InfoPanelReferenceTarget> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return None;
+        }
+
+        if trimmed.starts_with("file://") {
+            return self
+                .resolve_info_panel_reference_path(raw)
+                .map(InfoPanelReferenceTarget::LocalPath);
+        }
+
+        if reference_scheme(trimmed).is_some() || trimmed.starts_with("//") {
+            let url = if trimmed.starts_with("//") {
+                format!("https:{trimmed}")
+            } else {
+                trimmed.to_string()
+            };
+            return Some(InfoPanelReferenceTarget::ExternalUrl(url));
+        }
+
+        self.resolve_info_panel_reference_path(raw)
+            .map(InfoPanelReferenceTarget::LocalPath)
+    }
+
+    fn reveal_panel_reference_in_finder(&self, path: &Path) {
+        if path.exists() {
+            self.reveal_in_finder(path);
+            return;
+        }
+
+        if let Some(parent) = path.parent().filter(|parent| parent.exists()) {
+            if let Err(error) = Command::new("open").arg(parent).spawn() {
+                eprintln!("failed to open parent folder {}: {error}", parent.display());
+            }
+        }
+    }
+
+    fn trigger_info_panel_share_action(&self, action: &InfoPanelShareAction) {
+        match action {
+            InfoPanelShareAction::RevealPath(path) => self.reveal_panel_reference_in_finder(path),
+            InfoPanelShareAction::OpenUrl(url) => {
+                if let Err(error) = Command::new("open").arg(url).spawn() {
+                    eprintln!("failed to open URL {url}: {error}");
+                }
+            }
+        }
+    }
+
     fn collect_info_panel_resources(
         &self,
         text: &str,
     ) -> (
-        Vec<InfoPanelResourceItem>,
-        Vec<InfoPanelResourceItem>,
-        Vec<InfoPanelExternalLinkItem>,
+        Vec<InfoPanelReferenceItem>,
+        Vec<InfoPanelReferenceItem>,
+        Vec<InfoPanelReferenceItem>,
+        Vec<InfoPanelReferenceItem>,
     ) {
         let mut attachment_items = Vec::new();
         let mut image_items = Vec::new();
         let mut external_link_items = Vec::new();
-        let mut attachment_seen = HashSet::new();
-        let mut image_seen = HashSet::new();
-        let mut external_seen = HashSet::new();
+        let mut wiki_link_items = Vec::new();
         let mut pending_references = Vec::new();
 
-        let push_resource_item = |section: &mut Vec<InfoPanelResourceItem>,
-                                  seen: &mut HashSet<String>,
-                                  item: InfoPanelResourceItem,
-                                  key: String| {
-            if seen.insert(key) {
-                section.push(item);
-            }
-        };
+        let mut commit_reference = |pending: PendingPanelReference| match pending.kind {
+            PendingPanelReferenceKind::Link => {
+                let Some(target) = self.classify_info_panel_reference_target(&pending.target)
+                else {
+                    return;
+                };
+                let label = fallback_reference_label(&pending.label, &pending.target, &target);
 
-        let mut commit_reference = |pending: PendingPanelReference| {
-            if is_external_reference(&pending.target) {
-                if external_seen.insert(pending.target.clone()) {
-                    external_link_items.push(InfoPanelExternalLinkItem {
-                        label: normalize_panel_label(&pending.label, &pending.target),
-                        url: pending.target,
-                    });
+                match target {
+                    InfoPanelReferenceTarget::LocalPath(path) => {
+                        attachment_items.push(InfoPanelReferenceItem {
+                            label,
+                            source_line: pending.source_line,
+                            share_action: InfoPanelShareAction::RevealPath(path),
+                        });
+                    }
+                    InfoPanelReferenceTarget::ExternalUrl(url) => {
+                        external_link_items.push(InfoPanelReferenceItem {
+                            label,
+                            source_line: pending.source_line,
+                            share_action: InfoPanelShareAction::OpenUrl(url),
+                        });
+                    }
                 }
-                return;
             }
+            PendingPanelReferenceKind::Image => {
+                let Some(target) = self.classify_info_panel_reference_target(&pending.target)
+                else {
+                    return;
+                };
 
-            let Some(resolved_path) = self.resolve_info_panel_reference_path(&pending.target)
-            else {
-                return;
-            };
-            let key = resolved_path.to_string_lossy().into_owned();
-            let path = resolved_path.exists().then_some(resolved_path.clone());
-            let resolved_kind = resolved_path
-                .exists()
-                .then(|| classify_file_kind(&resolved_path));
-            let is_image = pending.kind == PendingPanelReferenceKind::Image
-                || resolved_kind.as_ref().is_some_and(FileKind::is_image);
-            let item = InfoPanelResourceItem {
-                label: if is_image {
-                    resolved_path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .filter(|name| !name.is_empty())
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| normalize_panel_label(&pending.label, &pending.target))
-                } else {
-                    normalize_panel_label(&pending.label, &pending.target)
-                },
-                path,
-                action: Some(if is_image {
-                    InfoPanelResourceAction::OpenPreviewTab
-                } else {
-                    InfoPanelResourceAction::RevealInFinder
-                }),
-            };
+                let share_action = match &target {
+                    InfoPanelReferenceTarget::LocalPath(path) => {
+                        InfoPanelShareAction::RevealPath(path.clone())
+                    }
+                    InfoPanelReferenceTarget::ExternalUrl(url) => {
+                        InfoPanelShareAction::OpenUrl(url.clone())
+                    }
+                };
 
-            if is_image {
-                push_resource_item(&mut image_items, &mut image_seen, item, key);
-            } else {
-                push_resource_item(&mut attachment_items, &mut attachment_seen, item, key);
+                image_items.push(InfoPanelReferenceItem {
+                    label: fallback_reference_label(&pending.label, &pending.target, &target),
+                    source_line: pending.source_line,
+                    share_action,
+                });
             }
         };
 
-        for event in Parser::new_ext(text, Options::all()) {
+        for (event, source_range) in Parser::new_ext(text, Options::all()).into_offset_iter() {
+            let source_line = self.buffer.offset_to_line_col(source_range.start).0;
             match event {
-                Event::Start(Tag::Link { dest_url, .. }) => {
+                Event::Start(Tag::Link {
+                    link_type,
+                    dest_url,
+                    ..
+                }) => {
+                    if matches!(
+                        link_type,
+                        LinkType::WikiLink { .. } | LinkType::ShortcutUnknown
+                    ) {
+                        continue;
+                    }
                     pending_references.push(PendingPanelReference {
                         kind: PendingPanelReferenceKind::Link,
                         target: dest_url.to_string(),
                         label: String::new(),
+                        source_line,
                     });
                 }
                 Event::Start(Tag::Image { dest_url, .. }) => {
@@ -807,6 +1164,7 @@ impl EditorView {
                         kind: PendingPanelReferenceKind::Image,
                         target: dest_url.to_string(),
                         label: String::new(),
+                        source_line,
                     });
                 }
                 Event::Text(content) | Event::Code(content) => {
@@ -830,7 +1188,7 @@ impl EditorView {
             }
         }
 
-        for decoration in &self.decorations {
+        for (line, decoration) in self.decorations.iter().enumerate() {
             for wiki_link in &decoration.wiki_links {
                 let resolved_path =
                     resolve_wiki_link_target_path(&self.sidebar_root, &wiki_link.target_path)
@@ -839,38 +1197,27 @@ impl EditorView {
                     continue;
                 };
 
-                let key = format!("wiki:{}", resolved_path.to_string_lossy());
-                let path = resolved_path.exists().then_some(resolved_path.clone());
-                let is_image =
-                    resolved_path.exists() && classify_file_kind(&resolved_path).is_image();
-                let item = InfoPanelResourceItem {
-                    label: if is_image {
-                        resolved_path
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .filter(|name| !name.is_empty())
-                            .map(ToString::to_string)
-                            .unwrap_or_else(|| normalize_panel_label("", &wiki_link.target_path))
-                    } else {
-                        normalize_panel_label("", &wiki_link.target_path)
-                    },
-                    path,
-                    action: Some(if is_image {
-                        InfoPanelResourceAction::OpenPreviewTab
-                    } else {
-                        InfoPanelResourceAction::RevealInFinder
-                    }),
-                };
+                let target = InfoPanelReferenceTarget::LocalPath(resolved_path.clone());
 
-                if is_image {
-                    push_resource_item(&mut image_items, &mut image_seen, item, key);
-                } else {
-                    push_resource_item(&mut attachment_items, &mut attachment_seen, item, key);
-                }
+                wiki_link_items.push(InfoPanelReferenceItem {
+                    label: fallback_reference_label("", &wiki_link.target_path, &target),
+                    source_line: line,
+                    share_action: InfoPanelShareAction::RevealPath(resolved_path),
+                });
             }
         }
 
-        (attachment_items, image_items, external_link_items)
+        attachment_items.sort_by_key(|item| item.source_line);
+        image_items.sort_by_key(|item| item.source_line);
+        external_link_items.sort_by_key(|item| item.source_line);
+        wiki_link_items.sort_by_key(|item| item.source_line);
+
+        (
+            attachment_items,
+            image_items,
+            external_link_items,
+            wiki_link_items,
+        )
     }
 
     fn collect_info_panel_data(&self) -> Option<InfoPanelData> {
@@ -908,44 +1255,34 @@ impl EditorView {
             .map(|meta| meta.len())
             .unwrap_or_else(|| text.len() as u64);
 
-        let front_matter_rows = self
-            .decorations
-            .iter()
-            .filter_map(|decoration| {
-                let info = decoration.table_info.as_ref()?;
-                if !info.is_front_matter || info.is_separator {
-                    return None;
-                }
-                let key = info.cells.first()?.trim().to_string();
-                if key.is_empty() {
-                    return None;
-                }
-                Some(InfoPanelRow {
-                    label: key,
-                    value: info
-                        .cells
-                        .get(1)
-                        .map(|cell| cell.trim().to_string())
-                        .unwrap_or_default(),
-                })
-            })
-            .collect();
-
-        let (attachment_items, image_items, external_link_items) = if supports_text_export {
-            self.collect_info_panel_resources(text)
+        let word_count = if supports_text_export {
+            count_document_words(text)
         } else {
-            (Vec::new(), Vec::new(), Vec::new())
+            0
         };
+        let line_count = if supports_text_export {
+            self.buffer.line_count()
+        } else {
+            0
+        };
+
+        let (attachment_items, image_items, external_link_items, wiki_link_items) =
+            if supports_text_export {
+                self.collect_info_panel_resources(text)
+            } else {
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            };
 
         Some(InfoPanelData {
             primary_rows: vec![
                 InfoPanelRow {
                     label: "名称".to_string(),
-                    value: relative_path,
-                },
-                InfoPanelRow {
-                    label: "类型".to_string(),
-                    value: format_file_kind(tab.file_kind.as_ref()).to_string(),
+                    value: path
+                        .and_then(|path| path.file_name())
+                        .and_then(|name| name.to_str())
+                        .filter(|name| !name.is_empty())
+                        .map(ToString::to_string)
+                        .unwrap_or(relative_path),
                 },
                 InfoPanelRow {
                     label: "创建".to_string(),
@@ -959,11 +1296,19 @@ impl EditorView {
                     label: "大小".to_string(),
                     value: format_file_size(file_size),
                 },
+                InfoPanelRow {
+                    label: "单词".to_string(),
+                    value: word_count.to_string(),
+                },
+                InfoPanelRow {
+                    label: "行数".to_string(),
+                    value: line_count.to_string(),
+                },
             ],
-            front_matter_rows,
             attachment_items,
             image_items,
             external_link_items,
+            wiki_link_items,
             supports_text_export,
         })
     }
@@ -1006,7 +1351,11 @@ impl EditorView {
             .unwrap_or("Untitled")
             .to_string();
         let default_name = self.export_default_name("html");
-        let document = build_html_document(&title, self.buffer.text());
+        let document = build_html_document(
+            &title,
+            self.buffer.text(),
+            self.current_file_path.as_deref(),
+        );
 
         cx.spawn(async move |_this, cx| {
             let maybe_path = cx
@@ -1032,6 +1381,7 @@ impl EditorView {
             .to_string();
         let default_name = self.export_default_name("pdf");
         let markdown = self.buffer.text().to_string();
+        let source_file_path = self.current_file_path.clone();
 
         cx.spawn(async move |_this, cx| {
             let maybe_path = cx
@@ -1042,10 +1392,16 @@ impl EditorView {
                 return;
             };
 
-            let export_result = cx
-                .background_executor()
-                .spawn(async move { build_pdf_document(&title, &markdown) })
-                .await;
+            #[cfg(target_os = "macos")]
+            let export_result = build_pdf_document(&title, &markdown, source_file_path.as_deref());
+
+            #[cfg(not(target_os = "macos"))]
+            let export_result =
+                cx.background_executor()
+                    .spawn(async move {
+                        build_pdf_document(&title, &markdown, source_file_path.as_deref())
+                    })
+                    .await;
 
             match export_result {
                 Ok(bytes) => {
@@ -1061,13 +1417,28 @@ impl EditorView {
         .detach();
     }
 
-    fn render_info_section_title(&self, title: &'static str) -> AnyElement {
+    fn render_info_section_title(
+        &self,
+        title: &'static str,
+        icon_path: &'static str,
+    ) -> AnyElement {
         let ups = &self.styles.utility_panel;
+        let icon_size = self.scaled(ups.utility_panel_section_title_font_size_px);
         div()
+            .mb(px(self.scaled(5.0)))
             .px(px(self.scaled(ups.utility_panel_section_padding_x_px)))
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(6.0)))
             .text_size(px(self.scaled(ups.utility_panel_section_title_font_size_px)))
             .text_color(ups.utility_panel_section_title_text_color)
             .font_weight(FontWeight::BOLD)
+            .child(
+                svg()
+                    .path(icon_path)
+                    .size(px(icon_size + self.scaled(3.0)))
+                    .text_color(ups.utility_panel_section_title_text_color),
+            )
             .child(title)
             .into_any_element()
     }
@@ -1151,64 +1522,15 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn render_resource_item(
+    fn render_reference_item(
         &self,
-        item: &InfoPanelResourceItem,
+        item: &InfoPanelReferenceItem,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ups = &self.styles.utility_panel;
-        let base = div()
-            .px(px(self.scaled(ups.utility_panel_section_padding_x_px)))
-            .min_h(px(self.scaled(ups.utility_panel_item_height_px)))
-            .w_full()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(self.scaled(ups.utility_panel_item_gap_px)))
-            .text_size(px(self.scaled(ups.utility_panel_item_font_size_px)))
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .flex_1()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_color(ups.utility_panel_item_value_text_color)
-                    .child(SharedString::from(item.label.clone())),
-            )
-            .child(
-                img(helpers::resolve_asset_image_path(SHARE_SVG_PATH))
-                    .w(px(self.scaled(ups.utility_panel_item_font_size_px)))
-                    .h(px(self.scaled(ups.utility_panel_item_font_size_px)))
-                    .flex_none(),
-            );
-
-        match (item.action, item.path.clone()) {
-            (Some(action), Some(path)) => base
-                .cursor(CursorStyle::Arrow)
-                .hover(move |style| style.bg(ups.utility_panel_button_hover_bg))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        match action {
-                            InfoPanelResourceAction::RevealInFinder => this.reveal_in_finder(&path),
-                            InfoPanelResourceAction::OpenPreviewTab => {
-                                this.open_path_in_preview_tab(path.clone(), true, cx);
-                            }
-                        }
-                    }),
-                )
-                .into_any_element(),
-            _ => base.opacity(0.55).into_any_element(),
-        }
-    }
-
-    fn render_external_link_item(
-        &self,
-        item: &InfoPanelExternalLinkItem,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let ups = &self.styles.utility_panel;
+        let share_action = item.share_action.clone();
+        let source_line = item.source_line;
+        let icon_size = self.scaled(ups.utility_panel_item_font_size_px);
         div()
             .px(px(self.scaled(ups.utility_panel_section_padding_x_px)))
             .min_h(px(self.scaled(ups.utility_panel_item_height_px)))
@@ -1222,14 +1544,10 @@ impl EditorView {
             .hover(move |style| style.bg(ups.utility_panel_button_hover_bg))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener({
-                    let url = item.url.clone();
-                    move |_this, _, _, cx| {
-                        cx.stop_propagation();
-                        if let Err(error) = Command::new("open").arg(&url).spawn() {
-                            eprintln!("failed to open URL {url}: {error}");
-                        }
-                    }
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.scroll_to_line(source_line, cx);
+                    this.request_editor_focus(cx);
                 }),
             )
             .child(
@@ -1238,14 +1556,36 @@ impl EditorView {
                     .flex_1()
                     .overflow_hidden()
                     .whitespace_nowrap()
+                    .truncate()
                     .text_color(ups.utility_panel_item_value_text_color)
                     .child(SharedString::from(item.label.clone())),
             )
             .child(
-                img(helpers::resolve_asset_image_path(SHARE_SVG_PATH))
-                    .w(px(self.scaled(ups.utility_panel_item_font_size_px)))
-                    .h(px(self.scaled(ups.utility_panel_item_font_size_px)))
-                    .flex_none(),
+                div()
+                    .flex_none()
+                    .w(px(icon_size + self.scaled(8.0)))
+                    .h(px(icon_size + self.scaled(8.0)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(self.scaled(6.0)))
+                    .text_color(gpui::white())
+                    .opacity(0.5)
+                    .hover(move |style| style.bg(ups.utility_panel_button_hover_bg))
+                    .hover(move |style| style.opacity(0.6))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.trigger_info_panel_share_action(&share_action);
+                        }),
+                    )
+                    .child(
+                        svg()
+                            .path(SHARE_SVG_PATH)
+                            .size(px(icon_size))
+                            .text_color(gpui::white()),
+                    ),
             )
             .into_any_element()
     }
@@ -1513,13 +1853,14 @@ impl EditorView {
 
         if let Some(data) = data {
             children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-            children.push(self.render_info_section_title("文件"));
+            children.push(self.render_info_section_title("统计", FILE_INFO_SECTION_INFO_SVG_PATH));
             for row in &data.primary_rows {
                 children.push(self.render_info_row(row));
             }
 
             children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-            children.push(self.render_info_section_title("导出"));
+            children
+                .push(self.render_info_section_title("导出", FILE_INFO_SECTION_EXPORT_SVG_PATH));
             children.push(
                 div()
                     .px(px(section_padding_x))
@@ -1545,48 +1886,51 @@ impl EditorView {
                             cx,
                             |this, cx| this.export_current_pdf(cx),
                         ),
-                        self.render_export_button("图片", false, cx, |_, _| {}),
                     ])
                     .into_any_element(),
             );
 
             if data.supports_text_export {
                 children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                children.push(self.render_info_section_title("附件"));
+                children.push(
+                    self.render_info_section_title("附件", FILE_INFO_SECTION_ATTACHMENT_SVG_PATH),
+                );
                 if data.attachment_items.is_empty() {
-                    children.push(self.render_info_empty_line("未发现本地附件。"));
+                    children.push(self.render_info_empty_line("无本地附件。"));
                 } else {
                     for item in &data.attachment_items {
-                        children.push(self.render_resource_item(item, cx));
+                        children.push(self.render_reference_item(item, cx));
                     }
                 }
 
                 children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                children.push(self.render_info_section_title("图片"));
+                children.push(self.render_info_section_title("图片", FMT_IMAGE_SVG));
                 if data.image_items.is_empty() {
-                    children.push(self.render_info_empty_line("未发现可预览图片。"));
+                    children.push(self.render_info_empty_line("无图片链接。"));
                 } else {
                     for item in &data.image_items {
-                        children.push(self.render_resource_item(item, cx));
+                        children.push(self.render_reference_item(item, cx));
                     }
                 }
 
                 children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                children.push(self.render_info_section_title("链接"));
+                children.push(self.render_info_section_title("链接", FMT_LINK_SVG));
                 if data.external_link_items.is_empty() {
-                    children.push(self.render_info_empty_line("未发现链接。"));
+                    children.push(self.render_info_empty_line("无远端链接。"));
                 } else {
                     for item in &data.external_link_items {
-                        children.push(self.render_external_link_item(item, cx));
+                        children.push(self.render_reference_item(item, cx));
                     }
                 }
-            }
 
-            if !data.front_matter_rows.is_empty() {
                 children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                children.push(self.render_info_section_title("属性"));
-                for row in &data.front_matter_rows {
-                    children.push(self.render_info_row(row));
+                children.push(self.render_info_section_title("双向链接", FMT_WIKI_LINK_SVG));
+                if data.wiki_link_items.is_empty() {
+                    children.push(self.render_info_empty_line("无双向链接。"));
+                } else {
+                    for item in &data.wiki_link_items {
+                        children.push(self.render_reference_item(item, cx));
+                    }
                 }
             }
         } else {
@@ -1596,7 +1940,7 @@ impl EditorView {
                     .pt(px(section_gap))
                     .text_size(px(empty_font_size))
                     .text_color(ups.utility_panel_empty_text_color)
-                    .child(SharedString::from("当前标签没有可展示的文件信息。"))
+                    .child(SharedString::from("无文件信息。"))
                     .into_any_element(),
             );
         }
@@ -1715,4 +2059,82 @@ impl EditorView {
             .children(children)
             .into_any_element()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        InfoPanelReferenceTarget, build_html_document, external_reference_host,
+        fallback_reference_label, path_reference_name, reference_scheme,
+    };
+    use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
+    use std::path::PathBuf;
+
+    #[test]
+    fn fallback_label_prefers_url_host_when_description_missing() {
+        let target = InfoPanelReferenceTarget::ExternalUrl(
+            "https://example.com/path/to/file.ext".to_string(),
+        );
+
+        assert_eq!(
+            fallback_reference_label("", "https://example.com/path/to/file.ext", &target),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn fallback_label_prefers_local_file_name_when_description_missing() {
+        let target = InfoPanelReferenceTarget::LocalPath(PathBuf::from("/tmp/path/to/file.ext"));
+
+        assert_eq!(
+            fallback_reference_label("", "/tmp/path/to/file.ext", &target),
+            "file.ext"
+        );
+    }
+
+    #[test]
+    fn reference_scheme_ignores_windows_drive_letters() {
+        assert_eq!(reference_scheme("C:\\notes\\a.md"), None);
+        assert_eq!(reference_scheme("https://example.com"), Some("https"));
+    }
+
+    #[test]
+    fn external_reference_host_extracts_mail_domain() {
+        assert_eq!(
+            external_reference_host("mailto:hello@example.com"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn path_reference_name_uses_file_name() {
+        assert_eq!(
+            path_reference_name(&PathBuf::from("./notes/file.md"), "./notes/file.md"),
+            "file.md"
+        );
+    }
+
+    #[test]
+    fn pulldown_cmark_exposes_double_brackets_as_wiki_links() {
+        let mut parser = Parser::new_ext("[[foo/bar.md]]", Options::all()).into_offset_iter();
+        let first_link = parser.find_map(|(event, _)| match event {
+            Event::Start(Tag::Link { link_type, .. }) => Some(link_type),
+            _ => None,
+        });
+
+        assert!(matches!(first_link, Some(LinkType::WikiLink { .. })));
+    }
+
+    #[test]
+    fn html_export_includes_print_styles_and_base_href() {
+        let html = build_html_document(
+            "Note",
+            "![img](./assets/pic.png)",
+            Some(&PathBuf::from("/tmp/demo/note.md")),
+        );
+
+        assert!(html.contains("@page{size:A4;margin:18mm;}"));
+        assert!(html.contains("<base href=\"file:///tmp/demo/\">"));
+    }
+
 }

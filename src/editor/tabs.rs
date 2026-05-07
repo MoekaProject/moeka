@@ -1053,7 +1053,7 @@ impl EditorView {
             if index > 0 {
                 breadcrumb = breadcrumb.child(
                     svg()
-                        .path("assets/icons/arrow-right.svg")
+                        .path("assets/icons/right.svg")
                         .size(px(separator_size))
                         .flex_none()
                         .text_color(es.editor_path_bar_separator_color),

@@ -69,6 +69,105 @@ pub struct WikiLinkSpan {
     pub target_path: String,
 }
 
+fn merge_byte_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    if ranges.is_empty() {
+        return ranges;
+    }
+
+    ranges.sort_by(|left, right| left.start.cmp(&right.start).then(left.end.cmp(&right.end)));
+
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(last) = merged.last_mut()
+            && range.start <= last.end
+        {
+            last.end = last.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+
+    merged
+}
+
+fn wiki_link_excluded_ranges(decoration: &LineDecoration) -> Vec<Range<usize>> {
+    let mut excluded = Vec::new();
+
+    for span in decoration.inline_spans.iter().filter(|span| {
+        matches!(
+            span.kind,
+            InlineKind::InlineCode | InlineKind::Link | InlineKind::Image
+        )
+    }) {
+        let full_range = decoration
+            .syntax_ranges
+            .iter()
+            .filter(|syntax_range| {
+                syntax_range.trigger_range.start <= span.range.start
+                    && syntax_range.trigger_range.end >= span.range.end
+            })
+            .map(|syntax_range| syntax_range.trigger_range.clone())
+            .min_by_key(|range| (range.end.saturating_sub(range.start), range.start));
+
+        match full_range {
+            Some(range) => excluded.push(range),
+            None if matches!(span.kind, InlineKind::InlineCode) => {
+                excluded.push(span.range.start.saturating_sub(1)..span.range.end.saturating_add(1));
+            }
+            None => {}
+        }
+    }
+
+    merge_byte_ranges(excluded)
+}
+
+fn range_intersects_byte(range: &Range<usize>, start: usize, end: usize) -> bool {
+    range.start < end && range.end > start
+}
+
+pub(crate) fn raw_wiki_link_ranges(
+    line_content: &str,
+    decoration: Option<&LineDecoration>,
+) -> Vec<Range<usize>> {
+    let excluded_ranges = decoration
+        .map(wiki_link_excluded_ranges)
+        .unwrap_or_default();
+    let mut open_stack = Vec::new();
+    let mut pairs = Vec::new();
+    let mut index = 0usize;
+
+    while index < line_content.len() {
+        let token_end = index.saturating_add(2);
+        if token_end <= line_content.len()
+            && !excluded_ranges
+                .iter()
+                .any(|range| range_intersects_byte(range, index, token_end))
+        {
+            if line_content.get(index..token_end) == Some("[[") {
+                open_stack.push(index);
+                index += 2;
+                continue;
+            }
+
+            if line_content.get(index..token_end) == Some("]]") {
+                if let Some(open) = open_stack.pop() {
+                    pairs.push(open..token_end);
+                }
+                index += 2;
+                continue;
+            }
+        }
+
+        let Some(ch) = line_content[index..].chars().next() else {
+            break;
+        };
+        index += ch.len_utf8();
+    }
+
+    pairs.sort_by_key(|range| range.start);
+    pairs
+}
+
 #[derive(Debug, Clone)]
 pub struct LineDecoration {
     pub block_type: BlockType,
@@ -949,34 +1048,9 @@ fn detect_wiki_links(decorations: &mut [LineDecoration], text: &str, line_starts
         }
 
         let line_content = get_line_content(text, line_starts, line, line_count);
-        let mut open_stack = Vec::new();
-        let mut pairs = Vec::new();
-        let mut index = 0usize;
-
-        while index < line_content.len() {
-            if line_content.get(index..index + 2) == Some("[[") {
-                open_stack.push(index);
-                index += 2;
-                continue;
-            }
-
-            if line_content.get(index..index + 2) == Some("]]") {
-                if let Some(open) = open_stack.pop() {
-                    pairs.push((open, index + 2));
-                }
-                index += 2;
-                continue;
-            }
-
-            let Some(ch) = line_content[index..].chars().next() else {
-                break;
-            };
-            index += ch.len_utf8();
-        }
-
-        pairs.sort_by_key(|(open, _)| *open);
-
-        for (open, full_end) in pairs {
+        for full_range in raw_wiki_link_ranges(line_content, Some(decoration)) {
+            let open = full_range.start;
+            let full_end = full_range.end;
             let inner_start = open + 2;
             let close_start = full_end.saturating_sub(2);
             let target_path = &line_content[inner_start..close_start];
@@ -990,7 +1064,7 @@ fn detect_wiki_links(decorations: &mut [LineDecoration], text: &str, line_starts
                 let collapsed_end = close_start;
 
                 if collapsed_start < collapsed_end {
-                    let full_trigger = open..full_end;
+                    let full_trigger = full_range.clone();
                     decoration.syntax_ranges.push(SyntaxRange {
                         range: open..collapsed_start,
                         trigger_range: full_trigger.clone(),
@@ -1007,5 +1081,28 @@ fn detect_wiki_links(decorations: &mut [LineDecoration], text: &str, line_starts
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_decorations, raw_wiki_link_ranges};
+
+    #[test]
+    fn wiki_link_ranges_ignore_inline_code_tokens() {
+        let text = "`[[` 文本 `]]`";
+        let decorations = parse_decorations(text);
+
+        assert!(decorations[0].wiki_links.is_empty());
+        assert!(raw_wiki_link_ranges(text, decorations.first()).is_empty());
+    }
+
+    #[test]
+    fn wiki_link_ranges_detect_plain_wiki_link() {
+        let text = "before [[notes/file.md]] after";
+        let decorations = parse_decorations(text);
+
+        assert_eq!(decorations[0].wiki_links.len(), 1);
+        assert_eq!(decorations[0].wiki_links[0].target_path, "notes/file.md");
     }
 }

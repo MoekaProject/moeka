@@ -521,8 +521,6 @@ impl EditorView {
                         self.cursor.offset = inner_abs_end;
                         self.is_selecting = false;
                     }
-
-                    self.ensure_wiki_link_menu_for_cursor(cx);
                     return;
                 }
             }

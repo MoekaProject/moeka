@@ -1093,7 +1093,7 @@ impl Styles {
                 utility_panel_border_color: theme.border_secondary,
                 utility_panel_top_spacer_height_px: 14.0,
                 utility_panel_bottom_spacer_height_px: 14.0,
-                utility_panel_header_height_px: 26.0,
+                utility_panel_header_height_px: 15.0,
                 utility_panel_header_padding_x_px: 14.0,
                 utility_panel_header_font_size_px: ui_font_size_xs_px,
                 utility_panel_header_text_color: theme.text_primary,

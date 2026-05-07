@@ -6,48 +6,26 @@ use gpui::{
     prelude::*, px, svg,
 };
 
-use crate::markdown::{BlockType, InlineKind};
+use crate::markdown::{BlockType, InlineKind, LineDecoration, raw_wiki_link_ranges};
 
 use super::shortcut::{ShortcutRenderStyle, render_shortcut};
 use super::*;
 
 fn current_raw_wiki_link_range(
+    decoration: Option<&LineDecoration>,
     line_content: &str,
     cursor_col: usize,
     selection_start_col: usize,
     selection_end_col: usize,
 ) -> Option<Range<usize>> {
-    let mut open_stack = Vec::new();
-    let mut pairs = Vec::new();
-    let mut index = 0usize;
-
-    while index < line_content.len() {
-        if line_content.get(index..index + 2) == Some("[[") {
-            open_stack.push(index);
-            index += 2;
-            continue;
-        }
-
-        if line_content.get(index..index + 2) == Some("]]") {
-            if let Some(open) = open_stack.pop() {
-                pairs.push(open..index + 2);
-            }
-            index += 2;
-            continue;
-        }
-
-        let Some(ch) = line_content[index..].chars().next() else {
-            break;
-        };
-        index += ch.len_utf8();
-    }
-
-    pairs.into_iter().find(|range| {
+    raw_wiki_link_ranges(line_content, decoration)
+        .into_iter()
+        .find(|range| {
         let cursor_in_range = cursor_col >= range.start && cursor_col <= range.end;
         let selection_in_range =
             selection_start_col >= range.start && selection_end_col <= range.end;
         cursor_in_range || selection_in_range
-    })
+        })
 }
 
 #[derive(Clone)]
@@ -90,6 +68,7 @@ impl EditorView {
                     .saturating_sub(line_start)
                     .min(line_content.len());
                 current_raw_wiki_link_range(
+                    Some(decoration),
                     line_content,
                     cursor_col,
                     selection_start_col,
@@ -471,6 +450,31 @@ impl EditorView {
         {
             self.open_wiki_link_menu(target.start, cx);
         }
+        self.sync_wiki_link_menu(cx);
+        true
+    }
+
+    pub(crate) fn maybe_open_wiki_link_menu_after_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(target) = self.current_wiki_link_target() else {
+            return false;
+        };
+
+        let query_start = target.start + 2;
+        let query_end = target.end.saturating_sub(2);
+        if self.cursor.offset < query_start || self.cursor.offset > query_end {
+            return false;
+        }
+
+        if self.wiki_link_start != Some(target.start)
+            || !matches!(
+                self.context_menu.as_ref().map(|menu| &menu.kind),
+                Some(ContextMenuKind::WikiLink)
+            )
+        {
+            self.open_wiki_link_menu(target.start, cx);
+            return true;
+        }
+
         self.sync_wiki_link_menu(cx);
         true
     }

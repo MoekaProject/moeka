@@ -214,6 +214,8 @@ impl EditorView {
             }
         } else if self.wiki_link_start.is_some() {
             self.sync_wiki_link_menu(cx);
+        } else {
+            self.maybe_open_wiki_link_menu_after_edit(cx);
         }
     }
 
@@ -282,6 +284,8 @@ impl EditorView {
         self.pause_blinking(cx);
         if self.wiki_link_start.is_some() {
             self.sync_wiki_link_menu(cx);
+        } else {
+            self.maybe_open_wiki_link_menu_after_edit(cx);
         }
     }
 
