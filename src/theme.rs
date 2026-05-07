@@ -324,7 +324,7 @@ impl Theme {
             bg_selected: crate::hex_hsla!("#2f3742"),
             bg_bar: crate::hex_hsla!("#22262d"),
             bg_tab: crate::hex_hsla!("#22262d"),
-            bg_tab_hover: crate::hex_hsla!("#21252b"),
+            bg_tab_hover: crate::hex_hsla!("#1f232a"),
             bg_tab_active: crate::hex_hsla!("#181b20"),
             bg_code: crate::hex_hsla!("#1c1e24"),
             bg_code_inline: crate::hex_hsla!("#2c313a"),
