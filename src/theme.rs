@@ -325,8 +325,8 @@ impl Theme {
             bg_bar: crate::hex_hsla!("#22262d"),
             bg_tab: crate::hex_hsla!("#22262d"),
             bg_tab_hover: crate::hex_hsla!("#21252b"),
-            bg_tab_active: crate::hex_hsla!("#21252b"),
-            bg_code: crate::hex_hsla!("#282c34"),
+            bg_tab_active: crate::hex_hsla!("#181b20"),
+            bg_code: crate::hex_hsla!("#1c1e24"),
             bg_code_inline: crate::hex_hsla!("#2c313a"),
             // Border
             border_primary: crate::hex_hsla!("#67718633"),
@@ -493,7 +493,7 @@ impl Theme {
             bg_bar: crate::hex_hsla!("#242835"),
             bg_tab: crate::hex_hsla!("#242835"),
             bg_tab_hover: crate::hex_hsla!("#212530"),
-            bg_tab_active: crate::hex_hsla!("#1e212b"),
+            bg_tab_active: crate::hex_hsla!("#16181f"),
             bg_code: crate::hex_hsla!("#141823"),
             bg_code_inline: crate::hex_hsla!("#141823"),
             // Border
