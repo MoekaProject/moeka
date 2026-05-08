@@ -1850,6 +1850,7 @@ fn rgba_to_hsla(r: f32, g: f32, b: f32, a: f32) -> Hsla {
 pub(crate) fn apply_code_block_highlighting(
     line_content: &str,
     language: &str,
+    theme: &Theme,
     colors: &mut [Hsla],
     weights: &mut [FontWeight],
     styles: &mut [FontStyle],
@@ -1866,7 +1867,10 @@ pub(crate) fn apply_code_block_highlighting(
         let mut byte_pos = 0usize;
         for (style, piece) in &ranges {
             let end = (byte_pos + piece.len()).min(colors.len());
-            let color = syntect_color_to_hsla(style.foreground);
+            let color = adjust_code_block_highlight_color_for_theme(
+                syntect_color_to_hsla(style.foreground),
+                theme,
+            );
             for idx in byte_pos..end {
                 colors[idx] = color;
                 weights[idx] = if style
@@ -1889,6 +1893,14 @@ pub(crate) fn apply_code_block_highlighting(
             byte_pos = end;
         }
     }
+}
+
+fn adjust_code_block_highlight_color_for_theme(mut color: Hsla, theme: &Theme) -> Hsla {
+    if theme.bg_primary.l >= 0.65 {
+        color.l = (color.l * 0.78).clamp(0.0, 1.0);
+        color.s = (color.s * 1.04).clamp(0.0, 1.0);
+    }
+    color
 }
 
 pub(crate) fn resolve_asset_image_path(path: &str) -> PathBuf {
@@ -2261,6 +2273,7 @@ pub(crate) fn build_text_runs_for_display(
         apply_code_block_highlighting(
             line_content,
             language,
+            theme,
             &mut buf_colors,
             &mut buf_weights,
             &mut buf_font_styles,

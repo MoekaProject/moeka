@@ -188,7 +188,9 @@ mod tests {
 
     fn sample_settings() -> AppSettings {
         AppSettings {
-            theme: "AyuDark".to_string(),
+            theme: "MilkyDark".to_string(),
+            dark_theme: "MilkyDark".to_string(),
+            light_theme: "MilkyLight".to_string(),
             ui_font: "SF Pro".to_string(),
             ui_scale: 1.2,
             body_latin_font: "IBM Plex Sans".to_string(),
@@ -243,6 +245,8 @@ mod tests {
         let loaded = load_config_from_path(&path).unwrap();
 
         assert_eq!(loaded.settings.theme, "MilkyDark");
+        assert_eq!(loaded.settings.dark_theme, AppSettings::default().dark_theme);
+        assert_eq!(loaded.settings.light_theme, AppSettings::default().light_theme);
         assert_eq!(loaded.settings.ui_font, AppSettings::default().ui_font);
         assert_eq!(loaded.workspaces.roots, vec![PathBuf::from("/tmp/demo")]);
         assert_eq!(loaded.schema_version, CONFIG_SCHEMA_VERSION);
@@ -269,11 +273,12 @@ mod tests {
         save_config_to_path(&path, &first).unwrap();
 
         let mut second = AppConfig::default();
-        second.settings.theme = "AyuLight".to_string();
+        second.settings.theme = "MilkyLight".to_string();
+        second.settings.light_theme = "MilkyLight".to_string();
         save_config_to_path(&path, &second).unwrap();
 
         let loaded = load_config_from_path(&path).unwrap();
-        assert_eq!(loaded.settings.theme, "AyuLight");
+        assert_eq!(loaded.settings.theme, "MilkyLight");
         assert!(!dir.path().join(".config.yaml.tmp").exists());
     }
 }

@@ -10,7 +10,6 @@ use super::*;
 
 pub(crate) const THEME_DEBUGGER_WIDTH_PX: f32 = 320.0;
 const THEME_DEBUGGER_HEADER_HEIGHT_PX: f32 = 30.0;
-const THEME_DEBUGGER_DETAIL_SWATCH_SIZE_PX: f32 = 56.0;
 const THEME_DEBUGGER_ROW_HEIGHT_PX: f32 = 30.0;
 const THEME_DEBUGGER_SLIDER_HEIGHT_PX: f32 = 16.0;
 const THEME_DEBUGGER_SLIDER_HANDLE_WIDTH_PX: f32 = 12.0;
@@ -325,12 +324,16 @@ impl EditorView {
         cx.notify();
     }
 
+    fn export_theme_debugger_theme(&self, cx: &mut Context<Self>) {
+        let text = format_theme_debugger_export(&self.theme);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+    }
+
     pub(crate) fn render_theme_debugger(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_theme_debugger_editors(cx);
 
         let width = self.theme_debugger_layout_width();
         let header_height = self.scaled(THEME_DEBUGGER_HEADER_HEIGHT_PX);
-        let swatch_size = self.scaled(THEME_DEBUGGER_DETAIL_SWATCH_SIZE_PX);
         let row_height = self.scaled(THEME_DEBUGGER_ROW_HEIGHT_PX);
         let header_padding_x = self.scaled(14.0);
         let section_gap = self.scaled(12.0);
@@ -499,15 +502,35 @@ impl EditorView {
                     .child("主题调试器")
                     .child(
                         div()
-                            .cursor(CursorStyle::Arrow)
-                            .text_color(text_primary)
-                            .hover(move |style| style.opacity(0.75))
-                            .child("重置")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.reset_theme_debugger_theme(cx);
-                                }),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(self.scaled(12.0)))
+                            .child(
+                                div()
+                                    .cursor(CursorStyle::Arrow)
+                                    .text_color(text_primary)
+                                    .hover(move |style| style.opacity(0.75))
+                                    .child("导出")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.export_theme_debugger_theme(cx);
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .cursor(CursorStyle::Arrow)
+                                    .text_color(text_primary)
+                                    .hover(move |style| style.opacity(0.75))
+                                    .child("重置")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.reset_theme_debugger_theme(cx);
+                                        }),
+                                    ),
                             ),
                     ),
             )
@@ -523,41 +546,6 @@ impl EditorView {
                     .border(px(1.0))
                     .border_color(divider_color)
                     .rounded(px(self.scaled(10.0)))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(self.scaled(12.0)))
-                            .items_center()
-                            .child(
-                                div()
-                                    .w(px(swatch_size))
-                                    .h(px(swatch_size))
-                                    .rounded(px(self.scaled(12.0)))
-                                    .bg(selected_color)
-                                    .border(px(1.0))
-                                    .border_color(divider_color),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(self.scaled(4.0)))
-                                    .child(
-                                        div()
-                                            .text_size(px(self.scaled(13.0)))
-                                            .text_color(text_primary)
-                                            .child(selected_field.label()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(self.scaled(11.0)))
-                                            .text_color(text_secondary)
-                                            .child(theme::hsla_to_hex_rgba(selected_color)),
-                                    ),
-                            ),
-                    )
                     .child(
                         div()
                             .flex()
@@ -947,6 +935,136 @@ fn parse_theme_debugger_alpha(text: &str) -> Option<f32> {
     };
 
     Some(alpha.clamp(0.0, 1.0))
+}
+
+fn format_theme_debugger_export(theme: &crate::theme::Theme) -> String {
+    let mut lines = vec!["{".to_string()];
+
+    append_theme_debugger_export_section(
+        &mut lines,
+        "Text",
+        &[
+            ThemeColorField::TextPrimary,
+            ThemeColorField::TextSecondary,
+            ThemeColorField::TextBright,
+            ThemeColorField::TextAccent,
+            ThemeColorField::TextDanger,
+        ],
+        theme,
+    );
+    append_theme_debugger_export_section(
+        &mut lines,
+        "Background",
+        &[
+            ThemeColorField::BgPrimary,
+            ThemeColorField::BgSecondary,
+            ThemeColorField::BgElevated,
+            ThemeColorField::BgHover,
+            ThemeColorField::BgSelected,
+            ThemeColorField::BgBar,
+            ThemeColorField::BgTab,
+            ThemeColorField::BgTabHover,
+            ThemeColorField::BgTabActive,
+            ThemeColorField::BgCode,
+            ThemeColorField::BgCodeInline,
+        ],
+        theme,
+    );
+    append_theme_debugger_export_section(
+        &mut lines,
+        "Border",
+        &[
+            ThemeColorField::BorderPrimary,
+            ThemeColorField::BorderSecondary,
+            ThemeColorField::BorderTertiary,
+            ThemeColorField::BorderDecorative,
+            ThemeColorField::BorderCodeBlock,
+        ],
+        theme,
+    );
+    append_theme_debugger_export_section(
+        &mut lines,
+        "Editor/Markdown",
+        &[
+            ThemeColorField::Cursor,
+            ThemeColorField::Selection,
+            ThemeColorField::LineHighlight,
+            ThemeColorField::Heading,
+            ThemeColorField::Bold,
+            ThemeColorField::Italic,
+            ThemeColorField::Strikethrough,
+            ThemeColorField::InlineCode,
+            ThemeColorField::Link,
+            ThemeColorField::SyntaxMarker,
+            ThemeColorField::ListMarker,
+            ThemeColorField::CheckboxChecked,
+            ThemeColorField::GutterHeading,
+        ],
+        theme,
+    );
+
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+fn append_theme_debugger_export_section(
+    lines: &mut Vec<String>,
+    title: &str,
+    fields: &[ThemeColorField],
+    theme: &crate::theme::Theme,
+) {
+    lines.push(format!("    // {title}"));
+    for &field in fields {
+        lines.push(format_theme_debugger_export_field(theme, field));
+    }
+}
+
+fn format_theme_debugger_export_field(
+    theme: &crate::theme::Theme,
+    field: ThemeColorField,
+) -> String {
+    let color = theme.color(field);
+    let hex = theme::hsla_to_hex_rgba(color);
+    let rgb_hex = &hex[..7];
+
+    if theme_debugger_export_uses_with_alpha(field) {
+        format!(
+            "    {}: with_alpha(crate::hex_hsla!(\"{}\"), {}),",
+            field.label(),
+            rgb_hex,
+            format_theme_debugger_alpha_value(color.a),
+        )
+    } else {
+        let literal = if (color.a - 1.0).abs() <= 0.000_1 {
+            rgb_hex
+        } else {
+            hex.as_str()
+        };
+        format!("    {}: crate::hex_hsla!(\"{}\"),", field.label(), literal,)
+    }
+}
+
+fn theme_debugger_export_uses_with_alpha(field: ThemeColorField) -> bool {
+    matches!(
+        field,
+        ThemeColorField::BorderDecorative
+            | ThemeColorField::BorderCodeBlock
+            | ThemeColorField::Selection
+            | ThemeColorField::LineHighlight
+            | ThemeColorField::SyntaxMarker
+            | ThemeColorField::GutterHeading
+    )
+}
+
+fn format_theme_debugger_alpha_value(alpha: f32) -> String {
+    let mut text = format!("{alpha:.3}");
+    while text.contains('.') && text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.push('0');
+    }
+    text
 }
 
 fn horizontal_fraction(bounds: Bounds<Pixels>, position: gpui::Point<Pixels>) -> f32 {

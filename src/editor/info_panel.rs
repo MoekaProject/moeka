@@ -1531,6 +1531,11 @@ impl EditorView {
         let share_action = item.share_action.clone();
         let source_line = item.source_line;
         let icon_size = self.scaled(ups.utility_panel_item_font_size_px);
+        let share_icon_color = if self.theme_kind.is_dark() {
+            gpui::white()
+        } else {
+            self.theme.text_primary
+        };
         div()
             .px(px(self.scaled(ups.utility_panel_section_padding_x_px)))
             .min_h(px(self.scaled(ups.utility_panel_item_height_px)))
@@ -1569,7 +1574,7 @@ impl EditorView {
                     .items_center()
                     .justify_center()
                     .rounded(px(self.scaled(6.0)))
-                    .text_color(gpui::white())
+                    .text_color(share_icon_color)
                     .opacity(0.5)
                     .hover(move |style| style.bg(ups.utility_panel_button_hover_bg))
                     .hover(move |style| style.opacity(0.6))
@@ -1584,7 +1589,7 @@ impl EditorView {
                         svg()
                             .path(SHARE_SVG_PATH)
                             .size(px(icon_size))
-                            .text_color(gpui::white()),
+                            .text_color(share_icon_color),
                     ),
             )
             .into_any_element()

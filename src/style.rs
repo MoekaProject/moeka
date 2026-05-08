@@ -478,6 +478,8 @@ impl CursorStyles {
 
 pub struct CodeBlockStyles {
     pub code_block_bg: Hsla,
+    pub code_block_border_width_px: f32,
+    pub code_block_border_color: Hsla,
     pub code_block_radius_px: f32,
     pub code_block_text_padding_left_px: f32,
     pub code_block_wrap_right_padding_px: f32,
@@ -1257,6 +1259,8 @@ impl Styles {
             },
             code_block: CodeBlockStyles {
                 code_block_bg: theme.bg_code,
+                code_block_border_width_px: 1.0,
+                code_block_border_color: theme.border_code_block,
                 code_block_radius_px: 0.0,
                 code_block_text_padding_left_px: 20.0,
                 code_block_wrap_right_padding_px: 30.0,
@@ -1275,7 +1279,7 @@ impl Styles {
                 code_block_copy_button_hover_text_color: theme.text_bright,
                 code_block_copy_button_hover_border_color: with_alpha(theme.text_accent, 0.35),
                 code_block_copy_button_copied_bg: with_alpha(theme.text_accent, 0.14),
-                code_block_copy_button_copied_text_color: gpui::white(),
+                code_block_copy_button_copied_text_color: theme.text_bright,
                 code_block_copy_button_copied_border_color: with_alpha(theme.text_accent, 0.45),
             },
             wiki_link: WikiLinkStyles {
@@ -1371,7 +1375,7 @@ impl Styles {
                 menu_border_width_px: 1.0,
                 menu_border_color: theme.border_primary,
                 menu_radius_px: 10.0,
-                menu_shadow: true,
+                menu_shadow: theme.bg_primary.l < 0.5,
                 menu_padding_y_px: 10.0,
                 menu_max_height_margin_px: 0.0,
                 menu_item_height_px: 28.0,

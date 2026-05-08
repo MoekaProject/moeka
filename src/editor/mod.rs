@@ -121,7 +121,10 @@ fn normalize_clipboard_image(image: &gpui::Image) -> gpui::Image {
     };
 
     let mut cursor = IoCursor::new(Vec::new());
-    if decoded.write_to(&mut cursor, image::ImageFormat::Png).is_err() {
+    if decoded
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .is_err()
+    {
         return image.clone();
     }
 
@@ -1653,7 +1656,12 @@ impl EditorView {
     // ── Theme toggle ─────────────────────────────────────────────
 
     pub(crate) fn toggle_theme(&mut self, cx: &mut Context<Self>) {
-        self.set_theme(self.theme_kind.paired_appearance(), cx);
+        let next = if self.theme_kind.is_dark() {
+            self.app_settings.light_theme_kind()
+        } else {
+            self.app_settings.dark_theme_kind()
+        };
+        self.set_theme(next, cx);
     }
 
     pub(crate) fn sync_overlay_text_input_styles(&mut self, cx: &mut Context<Self>) {
@@ -1683,8 +1691,12 @@ impl EditorView {
         self.settings_theme_dark_mode = kind.is_dark();
         self.theme = self.theme_kind.build();
         self.refresh_theme_styles(true, cx);
-        // Persist
         self.app_settings.theme = theme_kind_to_string(kind);
+        if kind.is_dark() {
+            self.app_settings.dark_theme = theme_kind_to_string(kind);
+        } else {
+            self.app_settings.light_theme = theme_kind_to_string(kind);
+        }
         self.app_settings.save();
         cx.notify();
     }

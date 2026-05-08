@@ -6,6 +6,10 @@ use super::{SidebarSortMode, config_store};
 pub(crate) struct AppSettings {
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default = "default_dark_theme")]
+    pub dark_theme: String,
+    #[serde(default = "default_light_theme")]
+    pub light_theme: String,
     #[serde(default = "default_ui_font")]
     pub ui_font: String,
     #[serde(default = "default_ui_scale")]
@@ -28,6 +32,14 @@ pub(crate) struct AppSettings {
 
 fn default_theme() -> String {
     "OneDark".to_string()
+}
+
+fn default_dark_theme() -> String {
+    "OneDark".to_string()
+}
+
+fn default_light_theme() -> String {
+    "OneLight".to_string()
 }
 
 fn default_ui_font() -> String {
@@ -70,6 +82,8 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme: default_theme(),
+            dark_theme: default_dark_theme(),
+            light_theme: default_light_theme(),
             ui_font: default_ui_font(),
             ui_scale: default_ui_scale(),
             body_latin_font: default_body_latin_font(),
@@ -93,13 +107,42 @@ impl AppSettings {
     }
 
     pub(crate) fn theme_kind(&self) -> ThemeKind {
-        match self.theme.as_str() {
-            "OneLight" => ThemeKind::OneLight,
-            "AyuDark" => ThemeKind::AyuDark,
-            "AyuLight" => ThemeKind::AyuLight,
-            "Milky" => ThemeKind::Milky,
-            "MilkyDark" => ThemeKind::MilkyDark,
-            _ => ThemeKind::OneDark,
+        Self::parse_theme_kind(&self.theme).unwrap_or_else(|| {
+            if self.theme.eq_ignore_ascii_case("light") {
+                self.light_theme_kind()
+            } else {
+                self.dark_theme_kind()
+            }
+        })
+    }
+
+    pub(crate) fn dark_theme_kind(&self) -> ThemeKind {
+        match Self::parse_theme_kind(&self.dark_theme) {
+            Some(kind) if kind.is_dark() => kind,
+            _ => match Self::parse_theme_kind(&self.theme) {
+                Some(kind) if kind.is_dark() => kind,
+                _ => ThemeKind::OneDark,
+            },
+        }
+    }
+
+    pub(crate) fn light_theme_kind(&self) -> ThemeKind {
+        match Self::parse_theme_kind(&self.light_theme) {
+            Some(kind) if !kind.is_dark() => kind,
+            _ => match Self::parse_theme_kind(&self.theme) {
+                Some(kind) if !kind.is_dark() => kind,
+                _ => ThemeKind::OneLight,
+            },
+        }
+    }
+
+    fn parse_theme_kind(value: &str) -> Option<ThemeKind> {
+        match value {
+            "OneDark" => Some(ThemeKind::OneDark),
+            "OneLight" => Some(ThemeKind::OneLight),
+            "MilkyDark" | "AyuDark" => Some(ThemeKind::MilkyDark),
+            "MilkyLight" | "Milky" | "AyuLight" => Some(ThemeKind::MilkyLight),
+            _ => None,
         }
     }
 
@@ -129,10 +172,8 @@ pub(crate) fn theme_kind_to_string(kind: ThemeKind) -> String {
     match kind {
         ThemeKind::OneDark => "OneDark",
         ThemeKind::OneLight => "OneLight",
-        ThemeKind::AyuDark => "AyuDark",
-        ThemeKind::AyuLight => "AyuLight",
-        ThemeKind::Milky => "Milky",
         ThemeKind::MilkyDark => "MilkyDark",
+        ThemeKind::MilkyLight => "MilkyLight",
     }
     .to_string()
 }

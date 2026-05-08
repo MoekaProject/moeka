@@ -2293,6 +2293,7 @@ impl EditorView {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
                                     this.switch_workspace(ws_switch.clone(), cx);
                                 }),
                             )

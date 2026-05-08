@@ -1664,6 +1664,11 @@ impl Element for EditorElement {
                 || is_front_matter_line
             {
                 let corner_r = px(editor.scaled(editor.styles.code_block.code_block_radius_px));
+                let side_inset = if editor.theme_kind.is_dark() {
+                    0.0
+                } else {
+                    editor.scaled(editor.styles.code_block.code_block_border_width_px)
+                };
                 let (group_start, group_end) = if is_front_matter_line {
                     let table_info = decoration.table_info.as_ref();
                     let start = table_info.map(|ti| ti.table_start_line).unwrap_or(line_idx);
@@ -1680,36 +1685,38 @@ impl Element for EditorElement {
                 let has_bottom_corner = is_group_end;
                 let background_left = editor_left + editor.padding_left();
                 let background_bottom = line_top + total_line_height;
-                if !is_front_matter_line {
-                    code_block_group_bounds
-                        .entry(group_start)
-                        .and_modify(|group| {
-                            group.top = group.top.min(line_top);
-                            group.bottom = group.bottom.max(background_bottom);
-                        })
-                        .or_insert(CodeBlockGroupBounds {
-                            left: background_left,
-                            top: line_top,
-                            width: text_width,
-                            bottom: background_bottom,
-                        });
+                let fill_left = background_left + side_inset;
+                let fill_width = (text_width - side_inset * 2.0).max(0.0);
+                code_block_group_bounds
+                    .entry(group_start)
+                    .and_modify(|group| {
+                        group.top = group.top.min(line_top);
+                        group.bottom = group.bottom.max(background_bottom);
+                    })
+                    .or_insert(CodeBlockGroupBounds {
+                        left: background_left,
+                        top: line_top,
+                        width: text_width,
+                        bottom: background_bottom,
+                    });
+                if fill_width > 0.0 {
+                    code_block_bgs.push(quad(
+                        Bounds::new(
+                            point(px(fill_left), px(line_top)),
+                            size(px(fill_width), px(total_line_height)),
+                        ),
+                        Corners {
+                            top_left: if has_top_corner { corner_r } else { px(0.0) },
+                            top_right: if has_top_corner { corner_r } else { px(0.0) },
+                            bottom_right: if has_bottom_corner { corner_r } else { px(0.0) },
+                            bottom_left: if has_bottom_corner { corner_r } else { px(0.0) },
+                        },
+                        editor.styles.code_block.code_block_bg,
+                        px(0.0),
+                        gpui::transparent_black(),
+                        BorderStyle::default(),
+                    ));
                 }
-                code_block_bgs.push(quad(
-                    Bounds::new(
-                        point(px(background_left), px(line_top)),
-                        size(px(text_width), px(total_line_height)),
-                    ),
-                    Corners {
-                        top_left: if has_top_corner { corner_r } else { px(0.0) },
-                        top_right: if has_top_corner { corner_r } else { px(0.0) },
-                        bottom_right: if has_bottom_corner { corner_r } else { px(0.0) },
-                        bottom_left: if has_bottom_corner { corner_r } else { px(0.0) },
-                    },
-                    editor.styles.code_block.code_block_bg,
-                    px(0.0),
-                    gpui::transparent_black(),
-                    BorderStyle::default(),
-                ));
             }
 
             // Table rendering (independent visual block on header line)
@@ -2974,17 +2981,13 @@ impl Element for EditorElement {
                                 px(text_line_top + f32::from(pos_start.y) + line_height),
                             ),
                         );
-                        if hovered_position
-                            .is_some_and(|position| link_bounds.contains(&position))
+                        if hovered_position.is_some_and(|position| link_bounds.contains(&position))
                         {
                             let ul_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
                             link_underlines.push(fill(
                                 Bounds::from_corners(
                                     point(px(content_x + indent_start) + pos_start.x, px(ul_y)),
-                                    point(
-                                        px(content_x + indent_start) + pos_end.x,
-                                        px(ul_y + 1.5),
-                                    ),
+                                    point(px(content_x + indent_start) + pos_end.x, px(ul_y + 1.5)),
                                 ),
                                 theme.link,
                             ));
@@ -3027,17 +3030,13 @@ impl Element for EditorElement {
                                 px(text_line_top + f32::from(pos_start.y) + line_height),
                             ),
                         );
-                        if hovered_position
-                            .is_some_and(|position| link_bounds.contains(&position))
+                        if hovered_position.is_some_and(|position| link_bounds.contains(&position))
                         {
                             let ul_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
                             link_underlines.push(fill(
                                 Bounds::from_corners(
                                     point(px(content_x + indent_start) + pos_start.x, px(ul_y)),
-                                    point(
-                                        px(content_x + indent_start) + pos_end.x,
-                                        px(ul_y + 1.5),
-                                    ),
+                                    point(px(content_x + indent_start) + pos_end.x, px(ul_y + 1.5)),
                                 ),
                                 theme.link,
                             ));
@@ -3080,11 +3079,36 @@ impl Element for EditorElement {
         let button_min_left = editor.scaled(code_block_styles.code_block_text_padding_left_px);
         let mut button_font = text_style.font();
         button_font.family = configured_font_family(editor.styles.ui_font_family);
+        let code_block_border_width =
+            px(editor.scaled(code_block_styles.code_block_border_width_px));
+        let code_block_radius = px(editor.scaled(code_block_styles.code_block_radius_px));
         for (start_line, group) in &code_block_group_bounds {
+            code_block_bgs.push(quad(
+                Bounds::new(
+                    point(px(group.left), px(group.top)),
+                    size(px(group.width), px(group.bottom - group.top)),
+                ),
+                Corners::all(code_block_radius),
+                gpui::transparent_black(),
+                code_block_border_width,
+                code_block_styles.code_block_border_color,
+                BorderStyle::default(),
+            ));
+
             let group_bounds = Bounds::new(
                 point(px(group.left), px(group.top)),
                 size(px(group.width), px(group.bottom - group.top)),
             );
+            let is_front_matter_group = editor
+                .decorations
+                .get(*start_line)
+                .and_then(|decoration| decoration.table_info.as_ref())
+                .is_some_and(|table_info| table_info.is_front_matter);
+
+            if is_front_matter_group {
+                continue;
+            }
+
             code_block_hover_areas_local.push((group_bounds, *start_line));
 
             let language_label = editor

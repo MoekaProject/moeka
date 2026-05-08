@@ -210,9 +210,9 @@ impl EditorView {
                                                 MouseButton::Left,
                                                 cx.listener(|this, _, _, cx| {
                                                     if this.settings_theme_dark_mode {
-                                                        let paired =
-                                                            this.theme_kind.paired_appearance();
-                                                        this.set_theme(paired, cx);
+                                                        let light_theme =
+                                                            this.app_settings.light_theme_kind();
+                                                        this.set_theme(light_theme, cx);
                                                     }
                                                 }),
                                             ),
@@ -238,9 +238,9 @@ impl EditorView {
                                                 MouseButton::Left,
                                                 cx.listener(|this, _, _, cx| {
                                                     if !this.settings_theme_dark_mode {
-                                                        let paired =
-                                                            this.theme_kind.paired_appearance();
-                                                        this.set_theme(paired, cx);
+                                                        let dark_theme =
+                                                            this.app_settings.dark_theme_kind();
+                                                        this.set_theme(dark_theme, cx);
                                                     }
                                                 }),
                                             ),
@@ -278,7 +278,8 @@ impl EditorView {
         let swatch_code = preview.inline_code;
         let swatch_secondary_bg = preview.bg_secondary;
         let active_accent = self.theme.text_accent;
-        let hover_bg = self.theme.bg_hover;
+        let inactive_border = preview.border_secondary;
+        let inactive_hover_border = preview.border_tertiary;
 
         let swatch_size = self.scaled(12.0);
 
@@ -295,13 +296,13 @@ impl EditorView {
             .border_color(if is_active {
                 active_accent
             } else {
-                gpui::transparent_black()
+                inactive_border
             })
             .bg(card_bg)
             .cursor(CursorStyle::Arrow)
             .hover(move |style| {
                 if !is_active {
-                    style.border_color(hover_bg)
+                    style.border_color(inactive_hover_border)
                 } else {
                     style
                 }
