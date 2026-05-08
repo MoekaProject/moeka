@@ -409,7 +409,8 @@ impl EditorView {
             return false;
         };
 
-        self.set_selection_range(target.full_range);
+        self.cursor.anchor = target.full_range.start.min(self.buffer.len());
+        self.cursor.offset = target.full_range.end.min(self.buffer.len());
         true
     }
 

@@ -1241,6 +1241,18 @@ impl EditorView {
                     },
                 ));
             }
+            items.push(self.render_context_menu_separator());
+            {
+                let p = path.clone();
+                items.push(self.render_context_menu_item(
+                    "关闭目录",
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.close_workspace(&p, cx);
+                    },
+                ));
+            }
             return items;
         }
 
@@ -2297,20 +2309,6 @@ impl EditorView {
                         this.pick_workspace_folder(cx);
                     },
                 ));
-                items.push(self.render_context_menu_separator());
-                {
-                    let workspace_to_close = current_root.clone();
-                    items.push(self.render_context_menu_item_with_icon(
-                        "关闭目录",
-                        "assets/icons/filetree/close.svg",
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.close_workspace(&workspace_to_close, cx);
-                        },
-                    ));
-                }
-                items.push(self.render_context_menu_separator());
                 items.push(self.render_context_menu_item_with_icon(
                     "应用设置...",
                     "assets/icons/setting.svg",
