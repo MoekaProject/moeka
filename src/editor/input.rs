@@ -405,30 +405,11 @@ impl EditorView {
     }
 
     fn select_image_syntax_on_line(&mut self, line_idx: usize) -> bool {
-        let Some(decoration) = self.decorations.get(line_idx) else {
-            return false;
-        };
-        let Some(span) = decoration
-            .inline_spans
-            .iter()
-            .find(|span| span.kind == InlineKind::Image)
-        else {
+        let Some(target) = self.image_menu_target_on_line(line_idx) else {
             return false;
         };
 
-        let line_start = self.buffer.line_start(line_idx);
-        let line_content = self.buffer.line_content(line_idx);
-        let full_start = span.range.start.saturating_sub(2);
-        let full_end = decoration
-            .syntax_ranges
-            .iter()
-            .filter(|range| range.range.start >= span.range.end)
-            .map(|range| range.range.end)
-            .max()
-            .unwrap_or(span.range.end)
-            .min(line_content.len());
-        self.cursor.offset = line_start + full_start;
-        self.cursor.anchor = line_start + full_end;
+        self.set_selection_range(target.full_range);
         true
     }
 
@@ -756,6 +737,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let toolbar_hover_changed = self.update_toolbar_corner_hover(event.position, cx);
+        self.hovered_editor_position = Some(event.position);
         if self.active_tab_is_image() {
             if let Some(drag) = self.image_drag_state {
                 if let Some(image_view) = self.active_image_view_state_mut() {

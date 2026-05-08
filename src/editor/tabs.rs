@@ -477,6 +477,19 @@ impl EditorView {
         session_store::persist_session(self);
     }
 
+    pub(crate) fn open_external_paths_in_tabs(
+        &mut self,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        let file_paths: Vec<PathBuf> = paths.iter().filter(|path| path.is_file()).cloned().collect();
+        let last_index = file_paths.len().saturating_sub(1);
+
+        for (index, path) in file_paths.into_iter().enumerate() {
+            self.open_path_in_permanent_tab(path, index == last_index, cx);
+        }
+    }
+
     fn should_track_in_recently_closed(tab: &OpenTab) -> bool {
         tab.kind == TabKind::Editor && tab.path.is_some() && !tab.is_preview
     }

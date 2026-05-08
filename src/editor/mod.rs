@@ -43,14 +43,16 @@ pub(crate) use assets::*;
 pub(crate) use types::*;
 
 use std::collections::{HashMap, HashSet};
+use std::io::Cursor as IoCursor;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use chrono::Local;
 use gpui::{
-    ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point, Render, RenderImage,
-    ScrollHandle, SharedString, Task, WrappedLine,
+    ClipboardEntry, ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point, Render,
+    RenderImage, ScrollHandle, SharedString, Task, WrappedLine,
 };
 
 use crate::actions::*;
@@ -92,6 +94,199 @@ pub(crate) fn perform_window_drag(window: &gpui::Window) {
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn perform_window_drag(_window: &gpui::Window) {}
+
+fn timestamp_file_stem() -> String {
+    Local::now().format("%Y%m%d%H%M%S").to_string()
+}
+
+fn image_extension(format: gpui::ImageFormat) -> &'static str {
+    match format {
+        gpui::ImageFormat::Png => "png",
+        gpui::ImageFormat::Jpeg => "jpg",
+        gpui::ImageFormat::Webp => "webp",
+        gpui::ImageFormat::Gif => "gif",
+        gpui::ImageFormat::Svg => "svg",
+        gpui::ImageFormat::Bmp => "bmp",
+        gpui::ImageFormat::Tiff => "tiff",
+    }
+}
+
+fn normalize_clipboard_image(image: &gpui::Image) -> gpui::Image {
+    if image.format == gpui::ImageFormat::Png {
+        return image.clone();
+    }
+
+    let Ok(decoded) = image::load_from_memory(&image.bytes) else {
+        return image.clone();
+    };
+
+    let mut cursor = IoCursor::new(Vec::new());
+    if decoded.write_to(&mut cursor, image::ImageFormat::Png).is_err() {
+        return image.clone();
+    }
+
+    gpui::Image::from_bytes(gpui::ImageFormat::Png, cursor.into_inner())
+}
+
+fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" | "bmp" | "tif" | "tiff"
+            )
+        })
+}
+
+fn markdown_reference_for_import_name(file_name: &str, is_image: bool) -> String {
+    if is_image {
+        format!("![]({file_name})")
+    } else {
+        format!("[{file_name}]({file_name})")
+    }
+}
+
+fn unique_import_path(directory: &Path, stem: &str, extension: Option<&str>) -> PathBuf {
+    let normalized_extension = extension
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| extension.trim_start_matches('.'));
+    let mut suffix = 0usize;
+
+    loop {
+        let file_name = match (suffix, normalized_extension) {
+            (0, Some(extension)) => format!("{stem}.{extension}"),
+            (0, None) => stem.to_string(),
+            (_, Some(extension)) => format!("{stem}-{suffix}.{extension}"),
+            (_, None) => format!("{stem}-{suffix}"),
+        };
+        let candidate = directory.join(&file_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+fn decode_percent_escapes(text: &str) -> String {
+    let mut decoded = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&text[index + 1..index + 3], 16) {
+                decoded.push(byte as char);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index] as char);
+        index += 1;
+    }
+
+    decoded
+}
+
+fn parse_file_urls_from_text(text: &str) -> Vec<PathBuf> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let path = line.strip_prefix("file://")?;
+            let decoded = decode_percent_escapes(path);
+            #[cfg(target_os = "windows")]
+            let decoded = decoded.trim_start_matches('/').to_string();
+            Some(PathBuf::from(decoded))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_nsstring(text: &str) -> *mut objc::runtime::Object {
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let c_string = std::ffi::CString::new(text).expect("NSString input contains interior NUL");
+        msg_send![class!(NSString), stringWithUTF8String: c_string.as_ptr()]
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_path_from_nsstring(value: *mut objc::runtime::Object) -> Option<PathBuf> {
+    use objc::{msg_send, sel, sel_impl};
+
+    if value.is_null() {
+        return None;
+    }
+
+    unsafe {
+        let utf8: *const std::os::raw::c_char = msg_send![value, UTF8String];
+        if utf8.is_null() {
+            None
+        } else {
+            Some(PathBuf::from(
+                std::ffi::CStr::from_ptr(utf8)
+                    .to_string_lossy()
+                    .into_owned(),
+            ))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_clipboard_file_paths() -> Vec<PathBuf> {
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let pasteboard: *mut objc::runtime::Object =
+            msg_send![class!(NSPasteboard), generalPasteboard];
+        if pasteboard.is_null() {
+            return Vec::new();
+        }
+
+        let items: *mut objc::runtime::Object = msg_send![pasteboard, pasteboardItems];
+        if items.is_null() {
+            return Vec::new();
+        }
+
+        let count: usize = msg_send![items, count];
+        let file_url_type = macos_nsstring("public.file-url");
+        let mut paths = Vec::new();
+
+        for index in 0..count {
+            let item: *mut objc::runtime::Object = msg_send![items, objectAtIndex: index];
+            if item.is_null() {
+                continue;
+            }
+
+            let url_string: *mut objc::runtime::Object =
+                msg_send![item, stringForType: file_url_type];
+            if url_string.is_null() {
+                continue;
+            }
+
+            let url: *mut objc::runtime::Object =
+                msg_send![class!(NSURL), URLWithString: url_string];
+            if url.is_null() {
+                continue;
+            }
+
+            let path_string: *mut objc::runtime::Object = msg_send![url, path];
+            if let Some(path) = macos_path_from_nsstring(path_string) {
+                paths.push(path);
+            }
+        }
+
+        paths
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_clipboard_file_paths() -> Vec<PathBuf> {
+    Vec::new()
+}
 
 // ── Layout constants ────────────────────────────────────────────────
 // NOTE: Numeric layout/style constants are now in style.rs (Styles struct).
@@ -356,6 +551,7 @@ pub(crate) enum DialogAction {
     CloseTabUnsaved { tab_id: String },
     SaveAndCloseTab { tab_id: String },
     DeletePath { path: PathBuf },
+    DismissOnly,
 }
 
 #[derive(Clone)]
@@ -368,6 +564,12 @@ pub(crate) struct Dialog {
     #[allow(dead_code)]
     pub is_danger: bool,
     pub action: DialogAction,
+}
+
+enum ClipboardPasteOutcome {
+    NotHandled,
+    Insert(String),
+    Consumed,
 }
 
 /// Display info for a single buffer line.
@@ -519,6 +721,7 @@ pub struct EditorView {
     pub(crate) gutter_fold_reveal_task: Option<Task<()>>,
     pub(crate) image_drag_state: Option<ImageDragState>,
     pub(crate) command_held: bool,
+    pub(crate) hovered_editor_position: Option<Point<Pixels>>,
     pub(crate) sidebar_custom_width: Option<f32>,
     pub(crate) sidebar_resizing: bool,
     pub(crate) sidebar_display_width: f32,
@@ -846,6 +1049,7 @@ impl EditorView {
             gutter_fold_reveal_task: None,
             image_drag_state: None,
             command_held: false,
+            hovered_editor_position: None,
             sidebar_custom_width: None,
             sidebar_resizing: false,
             sidebar_display_width: 0.0,
@@ -1400,14 +1604,12 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> bool {
         let toolbar_styles = &self.styles.toolbar;
-        let corner_width = self.scaled(toolbar_styles.toolbar_corner_reveal_width_px);
-        let corner_height = self.scaled(toolbar_styles.toolbar_corner_reveal_height_px);
+        let hover_height = self.scaled(toolbar_styles.toolbar_reveal_hover_height_px);
         let left = self.last_editor_left;
-        let right = (self.last_editor_left + self.last_editor_width).max(left + corner_width);
+        let right = (self.last_editor_left + self.last_editor_width).max(left + 1.0);
         let x = f32::from(position.x);
         let y = f32::from(position.y);
-        let hovering =
-            y <= corner_height && (x <= left + corner_width || x >= right - corner_width);
+        let hovering = y <= hover_height && x >= left && x <= right;
         let changed = hovering != self.toolbar_corner_hovered;
         self.toolbar_corner_hovered = hovering;
         if changed {
@@ -1738,6 +1940,7 @@ impl EditorView {
             DialogAction::DeletePath { path } => {
                 self.delete_path(path, cx);
             }
+            DialogAction::DismissOnly => {}
         }
         cx.notify();
     }
@@ -1808,8 +2011,132 @@ impl EditorView {
             DialogAction::DeletePath { .. } => {
                 // No save action for delete
             }
+            DialogAction::DismissOnly => {
+                // Informational dialog; save action is not applicable.
+            }
         }
         cx.notify();
+    }
+
+    fn show_save_before_import_dialog(&mut self, cx: &mut Context<Self>) {
+        self.show_dialog(
+            Dialog {
+                title: "请先保存当前文件".to_string(),
+                message: "粘贴图片或文件前，请先保存当前文档。".to_string(),
+                save_label: None,
+                confirm_label: "知道了".to_string(),
+                cancel_label: "取消".to_string(),
+                is_danger: false,
+                action: DialogAction::DismissOnly,
+            },
+            cx,
+        );
+    }
+
+    fn insert_pasted_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.checkpoint();
+        if self.has_extra_cursors() {
+            self.multi_cursor_insert(text);
+        } else {
+            self.cursor.insert(&mut self.buffer, text);
+        }
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    fn import_clipboard_resources(
+        &mut self,
+        item: &ClipboardItem,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<ClipboardPasteOutcome> {
+        let mut images: Vec<_> = item
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ClipboardEntry::Image(image) => Some(image.clone()),
+                _ => None,
+            })
+            .collect();
+
+        if images.len() > 1 {
+            images.sort_by_key(|image| match image.format {
+                gpui::ImageFormat::Png => 0,
+                gpui::ImageFormat::Jpeg => 1,
+                gpui::ImageFormat::Webp => 2,
+                gpui::ImageFormat::Gif => 3,
+                gpui::ImageFormat::Bmp => 4,
+                gpui::ImageFormat::Tiff => 5,
+                gpui::ImageFormat::Svg => 6,
+            });
+            images.truncate(1);
+        }
+        images = images
+            .into_iter()
+            .map(|image| normalize_clipboard_image(&image))
+            .collect();
+
+        let mut file_paths = item
+            .text()
+            .map(|text| parse_file_urls_from_text(&text))
+            .unwrap_or_default();
+        file_paths.extend(macos_clipboard_file_paths());
+        file_paths.retain(|path| path.is_file());
+        if !images.is_empty() {
+            file_paths.retain(|path| !is_image_path(path));
+        }
+        file_paths.dedup();
+
+        if images.is_empty() && file_paths.is_empty() {
+            return Ok(ClipboardPasteOutcome::NotHandled);
+        }
+
+        let Some(target_dir) = self
+            .current_file_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf)
+        else {
+            self.show_save_before_import_dialog(cx);
+            return Ok(ClipboardPasteOutcome::Consumed);
+        };
+
+        let mut markdown_lines = Vec::new();
+        for image in images {
+            let target_path = unique_import_path(
+                &target_dir,
+                &timestamp_file_stem(),
+                Some(image_extension(image.format)),
+            );
+            std::fs::write(&target_path, &image.bytes)?;
+            let file_name = target_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            markdown_lines.push(markdown_reference_for_import_name(file_name, true));
+        }
+
+        for source_path in file_paths {
+            let extension = source_path
+                .extension()
+                .and_then(|extension| extension.to_str());
+            let target_path = unique_import_path(&target_dir, &timestamp_file_stem(), extension);
+            std::fs::copy(&source_path, &target_path)?;
+            let file_name = target_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            markdown_lines.push(markdown_reference_for_import_name(
+                file_name,
+                is_image_path(&source_path),
+            ));
+        }
+
+        if markdown_lines.is_empty() {
+            Ok(ClipboardPasteOutcome::Consumed)
+        } else {
+            Ok(ClipboardPasteOutcome::Insert(markdown_lines.join("\n")))
+        }
     }
 
     pub(crate) fn render_dialog(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -2975,16 +3302,27 @@ impl EditorView {
     }
 
     pub(crate) fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.checkpoint();
-            if self.has_extra_cursors() {
-                self.multi_cursor_insert(&text);
-            } else {
-                self.cursor.insert(&mut self.buffer, &text);
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+
+        match self.import_clipboard_resources(&item, cx) {
+            Ok(ClipboardPasteOutcome::Insert(text)) => {
+                self.insert_pasted_text(&text, cx);
+                return;
             }
-            self.reparse();
-            self.scroll_to_cursor();
-            self.pause_blinking(cx);
+            Ok(ClipboardPasteOutcome::Consumed) => {
+                return;
+            }
+            Ok(ClipboardPasteOutcome::NotHandled) => {}
+            Err(error) => {
+                eprintln!("failed to import clipboard resources: {error}");
+                return;
+            }
+        }
+
+        if let Some(text) = item.text() {
+            self.insert_pasted_text(&text, cx);
         }
     }
 
@@ -4153,4 +4491,36 @@ pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{markdown_reference_for_import_name, unique_import_path};
+
+    #[test]
+    fn unique_import_path_appends_incrementing_suffix_on_conflict() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let directory = temp_dir.path();
+        std::fs::write(directory.join("20260507153045.png"), b"one").expect("write first");
+        std::fs::write(directory.join("20260507153045-1.png"), b"two").expect("write second");
+
+        let next_path = unique_import_path(directory, "20260507153045", Some("png"));
+
+        assert_eq!(
+            next_path.file_name().and_then(|name| name.to_str()),
+            Some("20260507153045-2.png")
+        );
+    }
+
+    #[test]
+    fn markdown_reference_for_import_name_formats_images_and_files() {
+        assert_eq!(
+            markdown_reference_for_import_name("20260507153045.png", true),
+            "![](20260507153045.png)"
+        );
+        assert_eq!(
+            markdown_reference_for_import_name("20260507153045.pdf", false),
+            "[20260507153045.pdf](20260507153045.pdf)"
+        );
+    }
 }

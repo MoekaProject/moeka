@@ -2136,5 +2136,4 @@ mod tests {
         assert!(html.contains("@page{size:A4;margin:18mm;}"));
         assert!(html.contains("<base href=\"file:///tmp/demo/\">"));
     }
-
 }

@@ -485,7 +485,7 @@ impl EditorView {
                 } else {
                     FOLDER_CLOSED_SVG_PATH
                 })
-                .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
+                .size(px(self.scaled(ss.sidebar_dir_icon_size_px)))
                 .text_color(icon_color)
                 .into_any_element()
         } else if let Some(label) = file_kind_badge_text(&item.path) {
@@ -1103,6 +1103,16 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    let pos = event.position;
+                    let menu_pos = gpui::point(pos.x, pos.y - gpui::px(20.0));
+                    this.open_workspace_menu(menu_pos, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
                     let pos = event.position;
                     let menu_pos = gpui::point(pos.x, pos.y - gpui::px(20.0));
                     this.open_workspace_menu(menu_pos, cx);

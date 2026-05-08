@@ -21,19 +21,32 @@ fn current_raw_wiki_link_range(
     raw_wiki_link_ranges(line_content, decoration)
         .into_iter()
         .find(|range| {
-        let cursor_in_range = cursor_col >= range.start && cursor_col <= range.end;
-        let selection_in_range =
-            selection_start_col >= range.start && selection_end_col <= range.end;
-        cursor_in_range || selection_in_range
+            let cursor_in_range = cursor_col >= range.start && cursor_col <= range.end;
+            let selection_in_range =
+                selection_start_col >= range.start && selection_end_col <= range.end;
+            cursor_in_range || selection_in_range
         })
 }
 
+fn image_markdown_ranges(line_content: &str) -> Option<(Range<usize>, Range<usize>, Range<usize>)> {
+    let full_start = line_content.find("![")?;
+    let desc_start = full_start + 2;
+    let desc_end = desc_start + line_content[desc_start..].find("](")?;
+    let url_start = desc_end + 2;
+    let url_end = url_start + line_content[url_start..].find(')')?;
+    Some((
+        full_start..url_end + 1,
+        desc_start..desc_end,
+        url_start..url_end,
+    ))
+}
+
 #[derive(Clone)]
-struct ImageMenuTarget {
-    line: usize,
-    full_range: Range<usize>,
-    desc_range: Range<usize>,
-    url_range: Range<usize>,
+pub(super) struct ImageMenuTarget {
+    pub(super) line: usize,
+    pub(super) full_range: Range<usize>,
+    pub(super) desc_range: Range<usize>,
+    pub(super) url_range: Range<usize>,
 }
 
 impl EditorView {
@@ -90,38 +103,41 @@ impl EditorView {
         }
     }
 
-    fn current_image_menu_target(&self) -> Option<ImageMenuTarget> {
-        let line = self.cursor_line();
+    pub(super) fn image_menu_target_on_line(&self, line: usize) -> Option<ImageMenuTarget> {
         let decoration = self.decorations.get(line)?;
-        let span = decoration
+        decoration
             .inline_spans
             .iter()
             .find(|span| span.kind == InlineKind::Image)?;
-        let url_range = decoration.syntax_ranges.iter().find(|range| {
-            range.range.start == span.range.end && range.range.end > range.range.start + 1
-        })?;
         let line_start = self.buffer.line_start(line);
         let line_content = self.buffer.line_content(line);
-        let full_start = line_start + span.range.start.saturating_sub(2);
-        let full_end = line_start + url_range.range.end.min(line_content.len());
+        let (full_range, desc_range, url_range) = image_markdown_ranges(line_content)?;
+
+        Some(ImageMenuTarget {
+            line,
+            full_range: line_start + full_range.start..line_start + full_range.end,
+            desc_range: line_start + desc_range.start..line_start + desc_range.end,
+            url_range: line_start + url_range.start..line_start + url_range.end,
+        })
+    }
+
+    fn current_image_menu_target(&self) -> Option<ImageMenuTarget> {
+        let line = self.cursor_line();
+        let target = self.image_menu_target_on_line(line)?;
         let selection = self.cursor.selection_range();
         let cursor_offset = self.cursor.offset;
-        let selected_image = selection.start == full_start && selection.end == full_end;
-        let cursor_in_image = cursor_offset >= full_start && cursor_offset <= full_end;
+        let selected_image =
+            selection.start == target.full_range.start && selection.end == target.full_range.end;
+        let cursor_in_image =
+            cursor_offset >= target.full_range.start && cursor_offset <= target.full_range.end;
         if !selected_image && !cursor_in_image {
             return None;
         }
 
-        Some(ImageMenuTarget {
-            line,
-            full_range: full_start..full_end,
-            desc_range: line_start + span.range.start..line_start + span.range.end,
-            url_range: line_start + url_range.range.start + 2
-                ..line_start + url_range.range.end.saturating_sub(1),
-        })
+        Some(target)
     }
 
-    fn set_selection_range(&mut self, range: Range<usize>) {
+    pub(super) fn set_selection_range(&mut self, range: Range<usize>) {
         self.cursor.anchor = range.start.min(self.buffer.len());
         self.cursor.offset = range.end.min(self.buffer.len());
         self.scroll_to_cursor();
@@ -2281,6 +2297,19 @@ impl EditorView {
                         this.pick_workspace_folder(cx);
                     },
                 ));
+                items.push(self.render_context_menu_separator());
+                {
+                    let workspace_to_close = current_root.clone();
+                    items.push(self.render_context_menu_item_with_icon(
+                        "关闭目录",
+                        "assets/icons/filetree/close.svg",
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_workspace(&workspace_to_close, cx);
+                        },
+                    ));
+                }
                 items.push(self.render_context_menu_separator());
                 items.push(self.render_context_menu_item_with_icon(
                     "应用设置...",

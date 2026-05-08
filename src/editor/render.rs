@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, Bounds, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Render,
-    SharedString, Window, deferred, div, img, prelude::*, px,
+    AnyElement, App, Bounds, CursorStyle, ExternalPaths, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Render, SharedString, Window, deferred, div, img, prelude::*, px,
 };
 
 use super::tooltip::{TooltipState, toolbar_anchor_bounds};
@@ -190,8 +190,9 @@ impl Render for EditorView {
             self.pending_editor_focus = false;
         }
         let resizing = self.sidebar_resizing || self.utility_panel_resizing;
-        let show_editor_toolbar =
+        let toolbar_base_visible =
             self.tabs.len() > 0 && !self.active_tab_is_settings() && !self.active_tab_is_binary();
+        let show_editor_toolbar = self.should_show_editor_toolbar(toolbar_base_visible);
         let ws = &self.styles.window;
         // Store window bounds for menu positioning
         let wb = window.bounds();
@@ -384,6 +385,7 @@ impl Render for EditorView {
                         let bg_hover = self.styles.sidebar.sidebar_item_hover_bg;
                         let btn_color = self.styles.sidebar.sidebar_empty_btn_text_color;
                         let border_color = self.styles.sidebar.sidebar_empty_btn_border_color;
+                        let file_drop_bg = self.styles.editor.editor_file_drop_bg;
                         this.child(
                             div()
                                 .flex_1()
@@ -391,14 +393,15 @@ impl Render for EditorView {
                                 .flex_col()
                                 .items_center()
                                 .justify_center()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                                        if event.click_count >= 2 {
-                                            this.create_scratch_tab(cx);
-                                        }
-                                    }),
-                                )
+                                .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                                    style.bg(file_drop_bg)
+                                })
+                                .on_drop(cx.listener(
+                                    |this, paths: &ExternalPaths, _, cx| {
+                                        this.open_external_paths_in_tabs(paths.paths(), cx);
+                                    },
+                                ))
+                                .cursor(CursorStyle::Arrow)
                                 .child(
                                     div()
                                         .id("empty-workspace-btn")
@@ -417,13 +420,11 @@ impl Render for EditorView {
                                         .child("新建文件...")
                                         .on_mouse_down(
                                             MouseButton::Left,
-                                            cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                                                if event.click_count >= 2 {
-                                                    this.create_scratch_tab(cx);
-                                                }
+                                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                                this.create_scratch_tab(cx);
                                             }),
                                         ),
-                                ),
+                                )
                         )
                     })
                     .when(
@@ -498,7 +499,24 @@ impl Render for EditorView {
                                                         .on_hover(cx.listener(
                                                             |this, hovering: &bool, _window, cx| {
                                                                 if !*hovering {
+                                                                    let had_hover = this
+                                                                        .hovered_editor_position
+                                                                        .take()
+                                                                        .is_some();
+                                                                    let toolbar_changed = if this
+                                                                        .toolbar_corner_hovered
+                                                                    {
+                                                                        this.toolbar_corner_hovered =
+                                                                            false;
+                                                                        this.sync_toolbar_opacity(cx);
+                                                                        true
+                                                                    } else {
+                                                                        false
+                                                                    };
                                                                     this.clear_gutter_fold_hover(cx);
+                                                                    if had_hover || toolbar_changed {
+                                                                        cx.notify();
+                                                                    }
                                                                 }
                                                             },
                                                         ))
@@ -508,6 +526,11 @@ impl Render for EditorView {
                                                     .drag_over::<DraggedSidebarItems>(
                                                         move |style, _, _, _| style,
                                                     )
+                                                    .drag_over::<ExternalPaths>({
+                                                        let file_drop_bg =
+                                                            self.styles.editor.editor_file_drop_bg;
+                                                        move |style, _, _, _| style.bg(file_drop_bg)
+                                                    })
                                                     .on_drop(cx.listener(
                                                         |this, dragged: &DraggedSidebarItems, _, cx| {
                                                             this.clear_sidebar_drag_state(cx);
@@ -516,6 +539,11 @@ impl Render for EditorView {
                                                                 &dragged.paths,
                                                                 cx,
                                                             );
+                                                        },
+                                                    ))
+                                                    .on_drop(cx.listener(
+                                                        |this, paths: &ExternalPaths, _, cx| {
+                                                            this.open_external_paths_in_tabs(paths.paths(), cx);
                                                         },
                                                     ))
                                                     .child(if self.active_tab_is_image() {
@@ -533,7 +561,7 @@ impl Render for EditorView {
                                                         }
                                                         .into_any_element()
                                                     })
-                                                    .child({
+                                                    .when(show_editor_toolbar, |this| this.child({
                                                         let primary_hover = self
                                                             .styles
                                                             .toolbar
@@ -586,11 +614,6 @@ impl Render for EditorView {
                                                             "toolbar-align-toggle",
                                                             align_anchor,
                                                         );
-                                                        let toolbar_opacity = if show_editor_toolbar {
-                                                            self.toolbar_opacity
-                                                        } else {
-                                                            self.styles.toolbar.toolbar_hidden_opacity
-                                                        };
                                                         div()
                                                             .absolute()
                                                             .left(px(toolbar_left))
@@ -598,7 +621,7 @@ impl Render for EditorView {
                                                             .flex()
                                                             .items_center()
                                                             .gap(px(toolbar_gap))
-                                                            .opacity(toolbar_opacity)
+                                                            .opacity(self.toolbar_opacity)
                                                             .child(self.render_toolbar_button(
                                                                 "toolbar-sidebar-toggle",
                                                                 primary_btn_size,
@@ -633,8 +656,8 @@ impl Render for EditorView {
                                                                     this.toggle_editor_alignment(cx);
                                                                 },
                                                             ))
-                                                    })
-                                                    .child({
+                                                    }))
+                                                    .when(show_editor_toolbar, |this| this.child({
                                                         let secondary_hover = self
                                                             .styles
                                                             .toolbar
@@ -684,11 +707,6 @@ impl Render for EditorView {
                                                             "toolbar-theme-toggle",
                                                             theme_anchor,
                                                         );
-                                                        let toolbar_opacity = if show_editor_toolbar {
-                                                            self.toolbar_opacity
-                                                        } else {
-                                                            self.styles.toolbar.toolbar_hidden_opacity
-                                                        };
                                                         div()
                                                             .absolute()
                                                             .right(px(toolbar_right))
@@ -696,7 +714,7 @@ impl Render for EditorView {
                                                             .flex()
                                                             .items_center()
                                                             .gap(px(toolbar_gap))
-                                                            .opacity(toolbar_opacity)
+                                                            .opacity(self.toolbar_opacity)
                                                             .child(self.render_toolbar_button(
                                                                 "toolbar-outline-toggle",
                                                                 secondary_btn_size,
@@ -731,7 +749,7 @@ impl Render for EditorView {
                                                                     this.toggle_theme(cx);
                                                                 },
                                                             ))
-                                                    })
+                                                    }))
                                                     .when_some(
                                                         self.render_tooltip_overlay(editor_pane_width),
                                                         |this, tooltip| this.child(tooltip),
@@ -900,7 +918,7 @@ impl EditorView {
                 div()
                     .text_size(px(self.scaled(self.styles.ui_font_size_px + 1.0)))
                     .text_color(self.theme.text_primary)
-                    .child("该文件不是文本文件"),
+                    .child("似乎该文件不是文本"),
             )
             .child(
                 div()
@@ -914,12 +932,12 @@ impl EditorView {
             .child(
                 div()
                     .px(px(self.scaled(12.0)))
-                    .py(px(self.scaled(8.0)))
+                    .py(px(self.scaled(4.0)))
                     .rounded(px(self.scaled(8.0)))
                     .bg(self.theme.bg_hover)
                     .text_color(self.theme.text_primary)
                     .cursor(CursorStyle::PointingHand)
-                    .child("打开该非文本文件")
+                    .child("打开文件")
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {

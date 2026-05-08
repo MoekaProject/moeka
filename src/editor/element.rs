@@ -2948,6 +2948,7 @@ impl Element for EditorElement {
 
             // Link underlines when cmd is held
             if editor.command_held {
+                let hovered_position = editor.hovered_editor_position;
                 for span in &decoration.inline_spans {
                     if span.kind != crate::markdown::InlineKind::Link {
                         continue;
@@ -2963,14 +2964,6 @@ impl Element for EditorElement {
                     ) {
                         let indent_start =
                             helpers::indent_for_y(indent_px, pos_start.y, line_height);
-                        let ul_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
-                        link_underlines.push(fill(
-                            Bounds::from_corners(
-                                point(px(content_x + indent_start) + pos_start.x, px(ul_y)),
-                                point(px(content_x + indent_start) + pos_end.x, px(ul_y + 1.5)),
-                            ),
-                            theme.link,
-                        ));
                         let link_bounds = Bounds::from_corners(
                             point(
                                 px(content_x + indent_start) + pos_start.x,
@@ -2981,6 +2974,21 @@ impl Element for EditorElement {
                                 px(text_line_top + f32::from(pos_start.y) + line_height),
                             ),
                         );
+                        if hovered_position
+                            .is_some_and(|position| link_bounds.contains(&position))
+                        {
+                            let ul_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
+                            link_underlines.push(fill(
+                                Bounds::from_corners(
+                                    point(px(content_x + indent_start) + pos_start.x, px(ul_y)),
+                                    point(
+                                        px(content_x + indent_start) + pos_end.x,
+                                        px(ul_y + 1.5),
+                                    ),
+                                ),
+                                theme.link,
+                            ));
+                        }
                         link_hitboxes
                             .push(window.insert_hitbox(link_bounds, HitboxBehavior::Normal));
                     }
@@ -3009,14 +3017,6 @@ impl Element for EditorElement {
                     ) {
                         let indent_start =
                             helpers::indent_for_y(indent_px, pos_start.y, line_height);
-                        let ul_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
-                        link_underlines.push(fill(
-                            Bounds::from_corners(
-                                point(px(content_x + indent_start) + pos_start.x, px(ul_y)),
-                                point(px(content_x + indent_start) + pos_end.x, px(ul_y + 1.5)),
-                            ),
-                            theme.link,
-                        ));
                         let link_bounds = Bounds::from_corners(
                             point(
                                 px(content_x + indent_start) + pos_start.x,
@@ -3027,6 +3027,21 @@ impl Element for EditorElement {
                                 px(text_line_top + f32::from(pos_start.y) + line_height),
                             ),
                         );
+                        if hovered_position
+                            .is_some_and(|position| link_bounds.contains(&position))
+                        {
+                            let ul_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
+                            link_underlines.push(fill(
+                                Bounds::from_corners(
+                                    point(px(content_x + indent_start) + pos_start.x, px(ul_y)),
+                                    point(
+                                        px(content_x + indent_start) + pos_end.x,
+                                        px(ul_y + 1.5),
+                                    ),
+                                ),
+                                theme.link,
+                            ));
+                        }
                         link_hitboxes
                             .push(window.insert_hitbox(link_bounds, HitboxBehavior::Normal));
                     }
