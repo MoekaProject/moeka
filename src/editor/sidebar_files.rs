@@ -5,6 +5,50 @@ use gpui::{AppContext, Context, Window};
 use super::*;
 
 impl EditorView {
+    fn begin_sidebar_rename(
+        &mut self,
+        path: PathBuf,
+        starred_surface: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let styles = self.sidebar_edit_text_input_styles();
+        let editor = cx.new(|cx| {
+            let mut text_input = crate::text_input::TextInput::new(styles, "名称...", cx);
+            text_input.set_text(&current_name, cx);
+            let dot_pos = current_name.rfind('.').unwrap_or(current_name.len());
+            text_input.set_selection(0, dot_pos, cx);
+            text_input
+        });
+        cx.subscribe(
+            &editor,
+            |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Submit => this.commit_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Escape => this.cancel_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Changed => {}
+                _ => {}
+            },
+        )
+        .detach();
+        let focus_handle = editor.read(cx).focus_handle.clone();
+        let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.cancel_sidebar_edit(cx);
+        });
+        window.focus(&focus_handle);
+        self.sidebar_edit = Some(if starred_surface {
+            SidebarEditMode::RenameStarred { path, editor }
+        } else {
+            SidebarEditMode::Rename { path, editor }
+        });
+        self.sidebar_edit_blur_sub = Some(blur_sub);
+        self.context_menu = None;
+        cx.notify();
+    }
+
     fn move_path_to_trash(path: &Path) -> anyhow::Result<()> {
         #[cfg(target_os = "macos")]
         {
@@ -92,37 +136,16 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let styles = self.sidebar_edit_text_input_styles();
-        let editor = cx.new(|cx| {
-            let mut text_input = crate::text_input::TextInput::new(styles, "名称...", cx);
-            text_input.set_text(&current_name, cx);
-            let dot_pos = current_name.rfind('.').unwrap_or(current_name.len());
-            text_input.set_selection(0, dot_pos, cx);
-            text_input
-        });
-        cx.subscribe(
-            &editor,
-            |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
-                crate::text_input::TextInputEvent::Submit => this.commit_sidebar_edit(cx),
-                crate::text_input::TextInputEvent::Escape => this.cancel_sidebar_edit(cx),
-                crate::text_input::TextInputEvent::Changed => {}
-                _ => {}
-            },
-        )
-        .detach();
-        let focus_handle = editor.read(cx).focus_handle.clone();
-        let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
-            this.cancel_sidebar_edit(cx);
-        });
-        window.focus(&focus_handle);
-        self.sidebar_edit = Some(SidebarEditMode::Rename { path, editor });
-        self.sidebar_edit_blur_sub = Some(blur_sub);
-        self.context_menu = None;
-        cx.notify();
+        self.begin_sidebar_rename(path, false, window, cx);
+    }
+
+    pub(crate) fn start_starred_rename(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_sidebar_rename(path, true, window, cx);
     }
 
     pub(crate) fn start_create_file(
@@ -194,7 +217,7 @@ impl EditorView {
         self.sidebar_edit_blur_sub = None;
         let value = edit.text(cx);
         match &edit {
-            SidebarEditMode::Rename { path, .. } => {
+            SidebarEditMode::Rename { path, .. } | SidebarEditMode::RenameStarred { path, .. } => {
                 let trimmed = value.trim();
                 if !trimmed.is_empty()
                     && trimmed

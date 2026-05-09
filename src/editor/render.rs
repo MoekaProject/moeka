@@ -119,7 +119,8 @@ impl EditorView {
     fn render_toolbar_button(
         &self,
         id: &'static str,
-        button_size: f32,
+        button_width: f32,
+        button_height: f32,
         icon_size: f32,
         base_opacity: f32,
         hover_opacity: f32,
@@ -136,8 +137,8 @@ impl EditorView {
 
         div()
             .id(id)
-            .w(px(button_size))
-            .h(px(button_size))
+            .w(px(button_width))
+            .h(px(button_height))
             .flex()
             .items_center()
             .justify_center()
@@ -629,6 +630,7 @@ impl Render for EditorView {
                                                             .child(self.render_toolbar_button(
                                                                 "toolbar-sidebar-toggle",
                                                                 primary_btn_size,
+                                                                primary_btn_size,
                                                                 primary_icon_size,
                                                                 1.0,
                                                                 primary_hover,
@@ -647,6 +649,7 @@ impl Render for EditorView {
                                                             ))
                                                             .child(self.render_toolbar_button(
                                                                 "toolbar-align-toggle",
+                                                                secondary_btn_size,
                                                                 secondary_btn_size,
                                                                 secondary_icon_size,
                                                                 1.0,
@@ -679,29 +682,36 @@ impl Render for EditorView {
                                                                 .toolbar
                                                                 .toolbar_secondary_btn_size_px,
                                                         );
+                                                        let secondary_btn_padding_x = self.scaled(
+                                                            self.styles
+                                                                .toolbar
+                                                                .toolbar_secondary_btn_padding_x_px,
+                                                        );
                                                         let secondary_icon_size = self.scaled(
                                                             self.styles
                                                                 .toolbar
                                                                 .toolbar_secondary_icon_size_px,
                                                         );
+                                                        let secondary_btn_width =
+                                                            secondary_icon_size + secondary_btn_padding_x * 2.0;
                                                         let outline_active = self.utility_panel
                                                             == Some(RightUtilityPanel::Outline);
                                                         let outline_x = editor_pane_width
                                                             - toolbar_right
-                                                            - secondary_btn_size * 2.0
+                                                            - secondary_btn_width * 2.0
                                                             - toolbar_gap;
                                                         let outline_anchor = toolbar_anchor_bounds(
                                                             outline_x,
                                                             toolbar_top,
-                                                            secondary_btn_size,
+                                                            secondary_btn_width,
                                                         );
                                                         let theme_x = editor_pane_width
                                                             - toolbar_right
-                                                            - secondary_btn_size;
+                                                            - secondary_btn_width;
                                                         let theme_anchor = toolbar_anchor_bounds(
                                                             theme_x,
                                                             toolbar_top,
-                                                            secondary_btn_size,
+                                                            secondary_btn_width,
                                                         );
                                                         self.sync_tooltip_anchor(
                                                             "toolbar-outline-toggle",
@@ -721,6 +731,7 @@ impl Render for EditorView {
                                                             .opacity(self.toolbar_opacity)
                                                             .child(self.render_toolbar_button(
                                                                 "toolbar-outline-toggle",
+                                                                secondary_btn_width,
                                                                 secondary_btn_size,
                                                                 secondary_icon_size,
                                                                 if outline_active { 1.0 } else { 0.55 },
@@ -736,6 +747,7 @@ impl Render for EditorView {
                                                             ))
                                                             .child(self.render_toolbar_button(
                                                                 "toolbar-theme-toggle",
+                                                                secondary_btn_width,
                                                                 secondary_btn_size,
                                                                 secondary_icon_size,
                                                                 1.0,

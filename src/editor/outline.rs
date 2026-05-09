@@ -197,7 +197,7 @@ impl EditorView {
         let hover_bg = os.outline_item_hover_bg;
         let header_text_color = os.outline_header_text_color;
         let header_padding_x = self.scaled(os.outline_header_padding_x_px);
-        let top_spacer = self.scaled(os.outline_top_spacer_height_px);
+        let top_spacer = self.scaled(self.styles.utility_panel.utility_panel_top_spacer_height_px);
         let bottom_spacer = self.scaled(os.outline_bottom_spacer_height_px);
 
         let mut items: Vec<AnyElement> = Vec::with_capacity(headings.len() + 3);

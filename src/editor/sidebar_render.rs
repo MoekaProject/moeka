@@ -347,6 +347,15 @@ impl EditorView {
     }
 
     fn render_starred_sidebar_item(&self, path: PathBuf, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(SidebarEditMode::RenameStarred {
+            path: ref rename_path,
+            ref editor,
+        }) = self.sidebar_edit
+            && *rename_path == path
+        {
+            return self.render_sidebar_edit_row(editor, 1, false, cx);
+        }
+
         let ss = &self.styles.sidebar;
         let is_selected = self.is_sidebar_item_selected(&path);
         let is_focused = self.focused_sidebar_path.as_deref() == Some(path.as_path());
@@ -502,12 +511,7 @@ impl EditorView {
                         this.sidebar_select_item(&context_menu_path, false, false);
                     }
                     this.focused_sidebar_path = Some(context_menu_path.clone());
-                    this.open_sidebar_context_menu(
-                        context_menu_path.clone(),
-                        false,
-                        event.position,
-                        cx,
-                    );
+                    this.open_starred_sidebar_context_menu(context_menu_path.clone(), event.position, cx);
                 }),
             )
             .into_any_element()
@@ -1165,8 +1169,7 @@ impl EditorView {
         let logo_area_height =
             self.scaled(ss.sidebar_logo_size_px + 2.0 * ss.sidebar_logo_padding_y_px);
         let scroll_y = -f32::from(self.sidebar_scroll_handle.offset().y);
-        let header_is_sticky = has_root
-            && scroll_y >= logo_area_height + self.sidebar_starred_section_height(has_root);
+        let sticky_headers_visible = has_root && scroll_y >= logo_area_height;
 
         div()
             .id("sidebar")
@@ -1274,7 +1277,7 @@ impl EditorView {
                 },
             )
             .when(
-                header_is_sticky && !self.workspace_search_visible,
+                sticky_headers_visible && !self.workspace_search_visible,
                 |this: gpui::Stateful<gpui::Div>| {
                     this.child(
                         div()
@@ -1283,6 +1286,7 @@ impl EditorView {
                             .top(px(self.scaled(ss.sidebar_top_spacer_height_px)))
                             .w_full()
                             .bg(ss.sidebar_bg)
+                            .child(self.render_starred_sidebar_section(&starred_files, cx))
                             .child(self.render_sidebar_header(cx)),
                     )
                 },

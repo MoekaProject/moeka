@@ -50,6 +50,20 @@ pub(super) struct ImageMenuTarget {
 }
 
 impl EditorView {
+    pub(crate) fn open_starred_sidebar_context_menu(
+        &mut self,
+        path: PathBuf,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = Some(ContextMenu {
+            position,
+            kind: ContextMenuKind::SidebarStarred { path },
+        });
+        self.sidebar_edit = None;
+        cx.notify();
+    }
+
     fn current_wiki_link_target(&self) -> Option<Range<usize>> {
         let line = self.cursor_line();
         let decoration = self.decorations.get(line)?;
@@ -1430,6 +1444,92 @@ impl EditorView {
         items
     }
 
+    fn render_starred_sidebar_context_menu(
+        &self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut items: Vec<AnyElement> = Vec::new();
+
+        {
+            let starred_path = path.clone();
+            items.push(self.render_context_menu_item(
+                "取消星标",
+                false,
+                cx,
+                move |this, _, cx| {
+                    let normalized = Self::normalize_sidebar_path(&starred_path);
+                    if this.app_settings.remove_starred_file(&normalized) {
+                        this.app_settings.save();
+                    }
+                    this.context_menu = None;
+                    cx.notify();
+                },
+            ));
+        }
+        items.push(self.render_context_menu_separator());
+
+        {
+            let rename_path = path.clone();
+            items.push(self.render_context_menu_item(
+                "重命名",
+                false,
+                cx,
+                move |this, window, cx| {
+                    this.start_starred_rename(rename_path.clone(), window, cx);
+                },
+            ));
+        }
+        {
+            let delete_path = path.clone();
+            items.push(self.render_context_menu_item(
+                "删除",
+                true,
+                cx,
+                move |this, _, cx| {
+                    this.delete_path(delete_path.clone(), cx);
+                },
+            ));
+        }
+        items.push(self.render_context_menu_separator());
+
+        if let Some(copy_path_text) = self.path_copy_text(&path, false) {
+            items.push(self.render_context_menu_item(
+                "复制路径",
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.copy_text_to_clipboard(copy_path_text.clone(), cx);
+                },
+            ));
+        }
+        if let Some(copy_relative_path_text) = self.path_copy_text(&path, true) {
+            items.push(self.render_context_menu_item(
+                "复制相对路径",
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.copy_text_to_clipboard(copy_relative_path_text.clone(), cx);
+                },
+            ));
+        }
+        items.push(self.render_context_menu_separator());
+
+        {
+            let reveal_path = path.clone();
+            items.push(self.render_context_menu_item(
+                "在访达中显示",
+                false,
+                cx,
+                move |this, _, _cx| {
+                    this.reveal_in_finder(&reveal_path);
+                },
+            ));
+        }
+
+        items
+    }
+
     fn render_heading_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let active_actions = self.active_format_actions();
         let heading_items: &[(&str, Option<&str>, FormatMenuAction)] = &[
@@ -2013,6 +2113,10 @@ impl EditorView {
         let (items, width) = match &menu.kind {
             ContextMenuKind::Sidebar { path, is_dir } => (
                 self.render_sidebar_context_menu(path.clone(), *is_dir, cx),
+                self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+            ),
+            ContextMenuKind::SidebarStarred { path } => (
+                self.render_starred_sidebar_context_menu(path.clone(), cx),
                 self.scaled(self.styles.context_menu.menu_sidebar_width_px),
             ),
             ContextMenuKind::SidebarSort => {

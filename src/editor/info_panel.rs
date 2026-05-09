@@ -1598,7 +1598,9 @@ impl EditorView {
     fn render_git_history_item(&self, item: &GitHistoryItem, cx: &mut Context<Self>) -> AnyElement {
         let ups = &self.styles.utility_panel;
         let history_item = item.clone();
-        let row_height = self.scaled(ups.utility_panel_item_font_size_px * 3.4);
+        let font_size = self.scaled(ups.utility_panel_item_font_size_px);
+        let row_height = self.scaled(ups.utility_panel_item_height_px * 2.0);
+        let row_gap = self.scaled(ups.utility_panel_item_gap_px * 0.4);
         div()
             .px(px(self.scaled(ups.utility_panel_section_padding_x_px)))
             .py(px(self.scaled(ups.utility_panel_item_gap_px)))
@@ -1607,7 +1609,7 @@ impl EditorView {
             .flex()
             .flex_col()
             .justify_center()
-            .gap(px(self.scaled(ups.utility_panel_item_gap_px) * 0.5))
+            .gap(px(row_gap))
             .overflow_hidden()
             .cursor(CursorStyle::Arrow)
             .hover(move |style| style.bg(ups.utility_panel_button_hover_bg))
@@ -1624,7 +1626,7 @@ impl EditorView {
                     .items_center()
                     .justify_between()
                     .gap(px(self.scaled(ups.utility_panel_item_gap_px)))
-                    .text_size(px(self.scaled(ups.utility_panel_item_font_size_px)))
+                    .text_size(px(font_size))
                     .child(
                         div()
                             .flex_1()
@@ -1644,8 +1646,10 @@ impl EditorView {
             )
             .child(
                 div()
+                    .flex_1()
+                    .min_w(px(0.0))
                     .w_full()
-                    .text_size(px(self.scaled(ups.utility_panel_item_font_size_px)))
+                    .text_size(px(font_size))
                     .text_color(ups.utility_panel_item_value_text_color)
                     .whitespace_nowrap()
                     .truncate()

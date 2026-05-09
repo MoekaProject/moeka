@@ -316,6 +316,9 @@ pub(crate) enum ContextMenuKind {
         path: PathBuf,
         is_dir: bool,
     },
+    SidebarStarred {
+        path: PathBuf,
+    },
     SidebarSort,
     SidebarCreate,
     Format,
@@ -404,6 +407,10 @@ pub(crate) enum SidebarEditMode {
         path: PathBuf,
         editor: gpui::Entity<crate::text_input::TextInput>,
     },
+    RenameStarred {
+        path: PathBuf,
+        editor: gpui::Entity<crate::text_input::TextInput>,
+    },
     CreateFile {
         parent: PathBuf,
         editor: gpui::Entity<crate::text_input::TextInput>,
@@ -418,6 +425,7 @@ impl SidebarEditMode {
     pub fn editor(&self) -> &gpui::Entity<crate::text_input::TextInput> {
         match self {
             Self::Rename { editor, .. }
+            | Self::RenameStarred { editor, .. }
             | Self::CreateFile { editor, .. }
             | Self::CreateDir { editor, .. } => editor,
         }
