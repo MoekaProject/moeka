@@ -1163,7 +1163,10 @@ impl Element for TextElement {
         let selection_color = styles.text_input_selection_color;
 
         let cursor_h_ratio = styles.text_input_cursor_height_ratio.clamp(0.3, 1.0);
-        let cursor_h = bounds.size.height * cursor_h_ratio;
+        let cursor_height_adjust = px(styles.text_input_cursor_height_adjust_px);
+        let cursor_h = (bounds.size.height * cursor_h_ratio + cursor_height_adjust)
+            .max(px(1.0))
+            .min(bounds.size.height);
         let cursor_y_inset = (bounds.size.height - cursor_h) / 2.0;
 
         let (selection, cursor) = if has_selection {

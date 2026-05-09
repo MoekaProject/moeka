@@ -38,7 +38,7 @@ impl EditorView {
             let styles = self.workspace_search_text_input_styles();
             let initial_query = self.workspace_search_query.clone();
             let editor = cx.new(|cx| {
-                let mut input = crate::text_input::TextInput::new(styles, "搜索文件...", cx);
+                let mut input = crate::text_input::TextInput::new(styles, "搜索...", cx);
                 if !initial_query.is_empty() {
                     input.set_text(&initial_query, cx);
                     input.select_all(cx);
@@ -75,9 +75,15 @@ impl EditorView {
 
         if let Some(editor) = &self.workspace_search_editor {
             let focus_handle = editor.read(cx).focus_handle.clone();
+            let focus_sub = cx.on_focus(&focus_handle, window, |this, _window, cx| {
+                this.workspace_search_input_focused = true;
+                cx.notify();
+            });
             let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
+                this.workspace_search_input_focused = false;
                 this.close_workspace_search_if_trimmed_empty(cx);
             });
+            self.workspace_search_focus_sub = Some(focus_sub);
             self.workspace_search_blur_sub = Some(blur_sub);
         }
 
@@ -97,8 +103,10 @@ impl EditorView {
 
     pub(crate) fn close_workspace_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.workspace_search_visible = false;
+        self.workspace_search_focus_sub = None;
         self.workspace_search_task = None;
         self.workspace_search_blur_sub = None;
+        self.workspace_search_input_focused = false;
         self.clear_workspace_search_preview_state();
         window.focus(&self.focus_handle(cx));
         cx.notify();
@@ -120,8 +128,10 @@ impl EditorView {
         self.workspace_search_visible = false;
         self.sidebar_visible = false;
         self.workspace_search_results.clear();
+        self.workspace_search_focus_sub = None;
         self.workspace_search_task = None;
         self.workspace_search_blur_sub = None;
+        self.workspace_search_input_focused = false;
         self.workspace_search_render_limit = 100;
         self.clear_workspace_search_preview_state();
         cx.notify();
@@ -337,21 +347,26 @@ impl EditorView {
     pub(crate) fn workspace_search_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
         let workspace_styles = &self.styles.workspace_search;
-        styles.text_input_height_px = self.scaled(workspace_styles.ws_search_input_height_px);
+        styles.text_input_height_px = self.scaled(
+            workspace_styles.ws_search_input_height_px
+                - 2.0 * workspace_styles.ws_search_input_border_width_px,
+        );
         styles.text_input_padding_left_px =
             self.scaled(workspace_styles.ws_search_input_left_inset_px);
         styles.text_input_padding_right_px =
-            self.scaled(workspace_styles.ws_search_input_right_inset_px);
+            self.scaled(self.styles.text_input.text_input_padding_right_px);
         styles.text_input_font_size_px =
             self.scaled(self.styles.text_input.text_input_font_size_px);
-        styles.text_input_bg = workspace_styles.ws_search_input_bg;
-        styles.text_input_focus_bg = workspace_styles.ws_search_input_focus_bg;
+        styles.text_input_bg = gpui::transparent_black();
+        styles.text_input_focus_bg = gpui::transparent_black();
         styles.text_input_radius_px = self.scaled(workspace_styles.ws_search_input_radius_px);
         styles.text_input_border_width_px = 0.0;
         styles.text_input_cursor_width_px =
             self.scaled(self.styles.text_input.text_input_cursor_width_px);
         styles.text_input_cursor_height_ratio =
             workspace_styles.ws_search_input_cursor_height_ratio;
+        styles.text_input_cursor_height_adjust_px =
+            workspace_styles.ws_search_input_cursor_height_adjust_px;
         styles
     }
 
@@ -362,61 +377,72 @@ impl EditorView {
         let button_size = self.scaled(workspace_styles.ws_search_btn_size_px);
         let button_icon_size = self.scaled(workspace_styles.ws_search_btn_icon_size_px);
         let button_gap = self.scaled(workspace_styles.ws_search_input_icon_gap_px);
+        let input_gap = self.scaled(workspace_styles.ws_search_input_gap_px);
         let icon_size = self.scaled(workspace_styles.ws_search_input_icon_size_px);
+        let chrome_padding_x = ((input_height - button_size).max(0.0) / 2.0).round();
         let input_left_inset = self.scaled(workspace_styles.ws_search_input_left_inset_px);
         let input_left = (input_left_inset - icon_size).max(0.0) / 2.0;
         let icon_top = (input_height - icon_size).max(0.0) / 2.0;
-        let button_inset = ((input_height - button_size).max(0.0) / 2.0).round();
-        let trailing_group_right = button_inset;
         let button_radius = self.scaled(4.0);
         let button_hover_bg = workspace_styles.ws_search_btn_hover_bg;
         let button_active_bg = workspace_styles.ws_search_btn_active_bg;
         let button_icon_color = workspace_styles.ws_search_btn_icon_color;
         let button_active_icon_color = workspace_styles.ws_search_btn_active_icon_color;
         let input_icon_color = workspace_styles.ws_search_input_icon_color;
-        let search_border_width = self.styles.search.search_bar_border_width_px;
-        let search_border_color = self.styles.search.search_bar_border_color;
+        let search_border_width = self.scaled(workspace_styles.ws_search_input_border_width_px);
+        let search_border_color = workspace_styles.ws_search_input_border_color;
+        let search_bg = if self.workspace_search_input_focused {
+            workspace_styles.ws_search_input_focus_bg
+        } else {
+            workspace_styles.ws_search_input_bg
+        };
         let result_selected_bg = self.styles.sidebar.sidebar_item_selected_bg;
 
         let mut children: Vec<AnyElement> = Vec::new();
         children.push(
             div()
                 .w_full()
-                .px(px(self.scaled(workspace_styles.ws_search_padding_px)))
-                .py(px(self.scaled(workspace_styles.ws_search_padding_px)))
+                .p(px(self.scaled(workspace_styles.ws_search_padding_px)))
                 .child(
                     div()
-                        .relative()
                         .w_full()
                         .h(px(input_height))
-                        .bg(workspace_styles.ws_search_input_bg)
+                        .px(px(chrome_padding_x))
+                        .bg(search_bg)
                         .border(px(search_border_width))
                         .border_color(search_border_color)
                         .rounded(px(self.scaled(workspace_styles.ws_search_input_radius_px)))
-                        .when_some(self.workspace_search_editor.clone(), |this, editor| {
-                            this.child(editor)
-                        })
+                        .flex()
+                        .items_center()
+                        .gap(px(input_gap))
                         .child(
                             div()
-                                .absolute()
-                                .left(px(input_left))
-                                .top(px(icon_top))
-                                .w(px(icon_size))
-                                .h(px(icon_size))
+                                .relative()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .h_full()
+                                .when_some(self.workspace_search_editor.clone(), |this, editor| {
+                                    this.child(editor)
+                                })
                                 .child(
-                                    svg()
-                                        .path(SEARCH_ICON_SVG_PATH)
-                                        .size(px(icon_size))
-                                        .text_color(input_icon_color),
+                                    div()
+                                        .absolute()
+                                        .left(px(input_left))
+                                        .top(px(icon_top))
+                                        .w(px(icon_size))
+                                        .h(px(icon_size))
+                                        .child(
+                                            svg()
+                                                .path(SEARCH_ICON_SVG_PATH)
+                                                .size(px(icon_size))
+                                                .text_color(input_icon_color),
+                                        ),
                                 ),
                         )
                         .child(
                             div()
-                                .absolute()
-                                .right(px(trailing_group_right))
-                                .top(px(0.0))
-                                .bottom(px(0.0))
                                 .flex()
+                                .flex_none()
                                 .items_center()
                                 .gap(px(button_gap))
                                 .child(

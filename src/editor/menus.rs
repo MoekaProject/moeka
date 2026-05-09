@@ -1482,14 +1482,11 @@ impl EditorView {
         }
         {
             let delete_path = path.clone();
-            items.push(self.render_context_menu_item(
-                "删除",
-                true,
-                cx,
-                move |this, _, cx| {
+            items.push(
+                self.render_context_menu_item("删除", true, cx, move |this, _, cx| {
                     this.delete_path(delete_path.clone(), cx);
-                },
-            ));
+                }),
+            );
         }
         items.push(self.render_context_menu_separator());
 

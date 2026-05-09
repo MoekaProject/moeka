@@ -7,6 +7,22 @@ use pinyin::ToPinyin;
 use super::*;
 
 impl EditorView {
+    fn quick_open_text_input_styles(&self) -> crate::style::TextInputStyles {
+        let mut styles = self.styles.text_input.clone();
+        styles.text_input_padding_left_px =
+            self.styles.quick_open.quick_open_input_text_padding_left_px;
+        styles.text_input_bg = self.styles.quick_open.quick_open_input_bg;
+        styles.text_input_focus_bg = self.styles.quick_open.quick_open_input_focus_bg;
+        styles.text_input_text_color = self.styles.quick_open.quick_open_input_text_color;
+        styles.text_input_cursor_height_ratio =
+            self.styles.quick_open.quick_open_input_cursor_height_ratio;
+        styles.text_input_cursor_height_adjust_px = self
+            .styles
+            .quick_open
+            .quick_open_input_cursor_height_adjust_px;
+        styles
+    }
+
     pub(crate) fn on_quick_open(
         &mut self,
         _: &QuickOpen,
@@ -24,11 +40,7 @@ impl EditorView {
         }
 
         if self.quick_open_editor.is_none() {
-            let mut styles = self.styles.text_input.clone();
-            styles.text_input_padding_left_px =
-                self.styles.quick_open.quick_open_input_text_padding_left_px;
-            styles.text_input_cursor_height_ratio =
-                self.styles.quick_open.quick_open_input_cursor_height_ratio;
+            let styles = self.quick_open_text_input_styles();
             let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "搜索文件...", cx));
             cx.subscribe(
                 &editor,
@@ -64,6 +76,7 @@ impl EditorView {
 
         if let Some(editor) = &self.quick_open_editor {
             editor.update(cx, |ti, cx| {
+                ti.styles = self.quick_open_text_input_styles();
                 ti.set_text(&self.quick_open_query, cx);
                 ti.select_all(cx);
             });

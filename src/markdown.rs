@@ -582,6 +582,37 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
     // Second pass: detect table lines
     detect_tables(&mut decorations, text, &line_starts);
 
+    for (line, decoration) in decorations.iter_mut().enumerate() {
+        if decoration.block_type != BlockType::Normal || decoration.table_info.is_some() {
+            continue;
+        }
+
+        let start = line_starts[line];
+        let end = line_starts.get(line + 1).copied().unwrap_or(text.len());
+        let content = &text[start..end];
+        let line_len = content.strip_suffix('\n').unwrap_or(content);
+        let leading_ws = line_len.len() - line_len.trim_start_matches([' ', '\t']).len();
+        let trimmed = &line_len[leading_ws..];
+
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+            decoration.block_type = BlockType::UnorderedList;
+            decoration.syntax_ranges.push(SyntaxRange {
+                range: leading_ws..leading_ws + 2,
+                trigger_range: leading_ws..leading_ws + 2,
+            });
+            continue;
+        }
+
+        let prefix_len = ordered_list_prefix_len(trimmed);
+        if prefix_len > 0 {
+            decoration.block_type = BlockType::OrderedList;
+            decoration.syntax_ranges.push(SyntaxRange {
+                range: leading_ws..leading_ws + prefix_len,
+                trigger_range: leading_ws..leading_ws + prefix_len,
+            });
+        }
+    }
+
     // Third pass: detect [[wiki links]] on each line.
     detect_wiki_links(&mut decorations, text, &line_starts);
 

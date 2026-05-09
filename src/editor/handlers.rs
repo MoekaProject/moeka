@@ -15,6 +15,7 @@ impl EditorView {
         {
             self.restore_snapshot(snapshot);
             self.tabs[index].snapshot = self.current_snapshot();
+            self.sync_active_tab_dirty_state();
             session_store::persist_session(self);
             self.pause_blinking(cx);
         }
@@ -67,6 +68,7 @@ impl EditorView {
         {
             self.restore_snapshot(snapshot);
             self.tabs[index].snapshot = self.current_snapshot();
+            self.sync_active_tab_dirty_state();
             session_store::persist_session(self);
             self.pause_blinking(cx);
         }
@@ -736,39 +738,44 @@ impl EditorView {
 
     pub(crate) fn on_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
         self.checkpoint();
-        if self.has_extra_cursors() {
-            self.multi_cursor_insert("  ");
-            self.reparse();
-            self.scroll_to_cursor();
-            self.pause_blinking(cx);
-            return;
-        }
-        let (start_line, end_line) = self.selected_line_span();
-        let has_list =
-            (start_line..=end_line).any(|line| self.list_indent_width_for_line(line).is_some());
+        let (line_indices, has_selection, has_list_line) =
+            self.collect_line_indices_for_block_indent();
 
-        if has_list {
+        if has_list_line {
             self.indent_selected_list_lines();
-        } else if self.cursor.has_selection() {
-            self.indent_current_lines("  ");
+        } else if has_selection {
+            if self.has_extra_cursors() {
+                self.indent_line_indices(&line_indices, "  ");
+            } else {
+                self.indent_current_lines("  ");
+            }
         } else {
-            self.cursor.insert(&mut self.buffer, "  ");
-            self.reparse();
-            self.scroll_to_cursor();
+            if self.has_extra_cursors() {
+                self.multi_cursor_insert("  ");
+                self.reparse();
+                self.scroll_to_cursor();
+            } else {
+                self.cursor.insert(&mut self.buffer, "  ");
+                self.reparse();
+                self.scroll_to_cursor();
+            }
         }
         self.pause_blinking(cx);
     }
 
     pub(crate) fn on_back_tab(&mut self, _: &BackTab, _: &mut Window, cx: &mut Context<Self>) {
         self.checkpoint();
-        let (start_line, end_line) = self.selected_line_span();
-        let has_list =
-            (start_line..=end_line).any(|line| self.list_indent_width_for_line(line).is_some());
+        let (line_indices, has_selection, has_list_line) =
+            self.collect_line_indices_for_block_indent();
 
-        if has_list {
+        if has_list_line {
             self.unindent_selected_list_lines();
-        } else if self.cursor.has_selection() {
-            self.unindent_current_lines(2);
+        } else if has_selection {
+            if self.has_extra_cursors() {
+                self.unindent_line_indices(&line_indices, 2);
+            } else {
+                self.unindent_current_lines(2);
+            }
         }
         self.pause_blinking(cx);
     }

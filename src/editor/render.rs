@@ -134,6 +134,7 @@ impl EditorView {
         let editor = cx.entity().clone();
         let title = SharedString::from(tooltip_title);
         let subtitle = tooltip_subtitle.map(SharedString::from);
+        let is_hovered = self.hovered_toolbar_button == Some(id);
 
         div()
             .id(id)
@@ -142,15 +143,21 @@ impl EditorView {
             .flex()
             .items_center()
             .justify_center()
-            .opacity(base_opacity)
+            .bg(gpui::transparent_black())
             .cursor(CursorStyle::Arrow)
-            .hover(move |style| style.opacity(hover_opacity))
             .on_hover({
                 let editor = editor.clone();
                 let title = title.clone();
                 let subtitle = subtitle.clone();
                 move |hovering: &bool, _: &mut Window, cx: &mut App| {
                     let _ = editor.update(cx, |this, cx| {
+                        let next_hover = if *hovering { Some(id) } else { None };
+                        if this.hovered_toolbar_button == Some(id) || next_hover.is_some() {
+                            if this.hovered_toolbar_button != next_hover {
+                                this.hovered_toolbar_button = next_hover;
+                                cx.notify();
+                            }
+                        }
                         if *hovering {
                             this.begin_tooltip_hover(
                                 TooltipState {
@@ -170,7 +177,12 @@ impl EditorView {
             .child(
                 img(helpers::resolve_asset_image_path(icon_path))
                     .w(px(icon_size))
-                    .h(px(icon_size)),
+                    .h(px(icon_size))
+                    .opacity(if is_hovered {
+                        hover_opacity
+                    } else {
+                        base_opacity
+                    }),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -682,18 +694,12 @@ impl Render for EditorView {
                                                                 .toolbar
                                                                 .toolbar_secondary_btn_size_px,
                                                         );
-                                                        let secondary_btn_padding_x = self.scaled(
-                                                            self.styles
-                                                                .toolbar
-                                                                .toolbar_secondary_btn_padding_x_px,
-                                                        );
                                                         let secondary_icon_size = self.scaled(
                                                             self.styles
                                                                 .toolbar
                                                                 .toolbar_secondary_icon_size_px,
                                                         );
-                                                        let secondary_btn_width =
-                                                            secondary_icon_size + secondary_btn_padding_x * 2.0;
+                                                        let secondary_btn_width = secondary_btn_size;
                                                         let outline_active = self.utility_panel
                                                             == Some(RightUtilityPanel::Outline);
                                                         let outline_x = editor_pane_width

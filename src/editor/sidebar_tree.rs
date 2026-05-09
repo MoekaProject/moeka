@@ -97,6 +97,9 @@ impl EditorView {
 
     pub(crate) fn collapse_all_dirs(&mut self, cx: &mut Context<Self>) {
         self.expanded_dirs.clear();
+        if self.sidebar_root.exists() {
+            self.expanded_dirs.insert(self.sidebar_root.clone());
+        }
         self.invalidate_sidebar_items_cache();
         self.reset_sidebar_render_limit();
         self.context_menu = None;

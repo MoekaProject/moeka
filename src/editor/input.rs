@@ -1358,7 +1358,7 @@ impl EditorView {
             .table_info
             .as_ref()
             .is_some_and(|ti| ti.is_front_matter);
-        let (display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
+        let (mut display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
             helpers::build_display_text(
                 line_content,
                 &decoration,
@@ -1371,6 +1371,12 @@ impl EditorView {
                 self.styles.checkbox.checkbox_parent_prefix_chars as usize,
                 0,
             );
+        self.apply_list_display_styles(
+            line_content,
+            &decoration,
+            &mut display_text,
+            prefix_collapsed,
+        );
 
         let runs = helpers::build_text_runs_for_display(
             &display_text,
@@ -1468,6 +1474,12 @@ impl EditorView {
         } else {
             editor_left + self.padding_left()
         };
+        let list_content_indent_px =
+            if is_list_type && !matches!(decoration.block_type, BlockType::TaskList(_)) {
+                self.scaled(self.styles.editor.editor_list_content_indent_px)
+            } else {
+                0.0
+            };
         let content_x =
             if matches!(decoration.block_type, BlockType::TaskList(_)) && prefix_collapsed {
                 let target_prefix_width = helpers::task_prefix_target_width_px(
@@ -1477,9 +1489,9 @@ impl EditorView {
                     task_source_indent_step_chars,
                 )
                 .unwrap_or(indent_px);
-                base_content_x + (target_prefix_width - indent_px)
+                base_content_x + list_content_indent_px + (target_prefix_width - indent_px)
             } else {
-                base_content_x
+                base_content_x + list_content_indent_px
             };
 
         Some(InlineLineDisplayInfo {

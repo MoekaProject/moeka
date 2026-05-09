@@ -1599,16 +1599,16 @@ impl EditorView {
         let ups = &self.styles.utility_panel;
         let history_item = item.clone();
         let font_size = self.scaled(ups.utility_panel_item_font_size_px);
-        let row_height = self.scaled(ups.utility_panel_item_height_px * 2.0);
+        let row_padding_y = self.scaled(ups.utility_panel_item_gap_px * 0.5);
         let row_gap = self.scaled(ups.utility_panel_item_gap_px * 0.4);
+        let row_height = font_size * 2.0 + row_gap + row_padding_y * 2.0;
         div()
             .px(px(self.scaled(ups.utility_panel_section_padding_x_px)))
-            .py(px(self.scaled(ups.utility_panel_item_gap_px)))
+            .py(px(row_padding_y))
             .w_full()
-            .h(px(row_height))
+            .min_h(px(row_height))
             .flex()
             .flex_col()
-            .justify_center()
             .gap(px(row_gap))
             .overflow_hidden()
             .cursor(CursorStyle::Arrow)

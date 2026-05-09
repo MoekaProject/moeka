@@ -72,6 +72,13 @@ fn ease_in_out_cubic(t: f32) -> f32 {
     }
 }
 
+fn text_tab_is_dirty(saved_text: Option<&str>, current_text: &str) -> bool {
+    match saved_text {
+        Some(saved_text) => saved_text != current_text,
+        None => !current_text.is_empty(),
+    }
+}
+
 // ── Platform helpers ────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
@@ -442,6 +449,12 @@ pub(crate) struct FileClipboard {
     pub is_cut: bool,
 }
 
+#[derive(Clone)]
+pub(crate) struct MultiCursorClipboard {
+    pub serialized_text: String,
+    pub segments: Vec<String>,
+}
+
 // ── Sidebar drag-and-drop types ─────────────────────────────────────
 
 #[derive(Clone)]
@@ -598,6 +611,7 @@ pub(crate) struct LineDisplayInfo {
     pub extra_height: f32,
     pub indent_px: f32,
     pub content_x: f32,
+    pub selection_padding_left_px: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -718,6 +732,7 @@ pub struct EditorView {
     pub(crate) sidebar_edit: Option<SidebarEditMode>,
     pub(crate) sidebar_edit_blur_sub: Option<gpui::Subscription>,
     pub(crate) file_clipboard: Option<FileClipboard>,
+    pub(crate) multi_cursor_clipboard: Option<MultiCursorClipboard>,
     pub(crate) ui_scale: f32,
     pub(crate) folded_sections: HashSet<usize>,
     pub(crate) folded_image_previews: HashSet<usize>,
@@ -762,6 +777,7 @@ pub struct EditorView {
     pub(crate) pending_close_tab_ids: Vec<String>,
     /// 多选：最后一个选中的 focus 路径
     pub(crate) focused_sidebar_path: Option<PathBuf>,
+    pub(crate) suppress_next_sidebar_sync_path: Option<PathBuf>,
     /// 多选锚点（shift 连续选择的起点）
     pub(crate) sidebar_selection_anchor: Option<PathBuf>,
     pub(crate) sidebar_sort_mode: SidebarSortMode,
@@ -830,6 +846,7 @@ pub struct EditorView {
     pub(crate) scroll_anim_epoch: usize,
     pub(crate) toolbar_hidden_by_scroll: bool,
     pub(crate) toolbar_corner_hovered: bool,
+    pub(crate) hovered_toolbar_button: Option<&'static str>,
     pub(crate) toolbar_opacity: f32,
     pub(crate) toolbar_opacity_target: f32,
     pub(crate) toolbar_opacity_epoch: usize,
@@ -870,7 +887,9 @@ pub struct EditorView {
     pub(crate) outline_flash_highlight_current_index: Option<usize>,
     pub(crate) outline_flash_epoch: usize,
     pub(crate) workspace_search_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) workspace_search_focus_sub: Option<gpui::Subscription>,
     pub(crate) workspace_search_blur_sub: Option<gpui::Subscription>,
+    pub(crate) workspace_search_input_focused: bool,
     pub(crate) workspace_search_task: Option<Task<()>>,
     pub(crate) workspace_search_scroll_handle: ScrollHandle,
     pub(crate) workspace_search_render_limit: usize,
@@ -1047,6 +1066,7 @@ impl EditorView {
             sidebar_edit: None,
             sidebar_edit_blur_sub: None,
             file_clipboard: None,
+            multi_cursor_clipboard: None,
             ui_scale: app_settings.ui_scale,
             folded_sections: HashSet::new(),
             folded_image_previews: HashSet::new(),
@@ -1090,6 +1110,7 @@ impl EditorView {
             dialog: None,
             pending_close_tab_ids: Vec::new(),
             focused_sidebar_path: None,
+            suppress_next_sidebar_sync_path: None,
             sidebar_selection_anchor: None,
             sidebar_sort_mode: app_settings.sidebar_sort_mode(),
             sidebar_starred_collapsed: false,
@@ -1148,6 +1169,7 @@ impl EditorView {
             scroll_anim_epoch: 0,
             toolbar_hidden_by_scroll: false,
             toolbar_corner_hovered: false,
+            hovered_toolbar_button: None,
             toolbar_opacity: 1.0,
             toolbar_opacity_target: 1.0,
             toolbar_opacity_epoch: 0,
@@ -1186,7 +1208,9 @@ impl EditorView {
             outline_flash_highlight_current_index: None,
             outline_flash_epoch: 0,
             workspace_search_editor: None,
+            workspace_search_focus_sub: None,
             workspace_search_blur_sub: None,
+            workspace_search_input_focused: false,
             workspace_search_task: None,
             workspace_search_scroll_handle: ScrollHandle::new(),
             workspace_search_render_limit: 100,
@@ -2162,6 +2186,317 @@ impl EditorView {
         }
     }
 
+    fn cursor_states_with_primary_flag(&self) -> Vec<(Cursor, bool)> {
+        let mut states = Vec::with_capacity(1 + self.extra_cursors.len());
+        states.push((self.cursor, true));
+        states.extend(
+            self.extra_cursors
+                .iter()
+                .copied()
+                .map(|cursor| (cursor, false)),
+        );
+        states
+    }
+
+    fn restore_cursor_states(&mut self, states: Vec<(Cursor, bool)>) {
+        self.extra_cursors.clear();
+        for (cursor, is_primary) in states {
+            if is_primary {
+                self.cursor = cursor;
+            } else {
+                self.extra_cursors.push(cursor);
+            }
+        }
+        self.dedup_cursors();
+    }
+
+    fn adjust_offset_for_line_prefix_change(
+        offset: usize,
+        line_start: usize,
+        removed: usize,
+        inserted: usize,
+    ) -> usize {
+        if offset < line_start {
+            return offset;
+        }
+
+        let removed_end = line_start.saturating_add(removed);
+        if offset <= line_start {
+            return line_start.saturating_add(inserted);
+        }
+        if removed > 0 && offset <= removed_end {
+            return line_start.saturating_add(inserted);
+        }
+
+        if inserted >= removed {
+            offset.saturating_add(inserted - removed)
+        } else {
+            offset.saturating_sub(removed - inserted)
+        }
+    }
+
+    fn line_span_for_range(&self, range: Range<usize>) -> (usize, usize) {
+        let (start_line, _) = self.buffer.offset_to_line_col(range.start);
+        let end_anchor = range
+            .end
+            .saturating_sub(usize::from(range.end > range.start));
+        let (end_line, _) = self.buffer.offset_to_line_col(end_anchor);
+        (start_line, end_line)
+    }
+
+    fn unordered_list_display_marker_for_line(&self, line_content: &str) -> &'static str {
+        let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+        let marker_cycle = &self.styles.editor.editor_unordered_list_marker_cycle;
+        let level = leading_ws / 2;
+        marker_cycle[level % marker_cycle.len()]
+    }
+
+    pub(crate) fn apply_list_display_styles(
+        &self,
+        _line_content: &str,
+        decoration: &LineDecoration,
+        display_text: &mut String,
+        prefix_collapsed: bool,
+    ) {
+        if !prefix_collapsed || decoration.block_type != BlockType::UnorderedList {
+            return;
+        }
+
+        let leading_ws = display_text.len() - display_text.trim_start_matches([' ', '\t']).len();
+        let marker_end = display_text[leading_ws..]
+            .char_indices()
+            .nth(2)
+            .map(|(offset, _)| leading_ws + offset)
+            .unwrap_or(display_text.len());
+        if marker_end > leading_ws {
+            display_text.replace_range(leading_ws..marker_end, "  ");
+        }
+    }
+
+    fn resolved_list_indent_widths(&self, line_indices: &[usize]) -> Vec<(usize, usize)> {
+        let mut current_width = 2;
+        let mut resolved = Vec::with_capacity(line_indices.len());
+
+        for &line in line_indices {
+            if let Some(width) = self.list_indent_width_for_line(line) {
+                current_width = width;
+            }
+            resolved.push((line, current_width));
+        }
+
+        resolved
+    }
+
+    pub(crate) fn collect_line_indices_for_block_indent(&self) -> (Vec<usize>, bool, bool) {
+        let mut lines = Vec::new();
+        let mut has_selection = false;
+        let mut has_list_line = false;
+
+        for (offset, anchor) in self.all_cursor_ranges() {
+            let range = offset.min(anchor)..offset.max(anchor);
+            if range.is_empty() {
+                let line = self.buffer.offset_to_line_col(offset).0;
+                if self.list_indent_width_for_line(line).is_some() {
+                    lines.push(line);
+                    has_list_line = true;
+                }
+                continue;
+            }
+
+            has_selection = true;
+            let (start_line, end_line) = self.line_span_for_range(range);
+            for line in start_line..=end_line {
+                has_list_line |= self.list_indent_width_for_line(line).is_some();
+                lines.push(line);
+            }
+        }
+
+        lines.sort_unstable();
+        lines.dedup();
+        (lines, has_selection, has_list_line)
+    }
+
+    pub(crate) fn indent_line_indices(&mut self, line_indices: &[usize], spaces: &str) {
+        if line_indices.is_empty() || spaces.is_empty() {
+            return;
+        }
+
+        let inserted = spaces.len();
+        let mut cursor_states = self.cursor_states_with_primary_flag();
+        for &line in line_indices {
+            let line_start = self.buffer.line_start(line);
+            self.buffer.insert(line_start, spaces);
+            for (cursor, _) in &mut cursor_states {
+                cursor.offset = Self::adjust_offset_for_line_prefix_change(
+                    cursor.offset,
+                    line_start,
+                    0,
+                    inserted,
+                )
+                .min(self.buffer.len());
+                cursor.anchor = Self::adjust_offset_for_line_prefix_change(
+                    cursor.anchor,
+                    line_start,
+                    0,
+                    inserted,
+                )
+                .min(self.buffer.len());
+            }
+        }
+
+        self.restore_cursor_states(cursor_states);
+        self.reparse();
+        self.scroll_to_cursor();
+    }
+
+    pub(crate) fn indent_line_indices_with_widths(&mut self, line_widths: &[(usize, usize)]) {
+        if line_widths.is_empty() {
+            return;
+        }
+
+        let mut cursor_states = self.cursor_states_with_primary_flag();
+        for &(line, width) in line_widths {
+            if width == 0 {
+                continue;
+            }
+
+            let line_start = self.buffer.line_start(line);
+            let spaces = " ".repeat(width);
+            self.buffer.insert(line_start, &spaces);
+            for (cursor, _) in &mut cursor_states {
+                cursor.offset =
+                    Self::adjust_offset_for_line_prefix_change(cursor.offset, line_start, 0, width)
+                        .min(self.buffer.len());
+                cursor.anchor =
+                    Self::adjust_offset_for_line_prefix_change(cursor.anchor, line_start, 0, width)
+                        .min(self.buffer.len());
+            }
+        }
+
+        self.restore_cursor_states(cursor_states);
+        self.reparse();
+        self.scroll_to_cursor();
+    }
+
+    pub(crate) fn unindent_line_indices(&mut self, line_indices: &[usize], max_spaces: usize) {
+        if line_indices.is_empty() || max_spaces == 0 {
+            return;
+        }
+
+        let mut cursor_states = self.cursor_states_with_primary_flag();
+        for &line in line_indices {
+            let line_start = self.buffer.line_start(line);
+            let strip = self
+                .buffer
+                .line_content(line)
+                .bytes()
+                .take(max_spaces)
+                .take_while(|&byte| byte == b' ')
+                .count();
+            if strip == 0 {
+                continue;
+            }
+
+            self.buffer.replace(line_start..line_start + strip, "");
+            for (cursor, _) in &mut cursor_states {
+                cursor.offset =
+                    Self::adjust_offset_for_line_prefix_change(cursor.offset, line_start, strip, 0)
+                        .min(self.buffer.len());
+                cursor.anchor =
+                    Self::adjust_offset_for_line_prefix_change(cursor.anchor, line_start, strip, 0)
+                        .min(self.buffer.len());
+            }
+        }
+
+        self.restore_cursor_states(cursor_states);
+        self.reparse();
+        self.scroll_to_cursor();
+    }
+
+    pub(crate) fn unindent_line_indices_with_widths(&mut self, line_widths: &[(usize, usize)]) {
+        if line_widths.is_empty() {
+            return;
+        }
+
+        let mut cursor_states = self.cursor_states_with_primary_flag();
+        for &(line, width) in line_widths {
+            if width == 0 {
+                continue;
+            }
+
+            let line_start = self.buffer.line_start(line);
+            let strip = self
+                .buffer
+                .line_content(line)
+                .bytes()
+                .take(width)
+                .take_while(|&byte| byte == b' ')
+                .count();
+            if strip == 0 {
+                continue;
+            }
+
+            self.buffer.replace(line_start..line_start + strip, "");
+            for (cursor, _) in &mut cursor_states {
+                cursor.offset =
+                    Self::adjust_offset_for_line_prefix_change(cursor.offset, line_start, strip, 0)
+                        .min(self.buffer.len());
+                cursor.anchor =
+                    Self::adjust_offset_for_line_prefix_change(cursor.anchor, line_start, strip, 0)
+                        .min(self.buffer.len());
+            }
+        }
+
+        self.restore_cursor_states(cursor_states);
+        self.reparse();
+        self.scroll_to_cursor();
+    }
+
+    fn multi_cursor_selected_texts(&self) -> Vec<String> {
+        self.cursor_states_with_primary_flag()
+            .into_iter()
+            .filter_map(|(cursor, _)| {
+                let range = cursor.selection_range();
+                (!range.is_empty()).then(|| self.buffer.text()[range].to_string())
+            })
+            .collect()
+    }
+
+    fn apply_multi_cursor_paste_segments(&mut self, segments: &[String]) {
+        let cursor_states = self.cursor_states_with_primary_flag();
+        if cursor_states.len() != segments.len() {
+            return;
+        }
+
+        let mut edits = Vec::with_capacity(cursor_states.len());
+        let mut resolved: Vec<_> = cursor_states
+            .into_iter()
+            .zip(segments.iter().cloned())
+            .map(|((cursor, is_primary), text)| (cursor, is_primary, text))
+            .collect();
+        resolved.sort_by(|left, right| {
+            let left_start = left.0.selection_range().start;
+            let right_start = right.0.selection_range().start;
+            right_start.cmp(&left_start)
+        });
+
+        for (cursor, is_primary, text) in resolved {
+            let range = cursor.selection_range();
+            let start = range.start;
+            let replaced_len = range.end.saturating_sub(range.start);
+            self.buffer.replace(range, &text);
+            edits.push(MultiCursorResolvedEdit {
+                start,
+                cursor_after: start + text.len(),
+                delta: text.len() as isize - replaced_len as isize,
+                is_primary,
+                ordered_list_update: None,
+            });
+        }
+
+        self.apply_multi_cursor_resolved_edits(edits);
+    }
+
     pub(crate) fn render_dialog(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui::{CursorStyle, FontWeight, MouseButton, SharedString, div, prelude::*, px};
 
@@ -2443,6 +2778,35 @@ impl EditorView {
     pub(crate) fn active_tab_supports_persistent_save(&self) -> bool {
         self.active_file_kind()
             .is_some_and(FileKind::supports_persistent_save)
+    }
+
+    pub(crate) fn sync_active_tab_dirty_state(&mut self) {
+        let Some(index) = self.active_tab_index() else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+        if tab.kind != TabKind::Editor {
+            tab.is_dirty = false;
+            return;
+        }
+        if !tab
+            .file_kind
+            .as_ref()
+            .is_some_and(FileKind::supports_text_buffer)
+        {
+            tab.is_dirty = false;
+            return;
+        }
+
+        let current_text = self.buffer.text();
+        tab.is_dirty = match tab.path.as_ref() {
+            Some(path) => std::fs::read_to_string(path)
+                .map(|saved_text| text_tab_is_dirty(Some(saved_text.as_str()), current_text))
+                .unwrap_or(true),
+            None => text_tab_is_dirty(None, current_text),
+        };
     }
 
     pub(crate) fn active_tab_is_markdown(&self) -> bool {
@@ -3227,12 +3591,24 @@ impl EditorView {
         self.push_undo_snapshot(self.current_snapshot());
     }
 
-    pub(crate) fn copy_selection_to_clipboard(&self, cx: &mut Context<Self>) {
-        if self.cursor.has_selection() {
-            let range = self.cursor.selection_range();
-            let text = self.buffer.text()[range].to_string();
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+    pub(crate) fn copy_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        let texts = self.multi_cursor_selected_texts();
+        if texts.is_empty() {
+            return;
         }
+
+        if texts.len() > 1 {
+            let serialized_text = texts.join("\n");
+            self.multi_cursor_clipboard = Some(MultiCursorClipboard {
+                serialized_text: serialized_text.clone(),
+                segments: texts,
+            });
+            cx.write_to_clipboard(ClipboardItem::new_string(serialized_text));
+            return;
+        }
+
+        self.multi_cursor_clipboard = None;
+        cx.write_to_clipboard(ClipboardItem::new_string(texts[0].clone()));
     }
 
     fn next_code_block_copy_feedback_epoch(&mut self) -> usize {
@@ -3312,16 +3688,47 @@ impl EditorView {
     }
 
     pub(crate) fn cut_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
-        if self.cursor.has_selection() {
-            self.checkpoint();
+        let texts = self.multi_cursor_selected_texts();
+        if texts.is_empty() {
+            return;
+        }
+
+        self.checkpoint();
+        if texts.len() > 1 {
+            let serialized_text = texts.join("\n");
+            self.multi_cursor_clipboard = Some(MultiCursorClipboard {
+                serialized_text: serialized_text.clone(),
+                segments: texts,
+            });
+            cx.write_to_clipboard(ClipboardItem::new_string(serialized_text));
+
+            let all = self.collect_multi_cursor_targets_desc();
+            let mut edits = Vec::with_capacity(all.len());
+            for (offset, anchor, is_primary) in &all {
+                let range_start = (*offset).min(*anchor);
+                let range_end = (*offset).max(*anchor);
+                if range_start != range_end {
+                    self.buffer.delete(range_start..range_end);
+                }
+                edits.push(MultiCursorResolvedEdit {
+                    start: range_start,
+                    cursor_after: range_start,
+                    delta: -(range_end as isize - range_start as isize),
+                    is_primary: *is_primary,
+                    ordered_list_update: None,
+                });
+            }
+            self.apply_multi_cursor_resolved_edits(edits);
+        } else {
+            self.multi_cursor_clipboard = None;
             let range = self.cursor.selection_range();
-            let text = self.buffer.text()[range.clone()].to_string();
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            cx.write_to_clipboard(ClipboardItem::new_string(texts[0].clone()));
             self.buffer.delete(range.clone());
             self.cursor.move_to(range.start, &self.buffer);
-            self.reparse();
-            self.pause_blinking(cx);
         }
+
+        self.reparse();
+        self.pause_blinking(cx);
     }
 
     pub(crate) fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
@@ -3345,6 +3752,18 @@ impl EditorView {
         }
 
         if let Some(text) = item.text() {
+            if let Some(multi_cursor_clipboard) = self.multi_cursor_clipboard.as_ref()
+                && multi_cursor_clipboard.serialized_text == text
+                && multi_cursor_clipboard.segments.len() == 1 + self.extra_cursors.len()
+            {
+                let segments = multi_cursor_clipboard.segments.clone();
+                self.checkpoint();
+                self.apply_multi_cursor_paste_segments(&segments);
+                self.reparse();
+                self.scroll_to_cursor();
+                self.pause_blinking(cx);
+                return;
+            }
             self.insert_pasted_text(&text, cx);
         }
     }
@@ -3581,13 +4000,7 @@ impl EditorView {
     }
 
     pub(crate) fn selected_line_span(&self) -> (usize, usize) {
-        let selection = self.cursor.selection_range();
-        let (start_line, _) = self.buffer.offset_to_line_col(selection.start);
-        let end_anchor = selection
-            .end
-            .saturating_sub(usize::from(selection.end > selection.start));
-        let (end_line, _) = self.buffer.offset_to_line_col(end_anchor);
-        (start_line, end_line)
+        self.line_span_for_range(self.cursor.selection_range())
     }
 
     pub(crate) fn list_indent_width_for_line(&self, line: usize) -> Option<usize> {
@@ -3619,83 +4032,31 @@ impl EditorView {
     }
 
     pub(crate) fn indent_selected_list_lines(&mut self) {
-        let selection = self.cursor.selection_range();
-        let (start_line, end_line) = self.selected_line_span();
-        let widths: Vec<usize> = (start_line..=end_line)
-            .map(|line| self.list_indent_width_for_line(line).unwrap_or(0))
-            .collect();
-
-        if widths.iter().all(|width| *width == 0) {
+        let (lines, _, has_list_line) = self.collect_line_indices_for_block_indent();
+        if !has_list_line {
             return;
         }
-
-        let mut inserted = 0usize;
-        for (index, width) in widths.iter().copied().enumerate() {
-            if width == 0 {
-                continue;
-            }
-
-            let line = start_line + index;
-            let line_start = self.buffer.line_start(line) + inserted;
-            self.buffer.insert(line_start, &" ".repeat(width));
-            inserted += width;
+        let line_widths = self.resolved_list_indent_widths(&lines);
+        self.indent_line_indices_with_widths(&line_widths);
+        if let (Some(first_line), Some(last_line)) = (lines.first().copied(), lines.last().copied())
+        {
+            self.normalize_ordered_lists_in_line_span(first_line, last_line);
+            self.reparse();
         }
-
-        let first_inserted = widths.first().copied().unwrap_or(0);
-        self.cursor.anchor = (selection.start + first_inserted).min(self.buffer.len());
-        self.cursor.offset = (selection.end + inserted).min(self.buffer.len());
-        self.reparse();
-        self.normalize_ordered_lists_in_line_span(start_line, end_line);
-        self.reparse();
-        self.scroll_to_cursor();
     }
 
     pub(crate) fn unindent_selected_list_lines(&mut self) {
-        let selection = self.cursor.selection_range();
-        let (start_line, end_line) = self.selected_line_span();
-        let strips: Vec<usize> = (start_line..=end_line)
-            .map(|line| {
-                let Some(max_spaces) = self.list_indent_width_for_line(line) else {
-                    return 0;
-                };
-                self.buffer
-                    .line_content(line)
-                    .bytes()
-                    .take(max_spaces)
-                    .take_while(|&byte| byte == b' ')
-                    .count()
-            })
-            .collect();
-
-        if strips.iter().all(|strip| *strip == 0) {
+        let (lines, _, has_list_line) = self.collect_line_indices_for_block_indent();
+        if !has_list_line {
             return;
         }
-
-        let mut total_removed = 0usize;
-        for (index, strip) in strips.iter().copied().enumerate() {
-            if strip == 0 {
-                continue;
-            }
-
-            let line = start_line + index;
-            let line_start = self.buffer.line_start(line);
-            self.buffer.replace(line_start..line_start + strip, "");
-            total_removed += strip;
+        let line_widths = self.resolved_list_indent_widths(&lines);
+        self.unindent_line_indices_with_widths(&line_widths);
+        if let (Some(first_line), Some(last_line)) = (lines.first().copied(), lines.last().copied())
+        {
+            self.normalize_ordered_lists_in_line_span(first_line, last_line);
+            self.reparse();
         }
-
-        let first_removed = strips.first().copied().unwrap_or(0);
-        self.cursor.anchor = selection
-            .start
-            .saturating_sub(first_removed)
-            .min(self.buffer.len());
-        self.cursor.offset = selection
-            .end
-            .saturating_sub(total_removed)
-            .min(self.buffer.len());
-        self.reparse();
-        self.normalize_ordered_lists_in_line_span(start_line, end_line);
-        self.reparse();
-        self.scroll_to_cursor();
     }
 
     pub(crate) fn unindent_current_lines(&mut self, max_spaces: usize) {
@@ -4518,7 +4879,19 @@ pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{markdown_reference_for_import_name, unique_import_path};
+    use super::{markdown_reference_for_import_name, text_tab_is_dirty, unique_import_path};
+
+    #[test]
+    fn text_tab_is_dirty_detects_saved_file_revert() {
+        assert!(text_tab_is_dirty(Some("hello"), "hello world"));
+        assert!(!text_tab_is_dirty(Some("hello"), "hello"));
+    }
+
+    #[test]
+    fn text_tab_is_dirty_treats_empty_untitled_buffer_as_clean() {
+        assert!(text_tab_is_dirty(None, "draft"));
+        assert!(!text_tab_is_dirty(None, ""));
+    }
 
     #[test]
     fn unique_import_path_appends_incrementing_suffix_on_conflict() {

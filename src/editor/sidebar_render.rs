@@ -486,6 +486,7 @@ impl EditorView {
                     let has_modifier = mods.platform || mods.shift;
                     this.sidebar_select_item(&click_path, mods.shift, mods.platform);
                     if !has_modifier {
+                        this.suppress_next_sidebar_sync_path = Some(click_path.clone());
                         if event.click_count() >= 2 {
                             this.focused_sidebar_path = None;
                             this.open_path_in_permanent_tab(click_path.clone(), true, cx);
@@ -511,7 +512,11 @@ impl EditorView {
                         this.sidebar_select_item(&context_menu_path, false, false);
                     }
                     this.focused_sidebar_path = Some(context_menu_path.clone());
-                    this.open_starred_sidebar_context_menu(context_menu_path.clone(), event.position, cx);
+                    this.open_starred_sidebar_context_menu(
+                        context_menu_path.clone(),
+                        event.position,
+                        cx,
+                    );
                 }),
             )
             .into_any_element()
@@ -820,13 +825,17 @@ impl EditorView {
                     if !has_modifier {
                         if path.is_dir() {
                             this.toggle_sidebar_directory(path.clone(), cx);
-                        } else if event.click_count() >= 2 {
-                            this.focused_sidebar_path = None;
-                            this.open_path_in_permanent_tab(path.clone(), true, cx);
-                            this.move_cursor_to_first_line_end();
-                            this.request_editor_focus(cx);
-                        } else if !this.switch_to_existing_editor_tab_for_path(&path, false, cx) {
-                            this.open_path_in_preview_tab(path.clone(), false, cx);
+                        } else {
+                            this.suppress_next_sidebar_sync_path = Some(path.clone());
+                            if event.click_count() >= 2 {
+                                this.focused_sidebar_path = None;
+                                this.open_path_in_permanent_tab(path.clone(), true, cx);
+                                this.move_cursor_to_first_line_end();
+                                this.request_editor_focus(cx);
+                            } else if !this.switch_to_existing_editor_tab_for_path(&path, false, cx)
+                            {
+                                this.open_path_in_preview_tab(path.clone(), false, cx);
+                            }
                         }
                     }
                     window.prevent_default();

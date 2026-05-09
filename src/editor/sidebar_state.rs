@@ -93,33 +93,38 @@ impl EditorView {
         }
     }
 
-    fn ensure_sidebar_item_visible(&self, index: usize) -> bool {
-        let bounds = self.sidebar_scroll_handle.bounds();
-        let viewport_height = f32::from(bounds.size.height);
-        if viewport_height <= 0.0 {
+    fn ensure_sidebar_item_visible(&self, index: usize, item_count: usize) -> bool {
+        if item_count == 0 {
             return false;
         }
+
+        let bounds = self.sidebar_scroll_handle.bounds();
+        let viewport_height = f32::from(bounds.size.height);
+        let viewport_height = if viewport_height > 0.0 {
+            viewport_height
+        } else {
+            self.last_window_height.max(self.sidebar_item_height_px())
+        };
 
         let offset = self.sidebar_scroll_handle.offset();
         let scroll_y = -f32::from(offset.y);
         let item_height = self.sidebar_item_height_px();
-        let item_top = self.sidebar_scroll_prefix_height(true) + index as f32 * item_height;
+        let prefix_height = self.sidebar_scroll_prefix_height(true);
+        let item_top = prefix_height + index as f32 * item_height;
         let item_bottom = item_top + item_height;
+        let bottom_spacer_height = self.scaled(self.styles.sidebar.sidebar_bottom_spacer_height_px);
+        let content_height = prefix_height + item_count as f32 * item_height + bottom_spacer_height;
+        let max_scroll_top = (content_height - viewport_height).max(0.0);
+        let desired_top = ((item_top + item_bottom) * 0.5 - viewport_height * 0.5)
+            .max(0.0)
+            .min(max_scroll_top);
 
-        let target_top = if item_top < scroll_y {
-            Some(item_top)
-        } else if item_bottom > scroll_y + viewport_height {
-            Some((item_bottom - viewport_height).max(0.0))
-        } else {
-            None
-        };
-
-        let Some(target_top) = target_top else {
+        if (desired_top - scroll_y).abs() < 0.5 {
             return false;
-        };
+        }
 
         self.sidebar_scroll_handle
-            .set_offset(gpui::point(offset.x, px(-target_top)));
+            .set_offset(gpui::point(offset.x, px(-desired_top)));
         true
     }
 
@@ -520,6 +525,7 @@ impl EditorView {
 
         self.invalidate_sidebar_items_cache();
         let items = self.sidebar_items();
+        let item_count = items.len();
         if let Some(index) = items.iter().position(|item| item.path == path) {
             self.selected_sidebar_paths.clear();
             self.selected_sidebar_paths.insert(path.clone());
@@ -528,27 +534,49 @@ impl EditorView {
             let sidebar_is_available = show_sidebar || self.sidebar_visible;
             if sidebar_is_available {
                 self.focused_sidebar_path = Some(path.clone());
-                let scrolled = self.ensure_sidebar_item_visible(index);
-                if switched_workspace || expanded_changed || scrolled {
-                    let reveal_path = self.focused_sidebar_path.clone();
-                    cx.spawn(async move |this, cx| {
+                let immediate_scrolled = self.ensure_sidebar_item_visible(index, item_count);
+                let needs_deferred_reveal =
+                    switched_workspace || expanded_changed || immediate_scrolled;
+                let reveal_path = self.focused_sidebar_path.clone();
+                cx.spawn(async move |this, cx| {
+                    let retry_count = if needs_deferred_reveal { 6 } else { 4 };
+                    for _ in 0..retry_count {
                         cx.background_executor()
-                            .timer(Duration::from_millis(1))
+                            .timer(Duration::from_millis(16))
                             .await;
-                        this.update(cx, |editor, cx| {
-                            if let Some(path) = reveal_path.as_ref() {
+
+                        let done = this
+                            .update(cx, |editor, cx| {
+                                let Some(path) = reveal_path.as_ref() else {
+                                    return true;
+                                };
+
                                 let items = editor.sidebar_items();
-                                if let Some(index) = items.iter().position(|item| &item.path == path)
-                                    && editor.ensure_sidebar_item_visible(index)
-                                {
+                                let item_count = items.len();
+                                let Some(index) = items.iter().position(|item| &item.path == path)
+                                else {
+                                    return false;
+                                };
+
+                                let bounds = editor.sidebar_scroll_handle.bounds();
+                                let viewport_height = f32::from(bounds.size.height);
+                                if viewport_height <= 0.0 {
+                                    return false;
+                                }
+
+                                if editor.ensure_sidebar_item_visible(index, item_count) {
                                     cx.notify();
                                 }
-                            }
-                        })
-                        .ok();
-                    })
-                    .detach();
-                }
+                                true
+                            })
+                            .unwrap_or(true);
+
+                        if done {
+                            break;
+                        }
+                    }
+                })
+                .detach();
             } else {
                 self.focused_sidebar_path = None;
             }

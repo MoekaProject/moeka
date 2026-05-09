@@ -562,7 +562,15 @@ impl EditorView {
             self.pause_blinking(cx);
         }
         if let Some(path) = tab.path.clone() {
-            self.sync_path_in_sidebar_state(path, cx);
+            let suppress_sidebar_sync = self
+                .suppress_next_sidebar_sync_path
+                .as_ref()
+                .is_some_and(|suppressed| suppressed == &path);
+            if suppress_sidebar_sync {
+                self.suppress_next_sidebar_sync_path = None;
+            } else {
+                self.sync_path_in_sidebar_state(path, cx);
+            }
         }
         self.record_active_tab_navigation_target();
         cx.notify();
@@ -1011,7 +1019,7 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn active_tab_breadcrumb_segments(&self) -> Vec<String> {
+    fn active_tab_breadcrumb_items(&self) -> Vec<(String, Option<PathBuf>)> {
         let Some(tab) = self
             .active_tab_index()
             .and_then(|index| self.tabs.get(index))
@@ -1020,11 +1028,11 @@ impl EditorView {
         };
 
         let Some(path) = tab.path.as_ref() else {
-            return vec![tab.title.clone()];
+            return vec![(tab.title.clone(), None)];
         };
 
         let Some(root) = self.workspace_root_for_path(path) else {
-            return vec![tab.title.clone()];
+            return vec![(tab.title.clone(), Some(path.clone()))];
         };
 
         let root_name = root
@@ -1033,20 +1041,22 @@ impl EditorView {
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| root.display().to_string());
 
-        let mut segments = vec![root_name];
+        let mut segments = vec![(root_name, Some(root.clone()))];
+        let mut segment_path = root.clone();
         if let Ok(relative_path) = path.strip_prefix(&root) {
             for component in relative_path.components() {
                 if let std::path::Component::Normal(name) = component {
                     let segment = name.to_string_lossy().into_owned();
                     if !segment.is_empty() {
-                        segments.push(segment);
+                        segment_path.push(&segment);
+                        segments.push((segment, Some(segment_path.clone())));
                     }
                 }
             }
         }
 
         if segments.len() == 1 {
-            segments.push(tab.title.clone());
+            segments.push((tab.title.clone(), Some(path.clone())));
         }
 
         segments
@@ -1060,6 +1070,11 @@ impl EditorView {
         let action_size = self.scaled(es.editor_path_bar_action_btn_size_px);
         let action_icon_size = self.scaled(es.editor_path_bar_action_icon_size_px);
         let action_hover_opacity = es.editor_path_bar_action_hover_opacity;
+        let item_padding_x = self.scaled(es.editor_path_bar_item_padding_x_px);
+        let item_padding_y = self.scaled(es.editor_path_bar_item_padding_y_px);
+        let item_radius = self.scaled(es.editor_path_bar_item_radius_px);
+        let item_hover_text_color = es.editor_path_bar_item_hover_text_color;
+        let item_opacity = es.editor_path_bar_item_opacity;
         let mut breadcrumb = div()
             .id("editor-path-bar-content")
             .flex_1()
@@ -1068,9 +1083,9 @@ impl EditorView {
             .flex()
             .items_center()
             .gap(px(gap));
-        let segments = self.active_tab_breadcrumb_segments();
+        let segments = self.active_tab_breadcrumb_items();
 
-        for (index, segment) in segments.iter().enumerate() {
+        for (index, (segment, segment_path)) in segments.iter().enumerate() {
             if index > 0 {
                 breadcrumb = breadcrumb.child(
                     svg()
@@ -1082,29 +1097,76 @@ impl EditorView {
             }
 
             let is_last = index + 1 == segments.len();
+            let segment_path = segment_path.clone();
             if is_last {
                 let (base, suffix) = split_file_name_for_display(segment);
                 let mut current = div()
+                    .cursor(CursorStyle::Arrow)
+                    .when_some(segment_path.clone(), |this, reveal_path| {
+                        this.on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.reveal_path_in_sidebar(reveal_path.clone(), cx);
+                            }),
+                        )
+                    })
+                    .flex()
                     .flex_1()
                     .min_w(px(0.0))
-                    .overflow_hidden()
-                    .flex()
-                    .items_center()
-                    .whitespace_nowrap();
-                current = current.child(div().whitespace_nowrap().child(base.to_string()));
-                if let Some(suffix) = suffix {
-                    current = current.child(
-                        div()
-                            .flex_none()
-                            .whitespace_nowrap()
-                            .opacity(es.editor_path_bar_suffix_opacity)
-                            .child(suffix.to_string()),
-                    );
-                }
+                    .overflow_hidden();
+                current = current.child(
+                    div()
+                        .px(px(item_padding_x))
+                        .py(px(item_padding_y))
+                        .rounded(px(item_radius))
+                        .text_color(item_hover_text_color)
+                        .opacity(item_opacity)
+                        .hover(move |style| style.opacity(1.0))
+                        .flex()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .items_center()
+                        .whitespace_nowrap()
+                        .child(div().whitespace_nowrap().child(base.to_string()))
+                        .when_some(suffix.clone(), |this, suffix| {
+                            this.child(
+                                div()
+                                    .flex_none()
+                                    .whitespace_nowrap()
+                                    .opacity(es.editor_path_bar_suffix_opacity)
+                                    .child(suffix.to_string()),
+                            )
+                        }),
+                );
                 breadcrumb = breadcrumb.child(current);
             } else {
-                breadcrumb =
-                    breadcrumb.child(div().flex_none().whitespace_nowrap().child(segment.clone()));
+                breadcrumb = breadcrumb.child(
+                    div()
+                        .cursor(CursorStyle::Arrow)
+                        .when_some(segment_path, |this, reveal_path| {
+                            this.on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.reveal_path_in_sidebar(reveal_path.clone(), cx);
+                                }),
+                            )
+                        })
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .child(
+                            div()
+                                .px(px(item_padding_x))
+                                .py(px(item_padding_y))
+                                .rounded(px(item_radius))
+                                .text_color(item_hover_text_color)
+                                .opacity(item_opacity)
+                                .hover(move |style| style.opacity(1.0))
+                                .whitespace_nowrap()
+                                .child(segment.clone()),
+                        ),
+                );
             }
         }
 
@@ -1517,8 +1579,9 @@ impl EditorView {
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
         let ts = &self.styles.tab_bar;
-        let button_size = (self.tab_bar_height() - self.scaled(6.0)).max(18.0);
+        let button_height = (self.tab_bar_height() - self.scaled(6.0)).max(18.0);
         let icon_size = self.scaled(ts.tab_item_icon_size_px);
+        let button_padding_x = self.scaled(ts.tab_action_button_padding_x_px);
         let button_opacity = if is_active {
             ts.tab_item_icon_active_opacity
         } else {
@@ -1532,8 +1595,8 @@ impl EditorView {
 
         div()
             .id(id)
-            .w(px(button_size))
-            .h(px(button_size))
+            .w(px(icon_size + button_padding_x * 2.0))
+            .h(px(button_height))
             .flex_none()
             .flex()
             .items_center()
@@ -1749,7 +1812,7 @@ impl EditorView {
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(self.scaled(ts.tab_item_gap_px)))
+            .gap(px(0.0))
             .pr(px(self.scaled(ts.tab_item_padding_right_px)))
             .child(self.render_tab_bar_action_button(
                 "tab-bar-info-toggle",

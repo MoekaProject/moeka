@@ -904,6 +904,7 @@ pub(crate) fn build_selection_quads(
     line_height: f32,
     font_size: f32,
     indent_px: f32,
+    leading_padding_px: f32,
     selection_color: Hsla,
     letter_spacing: f32,
     window: &mut Window,
@@ -970,7 +971,14 @@ pub(crate) fn build_selection_quads(
             let segment_y = line_top + segment_index as f32 * line_height;
             quads.push(fill(
                 Bounds::from_corners(
-                    point(px(content_x + indent + start_x), px(segment_y)),
+                    point(
+                        px(if overlap_start == segment_start {
+                            content_x - leading_padding_px
+                        } else {
+                            content_x + indent + start_x
+                        }),
+                        px(segment_y),
+                    ),
                     point(px(content_x + indent + end_x), px(segment_y + line_height)),
                 ),
                 selection_color,
@@ -1072,12 +1080,19 @@ pub(crate) fn compute_display_prefix_bytes(
     prefix_collapsed: bool,
     _collapsed_task_prefix_chars: usize,
 ) -> usize {
+    fn char_boundary_after_n_chars(text: &str, char_count: usize) -> usize {
+        text.char_indices()
+            .nth(char_count)
+            .map(|(offset, _)| offset)
+            .unwrap_or(text.len())
+    }
+
     let leading_ws = display_text.len() - display_text.trim_start_matches([' ', '\t']).len();
     let trimmed = &display_text[leading_ws..];
     match block_type {
         BlockType::UnorderedList => {
             if prefix_collapsed {
-                leading_ws + "• ".len()
+                leading_ws + char_boundary_after_n_chars(trimmed, 2)
             } else if trimmed.starts_with("- ")
                 || trimmed.starts_with("* ")
                 || trimmed.starts_with("+ ")
@@ -1099,7 +1114,7 @@ pub(crate) fn compute_display_prefix_bytes(
                 trimmed
                     .find(". ")
                     .map(|p| leading_ws + p + 2)
-                    .unwrap_or(leading_ws + trimmed.len().min(4))
+                    .unwrap_or_else(|| leading_ws + char_boundary_after_n_chars(trimmed, 4))
             } else {
                 trimmed.find(". ").map(|p| leading_ws + p + 2).unwrap_or(0)
             }

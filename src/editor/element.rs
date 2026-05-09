@@ -28,6 +28,7 @@ pub(crate) struct EditorPrepaintState {
     search_match_quads: Vec<PaintQuad>,
     line_highlight: Option<PaintQuad>,
     code_block_bgs: Vec<PaintQuad>,
+    unordered_list_markers: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
     marked_underlines: Vec<PaintQuad>,
     gutter_quads: Vec<PaintQuad>,
     gutter_labels: Vec<(ShapedLine, Point<Pixels>, Pixels)>,
@@ -525,6 +526,7 @@ impl Element for EditorElement {
         let mut code_block_hover_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut code_block_copy_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut code_block_copy_buttons: Vec<CodeBlockCopyButtonPaint> = Vec::new();
+        let mut unordered_list_markers: Vec<(WrappedLine, Point<Pixels>, Pixels)> = Vec::new();
 
         let hidden_lines: HashSet<usize> = {
             let mut set = HashSet::new();
@@ -733,6 +735,7 @@ impl Element for EditorElement {
                     extra_height: 0.0,
                     indent_px: 0.0,
                     content_x: editor_left + editor.padding_left(),
+                    selection_padding_left_px: 0.0,
                 }));
                 continue;
             }
@@ -884,6 +887,7 @@ impl Element for EditorElement {
                     extra_height: 0.0,
                     indent_px: 0.0,
                     content_x: editor_left + editor.padding_left(),
+                    selection_padding_left_px: 0.0,
                 }));
                 continue;
             }
@@ -927,6 +931,7 @@ impl Element for EditorElement {
                     extra_height: cached.extra_height,
                     indent_px: cached.indent_px,
                     content_x,
+                    selection_padding_left_px: cached.selection_padding_left_px,
                 }));
 
                 if line_bottom < origin_y || line_top > origin_y + viewport_height {
@@ -1045,6 +1050,7 @@ impl Element for EditorElement {
                             line_height,
                             font_size,
                             cached.indent_px,
+                            cached.selection_padding_left_px,
                             theme.selection,
                             editor_styles.editor_letter_spacing_px,
                             window,
@@ -1081,6 +1087,7 @@ impl Element for EditorElement {
                                 line_height,
                                 font_size,
                                 cached.indent_px,
+                                0.0,
                                 if is_active { active_bg } else { match_bg },
                                 editor_styles.editor_letter_spacing_px,
                                 window,
@@ -1121,6 +1128,7 @@ impl Element for EditorElement {
                                 line_height,
                                 font_size,
                                 cached.indent_px,
+                                0.0,
                                 if is_active { active_bg } else { match_bg },
                                 editor_styles.editor_letter_spacing_px,
                                 window,
@@ -1159,6 +1167,7 @@ impl Element for EditorElement {
                                 line_height,
                                 font_size,
                                 cached.indent_px,
+                                0.0,
                                 if is_active { active_bg } else { match_bg },
                                 editor_styles.editor_letter_spacing_px,
                                 window,
@@ -1283,7 +1292,7 @@ impl Element for EditorElement {
                 .is_some_and(|(start, end)| line_idx >= start && line_idx <= end)
                 || active_front_matter_group
                     .is_some_and(|(start, end)| line_idx >= start && line_idx <= end);
-            let (display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
+            let (mut display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
                 helpers::build_display_text(
                     line_content,
                     &decoration,
@@ -1296,6 +1305,12 @@ impl Element for EditorElement {
                     editor.styles.checkbox.checkbox_parent_prefix_chars as usize,
                     0,
                 );
+            editor.apply_list_display_styles(
+                line_content,
+                &decoration,
+                &mut display_text,
+                prefix_collapsed,
+            );
 
             let mut runs = helpers::build_text_runs_for_display(
                 &display_text,
@@ -1548,6 +1563,14 @@ impl Element for EditorElement {
                 } else {
                     editor_left + editor.padding_left()
                 };
+            let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+            let list_content_indent_px = if is_list_type
+                && !matches!(block_type, BlockType::TaskList(_))
+            {
+                editor.scaled(editor.styles.editor.editor_list_content_indent_px)
+            } else {
+                0.0
+            };
             let content_x = if matches!(block_type, BlockType::TaskList(_)) && prefix_collapsed {
                 let target_prefix_width = helpers::task_prefix_target_width_px(
                     line_content,
@@ -1556,10 +1579,12 @@ impl Element for EditorElement {
                     task_source_indent_step_chars,
                 )
                 .unwrap_or(indent_px);
-                base_content_x + (target_prefix_width - indent_px)
+                base_content_x + list_content_indent_px + (target_prefix_width - indent_px)
             } else {
-                base_content_x
+                base_content_x + list_content_indent_px
             };
+            let selection_padding_left_px =
+                (content_x - (editor_left + editor.padding_left())).max(0.0);
             let wrap_boundary_upstream_xs = compute_wrap_boundary_upstream_xs(
                 window,
                 wrapped,
@@ -1583,6 +1608,7 @@ impl Element for EditorElement {
                 extra_height,
                 indent_px,
                 content_x,
+                selection_padding_left_px,
             }));
 
             if line_bottom < origin_y || line_top > origin_y + viewport_height {
@@ -1989,6 +2015,7 @@ impl Element for EditorElement {
                                                                 cell_text_y,
                                                                 line_height,
                                                                 font_size,
+                                                                0.0,
                                                                 0.0,
                                                                 theme.selection,
                                                                 letter_spacing,
@@ -2720,6 +2747,7 @@ impl Element for EditorElement {
                         line_height,
                         font_size,
                         indent_px,
+                        selection_padding_left_px,
                         theme.selection,
                         letter_spacing,
                         window,
@@ -2775,6 +2803,7 @@ impl Element for EditorElement {
                             line_height,
                             font_size,
                             indent_px,
+                            0.0,
                             if is_active { active_bg } else { match_bg },
                             letter_spacing,
                             window,
@@ -2809,6 +2838,7 @@ impl Element for EditorElement {
                             line_height,
                             font_size,
                             indent_px,
+                            0.0,
                             if is_active { active_bg } else { match_bg },
                             letter_spacing,
                             window,
@@ -2841,6 +2871,7 @@ impl Element for EditorElement {
                             line_height,
                             font_size,
                             indent_px,
+                            0.0,
                             if is_active { active_bg } else { match_bg },
                             letter_spacing,
                             window,
@@ -3062,6 +3093,57 @@ impl Element for EditorElement {
                 is_table_block: is_table_block_line,
             });
 
+            if *block_type == BlockType::UnorderedList && prefix_collapsed {
+                let marker_text = editor
+                    .unordered_list_display_marker_for_line(line_content)
+                    .trim_end()
+                    .to_string();
+                if !marker_text.is_empty() {
+                    let marker_font_size = font_size
+                        + editor.scaled(
+                            editor
+                                .styles
+                                .editor
+                                .editor_unordered_list_marker_font_size_offset_px,
+                        );
+                    let marker_run = TextRun {
+                        len: marker_text.len(),
+                        font: monospace_font.clone(),
+                        color: theme.list_marker,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    if let Ok(shaped_lines) = window.text_system().shape_text(
+                        marker_text.clone().into(),
+                        px(marker_font_size),
+                        &[marker_run],
+                        None,
+                        None,
+                    ) && let Some(marker_wrapped) = shaped_lines.into_iter().next()
+                    {
+                        let marker_x = content_x
+                            + f32::from(
+                                wrapped
+                                    .position_for_index(leading_ws, px(line_height))
+                                    .unwrap_or_default()
+                                    .x,
+                            );
+                        let marker_offset = editor.scaled(
+                            editor
+                                .styles
+                                .editor
+                                .editor_unordered_list_marker_font_size_offset_px,
+                        );
+                        unordered_list_markers.push((
+                            marker_wrapped,
+                            point(px(marker_x), px(text_line_top - marker_offset * 0.35)),
+                            px(line_height),
+                        ));
+                    }
+                }
+            }
+
             y += total_line_height;
         }
 
@@ -3257,6 +3339,7 @@ impl Element for EditorElement {
             search_match_quads,
             line_highlight,
             code_block_bgs,
+            unordered_list_markers,
             marked_underlines,
             gutter_quads,
             gutter_labels,
@@ -3421,6 +3504,12 @@ impl Element for EditorElement {
                     )
                     .ok();
             }
+        }
+
+        for (marker, origin, line_height) in &prepaint.unordered_list_markers {
+            marker
+                .paint(*origin, *line_height, TextAlign::Left, None, window, cx)
+                .ok();
         }
 
         for button in &prepaint.code_block_copy_buttons {
