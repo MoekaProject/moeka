@@ -37,6 +37,14 @@ impl EditorView {
             return;
         }
 
+        let mut starred_changed = false;
+        for path in paths {
+            starred_changed |= self.app_settings.remove_starred_prefix(path);
+        }
+        if starred_changed {
+            self.app_settings.save();
+        }
+
         self.invalidate_sidebar_items_cache();
         self.tabs.retain(|tab| {
             tab.path
@@ -199,6 +207,10 @@ impl EditorView {
                     if let Err(error) = std::fs::rename(path, &new_path) {
                         eprintln!("Rename failed: {error}");
                     } else {
+                        let starred_changed = self.app_settings.rename_starred_prefix(path, &new_path);
+                        if starred_changed {
+                            self.app_settings.save();
+                        }
                         self.invalidate_sidebar_items_cache();
                         for tab in &mut self.tabs {
                             if tab.path.as_deref() == Some(path.as_path()) {

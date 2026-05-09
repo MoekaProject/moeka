@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use crate::theme::ThemeKind;
 
 use super::{SidebarSortMode, config_store};
@@ -28,6 +30,8 @@ pub(crate) struct AppSettings {
     pub letter_spacing: f32,
     #[serde(default = "default_sidebar_sort_mode")]
     pub sidebar_sort_mode: String,
+    #[serde(default = "default_starred_files")]
+    pub starred_files: Vec<PathBuf>,
 }
 
 fn default_theme() -> String {
@@ -78,6 +82,10 @@ fn default_sidebar_sort_mode() -> String {
     "created_desc".to_string()
 }
 
+fn default_starred_files() -> Vec<PathBuf> {
+    Vec::new()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -93,6 +101,7 @@ impl Default for AppSettings {
             line_height: default_line_height(),
             letter_spacing: default_letter_spacing(),
             sidebar_sort_mode: default_sidebar_sort_mode(),
+            starred_files: default_starred_files(),
         }
     }
 }
@@ -165,6 +174,62 @@ impl AppSettings {
             SidebarSortMode::Type => "type",
         }
         .to_string();
+    }
+
+    pub(crate) fn is_starred_file(&self, path: &Path) -> bool {
+        self.starred_files.iter().any(|candidate| candidate == path)
+    }
+
+    pub(crate) fn add_starred_file(&mut self, path: PathBuf) {
+        self.starred_files.retain(|candidate| candidate != &path);
+        self.starred_files.insert(0, path);
+    }
+
+    pub(crate) fn remove_starred_file(&mut self, path: &Path) -> bool {
+        let original_len = self.starred_files.len();
+        self.starred_files.retain(|candidate| candidate != path);
+        self.starred_files.len() != original_len
+    }
+
+    pub(crate) fn prune_missing_starred_files(&mut self) -> bool {
+        let original_len = self.starred_files.len();
+        self.starred_files
+            .retain(|path| path.exists() && path.is_file());
+        self.starred_files.len() != original_len
+    }
+
+    pub(crate) fn rename_starred_prefix(&mut self, from: &Path, to: &Path) -> bool {
+        let mut changed = false;
+        for path in &mut self.starred_files {
+            if path == from {
+                *path = to.to_path_buf();
+                changed = true;
+                continue;
+            }
+
+            if let Ok(relative) = path.strip_prefix(from) {
+                *path = to.join(relative);
+                changed = true;
+            }
+        }
+
+        if changed {
+            let mut deduped = Vec::with_capacity(self.starred_files.len());
+            for path in self.starred_files.drain(..) {
+                if !deduped.iter().any(|candidate| candidate == &path) {
+                    deduped.push(path);
+                }
+            }
+            self.starred_files = deduped;
+        }
+
+        changed
+    }
+
+    pub(crate) fn remove_starred_prefix(&mut self, prefix: &Path) -> bool {
+        let original_len = self.starred_files.len();
+        self.starred_files.retain(|path| !path.starts_with(prefix));
+        self.starred_files.len() != original_len
     }
 }
 

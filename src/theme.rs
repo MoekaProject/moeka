@@ -76,10 +76,12 @@ pub enum ThemeColorField {
     ListMarker,
     CheckboxChecked,
     GutterHeading,
+    GitStatusAdded,
+    GitStatusModified,
 }
 
 impl ThemeColorField {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 36] = [
         Self::TextPrimary,
         Self::TextSecondary,
         Self::TextBright,
@@ -114,6 +116,8 @@ impl ThemeColorField {
         Self::ListMarker,
         Self::CheckboxChecked,
         Self::GutterHeading,
+        Self::GitStatusAdded,
+        Self::GitStatusModified,
     ];
 
     pub fn label(self) -> &'static str {
@@ -152,6 +156,8 @@ impl ThemeColorField {
             Self::ListMarker => "list_marker",
             Self::CheckboxChecked => "checkbox_checked",
             Self::GutterHeading => "gutter_heading",
+            Self::GitStatusAdded => "git_status_added",
+            Self::GitStatusModified => "git_status_modified",
         }
     }
 }
@@ -214,6 +220,8 @@ pub struct Theme {
     pub list_marker: Hsla,
     pub checkbox_checked: Hsla,
     pub gutter_heading: Hsla,
+    pub git_status_added: Hsla,
+    pub git_status_modified: Hsla,
 }
 
 impl Theme {
@@ -253,6 +261,8 @@ impl Theme {
             ThemeColorField::ListMarker => self.list_marker,
             ThemeColorField::CheckboxChecked => self.checkbox_checked,
             ThemeColorField::GutterHeading => self.gutter_heading,
+            ThemeColorField::GitStatusAdded => self.git_status_added,
+            ThemeColorField::GitStatusModified => self.git_status_modified,
         }
     }
 
@@ -292,6 +302,8 @@ impl Theme {
             ThemeColorField::ListMarker => self.list_marker = color,
             ThemeColorField::CheckboxChecked => self.checkbox_checked = color,
             ThemeColorField::GutterHeading => self.gutter_heading = color,
+            ThemeColorField::GitStatusAdded => self.git_status_added = color,
+            ThemeColorField::GitStatusModified => self.git_status_modified = color,
         }
     }
 }
@@ -337,6 +349,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#e06c75"),
             checkbox_checked: crate::hex_hsla!("#3778ae"),
             gutter_heading: with_alpha(crate::hex_hsla!("#abb2bf"), 0.2),
+            git_status_added: crate::hex_hsla!("#3aa675"),
+            git_status_modified: crate::hex_hsla!("#3aa675"),
         }
     }
 
@@ -380,6 +394,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#C74440"),
             checkbox_checked: crate::hex_hsla!("#2383E2"),
             gutter_heading: with_alpha(crate::hex_hsla!("#37352F"), 0.2),
+            git_status_added: crate::hex_hsla!("#3AA675"),
+            git_status_modified: crate::hex_hsla!("#3AA675"),
         }
     }
 
@@ -423,6 +439,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#D3604F"),
             checkbox_checked: crate::hex_hsla!("#707DAD"),
             gutter_heading: with_alpha(crate::hex_hsla!("#383A42"), 0.2),
+            git_status_added: crate::hex_hsla!("#2F8F63"),
+            git_status_modified: crate::hex_hsla!("#2F8F63"),
         }
     }
 
@@ -466,6 +484,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#e06c75"),
             checkbox_checked: crate::hex_hsla!("#3778ae"),
             gutter_heading: with_alpha(crate::hex_hsla!("#abb2bf"), 0.2),
+            git_status_added: crate::hex_hsla!("#3aa675"),
+            git_status_modified: crate::hex_hsla!("#3aa675"),
         }
     }
 }

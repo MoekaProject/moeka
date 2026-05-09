@@ -12,13 +12,82 @@ impl EditorView {
         self.scaled(self.styles.sidebar.sidebar_item_height_px)
     }
 
+    pub(super) fn visible_starred_sidebar_files(&mut self) -> Vec<PathBuf> {
+        let mut changed = self.app_settings.prune_missing_starred_files();
+        let root = Self::normalize_sidebar_path(&self.sidebar_root);
+        let mut visible = Vec::new();
+        let mut deduped = Vec::with_capacity(self.app_settings.starred_files.len());
+
+        for path in self.app_settings.starred_files.iter().cloned() {
+            let normalized = Self::normalize_sidebar_path(&path);
+            if deduped.iter().any(|candidate| candidate == &normalized) {
+                changed = true;
+                continue;
+            }
+            if !normalized.exists() || !normalized.is_file() {
+                changed = true;
+                continue;
+            }
+            if !root.as_os_str().is_empty() && normalized.starts_with(&root) {
+                visible.push(normalized.clone());
+            }
+            deduped.push(normalized);
+        }
+
+        if deduped != self.app_settings.starred_files {
+            self.app_settings.starred_files = deduped;
+            changed = true;
+        }
+
+        if changed {
+            self.app_settings.save();
+        }
+
+        visible
+    }
+
+    pub(super) fn sidebar_starred_section_height(&self, has_root: bool) -> f32 {
+        if !has_root {
+            return 0.0;
+        }
+
+        let header_height = self.scaled(self.styles.sidebar.sidebar_header_height_px);
+        if self.sidebar_starred_collapsed {
+            return header_height;
+        }
+
+        header_height + self.sidebar_visible_starred_count() as f32 * self.sidebar_item_height_px()
+    }
+
+    pub(super) fn sidebar_visible_starred_count(&self) -> usize {
+        let root = Self::normalize_sidebar_path(&self.sidebar_root);
+        let mut visible = std::collections::HashSet::new();
+        self.app_settings
+            .starred_files
+            .iter()
+            .filter_map(|path| {
+                let normalized = Self::normalize_sidebar_path(path);
+                (normalized.exists()
+                    && normalized.is_file()
+                    && !root.as_os_str().is_empty()
+                    && normalized.starts_with(&root))
+                .then_some(normalized)
+            })
+            .for_each(|path| {
+                visible.insert(path);
+            });
+        visible.len()
+    }
+
     pub(super) fn sidebar_scroll_prefix_height(&self, has_root: bool) -> f32 {
         let sidebar_styles = &self.styles.sidebar;
         let logo_height = self.scaled(
             sidebar_styles.sidebar_logo_size_px + 2.0 * sidebar_styles.sidebar_logo_padding_y_px,
         );
         if has_root {
-            logo_height + self.scaled(sidebar_styles.sidebar_header_height_px)
+            logo_height
+                + self.sidebar_starred_section_height(has_root)
+                + self.scaled(sidebar_styles.sidebar_header_height_px)
         } else {
             logo_height
         }

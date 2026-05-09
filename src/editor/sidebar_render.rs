@@ -183,7 +183,7 @@ impl EditorView {
             .child(
                 svg()
                     .path(ROOT_SVG_PATH)
-                    .size(px(self.scaled(ss.sidebar_header_icon_size_px)))
+                    .size(px(self.scaled(ss.sidebar_header_root_icon_size_px)))
                     .text_color(ss.sidebar_header_icon_color),
             )
             .child(
@@ -229,7 +229,7 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    this.pick_workspace_folder(cx);
+                    this.toggle_sidebar_directory(this.sidebar_root.clone(), cx);
                 }),
             )
             .on_mouse_down(
@@ -279,6 +279,237 @@ impl EditorView {
                     },
                 )
             })
+            .into_any_element()
+    }
+
+    fn render_starred_sidebar_section(
+        &self,
+        starred_files: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ss = &self.styles.sidebar;
+        let header_hover_bg = ss.sidebar_header_hover_bg;
+        let icon_color = ss.sidebar_header_icon_color;
+        let title_color = ss.sidebar_header_text_color;
+        let is_collapsed = self.sidebar_starred_collapsed;
+
+        let header = div()
+            .w_full()
+            .h(px(self.scaled(ss.sidebar_header_height_px)))
+            .px(px(self.scaled(ss.sidebar_header_padding_right_px)))
+            .pl(px(self.scaled(ss.sidebar_header_padding_left_px)))
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(ss.sidebar_header_gap_px)))
+            .flex_none()
+            .hover(move |style| style.bg(header_hover_bg))
+            .cursor(CursorStyle::Arrow)
+            .child(
+                svg()
+                    .path(FILETREE_STAR_SVG_PATH)
+                    .size(px(self.scaled(ss.sidebar_header_star_icon_size_px)))
+                    .text_color(icon_color),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
+                    .text_color(title_color)
+                    .overflow_hidden()
+                    .truncate()
+                    .child("星标文件"),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.sidebar_starred_collapsed = !this.sidebar_starred_collapsed;
+                    cx.notify();
+                }),
+            );
+
+        div()
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .child(header)
+            .when(!is_collapsed, |this| {
+                this.children(
+                    starred_files
+                        .iter()
+                        .cloned()
+                        .map(|path| self.render_starred_sidebar_item(path, cx))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_starred_sidebar_item(&self, path: PathBuf, cx: &mut Context<Self>) -> AnyElement {
+        let ss = &self.styles.sidebar;
+        let is_selected = self.is_sidebar_item_selected(&path);
+        let is_focused = self.focused_sidebar_path.as_deref() == Some(path.as_path());
+        let git_status_color =
+            self.sidebar_git_status_color(self.sidebar_git_statuses.get(&path).copied());
+        let row_bg = if is_selected {
+            ss.sidebar_item_selected_bg
+        } else {
+            gpui::transparent_black()
+        };
+        let item_hover_bg = ss.sidebar_item_hover_bg;
+        let icon_color = git_status_color.unwrap_or(if is_selected {
+            ss.sidebar_item_selected_icon_color
+        } else {
+            ss.sidebar_item_icon_color
+        });
+        let label_color = git_status_color.unwrap_or(if is_selected {
+            ss.sidebar_item_selected_text_color
+        } else {
+            ss.sidebar_item_text_color
+        });
+        let focus_border_color = ss.sidebar_item_focus_border_color;
+        let active_border_color = ss.sidebar_item_active_border_color;
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let left_padding = self.scaled(
+            (ss.sidebar_item_indent_base_px + ss.sidebar_item_indent_step_px
+                - ss.sidebar_item_left_shift_px)
+                .max(0.0),
+        );
+        let action_hover_opacity = ss.sidebar_header_action_hover_opacity;
+        let remove_star_path = path.clone();
+        let click_path = path.clone();
+        let context_menu_path = path.clone();
+        let close_hover_bg = ss.sidebar_item_hover_bg;
+
+        div()
+            .id(SharedString::from(format!(
+                "sidebar-starred-{}",
+                path.display()
+            )))
+            .group("sidebar-starred-item")
+            .w_full()
+            .h(px(self.scaled(ss.sidebar_item_height_px)))
+            .flex_none()
+            .flex()
+            .items_center()
+            .bg(row_bg)
+            .border_1()
+            .border_color(if is_selected {
+                active_border_color
+            } else if is_focused {
+                focus_border_color
+            } else {
+                gpui::transparent_black()
+            })
+            .when(!self.sidebar_resizing && !self.outline_resizing, |this| {
+                this.hover(move |style| style.bg(item_hover_bg))
+            })
+            .child(
+                div()
+                    .w_full()
+                    .h_full()
+                    .pl(px(left_padding))
+                    .pr(px(self.scaled(ss.sidebar_item_padding_right_px)))
+                    .flex()
+                    .items_center()
+                    .gap(px(self.scaled(ss.sidebar_item_gap_px)))
+                    .child(
+                        div()
+                            .w(px(0.0))
+                            .h(px(self.scaled(ss.sidebar_item_fold_container_height_px)))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .child(div().w(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))),
+                    )
+                    .child(self.render_sidebar_edit_indicator(&name, false, icon_color))
+                    .child(self.render_sidebar_name_label(&name, label_color))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "sidebar-starred-remove-{}",
+                                path.display()
+                            )))
+                            .w(px(self.scaled(ss.sidebar_header_action_btn_size_px)))
+                            .h(px(self.scaled(ss.sidebar_header_action_btn_size_px)))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .cursor(CursorStyle::Arrow)
+                            .opacity(0.0)
+                            .group_hover("sidebar-starred-item", move |style| {
+                                style.opacity(ss.sidebar_header_action_opacity)
+                            })
+                            .hover(move |style| {
+                                style.opacity(action_hover_opacity).bg(close_hover_bg)
+                            })
+                            .child(
+                                svg()
+                                    .path(FILETREE_CLOSE_SVG_PATH)
+                                    .size(px(
+                                        self.scaled(ss.sidebar_starred_item_close_icon_size_px)
+                                    ))
+                                    .text_color(ss.sidebar_header_icon_color),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    let normalized =
+                                        Self::normalize_sidebar_path(&remove_star_path);
+                                    if this.app_settings.remove_starred_file(&normalized) {
+                                        this.app_settings.save();
+                                    }
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+            )
+            .on_click({
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    let mods = event.modifiers();
+                    let has_modifier = mods.platform || mods.shift;
+                    this.sidebar_select_item(&click_path, mods.shift, mods.platform);
+                    if !has_modifier {
+                        if event.click_count() >= 2 {
+                            this.focused_sidebar_path = None;
+                            this.open_path_in_permanent_tab(click_path.clone(), true, cx);
+                            this.move_cursor_to_first_line_end();
+                            this.request_editor_focus(cx);
+                        } else if !this.switch_to_existing_editor_tab_for_path(
+                            &click_path,
+                            false,
+                            cx,
+                        ) {
+                            this.open_path_in_preview_tab(click_path.clone(), false, cx);
+                        }
+                    }
+                    window.prevent_default();
+                    cx.notify();
+                })
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if !this.selected_sidebar_paths.contains(&context_menu_path) {
+                        this.sidebar_select_item(&context_menu_path, false, false);
+                    }
+                    this.focused_sidebar_path = Some(context_menu_path.clone());
+                    this.open_sidebar_context_menu(
+                        context_menu_path.clone(),
+                        false,
+                        event.position,
+                        cx,
+                    );
+                }),
+            )
             .into_any_element()
     }
 
@@ -681,6 +912,11 @@ impl EditorView {
         if has_root {
             self.refresh_sidebar_git_statuses_if_needed();
         }
+        let starred_files = if has_root {
+            self.visible_starred_sidebar_files()
+        } else {
+            Vec::new()
+        };
         let show_workspace_bar = true;
         let items = if has_root {
             Some(self.sidebar_items())
@@ -914,7 +1150,8 @@ impl EditorView {
         );
 
         if has_root {
-            tree_items.insert(1, header);
+            tree_items.insert(1, self.render_starred_sidebar_section(&starred_files, cx));
+            tree_items.insert(2, header);
         }
 
         tree_items.push(
@@ -928,7 +1165,8 @@ impl EditorView {
         let logo_area_height =
             self.scaled(ss.sidebar_logo_size_px + 2.0 * ss.sidebar_logo_padding_y_px);
         let scroll_y = -f32::from(self.sidebar_scroll_handle.offset().y);
-        let header_is_sticky = has_root && scroll_y >= logo_area_height;
+        let header_is_sticky = has_root
+            && scroll_y >= logo_area_height + self.sidebar_starred_section_height(has_root);
 
         div()
             .id("sidebar")

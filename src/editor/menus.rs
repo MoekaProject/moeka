@@ -963,7 +963,7 @@ impl EditorView {
         };
         let hover_bg = ms.menu_item_hover_bg;
         let item_id = SharedString::from(format!("menu-item-{}", label));
-        let icon_size = self.scaled(wss.ws_menu_item_action_icon_size_px);
+        let icon_size = self.scaled(ms.menu_format_icon_size_px);
         let check_size = self.scaled(wss.ws_menu_item_check_size_px);
         let icon_col_w = check_size.max(icon_size);
         div()
@@ -1279,6 +1279,25 @@ impl EditorView {
             ));
         }
         items.push(self.render_context_menu_separator());
+        if !is_dir {
+            let starred_path = path.clone();
+            let is_starred = self.app_settings.is_starred_file(&starred_path);
+            let label = if is_starred { "取消星标" } else { "星标" };
+            items.push(
+                self.render_context_menu_item(label, false, cx, move |this, _, cx| {
+                    let normalized = Self::normalize_sidebar_path(&starred_path);
+                    if is_starred {
+                        this.app_settings.remove_starred_file(&normalized);
+                    } else {
+                        this.app_settings.add_starred_file(normalized);
+                    }
+                    this.app_settings.save();
+                    this.context_menu = None;
+                    cx.notify();
+                }),
+            );
+            items.push(self.render_context_menu_separator());
+        }
         // Rename: only for single selection
         if self.selected_sidebar_paths.len() <= 1 {
             let p = path.clone();
@@ -2316,6 +2335,7 @@ impl EditorView {
                     false,
                     cx,
                     move |this, _, cx| {
+                        this.close_context_menu(cx);
                         this.open_settings_tab(cx);
                     },
                 ));

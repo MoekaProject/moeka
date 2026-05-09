@@ -482,7 +482,11 @@ impl EditorView {
         paths: &[PathBuf],
         cx: &mut Context<Self>,
     ) {
-        let file_paths: Vec<PathBuf> = paths.iter().filter(|path| path.is_file()).cloned().collect();
+        let file_paths: Vec<PathBuf> = paths
+            .iter()
+            .filter(|path| path.is_file())
+            .cloned()
+            .collect();
         let last_index = file_paths.len().saturating_sub(1);
 
         for (index, path) in file_paths.into_iter().enumerate() {
@@ -1048,13 +1052,17 @@ impl EditorView {
         segments
     }
 
-    pub(crate) fn render_active_tab_path_bar(&self) -> AnyElement {
+    pub(crate) fn render_active_tab_path_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let es = &self.styles.editor;
         let gap = self.scaled(es.editor_path_bar_gap_px);
         let separator_size = self.scaled(es.editor_path_bar_separator_size_px);
+        let action_gap = self.scaled(es.editor_path_bar_action_gap_px);
+        let action_size = self.scaled(es.editor_path_bar_action_btn_size_px);
+        let action_icon_size = self.scaled(es.editor_path_bar_action_icon_size_px);
+        let action_hover_opacity = es.editor_path_bar_action_hover_opacity;
         let mut breadcrumb = div()
             .id("editor-path-bar-content")
-            .w_full()
+            .flex_1()
             .min_w(px(0.0))
             .overflow_hidden()
             .flex()
@@ -1107,6 +1115,7 @@ impl EditorView {
             .flex_none()
             .flex()
             .items_center()
+            .justify_between()
             .px(px(self.scaled(es.editor_path_bar_padding_x_px)))
             .bg(es.editor_path_bar_bg)
             .border_b(px(self.scaled(es.editor_path_bar_border_width_px)))
@@ -1114,6 +1123,45 @@ impl EditorView {
             .text_size(px(self.scaled(es.editor_path_bar_font_size_px)))
             .text_color(es.editor_path_bar_text_color)
             .child(breadcrumb)
+            .when(self.active_tab_supports_text_search(), |this| {
+                this.child(
+                    div()
+                        .pl(px(action_gap))
+                        .pr(px(self.scaled(es.editor_path_bar_action_padding_right_px)))
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .id("editor-path-bar-search")
+                                .w(px(action_size))
+                                .h(px(action_size))
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .justify_center()
+                                .cursor(CursorStyle::Arrow)
+                                .opacity(es.editor_path_bar_action_opacity)
+                                .hover(move |style| style.opacity(action_hover_opacity))
+                                .child(
+                                    svg()
+                                        .path(FILETREE_SEARCH_SVG_PATH)
+                                        .size(px(action_icon_size))
+                                        .text_color(es.editor_path_bar_text_color),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        if this.search_visible {
+                                            this.dismiss_search(window, cx);
+                                        } else {
+                                            this.open_search(false, window, cx);
+                                        }
+                                    }),
+                                ),
+                        ),
+                )
+            })
             .into_any_element()
     }
 

@@ -177,7 +177,10 @@ impl EditorView {
     pub(crate) fn sidebar_items(&mut self) -> Vec<SidebarItem> {
         if self.sidebar_items_dirty {
             let mut items = Vec::new();
-            if self.sidebar_error.is_none() && self.sidebar_root.exists() {
+            if self.sidebar_error.is_none()
+                && self.sidebar_root.exists()
+                && self.expanded_dirs.contains(&self.sidebar_root)
+            {
                 self.collect_sidebar_items(&self.sidebar_root, 1, &mut items);
             }
             self.sidebar_items_cache = items;

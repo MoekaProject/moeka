@@ -193,6 +193,10 @@ impl Render for EditorView {
         let toolbar_base_visible =
             self.tabs.len() > 0 && !self.active_tab_is_settings() && !self.active_tab_is_binary();
         let show_editor_toolbar = self.should_show_editor_toolbar(toolbar_base_visible);
+        let render_editor_toolbar = toolbar_base_visible
+            && (show_editor_toolbar
+                || self.toolbar_opacity_task.is_some()
+                || self.toolbar_opacity > self.styles.toolbar.toolbar_hidden_opacity + 0.01);
         let ws = &self.styles.window;
         // Store window bounds for menu positioning
         let wb = window.bounds();
@@ -456,7 +460,7 @@ impl Render for EditorView {
                                             .overflow_hidden()
                                             .flex()
                                             .flex_col()
-                                            .child(self.render_active_tab_path_bar())
+                                            .child(self.render_active_tab_path_bar(cx))
                                             .child(
                                                 div()
                                                     .id("editor-pane-content")
@@ -561,7 +565,7 @@ impl Render for EditorView {
                                                         }
                                                         .into_any_element()
                                                     })
-                                                    .when(show_editor_toolbar, |this| this.child({
+                                                    .when(render_editor_toolbar, |this| this.child({
                                                         let primary_hover = self
                                                             .styles
                                                             .toolbar
@@ -657,7 +661,7 @@ impl Render for EditorView {
                                                                 },
                                                             ))
                                                     }))
-                                                    .when(show_editor_toolbar, |this| this.child({
+                                                    .when(render_editor_toolbar, |this| this.child({
                                                         let secondary_hover = self
                                                             .styles
                                                             .toolbar

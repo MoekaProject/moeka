@@ -757,6 +757,7 @@ pub struct EditorView {
     /// 多选锚点（shift 连续选择的起点）
     pub(crate) sidebar_selection_anchor: Option<PathBuf>,
     pub(crate) sidebar_sort_mode: SidebarSortMode,
+    pub(crate) sidebar_starred_collapsed: bool,
     /// 拖拽悬停的目标目录（仅用于高亮）
     pub(crate) sidebar_drag_hover_target: Option<PathBuf>,
     /// 拖拽悬停的目录（用于延迟自动展开）
@@ -1083,6 +1084,7 @@ impl EditorView {
             focused_sidebar_path: None,
             sidebar_selection_anchor: None,
             sidebar_sort_mode: app_settings.sidebar_sort_mode(),
+            sidebar_starred_collapsed: false,
             sidebar_drag_hover_target: None,
             sidebar_drag_expand_hover_dir: None,
             sidebar_drag_child_hover_position: None,
