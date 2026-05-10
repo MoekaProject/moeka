@@ -31,7 +31,7 @@ impl EditorView {
 
     pub(crate) fn sidebar_root_name(&self) -> String {
         if self.sidebar_root.as_os_str().is_empty() {
-            return "打开目录...".to_string();
+            return self.t(crate::i18n::TextKey::OpenFolder).to_string();
         }
 
         self.sidebar_root
@@ -538,21 +538,18 @@ impl EditorView {
                 .as_ref()
                 .is_some_and(FileKind::supports_text_buffer)
             {
-                self.buffer = Buffer::from_text(&tab.snapshot.text);
-                self.cursor.offset = tab.snapshot.cursor_offset.min(self.buffer.len());
-                self.cursor.anchor = tab.snapshot.cursor_anchor.min(self.buffer.len());
+                self.restore_tab_snapshot_state(&tab.snapshot);
             } else {
                 self.buffer = Buffer::from_text("");
                 self.cursor.offset = 0;
                 self.cursor.anchor = 0;
+                self.extra_cursors.clear();
             }
             self.marked_range = None;
-            self.scroll_offset = tab.snapshot.scroll_offset;
             self.image_drag_state = None;
             self.toolbar_hidden_by_scroll = self.scroll_offset > 0.5;
             self.toolbar_corner_hovered = false;
             self.sync_toolbar_opacity(cx);
-            self.reparse();
             if tab.file_kind.as_ref().is_some_and(FileKind::is_image)
                 && let Some(path) = tab.path.as_ref()
             {
@@ -560,6 +557,7 @@ impl EditorView {
             }
             self.clamp_scroll();
             self.pause_blinking(cx);
+            self.request_editor_focus(cx);
         }
         if let Some(path) = tab.path.clone() {
             let suppress_sidebar_sync = self
@@ -637,11 +635,16 @@ impl EditorView {
             if tab.is_dirty {
                 self.show_dialog(
                     Dialog {
-                        title: "未保存的更改".to_string(),
-                        message: format!("\"{}\" 有未保存更改需要确认。", tab.title),
-                        save_label: Some("保存".to_string()),
-                        confirm_label: "不保存".to_string(),
-                        cancel_label: "取消".to_string(),
+                        title: self
+                            .t(crate::i18n::TextKey::UnsavedChangesTitle)
+                            .to_string(),
+                        message: crate::i18n::close_tab_unsaved_message(
+                            self.ui_language,
+                            &tab.title,
+                        ),
+                        save_label: Some(self.t(crate::i18n::TextKey::Save).to_string()),
+                        confirm_label: self.t(crate::i18n::TextKey::Discard).to_string(),
+                        cancel_label: self.t(crate::i18n::TextKey::Cancel).to_string(),
                         is_danger: true,
                         action: DialogAction::CloseTabUnsaved {
                             tab_id: tab_id.to_string(),
@@ -825,13 +828,14 @@ impl EditorView {
             .unwrap_or_else(|| path.display().to_string())
     }
 
-    fn untitled_display_index(title: &str) -> Option<usize> {
-        if title == "Untitled" {
+    fn untitled_display_index(&self, title: &str) -> Option<usize> {
+        let untitled = self.t(crate::i18n::TextKey::Untitled);
+        if title == untitled {
             return Some(1);
         }
 
         title
-            .strip_prefix("Untitled ")?
+            .strip_prefix(&format!("{untitled} "))?
             .parse::<usize>()
             .ok()
             .filter(|index| *index > 1)
@@ -843,7 +847,7 @@ impl EditorView {
             if tab.kind != TabKind::Editor || tab.path.is_some() {
                 continue;
             }
-            if let Some(index) = Self::untitled_display_index(&tab.title) {
+            if let Some(index) = self.untitled_display_index(&tab.title) {
                 used_indices.insert(index);
             }
         }
@@ -853,11 +857,7 @@ impl EditorView {
             next_index += 1;
         }
 
-        if next_index == 1 {
-            "Untitled".to_string()
-        } else {
-            format!("Untitled {next_index}")
-        }
+        crate::i18n::untitled_title(self.ui_language, next_index)
     }
 
     pub(crate) fn create_scratch_tab(&mut self, cx: &mut Context<Self>) {
@@ -935,7 +935,7 @@ impl EditorView {
         self.persist_active_tab_state();
         let tab = OpenTab {
             id: self.next_tab_identity(),
-            title: "设置".to_string(),
+            title: self.t(crate::i18n::TextKey::SettingsTitle).to_string(),
             kind: TabKind::Settings,
             path: None,
             file_kind: None,
@@ -1249,7 +1249,7 @@ impl EditorView {
                 .text_size(px(self.scaled(ts.tab_item_badge_font_size_px)))
                 .text_color(ts.tab_item_badge_text_color)
                 .opacity(opacity)
-                .child("Diff")
+                .child(self.t(crate::i18n::TextKey::Diff))
                 .into_any_element();
         }
 

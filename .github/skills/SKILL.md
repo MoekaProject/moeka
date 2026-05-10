@@ -277,6 +277,12 @@ Collects heading hierarchy from `decorations`. Displays as a navigable tree in t
 
 Font picker with directional dropdown (auto-detects above/below based on available space). Theme selector, UI scale controls, line height and letter spacing controls. Inline numeric steppers share one TextInput styling/sync helper so value clamping, persistence, and UI refresh stay consistent across controls.
 
+### Internationalization (`src/i18n.rs`)
+
+- All user-visible UI text must go through `src/i18n.rs`; do not hardcode labels, placeholders, dialog copy, tab titles, or tooltip text in components.
+- When adding a new UI string, add a `TextKey` entry and translations for every supported language in the same change.
+- New settings controls, overlays, panels, and reusable components must be i18n-ready on first introduction.
+
 ### Info / Git History Panels (`info_panel.rs`)
 
 - Expensive panel data must be cached outside render.

@@ -3,12 +3,16 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, Context, CursorStyle, Focusable, MouseButton, ScrollHandle, SharedString, Window,
-    div, prelude::*, px,
+    div, prelude::*, px, svg,
 };
 
-use crate::theme::ThemeKind;
+use crate::i18n::{TextKey, UiLanguage, language_picker_options};
+use crate::theme::{EditorThemeMode, ThemeKind};
 
-use super::EditorView;
+use super::{
+    EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, THEME_DARK_MINI_SVG_PATH,
+    THEME_LIGHT_MINI_SVG_PATH,
+};
 
 // ── Font picker state ───────────────────────────────────────────────
 
@@ -17,13 +21,23 @@ pub(crate) enum FontRole {
     UiFont,
     BodyFont,
     CodeFont,
+    InterfaceLanguage,
+}
+
+#[derive(Clone)]
+pub(crate) struct PickerOption {
+    pub value: String,
+    pub label: String,
+    pub search_text: String,
+    pub preview_font: Option<String>,
 }
 
 #[derive(Clone)]
 pub(crate) struct FontPickerState {
     pub role: FontRole,
-    pub font_index: usize,
-    pub filtered: Vec<String>,
+    pub option_index: usize,
+    pub all_options: Vec<PickerOption>,
+    pub filtered: Vec<PickerOption>,
     pub selected_index: usize,
     pub scroll_handle: ScrollHandle,
     /// Locked direction: once decided, keep dropdown above or below.
@@ -63,7 +77,7 @@ impl EditorView {
                             .text_size(px(self.scaled(self.styles.ui_font_size_px + 9.0)))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(self.theme.text_bright)
-                            .child("设置"),
+                                .child(self.t(TextKey::SettingsPanelTitle)),
                     )
                     // Theme section
                     .child(self.render_theme_section(cx))
@@ -132,7 +146,7 @@ impl EditorView {
         });
     }
 
-    fn finalize_settings_change(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn finalize_settings_change(&mut self, cx: &mut Context<Self>) {
         self.app_settings.save();
         self.line_display_info.clear();
         cx.notify();
@@ -143,111 +157,215 @@ impl EditorView {
     fn render_theme_section(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.theme_kind;
         let is_dark_mode = self.settings_theme_dark_mode;
+        let editor_theme_mode = self.editor_theme_mode;
+        let settings_styles = &self.styles.settings_panel;
         let themes = if is_dark_mode {
             ThemeKind::dark_themes()
         } else {
             ThemeKind::light_themes()
         };
         let text_secondary = self.theme.text_secondary;
-        let border_color = self.theme.border_secondary;
         let hover_bg = self.theme.bg_hover;
         let toggle_active_bg = self.theme.text_primary;
         let toggle_active_text = self.theme.bg_primary;
+        let icon_size = self.scaled(settings_styles.settings_theme_toggle_icon_size_px);
+        let toggle_height = self.scaled(settings_styles.settings_theme_toggle_height_px);
+        let toggle_padding_x = self.scaled(settings_styles.settings_theme_toggle_padding_x_px);
+        let toggle_gap = self.scaled(settings_styles.settings_theme_toggle_gap_px);
+        let toggle_radius = self.scaled(settings_styles.settings_theme_toggle_radius_px);
+        let toggle_border_width =
+            self.scaled(settings_styles.settings_theme_toggle_border_width_px);
+        let option_height = self.scaled(settings_styles.settings_theme_option_height_px);
+        let option_padding_x = self.scaled(settings_styles.settings_theme_option_padding_x_px);
+        let option_radius = self.scaled(settings_styles.settings_theme_option_radius_px);
+        let option_border_width =
+            self.scaled(settings_styles.settings_theme_option_border_width_px);
+        let option_font_size = self.scaled(settings_styles.settings_theme_option_font_size_px);
+        let option_border_color = settings_styles.settings_theme_option_border_color;
+        let option_text_color = settings_styles.settings_theme_option_text_color;
+        let option_active_text_color = settings_styles.settings_theme_option_active_text_color;
+        let option_active_bg = settings_styles.settings_theme_option_active_bg;
+        let option_hover_bg = settings_styles.settings_theme_option_hover_bg;
 
         div()
             .flex()
             .flex_col()
-            .gap(px(self.scaled(12.0)))
+            .gap(px(self.scaled(16.0)))
+                    .child(self.render_section_heading(self.t(TextKey::ThemeSection)))
             .child(
                 div()
                     .w_full()
                     .flex()
-                    .flex_col()
-                    .gap(px(self.scaled(8.0)))
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(self.scaled(settings_styles.settings_theme_group_gap_px)))
                     .child(
                         div()
-                            .w_full()
                             .flex()
                             .flex_row()
-                            .items_end()
-                            .gap(px(self.scaled(12.0)))
+                            .gap(px(0.0))
+                            .rounded(px(toggle_radius))
+                            .border(px(toggle_border_width))
+                            .border_color(self.theme.border_primary)
+                            .overflow_hidden()
                             .child(
                                 div()
-                                    .flex_1()
-                                    .text_size(px(self.scaled(12.0)))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(text_secondary)
-                                    .child("主题".to_uppercase()),
+                                    .id("theme-toggle-light")
+                                    .rounded_l(px(toggle_radius))
+                                    .h(px(toggle_height))
+                                    .px(px(toggle_padding_x))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(toggle_gap))
+                                    .text_size(px(option_font_size))
+                                    .cursor(CursorStyle::Arrow)
+                                    .when(!is_dark_mode, |this| {
+                                        this.bg(toggle_active_bg).text_color(toggle_active_text)
+                                    })
+                                    .when(is_dark_mode, |this| {
+                                        this.text_color(text_secondary)
+                                            .hover(move |s| s.bg(hover_bg))
+                                    })
+                                    .child(
+                                        svg()
+                                            .path(THEME_LIGHT_MINI_SVG_PATH)
+                                            .size(px(icon_size))
+                                            .text_color(if !is_dark_mode {
+                                                toggle_active_text
+                                            } else {
+                                                text_secondary
+                                            }),
+                                    )
+                                    .child(self.t(TextKey::ThemeLight))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            if this.settings_theme_dark_mode {
+                                                let light_theme =
+                                                    this.app_settings.light_theme_kind();
+                                                this.set_theme(light_theme, cx);
+                                            }
+                                        }),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .mb(px(self.scaled(5.0)))
+                                    .id("theme-toggle-dark")
+                                    .rounded_r(px(toggle_radius))
+                                    .h(px(toggle_height))
+                                    .px(px(toggle_padding_x))
                                     .flex()
-                                    .flex_row()
-                                    .gap(px(0.0))
-                                    .rounded(px(self.scaled(5.0)))
-                                    .border(px(1.0))
-                                    .border_color(self.theme.border_primary)
-                                    .overflow_hidden()
+                                    .items_center()
+                                    .gap(px(toggle_gap))
+                                    .text_size(px(option_font_size))
+                                    .cursor(CursorStyle::Arrow)
+                                    .when(is_dark_mode, |this| {
+                                        this.bg(toggle_active_bg).text_color(toggle_active_text)
+                                    })
+                                    .when(!is_dark_mode, |this| {
+                                        this.text_color(text_secondary)
+                                            .hover(move |s| s.bg(hover_bg))
+                                    })
                                     .child(
-                                        div()
-                                            .id("theme-toggle-light")
-                                            .rounded_l(px(self.scaled(5.0)))
-                                            .px(px(self.scaled(12.0)))
-                                            .py(px(self.scaled(4.0)))
-                                            .text_size(px(self.scaled(11.0)))
-                                            .cursor(CursorStyle::Arrow)
-                                            .when(!is_dark_mode, |this| {
-                                                this.bg(toggle_active_bg)
-                                                    .text_color(toggle_active_text)
-                                            })
-                                            .when(is_dark_mode, |this| {
-                                                this.text_color(text_secondary)
-                                                    .hover(move |s| s.bg(hover_bg))
-                                            })
-                                            .child("浅色")
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, _, cx| {
-                                                    if this.settings_theme_dark_mode {
-                                                        let light_theme =
-                                                            this.app_settings.light_theme_kind();
-                                                        this.set_theme(light_theme, cx);
-                                                    }
-                                                }),
-                                            ),
+                                        svg()
+                                            .path(THEME_DARK_MINI_SVG_PATH)
+                                            .size(px(icon_size))
+                                            .text_color(if is_dark_mode {
+                                                toggle_active_text
+                                            } else {
+                                                text_secondary
+                                            }),
                                     )
-                                    .child(
-                                        div()
-                                            .id("theme-toggle-dark")
-                                            .rounded_r(px(self.scaled(5.0)))
-                                            .px(px(self.scaled(12.0)))
-                                            .py(px(self.scaled(4.0)))
-                                            .text_size(px(self.scaled(11.0)))
-                                            .cursor(CursorStyle::Arrow)
-                                            .when(is_dark_mode, |this| {
-                                                this.bg(toggle_active_bg)
-                                                    .text_color(toggle_active_text)
-                                            })
-                                            .when(!is_dark_mode, |this| {
-                                                this.text_color(text_secondary)
-                                                    .hover(move |s| s.bg(hover_bg))
-                                            })
-                                            .child("深色")
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, _, cx| {
-                                                    if !this.settings_theme_dark_mode {
-                                                        let dark_theme =
-                                                            this.app_settings.dark_theme_kind();
-                                                        this.set_theme(dark_theme, cx);
-                                                    }
-                                                }),
-                                            ),
+                                    .child(self.t(TextKey::ThemeDark))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            if !this.settings_theme_dark_mode {
+                                                let dark_theme =
+                                                    this.app_settings.dark_theme_kind();
+                                                this.set_theme(dark_theme, cx);
+                                            }
+                                        }),
                                     ),
                             ),
                     )
-                    .child(div().w_full().h(px(1.0)).bg(border_color)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(0.0))
+                            .rounded(px(option_radius))
+                            .border(px(option_border_width))
+                            .border_color(option_border_color)
+                            .overflow_hidden()
+                            .children(EditorThemeMode::all().iter().enumerate().map(
+                                |(index, mode)| {
+                                    let is_active = *mode == editor_theme_mode;
+                                    let mode = *mode;
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "editor-theme-mode-{}",
+                                            mode.as_str()
+                                        )))
+                                        .h(px(option_height))
+                                        .px(px(option_padding_x))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap(px(toggle_gap))
+                                        .text_size(px(option_font_size))
+                                        .text_color(if is_active {
+                                            option_active_text_color
+                                        } else {
+                                            option_text_color
+                                        })
+                                        .bg(if is_active {
+                                            option_active_bg
+                                        } else {
+                                            gpui::transparent_black()
+                                        })
+                                        .cursor(CursorStyle::Arrow)
+                                        .when(!is_active, |this| {
+                                            this.hover(move |s| s.bg(option_hover_bg))
+                                        })
+                                        .when(index > 0, |this| {
+                                            this.border_l(px(option_border_width))
+                                                .border_color(option_border_color)
+                                        })
+                                        .child(
+                                            svg()
+                                                .path(match mode {
+                                                    EditorThemeMode::Colorful => FLOWER_SVG_PATH,
+                                                    EditorThemeMode::Monochrome => {
+                                                        MOUNTAIN_SVG_PATH
+                                                    }
+                                                })
+                                                .size(px(icon_size))
+                                                .text_color(if is_active {
+                                                    option_active_text_color
+                                                } else {
+                                                    option_text_color
+                                                }),
+                                        )
+                                        .child(match mode {
+                                            EditorThemeMode::Colorful => {
+                                                self.t(TextKey::ThemeModeColorful)
+                                            }
+                                            EditorThemeMode::Monochrome => {
+                                                self.t(TextKey::ThemeModeMonochrome)
+                                            }
+                                        })
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.set_editor_theme_mode(mode, cx);
+                                            }),
+                                        )
+                                        .into_any_element()
+                                },
+                            )),
+                    ),
             )
             .child(
                 div()
@@ -377,17 +495,49 @@ impl EditorView {
             .flex()
             .flex_col()
             .gap(px(self.scaled(12.0)))
-            .child(self.render_section_heading("字体"))
+            .child(self.render_section_heading(self.t(TextKey::FontsSection)))
             // UI font
-            .child(self.render_font_row("界面字体", ui_font, FontRole::UiFont, 0, cx))
+            .child(self.render_picker_row(
+                self.t(TextKey::UiFont),
+                ui_font,
+                FontRole::UiFont,
+                0,
+                cx,
+            ))
+            // Interface language
+            .child(self.render_picker_row(
+                self.t(TextKey::InterfaceLanguage),
+                &self.ui_language.picker_label(),
+                FontRole::InterfaceLanguage,
+                0,
+                cx,
+            ))
             // UI scale
             .child(self.render_ui_font_size_row(cx))
             // Body font (Latin)
-            .child(self.render_font_row("编辑器字体", body_latin, FontRole::BodyFont, 0, cx))
+            .child(self.render_picker_row(
+                self.t(TextKey::EditorFont),
+                body_latin,
+                FontRole::BodyFont,
+                0,
+                cx,
+            ))
             // Body font (CJK)
-            .child(self.render_font_row("编辑器字体(CJK)", body_cjk, FontRole::BodyFont, 1, cx))
+            .child(self.render_picker_row(
+                self.t(TextKey::EditorFontCjk),
+                body_cjk,
+                FontRole::BodyFont,
+                1,
+                cx,
+            ))
             // Code font
-            .child(self.render_font_row("编辑器代码字体", monospace, FontRole::CodeFont, 0, cx))
+            .child(self.render_picker_row(
+                self.t(TextKey::CodeFont),
+                monospace,
+                FontRole::CodeFont,
+                0,
+                cx,
+            ))
             // Line height
             .child(self.render_line_height_row(cx))
             // Letter spacing
@@ -395,19 +545,19 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn render_font_row(
+    fn render_picker_row(
         &mut self,
         label: &str,
-        current_font: &str,
+        current_value: &str,
         role: FontRole,
-        font_index: usize,
+        option_index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let hover_bg = self.theme.bg_hover;
         let text_primary = self.theme.text_primary;
         let text_secondary = self.theme.text_secondary;
         let border_color = self.theme.border_primary;
-        let font_name = current_font.to_string();
+        let current_value = current_value.to_string();
 
         div()
             .flex()
@@ -424,7 +574,7 @@ impl EditorView {
             .child({
                 let bounds_cell = self
                     .font_picker_button_bounds
-                    .entry((role, font_index))
+                    .entry((role, option_index))
                     .or_insert_with(|| Rc::new(Cell::new(None)))
                     .clone();
                 div()
@@ -441,7 +591,7 @@ impl EditorView {
                         div()
                             .id(SharedString::from(format!(
                                 "font-picker-{:?}-{}",
-                                role as u8, font_index
+                                role as u8, option_index
                             )))
                             .w_full()
                             .h(px(self.scaled(30.0)))
@@ -455,12 +605,12 @@ impl EditorView {
                             .text_color(text_primary)
                             .cursor(CursorStyle::Arrow)
                             .hover(move |s| s.bg(hover_bg))
-                            .child(font_name)
+                            .child(current_value)
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _: &gpui::MouseDownEvent, window, cx| {
                                     window.prevent_default();
-                                    this.open_font_picker(role, font_index, window, cx);
+                                    this.open_font_picker(role, option_index, window, cx);
                                 }),
                             ),
                     )
@@ -523,7 +673,7 @@ impl EditorView {
                     .w(px(self.scaled(120.0)))
                     .text_size(px(self.scaled(13.0)))
                     .text_color(text_secondary)
-                    .child("界面缩放系数"),
+                    .child(self.t(TextKey::UiScale)),
             )
             .child(
                 div()
@@ -652,7 +802,7 @@ impl EditorView {
                     .w(px(self.scaled(120.0)))
                     .text_size(px(self.scaled(13.0)))
                     .text_color(text_secondary)
-                    .child("编辑器行间距"),
+                    .child(self.t(TextKey::LineHeight)),
             )
             .child(
                 div()
@@ -781,7 +931,7 @@ impl EditorView {
                     .w(px(self.scaled(120.0)))
                     .text_size(px(self.scaled(13.0)))
                     .text_color(text_secondary)
-                    .child("编辑器字符间距"),
+                    .child(self.t(TextKey::LetterSpacing)),
             )
             .child(
                 div()
@@ -896,25 +1046,53 @@ impl EditorView {
     pub(crate) fn open_font_picker(
         &mut self,
         role: FontRole,
-        font_index: usize,
+        option_index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Cache font names on first open
-        if self.cached_font_names.is_none() {
-            let mut names = window.text_system().all_font_names();
-            names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
-            names.dedup();
-            // Filter out hidden/system fonts
-            names.retain(|n| !n.starts_with('.'));
-            self.cached_font_names = Some(names);
-        }
-        let all_fonts = self.cached_font_names.clone().unwrap_or_default();
+        let (all_options, placeholder) = match role {
+            FontRole::InterfaceLanguage => (
+                language_picker_options()
+                    .into_iter()
+                    .map(|option| PickerOption {
+                        value: option.language.code().to_string(),
+                        label: option.label,
+                        search_text: option.search_text,
+                        preview_font: None,
+                    })
+                    .collect::<Vec<_>>(),
+                self.t(TextKey::SearchLanguages).to_string(),
+            ),
+            _ => {
+                if self.cached_font_names.is_none() {
+                    let mut names = window.text_system().all_font_names();
+                    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+                    names.dedup();
+                    names.retain(|name| !name.starts_with('.'));
+                    self.cached_font_names = Some(names);
+                }
+                (
+                    self.cached_font_names
+                        .clone()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|name| PickerOption {
+                            value: name.clone(),
+                            label: name.clone(),
+                            search_text: name.to_lowercase(),
+                            preview_font: Some(name),
+                        })
+                        .collect::<Vec<_>>(),
+                    self.t(TextKey::SearchFonts).to_string(),
+                )
+            }
+        };
 
         self.settings_font_picker = Some(FontPickerState {
             role,
-            font_index,
-            filtered: all_fonts,
+            option_index,
+            filtered: all_options.clone(),
+            all_options,
             selected_index: 0,
             scroll_handle: ScrollHandle::new(),
             show_above: std::cell::Cell::new(None),
@@ -926,22 +1104,21 @@ impl EditorView {
         styles.text_input_focus_bg = gpui::Hsla::transparent_black();
         styles.text_input_border_width_px = 0.0;
         styles.text_input_cursor_height_ratio = 0.6;
-        let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "搜索字体...", cx));
+        let editor = cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
         cx.subscribe(
             &editor,
             |this, editor, event: &crate::text_input::TextInputEvent, cx| {
                 match event {
                     crate::text_input::TextInputEvent::Changed => {
                         let query = editor.read(cx).text().to_lowercase();
-                        if let (Some(picker), Some(all_fonts)) =
-                            (&mut this.settings_font_picker, &this.cached_font_names)
-                        {
+                        if let Some(picker) = &mut this.settings_font_picker {
                             if query.is_empty() {
-                                picker.filtered = all_fonts.clone();
+                                picker.filtered = picker.all_options.clone();
                             } else {
-                                picker.filtered = all_fonts
+                                picker.filtered = picker
+                                    .all_options
                                     .iter()
-                                    .filter(|name| name.to_lowercase().contains(&query))
+                                    .filter(|option| option.search_text.contains(&query))
                                     .cloned()
                                     .collect();
                             }
@@ -950,11 +1127,10 @@ impl EditorView {
                         }
                     }
                     crate::text_input::TextInputEvent::Submit => {
-                        // Select current highlighted font
                         if let Some(picker) = &this.settings_font_picker {
-                            if let Some(name) = picker.filtered.get(picker.selected_index).cloned()
+                            if let Some(option) = picker.filtered.get(picker.selected_index).cloned()
                             {
-                                this.apply_font_selection(name, cx);
+                                this.apply_font_selection(option.value, cx);
                                 return;
                             }
                         }
@@ -1017,8 +1193,10 @@ impl EditorView {
             .iter()
             .take(200)
             .enumerate()
-            .map(|(idx, font_name)| {
-                let name = font_name.clone();
+            .map(|(idx, option)| {
+                let value = option.value.clone();
+                let label = option.label.clone();
+                let preview_font = option.preview_font.clone();
                 let is_selected = idx == picker.selected_index;
                 div()
                     .id(SharedString::from(format!("fp-item-{idx}")))
@@ -1029,17 +1207,19 @@ impl EditorView {
                     .items_center()
                     .text_size(px(self.scaled(13.0)))
                     .text_color(text_primary)
-                    .font_family(SharedString::from(name.clone()))
+                    .when_some(preview_font, |this, preview_font| {
+                        this.font_family(SharedString::from(preview_font))
+                    })
                     .when(is_selected, |this| this.bg(selected_bg))
                     .hover(move |s| s.bg(hover_bg))
                     .cursor(CursorStyle::Arrow)
-                    .child(name.clone())
+                    .child(label)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             window.prevent_default();
-                            this.apply_font_selection(name.clone(), cx);
+                            this.apply_font_selection(value.clone(), cx);
                         }),
                     )
                     .into_any_element()
@@ -1064,7 +1244,7 @@ impl EditorView {
         // Use captured button bounds for precise positioning
         let button_bounds = self
             .font_picker_button_bounds
-            .get(&(picker.role, picker.font_index))
+            .get(&(picker.role, picker.option_index))
             .and_then(|rc| rc.get());
         let (button_x, button_y, button_w_val, button_h) = match button_bounds {
             Some(b) => (
@@ -1189,7 +1369,7 @@ impl EditorView {
         if let Some(picker) = self.settings_font_picker.take() {
             self.settings_font_picker_editor = None;
             self.font_picker_trigger_position = None;
-            match (picker.role, picker.font_index) {
+            match (picker.role, picker.option_index) {
                 (FontRole::UiFont, _) => {
                     self.styles.ui_font_family = Box::leak(font_name.clone().into_boxed_str());
                     self.app_settings.ui_font = font_name;
@@ -1210,6 +1390,12 @@ impl EditorView {
                     self.styles.editor.editor_monospace_font_family =
                         Box::leak(font_name.clone().into_boxed_str());
                     self.app_settings.code_font = font_name;
+                }
+                (FontRole::InterfaceLanguage, _) => {
+                    if let Some(language) = UiLanguage::from_code(&font_name) {
+                        self.apply_ui_language(language, cx);
+                        return;
+                    }
                 }
                 _ => {}
             }

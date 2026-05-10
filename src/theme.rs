@@ -40,6 +40,33 @@ impl ThemeKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorThemeMode {
+    Colorful,
+    Monochrome,
+}
+
+impl EditorThemeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Colorful => "colorful",
+            Self::Monochrome => "monochrome",
+        }
+    }
+
+    pub fn all() -> &'static [Self] {
+        &[Self::Colorful, Self::Monochrome]
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "colorful" | "Colorful" => Some(Self::Colorful),
+            "monochrome" | "Monochrome" => Some(Self::Monochrome),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThemeColorField {
     TextPrimary,
@@ -81,7 +108,7 @@ pub enum ThemeColorField {
 }
 
 impl ThemeColorField {
-    pub const ALL: [Self; 36] = [
+    pub const UI_FIELDS: [Self; 18] = [
         Self::TextPrimary,
         Self::TextSecondary,
         Self::TextBright,
@@ -96,12 +123,15 @@ impl ThemeColorField {
         Self::BgTab,
         Self::BgTabHover,
         Self::BgTabActive,
-        Self::BgCode,
-        Self::BgCodeInline,
         Self::BorderPrimary,
         Self::BorderSecondary,
         Self::BorderTertiary,
         Self::BorderDecorative,
+    ];
+
+    pub const EDITOR_FIELDS: [Self; 18] = [
+        Self::BgCode,
+        Self::BgCodeInline,
         Self::BorderCodeBlock,
         Self::Cursor,
         Self::Selection,
@@ -308,6 +338,38 @@ impl Theme {
     }
 }
 
+pub fn apply_editor_theme_mode(theme: &Theme, mode: EditorThemeMode, is_dark: bool) -> Theme {
+    let mut themed = theme.clone();
+    if mode == EditorThemeMode::Monochrome {
+        let monochrome_link = crate::hex_hsla!("#61afef");
+        let emphasis = if is_dark {
+            themed.text_bright
+        } else {
+            themed.text_primary
+        };
+        let subtle = with_alpha(themed.text_secondary, if is_dark { 0.92 } else { 0.82 });
+        themed.heading = if is_dark {
+            with_alpha(emphasis, 0.88)
+        } else {
+            emphasis
+        };
+        themed.bold = themed.text_primary;
+        themed.italic = subtle;
+        themed.strikethrough = subtle;
+        themed.inline_code = if is_dark {
+            with_alpha(emphasis, 0.88)
+        } else {
+            emphasis
+        };
+        themed.link = monochrome_link;
+        themed.syntax_marker = subtle;
+        themed.list_marker = subtle;
+        themed.checkbox_checked = subtle;
+        themed.gutter_heading = with_alpha(themed.text_primary, if is_dark { 0.24 } else { 0.18 });
+    }
+    themed
+}
+
 impl Theme {
     pub fn one_dark() -> Self {
         Self {
@@ -334,7 +396,7 @@ impl Theme {
             border_secondary: crate::hex_hsla!("#67718633"),
             border_tertiary: crate::hex_hsla!("#3e4452"),
             border_decorative: with_alpha(crate::hex_hsla!("#636d83"), 0.5),
-            border_code_block: with_alpha(crate::hex_hsla!("#3E4856"), 0.35),
+            border_code_block: with_alpha(crate::hex_hsla!("#303740"), 1.0),
             // Editor/Markdown
             cursor: crate::hex_hsla!("#528bff"),
             selection: with_alpha(crate::hex_hsla!("#3e4451"), 0.6),
@@ -469,7 +531,7 @@ impl Theme {
             border_secondary: crate::hex_hsla!("#363a4f"),
             border_tertiary: crate::hex_hsla!("#4B5067"),
             border_decorative: with_alpha(crate::hex_hsla!("#5c6773"), 0.5),
-            border_code_block: with_alpha(crate::hex_hsla!("#2F3344"), 1.0),
+            border_code_block: with_alpha(crate::hex_hsla!("#2C3041"), 1.0),
             // Editor/Markdown
             cursor: crate::hex_hsla!("#528bff"),
             selection: with_alpha(crate::hex_hsla!("#3e4451"), 0.6),
@@ -673,6 +735,35 @@ fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
         return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
     }
     p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EditorThemeMode, Theme, apply_editor_theme_mode, with_alpha};
+
+    #[test]
+    fn monochrome_mode_keeps_code_block_colors() {
+        let base = Theme::one_dark();
+        let themed = apply_editor_theme_mode(&base, EditorThemeMode::Monochrome, true);
+
+        assert_eq!(themed.bg_code, base.bg_code);
+        assert_eq!(themed.border_code_block, base.border_code_block);
+        assert_eq!(themed.heading, with_alpha(base.text_bright, 0.88));
+        assert_eq!(themed.inline_code, with_alpha(base.text_bright, 0.88));
+        assert_eq!(themed.link, crate::hex_hsla!("#61afef"));
+    }
+
+    #[test]
+    fn monochrome_mode_uses_grayscale_markers_in_light_theme() {
+        let base = Theme::one_light();
+        let themed = apply_editor_theme_mode(&base, EditorThemeMode::Monochrome, false);
+
+        assert_eq!(themed.heading, base.text_primary);
+        assert_eq!(themed.inline_code, base.text_primary);
+        assert_eq!(themed.link, crate::hex_hsla!("#61afef"));
+        assert_eq!(themed.list_marker, with_alpha(base.text_secondary, 0.82));
+        assert_eq!(themed.syntax_marker, with_alpha(base.text_secondary, 0.82));
+    }
 }
 
 const fn rgb_to_hsla(r: f32, g: f32, b: f32, a: f32) -> Hsla {

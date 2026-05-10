@@ -2,6 +2,10 @@ schema_version: 1
 
 settings:
   theme: OneDark
+  dark_theme: OneDark
+  light_theme: OneLight
+  dark_editor_theme_mode: colorful
+  light_editor_theme_mode: monochrome
   ui_font: .SystemUIFont
   ui_scale: 1.0
   body_latin_font: Menlo

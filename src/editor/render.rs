@@ -6,11 +6,6 @@ use gpui::{
 use super::tooltip::{TooltipState, toolbar_anchor_bounds};
 use super::*;
 
-const TOOLBAR_SIDEBAR_TOOLTIP: (&str, Option<&str>) = ("显示或隐藏边栏", Some("⌘\\"));
-const TOOLBAR_ALIGN_TOOLTIP: (&str, Option<&str>) = ("切换左对齐", Some("⌘⇧L"));
-const TOOLBAR_OUTLINE_TOOLTIP: (&str, Option<&str>) = ("显示或隐藏内容大纲", None);
-const TOOLBAR_THEME_TOOLTIP: (&str, Option<&str>) = ("切换浅色或深色主题", Some("⌘⌥\\"));
-
 impl EditorView {
     fn render_right_panels(&mut self, cx: &mut Context<Self>) -> AnyElement {
         div()
@@ -434,7 +429,7 @@ impl Render for EditorView {
                                         .text_color(btn_color)
                                         .cursor(CursorStyle::Arrow)
                                         .hover(move |s| s.bg(bg_hover))
-                                        .child("新建文件...")
+                                        .child(self.t(crate::i18n::TextKey::NewFile))
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -648,8 +643,8 @@ impl Render for EditorView {
                                                                 primary_hover,
                                                                 SIDEBAR_TOGGLE_SVG_PATH,
                                                                 sidebar_anchor,
-                                                                TOOLBAR_SIDEBAR_TOOLTIP.0,
-                                                                TOOLBAR_SIDEBAR_TOOLTIP.1,
+                                                                self.t(crate::i18n::TextKey::ToolbarSidebarTooltip),
+                                                                Some("⌘\\"),
                                                                 cx,
                                                                 |this, cx| {
                                                                     if this.workspaces.is_empty() {
@@ -668,8 +663,8 @@ impl Render for EditorView {
                                                                 secondary_hover,
                                                                 EDITOR_ALIGN_LEFT_SVG_PATH,
                                                                 align_anchor,
-                                                                TOOLBAR_ALIGN_TOOLTIP.0,
-                                                                TOOLBAR_ALIGN_TOOLTIP.1,
+                                                                self.t(crate::i18n::TextKey::ToolbarAlignTooltip),
+                                                                Some("⌘⇧L"),
                                                                 cx,
                                                                 |this, cx| {
                                                                     this.toggle_editor_alignment(cx);
@@ -744,8 +739,8 @@ impl Render for EditorView {
                                                                 secondary_hover,
                                                                 OUTLINE_TOGGLE_SVG_PATH,
                                                                 outline_anchor,
-                                                                TOOLBAR_OUTLINE_TOOLTIP.0,
-                                                                TOOLBAR_OUTLINE_TOOLTIP.1,
+                                                                self.t(crate::i18n::TextKey::ToolbarOutlineTooltip),
+                                                                None,
                                                                 cx,
                                                                 |this, cx| {
                                                                     this.toggle_outline_visibility(cx);
@@ -764,8 +759,8 @@ impl Render for EditorView {
                                                                     THEME_LIGHT_SVG_PATH
                                                                 },
                                                                 theme_anchor,
-                                                                TOOLBAR_THEME_TOOLTIP.0,
-                                                                TOOLBAR_THEME_TOOLTIP.1,
+                                                                self.t(crate::i18n::TextKey::ToolbarThemeTooltip),
+                                                                Some("⌘⌥\\"),
                                                                 cx,
                                                                 |this, cx| {
                                                                     this.toggle_theme(cx);
@@ -940,7 +935,7 @@ impl EditorView {
                 div()
                     .text_size(px(self.scaled(self.styles.ui_font_size_px + 1.0)))
                     .text_color(self.theme.text_primary)
-                    .child("似乎该文件不是文本"),
+                    .child(self.t(crate::i18n::TextKey::BinaryFileMessage)),
             )
             .child(
                 div()
@@ -948,7 +943,7 @@ impl EditorView {
                     .child(
                         path.as_ref()
                             .map(|value| value.display().to_string())
-                            .unwrap_or_else(|| "当前文件".to_string()),
+                            .unwrap_or_else(|| self.t(crate::i18n::TextKey::CurrentFile).to_string()),
                     ),
             )
             .child(
@@ -959,7 +954,7 @@ impl EditorView {
                     .bg(self.theme.bg_hover)
                     .text_color(self.theme.text_primary)
                     .cursor(CursorStyle::PointingHand)
-                    .child("打开文件")
+                    .child(self.t(crate::i18n::TextKey::OpenFile))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {

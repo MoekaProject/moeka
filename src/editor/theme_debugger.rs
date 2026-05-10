@@ -17,6 +17,35 @@ const THEME_DEBUGGER_SV_HANDLE_SIZE_PX: f32 = 14.0;
 const THEME_DEBUGGER_HUE_SEGMENTS: usize = 6;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThemeDebuggerSection {
+    Interface,
+    Editor,
+}
+
+impl ThemeDebuggerSection {
+    fn label_key(self) -> crate::i18n::TextKey {
+        match self {
+            Self::Interface => crate::i18n::TextKey::ThemeDebuggerInterface,
+            Self::Editor => crate::i18n::TextKey::ThemeDebuggerEditor,
+        }
+    }
+
+    fn fields(self) -> &'static [ThemeColorField] {
+        match self {
+            Self::Interface => &ThemeColorField::UI_FIELDS,
+            Self::Editor => &ThemeColorField::EDITOR_FIELDS,
+        }
+    }
+
+    fn default_field(self) -> ThemeColorField {
+        match self {
+            Self::Interface => ThemeColorField::TextPrimary,
+            Self::Editor => ThemeColorField::Heading,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThemeDebuggerDragTarget {
     SaturationValue,
     Hue,
@@ -189,6 +218,26 @@ impl EditorView {
         cx.notify();
     }
 
+    fn select_theme_debugger_section(
+        &mut self,
+        section: ThemeDebuggerSection,
+        cx: &mut Context<Self>,
+    ) {
+        if self.theme_debugger_section == section {
+            return;
+        }
+        self.theme_debugger_section = section;
+        if !section
+            .fields()
+            .iter()
+            .any(|field| *field == self.theme_debugger_selected_field)
+        {
+            self.theme_debugger_selected_field = section.default_field();
+        }
+        self.sync_theme_debugger_editors(cx);
+        cx.notify();
+    }
+
     fn start_theme_debugger_drag(
         &mut self,
         target: ThemeDebuggerDragTarget,
@@ -318,7 +367,11 @@ impl EditorView {
 
     fn reset_theme_debugger_theme(&mut self, cx: &mut Context<Self>) {
         self.theme_debugger_drag_target = None;
-        self.theme = self.theme_kind.build();
+        self.theme = crate::theme::apply_editor_theme_mode(
+            &self.theme_kind.build(),
+            self.editor_theme_mode,
+            self.theme_kind.is_dark(),
+        );
         self.refresh_theme_styles(false, cx);
         self.sync_theme_debugger_editors(cx);
         cx.notify();
@@ -349,6 +402,7 @@ impl EditorView {
         let text_secondary = self.theme.text_secondary;
         let detail_label_font = self.scaled(12.0);
         let row_font = self.scaled(12.0);
+        let debugger_section = self.theme_debugger_section;
         let selected_field = self.theme_debugger_selected_field;
         let selected_color = self.theme.color(selected_field);
         let selected_hsva = hsla_to_hsva(selected_color);
@@ -407,7 +461,8 @@ impl EditorView {
             })
             .collect();
 
-        let rows: Vec<AnyElement> = ThemeColorField::ALL
+        let rows: Vec<AnyElement> = debugger_section
+            .fields()
             .iter()
             .copied()
             .map(|field| {
@@ -499,19 +554,70 @@ impl EditorView {
                     .px(px(header_padding_x))
                     .text_size(px(self.scaled(11.0)))
                     .text_color(text_secondary)
-                    .child("主题调试器")
+                    .child(self.t(crate::i18n::TextKey::ThemeDebugger))
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
+                            .gap(px(self.scaled(8.0)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .rounded(px(self.scaled(6.0)))
+                                    .border(px(1.0))
+                                    .border_color(border_color)
+                                    .overflow_hidden()
+                                    .children([
+                                        ThemeDebuggerSection::Interface,
+                                        ThemeDebuggerSection::Editor,
+                                    ]
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, section)| {
+                                        let is_active = section == debugger_section;
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "theme-debugger-section-{}",
+                                                self.t(section.label_key())
+                                            )))
+                                            .px(px(self.scaled(10.0)))
+                                            .py(px(self.scaled(5.0)))
+                                            .text_color(if is_active {
+                                                panel_bg
+                                            } else {
+                                                text_primary
+                                            })
+                                            .bg(if is_active {
+                                                text_primary
+                                            } else {
+                                                gpui::transparent_black()
+                                            })
+                                            .cursor(CursorStyle::Arrow)
+                                            .when(index > 0, |this| {
+                                                this.border_l(px(1.0)).border_color(border_color)
+                                            })
+                                            .when(!is_active, |this| {
+                                                this.hover(move |style| style.bg(hover_bg))
+                                            })
+                                            .child(self.t(section.label_key()))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    this.select_theme_debugger_section(section, cx);
+                                                }),
+                                            )
+                                            .into_any_element()
+                                    })),
+                            )
                             .gap(px(self.scaled(12.0)))
                             .child(
                                 div()
                                     .cursor(CursorStyle::Arrow)
                                     .text_color(text_primary)
                                     .hover(move |style| style.opacity(0.75))
-                                    .child("导出")
+                                    .child(self.t(crate::i18n::TextKey::Export))
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(|this, _, _, cx| {
@@ -524,7 +630,7 @@ impl EditorView {
                                     .cursor(CursorStyle::Arrow)
                                     .text_color(text_primary)
                                     .hover(move |style| style.opacity(0.75))
-                                    .child("重置")
+                                    .child(self.t(crate::i18n::TextKey::Reset))
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(|this, _, _, cx| {
@@ -555,7 +661,7 @@ impl EditorView {
                                 div()
                                     .text_size(px(detail_label_font))
                                     .text_color(text_secondary)
-                                    .child("Picker"),
+                                    .child(self.t(crate::i18n::TextKey::Picker)),
                             )
                             .child({
                                 let bounds_cell = self.theme_debugger_sv_bounds.clone();
@@ -675,7 +781,7 @@ impl EditorView {
                                         div()
                                             .text_size(px(detail_label_font))
                                             .text_color(text_secondary)
-                                            .child("Hue"),
+                                            .child(self.t(crate::i18n::TextKey::Hue)),
                                     )
                                     .child({
                                         let bounds_cell = self.theme_debugger_hue_bounds.clone();
@@ -773,7 +879,7 @@ impl EditorView {
                                         div()
                                             .text_size(px(detail_label_font))
                                             .text_color(text_secondary)
-                                            .child("Opacity"),
+                                            .child(self.t(crate::i18n::TextKey::Opacity)),
                                     )
                                     .child({
                                         let bounds_cell = self.theme_debugger_alpha_bounds.clone();
@@ -880,7 +986,7 @@ impl EditorView {
                                 div()
                                     .text_size(px(detail_label_font))
                                     .text_color(text_secondary)
-                                    .child("Hex"),
+                                    .child(self.t(crate::i18n::TextKey::Hex))
                             )
                             .when_some(self.theme_debugger_hex_editor.clone(), |this, editor| {
                                 this.child(editor)
@@ -895,7 +1001,7 @@ impl EditorView {
                                 div()
                                     .text_size(px(detail_label_font))
                                     .text_color(text_secondary)
-                                    .child("Alpha (%)"),
+                                    .child(self.t(crate::i18n::TextKey::AlphaPercent))
                             )
                             .child(
                                 div()
@@ -910,7 +1016,7 @@ impl EditorView {
                                         div()
                                             .text_size(px(self.scaled(11.0)))
                                             .text_color(text_secondary)
-                                            .child("支持 0-100 或 0-1"),
+                                            .child(self.t(crate::i18n::TextKey::AlphaHint)),
                                     ),
                             ),
                     ),

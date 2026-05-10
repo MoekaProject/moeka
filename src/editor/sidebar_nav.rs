@@ -109,11 +109,11 @@ impl EditorView {
             .unwrap_or_default();
         self.show_dialog(
             Dialog {
-                title: "删除".to_string(),
-                message: format!("确定要删除 \"{}\" 吗？此操作不可撤销。", name),
+                title: self.t(crate::i18n::TextKey::Delete).to_string(),
+                message: crate::i18n::delete_path_message(self.ui_language, &name),
                 save_label: None,
-                confirm_label: "删除".to_string(),
-                cancel_label: "取消".to_string(),
+                confirm_label: self.t(crate::i18n::TextKey::Delete).to_string(),
+                cancel_label: self.t(crate::i18n::TextKey::Cancel).to_string(),
                 is_danger: true,
                 action: DialogAction::DeletePath { path },
             },

@@ -3210,7 +3210,7 @@ impl Element for EditorElement {
             let is_button_hovered = editor.hovering_code_block_copy_start == Some(*start_line);
             let (label_text, button_bg, button_text_color, button_border_color) = if is_copied {
                 (
-                    "已复制".to_string(),
+                    editor.t(crate::i18n::TextKey::Copied).to_string(),
                     code_block_styles.code_block_copy_button_copied_bg,
                     code_block_styles.code_block_copy_button_copied_text_color,
                     code_block_styles.code_block_copy_button_copied_border_color,

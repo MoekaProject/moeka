@@ -322,7 +322,11 @@ fn deserialize_file_kind(value: &str) -> Option<FileKind> {
 fn settings_tab(id: String) -> OpenTab {
     OpenTab {
         id,
-        title: "设置".to_string(),
+        title: crate::i18n::translate(
+            crate::i18n::detect_system_language(),
+            crate::i18n::TextKey::SettingsTitle,
+        )
+        .to_string(),
         kind: TabKind::Settings,
         path: None,
         file_kind: None,

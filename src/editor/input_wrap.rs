@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::ops::Range;
 
-use gpui::{Pixels, Point, px};
+use gpui::{Pixels, Point, point, px};
 
 use super::*;
 
@@ -74,41 +75,71 @@ impl EditorView {
         Some((upstream_x, downstream_x))
     }
 
+    pub(crate) fn visual_position_for_wrapped_display(
+        wrapped_line: &WrappedLine,
+        display_text: &str,
+        disp_col: usize,
+        line_height: f32,
+        indent_px: f32,
+        wrap_boundary_upstream_xs: &HashMap<usize, f32>,
+        affinity: Option<WrapBoundaryAffinityKind>,
+    ) -> Option<Point<Pixels>> {
+        if let Some(upstream_visual_idx) = helpers::wrap_boundary_byte_indices(wrapped_line)
+            .iter()
+            .position(|boundary| *boundary == disp_col)
+        {
+            let downstream_visual_idx = upstream_visual_idx + 1;
+            if affinity == Some(WrapBoundaryAffinityKind::Downstream) {
+                let downstream_x = if downstream_visual_idx > 0 {
+                    indent_px
+                } else {
+                    0.0
+                };
+                return Some(point(
+                    px(downstream_x),
+                    px(downstream_visual_idx as f32 * line_height),
+                ));
+            }
+
+            if let Some(upstream_x) = wrap_boundary_upstream_xs.get(&disp_col).copied() {
+                let previous_boundary = display_text[..disp_col]
+                    .char_indices()
+                    .next_back()
+                    .map(|(index, _)| index)
+                    .unwrap_or(0);
+                let previous_pos = wrapped_line.position_for_index(previous_boundary, px(line_height))?;
+                let upstream_x = upstream_x
+                    + if upstream_visual_idx > 0 { indent_px } else { 0.0 };
+                return Some(point(px(upstream_x), previous_pos.y));
+            }
+        }
+
+        let pos = wrapped_line
+            .position_for_index(disp_col, px(line_height))
+            .unwrap_or_default();
+        Some(point(
+            px(f32::from(pos.x) + helpers::indent_for_y(indent_px, pos.y, line_height)),
+            pos.y,
+        ))
+    }
+
     pub(crate) fn cursor_visual_position(&self, offset: usize) -> Option<(usize, f32)> {
         let (line, col) = self.buffer.offset_to_line_col(offset);
         let info = self.line_display_info.get(line)?.as_ref()?;
         let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
-
-        if let Some((upstream_visual_idx, downstream_visual_idx)) =
-            Self::wrap_boundary_visual_indices(info, disp_col)
-        {
-            if self.wrap_boundary_affinity
-                == Some(WrapBoundaryAffinity {
-                    offset,
-                    kind: WrapBoundaryAffinityKind::Downstream,
-                })
-            {
-                let downstream_x = if downstream_visual_idx > 0 {
-                    info.indent_px
-                } else {
-                    0.0
-                };
-                return Some((downstream_visual_idx, downstream_x));
-            }
-
-            if let Some((upstream_x, _)) = Self::wrap_boundary_visual_x_pair(info, disp_col) {
-                return Some((upstream_visual_idx, upstream_x));
-            }
-        }
-
-        let pos = info
-            .wrapped_line
-            .position_for_index(disp_col, px(info.line_height))
-            .unwrap_or_default();
-        Some((
-            (f32::from(pos.y) / info.line_height) as usize,
-            f32::from(pos.x) + helpers::indent_for_y(info.indent_px, pos.y, info.line_height),
-        ))
+        let affinity = self.wrap_boundary_affinity.and_then(|current| {
+            (current.offset == offset).then_some(current.kind)
+        });
+        let pos = Self::visual_position_for_wrapped_display(
+            &info.wrapped_line,
+            &info.display_text,
+            disp_col,
+            info.line_height,
+            info.indent_px,
+            &info.wrap_boundary_upstream_xs,
+            affinity,
+        )?;
+        Some(((f32::from(pos.y) / info.line_height) as usize, f32::from(pos.x)))
     }
 
     pub(crate) fn cursor_visual_x(&self, offset: usize) -> Option<f32> {

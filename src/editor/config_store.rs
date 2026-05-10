@@ -191,7 +191,11 @@ mod tests {
             theme: "MilkyDark".to_string(),
             dark_theme: "MilkyDark".to_string(),
             light_theme: "MilkyLight".to_string(),
+            dark_editor_theme_mode: "monochrome".to_string(),
+            light_editor_theme_mode: "colorful".to_string(),
+            editor_theme_mode: "colorful".to_string(),
             ui_font: "SF Pro".to_string(),
+            language: "fr".to_string(),
             ui_scale: 1.2,
             body_latin_font: "IBM Plex Sans".to_string(),
             body_cjk_font: "PingFang SC".to_string(),
@@ -246,8 +250,23 @@ mod tests {
         let loaded = load_config_from_path(&path).unwrap();
 
         assert_eq!(loaded.settings.theme, "MilkyDark");
-        assert_eq!(loaded.settings.dark_theme, AppSettings::default().dark_theme);
-        assert_eq!(loaded.settings.light_theme, AppSettings::default().light_theme);
+        assert_eq!(
+            loaded.settings.dark_theme,
+            AppSettings::default().dark_theme
+        );
+        assert_eq!(
+            loaded.settings.light_theme,
+            AppSettings::default().light_theme
+        );
+        assert_eq!(loaded.settings.language, AppSettings::default().language);
+        assert_eq!(
+            loaded.settings.dark_editor_theme_mode,
+            AppSettings::default().dark_editor_theme_mode
+        );
+        assert_eq!(
+            loaded.settings.light_editor_theme_mode,
+            AppSettings::default().light_editor_theme_mode
+        );
         assert_eq!(loaded.settings.ui_font, AppSettings::default().ui_font);
         assert_eq!(loaded.workspaces.roots, vec![PathBuf::from("/tmp/demo")]);
         assert_eq!(loaded.schema_version, CONFIG_SCHEMA_VERSION);

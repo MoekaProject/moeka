@@ -58,8 +58,9 @@ use gpui::{
 use crate::actions::*;
 use crate::buffer::Buffer;
 use crate::cursor::Cursor;
+use crate::i18n::{TextKey, UiLanguage};
 use crate::markdown::{self, BlockType, LineDecoration};
-use crate::theme::{Theme, ThemeColorField, ThemeKind};
+use crate::theme::{EditorThemeMode, Theme, ThemeColorField, ThemeKind};
 
 const CODE_BLOCK_COPY_FEEDBACK_MS: u64 = 1200;
 const PANEL_ANIMATION_FRAME_MS: u64 = 8;
@@ -365,13 +366,13 @@ pub(crate) enum SidebarSortMode {
 }
 
 impl SidebarSortMode {
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label_key(self) -> crate::i18n::TextKey {
         match self {
-            Self::CreatedDesc => "创建时间（新到旧）",
-            Self::CreatedAsc => "创建时间（旧到新）",
-            Self::NameAsc => "名称（A-Z）",
-            Self::NameDesc => "名称（Z-A）",
-            Self::Type => "类型",
+            Self::CreatedDesc => crate::i18n::TextKey::SortCreatedDesc,
+            Self::CreatedAsc => crate::i18n::TextKey::SortCreatedAsc,
+            Self::NameAsc => crate::i18n::TextKey::SortNameAsc,
+            Self::NameDesc => crate::i18n::TextKey::SortNameDesc,
+            Self::Type => crate::i18n::TextKey::SortType,
         }
     }
 }
@@ -668,6 +669,7 @@ pub struct EditorView {
     pub(crate) extra_cursors: Vec<Cursor>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) theme_kind: ThemeKind,
+    pub(crate) editor_theme_mode: EditorThemeMode,
     pub(crate) theme: Theme,
     pub(crate) styles: crate::style::Styles,
     pub(crate) decorations: Vec<LineDecoration>,
@@ -833,6 +835,7 @@ pub struct EditorView {
     pub(crate) theme_debugger_width_epoch: usize,
     pub(crate) theme_debugger_width_task: Option<Task<()>>,
     pub(crate) theme_debugger_scroll_handle: ScrollHandle,
+    pub(crate) theme_debugger_section: theme_debugger::ThemeDebuggerSection,
     pub(crate) theme_debugger_selected_field: ThemeColorField,
     pub(crate) theme_debugger_hex_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) theme_debugger_alpha_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
@@ -919,6 +922,7 @@ pub struct EditorView {
         std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     >,
     pub(crate) cached_font_names: Option<Vec<String>>,
+    pub(crate) ui_language: UiLanguage,
     pub(crate) app_settings: AppSettings,
 }
 
@@ -940,8 +944,14 @@ impl EditorView {
         };
         // Load persisted settings
         let app_settings = AppSettings::load();
+        let ui_language = app_settings.ui_language();
         let theme_kind = app_settings.theme_kind();
-        let theme = theme_kind.build();
+        let editor_theme_mode = app_settings.editor_theme_mode_for_appearance(theme_kind.is_dark());
+        let theme = crate::theme::apply_editor_theme_mode(
+            &theme_kind.build(),
+            editor_theme_mode,
+            theme_kind.is_dark(),
+        );
         let mut styles = crate::style::Styles::from_theme(&theme);
         // Apply saved font settings
         styles.editor.editor_font_size_px = app_settings.font_size;
@@ -968,6 +978,7 @@ impl EditorView {
             extra_cursors: Vec::new(),
             focus_handle: cx.focus_handle(),
             theme_kind,
+            editor_theme_mode,
             theme,
             styles,
             decorations,
@@ -1012,7 +1023,7 @@ impl EditorView {
             tabs: vec![
                 OpenTab {
                     id: "welcome-1".to_string(),
-                    title: "欢迎使用".to_string(),
+                    title: crate::i18n::translate(ui_language, TextKey::WelcomeTitle).to_string(),
                     kind: TabKind::Editor,
                     path: None,
                     file_kind: Some(FileKind::Markdown),
@@ -1032,7 +1043,7 @@ impl EditorView {
                 },
                 OpenTab {
                     id: "settings-1".to_string(),
-                    title: "设置".to_string(),
+                    title: crate::i18n::translate(ui_language, TextKey::SettingsTitle).to_string(),
                     kind: TabKind::Settings,
                     path: None,
                     file_kind: None,
@@ -1159,6 +1170,7 @@ impl EditorView {
             theme_debugger_width_epoch: 0,
             theme_debugger_width_task: None,
             theme_debugger_scroll_handle: ScrollHandle::new(),
+            theme_debugger_section: theme_debugger::ThemeDebuggerSection::Interface,
             theme_debugger_selected_field: ThemeColorField::TextPrimary,
             theme_debugger_hex_editor: None,
             theme_debugger_alpha_editor: None,
@@ -1236,9 +1248,11 @@ impl EditorView {
             font_picker_trigger_position: None,
             font_picker_button_bounds: std::collections::HashMap::new(),
             cached_font_names: None,
+            ui_language,
             app_settings,
         };
         session_store::restore_session(&mut this);
+        this.refresh_builtin_tab_titles();
         this.sync_panel_display_state();
         this.start_blinking(cx);
         if !this.sidebar_root.as_os_str().is_empty() {
@@ -1250,6 +1264,33 @@ impl EditorView {
         this.toolbar_opacity_target = this.toolbar_opacity;
 
         this
+    }
+
+    pub(crate) fn t(&self, key: TextKey) -> &'static str {
+        crate::i18n::translate(self.ui_language, key)
+    }
+
+    pub(crate) fn refresh_builtin_tab_titles(&mut self) {
+        let welcome_title = self.t(TextKey::WelcomeTitle).to_string();
+        let settings_title = self.t(TextKey::SettingsTitle).to_string();
+        for tab in &mut self.tabs {
+            if tab.kind == TabKind::Settings {
+                tab.title = settings_title.clone();
+            } else if tab.id == "welcome-1" && tab.path.is_none() {
+                tab.title = welcome_title.clone();
+            }
+        }
+    }
+
+    pub(crate) fn apply_ui_language(&mut self, language: UiLanguage, cx: &mut Context<Self>) {
+        if self.ui_language == language {
+            self.close_font_picker(cx);
+            return;
+        }
+        self.ui_language = language;
+        self.app_settings.language = language.code().to_string();
+        self.refresh_builtin_tab_titles();
+        self.finalize_settings_change(cx);
     }
 
     pub(crate) fn should_show_editor_toolbar(&self, base_visible: bool) -> bool {
@@ -1721,9 +1762,20 @@ impl EditorView {
     }
 
     pub(crate) fn set_theme(&mut self, kind: ThemeKind, cx: &mut Context<Self>) {
+        let target_editor_theme_mode = if kind.is_dark() == self.theme_kind.is_dark() {
+            self.editor_theme_mode
+        } else {
+            self.app_settings
+                .editor_theme_mode_for_appearance(kind.is_dark())
+        };
         self.theme_kind = kind;
+        self.editor_theme_mode = target_editor_theme_mode;
         self.settings_theme_dark_mode = kind.is_dark();
-        self.theme = self.theme_kind.build();
+        self.theme = crate::theme::apply_editor_theme_mode(
+            &self.theme_kind.build(),
+            self.editor_theme_mode,
+            self.theme_kind.is_dark(),
+        );
         self.refresh_theme_styles(true, cx);
         self.app_settings.theme = theme_kind_to_string(kind);
         if kind.is_dark() {
@@ -1731,8 +1783,26 @@ impl EditorView {
         } else {
             self.app_settings.light_theme = theme_kind_to_string(kind);
         }
+        self.app_settings
+            .set_editor_theme_mode_for_appearance(kind.is_dark(), self.editor_theme_mode);
         self.app_settings.save();
         cx.notify();
+    }
+
+    pub(crate) fn set_editor_theme_mode(&mut self, mode: EditorThemeMode, cx: &mut Context<Self>) {
+        if self.editor_theme_mode == mode {
+            return;
+        }
+        self.editor_theme_mode = mode;
+        self.theme = crate::theme::apply_editor_theme_mode(
+            &self.theme_kind.build(),
+            self.editor_theme_mode,
+            self.theme_kind.is_dark(),
+        );
+        self.refresh_theme_styles(true, cx);
+        self.app_settings
+            .set_editor_theme_mode_for_appearance(self.theme_kind.is_dark(), mode);
+        self.finalize_settings_change(cx);
     }
 
     // ── File system watcher ─────────────────────────────────────
@@ -2019,11 +2089,14 @@ impl EditorView {
                         let text = tab.snapshot.text.clone();
                         let default_name = format!("{}.md", tab.title);
                         let tab_id_clone = tab_id.clone();
+                        let title = self.t(crate::i18n::TextKey::SaveFileDialog).to_string();
                         cx.spawn(async move |this, cx| {
-                            let maybe_path = cx
-                                .background_executor()
-                                .spawn(async move { helpers::save_file_blocking(&default_name) })
-                                .await;
+                            let maybe_path =
+                                cx.background_executor()
+                                    .spawn(async move {
+                                        helpers::save_file_blocking(&default_name, &title)
+                                    })
+                                    .await;
                             if let Some(path) = maybe_path {
                                 if std::fs::write(&path, &text).is_ok() {
                                     this.update(cx, |editor, cx| {
@@ -2068,11 +2141,15 @@ impl EditorView {
     fn show_save_before_import_dialog(&mut self, cx: &mut Context<Self>) {
         self.show_dialog(
             Dialog {
-                title: "请先保存当前文件".to_string(),
-                message: "粘贴图片或文件前，请先保存当前文档。".to_string(),
+                title: self
+                    .t(crate::i18n::TextKey::SaveCurrentFileFirstTitle)
+                    .to_string(),
+                message: self
+                    .t(crate::i18n::TextKey::SaveCurrentFileFirstMessage)
+                    .to_string(),
                 save_label: None,
-                confirm_label: "知道了".to_string(),
-                cancel_label: "取消".to_string(),
+                confirm_label: self.t(crate::i18n::TextKey::Acknowledge).to_string(),
+                cancel_label: self.t(crate::i18n::TextKey::Cancel).to_string(),
                 is_danger: false,
                 action: DialogAction::DismissOnly,
             },
@@ -2255,21 +2332,11 @@ impl EditorView {
         &self,
         _line_content: &str,
         decoration: &LineDecoration,
-        display_text: &mut String,
+        _display_text: &mut String,
         prefix_collapsed: bool,
     ) {
         if !prefix_collapsed || decoration.block_type != BlockType::UnorderedList {
             return;
-        }
-
-        let leading_ws = display_text.len() - display_text.trim_start_matches([' ', '\t']).len();
-        let marker_end = display_text[leading_ws..]
-            .char_indices()
-            .nth(2)
-            .map(|(offset, _)| leading_ws + offset)
-            .unwrap_or(display_text.len());
-        if marker_end > leading_ws {
-            display_text.replace_range(leading_ws..marker_end, "  ");
         }
     }
 
@@ -3577,6 +3644,26 @@ impl EditorView {
         self.dedup_cursors();
         self.reparse();
         self.scroll_to_cursor();
+    }
+
+    pub(crate) fn restore_tab_snapshot_state(&mut self, snapshot: &EditorSnapshot) {
+        self.buffer = Buffer::from_text(&snapshot.text);
+        self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
+        self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());
+        self.extra_cursors = snapshot
+            .extra_cursors
+            .iter()
+            .map(|(offset, anchor)| Cursor {
+                offset: (*offset).min(self.buffer.len()),
+                anchor: (*anchor).min(self.buffer.len()),
+            })
+            .collect();
+        self.scroll_offset = snapshot.scroll_offset;
+        self.clear_marked_ranges();
+        self.reset_cursor_visual_targeting();
+        self.ime_composition_snapshot = None;
+        self.dedup_cursors();
+        self.reparse();
     }
 
     pub(crate) fn push_undo_snapshot(&mut self, snapshot: EditorSnapshot) {

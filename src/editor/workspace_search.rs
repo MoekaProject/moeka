@@ -37,8 +37,9 @@ impl EditorView {
         if self.workspace_search_editor.is_none() {
             let styles = self.workspace_search_text_input_styles();
             let initial_query = self.workspace_search_query.clone();
-            let editor = cx.new(|cx| {
-                let mut input = crate::text_input::TextInput::new(styles, "搜索...", cx);
+            let placeholder = self.t(crate::i18n::TextKey::WorkspaceSearchPlaceholder).to_string();
+            let editor = cx.new(move |cx| {
+                let mut input = crate::text_input::TextInput::new(styles, &placeholder, cx);
                 if !initial_query.is_empty() {
                     input.set_text(&initial_query, cx);
                     input.select_all(cx);
@@ -590,9 +591,9 @@ impl EditorView {
 
         if !trimmed_query.is_empty() && self.workspace_search_results.is_empty() {
             let message = if self.workspace_search_task.is_some() {
-                "正在搜索..."
+                self.t(crate::i18n::TextKey::Searching)
             } else {
-                "无结果"
+                self.t(crate::i18n::TextKey::SearchNoResults)
             };
             children.push(
                 div()
@@ -615,9 +616,9 @@ impl EditorView {
                 .sum();
             let file_count = self.workspace_search_results.len();
             let summary_text = if self.workspace_search_task.is_some() {
-                format!("正在搜索... 当前 {total_matches} 个结果，{file_count} 个文件")
+                crate::i18n::workspace_search_progress(self.ui_language, total_matches, file_count)
             } else {
-                format!("{total_matches} 个结果，{file_count} 个文件")
+                crate::i18n::workspace_search_summary(self.ui_language, total_matches, file_count)
             };
             children.push(
                 div()

@@ -481,10 +481,12 @@ impl EntityInputHandler for EditorView {
                         .cloned()
                         .flatten()
                         .map(|info| InlineLineDisplayInfo {
+                            display_text: info.display_text,
                             buffer_to_display: info.buffer_to_display,
                             font_size: info.font_size,
                             line_height: info.line_height,
                             wrapped_line: info.wrapped_line,
+                            wrap_boundary_upstream_xs: info.wrap_boundary_upstream_xs,
                             indent_px: info.indent_px,
                             content_x: info.content_x,
                         })
@@ -495,10 +497,12 @@ impl EntityInputHandler for EditorView {
                 .cloned()
                 .flatten()
                 .map(|info| InlineLineDisplayInfo {
+                    display_text: info.display_text,
                     buffer_to_display: info.buffer_to_display,
                     font_size: info.font_size,
                     line_height: info.line_height,
                     wrapped_line: info.wrapped_line,
+                    wrap_boundary_upstream_xs: info.wrap_boundary_upstream_xs,
                     indent_px: info.indent_px,
                     content_x: info.content_x,
                 })
@@ -507,12 +511,20 @@ impl EntityInputHandler for EditorView {
 
         if let Some(info) = line_info {
             let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
-            let pos = info
-                .wrapped_line
-                .position_for_index(disp_col, px(info.line_height))
-                .unwrap_or_default();
-            let indent_adjust = helpers::indent_for_y(info.indent_px, pos.y, info.line_height);
-            let x = info.content_x + indent_adjust + f32::from(pos.x);
+            let affinity = self
+                .wrap_boundary_affinity
+                .and_then(|current| (current.offset == anchor_offset).then_some(current.kind));
+            let pos = Self::visual_position_for_wrapped_display(
+                &info.wrapped_line,
+                &info.display_text,
+                disp_col,
+                info.line_height,
+                info.indent_px,
+                &info.wrap_boundary_upstream_xs,
+                affinity,
+            )
+            .unwrap_or_default();
+            let x = info.content_x + f32::from(pos.x);
             let y = line_top_y + f32::from(pos.y);
             ime_debug_log(format!(
                 "bounds_for_range normal line={} col={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",

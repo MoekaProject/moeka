@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::theme::ThemeKind;
+use crate::i18n::{UiLanguage, default_language_code};
+use crate::theme::{EditorThemeMode, ThemeKind};
 
 use super::{SidebarSortMode, config_store};
 
@@ -12,8 +13,16 @@ pub(crate) struct AppSettings {
     pub dark_theme: String,
     #[serde(default = "default_light_theme")]
     pub light_theme: String,
+    #[serde(default = "default_dark_editor_theme_mode")]
+    pub dark_editor_theme_mode: String,
+    #[serde(default = "default_light_editor_theme_mode")]
+    pub light_editor_theme_mode: String,
+    #[serde(default = "default_editor_theme_mode")]
+    pub editor_theme_mode: String,
     #[serde(default = "default_ui_font")]
     pub ui_font: String,
+    #[serde(default = "default_language")]
+    pub language: String,
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
     #[serde(default = "default_body_latin_font")]
@@ -48,6 +57,22 @@ fn default_light_theme() -> String {
 
 fn default_ui_font() -> String {
     ".SystemUIFont".to_string()
+}
+
+fn default_language() -> String {
+    default_language_code()
+}
+
+fn default_editor_theme_mode() -> String {
+    EditorThemeMode::Colorful.as_str().to_string()
+}
+
+fn default_dark_editor_theme_mode() -> String {
+    EditorThemeMode::Colorful.as_str().to_string()
+}
+
+fn default_light_editor_theme_mode() -> String {
+    EditorThemeMode::Colorful.as_str().to_string()
 }
 
 fn default_ui_scale() -> f32 {
@@ -92,7 +117,11 @@ impl Default for AppSettings {
             theme: default_theme(),
             dark_theme: default_dark_theme(),
             light_theme: default_light_theme(),
+            dark_editor_theme_mode: default_dark_editor_theme_mode(),
+            light_editor_theme_mode: default_light_editor_theme_mode(),
+            editor_theme_mode: default_editor_theme_mode(),
             ui_font: default_ui_font(),
+            language: default_language(),
             ui_scale: default_ui_scale(),
             body_latin_font: default_body_latin_font(),
             body_cjk_font: default_body_cjk_font(),
@@ -123,6 +152,10 @@ impl AppSettings {
                 self.dark_theme_kind()
             }
         })
+    }
+
+    pub(crate) fn ui_language(&self) -> UiLanguage {
+        UiLanguage::from_code(&self.language).unwrap_or_else(crate::i18n::detect_system_language)
     }
 
     pub(crate) fn dark_theme_kind(&self) -> ThemeKind {
@@ -163,6 +196,47 @@ impl AppSettings {
             "type" => SidebarSortMode::Type,
             _ => SidebarSortMode::CreatedDesc,
         }
+    }
+
+    pub(crate) fn editor_theme_mode(&self) -> EditorThemeMode {
+        EditorThemeMode::from_str(&self.editor_theme_mode).unwrap_or(EditorThemeMode::Colorful)
+    }
+
+    pub(crate) fn dark_editor_theme_mode(&self) -> EditorThemeMode {
+        EditorThemeMode::from_str(&self.dark_editor_theme_mode)
+            .or_else(|| {
+                self.theme_kind()
+                    .is_dark()
+                    .then(|| self.editor_theme_mode())
+            })
+            .unwrap_or(EditorThemeMode::Colorful)
+    }
+
+    pub(crate) fn light_editor_theme_mode(&self) -> EditorThemeMode {
+        EditorThemeMode::from_str(&self.light_editor_theme_mode)
+            .or_else(|| (!self.theme_kind().is_dark()).then(|| self.editor_theme_mode()))
+            .unwrap_or(EditorThemeMode::Colorful)
+    }
+
+    pub(crate) fn editor_theme_mode_for_appearance(&self, is_dark: bool) -> EditorThemeMode {
+        if is_dark {
+            self.dark_editor_theme_mode()
+        } else {
+            self.light_editor_theme_mode()
+        }
+    }
+
+    pub(crate) fn set_editor_theme_mode_for_appearance(
+        &mut self,
+        is_dark: bool,
+        mode: EditorThemeMode,
+    ) {
+        if is_dark {
+            self.dark_editor_theme_mode = mode.as_str().to_string();
+        } else {
+            self.light_editor_theme_mode = mode.as_str().to_string();
+        }
+        self.editor_theme_mode = mode.as_str().to_string();
     }
 
     pub(crate) fn set_sidebar_sort_mode(&mut self, mode: SidebarSortMode) {
@@ -241,4 +315,55 @@ pub(crate) fn theme_kind_to_string(kind: ThemeKind) -> String {
         ThemeKind::MilkyLight => "MilkyLight",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppSettings;
+    use crate::theme::EditorThemeMode;
+
+    #[test]
+    fn editor_theme_mode_defaults_to_colorful() {
+        assert_eq!(
+            AppSettings::default().editor_theme_mode(),
+            EditorThemeMode::Colorful
+        );
+        assert_eq!(
+            AppSettings::default().dark_editor_theme_mode(),
+            EditorThemeMode::Colorful
+        );
+        assert_eq!(
+            AppSettings::default().light_editor_theme_mode(),
+            EditorThemeMode::Colorful
+        );
+    }
+
+    #[test]
+    fn invalid_editor_theme_mode_falls_back_to_colorful() {
+        let settings = AppSettings {
+            editor_theme_mode: "unexpected".to_string(),
+            ..AppSettings::default()
+        };
+
+        assert_eq!(settings.editor_theme_mode(), EditorThemeMode::Colorful);
+    }
+
+    #[test]
+    fn appearance_specific_editor_theme_mode_uses_matching_slot() {
+        let settings = AppSettings {
+            theme: "OneDark".to_string(),
+            dark_editor_theme_mode: "monochrome".to_string(),
+            light_editor_theme_mode: "colorful".to_string(),
+            ..AppSettings::default()
+        };
+
+        assert_eq!(
+            settings.editor_theme_mode_for_appearance(true),
+            EditorThemeMode::Monochrome
+        );
+        assert_eq!(
+            settings.editor_theme_mode_for_appearance(false),
+            EditorThemeMode::Colorful
+        );
+    }
 }

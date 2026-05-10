@@ -213,7 +213,7 @@ impl EditorView {
                 .px(px(header_padding_x))
                 .text_size(px(header_font_size))
                 .text_color(header_text_color)
-                .child("内容大纲")
+                .child(self.t(crate::i18n::TextKey::Outline))
                 .into_any_element(),
         );
 

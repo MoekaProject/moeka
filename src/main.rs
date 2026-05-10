@@ -4,6 +4,7 @@ mod actions;
 mod buffer;
 mod cursor;
 mod editor;
+mod i18n;
 mod markdown;
 mod style;
 mod table_ops;

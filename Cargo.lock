@@ -3215,6 +3215,7 @@ dependencies = [
  "similar",
  "smallvec",
  "syntect",
+ "sys-locale",
  "tempfile",
  "trash",
  "unicode-segmentation",

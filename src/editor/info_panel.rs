@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use gpui::{
     AnyElement, Context, CursorStyle, FontWeight, MouseButton, SharedString, div, prelude::*, px,
@@ -100,37 +100,6 @@ fn format_file_size(size: u64) -> String {
     } else {
         format!("{} B", size as u64)
     }
-}
-
-fn format_relative_time(time: SystemTime) -> String {
-    let Ok(delta) = SystemTime::now().duration_since(time) else {
-        return "刚刚".to_string();
-    };
-
-    let seconds = delta.as_secs();
-    if seconds < 60 {
-        "刚刚".to_string()
-    } else if seconds < 3600 {
-        format!("{} 分钟前", seconds / 60)
-    } else if seconds < 86_400 {
-        format!("{} 小时前", seconds / 3600)
-    } else if seconds < 86_400 * 365 {
-        format!("{} 天前", seconds / 86_400)
-    } else {
-        format!("{} 年前", seconds / (86_400 * 365))
-    }
-}
-
-fn format_unix_timestamp_relative(timestamp: i64) -> String {
-    if timestamp <= 0 {
-        return "刚刚".to_string();
-    }
-
-    let Some(time) = UNIX_EPOCH.checked_add(std::time::Duration::from_secs(timestamp as u64))
-    else {
-        return "刚刚".to_string();
-    };
-    format_relative_time(time)
 }
 
 fn export_dialog_path(default_name: &str, title: &str) -> Option<std::path::PathBuf> {
@@ -682,7 +651,11 @@ fn git_show_file_at_revision(repo_root: &Path, revision: &str, relative_path: &s
     }
 }
 
-fn build_git_diff_rows(base_text: &str, target_text: &str) -> Vec<GitDiffRow> {
+fn build_git_diff_rows(
+    language: crate::i18n::UiLanguage,
+    base_text: &str,
+    target_text: &str,
+) -> Vec<GitDiffRow> {
     let diff = TextDiff::from_lines(base_text, target_text);
     let mut old_line_number = 1usize;
     let mut new_line_number = 1usize;
@@ -727,7 +700,11 @@ fn build_git_diff_rows(base_text: &str, target_text: &str) -> Vec<GitDiffRow> {
             kind: GitDiffRowKind::Context,
             old_line_number: None,
             new_line_number: None,
-            text: "没有文本差异。".to_string(),
+            text: crate::i18n::translate(
+                language,
+                crate::i18n::TextKey::NoTextDiff,
+            )
+            .to_string(),
         });
     }
 
@@ -827,9 +804,9 @@ impl EditorView {
         if !status_output.trim().is_empty() {
             items.push(GitHistoryItem {
                 commit_hash: None,
-                short_hash: "WORKING".to_string(),
-                message: "未提交更改".to_string(),
-                time_label: "当前".to_string(),
+                short_hash: self.t(crate::i18n::TextKey::WorkingTree).to_string(),
+                message: self.t(crate::i18n::TextKey::UncommittedChanges).to_string(),
+                time_label: self.t(crate::i18n::TextKey::Current).to_string(),
                 is_working_tree: true,
             });
         }
@@ -860,8 +837,10 @@ impl EditorView {
             let short_hash = commit_hash.chars().take(8).collect::<String>();
             let time_label = timestamp
                 .parse::<i64>()
-                .map(format_unix_timestamp_relative)
-                .unwrap_or_else(|_| "刚刚".to_string());
+                .map(|value| crate::i18n::format_unix_timestamp_relative(self.ui_language, value))
+                .unwrap_or_else(|_| {
+                    crate::i18n::format_relative_time(self.ui_language, SystemTime::now())
+                });
             items.push(GitHistoryItem {
                 commit_hash: Some(commit_hash.to_string()),
                 short_hash,
@@ -937,7 +916,11 @@ impl EditorView {
         let Some(context) = self.git_repo_context() else {
             return;
         };
-        let diff_title = format!("Diff {}", Self::title_for_path(&context.file_path));
+        let diff_title = format!(
+            "{} {}",
+            self.t(crate::i18n::TextKey::Diff),
+            Self::title_for_path(&context.file_path)
+        );
 
         let (source_label, target_label, base_text, target_text) = if item.is_working_tree {
             let base_text =
@@ -945,11 +928,11 @@ impl EditorView {
             let target_text = self.current_file_text_for_git_diff(&context.file_path);
             (
                 if base_text.is_empty() {
-                    "空文件".to_string()
+                    self.t(crate::i18n::TextKey::EmptyFile).to_string()
                 } else {
                     "HEAD".to_string()
                 },
-                "工作区".to_string(),
+                self.t(crate::i18n::TextKey::WorkingTree).to_string(),
                 base_text,
                 target_text,
             )
@@ -974,7 +957,7 @@ impl EditorView {
         let diff = GitDiffState {
             source_label,
             target_label,
-            rows: build_git_diff_rows(&base_text, &target_text),
+            rows: build_git_diff_rows(self.ui_language, &base_text, &target_text),
         };
 
         self.open_git_diff_tab(diff_title, context.file_path, diff, cx);
@@ -1227,18 +1210,18 @@ impl EditorView {
         let relative_path = path
             .and_then(|path| self.relative_path_for_path(path))
             .or_else(|| path.map(|path| path.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| "未保存".to_string());
+            .unwrap_or_else(|| self.t(crate::i18n::TextKey::Unsaved).to_string());
         let metadata = path.and_then(|path| fs::metadata(path).ok());
         let created_at = metadata
             .as_ref()
             .and_then(|meta| meta.created().or_else(|_| meta.modified()).ok())
-            .map(format_relative_time)
-            .unwrap_or_else(|| "不可用".to_string());
+            .map(|time| crate::i18n::format_relative_time(self.ui_language, time))
+            .unwrap_or_else(|| self.t(crate::i18n::TextKey::Unavailable).to_string());
         let modified_at = metadata
             .as_ref()
             .and_then(|meta| meta.modified().ok())
-            .map(format_relative_time)
-            .unwrap_or_else(|| "不可用".to_string());
+            .map(|time| crate::i18n::format_relative_time(self.ui_language, time))
+            .unwrap_or_else(|| self.t(crate::i18n::TextKey::Unavailable).to_string());
 
         let supports_text_export = tab
             .file_kind
@@ -1276,7 +1259,7 @@ impl EditorView {
         Some(InfoPanelData {
             primary_rows: vec![
                 InfoPanelRow {
-                    label: "名称".to_string(),
+                    label: self.t(crate::i18n::TextKey::InfoName).to_string(),
                     value: path
                         .and_then(|path| path.file_name())
                         .and_then(|name| name.to_str())
@@ -1285,23 +1268,23 @@ impl EditorView {
                         .unwrap_or(relative_path),
                 },
                 InfoPanelRow {
-                    label: "创建".to_string(),
+                    label: self.t(crate::i18n::TextKey::InfoCreated).to_string(),
                     value: created_at,
                 },
                 InfoPanelRow {
-                    label: "修改".to_string(),
+                    label: self.t(crate::i18n::TextKey::InfoModified).to_string(),
                     value: modified_at,
                 },
                 InfoPanelRow {
-                    label: "大小".to_string(),
+                    label: self.t(crate::i18n::TextKey::InfoSize).to_string(),
                     value: format_file_size(file_size),
                 },
                 InfoPanelRow {
-                    label: "单词".to_string(),
+                    label: self.t(crate::i18n::TextKey::InfoWords).to_string(),
                     value: word_count.to_string(),
                 },
                 InfoPanelRow {
-                    label: "行数".to_string(),
+                    label: self.t(crate::i18n::TextKey::InfoLines).to_string(),
                     value: line_count.to_string(),
                 },
             ],
@@ -1320,18 +1303,22 @@ impl EditorView {
             .and_then(Path::file_stem)
             .and_then(|stem| stem.to_str())
             .filter(|stem| !stem.is_empty())
-            .unwrap_or("untitled");
+            .unwrap_or(self.t(crate::i18n::TextKey::Untitled));
         format!("{}.{}", title, extension)
     }
 
     fn export_current_markdown(&mut self, cx: &mut Context<Self>) {
         let default_name = self.export_default_name("md");
         let text = self.buffer.text().to_string();
+        let ui_language = self.ui_language;
 
         cx.spawn(async move |_this, cx| {
             let maybe_path = cx
                 .background_executor()
-                .spawn(async move { export_dialog_path(&default_name, "导出 Markdown") })
+                .spawn(async move {
+                    let title = crate::i18n::export_dialog_title(ui_language, "Markdown");
+                    export_dialog_path(&default_name, &title)
+                })
                 .await;
             if let Some(path) = maybe_path
                 && let Err(error) = fs::write(&path, text)
@@ -1348,7 +1335,7 @@ impl EditorView {
             .as_deref()
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
-            .unwrap_or("Untitled")
+            .unwrap_or(self.t(crate::i18n::TextKey::Untitled))
             .to_string();
         let default_name = self.export_default_name("html");
         let document = build_html_document(
@@ -1356,11 +1343,15 @@ impl EditorView {
             self.buffer.text(),
             self.current_file_path.as_deref(),
         );
+        let ui_language = self.ui_language;
 
         cx.spawn(async move |_this, cx| {
             let maybe_path = cx
                 .background_executor()
-                .spawn(async move { export_dialog_path(&default_name, "导出 HTML") })
+                .spawn(async move {
+                    let title = crate::i18n::export_dialog_title(ui_language, "HTML");
+                    export_dialog_path(&default_name, &title)
+                })
                 .await;
             if let Some(path) = maybe_path
                 && let Err(error) = fs::write(&path, document)
@@ -1377,16 +1368,20 @@ impl EditorView {
             .as_deref()
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
-            .unwrap_or("Untitled")
+            .unwrap_or(self.t(crate::i18n::TextKey::Untitled))
             .to_string();
         let default_name = self.export_default_name("pdf");
         let markdown = self.buffer.text().to_string();
         let source_file_path = self.current_file_path.clone();
+        let ui_language = self.ui_language;
 
         cx.spawn(async move |_this, cx| {
             let maybe_path = cx
                 .background_executor()
-                .spawn(async move { export_dialog_path(&default_name, "导出 PDF") })
+                .spawn(async move {
+                    let title = crate::i18n::export_dialog_title(ui_language, "PDF");
+                    export_dialog_path(&default_name, &title)
+                })
                 .await;
             let Some(path) = maybe_path else {
                 return;
@@ -1419,7 +1414,7 @@ impl EditorView {
 
     fn render_info_section_title(
         &self,
-        title: &'static str,
+        title: &str,
         icon_path: &'static str,
     ) -> AnyElement {
         let ups = &self.styles.utility_panel;
@@ -1439,7 +1434,7 @@ impl EditorView {
                     .size(px(icon_size + self.scaled(3.0)))
                     .text_color(ups.utility_panel_section_title_text_color),
             )
-            .child(title)
+            .child(SharedString::from(title.to_string()))
             .into_any_element()
     }
 
@@ -1471,7 +1466,7 @@ impl EditorView {
 
     fn render_export_button(
         &self,
-        label: &'static str,
+        label: &str,
         enabled: bool,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
@@ -1490,7 +1485,7 @@ impl EditorView {
             .text_color(ups.utility_panel_button_text_color)
             .opacity(if enabled { 1.0 } else { 0.45 })
             .cursor(CursorStyle::Arrow)
-            .child(label);
+            .child(SharedString::from(label.to_string()));
 
         if enabled {
             button
@@ -1856,20 +1851,25 @@ impl EditorView {
                 .px(px(header_padding_x))
                 .text_size(px(header_font_size))
                 .text_color(ups.utility_panel_header_text_color)
-                .child("文件信息")
+                .child(self.t(crate::i18n::TextKey::FileInfo))
                 .into_any_element(),
         ];
 
         if let Some(data) = data {
             children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-            children.push(self.render_info_section_title("统计", FILE_INFO_SECTION_INFO_SVG_PATH));
+            children.push(self.render_info_section_title(
+                self.t(crate::i18n::TextKey::Statistics),
+                FILE_INFO_SECTION_INFO_SVG_PATH,
+            ));
             for row in &data.primary_rows {
                 children.push(self.render_info_row(row));
             }
 
             children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-            children
-                .push(self.render_info_section_title("导出", FILE_INFO_SECTION_EXPORT_SVG_PATH));
+            children.push(self.render_info_section_title(
+                self.t(crate::i18n::TextKey::Export),
+                FILE_INFO_SECTION_EXPORT_SVG_PATH,
+            ));
             children.push(
                 div()
                     .px(px(section_padding_x))
@@ -1901,11 +1901,14 @@ impl EditorView {
 
             if data.supports_text_export {
                 children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                children.push(
-                    self.render_info_section_title("附件", FILE_INFO_SECTION_ATTACHMENT_SVG_PATH),
-                );
+                children.push(self.render_info_section_title(
+                    self.t(crate::i18n::TextKey::Attachments),
+                    FILE_INFO_SECTION_ATTACHMENT_SVG_PATH,
+                ));
                 if data.attachment_items.is_empty() {
-                    children.push(self.render_info_empty_line("无本地附件。"));
+                    children.push(self.render_info_empty_line(
+                        self.t(crate::i18n::TextKey::NoLocalAttachments),
+                    ));
                 } else {
                     for item in &data.attachment_items {
                         children.push(self.render_reference_item(item, cx));
@@ -1913,9 +1916,13 @@ impl EditorView {
                 }
 
                 children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                children.push(self.render_info_section_title("图片", FMT_IMAGE_SVG));
+                children.push(
+                    self.render_info_section_title(self.t(crate::i18n::TextKey::Images), FMT_IMAGE_SVG),
+                );
                 if data.image_items.is_empty() {
-                    children.push(self.render_info_empty_line("无图片链接。"));
+                    children.push(self.render_info_empty_line(
+                        self.t(crate::i18n::TextKey::NoImageLinks),
+                    ));
                 } else {
                     for item in &data.image_items {
                         children.push(self.render_reference_item(item, cx));
@@ -1923,9 +1930,13 @@ impl EditorView {
                 }
 
                 children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                children.push(self.render_info_section_title("链接", FMT_LINK_SVG));
+                children.push(
+                    self.render_info_section_title(self.t(crate::i18n::TextKey::Links), FMT_LINK_SVG),
+                );
                 if data.external_link_items.is_empty() {
-                    children.push(self.render_info_empty_line("无远端链接。"));
+                    children.push(self.render_info_empty_line(
+                        self.t(crate::i18n::TextKey::NoRemoteLinks),
+                    ));
                 } else {
                     for item in &data.external_link_items {
                         children.push(self.render_reference_item(item, cx));
@@ -1933,9 +1944,14 @@ impl EditorView {
                 }
 
                 children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                children.push(self.render_info_section_title("双向链接", FMT_WIKI_LINK_SVG));
+                children.push(self.render_info_section_title(
+                    self.t(crate::i18n::TextKey::Backlinks),
+                    FMT_WIKI_LINK_SVG,
+                ));
                 if data.wiki_link_items.is_empty() {
-                    children.push(self.render_info_empty_line("无双向链接。"));
+                    children.push(self.render_info_empty_line(
+                        self.t(crate::i18n::TextKey::NoBacklinks),
+                    ));
                 } else {
                     for item in &data.wiki_link_items {
                         children.push(self.render_reference_item(item, cx));
@@ -1949,7 +1965,9 @@ impl EditorView {
                     .pt(px(section_gap))
                     .text_size(px(empty_font_size))
                     .text_color(ups.utility_panel_empty_text_color)
-                    .child(SharedString::from("无文件信息。"))
+                    .child(SharedString::from(
+                        self.t(crate::i18n::TextKey::NoFileInfo).to_string(),
+                    ))
                     .into_any_element(),
             );
         }
@@ -1996,7 +2014,7 @@ impl EditorView {
                 .px(px(header_padding_x))
                 .text_size(px(header_font_size))
                 .text_color(ups.utility_panel_header_text_color)
-                .child("Git 历史")
+                .child(self.t(crate::i18n::TextKey::GitHistory))
                 .into_any_element(),
         ];
 
@@ -2030,7 +2048,9 @@ impl EditorView {
                         .pt(px(section_gap))
                         .text_size(px(empty_font_size))
                         .text_color(ups.utility_panel_empty_text_color)
-                        .child(SharedString::from("当前文件没有 Git 历史。"))
+                        .child(SharedString::from(
+                            self.t(crate::i18n::TextKey::NoGitHistory).to_string(),
+                        ))
                         .into_any_element(),
                 );
             }
@@ -2041,7 +2061,9 @@ impl EditorView {
                         .pt(px(section_gap))
                         .text_size(px(empty_font_size))
                         .text_color(ups.utility_panel_empty_text_color)
-                        .child(SharedString::from("当前文件不在 Git 仓库中。"))
+                        .child(SharedString::from(
+                            self.t(crate::i18n::TextKey::NotInGitRepo).to_string(),
+                        ))
                         .into_any_element(),
                 );
             }

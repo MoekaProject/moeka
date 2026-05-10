@@ -318,7 +318,7 @@ impl EditorView {
                     .text_color(title_color)
                     .overflow_hidden()
                     .truncate()
-                    .child("星标文件"),
+                        .child(self.t(crate::i18n::TextKey::StarredFiles)),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -1026,7 +1026,7 @@ impl EditorView {
                             .text_color(ss.sidebar_empty_btn_text_color)
                             .hover(move |s| s.bg(empty_hover_bg))
                             .cursor(CursorStyle::Arrow)
-                            .child("打开目录...")
+                            .child(self.t(crate::i18n::TextKey::OpenFolder))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {

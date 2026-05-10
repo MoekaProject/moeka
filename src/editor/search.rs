@@ -91,8 +91,9 @@ impl EditorView {
         if self.search_query_editor.is_none() {
             let styles = self.search_query_text_input_styles();
             let initial_query = self.search_query.clone();
-            let editor = cx.new(|cx| {
-                let mut input = crate::text_input::TextInput::new(styles, "搜索...", cx);
+            let placeholder = self.t(crate::i18n::TextKey::SearchPlaceholder).to_string();
+            let editor = cx.new(move |cx| {
+                let mut input = crate::text_input::TextInput::new(styles, &placeholder, cx);
                 if !initial_query.is_empty() {
                     input.set_text(&initial_query, cx);
                     input.select_all(cx);
@@ -136,8 +137,9 @@ impl EditorView {
         if self.search_replace_editor.is_none() {
             let styles = self.search_replace_text_input_styles();
             let initial_replace = self.search_replace.clone();
-            let editor = cx.new(|cx| {
-                let mut input = crate::text_input::TextInput::new(styles, "替换...", cx);
+            let placeholder = self.t(crate::i18n::TextKey::ReplacePlaceholder).to_string();
+            let editor = cx.new(move |cx| {
+                let mut input = crate::text_input::TextInput::new(styles, &placeholder, cx);
                 if !initial_replace.is_empty() {
                     input.set_text(&initial_replace, cx);
                 }
@@ -342,7 +344,7 @@ impl EditorView {
                 match_count
             )
         } else if !self.search_query.is_empty() {
-            "无结果".to_string()
+            self.t(crate::i18n::TextKey::SearchNoResults).to_string()
         } else {
             String::new()
         };
@@ -634,7 +636,7 @@ impl EditorView {
                             .text_color(replace_btn_color)
                             .cursor(gpui::CursorStyle::Arrow)
                             .hover(move |style| style.bg(replace_btn_hover))
-                            .child("替换")
+                            .child(self.t(crate::i18n::TextKey::Replace))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
@@ -656,7 +658,7 @@ impl EditorView {
                             .text_color(replace_btn_color)
                             .cursor(gpui::CursorStyle::Arrow)
                             .hover(move |style| style.bg(replace_btn_hover))
-                            .child("全部替换")
+                            .child(self.t(crate::i18n::TextKey::ReplaceAll))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {

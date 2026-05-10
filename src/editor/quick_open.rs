@@ -41,7 +41,9 @@ impl EditorView {
 
         if self.quick_open_editor.is_none() {
             let styles = self.quick_open_text_input_styles();
-            let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "搜索文件...", cx));
+            let placeholder = self.t(crate::i18n::TextKey::QuickOpenPlaceholder).to_string();
+            let editor =
+                cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
             cx.subscribe(
                 &editor,
                 |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -201,11 +203,11 @@ impl EditorView {
         let mut result_children: Vec<AnyElement> = Vec::new();
         if self.quick_open_results.is_empty() {
             let message = if self.quick_open_query.is_empty() {
-                "输入文件名或路径以快速打开"
+                self.t(crate::i18n::TextKey::QuickOpenEmpty)
             } else if self.quick_open_task.is_some() {
-                "正在搜索..."
+                self.t(crate::i18n::TextKey::Searching)
             } else {
-                "未找到匹配文件"
+                self.t(crate::i18n::TextKey::QuickOpenNoResults)
             };
             result_children.push(
                 div()

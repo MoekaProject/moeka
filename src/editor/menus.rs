@@ -28,6 +28,10 @@ fn current_raw_wiki_link_range(
         })
 }
 
+fn menu_icon_column_metrics(icon_size_px: f32, check_size_px: f32, gap_px: f32) -> (f32, f32) {
+    (check_size_px.max(icon_size_px), gap_px)
+}
+
 fn image_markdown_ranges(line_content: &str) -> Option<(Range<usize>, Range<usize>, Range<usize>)> {
     let full_start = line_content.find("![")?;
     let desc_start = full_start + 2;
@@ -161,6 +165,75 @@ impl EditorView {
         self.context_menu = None;
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         cx.notify();
+    }
+
+    fn context_menu_icon_path(&self, label: &str) -> Option<&'static str> {
+        let delete_prefix = format!("{} (", self.t(crate::i18n::TextKey::Delete));
+        match label {
+            current if current == self.t(crate::i18n::TextKey::NewFile) => Some(MENU_NEW_FILE_SVG_PATH),
+            current if current == self.t(crate::i18n::TextKey::MenuNewFolder) => Some(MENU_NEW_FOLDER_SVG_PATH),
+            current if current == self.t(crate::i18n::TextKey::Rename) => Some(MENU_RENAME_SVG_PATH),
+            current if current == self.t(crate::i18n::TextKey::Cut) => Some(MENU_CLIP_SVG_PATH),
+            current if current == self.t(crate::i18n::TextKey::Copy) => Some(MENU_PASTE_SVG_PATH),
+            current if current == self.t(crate::i18n::TextKey::Paste) => Some(MENU_PASTE_SVG_PATH),
+            current if current == self.t(crate::i18n::TextKey::CollapseAllDirectories) => {
+                Some(MENU_FOLD_SVG_PATH)
+            }
+            current if current == self.t(crate::i18n::TextKey::ExpandAllDirectories) => {
+                Some(MENU_EXPAND_SVG_PATH)
+            }
+            current if current == self.t(crate::i18n::TextKey::RevealInFinder) => {
+                Some(MENU_LOCATE_SVG_PATH)
+            }
+            current if current == self.t(crate::i18n::TextKey::Star) => Some(MENU_STAR_SVG_PATH),
+            current if current == self.t(crate::i18n::TextKey::Unstar) => Some(MENU_UNSTAR_SVG_PATH),
+            current if current == self.t(crate::i18n::TextKey::PinTab) => Some(MENU_PIN_SVG_PATH),
+            current if current == self.t(crate::i18n::TextKey::UnpinTab) => Some(MENU_UNPIN_SVG_PATH),
+            current if current == self.t(crate::i18n::TextKey::RevealInFileTree) => {
+                Some(MENU_LOCATE_TREE_SVG_PATH)
+            }
+            _ if label == self.t(crate::i18n::TextKey::Delete) || label.starts_with(&delete_prefix) => {
+                Some(MENU_DELETE_SVG_PATH)
+            }
+            _ => None,
+        }
+    }
+
+    fn format_action_label(&self, action: FormatMenuAction) -> String {
+        match action {
+            FormatMenuAction::Cut => self.t(crate::i18n::TextKey::Cut).to_string(),
+            FormatMenuAction::Copy => self.t(crate::i18n::TextKey::Copy).to_string(),
+            FormatMenuAction::Paste => self.t(crate::i18n::TextKey::Paste).to_string(),
+            FormatMenuAction::Heading1 => crate::i18n::heading_level_label(self.ui_language, 1),
+            FormatMenuAction::Heading2 => crate::i18n::heading_level_label(self.ui_language, 2),
+            FormatMenuAction::Heading3 => crate::i18n::heading_level_label(self.ui_language, 3),
+            FormatMenuAction::Heading4 => crate::i18n::heading_level_label(self.ui_language, 4),
+            FormatMenuAction::Heading5 => crate::i18n::heading_level_label(self.ui_language, 5),
+            FormatMenuAction::Heading6 => crate::i18n::heading_level_label(self.ui_language, 6),
+            FormatMenuAction::Paragraph => self.t(crate::i18n::TextKey::Paragraph).to_string(),
+            FormatMenuAction::Bold => self.t(crate::i18n::TextKey::Bold).to_string(),
+            FormatMenuAction::Italic => self.t(crate::i18n::TextKey::Italic).to_string(),
+            FormatMenuAction::Strikethrough => self.t(crate::i18n::TextKey::Strikethrough).to_string(),
+            FormatMenuAction::InlineCode => self.t(crate::i18n::TextKey::InlineCode).to_string(),
+            FormatMenuAction::CodeBlock => self.t(crate::i18n::TextKey::CodeBlock).to_string(),
+            FormatMenuAction::HorizontalRule => self.t(crate::i18n::TextKey::HorizontalRule).to_string(),
+            FormatMenuAction::Quote => self.t(crate::i18n::TextKey::Quote).to_string(),
+            FormatMenuAction::UnorderedList => self.t(crate::i18n::TextKey::UnorderedList).to_string(),
+            FormatMenuAction::OrderedList => self.t(crate::i18n::TextKey::OrderedList).to_string(),
+            FormatMenuAction::Todo => self.t(crate::i18n::TextKey::Todo).to_string(),
+            FormatMenuAction::Link => self.t(crate::i18n::TextKey::Link).to_string(),
+            FormatMenuAction::WikiLink => self.t(crate::i18n::TextKey::WikiLink).to_string(),
+            FormatMenuAction::Image => self.t(crate::i18n::TextKey::Image).to_string(),
+            FormatMenuAction::Table => self.t(crate::i18n::TextKey::Table).to_string(),
+            FormatMenuAction::EditImageDescription => {
+                self.t(crate::i18n::TextKey::EditDescription).to_string()
+            }
+            FormatMenuAction::EditImageUrl => self.t(crate::i18n::TextKey::EditUrl).to_string(),
+            FormatMenuAction::DeleteImage => self.t(crate::i18n::TextKey::Delete).to_string(),
+            FormatMenuAction::SelectImageFile => {
+                self.t(crate::i18n::TextKey::SelectImage).to_string()
+            }
+        }
     }
 
     fn path_copy_text(&self, path: &Path, relative: bool) -> Option<String> {
@@ -891,20 +964,40 @@ impl EditorView {
         };
 
         let mut actions = Vec::new();
-        let all_items: &[(&str, &str, FormatMenuAction)] = &[
-            ("待办事项", "todo task checkbox", FormatMenuAction::Todo),
-            ("代码块", "code block", FormatMenuAction::CodeBlock),
-            ("表格", "table grid 2x2", FormatMenuAction::Table),
-            ("链接", "link url", FormatMenuAction::Link),
+        let all_items = [
             (
-                "双向链接",
+                self.format_action_label(FormatMenuAction::Todo),
+                "todo task checkbox",
+                FormatMenuAction::Todo,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::CodeBlock),
+                "code block",
+                FormatMenuAction::CodeBlock,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::Table),
+                "table grid 2x2",
+                FormatMenuAction::Table,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::Link),
+                "link url",
+                FormatMenuAction::Link,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::WikiLink),
                 "wiki link backlink bidirectional",
                 FormatMenuAction::WikiLink,
             ),
-            ("图片", "image photo", FormatMenuAction::Image),
+            (
+                self.format_action_label(FormatMenuAction::Image),
+                "image photo",
+                FormatMenuAction::Image,
+            ),
         ];
-        for &(label, ft, action) in all_items {
-            if matches_filter(label, ft) {
+        for (label, ft, action) in all_items {
+            if matches_filter(&label, ft) {
                 actions.push(action);
             }
         }
@@ -930,7 +1023,18 @@ impl EditorView {
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
+        if let Some(icon_path) = self.context_menu_icon_path(label) {
+            return self.render_context_menu_item_with_icon(
+                label,
+                icon_path,
+                is_destructive,
+                cx,
+                handler,
+            );
+        }
+
         let ms = &self.styles.context_menu;
+        let wss = &self.styles.workspace_switcher;
         let text_color = if is_destructive {
             ms.menu_item_danger_text_color
         } else {
@@ -938,6 +1042,11 @@ impl EditorView {
         };
         let hover_bg = ms.menu_item_hover_bg;
         let item_id = SharedString::from(format!("menu-item-{}", label));
+        let (icon_col_w, gap) = menu_icon_column_metrics(
+            ms.menu_format_icon_size_px,
+            wss.ws_menu_item_check_size_px,
+            wss.ws_menu_item_action_icon_gap_px,
+        );
         div()
             .id(item_id)
             .w_full()
@@ -945,10 +1054,20 @@ impl EditorView {
             .px(px(ms.menu_item_padding_x_px))
             .flex()
             .items_center()
+            .gap(px(gap))
             .text_size(px(ms.menu_item_font_size_px))
             .text_color(text_color)
             .hover(move |s| s.bg(hover_bg))
             .cursor(CursorStyle::Arrow)
+            .child(
+                div()
+                    .w(px(icon_col_w))
+                    .h(px(icon_col_w))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center(),
+            )
             .child(label.to_string())
             .on_mouse_down(
                 MouseButton::Left,
@@ -977,18 +1096,21 @@ impl EditorView {
         };
         let hover_bg = ms.menu_item_hover_bg;
         let item_id = SharedString::from(format!("menu-item-{}", label));
-        let icon_size = self.scaled(ms.menu_format_icon_size_px);
-        let check_size = self.scaled(wss.ws_menu_item_check_size_px);
-        let icon_col_w = check_size.max(icon_size);
+        let (icon_col_w, gap) = menu_icon_column_metrics(
+            ms.menu_format_icon_size_px,
+            wss.ws_menu_item_check_size_px,
+            wss.ws_menu_item_action_icon_gap_px,
+        );
+        let icon_size = ms.menu_format_icon_size_px;
         div()
             .id(item_id)
             .w_full()
-            .h(px(self.scaled(ms.menu_item_height_px)))
-            .px(px(self.scaled(ms.menu_item_padding_x_px)))
+            .h(px(ms.menu_item_height_px))
+            .px(px(ms.menu_item_padding_x_px))
             .flex()
             .items_center()
-            .gap(px(self.scaled(wss.ws_menu_item_action_icon_gap_px)))
-            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
+            .gap(px(gap))
+            .text_size(px(ms.menu_item_font_size_px))
             .text_color(text_color)
             .hover(move |s| s.bg(hover_bg))
             .cursor(CursorStyle::Arrow)
@@ -1081,6 +1203,7 @@ impl EditorView {
         handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
         let ms = &self.styles.context_menu;
+        let icon_path = icon_path.or_else(|| self.context_menu_icon_path(label));
         let bg = if is_selected {
             ms.menu_item_selected_bg
         } else {
@@ -1100,7 +1223,7 @@ impl EditorView {
         let icon_size = self.scaled(ms.menu_format_icon_size_px);
         let icon_gap = self.scaled(ms.menu_format_icon_gap_px);
         let icon_shared: Option<SharedString> =
-            icon_path.map(|p| SharedString::from(p.to_string()));
+            icon_path.map(|path| SharedString::from(path.to_string()));
         let shortcut_style = ShortcutRenderStyle {
             font_size_px: self.scaled(ms.menu_shortcut_font_size_px),
             text_color: ms.menu_shortcut_text_color,
@@ -1184,7 +1307,7 @@ impl EditorView {
             {
                 let pd = parent_dir.clone();
                 items.push(self.render_context_menu_item(
-                    "新建文件",
+                    self.t(crate::i18n::TextKey::NewFile),
                     false,
                     cx,
                     move |this, window, cx| {
@@ -1195,7 +1318,7 @@ impl EditorView {
             {
                 let pd = parent_dir.clone();
                 items.push(self.render_context_menu_item(
-                    "新建目录",
+                    self.t(crate::i18n::TextKey::MenuNewFolder),
                     false,
                     cx,
                     move |this, window, cx| {
@@ -1206,7 +1329,7 @@ impl EditorView {
             items.push(self.render_context_menu_separator());
             if !self.expanded_dirs.is_empty() {
                 items.push(self.render_context_menu_item(
-                    "折叠所有目录",
+                    self.t(crate::i18n::TextKey::CollapseAllDirectories),
                     false,
                     cx,
                     move |this, _, cx| {
@@ -1215,7 +1338,7 @@ impl EditorView {
                 ));
             }
             items.push(self.render_context_menu_item(
-                "展开所有目录",
+                self.t(crate::i18n::TextKey::ExpandAllDirectories),
                 false,
                 cx,
                 move |this, _, cx| {
@@ -1225,7 +1348,7 @@ impl EditorView {
             items.push(self.render_context_menu_separator());
             if let Some(copy_path_text) = self.sidebar_paths_copy_text(&path, false) {
                 items.push(self.render_context_menu_item(
-                    "复制路径",
+                    self.t(crate::i18n::TextKey::CopyPath),
                     false,
                     cx,
                     move |this, _, cx| {
@@ -1235,7 +1358,7 @@ impl EditorView {
             }
             if let Some(copy_relative_path_text) = self.sidebar_paths_copy_text(&path, true) {
                 items.push(self.render_context_menu_item(
-                    "复制相对路径",
+                    self.t(crate::i18n::TextKey::CopyRelativePath),
                     false,
                     cx,
                     move |this, _, cx| {
@@ -1247,7 +1370,7 @@ impl EditorView {
             {
                 let p = path.clone();
                 items.push(self.render_context_menu_item(
-                    "在访达中显示",
+                    self.t(crate::i18n::TextKey::RevealInFinder),
                     false,
                     cx,
                     move |this, _, _cx| {
@@ -1259,7 +1382,7 @@ impl EditorView {
             {
                 let p = path.clone();
                 items.push(self.render_context_menu_item(
-                    "关闭目录",
+                    self.t(crate::i18n::TextKey::CloseFolder),
                     false,
                     cx,
                     move |this, _, cx| {
@@ -1273,7 +1396,7 @@ impl EditorView {
         {
             let pd = parent_dir.clone();
             items.push(self.render_context_menu_item(
-                "新建文件",
+                self.t(crate::i18n::TextKey::NewFile),
                 false,
                 cx,
                 move |this, window, cx| {
@@ -1284,7 +1407,7 @@ impl EditorView {
         {
             let pd = parent_dir.clone();
             items.push(self.render_context_menu_item(
-                "新建目录",
+                self.t(crate::i18n::TextKey::MenuNewFolder),
                 false,
                 cx,
                 move |this, window, cx| {
@@ -1296,7 +1419,11 @@ impl EditorView {
         if !is_dir {
             let starred_path = path.clone();
             let is_starred = self.app_settings.is_starred_file(&starred_path);
-            let label = if is_starred { "取消星标" } else { "星标" };
+            let label = if is_starred {
+                self.t(crate::i18n::TextKey::Unstar)
+            } else {
+                self.t(crate::i18n::TextKey::Star)
+            };
             items.push(
                 self.render_context_menu_item(label, false, cx, move |this, _, cx| {
                     let normalized = Self::normalize_sidebar_path(&starred_path);
@@ -1316,7 +1443,7 @@ impl EditorView {
         if self.selected_sidebar_paths.len() <= 1 {
             let p = path.clone();
             items.push(self.render_context_menu_item(
-                "重命名",
+                self.t(crate::i18n::TextKey::Rename),
                 false,
                 cx,
                 move |this, window, cx| {
@@ -1329,9 +1456,9 @@ impl EditorView {
                 self.selected_sidebar_paths.iter().cloned().collect();
             let count = selected.len();
             let delete_label = if count > 1 {
-                format!("删除 ({count} 项)")
+                crate::i18n::delete_items_label(self.ui_language, count)
             } else {
-                "删除".to_string()
+                self.t(crate::i18n::TextKey::Delete).to_string()
             };
             items.push(self.render_context_menu_item(
                 &delete_label,
@@ -1357,7 +1484,7 @@ impl EditorView {
             };
             let cut_path = path.clone();
             items.push(
-                self.render_context_menu_item("剪切", false, cx, move |this, _, cx| {
+                self.render_context_menu_item(self.t(crate::i18n::TextKey::Cut), false, cx, move |this, _, cx| {
                     this.file_clipboard = Some(FileClipboard {
                         paths: vec![Self::normalize_sidebar_path(&cut_path)],
                         is_cut: true,
@@ -1367,7 +1494,7 @@ impl EditorView {
                 }),
             );
             items.push(
-                self.render_context_menu_item("复制", false, cx, move |this, _, cx| {
+                self.render_context_menu_item(self.t(crate::i18n::TextKey::Copy), false, cx, move |this, _, cx| {
                     this.file_clipboard = Some(FileClipboard {
                         paths: paths.clone(),
                         is_cut: false,
@@ -1380,7 +1507,7 @@ impl EditorView {
         if has_clipboard {
             let pd = parent_dir.clone();
             items.push(
-                self.render_context_menu_item("粘贴", false, cx, move |this, _, cx| {
+                self.render_context_menu_item(self.t(crate::i18n::TextKey::Paste), false, cx, move |this, _, cx| {
                     this.paste_into_dir(pd.clone(), cx);
                 }),
             );
@@ -1388,7 +1515,7 @@ impl EditorView {
         items.push(self.render_context_menu_separator());
         if let Some(copy_path_text) = self.sidebar_paths_copy_text(&path, false) {
             items.push(self.render_context_menu_item(
-                "复制路径",
+                self.t(crate::i18n::TextKey::CopyPath),
                 false,
                 cx,
                 move |this, _, cx| {
@@ -1398,7 +1525,7 @@ impl EditorView {
         }
         if let Some(copy_relative_path_text) = self.sidebar_paths_copy_text(&path, true) {
             items.push(self.render_context_menu_item(
-                "复制相对路径",
+                self.t(crate::i18n::TextKey::CopyRelativePath),
                 false,
                 cx,
                 move |this, _, cx| {
@@ -1410,7 +1537,7 @@ impl EditorView {
         // Collapse / Expand all
         if !self.expanded_dirs.is_empty() {
             items.push(self.render_context_menu_item(
-                "折叠所有目录",
+                self.t(crate::i18n::TextKey::CollapseAllDirectories),
                 false,
                 cx,
                 move |this, _, cx| {
@@ -1420,7 +1547,7 @@ impl EditorView {
         }
         {
             items.push(self.render_context_menu_item(
-                "展开所有目录",
+                self.t(crate::i18n::TextKey::ExpandAllDirectories),
                 false,
                 cx,
                 move |this, _, cx| {
@@ -1432,7 +1559,7 @@ impl EditorView {
         {
             let p = path.clone();
             items.push(self.render_context_menu_item(
-                "在访达中显示",
+                self.t(crate::i18n::TextKey::RevealInFinder),
                 false,
                 cx,
                 move |this, _, _cx| {
@@ -1454,7 +1581,7 @@ impl EditorView {
         {
             let starred_path = path.clone();
             items.push(self.render_context_menu_item(
-                "取消星标",
+                self.t(crate::i18n::TextKey::Unstar),
                 false,
                 cx,
                 move |this, _, cx| {
@@ -1472,7 +1599,7 @@ impl EditorView {
         {
             let rename_path = path.clone();
             items.push(self.render_context_menu_item(
-                "重命名",
+                self.t(crate::i18n::TextKey::Rename),
                 false,
                 cx,
                 move |this, window, cx| {
@@ -1483,7 +1610,7 @@ impl EditorView {
         {
             let delete_path = path.clone();
             items.push(
-                self.render_context_menu_item("删除", true, cx, move |this, _, cx| {
+                self.render_context_menu_item(self.t(crate::i18n::TextKey::Delete), true, cx, move |this, _, cx| {
                     this.delete_path(delete_path.clone(), cx);
                 }),
             );
@@ -1492,7 +1619,7 @@ impl EditorView {
 
         if let Some(copy_path_text) = self.path_copy_text(&path, false) {
             items.push(self.render_context_menu_item(
-                "复制路径",
+                self.t(crate::i18n::TextKey::CopyPath),
                 false,
                 cx,
                 move |this, _, cx| {
@@ -1502,7 +1629,7 @@ impl EditorView {
         }
         if let Some(copy_relative_path_text) = self.path_copy_text(&path, true) {
             items.push(self.render_context_menu_item(
-                "复制相对路径",
+                self.t(crate::i18n::TextKey::CopyRelativePath),
                 false,
                 cx,
                 move |this, _, cx| {
@@ -1515,7 +1642,7 @@ impl EditorView {
         {
             let reveal_path = path.clone();
             items.push(self.render_context_menu_item(
-                "在访达中显示",
+                self.t(crate::i18n::TextKey::RevealInFinder),
                 false,
                 cx,
                 move |this, _, _cx| {
@@ -1529,50 +1656,27 @@ impl EditorView {
 
     fn render_heading_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let active_actions = self.active_format_actions();
-        let heading_items: &[(&str, Option<&str>, FormatMenuAction)] = &[
-            (
-                "标题1",
-                Some(HEADING_1_SVG_PATH),
-                FormatMenuAction::Heading1,
-            ),
-            (
-                "标题2",
-                Some(HEADING_2_SVG_PATH),
-                FormatMenuAction::Heading2,
-            ),
-            (
-                "标题3",
-                Some(HEADING_3_SVG_PATH),
-                FormatMenuAction::Heading3,
-            ),
-            (
-                "标题4",
-                Some(HEADING_4_SVG_PATH),
-                FormatMenuAction::Heading4,
-            ),
-            (
-                "标题5",
-                Some(HEADING_5_SVG_PATH),
-                FormatMenuAction::Heading5,
-            ),
-            (
-                "标题6",
-                Some(HEADING_6_SVG_PATH),
-                FormatMenuAction::Heading6,
-            ),
-            ("正文", None, FormatMenuAction::Paragraph),
+        let heading_items = [
+            (Some(HEADING_1_SVG_PATH), FormatMenuAction::Heading1),
+            (Some(HEADING_2_SVG_PATH), FormatMenuAction::Heading2),
+            (Some(HEADING_3_SVG_PATH), FormatMenuAction::Heading3),
+            (Some(HEADING_4_SVG_PATH), FormatMenuAction::Heading4),
+            (Some(HEADING_5_SVG_PATH), FormatMenuAction::Heading5),
+            (Some(HEADING_6_SVG_PATH), FormatMenuAction::Heading6),
+            (None, FormatMenuAction::Paragraph),
         ];
 
         heading_items
             .iter()
-            .map(|&(label, icon, action)| {
+            .map(|&(icon, action)| {
                 let is_active = if action == FormatMenuAction::Paragraph {
                     self.current_heading_action().is_none()
                 } else {
                     active_actions.contains(&action)
                 };
+                let label = self.format_action_label(action);
                 self.render_format_context_menu_item(
-                    label,
+                    &label,
                     icon,
                     None,
                     false,
@@ -1588,25 +1692,16 @@ impl EditorView {
 
     fn render_image_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut items: Vec<AnyElement> = [
-            (
-                "修改描述",
-                None,
-                FormatMenuAction::EditImageDescription,
-                false,
-            ),
-            ("修改 URL", None, FormatMenuAction::EditImageUrl, false),
-            ("删除", None, FormatMenuAction::DeleteImage, true),
-            (
-                "选择图片...",
-                None,
-                FormatMenuAction::SelectImageFile,
-                false,
-            ),
+            (None, FormatMenuAction::EditImageDescription, false),
+            (None, FormatMenuAction::EditImageUrl, false),
+            (None, FormatMenuAction::DeleteImage, true),
+            (None, FormatMenuAction::SelectImageFile, false),
         ]
         .into_iter()
-        .map(|(label, icon, action, _is_destructive)| {
+        .map(|(icon, action, _is_destructive)| {
+            let label = self.format_action_label(action);
             self.render_format_context_menu_item(
-                label,
+                &label,
                 icon,
                 None,
                 false,
@@ -1644,8 +1739,9 @@ impl EditorView {
             };
 
             if reveal_path.exists() {
+                let label = self.t(crate::i18n::TextKey::RevealInFinder).to_string();
                 items.push(self.render_format_context_menu_item(
-                    "在访达中显示",
+                    &label,
                     None,
                     None,
                     false,
@@ -1687,16 +1783,31 @@ impl EditorView {
         };
 
         if !is_slash_menu {
-            let clipboard_items: &[(&str, &str, Option<&str>, FormatMenuAction)] = &[
-                ("剪切", "cut", Some("⌘X"), FormatMenuAction::Cut),
-                ("复制", "copy", Some("⌘C"), FormatMenuAction::Copy),
-                ("粘贴", "paste", Some("⌘V"), FormatMenuAction::Paste),
+            let clipboard_items = [
+                (
+                    self.format_action_label(FormatMenuAction::Cut),
+                    "cut",
+                    Some("⌘X"),
+                    FormatMenuAction::Cut,
+                ),
+                (
+                    self.format_action_label(FormatMenuAction::Copy),
+                    "copy",
+                    Some("⌘C"),
+                    FormatMenuAction::Copy,
+                ),
+                (
+                    self.format_action_label(FormatMenuAction::Paste),
+                    "paste",
+                    Some("⌘V"),
+                    FormatMenuAction::Paste,
+                ),
             ];
             let mut clip_matched = Vec::new();
-            for &(label, ft, shortcut, action) in clipboard_items {
-                if matches_filter(label, ft) {
+            for (label, ft, shortcut, action) in clipboard_items {
+                if matches_filter(&label, ft) {
                     clip_matched.push(self.render_format_context_menu_item(
-                        label,
+                        &label,
                         None,
                         shortcut,
                         false,
@@ -1714,107 +1825,107 @@ impl EditorView {
         }
 
         // (label, filter_text, icon_path, shortcut, action)
-        let all_menu_items: &[(&str, &str, Option<&str>, Option<&str>, FormatMenuAction)] = &[
+        let all_menu_items = [
             (
-                "标题",
+                self.t(crate::i18n::TextKey::Heading).to_string(),
                 "heading title h1",
                 Some(HEADING_1_SVG_PATH),
                 None,
                 FormatMenuAction::Heading1,
             ),
             (
-                "粗体",
+                self.format_action_label(FormatMenuAction::Bold),
                 "bold",
                 Some(FMT_BOLD_SVG),
                 Some("⌘B"),
                 FormatMenuAction::Bold,
             ),
             (
-                "斜体",
+                self.format_action_label(FormatMenuAction::Italic),
                 "italic",
                 Some(FMT_ITALIC_SVG),
                 Some("⌘I"),
                 FormatMenuAction::Italic,
             ),
             (
-                "删除线",
+                self.format_action_label(FormatMenuAction::Strikethrough),
                 "strikethrough",
                 Some(FMT_STRIKETHROUGH_SVG),
                 Some("⌘⇧S"),
                 FormatMenuAction::Strikethrough,
             ),
             (
-                "行内代码",
+                self.format_action_label(FormatMenuAction::InlineCode),
                 "inline code",
                 Some(FMT_INLINE_CODE_SVG),
                 Some("⌘E"),
                 FormatMenuAction::InlineCode,
             ),
             (
-                "代码块",
+                self.format_action_label(FormatMenuAction::CodeBlock),
                 "code block",
                 Some(FMT_CODE_SVG),
                 Some("⌘⌥C"),
                 FormatMenuAction::CodeBlock,
             ),
             (
-                "分割线",
+                self.format_action_label(FormatMenuAction::HorizontalRule),
                 "horizontal rule divider",
                 Some(FMT_SPLIT_SVG),
                 Some("---"),
                 FormatMenuAction::HorizontalRule,
             ),
             (
-                "引用",
+                self.format_action_label(FormatMenuAction::Quote),
                 "quote blockquote",
                 Some(FMT_QUOTE_SVG),
                 Some("⌘⌥Q"),
                 FormatMenuAction::Quote,
             ),
             (
-                "无序列表",
+                self.format_action_label(FormatMenuAction::UnorderedList),
                 "unordered list bullet",
                 Some(FMT_LIST_SVG),
                 Some("⌘⌥U"),
                 FormatMenuAction::UnorderedList,
             ),
             (
-                "有序列表",
+                self.format_action_label(FormatMenuAction::OrderedList),
                 "ordered list numbered",
                 Some(FMT_ORDER_LIST_SVG),
                 Some("⌘⌥O"),
                 FormatMenuAction::OrderedList,
             ),
             (
-                "待办事项",
+                self.format_action_label(FormatMenuAction::Todo),
                 "todo task checkbox",
                 Some(FMT_TODO_SVG),
                 Some("⌘⌥T"),
                 FormatMenuAction::Todo,
             ),
             (
-                "链接",
+                self.format_action_label(FormatMenuAction::Link),
                 "link url",
                 Some(FMT_LINK_SVG),
                 Some("⌘K"),
                 FormatMenuAction::Link,
             ),
             (
-                "双向链接",
+                self.format_action_label(FormatMenuAction::WikiLink),
                 "wiki link backlink bidirectional",
                 Some(FMT_WIKI_LINK_SVG),
                 Some("[["),
                 FormatMenuAction::WikiLink,
             ),
             (
-                "图片",
+                self.format_action_label(FormatMenuAction::Image),
                 "image photo",
                 Some(FMT_IMAGE_SVG),
                 Some("⌘⇧I"),
                 FormatMenuAction::Image,
             ),
             (
-                "表格",
+                self.format_action_label(FormatMenuAction::Table),
                 "table grid 2x2",
                 Some(FMT_TABLE_SVG),
                 Some("2×2"),
@@ -1835,15 +1946,16 @@ impl EditorView {
             // Render slash menu items in the fixed order defined by slash_only_actions
             for &slash_action in slash_only_actions.iter() {
                 // Find the matching item in all_menu_items
-                if let Some(&(label, ft, icon, shortcut, action)) = all_menu_items
+                if let Some((label, ft, icon, shortcut, action)) = all_menu_items
                     .iter()
-                    .find(|&&(_, _, _, _, a)| a == slash_action)
+                    .find(|(_, _, _, _, a)| *a == slash_action)
+                    .cloned()
                 {
-                    if matches_filter(label, ft) {
+                    if matches_filter(&label, ft) {
                         let is_selected = actionable_index == selected_index;
                         let is_active = active_actions.contains(&action);
                         items.push(self.render_format_context_menu_item(
-                            label,
+                            &label,
                             icon,
                             shortcut,
                             is_selected,
@@ -1861,7 +1973,7 @@ impl EditorView {
             let group_boundaries = [0usize, 5, 11, 15];
             let mut group_start_flags = [false; 3];
 
-            for (idx, &(label, ft, _, _, _)) in all_menu_items.iter().enumerate() {
+            for (idx, (label, ft, _, _, _)) in all_menu_items.iter().enumerate() {
                 if matches_filter(label, ft) {
                     for g in 0..3 {
                         if idx >= group_boundaries[g] && idx < group_boundaries[g + 1] {
@@ -1880,12 +1992,12 @@ impl EditorView {
                     items.push(self.render_context_menu_separator());
                 }
                 for idx in group_boundaries[g]..group_boundaries[g + 1] {
-                    let (label, ft, icon, shortcut, action) = all_menu_items[idx];
-                    if matches_filter(label, ft) {
+                    let (label, ft, icon, shortcut, action) = all_menu_items[idx].clone();
+                    if matches_filter(&label, ft) {
                         let is_selected = false;
                         let is_active = active_actions.contains(&action);
                         items.push(self.render_format_context_menu_item(
-                            label,
+                            &label,
                             icon,
                             shortcut,
                             is_selected,
@@ -1917,8 +2029,9 @@ impl EditorView {
             self.wiki_link_recent_task.is_some() && self.wiki_link_recent_results.is_empty()
         };
         if show_loading {
+            let label = self.t(crate::i18n::TextKey::Searching).to_string();
             items.push(self.render_context_menu_item(
-                "正在搜索文件...",
+                &label,
                 false,
                 cx,
                 |_this, _, _cx| {},
@@ -1968,9 +2081,9 @@ impl EditorView {
 
         if search_items.is_empty() {
             let label = if has_query {
-                "无匹配可引用文件"
+                self.t(crate::i18n::TextKey::NoMatchingReferenceFiles)
             } else {
-                "暂无可引用文件"
+                self.t(crate::i18n::TextKey::NoReferenceFiles)
             };
             items.push(self.render_context_menu_item(label, false, cx, |_this, _, _cx| {}));
             return items;
@@ -2126,7 +2239,7 @@ impl EditorView {
                     SidebarSortMode::Type,
                 ] {
                     items.push(self.render_context_menu_choice_item(
-                        mode.label(),
+                        self.t(mode.label_key()),
                         self.sidebar_sort_mode == mode,
                         cx,
                         move |this, _, cx| {
@@ -2149,8 +2262,8 @@ impl EditorView {
                 {
                     let parent = self.sidebar_root.clone();
                     items.push(self.render_context_menu_item_with_icon(
-                        "新建文件",
-                        FILETREE_ADD_SVG_PATH,
+                        self.t(crate::i18n::TextKey::NewFile),
+                        MENU_NEW_FILE_SVG_PATH,
                         false,
                         cx,
                         move |this, window, cx| {
@@ -2161,8 +2274,8 @@ impl EditorView {
                 {
                     let parent = self.sidebar_root.clone();
                     items.push(self.render_context_menu_item_with_icon(
-                        "新建目录",
-                        FOLDER_CLOSED_SVG_PATH,
+                        self.t(crate::i18n::TextKey::MenuNewFolder),
+                        MENU_NEW_FOLDER_SVG_PATH,
                         false,
                         cx,
                         move |this, window, cx| {
@@ -2193,7 +2306,7 @@ impl EditorView {
                 {
                     let id = tab_id.clone();
                     items.push(self.render_context_menu_item(
-                        "关闭",
+                        self.t(crate::i18n::TextKey::Close),
                         false,
                         cx,
                         move |this, _, cx| {
@@ -2205,7 +2318,7 @@ impl EditorView {
                 {
                     let id = tab_id.clone();
                     items.push(self.render_context_menu_item(
-                        "关闭其他",
+                        self.t(crate::i18n::TextKey::CloseOthers),
                         false,
                         cx,
                         move |this, _, cx| {
@@ -2217,7 +2330,7 @@ impl EditorView {
                 {
                     let id = tab_id.clone();
                     items.push(self.render_context_menu_item(
-                        "关闭左侧",
+                        self.t(crate::i18n::TextKey::CloseLeft),
                         false,
                         cx,
                         move |this, _, cx| {
@@ -2229,7 +2342,7 @@ impl EditorView {
                 {
                     let id = tab_id.clone();
                     items.push(self.render_context_menu_item(
-                        "关闭右侧",
+                        self.t(crate::i18n::TextKey::CloseRight),
                         false,
                         cx,
                         move |this, _, cx| {
@@ -2240,7 +2353,7 @@ impl EditorView {
                 }
                 items.push(self.render_context_menu_separator());
                 items.push(self.render_context_menu_item(
-                    "关闭已保存",
+                    self.t(crate::i18n::TextKey::CloseSaved),
                     false,
                     cx,
                     move |this, _, cx| {
@@ -2252,9 +2365,9 @@ impl EditorView {
                 {
                     let id = tab_id.clone();
                     let label = if is_pinned {
-                        "取消固定"
+                        self.t(crate::i18n::TextKey::UnpinTab)
                     } else {
-                        "固定标签"
+                        self.t(crate::i18n::TextKey::PinTab)
                     };
                     items.push(self.render_context_menu_item(
                         label,
@@ -2271,7 +2384,7 @@ impl EditorView {
                     if let Some(path) = &tab.path {
                         let reveal_path = path.clone();
                         items.push(self.render_context_menu_item(
-                            "定位到文件树",
+                            self.t(crate::i18n::TextKey::RevealInFileTree),
                             false,
                             cx,
                             move |this, _, cx| {
@@ -2282,7 +2395,7 @@ impl EditorView {
                         {
                             let reveal_path = path.clone();
                             items.push(self.render_context_menu_item(
-                                "在访达中显示",
+                                self.t(crate::i18n::TextKey::RevealInFinder),
                                 false,
                                 cx,
                                 move |this, _, cx| {
@@ -2294,7 +2407,7 @@ impl EditorView {
                         items.push(self.render_context_menu_separator());
                         if let Some(relative_path_text) = self.path_copy_text(path, true) {
                             items.push(self.render_context_menu_item(
-                                "复制相对路径",
+                                self.t(crate::i18n::TextKey::CopyRelativePath),
                                 false,
                                 cx,
                                 move |this, _, cx| {
@@ -2305,7 +2418,7 @@ impl EditorView {
                         }
                         let path_text = path.display().to_string();
                         items.push(self.render_context_menu_item(
-                            "复制路径",
+                            self.t(crate::i18n::TextKey::CopyPath),
                             false,
                             cx,
                             move |this, _, cx| {
@@ -2422,7 +2535,7 @@ impl EditorView {
                 }
                 items.push(self.render_context_menu_separator());
                 items.push(self.render_context_menu_item_with_icon(
-                    "打开目录 ...",
+                    self.t(crate::i18n::TextKey::OpenFolder),
                     "assets/icons/filetree/all.svg",
                     false,
                     cx,
@@ -2431,7 +2544,7 @@ impl EditorView {
                     },
                 ));
                 items.push(self.render_context_menu_item_with_icon(
-                    "应用设置...",
+                    self.t(crate::i18n::TextKey::AppSettingsMenu),
                     "assets/icons/setting.svg",
                     false,
                     cx,
@@ -2460,7 +2573,7 @@ impl EditorView {
                     let tsl = tsl;
                     let r = r;
                     items.push(self.render_context_menu_item(
-                        "上方新增行",
+                        self.t(crate::i18n::TextKey::AddRowAbove),
                         false,
                         cx,
                         move |this, _, cx| {
@@ -2472,7 +2585,7 @@ impl EditorView {
                     let tsl = tsl;
                     let r = r;
                     items.push(self.render_context_menu_item(
-                        "下方新增行",
+                        self.t(crate::i18n::TextKey::AddRowBelow),
                         false,
                         cx,
                         move |this, _, cx| {
@@ -2485,7 +2598,7 @@ impl EditorView {
                         let tsl = tsl;
                         let c = c;
                         items.push(self.render_context_menu_item(
-                            "左侧新增列",
+                            self.t(crate::i18n::TextKey::AddColumnLeft),
                             false,
                             cx,
                             move |this, _, cx| {
@@ -2497,7 +2610,7 @@ impl EditorView {
                         let tsl = tsl;
                         let c = c;
                         items.push(self.render_context_menu_item(
-                            "右侧新增列",
+                            self.t(crate::i18n::TextKey::AddColumnRight),
                             false,
                             cx,
                             move |this, _, cx| {
@@ -2511,7 +2624,7 @@ impl EditorView {
                     let tsl = tsl;
                     let r = r;
                     items.push(self.render_context_menu_item(
-                        "删除行",
+                        self.t(crate::i18n::TextKey::DeleteRow),
                         false,
                         cx,
                         move |this, _, cx| {
@@ -2524,7 +2637,7 @@ impl EditorView {
                         let tsl = tsl;
                         let c = c;
                         items.push(self.render_context_menu_item(
-                            "删除列",
+                            self.t(crate::i18n::TextKey::DeleteColumn),
                             false,
                             cx,
                             move |this, _, cx| {
@@ -2538,9 +2651,9 @@ impl EditorView {
                     let tsl = tsl;
                     items.push(self.render_context_menu_item(
                         if is_front_matter {
-                            "删除 Front Matter"
+                            self.t(crate::i18n::TextKey::DeleteFrontMatter)
                         } else {
-                            "删除表格"
+                            self.t(crate::i18n::TextKey::DeleteTable)
                         },
                         false,
                         cx,

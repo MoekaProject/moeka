@@ -1412,10 +1412,11 @@ impl EditorView {
         } else {
             // No file path — open native save dialog in background
             let default_name = format!("{}.md", self.tabs[index].title);
+            let title = self.t(crate::i18n::TextKey::SaveFileDialog).to_string();
             cx.spawn(async move |this, cx| {
                 let maybe_path = cx
                     .background_executor()
-                    .spawn(async move { helpers::save_file_blocking(&default_name) })
+                    .spawn(async move { helpers::save_file_blocking(&default_name, &title) })
                     .await;
                 if let Some(path) = maybe_path
                     && std::fs::write(&path, &text).is_ok()

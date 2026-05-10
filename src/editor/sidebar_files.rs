@@ -17,8 +17,9 @@ impl EditorView {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         let styles = self.sidebar_edit_text_input_styles();
-        let editor = cx.new(|cx| {
-            let mut text_input = crate::text_input::TextInput::new(styles, "名称...", cx);
+        let placeholder = self.t(crate::i18n::TextKey::RenameNamePlaceholder).to_string();
+        let editor = cx.new(move |cx| {
+            let mut text_input = crate::text_input::TextInput::new(styles, &placeholder, cx);
             text_input.set_text(&current_name, cx);
             let dot_pos = current_name.rfind('.').unwrap_or(current_name.len());
             text_input.set_selection(0, dot_pos, cx);
@@ -157,7 +158,9 @@ impl EditorView {
         self.expanded_dirs.insert(parent.clone());
         self.invalidate_sidebar_items_cache();
         let styles = self.sidebar_edit_text_input_styles();
-        let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "文件名...", cx));
+        let placeholder = self.t(crate::i18n::TextKey::FileNamePlaceholder).to_string();
+        let editor =
+            cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
         cx.subscribe(
             &editor,
             |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -188,7 +191,9 @@ impl EditorView {
         self.expanded_dirs.insert(parent.clone());
         self.invalidate_sidebar_items_cache();
         let styles = self.sidebar_edit_text_input_styles();
-        let editor = cx.new(|cx| crate::text_input::TextInput::new(styles, "目录名...", cx));
+        let placeholder = self.t(crate::i18n::TextKey::FolderNamePlaceholder).to_string();
+        let editor =
+            cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
         cx.subscribe(
             &editor,
             |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -345,10 +350,11 @@ impl EditorView {
     }
 
     pub(crate) fn pick_workspace_folder(&mut self, cx: &mut Context<Self>) {
+        let title = self.t(crate::i18n::TextKey::ChooseWorkspaceFolder).to_string();
         cx.spawn(async move |this, cx| {
             let maybe_path = cx
                 .background_executor()
-                .spawn(async move { helpers::pick_folder_blocking() })
+                .spawn(async move { helpers::pick_folder_blocking(&title) })
                 .await;
             if let Some(path) = maybe_path {
                 this.update(cx, |editor, cx| {

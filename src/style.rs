@@ -42,6 +42,7 @@ pub struct Styles {
     pub search: SearchStyles,
     pub workspace_search: WorkspaceSearchStyles,
     pub quick_open: QuickOpenStyles,
+    pub settings_panel: SettingsPanelStyles,
 }
 
 // ── Window ──────────────────────────────────────────────────────────
@@ -912,6 +913,28 @@ pub struct QuickOpenStyles {
     pub quick_open_empty_text_color: Hsla,
 }
 
+// ── Settings Panel ─────────────────────────────────────────────────
+
+pub struct SettingsPanelStyles {
+    pub settings_theme_group_gap_px: f32,
+    pub settings_theme_toggle_height_px: f32,
+    pub settings_theme_toggle_padding_x_px: f32,
+    pub settings_theme_toggle_gap_px: f32,
+    pub settings_theme_toggle_radius_px: f32,
+    pub settings_theme_toggle_border_width_px: f32,
+    pub settings_theme_toggle_icon_size_px: f32,
+    pub settings_theme_option_height_px: f32,
+    pub settings_theme_option_padding_x_px: f32,
+    pub settings_theme_option_radius_px: f32,
+    pub settings_theme_option_border_width_px: f32,
+    pub settings_theme_option_font_size_px: f32,
+    pub settings_theme_option_hover_bg: Hsla,
+    pub settings_theme_option_active_bg: Hsla,
+    pub settings_theme_option_active_text_color: Hsla,
+    pub settings_theme_option_text_color: Hsla,
+    pub settings_theme_option_border_color: Hsla,
+}
+
 // ═════════════════════════════════════════════════════════════════════
 // Construction
 // ═════════════════════════════════════════════════════════════════════
@@ -987,7 +1010,7 @@ impl Styles {
                 editor_path_bar_border_color: theme.border_secondary,
                 editor_list_content_indent_px: 10.0,
                 editor_unordered_list_marker_cycle: ["• ", "◦ ", "▪ "],
-                editor_unordered_list_marker_font_size_offset_px: 2.0,
+                editor_unordered_list_marker_font_size_offset_px: 5.0,
                 editor_bg: theme.bg_primary,
                 editor_text_color: theme.text_primary,
                 editor_whitespace_dot_size_px: 2.0,
@@ -1645,6 +1668,25 @@ impl Styles {
                 quick_open_empty_height_px: 64.0,
                 quick_open_empty_font_size_px: ui_font_size_sm_px,
                 quick_open_empty_text_color: theme.text_secondary,
+            },
+            settings_panel: SettingsPanelStyles {
+                settings_theme_group_gap_px: 10.0,
+                settings_theme_toggle_height_px: 30.0,
+                settings_theme_toggle_padding_x_px: 12.0,
+                settings_theme_toggle_gap_px: 6.0,
+                settings_theme_toggle_radius_px: 6.0,
+                settings_theme_toggle_border_width_px: 1.0,
+                settings_theme_toggle_icon_size_px: 15.0,
+                settings_theme_option_height_px: 30.0,
+                settings_theme_option_padding_x_px: 12.0,
+                settings_theme_option_radius_px: 6.0,
+                settings_theme_option_border_width_px: 1.0,
+                settings_theme_option_font_size_px: ui_font_size_sm_px,
+                settings_theme_option_hover_bg: theme.bg_hover,
+                settings_theme_option_active_bg: theme.bg_selected,
+                settings_theme_option_active_text_color: theme.text_bright,
+                settings_theme_option_text_color: theme.text_secondary,
+                settings_theme_option_border_color: theme.border_primary,
             },
         }
     }

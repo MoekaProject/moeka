@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::Range;
 use std::time::Duration;
 
@@ -20,12 +21,59 @@ pub(super) struct TableCellDisplayInfo {
 }
 
 pub(super) struct InlineLineDisplayInfo {
+    pub(super) display_text: String,
     pub(super) buffer_to_display: Vec<usize>,
     pub(super) font_size: f32,
     pub(super) line_height: f32,
     pub(super) wrapped_line: WrappedLine,
+    pub(super) wrap_boundary_upstream_xs: HashMap<usize, f32>,
     pub(super) indent_px: f32,
     pub(super) content_x: f32,
+}
+
+fn compute_inline_wrap_boundary_upstream_xs(
+    window: &mut Window,
+    wrapped: &WrappedLine,
+    display_text: &str,
+    runs: &[TextRun],
+    font_size: f32,
+    line_height: f32,
+    letter_spacing: f32,
+) -> HashMap<usize, f32> {
+    let mut upstream_xs = HashMap::new();
+    let mut segment_start = 0;
+
+    for boundary in helpers::wrap_boundary_byte_indices(wrapped) {
+        let segment_text = &display_text[segment_start..boundary];
+        let segment_runs = helpers::extract_runs_for_range(runs, segment_start, boundary);
+        let segment_shared: SharedString = if segment_text.is_empty() {
+            " ".into()
+        } else {
+            segment_text.to_string().into()
+        };
+
+        if let Ok(segment_lines) = window.text_system().shape_text(
+            segment_shared,
+            px(font_size),
+            &segment_runs,
+            None,
+            None,
+        ) && let Some(mut segment_wrapped) = segment_lines.into_iter().next()
+        {
+            if letter_spacing != 0.0 {
+                helpers::apply_letter_spacing(&mut segment_wrapped, letter_spacing);
+            }
+            let segment_end_x = segment_wrapped
+                .position_for_index(segment_text.len(), px(line_height))
+                .map(|pos| f32::from(pos.x))
+                .unwrap_or(0.0);
+            upstream_xs.insert(boundary, segment_end_x);
+        }
+
+        segment_start = boundary;
+    }
+
+    upstream_xs
 }
 
 pub(super) fn ime_debug_enabled() -> bool {
@@ -1493,12 +1541,23 @@ impl EditorView {
             } else {
                 base_content_x + list_content_indent_px
             };
+        let wrap_boundary_upstream_xs = compute_inline_wrap_boundary_upstream_xs(
+            window,
+            &wrapped_line,
+            &display_text,
+            &runs,
+            font_size,
+            line_height,
+            letter_spacing,
+        );
 
         Some(InlineLineDisplayInfo {
+            display_text,
             buffer_to_display,
             font_size,
             line_height,
             wrapped_line,
+            wrap_boundary_upstream_xs,
             indent_px,
             content_x,
         })

@@ -272,7 +272,7 @@ pub(crate) fn build_display_text(
                 0
             };
             (fold_len > 0 && prefix_is_folded(leading_ws, fold_len, active_ranges))
-                .then_some((leading_ws..leading_ws + fold_len, "• ".to_string()))
+                .then_some((leading_ws..leading_ws + fold_len, "  ".to_string()))
         }
         BlockType::OrderedList => {
             let prefix_len = markdown::ordered_list_prefix_len(trimmed);
@@ -1092,7 +1092,7 @@ pub(crate) fn compute_display_prefix_bytes(
     match block_type {
         BlockType::UnorderedList => {
             if prefix_collapsed {
-                leading_ws + char_boundary_after_n_chars(trimmed, 2)
+                leading_ws
             } else if trimmed.starts_with("- ")
                 || trimmed.starts_with("* ")
                 || trimmed.starts_with("+ ")
@@ -1409,6 +1409,38 @@ mod tests {
                 collapsed_task_prefix_chars,
             ),
             collapsed_task_prefix_chars * 2,
+        );
+    }
+
+    #[test]
+    fn collapsed_unordered_list_prefix_stops_before_body_text() {
+        let line = "- item";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let (_, _, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &[Range {
+                start: line.len(),
+                end: line.len(),
+            }],
+            false,
+            None,
+            0,
+            3,
+            3,
+            2,
+            0,
+        );
+
+        assert!(prefix_collapsed);
+        let display_text = "  item".to_string();
+        assert_eq!(display_text, "  item");
+        assert_eq!(
+            compute_display_prefix_bytes(&display_text, &decoration.block_type, true, 3),
+            2,
         );
     }
 }
@@ -2061,15 +2093,15 @@ pub(crate) fn pick_image_file_blocking() -> Option<PathBuf> {
     None
 }
 
-pub(crate) fn pick_folder_blocking() -> Option<PathBuf> {
+pub(crate) fn pick_folder_blocking(title: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .set_title("选择工作区目录")
+    .set_title(title)
         .pick_folder()
 }
 
-pub(crate) fn save_file_blocking(default_name: &str) -> Option<PathBuf> {
+pub(crate) fn save_file_blocking(default_name: &str, title: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .set_title("保存文件")
+    .set_title(title)
         .set_file_name(default_name)
         .add_filter("Markdown", &["md", "markdown"])
         .save_file()
