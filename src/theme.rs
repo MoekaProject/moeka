@@ -469,7 +469,7 @@ impl Theme {
             border_secondary: crate::hex_hsla!("#363a4f"),
             border_tertiary: crate::hex_hsla!("#4B5067"),
             border_decorative: with_alpha(crate::hex_hsla!("#5c6773"), 0.5),
-            border_code_block: with_alpha(crate::hex_hsla!("#2A2D3A"), 0.85),
+            border_code_block: with_alpha(crate::hex_hsla!("#2F3344"), 1.0),
             // Editor/Markdown
             cursor: crate::hex_hsla!("#528bff"),
             selection: with_alpha(crate::hex_hsla!("#3e4451"), 0.6),
