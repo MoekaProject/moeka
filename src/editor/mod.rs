@@ -738,6 +738,7 @@ pub struct EditorView {
     pub(crate) ui_scale: f32,
     pub(crate) folded_sections: HashSet<usize>,
     pub(crate) folded_image_previews: HashSet<usize>,
+    pub(crate) generated_preview_keys: HashSet<String>,
     pub(crate) gutter_fold_areas: Vec<(gpui::Bounds<Pixels>, usize, bool)>,
     pub(crate) image_edit_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_image_edit_line: Option<usize>,
@@ -1081,6 +1082,7 @@ impl EditorView {
             ui_scale: app_settings.ui_scale,
             folded_sections: HashSet::new(),
             folded_image_previews: HashSet::new(),
+            generated_preview_keys: HashSet::new(),
             gutter_fold_areas: Vec::new(),
             image_edit_areas: Vec::new(),
             hovering_image_edit_line: None,
@@ -2786,8 +2788,34 @@ impl EditorView {
             .cloned()
             .unwrap_or(FileKind::Markdown);
         self.decorations = parse_decorations_for_file_kind(self.buffer.text(), &file_kind);
+        self.refresh_generated_block_previews();
         self.layout_dirty = true;
         self.invalidate_info_panel_cache();
+    }
+
+    fn refresh_generated_block_previews(&mut self) {
+        for key in self.generated_preview_keys.drain() {
+            self.image_cache.remove(&key);
+        }
+
+        for decoration in &self.decorations {
+            let Some(preview) = decoration.block_preview.as_ref() else {
+                continue;
+            };
+            if !preview.is_anchor || preview.source_text.is_empty() {
+                continue;
+            }
+            if self.generated_preview_keys.contains(&preview.cache_key) {
+                continue;
+            }
+
+            let svg =
+                helpers::build_generated_block_preview_svg(preview.kind, &preview.source_text);
+            let image = helpers::load_render_image_from_svg(&svg).ok().map(Arc::new);
+            self.image_cache.insert(preview.cache_key.clone(), image);
+            self.generated_preview_keys
+                .insert(preview.cache_key.clone());
+        }
     }
 
     pub(crate) fn active_file_kind(&self) -> Option<&FileKind> {
@@ -4884,19 +4912,120 @@ pub(crate) fn split_file_name_for_display(name: &str) -> (&str, Option<&str>) {
     }
 }
 
-pub(crate) fn resolve_wiki_link_target_path(sidebar_root: &Path, target: &str) -> Option<PathBuf> {
-    if target.trim().is_empty() {
-        return None;
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MarkdownNavigationTarget {
+    ExternalUrl(String),
+    CurrentAnchor(String),
+    File {
+        path: PathBuf,
+        anchor: Option<String>,
+    },
+}
+
+fn split_markdown_target(target: &str) -> (&str, Option<&str>) {
+    match target.split_once('#') {
+        Some((path, anchor)) => (path, Some(anchor)),
+        None => (target, None),
+    }
+}
+
+fn strip_heading_attribute_block(text: &str) -> (&str, Option<&str>) {
+    let trimmed = text.trim_end();
+    if !trimmed.ends_with('}') {
+        return (trimmed, None);
     }
 
-    let relative = PathBuf::from(target);
-    let resolved = if relative.is_absolute() {
-        relative
+    let Some(open_brace) = trimmed.rfind('{') else {
+        return (trimmed, None);
+    };
+    let attrs = &trimmed[open_brace + 1..trimmed.len() - 1];
+    if !attrs.split_whitespace().any(|token| token.starts_with('#')) {
+        return (trimmed, None);
+    }
+
+    (trimmed[..open_brace].trim_end(), Some(attrs))
+}
+
+fn slugify_heading_text(text: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+
+    for ch in text.trim().chars() {
+        let mut appended_alnum = false;
+        for lower in ch.to_lowercase() {
+            if lower.is_alphanumeric() {
+                slug.push(lower);
+                last_was_dash = false;
+                appended_alnum = true;
+            }
+        }
+
+        if appended_alnum {
+            continue;
+        }
+
+        if (ch.is_whitespace() || ch == '-') && !slug.is_empty() && !last_was_dash {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
+fn heading_matches_anchor(raw_line: &str, anchor: &str) -> bool {
+    let trimmed = raw_line.trim_start();
+    if !trimmed.starts_with('#') {
+        return false;
+    }
+
+    let heading_text = trimmed.trim_start_matches('#').trim_start();
+    let (text_without_attrs, attrs) = strip_heading_attribute_block(heading_text);
+    if let Some(attrs) = attrs
+        && attrs
+            .split_whitespace()
+            .filter_map(|token| token.strip_prefix('#'))
+            .any(|id| id == anchor)
+    {
+        return true;
+    }
+
+    slugify_heading_text(text_without_attrs) == anchor
+}
+
+fn resolve_markdown_target_path(
+    sidebar_root: &Path,
+    current_file_path: Option<&Path>,
+    target: &str,
+) -> Option<PathBuf> {
+    let (path_part, _) = split_markdown_target(target);
+    let path_part = path_part.trim();
+    if path_part.is_empty() {
+        return current_file_path.map(Path::to_path_buf);
+    }
+
+    let relative = PathBuf::from(path_part);
+    let candidates = if relative.is_absolute() {
+        vec![relative]
     } else {
-        sidebar_root.join(relative)
+        let mut candidates = Vec::new();
+        if let Some(current_file_path) = current_file_path
+            && let Some(parent) = current_file_path.parent()
+        {
+            candidates.push(parent.join(&relative));
+        }
+        candidates.push(sidebar_root.join(&relative));
+        candidates
     };
 
-    resolved.exists().then_some(resolved)
+    candidates.into_iter().find(|candidate| candidate.exists())
+}
+
+pub(crate) fn resolve_wiki_link_target_path(sidebar_root: &Path, target: &str) -> Option<PathBuf> {
+    resolve_markdown_target_path(sidebar_root, None, target)
 }
 
 pub(crate) fn parse_decorations_for_file_kind(
@@ -4926,6 +5055,130 @@ fn plain_text_decorations(text: &str, code_language: Option<String>) -> Vec<Line
         }
     }
     decorations
+}
+
+impl EditorView {
+    fn find_anchor_line_in_current_buffer(&self, anchor: &str) -> Option<usize> {
+        let anchor = anchor.trim();
+        if anchor.is_empty() {
+            return None;
+        }
+
+        self.decorations
+            .iter()
+            .enumerate()
+            .find_map(|(line_idx, decoration)| {
+                matches!(decoration.block_type, BlockType::Heading(_))
+                    .then(|| self.buffer.line_content(line_idx))
+                    .filter(|line| heading_matches_anchor(line, anchor))
+                    .map(|_| line_idx)
+            })
+    }
+
+    pub(crate) fn find_footnote_definition_line(&self, label: &str) -> Option<usize> {
+        self.decorations
+            .iter()
+            .position(|decoration| decoration.footnote_definition_label.as_deref() == Some(label))
+    }
+
+    fn reveal_line_in_current_buffer(&mut self, target_line: usize, cx: &mut Context<Self>) {
+        self.scroll_to_line(target_line, cx);
+        self.flash_outline_heading_line(target_line, cx);
+        cx.notify();
+    }
+
+    fn resolve_markdown_navigation_target(&self, target: &str) -> Option<MarkdownNavigationTarget> {
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        if trimmed.starts_with("http://")
+            || trimmed.starts_with("https://")
+            || trimmed.starts_with("mailto:")
+        {
+            return Some(MarkdownNavigationTarget::ExternalUrl(trimmed.to_string()));
+        }
+
+        let (path_part, anchor) = split_markdown_target(trimmed);
+        if path_part.trim().is_empty() {
+            return anchor
+                .filter(|anchor| !anchor.is_empty())
+                .map(|anchor| MarkdownNavigationTarget::CurrentAnchor(anchor.to_string()));
+        }
+
+        resolve_markdown_target_path(
+            &self.sidebar_root,
+            self.current_file_path.as_deref(),
+            trimmed,
+        )
+        .map(|path| MarkdownNavigationTarget::File {
+            path,
+            anchor: anchor
+                .filter(|anchor| !anchor.is_empty())
+                .map(str::to_string),
+        })
+    }
+
+    pub(crate) fn markdown_target_is_navigable(&self, target: &str) -> bool {
+        match self.resolve_markdown_navigation_target(target) {
+            Some(MarkdownNavigationTarget::ExternalUrl(_)) => true,
+            Some(MarkdownNavigationTarget::CurrentAnchor(anchor)) => {
+                self.find_anchor_line_in_current_buffer(&anchor).is_some()
+            }
+            Some(MarkdownNavigationTarget::File { .. }) => true,
+            None => false,
+        }
+    }
+
+    pub(crate) fn navigate_to_footnote_label(
+        &mut self,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(target_line) = self.find_footnote_definition_line(label) else {
+            return false;
+        };
+        self.reveal_line_in_current_buffer(target_line, cx);
+        true
+    }
+
+    pub(crate) fn navigate_markdown_target(
+        &mut self,
+        target: &str,
+        focus_editor: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(target) = self.resolve_markdown_navigation_target(target) else {
+            return false;
+        };
+
+        match target {
+            MarkdownNavigationTarget::ExternalUrl(url) => {
+                if let Err(error) = std::process::Command::new("open").arg(&url).spawn() {
+                    eprintln!("failed to open URL: {error}");
+                    return false;
+                }
+                true
+            }
+            MarkdownNavigationTarget::CurrentAnchor(anchor) => {
+                let Some(target_line) = self.find_anchor_line_in_current_buffer(&anchor) else {
+                    return false;
+                };
+                self.reveal_line_in_current_buffer(target_line, cx);
+                true
+            }
+            MarkdownNavigationTarget::File { path, anchor } => {
+                self.open_path_in_permanent_tab(path, focus_editor, cx);
+                if let Some(anchor) = anchor
+                    && let Some(target_line) = self.find_anchor_line_in_current_buffer(&anchor)
+                {
+                    self.reveal_line_in_current_buffer(target_line, cx);
+                }
+                true
+            }
+        }
+    }
 }
 
 pub(crate) fn default_document_text() -> String {
@@ -4966,7 +5219,10 @@ pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{markdown_reference_for_import_name, text_tab_is_dirty, unique_import_path};
+    use super::{
+        heading_matches_anchor, markdown_reference_for_import_name, resolve_markdown_target_path,
+        split_markdown_target, text_tab_is_dirty, unique_import_path,
+    };
 
     #[test]
     fn text_tab_is_dirty_detects_saved_file_revert() {
@@ -5005,5 +5261,43 @@ mod tests {
             markdown_reference_for_import_name("20260507153045.pdf", false),
             "[20260507153045.pdf](20260507153045.pdf)"
         );
+    }
+
+    #[test]
+    fn split_markdown_target_extracts_path_and_anchor() {
+        assert_eq!(
+            split_markdown_target("notes/file.md#intro"),
+            ("notes/file.md", Some("intro"))
+        );
+        assert_eq!(split_markdown_target("#intro"), ("", Some("intro")));
+        assert_eq!(
+            split_markdown_target("notes/file.md"),
+            ("notes/file.md", None)
+        );
+    }
+
+    #[test]
+    fn heading_matches_anchor_supports_slug_and_explicit_id() {
+        assert!(heading_matches_anchor("## Hello World", "hello-world"));
+        assert!(heading_matches_anchor("## 标题 {#custom-id}", "custom-id"));
+    }
+
+    #[test]
+    fn resolve_markdown_target_path_strips_fragment_and_prefers_current_file_dir() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let notes_dir = temp_dir.path().join("notes");
+        std::fs::create_dir_all(&notes_dir).expect("mkdir");
+        let current_file = notes_dir.join("current.md");
+        let linked_file = notes_dir.join("other.md");
+        std::fs::write(&current_file, b"# current").expect("write current");
+        std::fs::write(&linked_file, b"# other").expect("write other");
+
+        let resolved = resolve_markdown_target_path(
+            temp_dir.path(),
+            Some(current_file.as_path()),
+            "other.md#intro",
+        );
+
+        assert_eq!(resolved.as_deref(), Some(linked_file.as_path()));
     }
 }

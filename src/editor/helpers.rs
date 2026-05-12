@@ -15,9 +15,13 @@ use syntect::highlighting::{
 };
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 
-use image::Frame;
+use image::{Frame, RgbaImage};
+use resvg::tiny_skia::{Pixmap, Transform};
 
-use crate::markdown::{self, BlockType, InlineKind, LineDecoration, TableLineInfo};
+use crate::markdown::{
+    self, BlockPreview, BlockPreviewKind, BlockType, DisplayReplacement, InlineKind,
+    LineDecoration, TableLineInfo,
+};
 use crate::theme::Theme;
 
 use super::*;
@@ -117,6 +121,34 @@ pub(crate) fn active_ranges_intersect(
         .any(|active_range| active_range_intersects_target(active_range, target))
 }
 
+pub(crate) fn inline_range_is_collapsed(
+    decoration: &LineDecoration,
+    visible_range: &Range<usize>,
+    active_ranges: &[Range<usize>],
+) -> bool {
+    decoration
+        .syntax_ranges
+        .iter()
+        .filter(|syntax_range| {
+            syntax_range.trigger_range.start <= visible_range.start
+                && syntax_range.trigger_range.end >= visible_range.end
+        })
+        .map(|syntax_range| syntax_range.trigger_range.clone())
+        .min_by_key(|range| (range.end.saturating_sub(range.start), range.start))
+        .is_none_or(|trigger_range| !active_ranges_intersect(active_ranges, &trigger_range))
+}
+
+pub(crate) fn block_preview_is_active(
+    preview: &BlockPreview,
+    cursor_line: usize,
+    selection_ranges: &[Range<usize>],
+) -> bool {
+    (preview.start_line..=preview.end_line).contains(&cursor_line)
+        || selection_ranges.iter().any(|range| {
+            range.start < preview.source_range.end && range.end > preview.source_range.start
+        })
+}
+
 pub(crate) fn active_ranges_have_non_eol_position(
     active_ranges: &[Range<usize>],
     line_len: usize,
@@ -139,6 +171,64 @@ pub(crate) fn build_display_text(
     task_source_indent_step_chars: usize,
     front_matter_key_padding_chars: usize,
 ) -> (String, Vec<usize>, Vec<usize>, bool) {
+    fn append_mapped_replacement(
+        display_text: &mut String,
+        display_to_buffer: &mut Vec<usize>,
+        buffer_to_display: &mut [usize],
+        display_pos: &mut usize,
+        source_range: Range<usize>,
+        replacement: &str,
+    ) {
+        let replacement_display_start = *display_pos;
+        display_text.push_str(replacement);
+
+        let source_start = source_range.start.min(buffer_to_display.len());
+        let source_end = source_range.end.min(buffer_to_display.len());
+        let source_len = source_end.saturating_sub(source_start);
+
+        if replacement.is_empty() || source_len == 0 {
+            for _ in 0..replacement.len() {
+                display_to_buffer.push(source_end);
+            }
+            for buf_i in source_start..source_end {
+                buffer_to_display[buf_i] = replacement_display_start;
+            }
+            *display_pos += replacement.len();
+            return;
+        }
+
+        let replacement_char_starts: Vec<usize> = replacement
+            .char_indices()
+            .map(|(char_start, _)| char_start)
+            .collect();
+        let mut replacement_segments = Vec::with_capacity(replacement_char_starts.len());
+
+        for (index, char_start) in replacement_char_starts.iter().copied().enumerate() {
+            let char_end = replacement_char_starts
+                .get(index + 1)
+                .copied()
+                .unwrap_or(replacement.len());
+            let source_offset = (char_start * source_len / replacement.len()).min(source_len - 1);
+            replacement_segments.push((source_offset, char_start));
+            for _ in char_start..char_end {
+                display_to_buffer.push(source_start + source_offset);
+            }
+        }
+
+        let mut segment_index = 0usize;
+        for source_offset in 0..source_len {
+            while segment_index + 1 < replacement_segments.len()
+                && replacement_segments[segment_index + 1].0 <= source_offset
+            {
+                segment_index += 1;
+            }
+            buffer_to_display[source_start + source_offset] =
+                replacement_display_start + replacement_segments[segment_index].1;
+        }
+
+        *display_pos += replacement.len();
+    }
+
     let len = line_content.len();
     let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
     let trimmed = &line_content[leading_ws..];
@@ -188,7 +278,13 @@ pub(crate) fn build_display_text(
         );
     }
 
-    if decoration.syntax_ranges.is_empty() {
+    let display_replacements: Vec<&DisplayReplacement> = decoration
+        .display_replacements
+        .iter()
+        .filter(|replacement| !active_ranges_intersect(active_ranges, &replacement.trigger_range))
+        .collect();
+
+    if decoration.syntax_ranges.is_empty() && display_replacements.is_empty() {
         let display_to_buffer: Vec<usize> = (0..len).collect();
         let mut buffer_to_display: Vec<usize> = (0..len).collect();
         buffer_to_display.push(len);
@@ -238,7 +334,7 @@ pub(crate) fn build_display_text(
         })
         .collect();
 
-    if !hidden.iter().any(|&h| h) {
+    if !hidden.iter().any(|&h| h) && display_replacements.is_empty() {
         let display_to_buffer: Vec<usize> = (0..len).collect();
         let mut buffer_to_display: Vec<usize> = (0..len).collect();
         buffer_to_display.push(len);
@@ -303,87 +399,58 @@ pub(crate) fn build_display_text(
     let mut buffer_to_display = vec![0usize; len];
     let mut display_pos = 0;
 
-    if let Some((prefix_range, replacement)) = &prefix_range_and_replacement {
-        for (buf_pos, ch) in line_content[..prefix_range.start].char_indices() {
-            let ch_len = ch.len_utf8();
-            display_text.push(ch);
-            for offset in 0..ch_len {
-                display_to_buffer.push(buf_pos + offset);
-                buffer_to_display[buf_pos + offset] = display_pos + offset;
-            }
-            display_pos += ch_len;
+    let mut replacement_index = 0usize;
+    let mut buffer_pos = 0usize;
+    while buffer_pos < len {
+        if let Some((prefix_range, replacement)) = &prefix_range_and_replacement
+            && buffer_pos == prefix_range.start
+        {
+            append_mapped_replacement(
+                &mut display_text,
+                &mut display_to_buffer,
+                &mut buffer_to_display,
+                &mut display_pos,
+                prefix_range.clone(),
+                replacement,
+            );
+            buffer_pos = prefix_range.end.min(len);
+            continue;
         }
 
-        let collapsed_display_start = display_pos;
-        display_text.push_str(replacement);
-        let collapsed_buffer_start = prefix_range.start.min(len);
-        let collapsed_buffer_end = prefix_range.end.min(len);
-        let collapsed_buffer_len = collapsed_buffer_end.saturating_sub(collapsed_buffer_start);
-        if replacement.is_empty() || collapsed_buffer_len == 0 {
-            for _ in 0..replacement.len() {
-                display_to_buffer.push(collapsed_buffer_end);
-            }
-            for buf_i in collapsed_buffer_start..collapsed_buffer_end {
-                buffer_to_display[buf_i] = collapsed_display_start;
+        if let Some(replacement) = display_replacements.get(replacement_index)
+            && buffer_pos == replacement.source_range.start
+        {
+            append_mapped_replacement(
+                &mut display_text,
+                &mut display_to_buffer,
+                &mut buffer_to_display,
+                &mut display_pos,
+                replacement.source_range.clone(),
+                &replacement.display_text,
+            );
+            buffer_pos = replacement.source_range.end.min(len);
+            replacement_index += 1;
+            continue;
+        }
+
+        let next_buffer_pos = line_content[buffer_pos..]
+            .chars()
+            .next()
+            .map(|ch| buffer_pos + ch.len_utf8())
+            .unwrap_or(len);
+        if is_hidden[buffer_pos] {
+            for offset in buffer_pos..next_buffer_pos.min(len) {
+                buffer_to_display[offset] = display_pos;
             }
         } else {
-            let replacement_char_starts: Vec<usize> = replacement
-                .char_indices()
-                .map(|(char_start, _)| char_start)
-                .collect();
-            let mut prefix_segments = Vec::with_capacity(replacement_char_starts.len());
-
-            for (index, char_start) in replacement_char_starts.iter().copied().enumerate() {
-                let char_end = replacement_char_starts
-                    .get(index + 1)
-                    .copied()
-                    .unwrap_or(replacement.len());
-                let prefix_offset = (char_start * collapsed_buffer_len / replacement.len())
-                    .min(collapsed_buffer_len - 1);
-                prefix_segments.push((prefix_offset, char_start));
-                for _ in char_start..char_end {
-                    display_to_buffer.push(collapsed_buffer_start + prefix_offset);
-                }
+            display_text.push_str(&line_content[buffer_pos..next_buffer_pos]);
+            for offset in buffer_pos..next_buffer_pos.min(len) {
+                display_to_buffer.push(offset);
+                buffer_to_display[offset] = display_pos + (offset - buffer_pos);
             }
-
-            let mut segment_index = 0;
-            for prefix_offset in 0..collapsed_buffer_len {
-                while segment_index + 1 < prefix_segments.len()
-                    && prefix_segments[segment_index + 1].0 <= prefix_offset
-                {
-                    segment_index += 1;
-                }
-                buffer_to_display[collapsed_buffer_start + prefix_offset] =
-                    collapsed_display_start + prefix_segments[segment_index].1;
-            }
+            display_pos += next_buffer_pos - buffer_pos;
         }
-        display_pos += replacement.len();
-    }
-
-    for (buf_pos, ch) in line_content.char_indices() {
-        if let Some((prefix_range, _)) = &prefix_range_and_replacement {
-            if buf_pos < prefix_range.end {
-                continue;
-            }
-        }
-
-        let ch_len = ch.len_utf8();
-        if is_hidden[buf_pos] {
-            for offset in 0..ch_len {
-                if buf_pos + offset < len {
-                    buffer_to_display[buf_pos + offset] = display_pos;
-                }
-            }
-        } else {
-            display_text.push(ch);
-            for offset in 0..ch_len {
-                display_to_buffer.push(buf_pos + offset);
-                if buf_pos + offset < len {
-                    buffer_to_display[buf_pos + offset] = display_pos + offset;
-                }
-            }
-            display_pos += ch_len;
-        }
+        buffer_pos = next_buffer_pos;
     }
 
     buffer_to_display.push(display_text.len());
@@ -1443,6 +1510,22 @@ mod tests {
             2,
         );
     }
+
+    #[test]
+    fn emoji_shortcode_folds_into_unicode_display_text() {
+        let line = "launch :rocket: now";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let (display_text, display_to_buffer, buffer_to_display, _) =
+            build_display_text(line, &decoration, &[], false, None, 0, 0, 0, 0, 0);
+
+        assert_eq!(display_text, "launch 🚀 now");
+        assert_eq!(display_to_buffer[7], 7);
+        assert_eq!(buffer_to_display[7], 7);
+        assert_eq!(buffer_to_display[14], 7);
+    }
 }
 
 pub(crate) fn find_syntax_for_language(language: &str) -> Option<&'static SyntaxReference> {
@@ -2063,6 +2146,121 @@ fn load_render_image_from_bytes(bytes: &[u8]) -> anyhow::Result<RenderImage> {
     Ok(RenderImage::new([frame]))
 }
 
+pub(crate) fn load_render_image_from_svg(svg: &str) -> anyhow::Result<RenderImage> {
+    let options = usvg::Options::default();
+    let tree = usvg::Tree::from_str(svg, &options)?;
+    let size = tree.size().to_int_size();
+    let mut pixmap = Pixmap::new(size.width(), size.height())
+        .ok_or_else(|| anyhow::anyhow!("failed to allocate SVG pixmap"))?;
+    let mut pixmap_mut = pixmap.as_mut();
+    resvg::render(&tree, Transform::default(), &mut pixmap_mut);
+
+    let mut buffer = RgbaImage::from_raw(size.width(), size.height(), pixmap.take())
+        .ok_or_else(|| anyhow::anyhow!("failed to convert SVG pixmap"))?;
+    for pixel in buffer.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+
+    Ok(RenderImage::new([Frame::new(buffer)]))
+}
+
+pub(crate) fn build_generated_block_preview_svg(
+    kind: BlockPreviewKind,
+    source_text: &str,
+) -> String {
+    let normalized = source_text.trim();
+    match kind {
+        BlockPreviewKind::Math => build_math_block_preview_svg(normalized),
+        BlockPreviewKind::Mermaid => build_mermaid_block_preview_svg(normalized),
+    }
+}
+
+fn build_math_block_preview_svg(source_text: &str) -> String {
+    let lines = wrap_svg_text(source_text, 28, 4);
+    let width = 840;
+    let height = 180 + lines.len() as i32 * 30;
+    let line_height = 30;
+    let mut text_nodes = String::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let y = 104 + index as i32 * line_height;
+        text_nodes.push_str(&format!(
+            "<text x=\"420\" y=\"{y}\" text-anchor=\"middle\" font-family=\"Times New Roman, STSong, serif\" font-size=\"28\" font-style=\"italic\" fill=\"#E9E2D0\">{}</text>",
+            escape_svg_text(line)
+        ));
+    }
+
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"><defs><linearGradient id=\"bg\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#23262F\"/><stop offset=\"100%\" stop-color=\"#14161C\"/></linearGradient></defs><rect x=\"18\" y=\"18\" width=\"804\" height=\"{inner_height}\" rx=\"28\" fill=\"url(#bg)\"/><rect x=\"44\" y=\"42\" width=\"146\" height=\"30\" rx=\"15\" fill=\"#3A3F4B\"/><text x=\"117\" y=\"62\" text-anchor=\"middle\" font-family=\"Helvetica, Arial, sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"#F6C177\">KaTeX Preview</text>{text_nodes}</svg>",
+        inner_height = height - 36,
+    )
+}
+
+fn build_mermaid_block_preview_svg(source_text: &str) -> String {
+    let lines = wrap_svg_text(source_text, 40, 8);
+    let width = 920;
+    let height = 188 + lines.len() as i32 * 26;
+    let line_height = 24;
+    let mut code_nodes = String::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let y = 112 + index as i32 * line_height;
+        code_nodes.push_str(&format!(
+            "<text x=\"86\" y=\"{y}\" font-family=\"Menlo, Monaco, monospace\" font-size=\"19\" fill=\"#D7E3FF\">{}</text>",
+            escape_svg_text(line)
+        ));
+    }
+
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"><defs><linearGradient id=\"card\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#11243B\"/><stop offset=\"100%\" stop-color=\"#0A1322\"/></linearGradient></defs><rect x=\"18\" y=\"18\" width=\"884\" height=\"{inner_height}\" rx=\"28\" fill=\"url(#card)\"/><rect x=\"54\" y=\"48\" width=\"156\" height=\"32\" rx=\"16\" fill=\"#1F4B99\"/><text x=\"132\" y=\"69\" text-anchor=\"middle\" font-family=\"Helvetica, Arial, sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"#F4F8FF\">Mermaid Preview</text><path d=\"M708 84h70\" stroke=\"#73C7FF\" stroke-width=\"4\" stroke-linecap=\"round\"/><rect x=\"620\" y=\"66\" width=\"88\" height=\"36\" rx=\"18\" fill=\"#1C6DD0\"/><rect x=\"778\" y=\"66\" width=\"88\" height=\"36\" rx=\"18\" fill=\"#16A085\"/><text x=\"664\" y=\"89\" text-anchor=\"middle\" font-family=\"Helvetica, Arial, sans-serif\" font-size=\"16\" font-weight=\"700\" fill=\"#F5FBFF\">A</text><text x=\"822\" y=\"89\" text-anchor=\"middle\" font-family=\"Helvetica, Arial, sans-serif\" font-size=\"16\" font-weight=\"700\" fill=\"#F5FBFF\">B</text>{code_nodes}</svg>",
+        inner_height = height - 36,
+    )
+}
+
+fn wrap_svg_text(source_text: &str, max_chars: usize, max_lines: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for raw_line in source_text.lines() {
+        let mut current = String::new();
+        for word in raw_line.split_whitespace() {
+            let separator = if current.is_empty() { 0 } else { 1 };
+            if current.chars().count() + separator + word.chars().count() > max_chars
+                && !current.is_empty()
+            {
+                lines.push(current);
+                current = String::new();
+                if lines.len() == max_lines {
+                    return lines;
+                }
+            }
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+
+        lines.push(current);
+        if lines.len() == max_lines {
+            return lines;
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    lines.truncate(max_lines);
+    lines
+}
+
+fn escape_svg_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 pub(crate) fn load_render_image_from_path(path: &PathBuf) -> anyhow::Result<RenderImage> {
     let bytes = std::fs::read(path)?;
     load_render_image_from_bytes(&bytes)
@@ -2094,14 +2292,12 @@ pub(crate) fn pick_image_file_blocking() -> Option<PathBuf> {
 }
 
 pub(crate) fn pick_folder_blocking(title: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new()
-    .set_title(title)
-        .pick_folder()
+    rfd::FileDialog::new().set_title(title).pick_folder()
 }
 
 pub(crate) fn save_file_blocking(default_name: &str, title: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
-    .set_title(title)
+        .set_title(title)
         .set_file_name(default_name)
         .add_filter("Markdown", &["md", "markdown"])
         .save_file()
@@ -2362,6 +2558,47 @@ pub(crate) fn build_text_runs_for_display(
         }
     }
 
+    for highlight_range in &decoration.highlight_spans {
+        let start = highlight_range.start.min(buf_len);
+        let end = highlight_range.end.min(buf_len);
+        for index in start..end {
+            buf_bg_colors[index] =
+                Some(crate::theme::with_alpha(crate::hex_hsla!("#E5C07B"), 0.35));
+            buf_colors[index] = theme.bold;
+            buf_weights[index] = FontWeight::BOLD;
+        }
+    }
+
+    for superscript_range in &decoration.superscript_spans {
+        if inline_range_is_collapsed(decoration, superscript_range, active_ranges) {
+            let start = superscript_range.start.min(buf_len);
+            let end = superscript_range.end.min(buf_len);
+            for index in start..end {
+                buf_colors[index] = gpui::transparent_black();
+            }
+        }
+    }
+
+    for subscript_range in &decoration.subscript_spans {
+        if inline_range_is_collapsed(decoration, subscript_range, active_ranges) {
+            let start = subscript_range.start.min(buf_len);
+            let end = subscript_range.end.min(buf_len);
+            for index in start..end {
+                buf_colors[index] = gpui::transparent_black();
+            }
+        }
+    }
+
+    for footnote_reference in &decoration.footnote_references {
+        if !active_ranges_intersect(active_ranges, &footnote_reference.full_range) {
+            let start = footnote_reference.collapsed_range.start.min(buf_len);
+            let end = footnote_reference.collapsed_range.end.min(buf_len);
+            for index in start..end {
+                buf_colors[index] = gpui::transparent_black();
+            }
+        }
+    }
+
     for wiki_link in &decoration.wiki_links {
         let target_start = (wiki_link.full_range.start + 2).min(buf_len);
         let target_end = wiki_link.full_range.end.saturating_sub(2).min(buf_len);
@@ -2432,6 +2669,30 @@ pub(crate) fn build_text_runs_for_display(
         bg_colors.push(buf_bg_colors[buf_idx]);
         strikethroughs.push(buf_strikethroughs[buf_idx]);
         font_roles.push(buf_font_roles[buf_idx]);
+    }
+
+    if let Some(label) = decoration.footnote_definition_label.as_deref() {
+        let leading_ws = display_text.len() - display_text.trim_start_matches([' ', '\t']).len();
+        let raw_prefix = format!("[^{}]:", label);
+        let display_prefix = if line_content
+            .get(leading_ws..)
+            .is_some_and(|content| content.starts_with(&(raw_prefix.clone() + " ")))
+        {
+            format!("{}: ", label)
+        } else {
+            format!("{}:", label)
+        };
+
+        if display_text
+            .get(leading_ws..)
+            .is_some_and(|content| content.starts_with(&display_prefix))
+        {
+            let style_end = (leading_ws + display_prefix.trim_end().len()).min(disp_len);
+            for index in leading_ws..style_end {
+                colors[index] = theme.bold;
+                weights[index] = FontWeight::BOLD;
+            }
+        }
     }
 
     if prefix_collapsed {

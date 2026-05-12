@@ -14,7 +14,7 @@ pub(crate) struct OutlineHeading {
 }
 
 impl EditorView {
-    fn flash_outline_heading_line(&mut self, target_line: usize, cx: &mut Context<Self>) {
+    pub(crate) fn flash_outline_heading_line(&mut self, target_line: usize, cx: &mut Context<Self>) {
         let Some(path) = self.current_file_path.clone() else {
             return;
         };

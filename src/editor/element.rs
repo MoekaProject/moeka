@@ -46,6 +46,7 @@ pub(crate) struct EditorPrepaintState {
     image_edit_icons: Vec<(Bounds<Pixels>, usize, f32)>,
     /// Blue wavy underlines for links when cmd is held
     link_underlines: Vec<PaintQuad>,
+    inline_overlays: Vec<(ShapedLine, Point<Pixels>, Pixels)>,
     /// Per-cell shaped texts for table block rendering.
     table_cell_texts: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
     code_block_copy_buttons: Vec<CodeBlockCopyButtonPaint>,
@@ -402,6 +403,96 @@ fn push_gutter_line_number_label(
     gutter_labels.push((shaped, point(px(label_x), px(label_y)), px(line_height)));
 }
 
+fn inline_overlay_prefers_latin_font(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0000}'..='\u{024F}'
+            | '\u{1E00}'..='\u{1EFF}'
+            | '\u{2000}'..='\u{206F}'
+            | '\u{20A0}'..='\u{20CF}'
+    )
+}
+
+fn inline_overlay_runs(text: &str, latin_font: &Font, cjk_font: &Font, color: Hsla) -> Vec<TextRun> {
+    text.chars()
+        .map(|ch| TextRun {
+            len: ch.len_utf8(),
+            font: if inline_overlay_prefers_latin_font(ch) {
+                latin_font.clone()
+            } else {
+                cjk_font.clone()
+            },
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        })
+        .collect()
+}
+
+fn push_inline_text_overlay(
+    overlays: &mut Vec<(ShapedLine, Point<Pixels>, Pixels)>,
+    window: &mut Window,
+    wrapped: &WrappedLine,
+    display_text: &str,
+    visible_range: Range<usize>,
+    latin_font: &Font,
+    cjk_font: &Font,
+    color: Hsla,
+    font_size: f32,
+    scale: f32,
+    vertical_offset_px: f32,
+    anchor_right: bool,
+    content_x: f32,
+    text_line_top: f32,
+    indent_px: f32,
+    line_height: f32,
+) {
+    if visible_range.start >= visible_range.end || visible_range.end > display_text.len() {
+        return;
+    }
+
+    let Some(pos_start) = wrapped.position_for_index(visible_range.start, px(line_height)) else {
+        return;
+    };
+    let Some(pos_end) = wrapped.position_for_index(visible_range.end, px(line_height)) else {
+        return;
+    };
+    if pos_start.y != pos_end.y {
+        return;
+    }
+
+    let Some(overlay_text) = display_text.get(visible_range.clone()) else {
+        return;
+    };
+    if overlay_text.is_empty() {
+        return;
+    }
+
+    let overlay_runs = inline_overlay_runs(overlay_text, latin_font, cjk_font, color);
+    let overlay_font_size = (font_size * scale).max(8.0);
+    let shaped = window.text_system().shape_line(
+        SharedString::from(overlay_text.to_string()),
+        px(overlay_font_size),
+        &overlay_runs,
+        None,
+    );
+    let indent_start = helpers::indent_for_y(indent_px, pos_start.y, line_height);
+    let reserved_width = f32::from(pos_end.x - pos_start.x).max(0.0);
+    let overlay_width = f32::from(shaped.width);
+    let horizontal_offset = if anchor_right {
+        (reserved_width - overlay_width).max(0.0)
+    } else {
+        0.0
+    };
+    let overlay_origin = point(
+        px(content_x + indent_start + horizontal_offset) + pos_start.x,
+        px(text_line_top + f32::from(pos_start.y) + vertical_offset_px),
+    );
+    let overlay_line_height = px((overlay_font_size * 1.15).max(overlay_font_size + 1.0));
+    overlays.push((shaped, overlay_origin, overlay_line_height));
+}
+
 impl Element for EditorElement {
     type RequestLayoutState = ();
     type PrepaintState = EditorPrepaintState;
@@ -527,6 +618,7 @@ impl Element for EditorElement {
         let mut code_block_copy_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut code_block_copy_buttons: Vec<CodeBlockCopyButtonPaint> = Vec::new();
         let mut unordered_list_markers: Vec<(WrappedLine, Point<Pixels>, Pixels)> = Vec::new();
+        let mut inline_overlays: Vec<(ShapedLine, Point<Pixels>, Pixels)> = Vec::new();
 
         let hidden_lines: HashSet<usize> = {
             let mut set = HashSet::new();
@@ -1292,19 +1384,44 @@ impl Element for EditorElement {
                 .is_some_and(|(start, end)| line_idx >= start && line_idx <= end)
                 || active_front_matter_group
                     .is_some_and(|(start, end)| line_idx >= start && line_idx <= end);
+            let block_preview_active = decoration
+                .block_preview
+                .as_ref()
+                .is_some_and(|preview| {
+                    helpers::block_preview_is_active(preview, cursor_line, &all_sel_ranges)
+                });
+            let collapsed_block_preview = decoration
+                .block_preview
+                .as_ref()
+                .filter(|_| !block_preview_active);
+            if let Some(preview) = collapsed_block_preview
+                && !preview.is_anchor
+            {
+                display_info_cache.push(None);
+                continue;
+            }
             let (mut display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
-                helpers::build_display_text(
-                    line_content,
-                    &decoration,
-                    &active_ranges,
-                    code_block_syntax_active,
-                    table_width_chars,
-                    table_cell_padding_chars,
-                    collapsed_task_prefix_display_columns,
-                    checkbox_indent_step_display_columns,
-                    editor.styles.checkbox.checkbox_parent_prefix_chars as usize,
-                    0,
-                );
+                if collapsed_block_preview.is_some() {
+                    (
+                        String::new(),
+                        Vec::new(),
+                        vec![0; line_content.len()],
+                        false,
+                    )
+                } else {
+                    helpers::build_display_text(
+                        line_content,
+                        &decoration,
+                        &active_ranges,
+                        code_block_syntax_active,
+                        table_width_chars,
+                        table_cell_padding_chars,
+                        collapsed_task_prefix_display_columns,
+                        checkbox_indent_step_display_columns,
+                        editor.styles.checkbox.checkbox_parent_prefix_chars as usize,
+                        0,
+                    )
+                };
             editor.apply_list_display_styles(
                 line_content,
                 &decoration,
@@ -1312,60 +1429,72 @@ impl Element for EditorElement {
                 prefix_collapsed,
             );
 
-            let mut runs = helpers::build_text_runs_for_display(
-                &display_text,
-                line_content,
-                &display_to_buffer,
-                &decoration,
-                &active_ranges,
-                code_block_syntax_active,
-                prefix_collapsed,
-                &body_font,
-                &body_cjk_font,
-                &monospace_font,
-                &heading_font,
-                &heading_cjk_font,
-                collapsed_task_prefix_display_columns,
-                font_size,
-                theme,
-                editor.styles.wiki_link.wiki_link_text_color,
-                editor.styles.wiki_link.wiki_link_text_weight,
-                Some(editor.styles.table.front_matter_key_text_color),
-            );
-            helpers::apply_search_match_text_styles(
-                &mut runs,
-                &display_text,
-                &display_to_buffer,
-                line_start_offset,
-                &editor.search_matches,
-                editor.search_current_index,
-                editor.styles.search.search_match_text_color,
-                editor.styles.search.search_match_active_text_color,
-            );
-            if editor.current_file_path == editor.workspace_search_highlight_path {
+            let runs = if collapsed_block_preview.is_some() {
+                vec![TextRun {
+                    len: 1,
+                    font: body_font.clone(),
+                    color: gpui::transparent_black(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }]
+            } else {
+                let mut runs = helpers::build_text_runs_for_display(
+                    &display_text,
+                    line_content,
+                    &display_to_buffer,
+                    &decoration,
+                    &active_ranges,
+                    code_block_syntax_active,
+                    prefix_collapsed,
+                    &body_font,
+                    &body_cjk_font,
+                    &monospace_font,
+                    &heading_font,
+                    &heading_cjk_font,
+                    collapsed_task_prefix_display_columns,
+                    font_size,
+                    theme,
+                    editor.styles.wiki_link.wiki_link_text_color,
+                    editor.styles.wiki_link.wiki_link_text_weight,
+                    Some(editor.styles.table.front_matter_key_text_color),
+                );
                 helpers::apply_search_match_text_styles(
                     &mut runs,
                     &display_text,
                     &display_to_buffer,
                     line_start_offset,
-                    &editor.workspace_search_highlight_ranges,
-                    editor.workspace_search_highlight_current_index,
+                    &editor.search_matches,
+                    editor.search_current_index,
                     editor.styles.search.search_match_text_color,
                     editor.styles.search.search_match_active_text_color,
                 );
-            }
-            if editor.current_file_path == editor.outline_flash_highlight_path {
-                helpers::apply_search_match_text_styles(
-                    &mut runs,
-                    &display_text,
-                    &display_to_buffer,
-                    line_start_offset,
-                    &editor.outline_flash_highlight_ranges,
-                    editor.outline_flash_highlight_current_index,
-                    editor.styles.search.search_match_text_color,
-                    editor.styles.search.search_match_active_text_color,
-                );
-            }
+                if editor.current_file_path == editor.workspace_search_highlight_path {
+                    helpers::apply_search_match_text_styles(
+                        &mut runs,
+                        &display_text,
+                        &display_to_buffer,
+                        line_start_offset,
+                        &editor.workspace_search_highlight_ranges,
+                        editor.workspace_search_highlight_current_index,
+                        editor.styles.search.search_match_text_color,
+                        editor.styles.search.search_match_active_text_color,
+                    );
+                }
+                if editor.current_file_path == editor.outline_flash_highlight_path {
+                    helpers::apply_search_match_text_styles(
+                        &mut runs,
+                        &display_text,
+                        &display_to_buffer,
+                        line_start_offset,
+                        &editor.outline_flash_highlight_ranges,
+                        editor.outline_flash_highlight_current_index,
+                        editor.styles.search.search_match_text_color,
+                        editor.styles.search.search_match_active_text_color,
+                    );
+                }
+                runs
+            };
 
             let display_shared: SharedString = if display_text.is_empty() {
                 " ".into()
@@ -1500,6 +1629,24 @@ impl Element for EditorElement {
             } else {
                 0.0
             };
+            let generated_preview_extra_height = if let Some(preview) = collapsed_block_preview {
+                if let Some(Some(img_data)) = image_cache.get(&preview.cache_key) {
+                    let img_size = img_data.size(0);
+                    let img_w = img_size.width.0 as f32;
+                    let img_h = img_size.height.0 as f32;
+                    if img_w > 0.0 && img_h > 0.0 {
+                        let (_, display_h) =
+                            helpers::compute_image_preview_size(img_w, img_h, text_width);
+                        display_h + image_gap_top + image_gap_bottom
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
 
             // Compute table block extra height for header line (table rendered as block below)
             let table_extra_height = if *block_type == BlockType::Table {
@@ -1546,8 +1693,11 @@ impl Element for EditorElement {
                 0.0
             };
 
-            let extra_height =
-                block_padding_top + block_padding_bottom + image_extra_height + table_extra_height;
+            let extra_height = block_padding_top
+                + block_padding_bottom
+                + image_extra_height
+                + generated_preview_extra_height
+                + table_extra_height;
             let total_line_height = text_line_height + extra_height;
 
             let line_top = y - scroll_offset;
@@ -1564,13 +1714,6 @@ impl Element for EditorElement {
                     editor_left + editor.padding_left()
                 };
             let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
-            let list_content_indent_px = if is_list_type
-                && !matches!(block_type, BlockType::TaskList(_))
-            {
-                editor.scaled(editor.styles.editor.editor_list_content_indent_px)
-            } else {
-                0.0
-            };
             let content_x = if matches!(block_type, BlockType::TaskList(_)) && prefix_collapsed {
                 let target_prefix_width = helpers::task_prefix_target_width_px(
                     line_content,
@@ -1579,9 +1722,9 @@ impl Element for EditorElement {
                     task_source_indent_step_chars,
                 )
                 .unwrap_or(indent_px);
-                base_content_x + list_content_indent_px + (target_prefix_width - indent_px)
+                base_content_x + (target_prefix_width - indent_px)
             } else {
-                base_content_x + list_content_indent_px
+                base_content_x
             };
             let selection_padding_left_px =
                 (content_x - (editor_left + editor.padding_left())).max(0.0);
@@ -2436,6 +2579,35 @@ impl Element for EditorElement {
                 }
             }
 
+            if let Some(preview) = collapsed_block_preview {
+                if let Some(Some(img_data)) = image_cache.get(&preview.cache_key) {
+                    let img_size = img_data.size(0);
+                    let img_w = img_size.width.0 as f32;
+                    let img_h = img_size.height.0 as f32;
+                    if img_w > 0.0 && img_h > 0.0 {
+                        let (display_w, display_h) =
+                            helpers::compute_image_preview_size(img_w, img_h, text_width);
+                        let img_top = text_line_top + text_line_height + image_gap_top;
+                        let img_left = editor_left
+                            + editor.padding_left()
+                            + ((text_width - display_w) / 2.0).max(0.0);
+                        let img_bounds = Bounds::new(
+                            point(px(img_left), px(img_top)),
+                            size(px(display_w), px(display_h)),
+                        );
+                        image_previews.push((img_bounds, img_data.clone()));
+                        image_borders.push(quad(
+                            img_bounds,
+                            Corners::all(px(18.0)),
+                            gpui::transparent_black(),
+                            px(1.0),
+                            theme.border_decorative,
+                            BorderStyle::default(),
+                        ));
+                    }
+                }
+            }
+
             // Gutter decorations
             let gutter_center_y = text_line_top + line_height / 2.0;
             let fold_range = if hidden_lines.contains(&line_idx) {
@@ -3029,11 +3201,9 @@ impl Element for EditorElement {
                 }
 
                 for wiki_link in &decoration.wiki_links {
-                    let Some(_resolved_path) =
-                        resolve_wiki_link_target_path(&editor.sidebar_root, &wiki_link.target_path)
-                    else {
+                    if !editor.markdown_target_is_navigable(&wiki_link.target_path) {
                         continue;
-                    };
+                    }
                     let is_collapsed =
                         !helpers::active_ranges_intersect(&active_ranges, &wiki_link.full_range);
                     let visible_range = if is_collapsed {
@@ -3076,6 +3246,149 @@ impl Element for EditorElement {
                             .push(window.insert_hitbox(link_bounds, HitboxBehavior::Normal));
                     }
                 }
+
+                for footnote_reference in &decoration.footnote_references {
+                    if editor.find_footnote_definition_line(&footnote_reference.label).is_none() {
+                        continue;
+                    }
+                    let is_collapsed = !helpers::active_ranges_intersect(
+                        &active_ranges,
+                        &footnote_reference.full_range,
+                    );
+                    let visible_range = if is_collapsed {
+                        footnote_reference.collapsed_range.clone()
+                    } else {
+                        footnote_reference.full_range.clone()
+                    };
+                    let disp_start =
+                        helpers::buffer_to_display_offset(&buffer_to_display, visible_range.start);
+                    let disp_end =
+                        helpers::buffer_to_display_offset(&buffer_to_display, visible_range.end);
+                    if let (Some(pos_start), Some(pos_end)) = (
+                        wrapped.position_for_index(disp_start, px(line_height)),
+                        wrapped.position_for_index(disp_end, px(line_height)),
+                    ) {
+                        let indent_start =
+                            helpers::indent_for_y(indent_px, pos_start.y, line_height);
+                        let link_bounds = Bounds::from_corners(
+                            point(
+                                px(content_x + indent_start) + pos_start.x,
+                                px(text_line_top + f32::from(pos_start.y)),
+                            ),
+                            point(
+                                px(content_x + indent_start) + pos_end.x,
+                                px(text_line_top + f32::from(pos_start.y) + line_height),
+                            ),
+                        );
+                        if hovered_position.is_some_and(|position| link_bounds.contains(&position))
+                        {
+                            let ul_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
+                            link_underlines.push(fill(
+                                Bounds::from_corners(
+                                    point(px(content_x + indent_start) + pos_start.x, px(ul_y)),
+                                    point(px(content_x + indent_start) + pos_end.x, px(ul_y + 1.5)),
+                                ),
+                                theme.link,
+                            ));
+                        }
+                        link_hitboxes
+                            .push(window.insert_hitbox(link_bounds, HitboxBehavior::Normal));
+                    }
+                }
+            }
+
+            for superscript_range in &decoration.superscript_spans {
+                if !helpers::inline_range_is_collapsed(&decoration, superscript_range, &active_ranges)
+                {
+                    continue;
+                }
+                let disp_start =
+                    helpers::buffer_to_display_offset(&buffer_to_display, superscript_range.start);
+                let disp_end =
+                    helpers::buffer_to_display_offset(&buffer_to_display, superscript_range.end);
+                push_inline_text_overlay(
+                    &mut inline_overlays,
+                    window,
+                    wrapped,
+                    &display_text,
+                    disp_start..disp_end,
+                    &body_font,
+                    &body_cjk_font,
+                    theme.syntax_marker,
+                    font_size,
+                    1.0,
+                    -font_size * 0.16,
+                    false,
+                    content_x,
+                    text_line_top,
+                    indent_px,
+                    line_height,
+                );
+            }
+
+            for subscript_range in &decoration.subscript_spans {
+                if !helpers::inline_range_is_collapsed(&decoration, subscript_range, &active_ranges)
+                {
+                    continue;
+                }
+                let disp_start =
+                    helpers::buffer_to_display_offset(&buffer_to_display, subscript_range.start);
+                let disp_end =
+                    helpers::buffer_to_display_offset(&buffer_to_display, subscript_range.end);
+                push_inline_text_overlay(
+                    &mut inline_overlays,
+                    window,
+                    wrapped,
+                    &display_text,
+                    disp_start..disp_end,
+                    &body_font,
+                    &body_cjk_font,
+                    theme.syntax_marker,
+                    font_size,
+                    1.0,
+                    font_size * 0.16,
+                    false,
+                    content_x,
+                    text_line_top,
+                    indent_px,
+                    line_height,
+                );
+            }
+
+            for footnote_reference in &decoration.footnote_references {
+                if !helpers::inline_range_is_collapsed(
+                    &decoration,
+                    &footnote_reference.collapsed_range,
+                    &active_ranges,
+                ) {
+                    continue;
+                }
+                let disp_start = helpers::buffer_to_display_offset(
+                    &buffer_to_display,
+                    footnote_reference.collapsed_range.start,
+                );
+                let disp_end = helpers::buffer_to_display_offset(
+                    &buffer_to_display,
+                    footnote_reference.collapsed_range.end,
+                );
+                push_inline_text_overlay(
+                    &mut inline_overlays,
+                    window,
+                    wrapped,
+                    &display_text,
+                    disp_start..disp_end,
+                    &body_font,
+                    &body_cjk_font,
+                    theme.link,
+                    font_size,
+                    0.62,
+                    -font_size * 0.12,
+                    true,
+                    content_x,
+                    text_line_top,
+                    indent_px,
+                    line_height,
+                );
             }
 
             // Determine if this is a table row with per-cell rendering
@@ -3114,13 +3427,14 @@ impl Element for EditorElement {
                         underline: None,
                         strikethrough: None,
                     };
-                    if let Ok(shaped_lines) = window.text_system().shape_text(
+                    if let Ok(mut marker_wrapped_lines) = window.text_system().shape_text(
                         marker_text.clone().into(),
                         px(marker_font_size),
                         &[marker_run],
                         None,
                         None,
-                    ) && let Some(marker_wrapped) = shaped_lines.into_iter().next()
+                    )
+                        && let Some(marker_wrapped) = marker_wrapped_lines.pop()
                     {
                         let marker_x = content_x
                             + f32::from(
@@ -3128,17 +3442,25 @@ impl Element for EditorElement {
                                     .position_for_index(leading_ws, px(line_height))
                                     .unwrap_or_default()
                                     .x,
-                            );
+                            )
+                            + editor.scaled(2.0);
                         let marker_offset = editor.scaled(
                             editor
                                 .styles
                                 .editor
                                 .editor_unordered_list_marker_font_size_offset_px,
                         );
+                        let marker_line_height = line_height
+                            + editor.scaled(
+                                editor
+                                    .styles
+                                    .editor
+                                    .editor_unordered_list_marker_line_height_offset_px,
+                            );
                         unordered_list_markers.push((
                             marker_wrapped,
                             point(px(marker_x), px(text_line_top - marker_offset * 0.35)),
-                            px(line_height),
+                            px(marker_line_height),
                         ));
                     }
                 }
@@ -3355,6 +3677,7 @@ impl Element for EditorElement {
             code_block_copy_hitboxes,
             image_edit_icons,
             link_underlines,
+            inline_overlays,
         }
     }
 
@@ -3443,6 +3766,10 @@ impl Element for EditorElement {
                 .ok();
         }
         for (shaped, origin, line_height) in &prepaint.gutter_labels {
+            shaped.paint(*origin, *line_height, window, cx).ok();
+        }
+
+        for (shaped, origin, line_height) in &prepaint.inline_overlays {
             shaped.paint(*origin, *line_height, window, cx).ok();
         }
 

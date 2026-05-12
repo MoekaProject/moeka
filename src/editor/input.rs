@@ -379,20 +379,36 @@ impl EditorView {
         self.update_wrap_boundary_affinity_for_position(offset, event.position);
         if event.modifiers.platform {
             let (line, col) = self.buffer.offset_to_line_col(offset);
-            let wiki_link_path = self.decorations.get(line).and_then(|dec| {
+            let footnote_label = self.decorations.get(line).and_then(|dec| {
+                dec.footnote_references.iter().find_map(|footnote_reference| {
+                    if col < footnote_reference.full_range.start || col > footnote_reference.full_range.end {
+                        return None;
+                    }
+                    Some(footnote_reference.label.clone())
+                })
+            });
+            if let Some(label) = footnote_label
+                && self.navigate_to_footnote_label(&label, cx)
+            {
+                self.is_selecting = false;
+                return;
+            }
+
+            let wiki_link_target = self.decorations.get(line).and_then(|dec| {
                 dec.wiki_links.iter().find_map(|wiki_link| {
                     if col < wiki_link.full_range.start || col > wiki_link.full_range.end {
                         return None;
                     }
-                    resolve_wiki_link_target_path(&self.sidebar_root, &wiki_link.target_path)
+                    Some(wiki_link.target_path.clone())
                 })
             });
-            if let Some(path) = wiki_link_path {
-                self.open_path_in_permanent_tab(path, true, cx);
+            if let Some(target) = wiki_link_target
+                && self.navigate_markdown_target(&target, true, cx)
+            {
                 self.is_selecting = false;
-                cx.notify();
                 return;
             }
+
             let link_url = self.decorations.get(line).and_then(|dec| {
                 dec.inline_spans.iter().find_map(|span| {
                     if span.kind != InlineKind::Link {
@@ -423,17 +439,10 @@ impl EditorView {
                     }
                 })
             });
-            if let Some(url) = link_url {
-                if url.starts_with("http://")
-                    || url.starts_with("https://")
-                    || url.starts_with("mailto:")
-                {
-                    if let Err(error) = std::process::Command::new("open").arg(&url).spawn() {
-                        eprintln!("failed to open URL: {error}");
-                    }
-                }
+            if let Some(url) = link_url
+                && self.navigate_markdown_target(&url, true, cx)
+            {
                 self.is_selecting = false;
-                cx.notify();
                 return;
             }
             self.add_cursor_at(offset, offset);
@@ -1522,12 +1531,6 @@ impl EditorView {
         } else {
             editor_left + self.padding_left()
         };
-        let list_content_indent_px =
-            if is_list_type && !matches!(decoration.block_type, BlockType::TaskList(_)) {
-                self.scaled(self.styles.editor.editor_list_content_indent_px)
-            } else {
-                0.0
-            };
         let content_x =
             if matches!(decoration.block_type, BlockType::TaskList(_)) && prefix_collapsed {
                 let target_prefix_width = helpers::task_prefix_target_width_px(
@@ -1537,9 +1540,9 @@ impl EditorView {
                     task_source_indent_step_chars,
                 )
                 .unwrap_or(indent_px);
-                base_content_x + list_content_indent_px + (target_prefix_width - indent_px)
+                base_content_x + (target_prefix_width - indent_px)
             } else {
-                base_content_x + list_content_indent_px
+                base_content_x
             };
         let wrap_boundary_upstream_xs = compute_inline_wrap_boundary_upstream_xs(
             window,

@@ -62,11 +62,20 @@ fn greet(name: &str) {
 }
 ```
 
+## 链接与图片
+
+- 可以使用[内部](#英文示例)链接，跳转内部的行
+- 以及也可以使用脚注语法 [^note] 跳转到脚注行
+
 ## 行内语法
 
-## 行级语法
+- 下标示例：H~2~O，上标示例：E=mc^2^，可以用英文：Foo~bar~ 或者 Zoo^funny^ 等
+- 另外也支持==高亮==语法，让文本显得有强调的风格；
+- 还支持类似 `:smile:` 这类 shortcode 的语法，例如 :smile:
 
-## 链接与图片
+## 英文示例
+
+[^note]: 这里是脚注行，可以从其他地方跳转过来
 
 - Syntax markers hide when cursor leaves the range
 - .md files open into real tabs
