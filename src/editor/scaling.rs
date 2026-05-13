@@ -402,6 +402,10 @@ impl EditorView {
         self.toggle_utility_panel(RightUtilityPanel::Outline, cx);
     }
 
+    pub(crate) fn toggle_chat_panel(&mut self, cx: &mut Context<Self>) {
+        self.toggle_utility_panel(RightUtilityPanel::Chat, cx);
+    }
+
     pub(crate) fn toggle_info_panel(&mut self, cx: &mut Context<Self>) {
         self.toggle_utility_panel(RightUtilityPanel::Info, cx);
     }
@@ -415,6 +419,7 @@ impl EditorView {
         panel: RightUtilityPanel,
         cx: &mut Context<Self>,
     ) {
+        let previous_panel = self.utility_panel;
         let outcome = utility_panel_toggle_outcome(self.utility_panel, panel);
         self.utility_panel = outcome.next_panel;
         if outcome.clear_resizing {
@@ -425,6 +430,16 @@ impl EditorView {
         }
         if outcome.invalidate_git_history {
             self.invalidate_git_history_cache();
+        }
+        if previous_panel == Some(RightUtilityPanel::Chat)
+            && self.utility_panel != Some(RightUtilityPanel::Chat)
+        {
+            self.stop_chat_terminal();
+        }
+        if previous_panel != Some(RightUtilityPanel::Chat)
+            && self.utility_panel == Some(RightUtilityPanel::Chat)
+        {
+            self.open_chat_terminal(cx);
         }
         self.sync_utility_panel_width_animation(cx);
         cx.notify();

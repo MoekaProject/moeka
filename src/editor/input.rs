@@ -380,12 +380,16 @@ impl EditorView {
         if event.modifiers.platform {
             let (line, col) = self.buffer.offset_to_line_col(offset);
             let footnote_label = self.decorations.get(line).and_then(|dec| {
-                dec.footnote_references.iter().find_map(|footnote_reference| {
-                    if col < footnote_reference.full_range.start || col > footnote_reference.full_range.end {
-                        return None;
-                    }
-                    Some(footnote_reference.label.clone())
-                })
+                dec.footnote_references
+                    .iter()
+                    .find_map(|footnote_reference| {
+                        if col < footnote_reference.full_range.start
+                            || col > footnote_reference.full_range.end
+                        {
+                            return None;
+                        }
+                        Some(footnote_reference.label.clone())
+                    })
             });
             if let Some(label) = footnote_label
                 && self.navigate_to_footnote_label(&label, cx)
@@ -1023,6 +1027,9 @@ impl EditorView {
             0,
             0,
             0,
+            self.styles.editor.editor_superscript_scale_factor,
+            self.styles.editor.editor_subscript_scale_factor,
+            self.styles.editor.editor_superscript_scale_factor,
         );
         let trim_start = folded_raw.len() - folded_raw.trim_start().len();
         let trim_end = folded_raw.len() - folded_raw.trim_end().len();
@@ -1427,6 +1434,9 @@ impl EditorView {
                 checkbox_indent_step_display_columns,
                 self.styles.checkbox.checkbox_parent_prefix_chars as usize,
                 0,
+                self.styles.editor.editor_superscript_scale_factor,
+                self.styles.editor.editor_subscript_scale_factor,
+                self.styles.editor.editor_superscript_scale_factor,
             );
         self.apply_list_display_styles(
             line_content,

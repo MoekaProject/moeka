@@ -204,7 +204,10 @@ pub(crate) fn raw_wiki_link_ranges(
             }
         }
 
-        let Some(ch) = line_content.get(index..).and_then(|rest| rest.chars().next()) else {
+        let Some(ch) = line_content
+            .get(index..)
+            .and_then(|rest| rest.chars().next())
+        else {
             break;
         };
         index += ch.len_utf8();
@@ -633,15 +636,17 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                             range: label_end..trigger_end,
                             trigger_range: trigger_range.clone(),
                         });
-                        decorations[line].display_replacements.push(DisplayReplacement {
-                            source_range: trigger_range.clone(),
-                            display_text: if trigger_end > prefix_end {
-                                format!("{}: ", label)
-                            } else {
-                                format!("{}:", label)
-                            },
-                            trigger_range,
-                        });
+                        decorations[line]
+                            .display_replacements
+                            .push(DisplayReplacement {
+                                source_range: trigger_range.clone(),
+                                display_text: if trigger_end > prefix_end {
+                                    format!("{}: ", label)
+                                } else {
+                                    format!("{}:", label)
+                                },
+                                trigger_range,
+                            });
                     }
                 }
             }
@@ -1436,7 +1441,10 @@ fn detect_highlights(decorations: &mut [LineDecoration], text: &str, line_starts
                 continue;
             }
 
-            let Some(ch) = line_content.get(index..).and_then(|rest| rest.chars().next()) else {
+            let Some(ch) = line_content
+                .get(index..)
+                .and_then(|rest| rest.chars().next())
+            else {
                 break;
             };
             index += ch.len_utf8();
@@ -1478,7 +1486,10 @@ fn detect_emoji_shortcodes(decorations: &mut [LineDecoration], text: &str, line_
                 continue;
             }
 
-            let Some(ch) = line_content.get(index..).and_then(|rest| rest.chars().next()) else {
+            let Some(ch) = line_content
+                .get(index..)
+                .and_then(|rest| rest.chars().next())
+            else {
                 break;
             };
             if ch != ':' {
@@ -1490,7 +1501,9 @@ fn detect_emoji_shortcodes(decorations: &mut [LineDecoration], text: &str, line_
             let shortcode_start = cursor;
             let mut closing = None;
             while cursor < line_content.len() {
-                let Some(inner) = line_content.get(cursor..).and_then(|rest| rest.chars().next())
+                let Some(inner) = line_content
+                    .get(cursor..)
+                    .and_then(|rest| rest.chars().next())
                 else {
                     break;
                 };
@@ -1575,7 +1588,10 @@ fn detect_single_char_delimited_spans(
                 continue;
             }
 
-            let Some(ch) = line_content.get(index..).and_then(|rest| rest.chars().next()) else {
+            let Some(ch) = line_content
+                .get(index..)
+                .and_then(|rest| rest.chars().next())
+            else {
                 break;
             };
             if ch != delimiter {
@@ -1622,8 +1638,8 @@ fn detect_superscript_spans(decorations: &mut [LineDecoration], text: &str, line
         decorations,
         text,
         line_starts,
-        '~',
-        true,
+        '^',
+        false,
         |decoration, range| decoration.superscript_spans.push(range),
     );
 }
@@ -1633,8 +1649,8 @@ fn detect_subscript_spans(decorations: &mut [LineDecoration], text: &str, line_s
         decorations,
         text,
         line_starts,
-        '^',
-        false,
+        '~',
+        true,
         |decoration, range| decoration.subscript_spans.push(range),
     );
 }
@@ -1712,7 +1728,7 @@ mod tests {
 
     #[test]
     fn parse_decorations_detects_superscript_and_subscript() {
-        let text = "E=mc~2~ and H^2^O";
+        let text = "E=mc^2^ and H~2~O";
         let decorations = parse_decorations(text);
 
         assert_eq!(decorations[0].superscript_spans, vec![5..6]);
@@ -1739,7 +1755,10 @@ mod tests {
             Some("note")
         );
         assert_eq!(decorations[2].display_replacements.len(), 1);
-        assert_eq!(decorations[2].display_replacements[0].display_text, "note: ");
+        assert_eq!(
+            decorations[2].display_replacements[0].display_text,
+            "note: "
+        );
     }
 
     #[test]
@@ -1754,7 +1773,7 @@ mod tests {
 
     #[test]
     fn parse_decorations_handles_cjk_text_without_utf8_boundary_panics() {
-        let text = "有关于更多 Markdown 格式的说明，可以参考 Github 的 [Markdown 语法指南](https://docs.github.com/en/get-started)，了解和尝试 ==高亮== 与 H^2^O。";
+        let text = "有关于更多 Markdown 格式的说明，可以参考 Github 的 [Markdown 语法指南](https://docs.github.com/en/get-started)，了解和尝试 ==高亮== 与 H~2~O。";
         let decorations = parse_decorations(text);
 
         assert_eq!(decorations.len(), 1);
@@ -1787,7 +1806,15 @@ mod tests {
         let decorations = parse_decorations(text);
 
         assert!(!decorations.is_empty());
-        assert!(decorations.iter().any(|decoration| !decoration.highlight_spans.is_empty()));
-        assert!(decorations.iter().any(|decoration| !decoration.footnote_references.is_empty()));
+        assert!(
+            decorations
+                .iter()
+                .any(|decoration| !decoration.highlight_spans.is_empty())
+        );
+        assert!(
+            decorations
+                .iter()
+                .any(|decoration| !decoration.footnote_references.is_empty())
+        );
     }
 }

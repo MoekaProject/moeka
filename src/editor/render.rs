@@ -197,6 +197,10 @@ impl Render for EditorView {
             window.focus(&self.focus_handle(cx));
             self.pending_editor_focus = false;
         }
+        if self.pending_chat_input_focus {
+            self.chat_panel_focus_handle.focus(window);
+            self.pending_chat_input_focus = false;
+        }
         let resizing = self.sidebar_resizing || self.utility_panel_resizing;
         let toolbar_base_visible =
             self.tabs.len() > 0 && !self.active_tab_is_settings() && !self.active_tab_is_binary();

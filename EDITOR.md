@@ -5,37 +5,36 @@ description: 介绍小语文稿的使用
 
 # 小语文稿
 
-小语文稿是一个优雅，流畅，专注**文本管理**的写作应用。它使用起来非常简单，但也能够胜任重度写作者的需求。你可以在 macOS，~~Windows 和 Linux~~（稍后推出）上使用它，我们希望这款简洁的编辑器能让所有人都能快速建立自己的知识库，阅读下面的指导帮助你更快的了解。
+小语文稿是一个优雅，流畅，本地优先的 **Markdown 编辑应用**。它使用起来非常简单，但也能够胜任重度写作者的需求。你可以在 macOS，~~Windows 和 Linux~~（稍后推出）上使用它，我们希望这款简洁的编辑器能让所有人都能快速建立自己的知识库，阅读下面的指导帮助你更快的了解。
 
-使用 `Markdown` 语言作为文本编辑格式，它非常适合文字工作者，在尽可能做到良好可读性的同时*不干扰创作*，小语文稿支持的语法可以通过右键菜单预览，你也可以用其标注的快捷键快速更改格式。另外也支持在空行内输入 `/` 来唤出格式菜单，键入关键字来快速选择需要插入的格式。
+使用 `Markdown` 语言作为文本编辑格式，它非常适合文字工作者，在尽可能做到良好可读性的同时不干扰创作，小语文稿支持的语法可以通过右键菜单预览，你也可以用其标注的[快捷键](#表格语法)快速更改格式。另外也支持在空行内输入 `/` 来唤出格式菜单，键入关键字来快速选择需要插入的格式。
 
-## 语法介绍
+## 行级语法
+
+### 引用段落
 
 > Markdown 格式的文档应当是可作为纯文本发布的，没有格式化的样式，它的语法完全由标点符号组成，这些符号经过仔细筛选，让其本身就代表了字面上的意思，例如星号标记实际看起来是强调，列表标记看起来就像列表。—— John Gruber
 
+### 分割线
+
 ---
 
-小语文稿编辑器专注于纯文本编辑，可以插入类似如下的块级别代码：
+### 插入图片
 
-``` javascript
-function toggleSidebar() {
-  sidebarVisible.value = !sidebarVisible.value;
-  setTimeout(() => monacoEditorRef.value?.layout(), 50);
-}
-```
+![图片描述](https://cdn.cnbj1.fds.api.mi-img.com/product-images/new-product-images/xiaomi-17-ultra-byleica_820/images/5673.png)
 
-有关于更多 Markdown 格式的说明，可以参考 Github 的 [Markdown 语法指南](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax)，了解和尝试更多基本写法。
+---
 
-![图片添加描述](https://cdn.cnbj1.fds.api.mi-img.com/product-images/new-product-images/xiaomi-17-ultra-byleica_820/images/5673.png)
-- [x] 可以在这里录入一些待办事项；
-  - [x] 也可以有二级代办事项；
-  - [ ] 或者添加更多内容；
-- [x] 也可以在这里录入一些已完成事项；
+## 列表语法
+
+### 无序列表
 
 - 这是一个无序列表；
   - 这是二级无序列表；
   - 这是第二项；
 - 这是第二项；
+
+### 有序列表
 
 1. 这是一个有序列表；
    1. 这是二级有序列表；
@@ -44,17 +43,41 @@ function toggleSidebar() {
    - 这是一个无序列表；
    - 这是第二项；
 
+### 待办列表
 
-| 表头1   | 表头2   | 表头3                                                |
-| ------- | ------- | ---------------------------------------------------- |
-| 单元格1 | 单元格2 | 可以用其标注的快捷键快速更改格式                     |
-| 单元格3 | 单元格4 | 例如星号标记实际看起来是强调，列表标记看起来就像列表 |
+- [x] 可以在这里录入一些待办事项。
+  - [ ] 也可以有二级代办事项。
+  - [ ] 试试在该行内按下 `Tab` 或 `Shift + Tab`。
+- [ ] 追加录入一些已完成事项。
 
----
+## 快捷键
 
-This is a **bold** and *italic* demo.
+### 行内语法
 
-You can write `inline code` and:
+| 功能                  | 快捷键   |
+| --------------------- | -------- |
+| `Command + B`         | 加粗     |
+| `Command + I`         | 斜体     |
+| `Command + Shift + S` | 删除线   |
+| `Command + E`         | 行内代码 |
+
+### 行级语法
+
+| 功能                   | 快捷键   |
+| ---------------------- | -------- |
+| `Command + Option + C` | 代码块   |
+| `Command + Option + Q` | 引用     |
+| `Command + Option + U` | 无序列表 |
+| `Command + Option + O` | 有序列表 |
+| `Command + Option + T` | 待办事项 |  |
+
+| 功能                  | 快捷键   |
+| --------------------- | -------- |
+| `Command + K`         | 链接     |
+| `[[`                  | 双向链接 |
+| `Command + Shift + I` | 图片     |
+
+## 代码块语法
 
 ```rust
 fn greet(name: &str) {
@@ -62,25 +85,25 @@ fn greet(name: &str) {
 }
 ```
 
-## 链接与图片
-
-- 可以使用[内部](#英文示例)链接，跳转内部的行
-- 以及也可以使用脚注语法 [^note] 跳转到脚注行
-
 ## 行内语法
 
-- 下标示例：H~2~O，上标示例：E=mc^2^，可以用英文：Foo~bar~ 或者 Zoo^funny^ 等
-- 另外也支持==高亮==语法，让文本显得有强调的风格；
-- 还支持类似 `:smile:` 这类 shortcode 的语法，例如 :smile:
+- 可以使用**加粗**或者带有 *italic* 斜体语法来表示强调。
+- 也可以使用`行内代码`来标记某个关键词或代码行。
 
-## 英文示例
+## 链接语法
 
-[^note]: 这里是脚注行，可以从其他地方跳转过来
+- 可以使用[内部链接](#英文示例)，跳转到当前文件内的标题行。
+- 通过 [[我的设计风格.md]] 双向链接语法在文件间互相引用。
+- 或者使用[外部链接](https://google.com)，跳转到外部的任意链接。
+- 还可以使用脚注语法[^note]跳转到脚注行用于引用参考。
+- 另外可以使用[文件链接](功能规划.md)跳转到指定文件的指定标题。
+- 以上所有语法，都可以按住 `Command` 键并点击后跳转。
 
-- Syntax markers hide when cursor leaves the range
-- .md files open into real tabs
-- FileTree now lives in a fixed left pane
-- `inline code` with background
-- Headings with different sizes
-- [Visit Google](https://google.com) for search
-- Check out ![Logo](crates/zed/resources/app-icon.png) inline image
+## 行内扩展语法
+
+- 下标示例：H~2~O，上标示例：E=mc^2^，可以用英文：Foo~zoo~ 或者 Bar^baz^ 等。
+- 另外也支持==高亮==语法，让文本显得更加醒目强调。
+- 还支持类似 `:rocket:` 这类 emoji shortcode 的语法，例如 :rocket: 。
+- [^note]: 这里就是脚注行了，可以从其他地方跳转过来。
+
+有关于更多 Markdown 格式的说明，可以参考 Github 的 [Markdown 语法指南](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax)，了解和尝试更多基本写法。

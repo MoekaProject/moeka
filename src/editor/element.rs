@@ -152,6 +152,9 @@ fn build_precise_table_layout(
                     0,
                     0,
                     0,
+                    1.0,
+                    1.0,
+                    1.0,
                 );
                 let trim_start = folded_raw.len() - folded_raw.trim_start().len();
                 let trim_end = folded_raw.len() - folded_raw.trim_end().len();
@@ -413,7 +416,12 @@ fn inline_overlay_prefers_latin_font(ch: char) -> bool {
     )
 }
 
-fn inline_overlay_runs(text: &str, latin_font: &Font, cjk_font: &Font, color: Hsla) -> Vec<TextRun> {
+fn inline_overlay_runs(
+    text: &str,
+    latin_font: &Font,
+    cjk_font: &Font,
+    color: Hsla,
+) -> Vec<TextRun> {
     text.chars()
         .map(|ch| TextRun {
             len: ch.len_utf8(),
@@ -430,25 +438,31 @@ fn inline_overlay_runs(text: &str, latin_font: &Font, cjk_font: &Font, color: Hs
         .collect()
 }
 
+enum InlineOverlayVerticalAlign {
+    Top(f32),
+    Bottom(f32),
+    Offset(f32),
+}
+
 fn push_inline_text_overlay(
     overlays: &mut Vec<(ShapedLine, Point<Pixels>, Pixels)>,
     window: &mut Window,
     wrapped: &WrappedLine,
-    display_text: &str,
+    overlay_text: &str,
     visible_range: Range<usize>,
     latin_font: &Font,
     cjk_font: &Font,
     color: Hsla,
     font_size: f32,
     scale: f32,
-    vertical_offset_px: f32,
+    vertical_align: InlineOverlayVerticalAlign,
     anchor_right: bool,
     content_x: f32,
     text_line_top: f32,
     indent_px: f32,
     line_height: f32,
 ) {
-    if visible_range.start >= visible_range.end || visible_range.end > display_text.len() {
+    if visible_range.start >= visible_range.end || overlay_text.is_empty() {
         return;
     }
 
@@ -459,13 +473,6 @@ fn push_inline_text_overlay(
         return;
     };
     if pos_start.y != pos_end.y {
-        return;
-    }
-
-    let Some(overlay_text) = display_text.get(visible_range.clone()) else {
-        return;
-    };
-    if overlay_text.is_empty() {
         return;
     }
 
@@ -485,11 +492,20 @@ fn push_inline_text_overlay(
     } else {
         0.0
     };
+    let overlay_line_height = px((overlay_font_size * 1.15).max(overlay_font_size + 1.0));
+    let line_top = text_line_top + f32::from(pos_start.y);
+    let line_bottom = line_top + line_height;
+    let overlay_origin_y = match vertical_align {
+        InlineOverlayVerticalAlign::Top(inset) => line_top + inset,
+        InlineOverlayVerticalAlign::Bottom(inset) => {
+            line_bottom - f32::from(overlay_line_height) - inset
+        }
+        InlineOverlayVerticalAlign::Offset(offset) => line_top + offset,
+    };
     let overlay_origin = point(
         px(content_x + indent_start + horizontal_offset) + pos_start.x,
-        px(text_line_top + f32::from(pos_start.y) + vertical_offset_px),
+        px(overlay_origin_y),
     );
-    let overlay_line_height = px((overlay_font_size * 1.15).max(overlay_font_size + 1.0));
     overlays.push((shaped, overlay_origin, overlay_line_height));
 }
 
@@ -1384,12 +1400,9 @@ impl Element for EditorElement {
                 .is_some_and(|(start, end)| line_idx >= start && line_idx <= end)
                 || active_front_matter_group
                     .is_some_and(|(start, end)| line_idx >= start && line_idx <= end);
-            let block_preview_active = decoration
-                .block_preview
-                .as_ref()
-                .is_some_and(|preview| {
-                    helpers::block_preview_is_active(preview, cursor_line, &all_sel_ranges)
-                });
+            let block_preview_active = decoration.block_preview.as_ref().is_some_and(|preview| {
+                helpers::block_preview_is_active(preview, cursor_line, &all_sel_ranges)
+            });
             let collapsed_block_preview = decoration
                 .block_preview
                 .as_ref()
@@ -1420,6 +1433,9 @@ impl Element for EditorElement {
                         checkbox_indent_step_display_columns,
                         editor.styles.checkbox.checkbox_parent_prefix_chars as usize,
                         0,
+                        editor.styles.editor.editor_superscript_scale_factor,
+                        editor.styles.editor.editor_subscript_scale_factor,
+                        editor.styles.editor.editor_superscript_scale_factor,
                     )
                 };
             editor.apply_list_display_styles(
@@ -1713,7 +1729,8 @@ impl Element for EditorElement {
                 } else {
                     editor_left + editor.padding_left()
                 };
-            let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+            let leading_ws =
+                line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
             let content_x = if matches!(block_type, BlockType::TaskList(_)) && prefix_collapsed {
                 let target_prefix_width = helpers::task_prefix_target_width_px(
                     line_content,
@@ -3248,7 +3265,10 @@ impl Element for EditorElement {
                 }
 
                 for footnote_reference in &decoration.footnote_references {
-                    if editor.find_footnote_definition_line(&footnote_reference.label).is_none() {
+                    if editor
+                        .find_footnote_definition_line(&footnote_reference.label)
+                        .is_none()
+                    {
                         continue;
                     }
                     let is_collapsed = !helpers::active_ranges_intersect(
@@ -3298,8 +3318,11 @@ impl Element for EditorElement {
             }
 
             for superscript_range in &decoration.superscript_spans {
-                if !helpers::inline_range_is_collapsed(&decoration, superscript_range, &active_ranges)
-                {
+                if !helpers::inline_range_is_collapsed(
+                    &decoration,
+                    superscript_range,
+                    &active_ranges,
+                ) {
                     continue;
                 }
                 let disp_start =
@@ -3310,14 +3333,16 @@ impl Element for EditorElement {
                     &mut inline_overlays,
                     window,
                     wrapped,
-                    &display_text,
+                    line_content.get(superscript_range.clone()).unwrap_or_default(),
                     disp_start..disp_end,
                     &body_font,
                     &body_cjk_font,
                     theme.syntax_marker,
                     font_size,
-                    1.0,
-                    -font_size * 0.16,
+                    editor.styles.editor.editor_superscript_scale_factor,
+                    InlineOverlayVerticalAlign::Top(
+                        editor.scaled(editor.styles.editor.editor_superscript_offset_px),
+                    ),
                     false,
                     content_x,
                     text_line_top,
@@ -3339,14 +3364,16 @@ impl Element for EditorElement {
                     &mut inline_overlays,
                     window,
                     wrapped,
-                    &display_text,
+                    line_content.get(subscript_range.clone()).unwrap_or_default(),
                     disp_start..disp_end,
                     &body_font,
                     &body_cjk_font,
                     theme.syntax_marker,
                     font_size,
-                    1.0,
-                    font_size * 0.16,
+                    editor.styles.editor.editor_subscript_scale_factor,
+                    InlineOverlayVerticalAlign::Bottom(
+                        editor.scaled(editor.styles.editor.editor_subscript_offset_px),
+                    ),
                     false,
                     content_x,
                     text_line_top,
@@ -3375,15 +3402,17 @@ impl Element for EditorElement {
                     &mut inline_overlays,
                     window,
                     wrapped,
-                    &display_text,
+                    line_content
+                        .get(footnote_reference.collapsed_range.clone())
+                        .unwrap_or_default(),
                     disp_start..disp_end,
                     &body_font,
                     &body_cjk_font,
                     theme.link,
                     font_size,
-                    0.62,
-                    -font_size * 0.12,
-                    true,
+                    editor.styles.editor.editor_superscript_scale_factor,
+                    InlineOverlayVerticalAlign::Offset(-line_height * 0.14),
+                    false,
                     content_x,
                     text_line_top,
                     indent_px,
@@ -3433,8 +3462,7 @@ impl Element for EditorElement {
                         &[marker_run],
                         None,
                         None,
-                    )
-                        && let Some(marker_wrapped) = marker_wrapped_lines.pop()
+                    ) && let Some(marker_wrapped) = marker_wrapped_lines.pop()
                     {
                         let marker_x = content_x
                             + f32::from(

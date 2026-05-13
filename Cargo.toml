@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "9d9640d" }
 gpui = "0.2.2"
 printpdf = "0.7"
 pulldown-cmark = { version = "0.13.0", default-features = false, features = [
@@ -36,6 +37,7 @@ pinyin = "0.10"
 trash = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 emojis = "0.6"
+portable-pty = "0.9.0"
 resvg = { version = "0.45.1", default-features = false, features = [
   "text",
   "system-fonts",

@@ -158,6 +158,11 @@ pub(crate) fn active_ranges_have_non_eol_position(
     })
 }
 
+fn scaled_inline_placeholder(text: &str, scale: f32) -> String {
+    let target_columns = ((display_width(text) as f32) * scale).round() as usize;
+    " ".repeat(target_columns.max(1))
+}
+
 /// Build display text by selectively hiding syntax ranges.
 pub(crate) fn build_display_text(
     line_content: &str,
@@ -170,6 +175,9 @@ pub(crate) fn build_display_text(
     task_indent_step_display_columns: usize,
     task_source_indent_step_chars: usize,
     front_matter_key_padding_chars: usize,
+    superscript_scale_factor: f32,
+    subscript_scale_factor: f32,
+    footnote_scale_factor: f32,
 ) -> (String, Vec<usize>, Vec<usize>, bool) {
     fn append_mapped_replacement(
         display_text: &mut String,
@@ -278,11 +286,54 @@ pub(crate) fn build_display_text(
         );
     }
 
-    let display_replacements: Vec<&DisplayReplacement> = decoration
-        .display_replacements
-        .iter()
-        .filter(|replacement| !active_ranges_intersect(active_ranges, &replacement.trigger_range))
-        .collect();
+    let mut display_replacements: Vec<DisplayReplacement> =
+        decoration.display_replacements.iter().cloned().collect();
+
+    for superscript_range in &decoration.superscript_spans {
+        if !inline_range_is_collapsed(decoration, superscript_range, active_ranges) {
+            continue;
+        }
+        let Some(text) = line_content.get(superscript_range.clone()) else {
+            continue;
+        };
+        display_replacements.push(DisplayReplacement {
+            source_range: superscript_range.clone(),
+            display_text: scaled_inline_placeholder(text, superscript_scale_factor),
+            trigger_range: superscript_range.clone(),
+        });
+    }
+
+    for subscript_range in &decoration.subscript_spans {
+        if !inline_range_is_collapsed(decoration, subscript_range, active_ranges) {
+            continue;
+        }
+        let Some(text) = line_content.get(subscript_range.clone()) else {
+            continue;
+        };
+        display_replacements.push(DisplayReplacement {
+            source_range: subscript_range.clone(),
+            display_text: scaled_inline_placeholder(text, subscript_scale_factor),
+            trigger_range: subscript_range.clone(),
+        });
+    }
+
+    for footnote_reference in &decoration.footnote_references {
+        if active_ranges_intersect(active_ranges, &footnote_reference.full_range) {
+            continue;
+        }
+        let Some(text) = line_content.get(footnote_reference.collapsed_range.clone()) else {
+            continue;
+        };
+        display_replacements.push(DisplayReplacement {
+            source_range: footnote_reference.collapsed_range.clone(),
+            display_text: scaled_inline_placeholder(text, footnote_scale_factor),
+            trigger_range: footnote_reference.full_range.clone(),
+        });
+    }
+
+    display_replacements
+        .retain(|replacement| !active_ranges_intersect(active_ranges, &replacement.trigger_range));
+    display_replacements.sort_by_key(|replacement| replacement.source_range.start);
 
     if decoration.syntax_ranges.is_empty() && display_replacements.is_empty() {
         let display_to_buffer: Vec<usize> = (0..len).collect();
@@ -527,6 +578,9 @@ pub(crate) fn build_table_display_text(
             task_indent_step_display_columns,
             task_source_indent_step_chars,
             front_matter_key_padding_chars,
+            1.0,
+            1.0,
+            1.0,
         );
         let trimmed_start = folded_cell_raw.len() - folded_cell_raw.trim_start().len();
         let trimmed_end = folded_cell_raw.len() - folded_cell_raw.trim_end().len();
@@ -914,6 +968,9 @@ pub(crate) fn compute_table_layout(
                 0,
                 0,
                 0,
+                1.0,
+                1.0,
+                1.0,
             );
             let trimmed = folded_raw.trim();
             let trim_start = folded_raw.len() - folded_raw.trim_start().len();
@@ -1391,10 +1448,14 @@ fn syntax_lookup_candidates(language: &str) -> Vec<String> {
 mod tests {
     use std::ops::Range;
 
+    use gpui::{FontWeight, font};
+
     use crate::markdown;
+    use crate::theme::Theme;
 
     use super::{
-        build_display_text, compute_display_prefix_bytes, prefix_is_folded, task_prefix_is_folded,
+        build_display_text, build_text_runs_for_display, compute_display_prefix_bytes,
+        prefix_is_folded, task_prefix_is_folded,
     };
 
     #[test]
@@ -1465,6 +1526,9 @@ mod tests {
             collapsed_task_prefix_chars,
             2,
             0,
+            1.0,
+            1.0,
+            1.0,
         );
 
         assert!(prefix_collapsed);
@@ -1500,6 +1564,9 @@ mod tests {
             3,
             2,
             0,
+            1.0,
+            1.0,
+            1.0,
         );
 
         assert!(prefix_collapsed);
@@ -1518,13 +1585,113 @@ mod tests {
             .into_iter()
             .next()
             .unwrap_or_default();
-        let (display_text, display_to_buffer, buffer_to_display, _) =
-            build_display_text(line, &decoration, &[], false, None, 0, 0, 0, 0, 0);
+        let (display_text, display_to_buffer, buffer_to_display, _) = build_display_text(
+            line,
+            &decoration,
+            &[],
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
 
         assert_eq!(display_text, "launch 🚀 now");
         assert_eq!(display_to_buffer[7], 7);
         assert_eq!(buffer_to_display[7], 7);
         assert_eq!(buffer_to_display[14], 7);
+    }
+
+    #[test]
+    fn collapsed_scripts_use_compact_placeholders() {
+        let line = "E=mc^22^ H~2~O [^12]";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let (display_text, _, _, _) = build_display_text(
+            line,
+            &decoration,
+            &[],
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0.5,
+            0.5,
+            0.5,
+        );
+
+        assert!(display_text.len() < "E=mc22 H2O 12".len());
+    }
+
+    #[test]
+    fn active_highlight_keeps_markers_as_syntax_color() {
+        let line = "==hi==";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let active_ranges = [Range { start: 2, end: 2 }];
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &active_ranges,
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &active_ranges,
+            false,
+            prefix_collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            0,
+            16.0,
+            &theme,
+            theme.link,
+            FontWeight::NORMAL,
+            None,
+        );
+
+        assert_eq!(display_text, "==hi==");
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].len, 2);
+        assert_eq!(runs[0].color, theme.syntax_marker);
+        assert_eq!(runs[0].background_color, None);
+        assert_eq!(runs[1].len, 2);
+        assert_eq!(runs[1].color, theme.bold);
+        assert_eq!(
+            runs[1].background_color,
+            Some(crate::theme::with_alpha(crate::hex_hsla!("#E5C07B"), 0.22))
+        );
+        assert_eq!(runs[2].len, 2);
+        assert_eq!(runs[2].color, theme.syntax_marker);
+        assert_eq!(runs[2].background_color, None);
     }
 }
 
@@ -2558,12 +2725,13 @@ pub(crate) fn build_text_runs_for_display(
         }
     }
 
+    let inline_highlight_bg = crate::theme::with_alpha(crate::hex_hsla!("#E5C07B"), 0.22);
+
     for highlight_range in &decoration.highlight_spans {
         let start = highlight_range.start.min(buf_len);
         let end = highlight_range.end.min(buf_len);
         for index in start..end {
-            buf_bg_colors[index] =
-                Some(crate::theme::with_alpha(crate::hex_hsla!("#E5C07B"), 0.35));
+            buf_bg_colors[index] = Some(inline_highlight_bg);
             buf_colors[index] = theme.bold;
             buf_weights[index] = FontWeight::BOLD;
         }

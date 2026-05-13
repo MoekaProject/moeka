@@ -1,5 +1,6 @@
 mod app_settings;
 mod assets;
+mod chat_panel;
 mod config_paths;
 mod config_store;
 mod element;
@@ -908,6 +909,11 @@ pub struct EditorView {
     pub(crate) quick_open_scroll_handle: ScrollHandle,
     pub(crate) quick_open_render_limit: usize,
 
+    // ── Chat panel state ───────────────────────────────────────────
+    pub(crate) chat_terminal: Option<chat_panel::ChatTerminalSession>,
+    pub(crate) chat_panel_focus_handle: FocusHandle,
+    pub(crate) pending_chat_input_focus: bool,
+
     // Settings panel state
     pub(crate) settings_scroll_handle: ScrollHandle,
     pub(crate) settings_theme_dark_mode: bool,
@@ -925,6 +931,12 @@ pub struct EditorView {
     pub(crate) cached_font_names: Option<Vec<String>>,
     pub(crate) ui_language: UiLanguage,
     pub(crate) app_settings: AppSettings,
+}
+
+impl Drop for EditorView {
+    fn drop(&mut self) {
+        self.stop_chat_terminal();
+    }
 }
 
 impl EditorView {
@@ -1237,6 +1249,9 @@ impl EditorView {
             quick_open_task: None,
             quick_open_scroll_handle: ScrollHandle::new(),
             quick_open_render_limit: 100,
+            chat_terminal: None,
+            chat_panel_focus_handle: cx.focus_handle(),
+            pending_chat_input_focus: false,
 
             // Settings panel state
             settings_scroll_handle: ScrollHandle::new(),

@@ -8,6 +8,8 @@ use gpui::{
 
 use super::*;
 
+const CHAT_PANEL_SVG_PATH: &str = "assets/icons/chat.svg";
+
 #[derive(Clone, Copy)]
 enum TabDropTarget<'a> {
     Before(&'a str),
@@ -1724,6 +1726,7 @@ impl EditorView {
                 .into_any_element(),
         );
 
+        let chat_active = self.utility_panel == Some(RightUtilityPanel::Chat);
         let info_active = self.utility_panel == Some(RightUtilityPanel::Info);
         let git_active = self.utility_panel == Some(RightUtilityPanel::GitHistory);
         let can_nav_back = self.can_navigate_tab_history_back();
@@ -1814,6 +1817,16 @@ impl EditorView {
             .items_center()
             .gap(px(0.0))
             .pr(px(self.scaled(ts.tab_item_padding_right_px)))
+            .child(self.render_tab_bar_action_button(
+                "tab-bar-chat-toggle",
+                CHAT_PANEL_SVG_PATH,
+                chat_active,
+                true,
+                cx,
+                |this, cx| {
+                    this.toggle_chat_panel(cx);
+                },
+            ))
             .child(self.render_tab_bar_action_button(
                 "tab-bar-info-toggle",
                 INFO_PANEL_SVG_PATH,
