@@ -1169,7 +1169,7 @@ impl Styles {
                 outline_indent_guide_gap_length_px: 3.0,
             },
             utility_panel: UtilityPanelStyles {
-                utility_panel_width_px: 280.0,
+                utility_panel_width_px: 320.0,
                 utility_panel_bg: theme.bg_secondary,
                 utility_panel_border_width_px: 1.0,
                 utility_panel_border_color: theme.border_secondary,
@@ -1204,7 +1204,7 @@ impl Styles {
                 utility_panel_resize_indicator_color: theme.border_primary,
                 utility_panel_resize_active_indicator_color: theme.text_accent,
                 utility_panel_resize_min_width_px: 220.0,
-                utility_panel_resize_max_width_px: 420.0,
+                utility_panel_resize_max_width_px: 560.0,
                 utility_panel_visibility_animation_ms: 220,
             },
             tab_bar: TabBarStyles {

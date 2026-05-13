@@ -84,6 +84,26 @@ struct ChatTerminalSize {
     cols: usize,
 }
 
+#[derive(Clone, Copy)]
+struct ChatTerminalPalette {
+    black: Hsla,
+    red: Hsla,
+    green: Hsla,
+    yellow: Hsla,
+    blue: Hsla,
+    magenta: Hsla,
+    cyan: Hsla,
+    white: Hsla,
+    bright_black: Hsla,
+    bright_red: Hsla,
+    bright_green: Hsla,
+    bright_yellow: Hsla,
+    bright_blue: Hsla,
+    bright_magenta: Hsla,
+    bright_cyan: Hsla,
+    bright_white: Hsla,
+}
+
 impl EventListener for ChatTerminalListener {
     fn send_event(&self, _event: AlacTermEvent) {}
 }
@@ -297,24 +317,77 @@ fn normalize_cell_char(cell: &Cell) -> String {
     text
 }
 
-fn terminal_indexed_color(index: u8) -> Hsla {
+fn terminal_emphasis_color(color: Hsla, is_dark: bool) -> Hsla {
+    Hsla {
+        h: color.h,
+        s: (color.s * if is_dark { 1.08 } else { 1.12 }).clamp(0.0, 1.0),
+        l: (color.l + if is_dark { 0.1 } else { -0.08 }).clamp(0.0, 1.0),
+        a: color.a,
+    }
+}
+
+fn terminal_theme_palette(theme: &crate::theme::Theme, panel_bg: Hsla) -> ChatTerminalPalette {
+    let is_dark = panel_bg.l < 0.5;
+    let neutral_black = if is_dark {
+        theme.bg_primary
+    } else {
+        crate::theme::with_alpha(theme.text_primary, 0.92)
+    };
+    let neutral_white = if is_dark {
+        theme.text_primary
+    } else {
+        crate::theme::with_alpha(theme.text_primary, 0.78)
+    };
+
+    let base = ChatTerminalPalette {
+        black: neutral_black,
+        red: theme.text_danger,
+        green: theme.inline_code,
+        yellow: theme.bold,
+        blue: theme.link,
+        magenta: theme.italic,
+        cyan: theme.checkbox_checked,
+        white: neutral_white,
+        bright_black: theme.text_secondary,
+        bright_red: theme.text_danger,
+        bright_green: theme.inline_code,
+        bright_yellow: theme.bold,
+        bright_blue: theme.link,
+        bright_magenta: theme.italic,
+        bright_cyan: theme.checkbox_checked,
+        bright_white: theme.text_bright,
+    };
+
+    ChatTerminalPalette {
+        bright_black: terminal_emphasis_color(base.bright_black, is_dark),
+        bright_red: terminal_emphasis_color(base.bright_red, is_dark),
+        bright_green: terminal_emphasis_color(base.bright_green, is_dark),
+        bright_yellow: terminal_emphasis_color(base.bright_yellow, is_dark),
+        bright_blue: terminal_emphasis_color(base.bright_blue, is_dark),
+        bright_magenta: terminal_emphasis_color(base.bright_magenta, is_dark),
+        bright_cyan: terminal_emphasis_color(base.bright_cyan, is_dark),
+        ..base
+    }
+}
+
+fn terminal_indexed_color(index: u8, palette: &ChatTerminalPalette) -> Hsla {
     match index {
-        0 => gpui::rgb(0x000000).into(),
-        1 => gpui::rgb(0xcd3131).into(),
-        2 => gpui::rgb(0x0dbc79).into(),
-        3 => gpui::rgb(0xe5e510).into(),
-        4 => gpui::rgb(0x2472c8).into(),
-        5 => gpui::rgb(0xbc3fbc).into(),
-        6 => gpui::rgb(0x11a8cd).into(),
-        7 => gpui::rgb(0xe5e5e5).into(),
-        8 => gpui::rgb(0x666666).into(),
-        9 => gpui::rgb(0xf14c4c).into(),
-        10 => gpui::rgb(0x23d18b).into(),
-        11 => gpui::rgb(0xf5f543).into(),
-        12 => gpui::rgb(0x3b8eea).into(),
-        13 => gpui::rgb(0xd670d6).into(),
-        14 => gpui::rgb(0x29b8db).into(),
-        15 => gpui::rgb(0xffffff).into(),
+        0 => palette.black,
+        1 => palette.red,
+        2 => palette.green,
+        3 => palette.yellow,
+        4 => palette.blue,
+        5 => palette.magenta,
+        6 => palette.cyan,
+        7 => palette.white,
+        8 => palette.bright_black,
+        9 => palette.bright_red,
+        10 => palette.bright_green,
+        11 => palette.bright_yellow,
+        12 => palette.bright_blue,
+        13 => palette.bright_magenta,
+        14 => palette.bright_cyan,
+        15 => palette.bright_white,
         16..=231 => {
             let idx = index - 16;
             let r = idx / 36;
@@ -333,38 +406,48 @@ fn terminal_indexed_color(index: u8) -> Hsla {
     }
 }
 
-fn terminal_named_color(color: NamedColor, default_fg: Hsla, default_bg: Hsla) -> Hsla {
+fn terminal_named_color(
+    color: NamedColor,
+    palette: &ChatTerminalPalette,
+    default_fg: Hsla,
+    default_bg: Hsla,
+) -> Hsla {
     match color {
         NamedColor::Background => default_bg,
         NamedColor::Foreground => default_fg,
-        NamedColor::Black => terminal_indexed_color(0),
-        NamedColor::Red => terminal_indexed_color(1),
-        NamedColor::Green => terminal_indexed_color(2),
-        NamedColor::Yellow => terminal_indexed_color(3),
-        NamedColor::Blue => terminal_indexed_color(4),
-        NamedColor::Magenta => terminal_indexed_color(5),
-        NamedColor::Cyan => terminal_indexed_color(6),
-        NamedColor::White => terminal_indexed_color(7),
-        NamedColor::BrightBlack => terminal_indexed_color(8),
-        NamedColor::BrightRed => terminal_indexed_color(9),
-        NamedColor::BrightGreen => terminal_indexed_color(10),
-        NamedColor::BrightYellow => terminal_indexed_color(11),
-        NamedColor::BrightBlue => terminal_indexed_color(12),
-        NamedColor::BrightMagenta => terminal_indexed_color(13),
-        NamedColor::BrightCyan => terminal_indexed_color(14),
-        NamedColor::BrightWhite => terminal_indexed_color(15),
+        NamedColor::Black => palette.black,
+        NamedColor::Red => palette.red,
+        NamedColor::Green => palette.green,
+        NamedColor::Yellow => palette.yellow,
+        NamedColor::Blue => palette.blue,
+        NamedColor::Magenta => palette.magenta,
+        NamedColor::Cyan => palette.cyan,
+        NamedColor::White => palette.white,
+        NamedColor::BrightBlack => palette.bright_black,
+        NamedColor::BrightRed => palette.bright_red,
+        NamedColor::BrightGreen => palette.bright_green,
+        NamedColor::BrightYellow => palette.bright_yellow,
+        NamedColor::BrightBlue => palette.bright_blue,
+        NamedColor::BrightMagenta => palette.bright_magenta,
+        NamedColor::BrightCyan => palette.bright_cyan,
+        NamedColor::BrightWhite => palette.bright_white,
         NamedColor::Cursor => default_fg,
         _ => default_fg,
     }
 }
 
-fn terminal_color_to_hsla(color: AlacColor, default_fg: Hsla, default_bg: Hsla) -> Hsla {
+fn terminal_color_to_hsla(
+    color: AlacColor,
+    palette: &ChatTerminalPalette,
+    default_fg: Hsla,
+    default_bg: Hsla,
+) -> Hsla {
     match color {
-        AlacColor::Named(named) => terminal_named_color(named, default_fg, default_bg),
+        AlacColor::Named(named) => terminal_named_color(named, palette, default_fg, default_bg),
         AlacColor::Spec(Rgb { r, g, b }) => {
             gpui::rgb(((r as u32) << 16) | ((g as u32) << 8) | (b as u32)).into()
         }
-        AlacColor::Indexed(index) => terminal_indexed_color(index),
+        AlacColor::Indexed(index) => terminal_indexed_color(index, palette),
     }
 }
 
@@ -569,8 +652,9 @@ impl EditorView {
         let cell_height = (body_font_size * 1.5).max(body_font_size + self.scaled(4.0));
         let monospace = SharedString::from(self.styles.editor.editor_monospace_font_family);
         let default_fg = ups.utility_panel_item_value_text_color;
-        let default_bg: Hsla = gpui::rgb(0x10151d).into();
-        let cursor_color: Hsla = gpui::rgb(0xd7e3ff).into();
+        let default_bg = ups.utility_panel_bg;
+        let cursor_color = self.theme.cursor;
+        let palette = terminal_theme_palette(&self.theme, default_bg);
 
         let (status_label, cwd_label, snapshot) = match self.chat_terminal.as_ref() {
             Some(session) => {
@@ -619,8 +703,8 @@ impl EditorView {
         let row_children = grid.into_iter().enumerate().map(|(row_index, row)| {
             let cell_children = row.into_iter().enumerate().map(|(col_index, maybe_cell)| {
                 let cell = maybe_cell.unwrap_or_default();
-                let mut fg = terminal_color_to_hsla(cell.fg, default_fg, default_bg);
-                let mut bg = terminal_color_to_hsla(cell.bg, default_fg, default_bg);
+                let mut fg = terminal_color_to_hsla(cell.fg, &palette, default_fg, default_bg);
+                let mut bg = terminal_color_to_hsla(cell.bg, &palette, default_fg, default_bg);
                 if cell.flags.contains(Flags::INVERSE) {
                     std::mem::swap(&mut fg, &mut bg);
                 }
