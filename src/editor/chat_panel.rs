@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use alacritty_terminal::{
     event::{Event as AlacTermEvent, EventListener},
-    grid::Dimensions,
+    grid::{Dimensions, Scroll},
     index::{Column, Line, Point as AlacPoint},
     sync::FairMutex,
     term::{
@@ -17,8 +17,8 @@ use alacritty_terminal::{
     vte::ansi::{Color as AlacColor, CursorShape as AlacCursorShape, NamedColor, Processor, Rgb},
 };
 use gpui::{
-    AnyElement, Context, CursorStyle, FontWeight, Hsla, KeyDownEvent, SharedString, Window, div,
-    prelude::*, px,
+    AnyElement, Context, CursorStyle, FontWeight, Hsla, KeyDownEvent, ScrollWheelEvent,
+    SharedString, Window, div, prelude::*, px,
 };
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -29,7 +29,6 @@ const CHAT_PANEL_DEFAULT_COLS: u16 = 96;
 const CHAT_PANEL_POLL_MS: u64 = 16;
 
 pub(crate) struct ChatTerminalSession {
-    pub(crate) cwd: Option<PathBuf>,
     pub(crate) status: ChatTerminalStatus,
     pub(crate) snapshot: ChatTerminalSnapshot,
     runtime: Option<ChatTerminalRuntime>,
@@ -139,7 +138,6 @@ impl Default for ChatTerminalSnapshot {
 impl ChatTerminalSession {
     fn unavailable(message: impl Into<String>) -> Self {
         Self {
-            cwd: None,
             status: ChatTerminalStatus::Unavailable(message.into()),
             snapshot: ChatTerminalSnapshot::default(),
             runtime: None,
@@ -204,7 +202,6 @@ impl ChatTerminalSession {
         });
 
         let mut session = Self {
-            cwd: Some(cwd),
             status: ChatTerminalStatus::Launching,
             snapshot: ChatTerminalSnapshot::default(),
             runtime: Some(ChatTerminalRuntime {
@@ -235,6 +232,19 @@ impl ChatTerminalSession {
         writer.write_all(bytes)?;
         writer.flush()?;
         Ok(())
+    }
+
+    fn scroll_display(&mut self, scroll: Scroll) {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+
+        {
+            let mut term = runtime.term.lock();
+            term.scroll_display(scroll);
+        }
+
+        self.refresh_snapshot();
     }
 
     fn resize(&mut self, rows: u16, cols: u16) {
@@ -459,6 +469,30 @@ fn keystroke_to_terminal_bytes(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
         return None;
     }
 
+    let modifier_code = 1
+        + if modifiers.shift { 1 } else { 0 }
+        + if modifiers.alt { 2 } else { 0 }
+        + if modifiers.control { 4 } else { 0 };
+
+    if modifier_code > 1 {
+        let modified = match key {
+            "up" => Some(format!("\x1b[1;{}A", modifier_code).into_bytes()),
+            "down" => Some(format!("\x1b[1;{}B", modifier_code).into_bytes()),
+            "right" => Some(format!("\x1b[1;{}C", modifier_code).into_bytes()),
+            "left" => Some(format!("\x1b[1;{}D", modifier_code).into_bytes()),
+            "home" => Some(format!("\x1b[1;{}H", modifier_code).into_bytes()),
+            "end" => Some(format!("\x1b[1;{}F", modifier_code).into_bytes()),
+            "pageup" => Some(format!("\x1b[5;{}~", modifier_code).into_bytes()),
+            "pagedown" => Some(format!("\x1b[6;{}~", modifier_code).into_bytes()),
+            "delete" => Some(format!("\x1b[3;{}~", modifier_code).into_bytes()),
+            _ => None,
+        };
+
+        if let Some(bytes) = modified {
+            return Some(bytes);
+        }
+    }
+
     let mut bytes = match key {
         "enter" | "return" => vec![b'\r'],
         "backspace" => vec![0x7f],
@@ -505,6 +539,58 @@ fn keystroke_to_terminal_bytes(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
 }
 
 impl EditorView {
+    fn focus_chat_terminal_panel(&self, window: &mut Window) {
+        window.focus(&self.chat_panel_focus_handle);
+    }
+
+    fn send_chat_terminal_bytes(
+        &mut self,
+        bytes: &[u8],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_chat_terminal_panel(window);
+        cx.stop_propagation();
+        if let Some(session) = self.chat_terminal.as_mut() {
+            let _ = session.write_bytes(bytes);
+        }
+    }
+
+    pub(crate) fn ensure_chat_terminal_visible(&mut self, cx: &mut Context<Self>) {
+        self.pending_chat_input_focus = true;
+        if self.utility_panel != Some(RightUtilityPanel::Chat) {
+            self.toggle_utility_panel(RightUtilityPanel::Chat, cx);
+            return;
+        }
+
+        if self.chat_terminal.is_none() {
+            self.open_chat_terminal(cx);
+            return;
+        }
+
+        cx.notify();
+    }
+
+    pub(crate) fn add_path_to_chat(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        let Some(relative_path) = self.relative_path_for_path(path) else {
+            return;
+        };
+
+        self.ensure_chat_terminal_visible(cx);
+        if let Some(session) = self.chat_terminal.as_mut() {
+            let _ = session.write_bytes(format!("@{}", relative_path).as_bytes());
+        }
+    }
+
+    fn swallow_chat_terminal_editor_action(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_chat_terminal_panel(window);
+        cx.stop_propagation();
+    }
+
     pub(crate) fn chat_panel_working_directory(&self) -> Option<PathBuf> {
         self.current_file_path
             .as_ref()
@@ -613,10 +699,11 @@ impl EditorView {
         let font_size = self
             .scaled(self.styles.utility_panel.utility_panel_item_font_size_px)
             .max(11.0);
-        let panel_width = self.utility_panel_width().max(220.0);
-        let panel_height = self.last_window_height.max(240.0);
-        let cols = ((panel_width - self.scaled(24.0)) / (font_size * 0.62)).floor() as u16;
-        let rows = ((panel_height - self.scaled(96.0)) / (font_size * 1.6)).floor() as u16;
+        let terminal_padding = self.scaled(self.styles.utility_panel.utility_panel_terminal_padding_px);
+        let panel_width = (self.utility_panel_width() - terminal_padding * 2.0).max(220.0);
+        let panel_height = (self.last_window_height - terminal_padding * 2.0).max(240.0);
+        let cols = (panel_width / (font_size * 0.62)).floor() as u16;
+        let rows = (panel_height / (font_size * 1.6)).floor() as u16;
         if let Some(session) = self.chat_terminal.as_mut() {
             session.resize(rows, cols);
         }
@@ -625,16 +712,61 @@ impl EditorView {
     fn on_chat_terminal_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.focus_chat_terminal_panel(window);
+        cx.stop_propagation();
         let Some(bytes) = keystroke_to_terminal_bytes(&event.keystroke) else {
             return;
         };
-        if let Some(session) = self.chat_terminal.as_mut()
-            && session.write_bytes(&bytes).is_ok()
-        {
-            cx.stop_propagation();
+        if let Some(session) = self.chat_terminal.as_mut() {
+            let _ = session.write_bytes(&bytes);
+        }
+    }
+
+    fn on_chat_terminal_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_chat_terminal_panel(window);
+        cx.stop_propagation();
+
+        let line_height = (self
+            .scaled(self.styles.utility_panel.utility_panel_item_font_size_px)
+            .max(11.0)
+            * 1.5)
+            .max(1.0);
+        let delta_y: f32 = event.delta.pixel_delta(px(line_height)).y.into();
+        if delta_y.abs() < 1.0 {
+            return;
+        }
+
+        let lines = ((delta_y.abs() / line_height).round() as i32).max(1);
+        let delta = if delta_y < 0.0 { lines } else { -lines };
+        if let Some(session) = self.chat_terminal.as_mut() {
+            session.scroll_display(Scroll::Delta(delta));
+            cx.notify();
+        }
+    }
+
+    fn on_chat_terminal_paste_action(
+        &mut self,
+        _: &Paste,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.swallow_chat_terminal_editor_action(window, cx);
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        let Some(text) = item.text() else {
+            return;
+        };
+        if let Some(session) = self.chat_terminal.as_mut() {
+            let _ = session.write_bytes(text.as_bytes());
         }
     }
 
@@ -642,41 +774,21 @@ impl EditorView {
         self.resize_chat_terminal();
 
         let ups = &self.styles.utility_panel;
-        let top_spacer = self.scaled(ups.utility_panel_top_spacer_height_px);
-        let header_height = self.scaled(ups.utility_panel_header_height_px);
-        let header_padding_x = self.scaled(ups.utility_panel_header_padding_x_px);
-        let header_font_size = self.scaled(ups.utility_panel_header_font_size_px);
-        let section_padding_x = self.scaled(ups.utility_panel_section_padding_x_px);
         let body_font_size = self.scaled(ups.utility_panel_item_font_size_px).max(11.0);
         let cell_width = (body_font_size * 0.62).max(7.0);
         let cell_height = (body_font_size * 1.5).max(body_font_size + self.scaled(4.0));
+        let terminal_padding = self.scaled(ups.utility_panel_terminal_padding_px);
         let monospace = SharedString::from(self.styles.editor.editor_monospace_font_family);
         let default_fg = ups.utility_panel_item_value_text_color;
         let default_bg = ups.utility_panel_bg;
         let cursor_color = self.theme.cursor;
         let palette = terminal_theme_palette(&self.theme, default_bg);
 
-        let (status_label, cwd_label, snapshot) = match self.chat_terminal.as_ref() {
-            Some(session) => {
-                let status_label = match &session.status {
-                    ChatTerminalStatus::Launching => "Starting copilot".to_string(),
-                    ChatTerminalStatus::Running => "Connected".to_string(),
-                    ChatTerminalStatus::Exited => "Exited".to_string(),
-                    ChatTerminalStatus::Unavailable(message) => message.clone(),
-                };
-                let cwd_label = session
-                    .cwd
-                    .as_ref()
-                    .map(|cwd| cwd.display().to_string())
-                    .unwrap_or_else(|| "No workspace".to_string());
-                (status_label, cwd_label, session.snapshot.clone())
-            }
-            None => (
-                "Chat session is not running".to_string(),
-                "No workspace".to_string(),
-                ChatTerminalSnapshot::default(),
-            ),
-        };
+        let snapshot = self
+            .chat_terminal
+            .as_ref()
+            .map(|session| session.snapshot.clone())
+            .unwrap_or_default();
 
         let mut grid = vec![vec![None; snapshot.cols as usize]; snapshot.rows as usize];
         for indexed in &snapshot.cells {
@@ -698,7 +810,8 @@ impl EditorView {
         let cursor_visible = matches!(
             self.chat_terminal.as_ref().map(|session| &session.status),
             Some(ChatTerminalStatus::Running)
-        );
+        ) && snapshot.cursor.shape != AlacCursorShape::Hidden;
+        let cursor_shape = snapshot.cursor.shape;
 
         let row_children = grid.into_iter().enumerate().map(|(row_index, row)| {
             let cell_children = row.into_iter().enumerate().map(|(col_index, maybe_cell)| {
@@ -711,8 +824,10 @@ impl EditorView {
 
                 let is_cursor = cursor_visible && row_index == cursor_row && col_index == cursor_col;
                 if is_cursor {
-                    std::mem::swap(&mut fg, &mut bg);
-                    bg = cursor_color;
+                    if cursor_shape == AlacCursorShape::Block {
+                        std::mem::swap(&mut fg, &mut bg);
+                        bg = cursor_color;
+                    }
                 }
 
                 let is_wide = cell.flags.contains(Flags::WIDE_CHAR);
@@ -723,6 +838,7 @@ impl EditorView {
                 };
 
                 div()
+                    .relative()
                     .w(px(if is_wide { cell_width * 2.0 } else { cell_width }))
                     .h(px(cell_height))
                     .flex_none()
@@ -734,6 +850,28 @@ impl EditorView {
                     .line_height(px(cell_height))
                     .overflow_hidden()
                     .child(normalize_cell_char(&cell))
+                    .when(is_cursor && cursor_shape == AlacCursorShape::Beam, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .left(px(0.0))
+                                .top(px(0.0))
+                                .bottom(px(0.0))
+                                .w(px(2.0))
+                                .bg(cursor_color),
+                        )
+                    })
+                    .when(is_cursor && cursor_shape == AlacCursorShape::Underline, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .left(px(0.0))
+                                .right(px(0.0))
+                                .bottom(px(0.0))
+                                .h(px(2.0))
+                                .bg(cursor_color),
+                        )
+                    })
                     .into_any_element()
             });
 
@@ -752,10 +890,90 @@ impl EditorView {
             .key_context("ChatTerminal")
             .track_focus(&self.chat_panel_focus_handle)
             .on_key_down(cx.listener(Self::on_chat_terminal_key_down))
+            .on_scroll_wheel(cx.listener(Self::on_chat_terminal_scroll))
+            .on_action(cx.listener(|this, _: &Undo, window, cx| {
+                this.swallow_chat_terminal_editor_action(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Redo, window, cx| {
+                this.swallow_chat_terminal_editor_action(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Backspace, window, cx| {
+                this.send_chat_terminal_bytes(b"\x7f", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Delete, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[3~", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Left, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[D", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Right, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[C", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Up, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[A", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Down, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[B", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectLeft, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[1;2D", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectRight, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[1;2C", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectUp, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[1;2A", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectDown, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[1;2B", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectAll, window, cx| {
+                this.swallow_chat_terminal_editor_action(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Home, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[H", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &End, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[F", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectHome, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[1;2H", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectEnd, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[1;2F", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Enter, window, cx| {
+                this.send_chat_terminal_bytes(b"\r", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Tab, window, cx| {
+                this.send_chat_terminal_bytes(b"\t", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &BackTab, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b[Z", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Copy, window, cx| {
+                this.swallow_chat_terminal_editor_action(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Cut, window, cx| {
+                this.swallow_chat_terminal_editor_action(window, cx);
+            }))
+            .on_action(cx.listener(Self::on_chat_terminal_paste_action))
+            .on_action(cx.listener(|this, _: &MoveWordLeft, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1bb", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MoveWordRight, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1bf", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeleteWordLeft, window, cx| {
+                this.send_chat_terminal_bytes(b"\x17", window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                this.send_chat_terminal_bytes(b"\x1b", window, cx);
+            }))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _event, window, cx| {
-                    this.chat_panel_focus_handle.focus(window);
+                    this.focus_chat_terminal_panel(window);
                     cx.stop_propagation();
                 }),
             )
@@ -765,46 +983,13 @@ impl EditorView {
             .bg(ups.utility_panel_bg)
             .border_l(px(self.scaled(ups.utility_panel_border_width_px)))
             .border_color(ups.utility_panel_border_color)
-            .flex()
-            .flex_col()
-            .child(div().h(px(top_spacer)).flex_shrink_0())
-            .child(
-                div()
-                    .h(px(header_height))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(header_padding_x))
-                    .text_size(px(header_font_size))
-                    .text_color(ups.utility_panel_header_text_color)
-                    .child("Chat")
-                    .child(
-                        div()
-                            .text_size(px(self.scaled(ups.utility_panel_item_font_size_px)))
-                            .text_color(ups.utility_panel_empty_text_color)
-                            .child(status_label),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .px(px(section_padding_x))
-                    .pb(px(self.scaled(8.0)))
-                    .font_family(monospace.clone())
-                    .text_size(px(body_font_size))
-                    .text_color(ups.utility_panel_empty_text_color)
-                    .child(cwd_label),
-            )
             .child(
                 div()
                     .flex_1()
-                    .mx(px(section_padding_x))
-                    .mb(px(self.scaled(12.0)))
+                    .p(px(terminal_padding))
                     .bg(default_bg)
-                    .border_1()
-                    .border_color(ups.utility_panel_border_color)
                     .overflow_hidden()
+                    .on_scroll_wheel(cx.listener(Self::on_chat_terminal_scroll))
                     .child(
                         div()
                             .h_full()

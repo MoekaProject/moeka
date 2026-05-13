@@ -1380,6 +1380,19 @@ impl EditorView {
             }
             items.push(self.render_context_menu_separator());
             {
+                let chat_path = path.clone();
+                items.push(self.render_context_menu_item(
+                    "添加到聊天",
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.add_path_to_chat(&chat_path, cx);
+                    },
+                ));
+            }
+            items.push(self.render_context_menu_separator());
+            {
                 let p = path.clone();
                 items.push(self.render_context_menu_item(
                     self.t(crate::i18n::TextKey::CloseFolder),
@@ -1439,6 +1452,19 @@ impl EditorView {
             );
             items.push(self.render_context_menu_separator());
         }
+        {
+            let chat_path = path.clone();
+            items.push(self.render_context_menu_item(
+                "添加到聊天",
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.close_context_menu(cx);
+                    this.add_path_to_chat(&chat_path, cx);
+                },
+            ));
+        }
+        items.push(self.render_context_menu_separator());
         // Rename: only for single selection
         if self.selected_sidebar_paths.len() <= 1 {
             let p = path.clone();
@@ -1821,6 +1847,24 @@ impl EditorView {
             }
             if !clip_matched.is_empty() {
                 items.extend(clip_matched);
+            }
+
+            if let Some(current_path) = self.current_file_path.clone() {
+                if !items.is_empty() {
+                    items.push(self.render_context_menu_separator());
+                }
+                items.push(self.render_format_context_menu_item(
+                    "添加到聊天",
+                    None,
+                    None,
+                    false,
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.add_path_to_chat(&current_path, cx);
+                    },
+                ));
             }
         }
 
@@ -2382,6 +2426,17 @@ impl EditorView {
                 // Copy path if tab has a file
                 if let Some(tab) = self.tabs.iter().find(|t| t.id == *tab_id) {
                     if let Some(path) = &tab.path {
+                        let chat_path = path.clone();
+                        items.push(self.render_context_menu_item(
+                            "添加到聊天",
+                            false,
+                            cx,
+                            move |this, _, cx| {
+                                this.close_context_menu(cx);
+                                this.add_path_to_chat(&chat_path, cx);
+                            },
+                        ));
+                        items.push(self.render_context_menu_separator());
                         let reveal_path = path.clone();
                         items.push(self.render_context_menu_item(
                             self.t(crate::i18n::TextKey::RevealInFileTree),

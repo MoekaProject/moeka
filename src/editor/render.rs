@@ -198,7 +198,7 @@ impl Render for EditorView {
             self.pending_editor_focus = false;
         }
         if self.pending_chat_input_focus {
-            self.chat_panel_focus_handle.focus(window);
+            window.focus(&self.chat_panel_focus_handle);
             self.pending_chat_input_focus = false;
         }
         let resizing = self.sidebar_resizing || self.utility_panel_resizing;
@@ -947,7 +947,9 @@ impl EditorView {
                     .child(
                         path.as_ref()
                             .map(|value| value.display().to_string())
-                            .unwrap_or_else(|| self.t(crate::i18n::TextKey::CurrentFile).to_string()),
+                            .unwrap_or_else(|| {
+                                self.t(crate::i18n::TextKey::CurrentFile).to_string()
+                            }),
                     ),
             )
             .child(

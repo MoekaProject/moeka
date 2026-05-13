@@ -700,11 +700,7 @@ fn build_git_diff_rows(
             kind: GitDiffRowKind::Context,
             old_line_number: None,
             new_line_number: None,
-            text: crate::i18n::translate(
-                language,
-                crate::i18n::TextKey::NoTextDiff,
-            )
-            .to_string(),
+            text: crate::i18n::translate(language, crate::i18n::TextKey::NoTextDiff).to_string(),
         });
     }
 
@@ -1412,11 +1408,7 @@ impl EditorView {
         .detach();
     }
 
-    fn render_info_section_title(
-        &self,
-        title: &str,
-        icon_path: &'static str,
-    ) -> AnyElement {
+    fn render_info_section_title(&self, title: &str, icon_path: &'static str) -> AnyElement {
         let ups = &self.styles.utility_panel;
         let icon_size = self.scaled(ups.utility_panel_section_title_font_size_px);
         div()
@@ -1907,9 +1899,11 @@ impl EditorView {
                     FILE_INFO_SECTION_ATTACHMENT_SVG_PATH,
                 ));
                 if data.attachment_items.is_empty() {
-                    children.push(self.render_info_empty_line(
-                        self.t(crate::i18n::TextKey::NoLocalAttachments),
-                    ));
+                    children.push(
+                        self.render_info_empty_line(
+                            self.t(crate::i18n::TextKey::NoLocalAttachments),
+                        ),
+                    );
                 } else {
                     for item in &data.attachment_items {
                         children.push(self.render_reference_item(item, cx));
@@ -1917,13 +1911,14 @@ impl EditorView {
                 }
 
                 children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                children.push(
-                    self.render_info_section_title(self.t(crate::i18n::TextKey::Images), FMT_IMAGE_SVG),
-                );
+                children.push(self.render_info_section_title(
+                    self.t(crate::i18n::TextKey::Images),
+                    FMT_IMAGE_SVG,
+                ));
                 if data.image_items.is_empty() {
-                    children.push(self.render_info_empty_line(
-                        self.t(crate::i18n::TextKey::NoImageLinks),
-                    ));
+                    children.push(
+                        self.render_info_empty_line(self.t(crate::i18n::TextKey::NoImageLinks)),
+                    );
                 } else {
                     for item in &data.image_items {
                         children.push(self.render_reference_item(item, cx));
@@ -1932,12 +1927,15 @@ impl EditorView {
 
                 children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
                 children.push(
-                    self.render_info_section_title(self.t(crate::i18n::TextKey::Links), FMT_LINK_SVG),
+                    self.render_info_section_title(
+                        self.t(crate::i18n::TextKey::Links),
+                        FMT_LINK_SVG,
+                    ),
                 );
                 if data.external_link_items.is_empty() {
-                    children.push(self.render_info_empty_line(
-                        self.t(crate::i18n::TextKey::NoRemoteLinks),
-                    ));
+                    children.push(
+                        self.render_info_empty_line(self.t(crate::i18n::TextKey::NoRemoteLinks)),
+                    );
                 } else {
                     for item in &data.external_link_items {
                         children.push(self.render_reference_item(item, cx));
@@ -1950,9 +1948,9 @@ impl EditorView {
                     FMT_WIKI_LINK_SVG,
                 ));
                 if data.wiki_link_items.is_empty() {
-                    children.push(self.render_info_empty_line(
-                        self.t(crate::i18n::TextKey::NoBacklinks),
-                    ));
+                    children.push(
+                        self.render_info_empty_line(self.t(crate::i18n::TextKey::NoBacklinks)),
+                    );
                 } else {
                     for item in &data.wiki_link_items {
                         children.push(self.render_reference_item(item, cx));

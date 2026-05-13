@@ -295,6 +295,7 @@ pub struct OutlineStyles {
 pub struct UtilityPanelStyles {
     pub utility_panel_width_px: f32,
     pub utility_panel_bg: Hsla,
+    pub utility_panel_terminal_padding_px: f32,
     pub utility_panel_border_width_px: f32,
     pub utility_panel_border_color: Hsla,
     pub utility_panel_top_spacer_height_px: f32,
@@ -1171,6 +1172,7 @@ impl Styles {
             utility_panel: UtilityPanelStyles {
                 utility_panel_width_px: 320.0,
                 utility_panel_bg: theme.bg_secondary,
+                utility_panel_terminal_padding_px: 10.0,
                 utility_panel_border_width_px: 1.0,
                 utility_panel_border_color: theme.border_secondary,
                 utility_panel_top_spacer_height_px: 14.0,
