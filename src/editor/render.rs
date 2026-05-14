@@ -7,7 +7,11 @@ use super::tooltip::{TooltipState, toolbar_anchor_bounds};
 use super::*;
 
 impl EditorView {
-    fn render_right_panels(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_right_panels(
+        &mut self,
+        chat_panel_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .id("right-panels")
             .h_full()
@@ -24,7 +28,7 @@ impl EditorView {
                         .child(self.render_theme_debugger(cx)),
                 )
             })
-            .when(self.should_render_utility_panel(), |this| {
+            .when(self.should_render_utility_panel_on_right(), |this| {
                 let ups = &self.styles.utility_panel;
                 let panel_w = self.utility_panel_width();
                 let panel_layout_w = self.utility_panel_layout_width();
@@ -44,7 +48,7 @@ impl EditorView {
                             div()
                                 .h_full()
                                 .w(px(panel_layout_w))
-                                .child(self.render_utility_panel(cx)),
+                                .child(self.render_utility_panel(chat_panel_focused, cx)),
                         )
                         .child(
                             div()
@@ -193,14 +197,22 @@ impl EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_chat_terminal_metrics(window, cx);
         if self.pending_editor_focus {
             window.focus(&self.focus_handle(cx));
             self.pending_editor_focus = false;
         }
         if self.pending_chat_input_focus {
             window.focus(&self.chat_panel_focus_handle);
+            window.invalidate_character_coordinates();
             self.pending_chat_input_focus = false;
         }
+        if self.utility_panel == Some(RightUtilityPanel::Chat)
+            && self.chat_panel_focus_handle.is_focused(window)
+        {
+            window.invalidate_character_coordinates();
+        }
+        let chat_panel_focused = self.chat_panel_focus_handle.is_focused(window);
         let resizing = self.sidebar_resizing || self.utility_panel_resizing;
         let toolbar_base_visible =
             self.tabs.len() > 0 && !self.active_tab_is_settings() && !self.active_tab_is_binary();
@@ -460,124 +472,132 @@ impl Render for EditorView {
                                 (self.last_window_width - sidebar_width - trailing_width).max(1.0);
                             this.child(
                                 div()
-                                    .id("workspace-content-row")
+                                    .id("workspace-content-column")
                                     .flex_1()
                                     .flex()
-                                    .flex_row()
+                                    .flex_col()
                                     .overflow_hidden()
                                     .child(
                                         div()
-                                            .id("editor-pane")
+                                            .id("workspace-content-row")
                                             .flex_1()
-                                            .overflow_hidden()
+                                            .min_h(px(0.0))
                                             .flex()
-                                            .flex_col()
-                                            .child(self.render_active_tab_path_bar(cx))
+                                            .flex_row()
+                                            .overflow_hidden()
                                             .child(
                                                 div()
-                                                    .id("editor-pane-content")
-                                                    .relative()
+                                                    .id("editor-pane")
                                                     .flex_1()
                                                     .overflow_hidden()
-                                                    .cursor(
-                                                        if self.active_tab_is_image()
-                                                            || self.active_tab_is_binary()
-                                                            || self.active_tab_is_diff()
-                                                            || self.hovering_checkbox
-                                                            || self.hovering_fold_line.is_some()
-                                                            || self.hovering_image_edit_line.is_some()
-                                                        {
-                                                            CursorStyle::Arrow
-                                                        } else {
-                                                            CursorStyle::IBeam
-                                                        },
-                                                    )
-                                                    .when(!self.active_tab_is_diff(), |this| {
-                                                        this.on_mouse_down(
-                                                            MouseButton::Left,
-                                                            cx.listener(|this, event, window, cx| {
-                                                                this.focused_sidebar_path = None;
-                                                                this.on_mouse_down(event, window, cx);
-                                                            }),
-                                                        )
-                                                        .on_mouse_down(
-                                                            MouseButton::Right,
-                                                            cx.listener(Self::on_editor_context_menu),
-                                                        )
-                                                        .on_mouse_up(
-                                                            MouseButton::Left,
-                                                            cx.listener(Self::on_mouse_up),
-                                                        )
-                                                        .on_mouse_up_out(
-                                                            MouseButton::Left,
-                                                            cx.listener(Self::on_mouse_up),
-                                                        )
-                                                        .on_hover(cx.listener(
-                                                            |this, hovering: &bool, _window, cx| {
-                                                                if !*hovering {
-                                                                    let had_hover = this
-                                                                        .hovered_editor_position
-                                                                        .take()
-                                                                        .is_some();
-                                                                    let toolbar_changed = if this
-                                                                        .toolbar_corner_hovered
-                                                                    {
-                                                                        this.toolbar_corner_hovered =
-                                                                            false;
-                                                                        this.sync_toolbar_opacity(cx);
-                                                                        true
-                                                                    } else {
-                                                                        false
-                                                                    };
-                                                                    this.clear_gutter_fold_hover(cx);
-                                                                    if had_hover || toolbar_changed {
-                                                                        cx.notify();
-                                                                    }
+                                                    .flex()
+                                                    .flex_col()
+                                                    .child(self.render_active_tab_path_bar(cx))
+                                                    .child(
+                                                        div()
+                                                            .id("editor-pane-content")
+                                                            .relative()
+                                                            .flex_1()
+                                                            .overflow_hidden()
+                                                            .cursor(
+                                                                if self.active_tab_is_image()
+                                                                    || self.active_tab_is_binary()
+                                                                    || self.active_tab_is_diff()
+                                                                    || self.hovering_checkbox
+                                                                    || self.hovering_fold_line.is_some()
+                                                                    || self.hovering_image_edit_line.is_some()
+                                                                {
+                                                                    CursorStyle::Arrow
+                                                                } else {
+                                                                    CursorStyle::IBeam
+                                                                },
+                                                            )
+                                                            .when(!self.active_tab_is_diff(), |this| {
+                                                                this.on_mouse_down(
+                                                                    MouseButton::Left,
+                                                                    cx.listener(|this, event, window, cx| {
+                                                                        this.focused_sidebar_path = None;
+                                                                        this.on_mouse_down(event, window, cx);
+                                                                    }),
+                                                                )
+                                                                .on_mouse_down(
+                                                                    MouseButton::Right,
+                                                                    cx.listener(Self::on_editor_context_menu),
+                                                                )
+                                                                .on_mouse_up(
+                                                                    MouseButton::Left,
+                                                                    cx.listener(Self::on_mouse_up),
+                                                                )
+                                                                .on_mouse_up_out(
+                                                                    MouseButton::Left,
+                                                                    cx.listener(Self::on_mouse_up),
+                                                                )
+                                                                .on_hover(cx.listener(
+                                                                    |this, hovering: &bool, _window, cx| {
+                                                                        if !*hovering {
+                                                                            let had_hover = this
+                                                                                .hovered_editor_position
+                                                                                .take()
+                                                                                .is_some();
+                                                                            let toolbar_changed = if this
+                                                                                .toolbar_corner_hovered
+                                                                            {
+                                                                                this.toolbar_corner_hovered =
+                                                                                    false;
+                                                                                this.sync_toolbar_opacity(cx);
+                                                                                true
+                                                                            } else {
+                                                                                false
+                                                                            };
+                                                                            this.clear_gutter_fold_hover(cx);
+                                                                            if had_hover || toolbar_changed {
+                                                                                cx.notify();
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                ))
+                                                                .on_mouse_move(cx.listener(Self::on_mouse_move))
+                                                                .on_scroll_wheel(cx.listener(Self::on_scroll))
+                                                            })
+                                                            .drag_over::<DraggedSidebarItems>(
+                                                                move |style, _, _, _| style,
+                                                            )
+                                                            .drag_over::<ExternalPaths>({
+                                                                let file_drop_bg =
+                                                                    self.styles.editor.editor_file_drop_bg;
+                                                                move |style, _, _, _| style.bg(file_drop_bg)
+                                                            })
+                                                            .on_drop(cx.listener(
+                                                                |this, dragged: &DraggedSidebarItems, _, cx| {
+                                                                    this.clear_sidebar_drag_state(cx);
+                                                                    this.focused_sidebar_path = None;
+                                                                    this.insert_sidebar_items_as_wiki_links(
+                                                                        &dragged.paths,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            ))
+                                                            .on_drop(cx.listener(
+                                                                |this, paths: &ExternalPaths, _, cx| {
+                                                                    this.open_external_paths_in_tabs(paths.paths(), cx);
+                                                                },
+                                                            ))
+                                                            .child(if self.active_tab_is_image() {
+                                                                image_view::ImageViewElement {
+                                                                    editor: cx.entity().clone(),
                                                                 }
-                                                            },
-                                                        ))
-                                                        .on_mouse_move(cx.listener(Self::on_mouse_move))
-                                                        .on_scroll_wheel(cx.listener(Self::on_scroll))
-                                                    })
-                                                    .drag_over::<DraggedSidebarItems>(
-                                                        move |style, _, _, _| style,
-                                                    )
-                                                    .drag_over::<ExternalPaths>({
-                                                        let file_drop_bg =
-                                                            self.styles.editor.editor_file_drop_bg;
-                                                        move |style, _, _, _| style.bg(file_drop_bg)
-                                                    })
-                                                    .on_drop(cx.listener(
-                                                        |this, dragged: &DraggedSidebarItems, _, cx| {
-                                                            this.clear_sidebar_drag_state(cx);
-                                                            this.focused_sidebar_path = None;
-                                                            this.insert_sidebar_items_as_wiki_links(
-                                                                &dragged.paths,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    ))
-                                                    .on_drop(cx.listener(
-                                                        |this, paths: &ExternalPaths, _, cx| {
-                                                            this.open_external_paths_in_tabs(paths.paths(), cx);
-                                                        },
-                                                    ))
-                                                    .child(if self.active_tab_is_image() {
-                                                        image_view::ImageViewElement {
-                                                            editor: cx.entity().clone(),
-                                                        }
-                                                        .into_any_element()
-                                                    } else if self.active_tab_is_diff() {
-                                                        self.render_git_diff_view(cx)
-                                                    } else if self.active_tab_is_binary() {
-                                                        self.render_binary_placeholder(cx)
-                                                    } else {
-                                                        element::EditorElement {
-                                                            editor: cx.entity().clone(),
-                                                        }
-                                                        .into_any_element()
-                                                    })
-                                                    .when(render_editor_toolbar, |this| this.child({
+                                                                .into_any_element()
+                                                            } else if self.active_tab_is_diff() {
+                                                                self.render_git_diff_view(cx)
+                                                            } else if self.active_tab_is_binary() {
+                                                                self.render_binary_placeholder(cx)
+                                                            } else {
+                                                                element::EditorElement {
+                                                                    editor: cx.entity().clone(),
+                                                                }
+                                                                .into_any_element()
+                                                            })
+                                                            .when(render_editor_toolbar, |this| this.child({
                                                         let primary_hover = self
                                                             .styles
                                                             .toolbar
@@ -781,13 +801,121 @@ impl Render for EditorView {
                                                         |this: gpui::Stateful<gpui::Div>| {
                                                             this.child(self.render_search_bar(cx))
                                                         },
+                                                            ),
                                                     ),
+                                            )
+                                            .when(
+                                                self.should_render_right_panels(),
+                                                |this| {
+                                                    this.child(self.render_right_panels(
+                                                        chat_panel_focused,
+                                                        cx,
+                                                    ))
+                                                },
                                             ),
                                     )
-                                    .when(
-                                        self.should_render_right_panels(),
-                                        |this| this.child(self.render_right_panels(cx)),
-                                    ),
+                                    .when(self.should_render_bottom_chat_panel(), |this| {
+                                        let panel_h = self.utility_panel_width();
+                                        let panel_layout_h = self.utility_panel_layout_width();
+                                        let ups = &self.styles.utility_panel;
+                                        let hover_indicator_color =
+                                            ups.utility_panel_resize_active_indicator_color;
+                                        let hover_indicator_width = self.scaled(
+                                            ups.utility_panel_resize_active_indicator_width_px,
+                                        );
+                                        let handle_width =
+                                            self.scaled(ups.utility_panel_resize_handle_width_px);
+                                        this.child(
+                                            div()
+                                                .id("bottom-chat-panel-wrap")
+                                                .relative()
+                                                .w_full()
+                                                .h(px(panel_h))
+                                                .overflow_hidden()
+                                                .flex_none()
+                                                .child(
+                                                    div()
+                                                        .w_full()
+                                                        .h(px(panel_layout_h))
+                                                        .child(self.render_utility_panel(
+                                                            chat_panel_focused,
+                                                            cx,
+                                                        )),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("bottom-chat-panel-resize-handle")
+                                                        .absolute()
+                                                        .left_0()
+                                                        .top_0()
+                                                        .w_full()
+                                                        .h(px(handle_width))
+                                                        .cursor(CursorStyle::ResizeUpDown)
+                                                        .hover(move |style| {
+                                                            style
+                                                                .border_t(px(hover_indicator_width))
+                                                                .border_color(hover_indicator_color)
+                                                        })
+                                                        .on_mouse_move(cx.listener(
+                                                            |this,
+                                                             event: &MouseMoveEvent,
+                                                             window,
+                                                             cx| {
+                                                                if this.utility_panel_resizing {
+                                                                    let window_height =
+                                                                        f32::from(window.bounds().size.height);
+                                                                    let min_h = this.scaled(
+                                                                        this.styles
+                                                                            .utility_panel
+                                                                            .utility_panel_resize_min_width_px,
+                                                                    );
+                                                                    let max_h = this.scaled(
+                                                                        this.styles
+                                                                            .utility_panel
+                                                                            .utility_panel_resize_max_width_px,
+                                                                    );
+                                                                    let new_height =
+                                                                        window_height - f32::from(event.position.y);
+                                                                    let new_height =
+                                                                        new_height.clamp(min_h, max_h);
+                                                                    this.utility_panel_custom_width =
+                                                                        Some(new_height);
+                                                                    this.set_utility_panel_width_immediately(
+                                                                        new_height,
+                                                                    );
+                                                                    cx.notify();
+                                                                }
+                                                            },
+                                                        ))
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(
+                                                                |this: &mut Self,
+                                                                 _: &MouseDownEvent,
+                                                                 _,
+                                                                 cx| {
+                                                                    this.utility_panel_resizing = true;
+                                                                    cx.notify();
+                                                                },
+                                                            ),
+                                                        )
+                                                        .on_mouse_up(
+                                                            MouseButton::Left,
+                                                            cx.listener(|this, _, _, cx| {
+                                                                this.utility_panel_resizing = false;
+                                                                cx.notify();
+                                                            }),
+                                                        )
+                                                        .on_mouse_up_out(
+                                                            MouseButton::Left,
+                                                            cx.listener(|this, _, _, cx| {
+                                                                this.utility_panel_resizing = false;
+                                                                cx.notify();
+                                                            }),
+                                                        ),
+                                                ),
+                                        )
+                                    }),
                             )
                         },
                     ),
@@ -818,19 +946,40 @@ impl Render for EditorView {
                         .styles
                         .utility_panel
                         .utility_panel_resize_active_indicator_color;
-                    let x = (self.last_window_width - self.utility_panel_width()).max(0.0);
-                    Some(
-                        div()
-                            .absolute()
-                            .left(px(x))
-                            .top_0()
-                            .w(px(iw))
-                            .h_full()
-                            .bg(ic)
-                            .into_any_element(),
-                    )
+                    if self.should_render_bottom_chat_panel() {
+                        let y = (self.last_window_height - self.utility_panel_width()).max(0.0);
+                        Some(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top(px(y))
+                                .w_full()
+                                .h(px(iw))
+                                .bg(ic)
+                                .into_any_element(),
+                        )
+                    } else {
+                        let x = (self.last_window_width - self.utility_panel_width()).max(0.0);
+                        Some(
+                            div()
+                                .absolute()
+                                .left(px(x))
+                                .top_0()
+                                .w(px(iw))
+                                .h_full()
+                                .bg(ic)
+                                .into_any_element(),
+                        )
+                    }
                 } else {
                     None
+                };
+                let resize_cursor = if self.utility_panel_resizing
+                    && self.should_render_bottom_chat_panel()
+                {
+                    CursorStyle::ResizeUpDown
+                } else {
+                    CursorStyle::ResizeLeftRight
                 };
                 this.child(deferred(
                     div()
@@ -840,7 +989,7 @@ impl Render for EditorView {
                         .top(px(0.0))
                         .w_full()
                         .h_full()
-                        .cursor(CursorStyle::ResizeLeftRight)
+                        .cursor(resize_cursor)
                         .children(indicator_line)
                         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                             if this.sidebar_resizing {
@@ -861,10 +1010,14 @@ impl Render for EditorView {
                                 let max_w = this.scaled(
                                     this.styles.utility_panel.utility_panel_resize_max_width_px,
                                 );
-                                let new_width = window_width - f32::from(event.position.x);
-                                let new_width = new_width.clamp(min_w, max_w);
-                                this.utility_panel_custom_width = Some(new_width);
-                                this.set_utility_panel_width_immediately(new_width);
+                                let new_size = if this.should_render_bottom_chat_panel() {
+                                    let window_height = f32::from(window.bounds().size.height);
+                                    (window_height - f32::from(event.position.y)).clamp(min_w, max_w)
+                                } else {
+                                    (window_width - f32::from(event.position.x)).clamp(min_w, max_w)
+                                };
+                                this.utility_panel_custom_width = Some(new_size);
+                                this.set_utility_panel_width_immediately(new_size);
                                 cx.notify();
                             }
                         }))

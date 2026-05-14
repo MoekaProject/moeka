@@ -403,6 +403,24 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_chat_panel(&mut self, cx: &mut Context<Self>) {
+        self.utility_panel_resizing = false;
+        if self.utility_panel == Some(RightUtilityPanel::Chat) {
+            self.toggle_utility_panel(RightUtilityPanel::Chat, cx);
+            return;
+        }
+
+        self.chat_panel_placement = ChatPanelPlacement::Right;
+        self.toggle_utility_panel(RightUtilityPanel::Chat, cx);
+    }
+
+    pub(crate) fn show_chat_panel_bottom(&mut self, cx: &mut Context<Self>) {
+        self.utility_panel_resizing = false;
+        if self.utility_panel == Some(RightUtilityPanel::Chat) {
+            self.toggle_utility_panel(RightUtilityPanel::Chat, cx);
+            return;
+        }
+
+        self.chat_panel_placement = ChatPanelPlacement::Bottom;
         self.toggle_utility_panel(RightUtilityPanel::Chat, cx);
     }
 

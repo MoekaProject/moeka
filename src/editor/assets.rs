@@ -1,4 +1,5 @@
 pub(crate) const COMMENT_SVG_PATH: &str = "assets/icons/comment.svg";
+pub(crate) const CHAT_SVG_PATH: &str = "assets/icons/chat.svg";
 pub(crate) const HEADING_1_SVG_PATH: &str = "assets/icons/format/heading-1.svg";
 pub(crate) const HEADING_2_SVG_PATH: &str = "assets/icons/format/heading-2.svg";
 pub(crate) const HEADING_3_SVG_PATH: &str = "assets/icons/format/heading-3.svg";
@@ -39,6 +40,7 @@ pub(crate) const MENU_UNSTAR_SVG_PATH: &str = "assets/icons/menu/unstar.svg";
 pub(crate) const MENU_PIN_SVG_PATH: &str = "assets/icons/menu/pin.svg";
 pub(crate) const MENU_UNPIN_SVG_PATH: &str = "assets/icons/menu/unpin.svg";
 pub(crate) const MENU_LOCATE_TREE_SVG_PATH: &str = "assets/icons/menu/locate-tree.svg";
+pub(crate) const MENU_AT_SVG_PATH: &str = "assets/icons/menu/at.svg";
 pub(crate) const FOLDER_OPEN_SVG_PATH: &str = "assets/icons/filetree/folder-open.svg";
 pub(crate) const FOLDER_CLOSED_SVG_PATH: &str = "assets/icons/filetree/folder-closed.svg";
 pub(crate) const MARKDOWN_SVG_PATH: &str = "assets/icons/filetree/markdown.svg";

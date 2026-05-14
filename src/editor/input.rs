@@ -427,20 +427,9 @@ impl EditorView {
                         .map(|sr| sr.range.end)
                         .max()
                         .unwrap_or(span.range.end);
-                    if col >= full_start && col <= full_end {
-                        let line_content = self.buffer.line_content(line);
-                        let source = &line_content[full_start..full_end.min(line_content.len())];
-                        source.find("](").and_then(|bp| {
-                            let url = &source[bp + 2..source.len().saturating_sub(1)];
-                            if url.is_empty() {
-                                None
-                            } else {
-                                Some(url.to_string())
-                            }
-                        })
-                    } else {
-                        None
-                    }
+                    (col >= full_start && col <= full_end)
+                        .then(|| span.target.clone())
+                        .flatten()
                 })
             });
             if let Some(url) = link_url

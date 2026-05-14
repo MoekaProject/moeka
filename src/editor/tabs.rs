@@ -1577,6 +1577,7 @@ impl EditorView {
         icon_path: &'static str,
         is_active: bool,
         is_enabled: bool,
+        on_right_click: Option<fn(&mut Self, &mut Context<Self>)>,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
@@ -1620,6 +1621,15 @@ impl EditorView {
                     cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         on_click(this, cx);
+                    }),
+                )
+            })
+            .when_some(on_right_click.filter(|_| is_enabled), |this, handler| {
+                this.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        handler(this, cx);
                     }),
                 )
             })
@@ -1822,6 +1832,7 @@ impl EditorView {
                 CHAT_PANEL_SVG_PATH,
                 chat_active,
                 true,
+                Some(Self::show_chat_panel_bottom),
                 cx,
                 |this, cx| {
                     this.toggle_chat_panel(cx);
@@ -1832,6 +1843,7 @@ impl EditorView {
                 INFO_PANEL_SVG_PATH,
                 info_active,
                 true,
+                None,
                 cx,
                 |this, cx| {
                     this.toggle_info_panel(cx);
@@ -1842,6 +1854,7 @@ impl EditorView {
                 GIT_HISTORY_SVG_PATH,
                 git_active,
                 true,
+                None,
                 cx,
                 |this, cx| {
                     this.toggle_git_history_panel(cx);

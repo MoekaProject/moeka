@@ -43,6 +43,7 @@ pub enum BlockType {
 pub struct InlineSpan {
     pub kind: InlineKind,
     pub range: Range<usize>,
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -325,9 +326,18 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
     let mut current_code_language: Option<String> = None;
     let mut in_blockquote = false;
     enum OpenInline {
-        Plain { kind: InlineKind, start: usize },
-        Image { start: usize, dest_url: String },
-        WikiLink { start: usize },
+        Plain {
+            kind: InlineKind,
+            start: usize,
+            target: Option<String>,
+        },
+        Image {
+            start: usize,
+            dest_url: String,
+        },
+        WikiLink {
+            start: usize,
+        },
     }
 
     struct OpenMermaidBlock {
@@ -482,10 +492,16 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                 inline_stack.push(OpenInline::Plain {
                     kind: InlineKind::Italic,
                     start: source_range.start,
+                    target: None,
                 });
             }
             Event::End(TagEnd::Emphasis) => {
-                if let Some(OpenInline::Plain { kind, start }) = inline_stack.pop() {
+                if let Some(OpenInline::Plain {
+                    kind,
+                    start,
+                    target: _,
+                }) = inline_stack.pop()
+                {
                     if kind == InlineKind::Italic {
                         add_inline_span(
                             &mut decorations,
@@ -494,6 +510,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                             start,
                             source_range.end,
                             InlineKind::Italic,
+                            None,
                             text,
                         );
                     }
@@ -503,10 +520,16 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                 inline_stack.push(OpenInline::Plain {
                     kind: InlineKind::Bold,
                     start: source_range.start,
+                    target: None,
                 });
             }
             Event::End(TagEnd::Strong) => {
-                if let Some(OpenInline::Plain { kind, start }) = inline_stack.pop() {
+                if let Some(OpenInline::Plain {
+                    kind,
+                    start,
+                    target: _,
+                }) = inline_stack.pop()
+                {
                     if kind == InlineKind::Bold {
                         add_inline_span(
                             &mut decorations,
@@ -515,6 +538,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                             start,
                             source_range.end,
                             InlineKind::Bold,
+                            None,
                             text,
                         );
                     }
@@ -524,10 +548,16 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                 inline_stack.push(OpenInline::Plain {
                     kind: InlineKind::Strikethrough,
                     start: source_range.start,
+                    target: None,
                 });
             }
             Event::End(TagEnd::Strikethrough) => {
-                if let Some(OpenInline::Plain { kind, start }) = inline_stack.pop() {
+                if let Some(OpenInline::Plain {
+                    kind,
+                    start,
+                    target: _,
+                }) = inline_stack.pop()
+                {
                     if kind == InlineKind::Strikethrough {
                         add_inline_span(
                             &mut decorations,
@@ -536,6 +566,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                             start,
                             source_range.end,
                             InlineKind::Strikethrough,
+                            None,
                             text,
                         );
                     }
@@ -551,17 +582,21 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                         start: source_range.start,
                     });
                 } else {
-                    let _ = dest_url;
                     inline_stack.push(OpenInline::Plain {
                         kind: InlineKind::Link,
                         start: source_range.start,
+                        target: Some(dest_url.to_string()),
                     });
                 }
             }
             Event::End(TagEnd::Link) => {
                 if let Some(open_inline) = inline_stack.pop() {
                     match open_inline {
-                        OpenInline::Plain { kind, start } if kind == InlineKind::Link => {
+                        OpenInline::Plain {
+                            kind,
+                            start,
+                            target,
+                        } if kind == InlineKind::Link => {
                             add_inline_span(
                                 &mut decorations,
                                 &line_starts,
@@ -569,6 +604,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                                 start,
                                 source_range.end,
                                 InlineKind::Link,
+                                target,
                                 text,
                             );
                         }
@@ -601,6 +637,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                         start,
                         source_range.end,
                         InlineKind::Image,
+                        Some(dest_url.clone()),
                         text,
                     );
                     // Store image path for preview rendering
@@ -677,6 +714,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                     decorations[line].inline_spans.push(InlineSpan {
                         kind: InlineKind::InlineCode,
                         range: col + 1..end_col - 1,
+                        target: None,
                     });
                 }
             }
@@ -911,6 +949,7 @@ fn add_inline_span(
     start: usize,
     end: usize,
     kind: InlineKind,
+    target: Option<String>,
     text: &str,
 ) {
     let (start_line, start_col) = offset_to_line_col(start);
@@ -933,6 +972,7 @@ fn add_inline_span(
             decorations[start_line].inline_spans.push(InlineSpan {
                 kind,
                 range: start_col + marker_len..line_end,
+                target,
             });
         }
         return;
@@ -954,6 +994,7 @@ fn add_inline_span(
             decorations[start_line].inline_spans.push(InlineSpan {
                 kind,
                 range: start_col + marker_len..end_col.saturating_sub(marker_len),
+                target,
             });
             decorations[start_line].syntax_ranges.push(SyntaxRange {
                 range: start_col..start_col + marker_len,
@@ -978,6 +1019,7 @@ fn add_inline_span(
                     decorations[start_line].inline_spans.push(InlineSpan {
                         kind,
                         range: url_start_col..url_end_col,
+                        target,
                     });
                     // Hide prefix `[` or `![`, `](` and trailing `)`
                     decorations[start_line].syntax_ranges.push(SyntaxRange {
@@ -992,6 +1034,7 @@ fn add_inline_span(
                     decorations[start_line].inline_spans.push(InlineSpan {
                         kind,
                         range: start_col + prefix_len..text_end_col,
+                        target,
                     });
                     // Hide opening `[` or `![`
                     decorations[start_line].syntax_ranges.push(SyntaxRange {
@@ -1741,6 +1784,18 @@ mod tests {
         let decorations = parse_decorations(text);
 
         assert_eq!(decorations[0].highlight_spans, vec![6..15]);
+    }
+
+    #[test]
+    fn parse_decorations_preserves_inline_link_target() {
+        let text = "跳到 [标题](#标题1)";
+        let decorations = parse_decorations(text);
+
+        assert_eq!(decorations[0].inline_spans.len(), 1);
+        assert_eq!(
+            decorations[0].inline_spans[0].target.as_deref(),
+            Some("#标题1")
+        );
     }
 
     #[test]

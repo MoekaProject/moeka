@@ -41,6 +41,12 @@ pub(crate) enum RightUtilityPanel {
     GitHistory,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChatPanelPlacement {
+    Right,
+    Bottom,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TabNavigationTarget {
     Settings,

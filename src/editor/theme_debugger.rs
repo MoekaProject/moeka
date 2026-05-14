@@ -100,7 +100,12 @@ impl EditorView {
             return 0.0;
         }
 
-        self.utility_panel_width() + self.theme_debugger_width()
+        let utility_width = if self.should_render_utility_panel_on_right() {
+            self.utility_panel_width()
+        } else {
+            0.0
+        };
+        utility_width + self.theme_debugger_width()
     }
 
     pub(crate) fn toggle_theme_debugger_visibility(&mut self, cx: &mut Context<Self>) {

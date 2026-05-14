@@ -341,6 +341,7 @@ pub(crate) enum ContextMenuKind {
         row: usize,
         col: usize,
     },
+    Terminal,
 }
 
 #[derive(Clone)]
@@ -823,6 +824,7 @@ pub struct EditorView {
     pub(crate) git_history_cache_scanned_at: Option<SystemTime>,
     pub(crate) utility_panel: Option<RightUtilityPanel>,
     pub(crate) displayed_utility_panel: Option<RightUtilityPanel>,
+    pub(crate) chat_panel_placement: ChatPanelPlacement,
     pub(crate) utility_panel_custom_width: Option<f32>,
     pub(crate) utility_panel_resizing: bool,
     pub(crate) utility_panel_display_width: f32,
@@ -913,6 +915,13 @@ pub struct EditorView {
     pub(crate) chat_terminal: Option<chat_panel::ChatTerminalSession>,
     pub(crate) chat_panel_focus_handle: FocusHandle,
     pub(crate) pending_chat_input_focus: bool,
+    pub(crate) chat_terminal_scroll_px: Pixels,
+    pub(crate) chat_terminal_cell_width_px: f32,
+    pub(crate) chat_terminal_cell_height_px: f32,
+    pub(crate) chat_terminal_marked_text: Option<String>,
+    pub(crate) chat_terminal_selection: Option<chat_panel::ChatTerminalSelection>,
+    pub(crate) chat_terminal_selecting: bool,
+    pub(crate) chat_terminal_input_bounds: Option<gpui::Bounds<gpui::Pixels>>,
 
     // Settings panel state
     pub(crate) settings_scroll_handle: ScrollHandle,
@@ -1170,6 +1179,7 @@ impl EditorView {
             git_history_cache_scanned_at: None,
             utility_panel: None,
             displayed_utility_panel: None,
+            chat_panel_placement: ChatPanelPlacement::Right,
             utility_panel_custom_width: None,
             utility_panel_resizing: false,
             utility_panel_display_width: 0.0,
@@ -1252,6 +1262,13 @@ impl EditorView {
             chat_terminal: None,
             chat_panel_focus_handle: cx.focus_handle(),
             pending_chat_input_focus: false,
+            chat_terminal_scroll_px: Pixels::ZERO,
+            chat_terminal_cell_width_px: 0.0,
+            chat_terminal_cell_height_px: 0.0,
+            chat_terminal_marked_text: None,
+            chat_terminal_selection: None,
+            chat_terminal_selecting: false,
+            chat_terminal_input_bounds: None,
 
             // Settings panel state
             settings_scroll_handle: ScrollHandle::new(),
@@ -1421,6 +1438,16 @@ impl EditorView {
             && (self.utility_panel_width_task.is_some() || self.utility_panel_width() > 0.5)
     }
 
+    pub(crate) fn should_render_bottom_chat_panel(&self) -> bool {
+        self.should_render_utility_panel()
+            && self.displayed_utility_panel == Some(RightUtilityPanel::Chat)
+            && self.chat_panel_placement == ChatPanelPlacement::Bottom
+    }
+
+    pub(crate) fn should_render_utility_panel_on_right(&self) -> bool {
+        self.should_render_utility_panel() && !self.should_render_bottom_chat_panel()
+    }
+
     pub(crate) fn theme_debugger_target_width(&self) -> f32 {
         self.scaled(theme_debugger::THEME_DEBUGGER_WIDTH_PX)
     }
@@ -1443,7 +1470,7 @@ impl EditorView {
     }
 
     pub(crate) fn should_render_right_panels(&self) -> bool {
-        self.should_render_theme_debugger_panel() || self.should_render_utility_panel()
+        self.should_render_theme_debugger_panel() || self.should_render_utility_panel_on_right()
     }
 
     pub(crate) fn set_sidebar_width_immediately(&mut self, width: f32) {
