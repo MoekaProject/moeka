@@ -22,7 +22,7 @@ use gpui::{
     FontFallbacks, FontStyle, FontWeight, GlobalElementId, Hsla, InputHandler, KeyDownEvent,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
     ScrollWheelEvent, SharedString, Style, TextRun as GpuiTextRun, TouchPhase, UTF16Selection,
-    Window, div, fill, point, prelude::*, px, relative, size,
+    Window, div, fill, point, prelude::*, px, relative, size, svg,
 };
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -699,6 +699,44 @@ impl Default for ChatTerminalSnapshot {
     }
 }
 
+impl ChatAgentCli {
+    pub(crate) fn all() -> [Self; 4] {
+        [
+            Self::GithubCopilot,
+            Self::OpenAICodex,
+            Self::ClaudeCode,
+            Self::GeminiCli,
+        ]
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::GithubCopilot => "Github Copilot",
+            Self::OpenAICodex => "OpenAI Codex",
+            Self::ClaudeCode => "Claude Code",
+            Self::GeminiCli => "Gemini CLI",
+        }
+    }
+
+    pub(crate) fn command_name(self) -> &'static str {
+        match self {
+            Self::GithubCopilot => "copilot",
+            Self::OpenAICodex => "codex",
+            Self::ClaudeCode => "claude",
+            Self::GeminiCli => "gemini",
+        }
+    }
+
+    pub(crate) fn icon_path(self) -> &'static str {
+        match self {
+            Self::GithubCopilot => MENU_COPILOT_SVG_PATH,
+            Self::OpenAICodex => MENU_CODEX_SVG_PATH,
+            Self::ClaudeCode => MENU_CLAUDE_SVG_PATH,
+            Self::GeminiCli => MENU_GEMINI_SVG_PATH,
+        }
+    }
+}
+
 impl ChatTerminalSession {
     fn unavailable(message: impl Into<String>) -> Self {
         Self {
@@ -712,7 +750,7 @@ impl ChatTerminalSession {
         }
     }
 
-    fn launch(cwd: PathBuf) -> anyhow::Result<Self> {
+    fn launch(cwd: PathBuf, agent_cli: ChatAgentCli) -> anyhow::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: CHAT_PANEL_DEFAULT_ROWS,
@@ -721,7 +759,7 @@ impl ChatTerminalSession {
             pixel_height: 0,
         })?;
 
-        let mut command = CommandBuilder::new("codex");
+        let mut command = CommandBuilder::new(agent_cli.command_name());
         command.cwd(cwd.clone());
 
         let child = pair.slave.spawn_command(command)?;
@@ -1433,7 +1471,7 @@ impl EditorView {
             return;
         };
 
-        match ChatTerminalSession::launch(cwd) {
+        match ChatTerminalSession::launch(cwd, self.chat_agent_cli) {
             Ok(mut session) => {
                 session.status = ChatTerminalStatus::Running;
                 self.chat_terminal = Some(session);
@@ -1446,6 +1484,15 @@ impl EditorView {
         }
 
         cx.notify();
+    }
+
+    pub(crate) fn select_chat_agent_cli(
+        &mut self,
+        agent_cli: ChatAgentCli,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_agent_cli = agent_cli;
+        self.open_chat_terminal(cx);
     }
 
     pub(crate) fn stop_chat_terminal(&mut self) {
@@ -1532,6 +1579,8 @@ impl EditorView {
         let (_, cell_width, cell_height) = self.chat_terminal_metrics();
         let terminal_padding =
             self.scaled(self.styles.utility_panel.utility_panel_terminal_padding_px);
+        let footer_top_gap = self.scaled(8.0);
+        let footer_height = self.scaled(30.0) + terminal_padding + footer_top_gap;
         let panel_width = if self.chat_panel_placement == ChatPanelPlacement::Bottom {
             (self.last_window_width
                 - self.sidebar_width()
@@ -1542,9 +1591,9 @@ impl EditorView {
             (self.utility_panel_width() - terminal_padding * 2.0).max(220.0)
         };
         let panel_height = if self.chat_panel_placement == ChatPanelPlacement::Bottom {
-            (self.utility_panel_width() - terminal_padding * 2.0).max(120.0)
+            (self.utility_panel_width() - terminal_padding * 2.0 - footer_height).max(120.0)
         } else {
-            (self.last_window_height - terminal_padding * 2.0).max(240.0)
+            (self.last_window_height - terminal_padding * 2.0 - footer_height).max(240.0)
         };
         let cols = (panel_width / cell_width.max(1.0)).floor() as u16;
         let rows = (panel_height / cell_height.max(1.0)).floor() as u16;
@@ -1897,6 +1946,13 @@ impl EditorView {
         let cursor_color = self.theme.cursor;
         let palette = terminal_theme_palette(&self.theme, default_bg);
         let content_opacity = if is_focused { 1.0 } else { 0.8 };
+        let agent_button_height = self.scaled(30.0);
+        let agent_button_icon_size = self.scaled(16.0);
+        let agent_button_gap = self.scaled(8.0);
+        let agent_footer_top_gap = self.scaled(8.0);
+        let agent_button_hover_bg = self.theme.bg_hover;
+        let agent_button_text = self.theme.text_primary;
+        let agent_button_border = self.theme.border_primary;
 
         let snapshot = self
             .chat_terminal
@@ -2108,6 +2164,49 @@ impl EditorView {
                                             .child(text),
                                     )
                                 },
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex_none()
+                    .px(px(terminal_padding))
+                    .pt(px(agent_footer_top_gap))
+                    .pb(px(terminal_padding))
+                    .flex()
+                    .items_center()
+                    .justify_start()
+                    .child(
+                        div()
+                            .id("chat-agent-cli-button")
+                            .h(px(agent_button_height))
+                            .px(px(self.scaled(10.0)))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(agent_button_gap))
+                            .rounded(px(self.scaled(6.0)))
+                            .border(px(1.0))
+                            .border_color(agent_button_border)
+                            .text_size(px(self.scaled(13.0)))
+                            .text_color(agent_button_text)
+                            .cursor(CursorStyle::Arrow)
+                            .hover(move |style| style.bg(agent_button_hover_bg))
+                            .child(
+                                svg()
+                                    .path(self.chat_agent_cli.icon_path())
+                                    .size(px(agent_button_icon_size))
+                                    .text_color(agent_button_text),
+                            )
+                            .child(self.chat_agent_cli.label().to_string())
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    window.prevent_default();
+                                    this.open_chat_agent_cli_menu(event.position, cx);
+                                }),
                             ),
                     ),
             )

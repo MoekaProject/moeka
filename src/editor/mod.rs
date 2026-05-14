@@ -342,6 +342,7 @@ pub(crate) enum ContextMenuKind {
         col: usize,
     },
     Terminal,
+    ChatAgentCli,
 }
 
 #[derive(Clone)]
@@ -913,6 +914,7 @@ pub struct EditorView {
 
     // ── Chat panel state ───────────────────────────────────────────
     pub(crate) chat_terminal: Option<chat_panel::ChatTerminalSession>,
+    pub(crate) chat_agent_cli: ChatAgentCli,
     pub(crate) chat_panel_focus_handle: FocusHandle,
     pub(crate) pending_chat_input_focus: bool,
     pub(crate) chat_terminal_scroll_px: Pixels,
@@ -1180,6 +1182,7 @@ impl EditorView {
             utility_panel: None,
             displayed_utility_panel: None,
             chat_panel_placement: ChatPanelPlacement::Right,
+            chat_agent_cli: ChatAgentCli::GithubCopilot,
             utility_panel_custom_width: None,
             utility_panel_resizing: false,
             utility_panel_display_width: 0.0,

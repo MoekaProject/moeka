@@ -47,6 +47,14 @@ pub(crate) enum ChatPanelPlacement {
     Bottom,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChatAgentCli {
+    GithubCopilot,
+    OpenAICodex,
+    ClaudeCode,
+    GeminiCli,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TabNavigationTarget {
     Settings,

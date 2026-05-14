@@ -743,6 +743,19 @@ impl EditorView {
         cx.notify();
     }
 
+    pub(crate) fn open_chat_agent_cli_menu(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = Some(ContextMenu {
+            position,
+            kind: ContextMenuKind::ChatAgentCli,
+        });
+        self.sidebar_edit = None;
+        cx.notify();
+    }
+
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu.take().is_some() {
             if let Some(start) = self.slash_menu_start.take() {
@@ -1165,6 +1178,67 @@ impl EditorView {
                             .size(px(icon_size))
                             .text_color(wss.ws_menu_item_action_icon_color),
                     ),
+            )
+            .child(label.to_string())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, window, cx| {
+                    cx.stop_propagation();
+                    handler(this, window, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_context_menu_item_with_icon_and_check(
+        &self,
+        label: &str,
+        icon_path: &'static str,
+        is_active: bool,
+        cx: &mut Context<Self>,
+        handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let ms = &self.styles.context_menu;
+        let wss = &self.styles.workspace_switcher;
+        let hover_bg = ms.menu_item_hover_bg;
+        let text_color = ms.menu_item_text_color;
+        let check_size = self.scaled(wss.ws_menu_item_check_size_px);
+        let icon_size = self.scaled(ms.menu_format_icon_size_px + 3.0);
+        let gap = self.scaled(wss.ws_menu_item_action_icon_gap_px);
+
+        div()
+            .w_full()
+            .h(px(self.scaled(ms.menu_item_height_px)))
+            .px(px(self.scaled(ms.menu_item_padding_x_px)))
+            .flex()
+            .items_center()
+            .gap(px(gap))
+            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
+            .text_color(text_color)
+            .hover(move |s| s.bg(hover_bg))
+            .cursor(CursorStyle::Arrow)
+            .child(
+                div()
+                    .w(px(check_size))
+                    .h(px(check_size))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .when(is_active, |this| {
+                        this.child(
+                            svg()
+                                .path(CHECK_SVG_PATH)
+                                .size(px(check_size))
+                                .text_color(wss.ws_menu_item_check_color),
+                        )
+                    }),
+            )
+            .child(
+                svg()
+                    .path(icon_path)
+                    .size(px(icon_size))
+                    .text_color(ms.menu_format_icon_color),
             )
             .child(label.to_string())
             .on_mouse_down(
@@ -2584,6 +2658,26 @@ impl EditorView {
                         let _ = this.select_all_chat_terminal(cx);
                     },
                 ));
+                (
+                    items,
+                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                )
+            }
+            ContextMenuKind::ChatAgentCli => {
+                let mut items = Vec::new();
+                for agent_cli in ChatAgentCli::all() {
+                    let is_active = self.chat_agent_cli == agent_cli;
+                    items.push(self.render_context_menu_item_with_icon_and_check(
+                        agent_cli.label(),
+                        agent_cli.icon_path(),
+                        is_active,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.select_chat_agent_cli(agent_cli, cx);
+                        },
+                    ));
+                }
                 (
                     items,
                     self.scaled(self.styles.context_menu.menu_sidebar_width_px),
