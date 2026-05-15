@@ -158,6 +158,18 @@ pub(crate) fn active_ranges_have_non_eol_position(
     })
 }
 
+fn active_ranges_have_selection(active_ranges: &[Range<usize>]) -> bool {
+    active_ranges.iter().any(|active_range| active_range.start != active_range.end)
+}
+
+fn heading_syntax_is_active(decoration: &LineDecoration, active_ranges: &[Range<usize>]) -> bool {
+    active_ranges_have_selection(active_ranges)
+        || decoration
+            .syntax_ranges
+            .iter()
+            .any(|syntax_range| active_ranges_intersect(active_ranges, &syntax_range.trigger_range))
+}
+
 fn scaled_inline_placeholder(text: &str, scale: f32) -> String {
     let target_columns = ((display_width(text) as f32) * scale).round() as usize;
     " ".repeat(target_columns.max(1))
@@ -370,7 +382,7 @@ pub(crate) fn build_display_text(
                 return true;
             }
             if matches!(decoration.block_type, BlockType::Heading(_)) {
-                return !active_ranges_have_non_eol_position(active_ranges, len);
+                return !heading_syntax_is_active(decoration, active_ranges);
             }
             if active_ranges_intersect(active_ranges, &sr.trigger_range) {
                 return false;
@@ -1579,6 +1591,133 @@ mod tests {
     }
 
     #[test]
+    fn heading_prefix_stays_collapsed_when_cursor_is_in_body_text() {
+        let line = "# title";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let (display_text, _, _, _) = build_display_text(
+            line,
+            &decoration,
+            &[Range { start: 3, end: 3 }],
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+
+        assert_eq!(display_text, "title");
+    }
+
+    #[test]
+    fn heading_prefix_expands_when_cursor_is_in_heading_marker() {
+        let line = "# title";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let (display_text, _, _, _) = build_display_text(
+            line,
+            &decoration,
+            &[Range { start: 1, end: 1 }],
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+
+        assert_eq!(display_text, line);
+    }
+
+    #[test]
+    fn heading_prefix_expands_when_selection_exists() {
+        let line = "# title";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let (display_text, _, _, _) = build_display_text(
+            line,
+            &decoration,
+            &[Range { start: 3, end: 5 }],
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+
+        assert_eq!(display_text, line);
+    }
+
+    #[test]
+    fn heading_body_cursor_does_not_paint_syntax_marker_color() {
+        let line = "# title";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let active_ranges = [Range { start: 3, end: 3 }];
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &active_ranges,
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &active_ranges,
+            false,
+            prefix_collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            0,
+            16.0,
+            &theme,
+            theme.link,
+            FontWeight::NORMAL,
+            None,
+        );
+
+        assert_eq!(display_text, "title");
+        assert!(runs.iter().all(|run| run.color != theme.syntax_marker));
+    }
+
+    #[test]
     fn emoji_shortcode_folds_into_unicode_display_text() {
         let line = "launch :rocket: now";
         let decoration = markdown::parse_decorations(line)
@@ -2780,7 +2919,7 @@ pub(crate) fn build_text_runs_for_display(
         if !matches!(decoration.block_type, BlockType::Table) {
             for sr in &decoration.syntax_ranges {
                 let syntax_is_active = if matches!(decoration.block_type, BlockType::Heading(_)) {
-                    true
+                    heading_syntax_is_active(decoration, active_ranges)
                 } else if matches!(decoration.block_type, BlockType::CodeBlockFence) {
                     // Fence lines always have syntax visible; use active code block check
                     // to determine if markers should get syntax_marker color

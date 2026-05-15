@@ -319,6 +319,11 @@ pub(crate) struct ContextMenu {
     pub kind: ContextMenuKind,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ContextSubmenuAim {
+    pub origin: Point<Pixels>,
+}
+
 #[derive(Clone)]
 pub(crate) enum ContextMenuKind {
     Sidebar {
@@ -331,6 +336,7 @@ pub(crate) enum ContextMenuKind {
     SidebarSort,
     SidebarCreate,
     Format,
+    FormatMore,
     WikiLink,
     Tab {
         tab_id: String,
@@ -342,7 +348,9 @@ pub(crate) enum ContextMenuKind {
         col: usize,
     },
     Terminal,
-    ChatAgentCli,
+    ChatTab {
+        tab_id: String,
+    },
 }
 
 #[derive(Clone)]
@@ -400,6 +408,7 @@ pub(crate) enum FormatMenuAction {
     Italic,
     Strikethrough,
     InlineCode,
+    Highlight,
     CodeBlock,
     HorizontalRule,
     Quote,
@@ -410,6 +419,9 @@ pub(crate) enum FormatMenuAction {
     WikiLink,
     Image,
     Table,
+    Superscript,
+    Subscript,
+    Footnote,
 }
 
 #[derive(Clone)]
@@ -537,6 +549,14 @@ pub(crate) struct WorkspaceFileCandidate {
 
 #[derive(Clone)]
 pub(crate) struct DraggedTab {
+    pub tab_id: String,
+    pub title: String,
+    pub path: Option<PathBuf>,
+    pub source_index: usize,
+}
+
+#[derive(Clone)]
+pub(crate) struct DraggedChatTab {
     pub tab_id: String,
     pub title: String,
     pub source_index: usize,
@@ -734,6 +754,9 @@ pub struct EditorView {
     pub(crate) content_origin: Point<Pixels>,
     pub(crate) last_mouse_down_target: Option<(Point<Pixels>, usize)>,
     pub(crate) context_menu: Option<ContextMenu>,
+    pub(crate) context_submenu: Option<ContextMenuKind>,
+    pub(crate) context_submenu_aim: Option<ContextSubmenuAim>,
+    pub(crate) context_submenu_hovered: bool,
     pub(crate) sidebar_edit: Option<SidebarEditMode>,
     pub(crate) sidebar_edit_blur_sub: Option<gpui::Subscription>,
     pub(crate) file_clipboard: Option<FileClipboard>,
@@ -825,6 +848,8 @@ pub struct EditorView {
     pub(crate) git_history_cache_scanned_at: Option<SystemTime>,
     pub(crate) utility_panel: Option<RightUtilityPanel>,
     pub(crate) displayed_utility_panel: Option<RightUtilityPanel>,
+    pub(crate) chat_panel_visible: bool,
+    pub(crate) last_non_chat_utility_panel: Option<RightUtilityPanel>,
     pub(crate) chat_panel_placement: ChatPanelPlacement,
     pub(crate) utility_panel_custom_width: Option<f32>,
     pub(crate) utility_panel_resizing: bool,
@@ -913,8 +938,10 @@ pub struct EditorView {
     pub(crate) quick_open_render_limit: usize,
 
     // ── Chat panel state ───────────────────────────────────────────
-    pub(crate) chat_terminal: Option<chat_panel::ChatTerminalSession>,
-    pub(crate) chat_agent_cli: ChatAgentCli,
+    pub(crate) chat_tabs: Vec<chat_panel::ChatTab>,
+    pub(crate) active_chat_tab_id: Option<String>,
+    pub(crate) chat_tab_drag_candidate_id: Option<String>,
+    pub(crate) chat_tab_dragging_id: Option<String>,
     pub(crate) chat_panel_focus_handle: FocusHandle,
     pub(crate) pending_chat_input_focus: bool,
     pub(crate) chat_terminal_scroll_px: Pixels,
@@ -1098,6 +1125,9 @@ impl EditorView {
             content_origin: Point::default(),
             last_mouse_down_target: None,
             context_menu: None,
+            context_submenu: None,
+            context_submenu_aim: None,
+            context_submenu_hovered: false,
             sidebar_edit: None,
             sidebar_edit_blur_sub: None,
             file_clipboard: None,
@@ -1181,8 +1211,9 @@ impl EditorView {
             git_history_cache_scanned_at: None,
             utility_panel: None,
             displayed_utility_panel: None,
+            chat_panel_visible: false,
+            last_non_chat_utility_panel: None,
             chat_panel_placement: ChatPanelPlacement::Right,
-            chat_agent_cli: ChatAgentCli::GithubCopilot,
             utility_panel_custom_width: None,
             utility_panel_resizing: false,
             utility_panel_display_width: 0.0,
@@ -1262,7 +1293,10 @@ impl EditorView {
             quick_open_task: None,
             quick_open_scroll_handle: ScrollHandle::new(),
             quick_open_render_limit: 100,
-            chat_terminal: None,
+            chat_tabs: Vec::new(),
+            active_chat_tab_id: None,
+            chat_tab_drag_candidate_id: None,
+            chat_tab_dragging_id: None,
             chat_panel_focus_handle: cx.focus_handle(),
             pending_chat_input_focus: false,
             chat_terminal_scroll_px: Pixels::ZERO,
@@ -1439,6 +1473,17 @@ impl EditorView {
     pub(crate) fn should_render_utility_panel(&self) -> bool {
         self.displayed_utility_panel.is_some()
             && (self.utility_panel_width_task.is_some() || self.utility_panel_width() > 0.5)
+    }
+
+    pub(crate) fn is_utility_panel_active(&self, panel: RightUtilityPanel) -> bool {
+        match panel {
+            RightUtilityPanel::Chat => {
+                self.chat_panel_visible || self.utility_panel == Some(RightUtilityPanel::Chat)
+            }
+            _ => {
+                self.utility_panel == Some(panel) || self.last_non_chat_utility_panel == Some(panel)
+            }
+        }
     }
 
     pub(crate) fn should_render_bottom_chat_panel(&self) -> bool {

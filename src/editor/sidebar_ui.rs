@@ -35,6 +35,8 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.context_menu = Some(ContextMenu { position, kind });
+        self.context_submenu = None;
+        self.context_submenu_aim = None;
         if clear_sidebar_edit {
             self.sidebar_edit = None;
         }

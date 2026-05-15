@@ -4,36 +4,56 @@ use crate::markdown::BlockType;
 
 use super::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct UtilityPanelToggleOutcome {
-    next_panel: Option<RightUtilityPanel>,
-    clear_resizing: bool,
-    invalidate_info: bool,
-    invalidate_git_history: bool,
-}
-
-fn utility_panel_toggle_outcome(
-    current_panel: Option<RightUtilityPanel>,
-    requested_panel: RightUtilityPanel,
-) -> UtilityPanelToggleOutcome {
-    if current_panel == Some(requested_panel) {
-        return UtilityPanelToggleOutcome {
-            next_panel: None,
-            clear_resizing: true,
-            invalidate_info: false,
-            invalidate_git_history: false,
-        };
-    }
-
-    UtilityPanelToggleOutcome {
-        next_panel: Some(requested_panel),
-        clear_resizing: false,
-        invalidate_info: requested_panel == RightUtilityPanel::Info,
-        invalidate_git_history: requested_panel == RightUtilityPanel::GitHistory,
-    }
-}
-
 impl EditorView {
+    pub(crate) fn set_visible_utility_panel(
+        &mut self,
+        next_panel: Option<RightUtilityPanel>,
+        cx: &mut Context<Self>,
+    ) {
+        let previous_panel = self.utility_panel;
+        self.utility_panel = next_panel;
+
+        if next_panel == Some(RightUtilityPanel::Info) {
+            self.invalidate_info_panel_cache();
+        }
+        if next_panel == Some(RightUtilityPanel::GitHistory) {
+            self.invalidate_git_history_cache();
+        }
+        if previous_panel != Some(RightUtilityPanel::Chat)
+            && next_panel == Some(RightUtilityPanel::Chat)
+        {
+            self.open_chat_terminal(cx);
+        }
+
+        self.sync_utility_panel_width_animation(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn reveal_chat_panel(&mut self, cx: &mut Context<Self>) {
+        self.chat_panel_visible = true;
+        if let Some(current_panel) = self
+            .utility_panel
+            .filter(|panel| *panel != RightUtilityPanel::Chat)
+        {
+            self.last_non_chat_utility_panel = Some(current_panel);
+        }
+
+        if self.utility_panel != Some(RightUtilityPanel::Chat) {
+            self.set_visible_utility_panel(Some(RightUtilityPanel::Chat), cx);
+        } else {
+            self.open_chat_terminal(cx);
+        }
+    }
+
+    pub(crate) fn hide_chat_panel(&mut self, cx: &mut Context<Self>) {
+        self.chat_panel_visible = false;
+        if self.utility_panel == Some(RightUtilityPanel::Chat) {
+            self.set_visible_utility_panel(self.last_non_chat_utility_panel, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
     pub(crate) fn scaled(&self, value: f32) -> f32 {
         value * self.ui_scale
     }
@@ -404,24 +424,27 @@ impl EditorView {
 
     pub(crate) fn toggle_chat_panel(&mut self, cx: &mut Context<Self>) {
         self.utility_panel_resizing = false;
-        if self.utility_panel == Some(RightUtilityPanel::Chat) {
-            self.toggle_utility_panel(RightUtilityPanel::Chat, cx);
+        if self.chat_panel_visible {
+            self.hide_chat_panel(cx);
             return;
         }
 
         self.chat_panel_placement = ChatPanelPlacement::Right;
-        self.toggle_utility_panel(RightUtilityPanel::Chat, cx);
+        self.reveal_chat_panel(cx);
     }
 
     pub(crate) fn show_chat_panel_bottom(&mut self, cx: &mut Context<Self>) {
         self.utility_panel_resizing = false;
-        if self.utility_panel == Some(RightUtilityPanel::Chat) {
-            self.toggle_utility_panel(RightUtilityPanel::Chat, cx);
+        let should_hide = self.chat_panel_visible
+            && self.utility_panel == Some(RightUtilityPanel::Chat)
+            && self.chat_panel_placement == ChatPanelPlacement::Bottom;
+        if should_hide {
+            self.hide_chat_panel(cx);
             return;
         }
 
         self.chat_panel_placement = ChatPanelPlacement::Bottom;
-        self.toggle_utility_panel(RightUtilityPanel::Chat, cx);
+        self.reveal_chat_panel(cx);
     }
 
     pub(crate) fn toggle_info_panel(&mut self, cx: &mut Context<Self>) {
@@ -437,98 +460,25 @@ impl EditorView {
         panel: RightUtilityPanel,
         cx: &mut Context<Self>,
     ) {
-        let previous_panel = self.utility_panel;
-        let outcome = utility_panel_toggle_outcome(self.utility_panel, panel);
-        self.utility_panel = outcome.next_panel;
-        if outcome.clear_resizing {
+        if panel == RightUtilityPanel::Chat {
+            self.toggle_chat_panel(cx);
+            return;
+        }
+
+        if self.utility_panel == Some(panel) {
             self.utility_panel_resizing = false;
-        }
-        if outcome.invalidate_info {
-            self.invalidate_info_panel_cache();
-        }
-        if outcome.invalidate_git_history {
-            self.invalidate_git_history_cache();
-        }
-        if previous_panel == Some(RightUtilityPanel::Chat)
-            && self.utility_panel != Some(RightUtilityPanel::Chat)
-        {
-            self.stop_chat_terminal();
-        }
-        if previous_panel != Some(RightUtilityPanel::Chat)
-            && self.utility_panel == Some(RightUtilityPanel::Chat)
-        {
-            self.open_chat_terminal(cx);
-        }
-        self.sync_utility_panel_width_animation(cx);
-        cx.notify();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{RightUtilityPanel, UtilityPanelToggleOutcome, utility_panel_toggle_outcome};
-
-    #[test]
-    fn toggling_same_panel_closes_and_clears_resizing() {
-        let outcome =
-            utility_panel_toggle_outcome(Some(RightUtilityPanel::Info), RightUtilityPanel::Info);
-
-        assert_eq!(
-            outcome,
-            UtilityPanelToggleOutcome {
-                next_panel: None,
-                clear_resizing: true,
-                invalidate_info: false,
-                invalidate_git_history: false,
+            if self.last_non_chat_utility_panel == Some(panel) {
+                self.last_non_chat_utility_panel = None;
             }
-        );
-    }
-
-    #[test]
-    fn opening_info_panel_requests_info_invalidation_only() {
-        let outcome = utility_panel_toggle_outcome(None, RightUtilityPanel::Info);
-
-        assert_eq!(
-            outcome,
-            UtilityPanelToggleOutcome {
-                next_panel: Some(RightUtilityPanel::Info),
-                clear_resizing: false,
-                invalidate_info: true,
-                invalidate_git_history: false,
+            if self.chat_panel_visible {
+                self.set_visible_utility_panel(Some(RightUtilityPanel::Chat), cx);
+            } else {
+                self.set_visible_utility_panel(None, cx);
             }
-        );
-    }
+            return;
+        }
 
-    #[test]
-    fn switching_to_git_history_requests_git_invalidation_only() {
-        let outcome = utility_panel_toggle_outcome(
-            Some(RightUtilityPanel::Info),
-            RightUtilityPanel::GitHistory,
-        );
-
-        assert_eq!(
-            outcome,
-            UtilityPanelToggleOutcome {
-                next_panel: Some(RightUtilityPanel::GitHistory),
-                clear_resizing: false,
-                invalidate_info: false,
-                invalidate_git_history: true,
-            }
-        );
-    }
-
-    #[test]
-    fn opening_outline_keeps_cache_invalidations_off() {
-        let outcome = utility_panel_toggle_outcome(None, RightUtilityPanel::Outline);
-
-        assert_eq!(
-            outcome,
-            UtilityPanelToggleOutcome {
-                next_panel: Some(RightUtilityPanel::Outline),
-                clear_resizing: false,
-                invalidate_info: false,
-                invalidate_git_history: false,
-            }
-        );
+        self.last_non_chat_utility_panel = Some(panel);
+        self.set_visible_utility_panel(Some(panel), cx);
     }
 }

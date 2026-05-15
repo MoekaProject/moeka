@@ -241,6 +241,14 @@ impl Render for EditorView {
             .border(px(ws.window_border_width_px))
             .border_color(ws.window_border_color)
             .rounded(px(ws.window_radius_px))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.context_menu.is_some() {
+                        this.close_context_menu(cx);
+                    }
+                }),
+            )
             .on_action(cx.listener(Self::on_undo))
             .on_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::on_backspace))
@@ -719,8 +727,10 @@ impl Render for EditorView {
                                                                 .toolbar_secondary_icon_size_px,
                                                         );
                                                         let secondary_btn_width = secondary_btn_size;
-                                                        let outline_active = self.utility_panel
-                                                            == Some(RightUtilityPanel::Outline);
+                                                        let outline_active = self
+                                                            .is_utility_panel_active(
+                                                                RightUtilityPanel::Outline,
+                                                            );
                                                         let outline_x = editor_pane_width
                                                             - toolbar_right
                                                             - secondary_btn_width * 2.0
@@ -1033,29 +1043,7 @@ impl Render for EditorView {
                 ))
             })
             .when(self.context_menu.is_some(), |this| {
-                this.child(deferred(
-                    div()
-                        .occlude()
-                        .absolute()
-                        .left(px(0.0))
-                        .top(px(0.0))
-                        .w_full()
-                        .h_full()
-                        .cursor(CursorStyle::Arrow)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.close_context_menu(cx);
-                            }),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(|this, _, _, cx| {
-                                this.close_context_menu(cx);
-                            }),
-                        )
-                        .child(self.render_context_menu(cx)),
-                ))
+                this.child(deferred(self.render_context_menu(cx)))
             })
             .when(self.settings_font_picker.is_some(), |this| {
                 if let Some(picker) = &self.settings_font_picker {

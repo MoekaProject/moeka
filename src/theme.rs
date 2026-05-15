@@ -522,8 +522,8 @@ impl Theme {
             bg_selected: crate::hex_hsla!("#181D28"),
             bg_bar: crate::hex_hsla!("#242835"),
             bg_tab: crate::hex_hsla!("#242835"),
-            bg_tab_hover: crate::hex_hsla!("#16181f"),
-            bg_tab_active: crate::hex_hsla!("#16181f"),
+            bg_tab_hover: crate::hex_hsla!("#1e212b"),
+            bg_tab_active: crate::hex_hsla!("#1e212b"),
             bg_code: crate::hex_hsla!("#191D27"),
             bg_code_inline: crate::hex_hsla!("#141823"),
             // Border

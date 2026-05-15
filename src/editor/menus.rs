@@ -2,8 +2,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, Context, CursorStyle, FontWeight, MouseButton, Pixels, Point, SharedString, div,
-    prelude::*, px, svg,
+    AnyElement, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
+    Pixels, Point, SharedString, div, prelude::*, px, svg,
 };
 
 use crate::markdown::{BlockType, InlineKind, LineDecoration, raw_wiki_link_ranges};
@@ -34,6 +34,23 @@ fn current_raw_wiki_link_range(
 
 fn menu_icon_column_metrics(icon_size_px: f32, check_size_px: f32, gap_px: f32) -> (f32, f32) {
     (check_size_px.max(icon_size_px), gap_px)
+}
+
+#[derive(Clone, Copy)]
+struct ContextMenuPanelLayout {
+    left: f32,
+    estimated_top: f32,
+    max_height: f32,
+    bottom_anchor: Option<f32>,
+    overlay_width: f32,
+    overlay_height: f32,
+    margin: f32,
+}
+
+#[derive(Clone, Copy)]
+enum FormatMenuHoverBehavior {
+    None,
+    ClearSubmenu,
 }
 
 fn image_markdown_ranges(line_content: &str) -> Option<(Range<usize>, Range<usize>, Range<usize>)> {
@@ -68,6 +85,9 @@ impl EditorView {
             position,
             kind: ContextMenuKind::SidebarStarred { path },
         });
+        self.context_submenu = None;
+        self.context_submenu_aim = None;
+        self.context_submenu_hovered = false;
         self.sidebar_edit = None;
         cx.notify();
     }
@@ -184,7 +204,7 @@ impl EditorView {
                 Some(MENU_RENAME_SVG_PATH)
             }
             current if current == self.t(crate::i18n::TextKey::Cut) => Some(MENU_CLIP_SVG_PATH),
-            current if current == self.t(crate::i18n::TextKey::Copy) => Some(MENU_PASTE_SVG_PATH),
+            current if current == self.t(crate::i18n::TextKey::Copy) => Some(MENU_COPY_SVG_PATH),
             current if current == self.t(crate::i18n::TextKey::Paste) => Some(MENU_PASTE_SVG_PATH),
             current if current == self.t(crate::i18n::TextKey::CollapseAllDirectories) => {
                 Some(MENU_FOLD_SVG_PATH)
@@ -235,6 +255,7 @@ impl EditorView {
                 self.t(crate::i18n::TextKey::Strikethrough).to_string()
             }
             FormatMenuAction::InlineCode => self.t(crate::i18n::TextKey::InlineCode).to_string(),
+            FormatMenuAction::Highlight => self.extra_format_action_label(action).to_string(),
             FormatMenuAction::CodeBlock => self.t(crate::i18n::TextKey::CodeBlock).to_string(),
             FormatMenuAction::HorizontalRule => {
                 self.t(crate::i18n::TextKey::HorizontalRule).to_string()
@@ -249,6 +270,9 @@ impl EditorView {
             FormatMenuAction::WikiLink => self.t(crate::i18n::TextKey::WikiLink).to_string(),
             FormatMenuAction::Image => self.t(crate::i18n::TextKey::Image).to_string(),
             FormatMenuAction::Table => self.t(crate::i18n::TextKey::Table).to_string(),
+            FormatMenuAction::Superscript
+            | FormatMenuAction::Subscript
+            | FormatMenuAction::Footnote => self.extra_format_action_label(action).to_string(),
             FormatMenuAction::EditImageDescription => {
                 self.t(crate::i18n::TextKey::EditDescription).to_string()
             }
@@ -257,6 +281,39 @@ impl EditorView {
             FormatMenuAction::SelectImageFile => {
                 self.t(crate::i18n::TextKey::SelectImage).to_string()
             }
+        }
+    }
+
+    fn extra_format_action_label(&self, action: FormatMenuAction) -> &'static str {
+        match self.ui_language {
+            UiLanguage::ChineseSimplified => match action {
+                FormatMenuAction::Highlight => "高亮",
+                FormatMenuAction::Superscript => "上标",
+                FormatMenuAction::Subscript => "下标",
+                FormatMenuAction::Footnote => "脚注",
+                _ => "",
+            },
+            UiLanguage::ChineseTraditional => match action {
+                FormatMenuAction::Highlight => "高亮",
+                FormatMenuAction::Superscript => "上標",
+                FormatMenuAction::Subscript => "下標",
+                FormatMenuAction::Footnote => "腳註",
+                _ => "",
+            },
+            _ => match action {
+                FormatMenuAction::Highlight => "Highlight",
+                FormatMenuAction::Superscript => "Superscript",
+                FormatMenuAction::Subscript => "Subscript",
+                FormatMenuAction::Footnote => "Footnote",
+                _ => "",
+            },
+        }
+    }
+
+    fn more_formats_menu_label(&self) -> &'static str {
+        match self.ui_language {
+            UiLanguage::ChineseSimplified | UiLanguage::ChineseTraditional => "更多格式",
+            _ => "More Formats",
         }
     }
 
@@ -418,6 +475,18 @@ impl EditorView {
 
         // Check inline spans (including markers) — pick the smallest (innermost) match
         let mut best_inline: Option<(usize, FormatMenuAction)> = None;
+        let mut update_best_inline =
+            |full_start: usize, full_end: usize, action: FormatMenuAction| {
+                if cursor_col >= full_start && cursor_col <= full_end {
+                    let span_len = full_end.saturating_sub(full_start);
+                    if best_inline
+                        .as_ref()
+                        .is_none_or(|(prev_len, _)| span_len < *prev_len)
+                    {
+                        best_inline = Some((span_len, action));
+                    }
+                }
+            };
         for span in &decoration.inline_spans {
             let marker_len = match &span.kind {
                 InlineKind::Bold => 2,
@@ -429,25 +498,49 @@ impl EditorView {
             };
             let full_start = span.range.start.saturating_sub(marker_len);
             let full_end = span.range.end + marker_len;
-            if cursor_col >= full_start && cursor_col <= full_end {
-                let action = match &span.kind {
-                    InlineKind::Bold => Some(FormatMenuAction::Bold),
-                    InlineKind::Italic => Some(FormatMenuAction::Italic),
-                    InlineKind::Strikethrough => Some(FormatMenuAction::Strikethrough),
-                    InlineKind::InlineCode => Some(FormatMenuAction::InlineCode),
-                    InlineKind::Link => Some(FormatMenuAction::Link),
-                    InlineKind::Image => Some(FormatMenuAction::Image),
-                };
-                if let Some(action) = action {
-                    let span_len = full_end - full_start;
-                    if best_inline
-                        .as_ref()
-                        .is_none_or(|(prev_len, _)| span_len < *prev_len)
-                    {
-                        best_inline = Some((span_len, action));
-                    }
-                }
+            let action = match &span.kind {
+                InlineKind::Bold => Some(FormatMenuAction::Bold),
+                InlineKind::Italic => Some(FormatMenuAction::Italic),
+                InlineKind::Strikethrough => Some(FormatMenuAction::Strikethrough),
+                InlineKind::InlineCode => Some(FormatMenuAction::InlineCode),
+                InlineKind::Link => Some(FormatMenuAction::Link),
+                InlineKind::Image => Some(FormatMenuAction::Image),
+            };
+            if let Some(action) = action {
+                update_best_inline(full_start, full_end, action);
             }
+        }
+
+        for span in &decoration.highlight_spans {
+            update_best_inline(
+                span.start.saturating_sub(2),
+                span.end.saturating_add(2),
+                FormatMenuAction::Highlight,
+            );
+        }
+
+        for span in &decoration.superscript_spans {
+            update_best_inline(
+                span.start.saturating_sub(1),
+                span.end.saturating_add(1),
+                FormatMenuAction::Superscript,
+            );
+        }
+
+        for span in &decoration.subscript_spans {
+            update_best_inline(
+                span.start.saturating_sub(1),
+                span.end.saturating_add(1),
+                FormatMenuAction::Subscript,
+            );
+        }
+
+        for footnote_reference in &decoration.footnote_references {
+            update_best_inline(
+                footnote_reference.full_range.start,
+                footnote_reference.full_range.end,
+                FormatMenuAction::Footnote,
+            );
         }
 
         if let Some((_, action)) = best_inline {
@@ -484,6 +577,9 @@ impl EditorView {
             position,
             kind: ContextMenuKind::Sidebar { path, is_dir },
         });
+        self.context_submenu = None;
+        self.context_submenu_aim = None;
+        self.context_submenu_hovered = false;
         self.sidebar_edit = None;
         cx.notify();
     }
@@ -497,6 +593,9 @@ impl EditorView {
             position,
             kind: ContextMenuKind::Format,
         });
+        self.context_submenu = None;
+        self.context_submenu_aim = None;
+        self.context_submenu_hovered = false;
         self.sidebar_edit = None;
         cx.notify();
     }
@@ -556,6 +655,9 @@ impl EditorView {
             position: pos,
             kind: ContextMenuKind::WikiLink,
         });
+        self.context_submenu = None;
+        self.context_submenu_aim = None;
+        self.context_submenu_hovered = false;
         if self.wiki_link_query.trim().is_empty() {
             self.run_wiki_link_recent_search(cx);
         } else {
@@ -726,6 +828,9 @@ impl EditorView {
             position,
             kind: ContextMenuKind::Tab { tab_id },
         });
+        self.context_submenu = None;
+        self.context_submenu_aim = None;
+        self.context_submenu_hovered = false;
         self.sidebar_edit = None;
         cx.notify();
     }
@@ -739,25 +844,36 @@ impl EditorView {
             position,
             kind: ContextMenuKind::Terminal,
         });
+        self.context_submenu = None;
+        self.context_submenu_aim = None;
+        self.context_submenu_hovered = false;
         self.sidebar_edit = None;
         cx.notify();
     }
 
-    pub(crate) fn open_chat_agent_cli_menu(
+    pub(crate) fn open_chat_tab_context_menu(
         &mut self,
+        tab_id: String,
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
         self.context_menu = Some(ContextMenu {
             position,
-            kind: ContextMenuKind::ChatAgentCli,
+            kind: ContextMenuKind::ChatTab { tab_id },
         });
+        self.context_submenu = None;
+        self.context_submenu_aim = None;
+        self.context_submenu_hovered = false;
         self.sidebar_edit = None;
         cx.notify();
     }
 
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
-        if self.context_menu.take().is_some() {
+        let had_menu = self.context_menu.take().is_some();
+        let had_submenu = self.context_submenu.take().is_some();
+        let had_submenu_aim = self.context_submenu_aim.take().is_some();
+        let had_submenu_hovered = std::mem::replace(&mut self.context_submenu_hovered, false);
+        if had_menu || had_submenu || had_submenu_aim || had_submenu_hovered {
             if let Some(start) = self.slash_menu_start.take() {
                 let end = self.cursor.offset;
                 if end > start {
@@ -836,6 +952,8 @@ impl EditorView {
             self.slash_filter.clear();
         }
         self.context_menu = None;
+        self.context_submenu = None;
+        self.context_submenu_aim = None;
         match action {
             FormatMenuAction::Cut => self.cut_selection_to_clipboard(cx),
             FormatMenuAction::Copy => self.copy_selection_to_clipboard(cx),
@@ -905,6 +1023,11 @@ impl EditorView {
                 self.apply_wrap("`", "`");
                 self.pause_blinking(cx);
             }
+            FormatMenuAction::Highlight => {
+                self.checkpoint();
+                self.apply_wrap("==", "==");
+                self.pause_blinking(cx);
+            }
             FormatMenuAction::CodeBlock => {
                 self.checkpoint();
                 self.wrap_current_lines_as_code_block();
@@ -971,6 +1094,37 @@ impl EditorView {
                 let select_end = select_start + "列1".len();
                 self.cursor.anchor = select_start;
                 self.cursor.offset = select_end;
+                self.reparse();
+                self.scroll_to_cursor();
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Superscript => {
+                self.checkpoint();
+                self.apply_wrap("^", "^");
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Subscript => {
+                self.checkpoint();
+                self.apply_wrap("~", "~");
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::Footnote => {
+                self.checkpoint();
+                let range = self.cursor.selection_range();
+                if range.is_empty() {
+                    let snippet = "[^note]";
+                    self.buffer.replace(range.clone(), snippet);
+                    let select_start = range.start + 2;
+                    let select_end = select_start + "note".len();
+                    self.cursor.anchor = select_start;
+                    self.cursor.offset = select_end;
+                } else {
+                    let selected_text = self.buffer.text()[range.clone()].to_string();
+                    let replacement = format!("[^{}]", selected_text);
+                    self.buffer.replace(range.clone(), &replacement);
+                    self.cursor
+                        .move_to(range.start + replacement.len(), &self.buffer);
+                }
                 self.reparse();
                 self.scroll_to_cursor();
                 self.pause_blinking(cx);
@@ -1203,8 +1357,16 @@ impl EditorView {
         let hover_bg = ms.menu_item_hover_bg;
         let text_color = ms.menu_item_text_color;
         let check_size = self.scaled(wss.ws_menu_item_check_size_px);
-        let icon_size = self.scaled(ms.menu_format_icon_size_px + 3.0);
+        let icon_size = self.scaled(
+            ms.menu_format_icon_size_px
+                + if icon_path.ends_with("copilot.svg") {
+                    5.0
+                } else {
+                    3.0
+                },
+        );
         let gap = self.scaled(wss.ws_menu_item_action_icon_gap_px);
+        let icon_column_width = check_size.max(icon_size);
 
         div()
             .w_full()
@@ -1235,10 +1397,19 @@ impl EditorView {
                     }),
             )
             .child(
-                svg()
-                    .path(icon_path)
-                    .size(px(icon_size))
-                    .text_color(ms.menu_format_icon_color),
+                div()
+                    .w(px(icon_column_width))
+                    .h(px(icon_column_width))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        svg()
+                            .path(icon_path)
+                            .size(px(icon_size))
+                            .text_color(ms.menu_format_icon_color),
+                    ),
             )
             .child(label.to_string())
             .on_mouse_down(
@@ -1313,6 +1484,29 @@ impl EditorView {
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
+        self.render_format_context_menu_item_with_hover_behavior(
+            label,
+            icon_path,
+            shortcut,
+            is_selected,
+            is_active,
+            FormatMenuHoverBehavior::None,
+            cx,
+            handler,
+        )
+    }
+
+    fn render_format_context_menu_item_with_hover_behavior(
+        &self,
+        label: &str,
+        icon_path: Option<&str>,
+        shortcut: Option<&str>,
+        is_selected: bool,
+        is_active: bool,
+        hover_behavior: FormatMenuHoverBehavior,
+        cx: &mut Context<Self>,
+        handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
         let ms = &self.styles.context_menu;
         let icon_path = icon_path.or_else(|| self.context_menu_icon_path(label));
         let bg = if is_selected {
@@ -1376,11 +1570,106 @@ impl EditorView {
             .when_some(shortcut, |this, shortcut| {
                 this.child(div().child(render_shortcut(shortcut, shortcut_style)))
             })
+            .when(
+                !matches!(hover_behavior, FormatMenuHoverBehavior::None),
+                |this| {
+                    this.on_mouse_move(cx.listener(
+                        move |this, event: &MouseMoveEvent, _window, cx| match hover_behavior {
+                            FormatMenuHoverBehavior::None => {}
+                            FormatMenuHoverBehavior::ClearSubmenu => {
+                                if this.should_preserve_format_more_submenu(event.position) {
+                                    return;
+                                }
+                                if this.context_submenu.take().is_some() {
+                                    this.context_submenu_aim = None;
+                                    this.context_submenu_hovered = false;
+                                    cx.notify();
+                                }
+                            }
+                        },
+                    ))
+                },
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
                     cx.stop_propagation();
                     handler(this, window, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_format_submenu_trigger_item(
+        &self,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ms = &self.styles.context_menu;
+        let is_open = matches!(self.context_submenu, Some(ContextMenuKind::FormatMore));
+        let icon_size = self.scaled(ms.menu_format_icon_size_px);
+        let arrow_size = (icon_size - self.scaled(2.0)).max(self.scaled(10.0));
+        let hover_bg = ms.menu_item_hover_bg;
+        let text_color = ms.menu_item_text_color;
+        let bg = if is_open {
+            ms.menu_item_selected_bg
+        } else {
+            gpui::transparent_black()
+        };
+
+        div()
+            .w_full()
+            .h(px(self.scaled(ms.menu_item_height_px)))
+            .bg(bg)
+            .px(px(self.scaled(ms.menu_item_padding_x_px)))
+            .flex()
+            .items_center()
+            .justify_between()
+            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
+            .text_color(text_color)
+            .hover(move |style| style.bg(hover_bg))
+            .cursor(CursorStyle::Arrow)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(icon_size))
+                            .h(px(icon_size))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .flex_none(),
+                    )
+                    .child(label.to_string()),
+            )
+            .child(
+                svg()
+                    .path("assets/icons/right.svg")
+                    .size(px(arrow_size))
+                    .text_color(ms.menu_shortcut_text_color),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                this.context_submenu_aim = Some(ContextSubmenuAim {
+                    origin: event.position,
+                });
+                this.context_submenu_hovered = false;
+                if !matches!(this.context_submenu, Some(ContextMenuKind::FormatMore)) {
+                    this.context_submenu = Some(ContextMenuKind::FormatMore);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.context_submenu_aim = Some(ContextSubmenuAim {
+                        origin: event.position,
+                    });
+                    this.context_submenu_hovered = false;
+                    this.context_submenu = Some(ContextMenuKind::FormatMore);
+                    cx.notify();
                 }),
             )
             .into_any_element()
@@ -1932,57 +2221,48 @@ impl EditorView {
         };
 
         if !is_slash_menu {
-            let clipboard_items = [
+            for (label, shortcut, action) in [
                 (
                     self.format_action_label(FormatMenuAction::Cut),
-                    "cut",
                     Some("⌘X"),
                     FormatMenuAction::Cut,
                 ),
                 (
                     self.format_action_label(FormatMenuAction::Copy),
-                    "copy",
                     Some("⌘C"),
                     FormatMenuAction::Copy,
                 ),
                 (
                     self.format_action_label(FormatMenuAction::Paste),
-                    "paste",
                     Some("⌘V"),
                     FormatMenuAction::Paste,
                 ),
-            ];
-            let mut clip_matched = Vec::new();
-            for (label, ft, shortcut, action) in clipboard_items {
-                if matches_filter(&label, ft) {
-                    clip_matched.push(self.render_format_context_menu_item(
-                        &label,
-                        None,
-                        shortcut,
-                        false,
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.execute_format_menu_action(action, cx);
-                        },
-                    ));
-                }
-            }
-            if !clip_matched.is_empty() {
-                items.extend(clip_matched);
+            ] {
+                items.push(self.render_format_context_menu_item_with_hover_behavior(
+                    &label,
+                    None,
+                    shortcut,
+                    false,
+                    false,
+                    FormatMenuHoverBehavior::ClearSubmenu,
+                    cx,
+                    move |this, _, cx| {
+                        this.execute_format_menu_action(action, cx);
+                    },
+                ));
             }
 
             if let Some(current_path) = self.current_file_path.clone() {
-                if !items.is_empty() {
-                    items.push(self.render_context_menu_separator());
-                }
+                items.push(self.render_context_menu_separator());
+
                 let chat_path = current_path.clone();
-                items.push(self.render_format_context_menu_item(
+                items.push(self.render_format_context_menu_item_with_hover_behavior(
                     ADD_FILE_TO_CHAT_LABEL,
                     Some(MENU_AT_SVG_PATH),
                     None,
                     false,
                     false,
+                    FormatMenuHoverBehavior::ClearSubmenu,
                     cx,
                     move |this, _, cx| {
                         this.close_context_menu(cx);
@@ -1994,12 +2274,13 @@ impl EditorView {
                 if !selection.is_empty() {
                     let selection_path = current_path.clone();
                     let selection_range = selection.clone();
-                    items.push(self.render_format_context_menu_item(
+                    items.push(self.render_format_context_menu_item_with_hover_behavior(
                         ADD_SELECTION_TO_CHAT_LABEL,
                         Some(CHAT_SVG_PATH),
                         None,
                         false,
                         false,
+                        FormatMenuHoverBehavior::ClearSubmenu,
                         cx,
                         move |this, _, cx| {
                             this.close_context_menu(cx);
@@ -2012,44 +2293,99 @@ impl EditorView {
                     ));
                 }
             }
+
+            items.push(self.render_context_menu_separator());
+
+            for (label, icon, shortcut, action) in [
+                (
+                    self.t(crate::i18n::TextKey::Heading).to_string(),
+                    Some(HEADING_1_SVG_PATH),
+                    None,
+                    FormatMenuAction::Heading1,
+                ),
+                (
+                    self.format_action_label(FormatMenuAction::Bold),
+                    Some(FMT_BOLD_SVG),
+                    Some("⌘B"),
+                    FormatMenuAction::Bold,
+                ),
+                (
+                    self.format_action_label(FormatMenuAction::Italic),
+                    Some(FMT_ITALIC_SVG),
+                    Some("⌘I"),
+                    FormatMenuAction::Italic,
+                ),
+                (
+                    self.format_action_label(FormatMenuAction::Strikethrough),
+                    Some(FMT_STRIKETHROUGH_SVG),
+                    Some("⌘⇧S"),
+                    FormatMenuAction::Strikethrough,
+                ),
+                (
+                    self.format_action_label(FormatMenuAction::InlineCode),
+                    Some(FMT_INLINE_CODE_SVG),
+                    Some("⌘E"),
+                    FormatMenuAction::InlineCode,
+                ),
+            ] {
+                let is_active = active_actions.contains(&action);
+                items.push(self.render_format_context_menu_item_with_hover_behavior(
+                    &label,
+                    icon,
+                    shortcut,
+                    false,
+                    is_active,
+                    FormatMenuHoverBehavior::ClearSubmenu,
+                    cx,
+                    move |this, _, cx| {
+                        this.execute_format_menu_action(action, cx);
+                    },
+                ));
+            }
+
+            items.push(self.render_context_menu_separator());
+
+            for (label, icon, shortcut, action) in [
+                (
+                    self.format_action_label(FormatMenuAction::Todo),
+                    Some(FMT_TODO_SVG),
+                    Some("⌘⌥T"),
+                    FormatMenuAction::Todo,
+                ),
+                (
+                    self.format_action_label(FormatMenuAction::Link),
+                    Some(FMT_LINK_SVG),
+                    Some("⌘K"),
+                    FormatMenuAction::Link,
+                ),
+            ] {
+                let is_active = active_actions.contains(&action);
+                items.push(self.render_format_context_menu_item_with_hover_behavior(
+                    &label,
+                    icon,
+                    shortcut,
+                    false,
+                    is_active,
+                    FormatMenuHoverBehavior::ClearSubmenu,
+                    cx,
+                    move |this, _, cx| {
+                        this.execute_format_menu_action(action, cx);
+                    },
+                ));
+            }
+
+            items.push(self.render_context_menu_separator());
+            items.push(self.render_format_submenu_trigger_item(self.more_formats_menu_label(), cx));
+            return items;
         }
 
-        // (label, filter_text, icon_path, shortcut, action)
-        let all_menu_items = [
+        let slash_items = [
             (
-                self.t(crate::i18n::TextKey::Heading).to_string(),
-                "heading title h1",
-                Some(HEADING_1_SVG_PATH),
-                None,
-                FormatMenuAction::Heading1,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::Bold),
-                "bold",
-                Some(FMT_BOLD_SVG),
-                Some("⌘B"),
-                FormatMenuAction::Bold,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::Italic),
-                "italic",
-                Some(FMT_ITALIC_SVG),
-                Some("⌘I"),
-                FormatMenuAction::Italic,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::Strikethrough),
-                "strikethrough",
-                Some(FMT_STRIKETHROUGH_SVG),
-                Some("⌘⇧S"),
-                FormatMenuAction::Strikethrough,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::InlineCode),
-                "inline code",
-                Some(FMT_INLINE_CODE_SVG),
-                Some("⌘E"),
-                FormatMenuAction::InlineCode,
+                self.format_action_label(FormatMenuAction::Todo),
+                "todo task checkbox",
+                Some(FMT_TODO_SVG),
+                Some("⌘⌥T"),
+                FormatMenuAction::Todo,
             ),
             (
                 self.format_action_label(FormatMenuAction::CodeBlock),
@@ -2059,39 +2395,11 @@ impl EditorView {
                 FormatMenuAction::CodeBlock,
             ),
             (
-                self.format_action_label(FormatMenuAction::HorizontalRule),
-                "horizontal rule divider",
-                Some(FMT_SPLIT_SVG),
-                Some("---"),
-                FormatMenuAction::HorizontalRule,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::Quote),
-                "quote blockquote",
-                Some(FMT_QUOTE_SVG),
-                Some("⌘⌥Q"),
-                FormatMenuAction::Quote,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::UnorderedList),
-                "unordered list bullet",
-                Some(FMT_LIST_SVG),
-                Some("⌘⌥U"),
-                FormatMenuAction::UnorderedList,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::OrderedList),
-                "ordered list numbered",
-                Some(FMT_ORDER_LIST_SVG),
-                Some("⌘⌥O"),
-                FormatMenuAction::OrderedList,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::Todo),
-                "todo task checkbox",
-                Some(FMT_TODO_SVG),
-                Some("⌘⌥T"),
-                FormatMenuAction::Todo,
+                self.format_action_label(FormatMenuAction::Table),
+                "table grid 2x2",
+                Some(FMT_TABLE_SVG),
+                Some("2×2"),
+                FormatMenuAction::Table,
             ),
             (
                 self.format_action_label(FormatMenuAction::Link),
@@ -2114,93 +2422,154 @@ impl EditorView {
                 Some("⌘⇧I"),
                 FormatMenuAction::Image,
             ),
+        ];
+
+        for (label, filter_text, icon, shortcut, action) in slash_items {
+            if matches_filter(&label, filter_text) {
+                let is_selected = actionable_index == selected_index;
+                let is_active = active_actions.contains(&action);
+                items.push(self.render_format_context_menu_item(
+                    &label,
+                    icon,
+                    shortcut,
+                    is_selected,
+                    is_active,
+                    cx,
+                    move |this, _, cx| {
+                        this.execute_format_menu_action(action, cx);
+                    },
+                ));
+                actionable_index += 1;
+            }
+        }
+
+        items
+    }
+
+    fn render_format_more_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let active_actions = self.active_format_actions();
+        let mut items = Vec::new();
+
+        let block_actions = [
+            (
+                self.format_action_label(FormatMenuAction::CodeBlock),
+                Some(FMT_CODE_SVG),
+                Some("⌘⌥C"),
+                FormatMenuAction::CodeBlock,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::HorizontalRule),
+                Some(FMT_SPLIT_SVG),
+                Some("---"),
+                FormatMenuAction::HorizontalRule,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::Quote),
+                Some(FMT_QUOTE_SVG),
+                Some("⌘⌥Q"),
+                FormatMenuAction::Quote,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::UnorderedList),
+                Some(FMT_LIST_SVG),
+                Some("⌘⌥U"),
+                FormatMenuAction::UnorderedList,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::OrderedList),
+                Some(FMT_ORDER_LIST_SVG),
+                Some("⌘⌥O"),
+                FormatMenuAction::OrderedList,
+            ),
+        ];
+
+        for (label, icon, shortcut, action) in block_actions {
+            let is_active = active_actions.contains(&action);
+            items.push(self.render_format_context_menu_item(
+                &label,
+                icon,
+                shortcut,
+                false,
+                is_active,
+                cx,
+                move |this, _, cx| {
+                    this.execute_format_menu_action(action, cx);
+                },
+            ));
+        }
+
+        items.push(self.render_context_menu_separator());
+
+        for (label, icon, shortcut, action) in [
+            (
+                self.format_action_label(FormatMenuAction::WikiLink),
+                Some(FMT_WIKI_LINK_SVG),
+                Some("[["),
+                FormatMenuAction::WikiLink,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::Image),
+                Some(FMT_IMAGE_SVG),
+                Some("⌘⇧I"),
+                FormatMenuAction::Image,
+            ),
             (
                 self.format_action_label(FormatMenuAction::Table),
-                "table grid 2x2",
                 Some(FMT_TABLE_SVG),
                 Some("2×2"),
                 FormatMenuAction::Table,
             ),
-        ];
+        ] {
+            let is_active = active_actions.contains(&action);
+            items.push(self.render_format_context_menu_item(
+                &label,
+                icon,
+                shortcut,
+                false,
+                is_active,
+                cx,
+                move |this, _, cx| {
+                    this.execute_format_menu_action(action, cx);
+                },
+            ));
+        }
 
-        let slash_only_actions: &[FormatMenuAction] = &[
-            FormatMenuAction::Todo,
-            FormatMenuAction::CodeBlock,
-            FormatMenuAction::Table,
-            FormatMenuAction::Link,
-            FormatMenuAction::WikiLink,
-            FormatMenuAction::Image,
-        ];
+        items.push(self.render_context_menu_separator());
 
-        if is_slash_menu {
-            // Render slash menu items in the fixed order defined by slash_only_actions
-            for &slash_action in slash_only_actions.iter() {
-                // Find the matching item in all_menu_items
-                if let Some((label, ft, icon, shortcut, action)) = all_menu_items
-                    .iter()
-                    .find(|(_, _, _, _, a)| *a == slash_action)
-                    .cloned()
-                {
-                    if matches_filter(&label, ft) {
-                        let is_selected = actionable_index == selected_index;
-                        let is_active = active_actions.contains(&action);
-                        items.push(self.render_format_context_menu_item(
-                            &label,
-                            icon,
-                            shortcut,
-                            is_selected,
-                            is_active,
-                            cx,
-                            move |this, _, cx| {
-                                this.execute_format_menu_action(action, cx);
-                            },
-                        ));
-                        actionable_index += 1;
-                    }
-                }
-            }
-        } else {
-            let group_boundaries = [0usize, 5, 11, 15];
-            let mut group_start_flags = [false; 3];
-
-            for (idx, (label, ft, _, _, _)) in all_menu_items.iter().enumerate() {
-                if matches_filter(label, ft) {
-                    for g in 0..3 {
-                        if idx >= group_boundaries[g] && idx < group_boundaries[g + 1] {
-                            group_start_flags[g] = true;
-                        }
-                    }
-                }
-            }
-
-            let mut prev_group_had_items = !items.is_empty();
-            for g in 0..3 {
-                if !group_start_flags[g] {
-                    continue;
-                }
-                if prev_group_had_items {
-                    items.push(self.render_context_menu_separator());
-                }
-                for idx in group_boundaries[g]..group_boundaries[g + 1] {
-                    let (label, ft, icon, shortcut, action) = all_menu_items[idx].clone();
-                    if matches_filter(&label, ft) {
-                        let is_selected = false;
-                        let is_active = active_actions.contains(&action);
-                        items.push(self.render_format_context_menu_item(
-                            &label,
-                            icon,
-                            shortcut,
-                            is_selected,
-                            is_active,
-                            cx,
-                            move |this, _, cx| {
-                                this.execute_format_menu_action(action, cx);
-                            },
-                        ));
-                    }
-                }
-                prev_group_had_items = true;
-            }
+        for (label, shortcut, action) in [
+            (
+                self.format_action_label(FormatMenuAction::Superscript),
+                Some("^text^"),
+                FormatMenuAction::Superscript,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::Subscript),
+                Some("~text~"),
+                FormatMenuAction::Subscript,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::Footnote),
+                Some("[^note]"),
+                FormatMenuAction::Footnote,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::Highlight),
+                Some("==text=="),
+                FormatMenuAction::Highlight,
+            ),
+        ] {
+            let is_active = active_actions.contains(&action);
+            items.push(self.render_format_context_menu_item(
+                &label,
+                None,
+                shortcut,
+                false,
+                is_active,
+                cx,
+                move |this, _, cx| {
+                    this.execute_format_menu_action(action, cx);
+                },
+            ));
         }
 
         items
@@ -2398,12 +2767,332 @@ impl EditorView {
             .into_any_element()
     }
 
+    fn estimated_context_menu_height(&self, item_count: usize) -> f32 {
+        let ms = &self.styles.context_menu;
+        item_count as f32 * self.scaled(ms.menu_item_height_px)
+            + self.scaled(ms.menu_padding_y_px) * 2.0
+    }
+
+    fn context_menu_panel_layout(
+        &self,
+        position: Point<Pixels>,
+        width: f32,
+        estimated_menu_height: f32,
+    ) -> ContextMenuPanelLayout {
+        let ms = &self.styles.context_menu;
+        let border_w = self.styles.window.window_border_width_px;
+        let overlay_w = self.last_window_width - 2.0 * border_w;
+        let overlay_h = self.last_window_height - 2.0 * border_w;
+        let pos_x = (f32::from(position.x) - border_w).clamp(0.0, overlay_w);
+        let pos_y = (f32::from(position.y) - border_w).clamp(0.0, overlay_h);
+        let margin = self.scaled(ms.menu_max_height_margin_px).max(4.0);
+
+        let space_right = overlay_w - pos_x - margin;
+        let space_left = pos_x - margin;
+        let space_below = overlay_h - pos_y - margin;
+        let space_above = pos_y - margin;
+
+        let open_right = space_right >= width || space_right >= space_left;
+        let open_down = space_below >= estimated_menu_height || space_below >= space_above;
+
+        let left = if open_right {
+            pos_x
+        } else {
+            (pos_x - width).max(margin)
+        };
+        let max_height = if open_down {
+            (overlay_h - pos_y - margin).max(self.scaled(100.0))
+        } else {
+            (pos_y - margin).max(self.scaled(100.0))
+        };
+
+        ContextMenuPanelLayout {
+            left,
+            estimated_top: if open_down {
+                pos_y
+            } else {
+                (pos_y - estimated_menu_height).max(margin)
+            },
+            max_height,
+            bottom_anchor: if open_down {
+                None
+            } else {
+                Some(overlay_h - pos_y)
+            },
+            overlay_width: overlay_w,
+            overlay_height: overlay_h,
+            margin,
+        }
+    }
+
+    fn context_menu_layout_top(&self, layout: ContextMenuPanelLayout, panel_height: f32) -> f32 {
+        if let Some(bottom_anchor) = layout.bottom_anchor {
+            layout.overlay_height - bottom_anchor - panel_height
+        } else {
+            layout.estimated_top
+        }
+    }
+
+    fn context_menu_overlay_coordinates(&self, position: Point<Pixels>) -> (f32, f32) {
+        let border_w = self.styles.window.window_border_width_px;
+        (
+            f32::from(position.x) - border_w,
+            f32::from(position.y) - border_w,
+        )
+    }
+
+    fn triangle_sign(point: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+        (point.0 - b.0) * (a.1 - b.1) - (a.0 - b.0) * (point.1 - b.1)
+    }
+
+    fn point_in_triangle(
+        &self,
+        point: (f32, f32),
+        a: (f32, f32),
+        b: (f32, f32),
+        c: (f32, f32),
+    ) -> bool {
+        let d1 = Self::triangle_sign(point, a, b);
+        let d2 = Self::triangle_sign(point, b, c);
+        let d3 = Self::triangle_sign(point, c, a);
+        let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+        let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+        !(has_neg && has_pos)
+    }
+
+    fn format_more_submenu_layout(&self, menu: &ContextMenu) -> Option<ContextMenuPanelLayout> {
+        if !matches!(menu.kind, ContextMenuKind::Format) || !self.can_render_format_more_submenu() {
+            return None;
+        }
+
+        let ms = &self.styles.context_menu;
+        let main_menu_width = self.scaled(ms.menu_format_width_px);
+        let main_menu_height = self.format_main_menu_height();
+        let submenu_width = self.scaled(ms.menu_format_width_px);
+        let submenu_height = self.format_more_menu_height();
+        let submenu_gap = self.scaled(ms.menu_submenu_gap_px);
+        let main_layout =
+            self.context_menu_panel_layout(menu.position, main_menu_width, main_menu_height);
+        let main_menu_top = self.context_menu_layout_top(main_layout, main_menu_height);
+        let right_space = main_layout.overlay_width
+            - (main_layout.left + main_menu_width)
+            - submenu_gap
+            - main_layout.margin;
+        let submenu_left = if right_space >= submenu_width {
+            main_layout.left + main_menu_width + submenu_gap
+        } else {
+            (main_layout.left - submenu_width - submenu_gap).max(main_layout.margin)
+        };
+        let max_top = (main_layout.overlay_height - main_layout.margin - submenu_height)
+            .max(main_layout.margin);
+        let submenu_top = (self.format_more_submenu_trigger_center_y(main_menu_top)
+            - submenu_height / 2.0)
+            .clamp(main_layout.margin, max_top);
+
+        Some(ContextMenuPanelLayout {
+            left: submenu_left,
+            estimated_top: submenu_top,
+            max_height: (main_layout.overlay_height - 2.0 * main_layout.margin)
+                .max(self.scaled(100.0)),
+            bottom_anchor: None,
+            overlay_width: main_layout.overlay_width,
+            overlay_height: main_layout.overlay_height,
+            margin: main_layout.margin,
+        })
+    }
+
+    fn should_preserve_format_more_submenu(&self, cursor_position: Point<Pixels>) -> bool {
+        let Some(menu) = &self.context_menu else {
+            return false;
+        };
+        if !matches!(menu.kind, ContextMenuKind::Format)
+            || !matches!(self.context_submenu, Some(ContextMenuKind::FormatMore))
+        {
+            return false;
+        }
+
+        let Some(aim) = self.context_submenu_aim else {
+            return false;
+        };
+        let Some(submenu_layout) = self.format_more_submenu_layout(menu) else {
+            return false;
+        };
+
+        let submenu_width = self.scaled(self.styles.context_menu.menu_format_width_px);
+        let submenu_height = self.format_more_menu_height();
+        let submenu_top = self.context_menu_layout_top(submenu_layout, submenu_height);
+        let (origin_x, origin_y) = self.context_menu_overlay_coordinates(aim.origin);
+        let (cursor_x, cursor_y) = self.context_menu_overlay_coordinates(cursor_position);
+        let submenu_on_right = submenu_layout.left >= origin_x;
+        let submenu_edge_x = if submenu_on_right {
+            submenu_layout.left
+        } else {
+            submenu_layout.left + submenu_width
+        };
+
+        if cursor_x < origin_x.min(submenu_edge_x) - 1.0
+            || cursor_x > origin_x.max(submenu_edge_x) + 1.0
+        {
+            return false;
+        }
+
+        self.point_in_triangle(
+            (cursor_x, cursor_y),
+            (origin_x, origin_y),
+            (submenu_edge_x, submenu_top),
+            (submenu_edge_x, submenu_top + submenu_height),
+        )
+    }
+
+    fn render_context_menu_panel(
+        &self,
+        panel_id: &'static str,
+        layout: ContextMenuPanelLayout,
+        width: f32,
+        items: Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ms = &self.styles.context_menu;
+
+        let mut menu_div = div()
+            .id(panel_id)
+            .absolute()
+            .left(px(layout.left))
+            .w(px(width))
+            .max_h(px(layout.max_height))
+            .overflow_y_scroll()
+            .py(px(self.scaled(ms.menu_padding_y_px)))
+            .bg(ms.menu_bg)
+            .border(px(ms.menu_border_width_px))
+            .border_color(ms.menu_border_color)
+            .rounded(px(self.scaled(ms.menu_radius_px)));
+
+        if let Some(bottom_anchor) = layout.bottom_anchor {
+            menu_div = menu_div.bottom(px(bottom_anchor));
+        } else {
+            menu_div = menu_div.top(px(layout.estimated_top));
+        }
+
+        if ms.menu_shadow {
+            menu_div = menu_div.shadow_sm();
+        }
+
+        let menu_div = menu_div
+            .children(items)
+            .cursor(CursorStyle::Arrow)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, _event, _window, _cx| {}),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_this, _event, _window, _cx| {}),
+            )
+            .on_mouse_move(cx.listener(|_this, _event, _window, _cx| {}))
+            .on_scroll_wheel(cx.listener(|_this, _event, _window, _cx| {}));
+
+        let menu_div = if panel_id == "context-menu" {
+            menu_div.on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                this.close_context_menu(cx);
+            }))
+        } else {
+            menu_div
+        };
+
+        let menu_div = if panel_id == "context-submenu" {
+            menu_div.on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                if *hovered {
+                    this.context_submenu_hovered = true;
+                    return;
+                }
+
+                if this.context_submenu_hovered
+                    && matches!(this.context_submenu, Some(ContextMenuKind::FormatMore))
+                {
+                    this.context_submenu = None;
+                    this.context_submenu_aim = None;
+                    this.context_submenu_hovered = false;
+                    cx.notify();
+                }
+            }))
+        } else {
+            menu_div
+        };
+
+        menu_div.into_any_element()
+    }
+
+    fn can_render_format_more_submenu(&self) -> bool {
+        self.slash_menu_start.is_none()
+            && self.current_image_menu_target().is_none()
+            && self.current_heading_action().is_none()
+    }
+
+    fn context_menu_separator_block_height(&self) -> f32 {
+        let ms = &self.styles.context_menu;
+        self.scaled(ms.menu_separator_height_px + ms.menu_separator_margin_y_px * 2.0)
+    }
+
+    fn format_main_menu_height(&self) -> f32 {
+        let ms = &self.styles.context_menu;
+        let item_height = self.scaled(ms.menu_item_height_px);
+        let padding = self.scaled(ms.menu_padding_y_px) * 2.0;
+        let separator_height = self.context_menu_separator_block_height();
+        let chat_rows = if self.current_file_path.is_some() {
+            if self.cursor.selection_range().is_empty() {
+                1.0
+            } else {
+                2.0
+            }
+        } else {
+            0.0
+        };
+        let separator_count = if self.current_file_path.is_some() {
+            4.0
+        } else {
+            3.0
+        };
+        padding
+            + item_height * (3.0 + chat_rows + 5.0 + 2.0 + 1.0)
+            + separator_height * separator_count
+    }
+
+    fn format_more_menu_height(&self) -> f32 {
+        let ms = &self.styles.context_menu;
+        let item_height = self.scaled(ms.menu_item_height_px);
+        let padding = self.scaled(ms.menu_padding_y_px) * 2.0;
+        let separator_height = self.context_menu_separator_block_height();
+        padding + item_height * 12.0 + separator_height * 2.0
+    }
+
+    fn format_more_submenu_trigger_center_y(&self, main_menu_top: f32) -> f32 {
+        let ms = &self.styles.context_menu;
+        let item_height = self.scaled(ms.menu_item_height_px);
+        let separator_height = self.context_menu_separator_block_height();
+        let mut y = main_menu_top + self.scaled(ms.menu_padding_y_px);
+
+        y += item_height * 3.0;
+        if self.current_file_path.is_some() {
+            y += separator_height;
+            y += if self.cursor.selection_range().is_empty() {
+                item_height
+            } else {
+                item_height * 2.0
+            };
+        }
+
+        y += separator_height;
+        y += item_height * 5.0;
+        y += separator_height;
+        y += item_height * 2.0;
+        y += separator_height;
+        y + item_height / 2.0
+    }
+
     pub(crate) fn render_context_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(menu) = &self.context_menu else {
             return div().into_any_element();
         };
-        let pos_x: f32 = menu.position.x.into();
-        let pos_y: f32 = menu.position.y.into();
 
         let (items, width) = match &menu.kind {
             ContextMenuKind::Sidebar { path, is_dir } => (
@@ -2475,6 +3164,10 @@ impl EditorView {
             }
             ContextMenuKind::Format => (
                 self.render_format_context_menu(cx),
+                self.scaled(self.styles.context_menu.menu_format_width_px),
+            ),
+            ContextMenuKind::FormatMore => (
+                self.render_format_more_context_menu(cx),
                 self.scaled(self.styles.context_menu.menu_format_width_px),
             ),
             ContextMenuKind::WikiLink => (
@@ -2564,7 +3257,6 @@ impl EditorView {
                         },
                     ));
                 }
-                // Copy path if tab has a file
                 if let Some(tab) = self.tabs.iter().find(|t| t.id == *tab_id) {
                     if let Some(path) = &tab.path {
                         let chat_path = path.clone();
@@ -2663,10 +3355,66 @@ impl EditorView {
                     self.scaled(self.styles.context_menu.menu_sidebar_width_px),
                 )
             }
-            ContextMenuKind::ChatAgentCli => {
+            ContextMenuKind::ChatTab { tab_id } => {
                 let mut items = Vec::new();
+                let (is_pinned, active_agent_cli) = self
+                    .chat_tabs
+                    .iter()
+                    .find(|tab| tab.id == *tab_id)
+                    .map(|tab| (tab.is_pinned, tab.agent_cli))
+                    .unwrap_or((false, ChatAgentCli::GithubCopilot));
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::Close),
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.close_chat_tab(&id, cx);
+                        },
+                    ));
+                }
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::CloseOthers),
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.close_chat_other_tabs(&id, cx);
+                        },
+                    ));
+                }
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::CloseLeft),
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.close_chat_left_tabs(&id, cx);
+                        },
+                    ));
+                }
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::CloseRight),
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.close_chat_right_tabs(&id, cx);
+                        },
+                    ));
+                }
+                items.push(self.render_context_menu_separator());
                 for agent_cli in ChatAgentCli::all() {
-                    let is_active = self.chat_agent_cli == agent_cli;
+                    let id = tab_id.clone();
+                    let is_active = active_agent_cli == agent_cli;
                     items.push(self.render_context_menu_item_with_icon_and_check(
                         agent_cli.label(),
                         agent_cli.icon_path(),
@@ -2674,13 +3422,36 @@ impl EditorView {
                         cx,
                         move |this, _, cx| {
                             this.close_context_menu(cx);
-                            this.select_chat_agent_cli(agent_cli, cx);
+                            this.select_chat_tab_agent_cli(&id, agent_cli, cx);
+                        },
+                    ));
+                }
+                items.push(self.render_context_menu_separator());
+                {
+                    let id = tab_id.clone();
+                    let label = if is_pinned {
+                        self.t(crate::i18n::TextKey::UnpinTab)
+                    } else {
+                        self.t(crate::i18n::TextKey::PinTab)
+                    };
+                    items.push(self.render_context_menu_item(
+                        label,
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.toggle_chat_tab_pin(&id, cx);
                         },
                     ));
                 }
                 (
                     items,
-                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                    self.scaled(
+                        self.styles
+                            .context_menu
+                            .menu_sidebar_width_px
+                            .max(self.styles.context_menu.menu_tab_width_px),
+                    ),
                 )
             }
             ContextMenuKind::Workspace => {
@@ -2919,79 +3690,47 @@ impl EditorView {
             }
         };
 
-        let ms = &self.styles.context_menu;
+        let estimated_menu_height = self.estimated_context_menu_height(items.len());
+        let layout = self.context_menu_panel_layout(menu.position, width, estimated_menu_height);
+        let main_menu = self.render_context_menu_panel("context-menu", layout, width, items, cx);
 
-        // Estimate total menu height from items
-        let item_count = items.len();
-        let estimated_item_height = self.scaled(ms.menu_item_height_px);
-        let menu_padding = self.scaled(ms.menu_padding_y_px) * 2.0;
-        let estimated_menu_height = item_count as f32 * estimated_item_height + menu_padding;
-
-        // Use window bounds for positioning, adjusted for editor-root border
-        let border_w = self.styles.window.window_border_width_px;
-        let overlay_w = self.last_window_width - 2.0 * border_w;
-        let overlay_h = self.last_window_height - 2.0 * border_w;
-        // Convert window-coordinate mouse position to overlay-local coordinates
-        let pos_x = (pos_x - border_w).clamp(0.0, overlay_w);
-        let pos_y = (pos_y - border_w).clamp(0.0, overlay_h);
-        let margin = self.scaled(ms.menu_max_height_margin_px).max(4.0);
-
-        let space_right = overlay_w - pos_x - margin;
-        let space_left = pos_x - margin;
-        let space_below = overlay_h - pos_y - margin;
-        let space_above = pos_y - margin;
-
-        // Decide direction
-        let open_right = space_right >= width || space_right >= space_left;
-        let open_down = space_below >= estimated_menu_height || space_below >= space_above;
-
-        let final_x = if open_right {
-            pos_x
+        let submenu = if matches!(menu.kind, ContextMenuKind::Format)
+            && matches!(self.context_submenu, Some(ContextMenuKind::FormatMore))
+            && self.can_render_format_more_submenu()
+        {
+            let submenu_items = self.render_format_more_context_menu(cx);
+            let submenu_width = self.scaled(self.styles.context_menu.menu_format_width_px);
+            let submenu_layout =
+                self.format_more_submenu_layout(menu)
+                    .unwrap_or(ContextMenuPanelLayout {
+                        left: layout.left + width,
+                        estimated_top: layout.estimated_top,
+                        max_height: layout.max_height,
+                        bottom_anchor: None,
+                        overlay_width: layout.overlay_width,
+                        overlay_height: layout.overlay_height,
+                        margin: layout.margin,
+                    });
+            Some(self.render_context_menu_panel(
+                "context-submenu",
+                submenu_layout,
+                submenu_width,
+                submenu_items,
+                cx,
+            ))
         } else {
-            (pos_x - width).max(margin)
+            None
         };
 
-        let max_menu_height = if open_down {
-            (overlay_h - pos_y - margin).max(self.scaled(100.0))
-        } else {
-            (pos_y - margin).max(self.scaled(100.0))
-        };
-
-        // Use .top() for downward, .bottom() for upward to anchor the correct edge
-        let mut menu_div = div()
-            .id("context-menu")
+        div()
+            .id("context-menu-anchor")
             .absolute()
-            .left(px(final_x))
-            .w(px(width))
-            .max_h(px(max_menu_height))
-            .overflow_y_scroll()
-            .py(px(self.scaled(ms.menu_padding_y_px)))
-            .bg(ms.menu_bg)
-            .border(px(ms.menu_border_width_px))
-            .border_color(ms.menu_border_color)
-            .rounded(px(self.scaled(ms.menu_radius_px)));
-        if open_down {
-            menu_div = menu_div.top(px(pos_y));
-        } else {
-            // Anchor bottom edge of menu at cursor y position
-            menu_div = menu_div.bottom(px(overlay_h - pos_y));
-        }
-        if ms.menu_shadow {
-            menu_div = menu_div.shadow_sm();
-        }
-        menu_div
-            .children(items)
-            .cursor(CursorStyle::Arrow)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_this, _event, _window, _cx| {}),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|_this, _event, _window, _cx| {}),
-            )
-            .on_mouse_move(cx.listener(|_this, _event, _window, _cx| {}))
-            .on_scroll_wheel(cx.listener(|_this, _event, _window, _cx| {}))
+            .left(px(0.0))
+            .top(px(0.0))
+            .w_full()
+            .h_full()
+            .child(main_menu)
+            .when_some(submenu, |this, submenu| this.child(submenu))
             .into_any_element()
     }
 }

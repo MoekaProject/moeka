@@ -31,6 +31,7 @@ pub(crate) const MENU_NEW_FOLDER_SVG_PATH: &str = "assets/icons/menu/new-folder.
 pub(crate) const MENU_RENAME_SVG_PATH: &str = "assets/icons/menu/rename.svg";
 pub(crate) const MENU_DELETE_SVG_PATH: &str = "assets/icons/menu/delete.svg";
 pub(crate) const MENU_CLIP_SVG_PATH: &str = "assets/icons/menu/clip.svg";
+pub(crate) const MENU_COPY_SVG_PATH: &str = "assets/icons/menu/copy.svg";
 pub(crate) const MENU_PASTE_SVG_PATH: &str = "assets/icons/menu/paste.svg";
 pub(crate) const MENU_FOLD_SVG_PATH: &str = "assets/icons/menu/fold.svg";
 pub(crate) const MENU_EXPAND_SVG_PATH: &str = "assets/icons/menu/expand.svg";

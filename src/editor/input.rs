@@ -569,9 +569,8 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.context_menu.is_some() {
-            return;
-        }
+        window.prevent_default();
+        cx.stop_propagation();
         self.is_selecting = false;
 
         if let Some(&(bounds, table_start, visual_row, col)) = self
@@ -594,6 +593,9 @@ impl EditorView {
                 .get(table_start)
                 .and_then(|dec| dec.table_info.as_ref())
                 .is_some_and(|ti| ti.is_front_matter);
+            self.context_submenu = None;
+            self.context_submenu_aim = None;
+            self.context_submenu_hovered = false;
             self.context_menu = Some(ContextMenu {
                 position: event.position,
                 kind: ContextMenuKind::Table {

@@ -292,6 +292,7 @@ impl EditorView {
         let icon_color = ss.sidebar_header_icon_color;
         let title_color = ss.sidebar_header_text_color;
         let is_collapsed = self.sidebar_starred_collapsed;
+        let starred_count = starred_files.len();
 
         let header = div()
             .w_full()
@@ -318,8 +319,18 @@ impl EditorView {
                     .text_color(title_color)
                     .overflow_hidden()
                     .truncate()
-                        .child(self.t(crate::i18n::TextKey::StarredFiles)),
+                    .child(self.t(crate::i18n::TextKey::StarredFiles)),
             )
+            .when(starred_count > 0, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
+                        .text_color(title_color)
+                        .opacity(ss.sidebar_item_suffix_opacity)
+                        .child(starred_count.to_string()),
+                )
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -506,7 +517,8 @@ impl EditorView {
             })
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
                     cx.stop_propagation();
                     if !this.selected_sidebar_paths.contains(&context_menu_path) {
                         this.sidebar_select_item(&context_menu_path, false, false);
@@ -908,7 +920,8 @@ impl EditorView {
             }))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
                     cx.stop_propagation();
                     if !this.selected_sidebar_paths.contains(&path) {
                         this.sidebar_select_item(&path, false, false);
@@ -1225,7 +1238,9 @@ impl EditorView {
                             )
                             .on_mouse_down(MouseButton::Right, {
                                 let root = self.sidebar_root.clone();
-                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    window.prevent_default();
+                                    cx.stop_propagation();
                                     this.open_sidebar_context_menu(
                                         root.clone(),
                                         true,
@@ -1354,6 +1369,7 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
                     let pos = event.position;
                     let menu_pos = gpui::point(pos.x, pos.y - gpui::px(20.0));
                     this.open_workspace_menu(menu_pos, cx);

@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use gpui::{AppContext, Context, Window};
@@ -17,7 +18,9 @@ impl EditorView {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         let styles = self.sidebar_edit_text_input_styles();
-        let placeholder = self.t(crate::i18n::TextKey::RenameNamePlaceholder).to_string();
+        let placeholder = self
+            .t(crate::i18n::TextKey::RenameNamePlaceholder)
+            .to_string();
         let editor = cx.new(move |cx| {
             let mut text_input = crate::text_input::TextInput::new(styles, &placeholder, cx);
             text_input.set_text(&current_name, cx);
@@ -158,9 +161,10 @@ impl EditorView {
         self.expanded_dirs.insert(parent.clone());
         self.invalidate_sidebar_items_cache();
         let styles = self.sidebar_edit_text_input_styles();
-        let placeholder = self.t(crate::i18n::TextKey::FileNamePlaceholder).to_string();
-        let editor =
-            cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
+        let placeholder = self
+            .t(crate::i18n::TextKey::FileNamePlaceholder)
+            .to_string();
+        let editor = cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
         cx.subscribe(
             &editor,
             |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -191,9 +195,10 @@ impl EditorView {
         self.expanded_dirs.insert(parent.clone());
         self.invalidate_sidebar_items_cache();
         let styles = self.sidebar_edit_text_input_styles();
-        let placeholder = self.t(crate::i18n::TextKey::FolderNamePlaceholder).to_string();
-        let editor =
-            cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
+        let placeholder = self
+            .t(crate::i18n::TextKey::FolderNamePlaceholder)
+            .to_string();
+        let editor = cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
         cx.subscribe(
             &editor,
             |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -235,7 +240,8 @@ impl EditorView {
                     if let Err(error) = std::fs::rename(path, &new_path) {
                         eprintln!("Rename failed: {error}");
                     } else {
-                        let starred_changed = self.app_settings.rename_starred_prefix(path, &new_path);
+                        let starred_changed =
+                            self.app_settings.rename_starred_prefix(path, &new_path);
                         if starred_changed {
                             self.app_settings.save();
                         }
@@ -307,6 +313,64 @@ impl EditorView {
         self.delete_paths_to_trash(&[path], cx);
     }
 
+    fn next_available_paste_destination(src: &Path, target_dir: &Path) -> Option<PathBuf> {
+        let name = src.file_name()?;
+        let initial = target_dir.join(name);
+        if !initial.exists() {
+            return Some(initial);
+        }
+
+        if src.is_file() {
+            let stem = src.file_stem().unwrap_or(name);
+            let extension = src.extension().filter(|ext| !ext.is_empty());
+            for suffix in 1.. {
+                let mut candidate = OsString::from(stem);
+                candidate.push(format!("-{suffix}"));
+                if let Some(extension) = extension {
+                    candidate.push(".");
+                    candidate.push(extension);
+                }
+                let candidate_path = target_dir.join(candidate);
+                if !candidate_path.exists() {
+                    return Some(candidate_path);
+                }
+            }
+        }
+
+        for suffix in 1.. {
+            let mut candidate = OsString::from(name);
+            candidate.push(format!("-{suffix}"));
+            let candidate_path = target_dir.join(candidate);
+            if !candidate_path.exists() {
+                return Some(candidate_path);
+            }
+        }
+
+        None
+    }
+
+    fn copy_path_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
+        if src.is_dir() {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::create_dir(dst)?;
+            for entry in std::fs::read_dir(src)? {
+                let entry = entry?;
+                let child_src = entry.path();
+                let child_dst = dst.join(entry.file_name());
+                Self::copy_path_recursively(&child_src, &child_dst)?;
+            }
+            return Ok(());
+        }
+
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(src, dst)?;
+        Ok(())
+    }
+
     pub(crate) fn paste_into_dir(&mut self, target_dir: PathBuf, cx: &mut Context<Self>) {
         let Some(clipboard) = self.file_clipboard.take() else {
             return;
@@ -314,10 +378,9 @@ impl EditorView {
         let target_dir = Self::normalize_sidebar_path(&target_dir);
         for src in &clipboard.paths {
             let src = Self::normalize_sidebar_path(src);
-            let Some(name) = src.file_name() else {
+            let Some(dst) = Self::next_available_paste_destination(&src, &target_dir) else {
                 continue;
             };
-            let dst = target_dir.join(name);
             if clipboard.is_cut {
                 if let Err(error) = std::fs::rename(&src, &dst) {
                     eprintln!("Move {:?} -> {:?} failed: {error}", src, dst);
@@ -329,10 +392,8 @@ impl EditorView {
                         }
                     }
                 }
-            } else if src.is_file()
-                && let Err(error) = std::fs::copy(src, &dst)
-            {
-                eprintln!("Copy failed: {error}");
+            } else if let Err(error) = Self::copy_path_recursively(&src, &dst) {
+                eprintln!("Copy {:?} -> {:?} failed: {error}", src, dst);
             }
         }
         self.context_menu = None;
@@ -350,7 +411,9 @@ impl EditorView {
     }
 
     pub(crate) fn pick_workspace_folder(&mut self, cx: &mut Context<Self>) {
-        let title = self.t(crate::i18n::TextKey::ChooseWorkspaceFolder).to_string();
+        let title = self
+            .t(crate::i18n::TextKey::ChooseWorkspaceFolder)
+            .to_string();
         cx.spawn(async move |this, cx| {
             let maybe_path = cx
                 .background_executor()
@@ -426,5 +489,75 @@ impl EditorView {
             cx.notify();
         }
         session_store::persist_session(self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EditorView;
+    use std::fs;
+
+    #[test]
+    fn paste_destination_adds_incrementing_suffix_before_extension() {
+        let temp = tempfile::tempdir().unwrap();
+        let target_dir = temp.path().join("target");
+        let source_dir = temp.path().join("source");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&source_dir).unwrap();
+
+        let source = source_dir.join("file.ext");
+        fs::write(&source, "src").unwrap();
+        fs::write(target_dir.join("file.ext"), "existing").unwrap();
+        fs::write(target_dir.join("file-1.ext"), "existing").unwrap();
+
+        let destination =
+            EditorView::next_available_paste_destination(&source, &target_dir).unwrap();
+
+        assert_eq!(
+            destination.file_name().unwrap().to_string_lossy(),
+            "file-2.ext"
+        );
+    }
+
+    #[test]
+    fn paste_destination_adds_incrementing_suffix_for_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let target_dir = temp.path().join("target");
+        let source_dir = temp.path().join("source").join("notes");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir(target_dir.join("notes")).unwrap();
+        fs::create_dir(target_dir.join("notes-1")).unwrap();
+
+        let destination =
+            EditorView::next_available_paste_destination(&source_dir, &target_dir).unwrap();
+
+        assert_eq!(
+            destination.file_name().unwrap().to_string_lossy(),
+            "notes-2"
+        );
+    }
+
+    #[test]
+    fn recursive_copy_preserves_directory_contents() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_dir = temp.path().join("source").join("docs");
+        let nested_dir = source_dir.join("nested");
+        let destination_dir = temp.path().join("target").join("docs-copy");
+
+        fs::create_dir_all(&nested_dir).unwrap();
+        fs::write(source_dir.join("root.md"), "root").unwrap();
+        fs::write(nested_dir.join("child.md"), "child").unwrap();
+
+        EditorView::copy_path_recursively(&source_dir, &destination_dir).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(destination_dir.join("root.md")).unwrap(),
+            "root"
+        );
+        assert_eq!(
+            fs::read_to_string(destination_dir.join("nested").join("child.md")).unwrap(),
+            "child"
+        );
     }
 }

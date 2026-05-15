@@ -18,11 +18,11 @@ use alacritty_terminal::{
     vte::ansi::{Color as AlacColor, CursorShape as AlacCursorShape, NamedColor, Processor, Rgb},
 };
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, Font,
-    FontFallbacks, FontStyle, FontWeight, GlobalElementId, Hsla, InputHandler, KeyDownEvent,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    ScrollWheelEvent, SharedString, Style, TextRun as GpuiTextRun, TouchPhase, UTF16Selection,
-    Window, div, fill, point, prelude::*, px, relative, size, svg,
+    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, DragMoveEvent, Element,
+    ElementId, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId, Hsla, InputHandler,
+    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, ScrollWheelEvent, SharedString, Style, TextRun as GpuiTextRun, TouchPhase,
+    UTF16Selection, Window, div, fill, point, prelude::*, px, relative, size, svg,
 };
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -40,6 +40,15 @@ pub(crate) struct ChatTerminalSession {
     pub(crate) poll_task: Option<Task<()>>,
     rows: u16,
     cols: u16,
+}
+
+pub(crate) struct ChatTab {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) agent_cli: ChatAgentCli,
+    pub(crate) instance_index: usize,
+    pub(crate) is_pinned: bool,
+    pub(crate) session: Option<ChatTerminalSession>,
 }
 
 struct ChatTerminalRuntime {
@@ -129,6 +138,13 @@ struct ChatTerminalPaintBatch {
     cell_count: usize,
     style: GpuiTextRun,
     font_size: f32,
+}
+
+#[derive(Clone, Copy)]
+enum ChatTabDropTarget<'a> {
+    Before(&'a str),
+    After(&'a str),
+    End,
 }
 
 impl ChatTerminalSelection {
@@ -594,7 +610,7 @@ impl InputHandler for ChatTerminalInputHandler {
     ) {
         self.editor.update(cx, |editor, editor_cx| {
             editor.chat_terminal_marked_text = None;
-            if let Some(session) = editor.chat_terminal.as_mut() {
+            if let Some(session) = editor.active_chat_terminal_mut() {
                 let _ = session.write_bytes(text.as_bytes());
             }
             editor_cx.notify();
@@ -633,8 +649,7 @@ impl InputHandler for ChatTerminalInputHandler {
     ) -> Option<Bounds<Pixels>> {
         let editor = self.editor.read(cx);
         let snapshot = editor
-            .chat_terminal
-            .as_ref()
+            .active_chat_terminal()
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         let (_, cell_width, cell_height) = editor.chat_terminal_metrics();
@@ -695,6 +710,30 @@ impl Default for ChatTerminalSnapshot {
                 shape: AlacCursorShape::Block,
                 point: AlacPoint::new(Line(0), Column(0)),
             },
+        }
+    }
+}
+
+impl ChatTab {
+    fn new(id: String, agent_cli: ChatAgentCli, instance_index: usize) -> Self {
+        Self {
+            title: agent_cli.label().to_string(),
+            id,
+            agent_cli,
+            instance_index,
+            is_pinned: false,
+            session: None,
+        }
+    }
+
+    fn title_suffix(&self) -> Option<String> {
+        (self.instance_index > 1).then(|| format!(" - {}", self.instance_index))
+    }
+
+    fn display_title(&self) -> String {
+        match self.title_suffix() {
+            Some(suffix) => format!("{}{}", self.title, suffix),
+            None => self.title.clone(),
         }
     }
 }
@@ -1358,6 +1397,305 @@ impl EditorView {
         window.focus(&self.chat_panel_focus_handle);
     }
 
+    fn ensure_default_chat_tab(&mut self) {
+        if self.chat_tabs.is_empty() {
+            let id = self.next_tab_identity();
+            self.chat_tabs
+                .push(ChatTab::new(id.clone(), ChatAgentCli::GithubCopilot, 1));
+            self.active_chat_tab_id = Some(id);
+            return;
+        }
+
+        if self.active_chat_tab_index().is_none() {
+            self.active_chat_tab_id = self.chat_tabs.first().map(|tab| tab.id.clone());
+        }
+    }
+
+    pub(crate) fn active_chat_tab_index(&self) -> Option<usize> {
+        self.active_chat_tab_id
+            .as_ref()
+            .and_then(|id| self.chat_tabs.iter().position(|tab| &tab.id == id))
+    }
+
+    fn active_chat_tab(&self) -> Option<&ChatTab> {
+        self.active_chat_tab_index()
+            .and_then(|index| self.chat_tabs.get(index))
+    }
+
+    fn active_chat_tab_mut(&mut self) -> Option<&mut ChatTab> {
+        let index = self.active_chat_tab_index()?;
+        self.chat_tabs.get_mut(index)
+    }
+
+    fn active_chat_terminal(&self) -> Option<&ChatTerminalSession> {
+        self.active_chat_tab().and_then(|tab| tab.session.as_ref())
+    }
+
+    fn active_chat_terminal_mut(&mut self) -> Option<&mut ChatTerminalSession> {
+        self.active_chat_tab_mut()
+            .and_then(|tab| tab.session.as_mut())
+    }
+
+    fn build_chat_terminal_session(&self, agent_cli: ChatAgentCli) -> ChatTerminalSession {
+        let Some(cwd) = self.chat_panel_working_directory() else {
+            return ChatTerminalSession::unavailable(
+                "No workspace root available for chat terminal.",
+            );
+        };
+
+        match ChatTerminalSession::launch(cwd, agent_cli) {
+            Ok(mut session) => {
+                session.status = ChatTerminalStatus::Running;
+                session
+            }
+            Err(error) => ChatTerminalSession::unavailable(error.to_string()),
+        }
+    }
+
+    fn next_chat_tab_agent_cli(&self) -> ChatAgentCli {
+        self.active_chat_tab()
+            .map(|tab| tab.agent_cli)
+            .or_else(|| self.chat_tabs.last().map(|tab| tab.agent_cli))
+            .unwrap_or(ChatAgentCli::GithubCopilot)
+    }
+
+    fn next_chat_tab_instance_index(&self, agent_cli: ChatAgentCli) -> usize {
+        self.chat_tabs
+            .iter()
+            .filter(|tab| tab.agent_cli == agent_cli)
+            .count()
+            + 1
+    }
+
+    pub(crate) fn create_chat_tab(&mut self, cx: &mut Context<Self>) {
+        let id = self.next_tab_identity();
+        let agent_cli = self.next_chat_tab_agent_cli();
+        let instance_index = self.next_chat_tab_instance_index(agent_cli);
+        let insert_index = self
+            .active_chat_tab_index()
+            .map(|index| index + 1)
+            .unwrap_or(self.chat_tabs.len());
+        self.chat_tabs.insert(
+            insert_index.min(self.chat_tabs.len()),
+            ChatTab::new(id.clone(), agent_cli, instance_index),
+        );
+        self.active_chat_tab_id = Some(id);
+        self.chat_terminal_scroll_px = Pixels::ZERO;
+        self.chat_terminal_input_bounds = None;
+        self.clear_chat_terminal_interaction_state();
+        if self.utility_panel == Some(RightUtilityPanel::Chat) {
+            self.open_chat_terminal(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn switch_to_chat_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        if !self.chat_tabs.iter().any(|tab| tab.id == tab_id) {
+            return;
+        }
+
+        self.active_chat_tab_id = Some(tab_id.to_string());
+        self.chat_terminal_scroll_px = Pixels::ZERO;
+        self.chat_terminal_input_bounds = None;
+        self.clear_chat_terminal_interaction_state();
+        if self.utility_panel == Some(RightUtilityPanel::Chat) {
+            self.open_chat_terminal(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn close_chat_tabs_by_ids(&mut self, tab_ids: &[String], cx: &mut Context<Self>) {
+        if tab_ids.is_empty() {
+            return;
+        }
+
+        let active_removed = self
+            .active_chat_tab_id
+            .as_ref()
+            .is_some_and(|active_id| tab_ids.iter().any(|id| id == active_id));
+
+        for tab_id in tab_ids {
+            if let Some(index) = self.chat_tabs.iter().position(|tab| &tab.id == tab_id) {
+                let mut removed = self.chat_tabs.remove(index);
+                if let Some(mut session) = removed.session.take() {
+                    session.stop();
+                }
+            }
+        }
+
+        if self.chat_tabs.is_empty() {
+            self.active_chat_tab_id = None;
+            if self.chat_panel_visible {
+                self.hide_chat_panel(cx);
+            } else {
+                cx.notify();
+            }
+            return;
+        }
+
+        if active_removed {
+            self.active_chat_tab_id = self.chat_tabs.first().map(|tab| tab.id.clone());
+            if self.utility_panel == Some(RightUtilityPanel::Chat) {
+                self.open_chat_terminal(cx);
+            } else {
+                cx.notify();
+            }
+        } else {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn close_chat_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        self.close_chat_tabs_by_ids(&[tab_id.to_string()], cx);
+    }
+
+    pub(crate) fn close_chat_left_tabs(&mut self, from_tab_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.chat_tabs.iter().position(|tab| tab.id == from_tab_id) else {
+            return;
+        };
+        let ids: Vec<String> = self.chat_tabs[..index]
+            .iter()
+            .filter(|tab| !tab.is_pinned)
+            .map(|tab| tab.id.clone())
+            .collect();
+        self.close_chat_tabs_by_ids(&ids, cx);
+    }
+
+    pub(crate) fn close_chat_other_tabs(&mut self, current_tab_id: &str, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self
+            .chat_tabs
+            .iter()
+            .filter(|tab| tab.id != current_tab_id && !tab.is_pinned)
+            .map(|tab| tab.id.clone())
+            .collect();
+        self.close_chat_tabs_by_ids(&ids, cx);
+    }
+
+    pub(crate) fn close_chat_right_tabs(&mut self, from_tab_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.chat_tabs.iter().position(|tab| tab.id == from_tab_id) else {
+            return;
+        };
+        let ids: Vec<String> = self.chat_tabs[(index + 1)..]
+            .iter()
+            .filter(|tab| !tab.is_pinned)
+            .map(|tab| tab.id.clone())
+            .collect();
+        self.close_chat_tabs_by_ids(&ids, cx);
+    }
+
+    pub(crate) fn toggle_chat_tab_pin(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.chat_tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+
+        let mut tab = self.chat_tabs.remove(index);
+        tab.is_pinned = !tab.is_pinned;
+        let insert_index = if tab.is_pinned {
+            self.chat_tabs
+                .iter()
+                .position(|candidate| !candidate.is_pinned)
+                .unwrap_or(self.chat_tabs.len())
+        } else {
+            self.chat_tabs
+                .iter()
+                .rposition(|candidate| candidate.is_pinned)
+                .map(|index| index + 1)
+                .unwrap_or(0)
+        };
+        self.chat_tabs
+            .insert(insert_index.min(self.chat_tabs.len()), tab);
+        self.active_chat_tab_id = Some(tab_id.to_string());
+        cx.notify();
+    }
+
+    pub(crate) fn reorder_chat_tab_before(
+        &mut self,
+        from_id: &str,
+        to_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if from_id == to_id {
+            return;
+        }
+        let Some(from_index) = self.chat_tabs.iter().position(|tab| tab.id == from_id) else {
+            return;
+        };
+        let Some(mut to_index) = self.chat_tabs.iter().position(|tab| tab.id == to_id) else {
+            return;
+        };
+        let moved = self.chat_tabs.remove(from_index);
+        if from_index < to_index {
+            to_index = to_index.saturating_sub(1);
+        }
+        self.chat_tabs.insert(to_index, moved);
+        cx.notify();
+    }
+
+    pub(crate) fn reorder_chat_tab_after(
+        &mut self,
+        from_id: &str,
+        to_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if from_id == to_id {
+            return;
+        }
+        let Some(from_index) = self.chat_tabs.iter().position(|tab| tab.id == from_id) else {
+            return;
+        };
+        let Some(mut to_index) = self.chat_tabs.iter().position(|tab| tab.id == to_id) else {
+            return;
+        };
+        let moved = self.chat_tabs.remove(from_index);
+        if from_index < to_index {
+            to_index = to_index.saturating_sub(1);
+        }
+        self.chat_tabs
+            .insert((to_index + 1).min(self.chat_tabs.len()), moved);
+        cx.notify();
+    }
+
+    pub(crate) fn reorder_chat_tab_to_end(&mut self, from_id: &str, cx: &mut Context<Self>) {
+        let Some(from_index) = self.chat_tabs.iter().position(|tab| tab.id == from_id) else {
+            return;
+        };
+        let moved = self.chat_tabs.remove(from_index);
+        self.chat_tabs.push(moved);
+        cx.notify();
+    }
+
+    fn chat_tab_drop_changes_order_for(
+        current_tab_ids: &[String],
+        from_id: &str,
+        target: ChatTabDropTarget<'_>,
+    ) -> bool {
+        let Some(from_index) = current_tab_ids.iter().position(|tab_id| tab_id == from_id) else {
+            return false;
+        };
+
+        let mut reordered = current_tab_ids.to_vec();
+        let moved = reordered.remove(from_index);
+        match target {
+            ChatTabDropTarget::Before(to_id) => {
+                let Some(to_index) = reordered.iter().position(|tab_id| tab_id == to_id) else {
+                    return false;
+                };
+                reordered.insert(to_index, moved);
+            }
+            ChatTabDropTarget::After(to_id) => {
+                let Some(to_index) = reordered.iter().position(|tab_id| tab_id == to_id) else {
+                    return false;
+                };
+                reordered.insert((to_index + 1).min(reordered.len()), moved);
+            }
+            ChatTabDropTarget::End => reordered.push(moved),
+        }
+
+        reordered != current_tab_ids
+    }
+
     fn send_chat_terminal_bytes(
         &mut self,
         bytes: &[u8],
@@ -1367,19 +1705,72 @@ impl EditorView {
         self.focus_chat_terminal_panel(window);
         cx.stop_propagation();
         self.chat_terminal_marked_text = None;
-        if let Some(session) = self.chat_terminal.as_mut() {
+        if let Some(session) = self.active_chat_terminal_mut() {
             let _ = session.write_bytes(bytes);
         }
+    }
+
+    fn insert_chat_reference_labels(&mut self, labels: &[String], cx: &mut Context<Self>) {
+        let text = labels
+            .iter()
+            .map(|label| label.trim())
+            .filter(|label| !label.is_empty())
+            .map(|label| format!("@{} ", label))
+            .collect::<String>();
+        if text.is_empty() {
+            return;
+        }
+
+        self.ensure_chat_terminal_visible(cx);
+        if self.active_chat_terminal().is_none() {
+            self.open_chat_terminal(cx);
+        }
+        if let Some(session) = self.active_chat_terminal_mut() {
+            let _ = session.write_bytes(text.as_bytes());
+        }
+    }
+
+    fn chat_drop_reference_label_for_path(&self, path: &std::path::Path) -> Option<String> {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .or_else(|| self.relative_path_for_path(path))
+    }
+
+    pub(crate) fn add_dragged_paths_to_chat(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let labels: Vec<String> = paths
+            .iter()
+            .filter_map(|path| self.chat_drop_reference_label_for_path(path))
+            .collect();
+        self.clear_sidebar_drag_state(cx);
+        self.insert_chat_reference_labels(&labels, cx);
+    }
+
+    pub(crate) fn add_dragged_tab_to_chat(
+        &mut self,
+        title: &str,
+        path: Option<&PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(label) = path
+            .and_then(|path| self.chat_drop_reference_label_for_path(path))
+            .or_else(|| {
+                let trimmed = title.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+        else {
+            return;
+        };
+        self.insert_chat_reference_labels(&[label], cx);
     }
 
     pub(crate) fn ensure_chat_terminal_visible(&mut self, cx: &mut Context<Self>) {
         self.pending_chat_input_focus = true;
         if self.utility_panel != Some(RightUtilityPanel::Chat) {
-            self.toggle_utility_panel(RightUtilityPanel::Chat, cx);
+            self.reveal_chat_panel(cx);
             return;
         }
 
-        if self.chat_terminal.is_none() {
+        if self.active_chat_terminal().is_none() {
             self.open_chat_terminal(cx);
             return;
         }
@@ -1393,7 +1784,7 @@ impl EditorView {
         };
 
         self.ensure_chat_terminal_visible(cx);
-        if let Some(session) = self.chat_terminal.as_mut() {
+        if let Some(session) = self.active_chat_terminal_mut() {
             let _ = session.write_bytes(format!("@{} ", relative_path).as_bytes());
         }
     }
@@ -1435,7 +1826,7 @@ impl EditorView {
         let (end_line, end_col) = self.chat_reference_position(end_anchor);
 
         self.ensure_chat_terminal_visible(cx);
-        if let Some(session) = self.chat_terminal.as_mut() {
+        if let Some(session) = self.active_chat_terminal_mut() {
             let text = format!(
                 "@{} L{}:C{}-L{}:C{} ",
                 relative_path, start_line, start_col, end_line, end_col
@@ -1459,40 +1850,59 @@ impl EditorView {
     }
 
     pub(crate) fn open_chat_terminal(&mut self, cx: &mut Context<Self>) {
-        self.stop_chat_terminal();
+        self.ensure_default_chat_tab();
         self.pending_chat_input_focus = true;
         self.clear_chat_terminal_interaction_state();
 
-        let Some(cwd) = self.chat_panel_working_directory() else {
-            self.chat_terminal = Some(ChatTerminalSession::unavailable(
-                "No workspace root available for chat terminal.",
-            ));
+        let Some(active_index) = self.active_chat_tab_index() else {
             cx.notify();
             return;
         };
 
-        match ChatTerminalSession::launch(cwd, self.chat_agent_cli) {
-            Ok(mut session) => {
-                session.status = ChatTerminalStatus::Running;
-                self.chat_terminal = Some(session);
-                self.start_chat_terminal_poll(cx);
-                self.resize_chat_terminal();
-            }
-            Err(error) => {
-                self.chat_terminal = Some(ChatTerminalSession::unavailable(error.to_string()));
+        if self.chat_tabs[active_index].session.is_none() {
+            let agent_cli = self.chat_tabs[active_index].agent_cli;
+            self.chat_tabs[active_index].title = agent_cli.label().to_string();
+            let session = self.build_chat_terminal_session(agent_cli);
+            let should_poll = matches!(session.status, ChatTerminalStatus::Running);
+            self.chat_tabs[active_index].session = Some(session);
+            if should_poll {
+                let tab_id = self.chat_tabs[active_index].id.clone();
+                self.start_chat_terminal_poll(tab_id, cx);
             }
         }
 
+        self.resize_chat_terminal();
         cx.notify();
     }
 
-    pub(crate) fn select_chat_agent_cli(
+    pub(crate) fn select_chat_tab_agent_cli(
         &mut self,
+        tab_id: &str,
         agent_cli: ChatAgentCli,
         cx: &mut Context<Self>,
     ) {
-        self.chat_agent_cli = agent_cli;
-        self.open_chat_terminal(cx);
+        let Some(index) = self.chat_tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+
+        if self.chat_tabs[index].agent_cli == agent_cli {
+            cx.notify();
+            return;
+        }
+
+        self.chat_tabs[index].agent_cli = agent_cli;
+        self.chat_tabs[index].title = agent_cli.label().to_string();
+        if let Some(mut session) = self.chat_tabs[index].session.take() {
+            session.stop();
+        }
+
+        if self.active_chat_tab_id.as_deref() == Some(tab_id)
+            && self.utility_panel == Some(RightUtilityPanel::Chat)
+        {
+            self.open_chat_terminal(cx);
+        } else {
+            cx.notify();
+        }
     }
 
     pub(crate) fn stop_chat_terminal(&mut self) {
@@ -1500,13 +1910,20 @@ impl EditorView {
         self.chat_terminal_scroll_px = Pixels::ZERO;
         self.chat_terminal_input_bounds = None;
         self.clear_chat_terminal_interaction_state();
-        if let Some(mut session) = self.chat_terminal.take() {
-            session.stop();
+        for tab in &mut self.chat_tabs {
+            if let Some(mut session) = tab.session.take() {
+                session.stop();
+            }
         }
     }
 
-    fn start_chat_terminal_poll(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.chat_terminal.as_mut() else {
+    fn start_chat_terminal_poll(&mut self, tab_id: String, cx: &mut Context<Self>) {
+        let Some(session) = self
+            .chat_tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.session.as_mut())
+        else {
             return;
         };
 
@@ -1514,7 +1931,11 @@ impl EditorView {
             loop {
                 let done = this
                     .update(cx, |this, cx| {
-                        let Some(session) = this.chat_terminal.as_mut() else {
+                        let Some(tab) = this.chat_tabs.iter_mut().find(|tab| tab.id == tab_id)
+                        else {
+                            return true;
+                        };
+                        let Some(session) = tab.session.as_mut() else {
                             return true;
                         };
 
@@ -1533,8 +1954,10 @@ impl EditorView {
                                     if matches!(session.status, ChatTerminalStatus::Launching) {
                                         session.status = ChatTerminalStatus::Running;
                                     }
-                                    this.chat_terminal_selection = None;
-                                    this.chat_terminal_selecting = false;
+                                    if this.active_chat_tab_id.as_deref() == Some(tab_id.as_str()) {
+                                        this.chat_terminal_selection = None;
+                                        this.chat_terminal_selecting = false;
+                                    }
                                     session.refresh_snapshot();
                                 }
                                 ChatTerminalEvent::Exited => {
@@ -1553,7 +1976,9 @@ impl EditorView {
                             }
                         }
 
-                        if clear_interaction_state {
+                        if clear_interaction_state
+                            && this.active_chat_tab_id.as_deref() == Some(tab_id.as_str())
+                        {
                             this.clear_chat_terminal_interaction_state();
                         }
 
@@ -1579,8 +2004,7 @@ impl EditorView {
         let (_, cell_width, cell_height) = self.chat_terminal_metrics();
         let terminal_padding =
             self.scaled(self.styles.utility_panel.utility_panel_terminal_padding_px);
-        let footer_top_gap = self.scaled(8.0);
-        let footer_height = self.scaled(30.0) + terminal_padding + footer_top_gap;
+        let tab_bar_height = self.tab_bar_height();
         let panel_width = if self.chat_panel_placement == ChatPanelPlacement::Bottom {
             (self.last_window_width
                 - self.sidebar_width()
@@ -1591,13 +2015,13 @@ impl EditorView {
             (self.utility_panel_width() - terminal_padding * 2.0).max(220.0)
         };
         let panel_height = if self.chat_panel_placement == ChatPanelPlacement::Bottom {
-            (self.utility_panel_width() - terminal_padding * 2.0 - footer_height).max(120.0)
+            (self.utility_panel_width() - terminal_padding * 2.0 - tab_bar_height).max(120.0)
         } else {
-            (self.last_window_height - terminal_padding * 2.0 - footer_height).max(240.0)
+            (self.last_window_height - terminal_padding * 2.0 - tab_bar_height).max(240.0)
         };
         let cols = (panel_width / cell_width.max(1.0)).floor() as u16;
         let rows = (panel_height / cell_height.max(1.0)).floor() as u16;
-        if let Some(session) = self.chat_terminal.as_mut() {
+        if let Some(session) = self.active_chat_terminal_mut() {
             if session.rows != rows.max(2) || session.cols != cols.max(20) {
                 session.resize(rows, cols);
             }
@@ -1618,7 +2042,7 @@ impl EditorView {
         let Some(bytes) = keystroke_to_terminal_bytes(&event.keystroke) else {
             return;
         };
-        if let Some(session) = self.chat_terminal.as_mut() {
+        if let Some(session) = self.active_chat_terminal_mut() {
             let _ = session.write_bytes(&bytes);
         }
     }
@@ -1639,7 +2063,7 @@ impl EditorView {
             return;
         };
 
-        if let Some(session) = self.chat_terminal.as_mut() {
+        if let Some(session) = self.active_chat_terminal_mut() {
             session.scroll_display(Scroll::Delta(delta));
             cx.notify();
         }
@@ -1652,8 +2076,7 @@ impl EditorView {
     ) -> Option<i32> {
         let line_height = px(line_height.max(1.0));
         let scroll_height = self
-            .chat_terminal
-            .as_ref()
+            .active_chat_terminal()
             .map(|session| line_height * session.snapshot.rows.max(1) as f32)
             .unwrap_or(line_height);
         match event.touch_phase {
@@ -1689,7 +2112,7 @@ impl EditorView {
         let Some(text) = item.text() else {
             return;
         };
-        if let Some(session) = self.chat_terminal.as_mut() {
+        if let Some(session) = self.active_chat_terminal_mut() {
             let _ = session.write_bytes(text.as_bytes());
         }
     }
@@ -1699,8 +2122,7 @@ impl EditorView {
         let local = bounds.localize(&position)?;
         let (_, cell_width, cell_height) = self.chat_terminal_metrics();
         let snapshot = self
-            .chat_terminal
-            .as_ref()
+            .active_chat_terminal()
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         if snapshot.rows == 0 || snapshot.cols == 0 {
@@ -1716,8 +2138,7 @@ impl EditorView {
 
     fn chat_terminal_normalized_col(&self, row: usize, col: usize) -> Option<usize> {
         let snapshot = self
-            .chat_terminal
-            .as_ref()
+            .active_chat_terminal()
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         let rows = Self::chat_terminal_rows(&snapshot);
@@ -1734,8 +2155,7 @@ impl EditorView {
         }
 
         let snapshot = self
-            .chat_terminal
-            .as_ref()
+            .active_chat_terminal()
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         let rows = Self::chat_terminal_rows(&snapshot);
@@ -1797,8 +2217,7 @@ impl EditorView {
 
     pub(crate) fn select_all_chat_terminal(&mut self, cx: &mut Context<Self>) -> bool {
         let snapshot = self
-            .chat_terminal
-            .as_ref()
+            .active_chat_terminal()
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         let rows = Self::chat_terminal_rows(&snapshot);
@@ -1830,8 +2249,7 @@ impl EditorView {
         col: usize,
     ) -> Option<ChatTerminalSelection> {
         let snapshot = self
-            .chat_terminal
-            .as_ref()
+            .active_chat_terminal()
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         let rows = Self::chat_terminal_rows(&snapshot);
@@ -1899,6 +2317,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.focus_chat_terminal_panel(window);
+        window.prevent_default();
         cx.stop_propagation();
         self.chat_terminal_marked_text = None;
         if let Some((row, col)) = self.chat_terminal_cell_from_position(event.position) {
@@ -1930,6 +2349,433 @@ impl EditorView {
         cx.notify();
     }
 
+    fn render_chat_tab_title_label(&self, tab: &ChatTab, is_active: bool) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let text_color = if is_active {
+            ts.tab_item_active_text_color
+        } else {
+            ts.tab_item_text_color
+        };
+        let suffix_opacity = if is_active { 0.7 } else { 0.5 };
+
+        div()
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(2.0)))
+            .text_size(px(self.scaled(ts.tab_item_font_size_px)))
+            .text_color(text_color)
+            .font_weight(if is_active {
+                FontWeight::MEDIUM
+            } else {
+                FontWeight::NORMAL
+            })
+            .child(
+                div().flex_1().min_w(px(0.0)).overflow_hidden().child(
+                    div()
+                        .whitespace_nowrap()
+                        .truncate()
+                        .child(tab.title.clone()),
+                ),
+            )
+            .when_some(tab.title_suffix(), |this, suffix| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .opacity(suffix_opacity)
+                        .child(suffix),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_chat_tab(&self, tab: &ChatTab, cx: &mut Context<Self>) -> AnyElement {
+        let is_active = self.active_chat_tab_id.as_deref() == Some(tab.id.as_str());
+        let tab_index = self
+            .chat_tabs
+            .iter()
+            .position(|candidate| candidate.id == tab.id)
+            .unwrap_or(0);
+        let tab_id = tab.id.clone();
+        let close_id = tab.id.clone();
+        let middle_close_id = tab.id.clone();
+        let context_tab_id = tab.id.clone();
+        let drag_tab_id = tab.id.clone();
+        let hover_tab_id = tab.id.clone();
+        let drop_tab_id = tab.id.clone();
+        let drag_title = tab.display_title();
+        let ts = &self.styles.tab_bar;
+        let tab_hover_bg = ts.tab_item_hover_bg;
+        let close_hover_bg = ts.tab_item_close_hover_bg;
+        let drop_indicator_color = ts.tab_drop_indicator_color;
+        let drop_indicator_width = ts.tab_drop_indicator_width_px;
+        let source_opacity = ts.tab_drag_source_opacity;
+        let agent_icon_size = self.scaled(ts.tab_item_icon_size_px);
+        let tab_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
+        let tab_surface_height = if is_active {
+            self.tab_bar_height()
+        } else {
+            tab_height
+        };
+        let tab_bg = if is_active {
+            ts.tab_item_active_bg
+        } else {
+            ts.tab_item_bg
+        };
+        let is_being_dragged = self.chat_tab_dragging_id.as_deref() == Some(tab.id.as_str());
+        let current_tab_ids: Vec<String> =
+            self.chat_tabs.iter().map(|tab| tab.id.clone()).collect();
+
+        div()
+            .id(SharedString::from(format!("chat-tab-{}", tab.id)))
+            .group("chat-tab-item")
+            .relative()
+            .h(px(self.tab_bar_height()))
+            .min_w(px(self.scaled(ts.tab_item_min_width_px)))
+            .max_w(px(self.scaled(ts.tab_item_max_width_px)))
+            .flex_none()
+            .when(is_being_dragged, |this: gpui::Stateful<gpui::Div>| {
+                this.opacity(source_opacity)
+            })
+            .drag_over::<DraggedChatTab>({
+                let drop_tab_id = drop_tab_id.clone();
+                move |style, dragged, _, _| {
+                    let drop_target = if tab_index <= dragged.source_index {
+                        ChatTabDropTarget::Before(drop_tab_id.as_str())
+                    } else {
+                        ChatTabDropTarget::After(drop_tab_id.as_str())
+                    };
+                    if !Self::chat_tab_drop_changes_order_for(
+                        &current_tab_ids,
+                        &dragged.tab_id,
+                        drop_target,
+                    ) {
+                        return style;
+                    }
+                    if matches!(drop_target, ChatTabDropTarget::Before(_)) {
+                        style
+                            .border_l(px(drop_indicator_width))
+                            .border_r(px(0.0))
+                            .border_color(drop_indicator_color)
+                    } else {
+                        style
+                            .border_l(px(0.0))
+                            .border_r(px(drop_indicator_width))
+                            .border_color(drop_indicator_color)
+                    }
+                }
+            })
+            .on_drop(cx.listener(move |this, dragged: &DraggedChatTab, _, cx| {
+                let place_after = this
+                    .chat_tabs
+                    .iter()
+                    .position(|candidate| candidate.id == dragged.tab_id)
+                    .zip(
+                        this.chat_tabs
+                            .iter()
+                            .position(|candidate| candidate.id == drop_tab_id),
+                    )
+                    .is_some_and(|(from_index, to_index)| from_index < to_index);
+                let current_tab_ids: Vec<String> =
+                    this.chat_tabs.iter().map(|tab| tab.id.clone()).collect();
+                let drop_target = if place_after {
+                    ChatTabDropTarget::After(drop_tab_id.as_str())
+                } else {
+                    ChatTabDropTarget::Before(drop_tab_id.as_str())
+                };
+                if !Self::chat_tab_drop_changes_order_for(
+                    &current_tab_ids,
+                    &dragged.tab_id,
+                    drop_target,
+                ) {
+                    this.chat_tab_drag_candidate_id = None;
+                    this.chat_tab_dragging_id = None;
+                    return;
+                }
+                if place_after {
+                    this.reorder_chat_tab_after(&dragged.tab_id, &drop_tab_id, cx);
+                } else {
+                    this.reorder_chat_tab_before(&dragged.tab_id, &drop_tab_id, cx);
+                }
+                this.chat_tab_drag_candidate_id = None;
+                this.chat_tab_dragging_id = None;
+            }))
+            .child(
+                div()
+                    .h(px(tab_surface_height))
+                    .pl(px(self.scaled(ts.tab_item_padding_left_px)))
+                    .pr(px(self.scaled(ts.tab_item_padding_right_px)))
+                    .flex()
+                    .items_center()
+                    .gap(px(self.scaled(ts.tab_item_gap_px)))
+                    .bg(tab_bg)
+                    .border_r(px(ts.tab_item_border_width_px))
+                    .border_color(ts.tab_item_border_color)
+                    .hover(move |style| style.bg(tab_hover_bg))
+                    .child(
+                        svg()
+                            .path(tab.agent_cli.icon_path())
+                            .size(px(agent_icon_size))
+                            .text_color(ts.tab_item_icon_color)
+                            .opacity(if is_active {
+                                ts.tab_item_icon_active_opacity
+                            } else {
+                                ts.tab_item_icon_inactive_opacity
+                            }),
+                    )
+                    .child(self.render_chat_tab_title_label(tab, is_active))
+                    .when(tab.is_pinned, |this| {
+                        this.child(
+                            svg()
+                                .path("assets/icons/format/pin.svg")
+                                .size(px(self.scaled(ts.tab_pin_icon_size_px)))
+                                .text_color(ts.tab_pin_icon_color)
+                                .opacity(if is_active {
+                                    ts.tab_item_icon_active_opacity
+                                } else {
+                                    ts.tab_item_icon_inactive_opacity
+                                }),
+                        )
+                    })
+                    .child(
+                        div()
+                            .w(px(self.scaled(ts.tab_item_close_size_px)))
+                            .h(px(self.scaled(ts.tab_item_close_size_px)))
+                            .rounded_full()
+                            .flex()
+                            .flex_none()
+                            .justify_center()
+                            .items_center()
+                            .text_size(px(self.scaled(ts.tab_item_close_font_size_px)))
+                            .text_color(ts.tab_item_close_text_color)
+                            .opacity(if is_active {
+                                ts.tab_item_close_active_opacity
+                            } else {
+                                ts.tab_item_close_inactive_opacity
+                            })
+                            .group_hover("chat-tab-item", |style| {
+                                style.opacity(ts.tab_item_close_active_opacity)
+                            })
+                            .hover(move |style| style.bg(close_hover_bg))
+                            .child("✕")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.close_chat_tab(&close_id, cx);
+                                }),
+                            ),
+                    ),
+            )
+            .on_drag(
+                DraggedChatTab {
+                    tab_id: drag_tab_id.clone(),
+                    title: drag_title,
+                    source_index: tab_index,
+                },
+                {
+                    let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
+                    move |dragged, offset, _window, cx| {
+                        cx.new(|_cx| DraggedTabView {
+                            title: dragged.title.clone(),
+                            font_size_px: ghost_font_size_px,
+                            cursor_offset: offset,
+                        })
+                    }
+                },
+            )
+            .on_drag_move(cx.listener(
+                move |this, _event: &DragMoveEvent<DraggedChatTab>, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.chat_tab_drag_candidate_id = Some(drag_tab_id.clone());
+                    this.chat_tab_dragging_id = Some(drag_tab_id.clone());
+                },
+            ))
+            .on_mouse_move(
+                cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
+                    if event.dragging()
+                        && (this.chat_tab_drag_candidate_id.as_deref()
+                            == Some(hover_tab_id.as_str())
+                            || this.chat_tab_dragging_id.is_some())
+                    {
+                        this.chat_tab_dragging_id = Some(hover_tab_id.clone());
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    this.chat_tab_drag_candidate_id = Some(tab_id.clone());
+                    this.switch_to_chat_tab(&tab_id, cx);
+                    cx.stop_propagation();
+                    if event.click_count >= 2 {
+                        window.prevent_default();
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.open_chat_tab_context_menu(context_tab_id.clone(), event.position, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.close_chat_tab(&middle_close_id, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_chat_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let inner_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
+        let end_drop_indicator_color = ts.tab_drop_indicator_color;
+        let end_drop_indicator_width = ts.tab_drop_indicator_width_px;
+        let current_tab_ids: Vec<String> =
+            self.chat_tabs.iter().map(|tab| tab.id.clone()).collect();
+        let mut tab_items: Vec<AnyElement> = self
+            .chat_tabs
+            .iter()
+            .map(|tab| self.render_chat_tab(tab, cx))
+            .collect();
+
+        let new_hover_color = ts.tab_new_hover_text_color;
+        let new_hover_bg = ts.tab_item_hover_bg;
+        let tab_plus_gap_width = self.scaled(ts.tab_spacer_width_px);
+        tab_items.push(
+            div()
+                .h(px(inner_height))
+                .w(px(self.scaled(ts.tab_new_width_px)))
+                .flex_none()
+                .flex()
+                .justify_center()
+                .items_center()
+                .text_size(px(self.scaled(ts.tab_new_font_size_px)))
+                .text_color(ts.tab_new_text_color)
+                .hover(move |style| style.text_color(new_hover_color).bg(new_hover_bg))
+                .child("+")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.create_chat_tab(cx);
+                    }),
+                )
+                .into_any_element(),
+        );
+        tab_items.push(
+            div()
+                .h(px(inner_height))
+                .w(px(tab_plus_gap_width))
+                .flex_none()
+                .into_any_element(),
+        );
+        tab_items.push(
+            div()
+                .flex_1()
+                .h(px(inner_height))
+                .min_w(px(0.0))
+                .drag_over::<DraggedChatTab>(move |style, dragged, _, _| {
+                    if Self::chat_tab_drop_changes_order_for(
+                        &current_tab_ids,
+                        &dragged.tab_id,
+                        ChatTabDropTarget::End,
+                    ) {
+                        style
+                            .border_l(px(end_drop_indicator_width))
+                            .border_color(end_drop_indicator_color)
+                    } else {
+                        style
+                    }
+                })
+                .on_drop(cx.listener(move |this, dragged: &DraggedChatTab, _, cx| {
+                    let current_tab_ids: Vec<String> =
+                        this.chat_tabs.iter().map(|tab| tab.id.clone()).collect();
+                    if Self::chat_tab_drop_changes_order_for(
+                        &current_tab_ids,
+                        &dragged.tab_id,
+                        ChatTabDropTarget::End,
+                    ) {
+                        this.reorder_chat_tab_to_end(&dragged.tab_id, cx);
+                    }
+                    this.chat_tab_drag_candidate_id = None;
+                    this.chat_tab_dragging_id = None;
+                }))
+                .into_any_element(),
+        );
+
+        div()
+            .id("chat-tab-bar")
+            .relative()
+            .w_full()
+            .h(px(self.tab_bar_height()))
+            .flex()
+            .items_start()
+            .bg(ts.tab_bar_bg)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if this.chat_tab_drag_candidate_id.is_some()
+                        || this.chat_tab_dragging_id.is_some()
+                    {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if event.dragging()
+                    && (this.chat_tab_drag_candidate_id.is_some()
+                        || this.chat_tab_dragging_id.is_some())
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.chat_tab_drag_candidate_id = None;
+                    if this.chat_tab_dragging_id.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.chat_tab_drag_candidate_id = None;
+                    if this.chat_tab_dragging_id.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(ts.tab_bar_border_width_px))
+                    .bg(ts.tab_bar_border_color),
+            )
+            .children(tab_items)
+            .into_any_element()
+    }
+
     pub(crate) fn render_chat_panel(
         &mut self,
         is_focused: bool,
@@ -1942,27 +2788,20 @@ impl EditorView {
         let terminal_padding = self.scaled(ups.utility_panel_terminal_padding_px);
         let monospace = SharedString::from(self.styles.editor.editor_monospace_font_family);
         let default_fg = ups.utility_panel_item_value_text_color;
-        let default_bg = ups.utility_panel_bg;
+        let default_bg = self.styles.editor.editor_bg;
         let cursor_color = self.theme.cursor;
         let palette = terminal_theme_palette(&self.theme, default_bg);
         let content_opacity = if is_focused { 1.0 } else { 0.8 };
-        let agent_button_height = self.scaled(30.0);
-        let agent_button_icon_size = self.scaled(16.0);
-        let agent_button_gap = self.scaled(8.0);
-        let agent_footer_top_gap = self.scaled(8.0);
-        let agent_button_hover_bg = self.theme.bg_hover;
-        let agent_button_text = self.theme.text_primary;
-        let agent_button_border = self.theme.border_primary;
+        let file_drop_bg = self.styles.editor.editor_file_drop_bg;
 
         let snapshot = self
-            .chat_terminal
-            .as_ref()
+            .active_chat_terminal()
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         let cursor_row = Self::chat_terminal_cursor_display_row(&snapshot);
         let cursor_col = snapshot.cursor.point.column.0;
         let cursor_visible = matches!(
-            self.chat_terminal.as_ref().map(|session| &session.status),
+            self.active_chat_terminal().map(|session| &session.status),
             Some(ChatTerminalStatus::Running)
         ) && snapshot.cursor.shape != AlacCursorShape::Hidden
             && cursor_row.is_some();
@@ -2086,7 +2925,7 @@ impl EditorView {
             .cursor(CursorStyle::Arrow)
             .h_full()
             .w_full()
-            .bg(ups.utility_panel_bg)
+            .bg(default_bg)
             .when(
                 self.chat_panel_placement == ChatPanelPlacement::Bottom,
                 |this| {
@@ -2101,6 +2940,7 @@ impl EditorView {
                         .border_color(ups.utility_panel_border_color)
                 },
             )
+            .child(self.render_chat_tab_bar(cx))
             .child(
                 div()
                     .flex_1()
@@ -2112,7 +2952,9 @@ impl EditorView {
                         div()
                             .w_full()
                             .h_full()
-                            .p(px(terminal_padding))
+                            .px(px(terminal_padding))
+                            .pt(px(terminal_padding))
+                            .pb(px(terminal_padding))
                             .relative()
                             .bg(default_bg)
                             .overflow_hidden()
@@ -2141,6 +2983,20 @@ impl EditorView {
                             .right(px(terminal_padding))
                             .bottom(px(terminal_padding))
                             .on_scroll_wheel(cx.listener(Self::on_chat_terminal_scroll))
+                            .drag_over::<DraggedSidebarItems>(move |style, _, _, _| {
+                                style.bg(file_drop_bg)
+                            })
+                            .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(file_drop_bg))
+                            .on_drop(cx.listener(|this, dragged: &DraggedSidebarItems, _, cx| {
+                                this.add_dragged_paths_to_chat(&dragged.paths, cx);
+                            }))
+                            .on_drop(cx.listener(|this, dragged: &DraggedTab, _, cx| {
+                                this.add_dragged_tab_to_chat(
+                                    &dragged.title,
+                                    dragged.path.as_ref(),
+                                    cx,
+                                );
+                            }))
                             .child(ChatTerminalInputElement {
                                 editor: cx.entity().clone(),
                             })
@@ -2164,49 +3020,6 @@ impl EditorView {
                                             .child(text),
                                     )
                                 },
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .flex_none()
-                    .px(px(terminal_padding))
-                    .pt(px(agent_footer_top_gap))
-                    .pb(px(terminal_padding))
-                    .flex()
-                    .items_center()
-                    .justify_start()
-                    .child(
-                        div()
-                            .id("chat-agent-cli-button")
-                            .h(px(agent_button_height))
-                            .px(px(self.scaled(10.0)))
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap(px(agent_button_gap))
-                            .rounded(px(self.scaled(6.0)))
-                            .border(px(1.0))
-                            .border_color(agent_button_border)
-                            .text_size(px(self.scaled(13.0)))
-                            .text_color(agent_button_text)
-                            .cursor(CursorStyle::Arrow)
-                            .hover(move |style| style.bg(agent_button_hover_bg))
-                            .child(
-                                svg()
-                                    .path(self.chat_agent_cli.icon_path())
-                                    .size(px(agent_button_icon_size))
-                                    .text_color(agent_button_text),
-                            )
-                            .child(self.chat_agent_cli.label().to_string())
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                                    cx.stop_propagation();
-                                    window.prevent_default();
-                                    this.open_chat_agent_cli_menu(event.position, cx);
-                                }),
                             ),
                     ),
             )

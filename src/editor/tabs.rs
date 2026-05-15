@@ -1329,6 +1329,17 @@ impl EditorView {
         let drop_indicator_color = ts.tab_drop_indicator_color;
         let drop_indicator_width = ts.tab_drop_indicator_width_px;
         let source_opacity = ts.tab_drag_source_opacity;
+        let tab_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
+        let tab_surface_height = if is_active {
+            self.tab_bar_height()
+        } else {
+            tab_height
+        };
+        let tab_bg = if is_active {
+            ts.tab_item_active_bg
+        } else {
+            ts.tab_item_bg
+        };
         let is_being_dragged = self.tab_dragging_id.as_deref() == Some(tab.id.as_str());
         let current_tab_ids: Vec<String> = self
             .tabs
@@ -1347,20 +1358,7 @@ impl EditorView {
             .h(px(self.tab_bar_height()))
             .min_w(px(self.scaled(ts.tab_item_min_width_px)))
             .max_w(px(self.scaled(ts.tab_item_max_width_px)))
-            .pl(px(self.scaled(ts.tab_item_padding_left_px)))
-            .pr(px(self.scaled(ts.tab_item_padding_right_px)))
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(ts.tab_item_gap_px)))
             .flex_none()
-            .bg(if is_active {
-                ts.tab_item_active_bg
-            } else {
-                ts.tab_item_bg
-            })
-            .border_r(px(ts.tab_item_border_width_px))
-            .border_color(ts.tab_item_border_color)
-            .hover(move |style| style.bg(tab_hover_bg))
             // Dim the source tab while dragging
             .when(is_being_dragged, |this: gpui::Stateful<gpui::Div>| {
                 this.opacity(source_opacity)
@@ -1440,74 +1438,88 @@ impl EditorView {
                 this.tab_drag_candidate_id = None;
                 this.tab_dragging_id = None;
             }))
-            .when(true, |this: gpui::Stateful<gpui::Div>| {
-                this.when(tab_kind == TabKind::Editor, |this| {
-                    this.child(self.render_tab_file_indicator(tab, is_active))
-                })
-                .when(tab_kind == TabKind::Diff, |this| {
-                    this.child(self.render_tab_file_indicator(tab, is_active))
-                })
-                .when(tab_kind == TabKind::Settings, |this| {
-                    this.child(
-                        svg()
-                            .path("assets/icons/setting.svg")
-                            .size(px(self.scaled(ts.tab_item_icon_size_px)))
-                            .text_color(ts.tab_item_icon_color)
-                            .opacity(if is_active {
-                                ts.tab_item_icon_active_opacity
-                            } else {
-                                ts.tab_item_icon_inactive_opacity
-                            }),
-                    )
-                })
-                .child(self.render_tab_title_label(tab, is_active, is_preview, is_deleted))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("close-{}", tab.id)))
-                        .w(px(self.scaled(ts.tab_item_close_size_px)))
-                        .h(px(self.scaled(ts.tab_item_close_size_px)))
-                        .rounded_full()
-                        .flex()
-                        .flex_none()
-                        .justify_center()
-                        .items_center()
-                        .when(is_dirty, |this| {
+            .child(
+                div()
+                    .h(px(tab_surface_height))
+                    .pl(px(self.scaled(ts.tab_item_padding_left_px)))
+                    .pr(px(self.scaled(ts.tab_item_padding_right_px)))
+                    .flex()
+                    .items_center()
+                    .gap(px(self.scaled(ts.tab_item_gap_px)))
+                    .bg(tab_bg)
+                    .border_r(px(ts.tab_item_border_width_px))
+                    .border_color(ts.tab_item_border_color)
+                    .hover(move |style| style.bg(tab_hover_bg))
+                    .when(true, |this| {
+                        this.when(tab_kind == TabKind::Editor, |this| {
+                            this.child(self.render_tab_file_indicator(tab, is_active))
+                        })
+                        .when(tab_kind == TabKind::Diff, |this| {
+                            this.child(self.render_tab_file_indicator(tab, is_active))
+                        })
+                        .when(tab_kind == TabKind::Settings, |this| {
                             this.child(
-                                div()
-                                    .w(px(self.scaled(ts.tab_item_dirty_dot_size_px)))
-                                    .h(px(self.scaled(ts.tab_item_dirty_dot_size_px)))
-                                    .rounded_full()
-                                    .bg(ts.tab_item_dirty_dot_color),
+                                svg()
+                                    .path("assets/icons/setting.svg")
+                                    .size(px(self.scaled(ts.tab_item_icon_size_px)))
+                                    .text_color(ts.tab_item_icon_color)
+                                    .opacity(if is_active {
+                                        ts.tab_item_icon_active_opacity
+                                    } else {
+                                        ts.tab_item_icon_inactive_opacity
+                                    }),
                             )
                         })
-                        .when(!is_dirty, |this| {
-                            this.text_size(px(self.scaled(ts.tab_item_close_font_size_px)))
-                                .text_color(ts.tab_item_close_text_color)
-                                .opacity(if is_active {
-                                    ts.tab_item_close_active_opacity
-                                } else {
-                                    ts.tab_item_close_inactive_opacity
+                        .child(self.render_tab_title_label(tab, is_active, is_preview, is_deleted))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("close-{}", tab.id)))
+                                .w(px(self.scaled(ts.tab_item_close_size_px)))
+                                .h(px(self.scaled(ts.tab_item_close_size_px)))
+                                .rounded_full()
+                                .flex()
+                                .flex_none()
+                                .justify_center()
+                                .items_center()
+                                .when(is_dirty, |this| {
+                                    this.child(
+                                        div()
+                                            .w(px(self.scaled(ts.tab_item_dirty_dot_size_px)))
+                                            .h(px(self.scaled(ts.tab_item_dirty_dot_size_px)))
+                                            .rounded_full()
+                                            .bg(ts.tab_item_dirty_dot_color),
+                                    )
                                 })
-                                .group_hover("tab-item", |style| {
-                                    style.opacity(ts.tab_item_close_active_opacity)
+                                .when(!is_dirty, |this| {
+                                    this.text_size(px(self.scaled(ts.tab_item_close_font_size_px)))
+                                        .text_color(ts.tab_item_close_text_color)
+                                        .opacity(if is_active {
+                                            ts.tab_item_close_active_opacity
+                                        } else {
+                                            ts.tab_item_close_inactive_opacity
+                                        })
+                                        .group_hover("tab-item", |style| {
+                                            style.opacity(ts.tab_item_close_active_opacity)
+                                        })
+                                        .hover(move |style| style.bg(close_hover_bg))
+                                        .child("✕")
                                 })
-                                .hover(move |style| style.bg(close_hover_bg))
-                                .child("✕")
-                        })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.request_close_tab(&close_id, cx);
-                            }),
-                        ),
-                )
-            })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.request_close_tab(&close_id, cx);
+                                    }),
+                                ),
+                        )
+                    }),
+            )
             // Drag initiation: create ghost element
             .on_drag(
                 DraggedTab {
                     tab_id: drag_tab_id.clone(),
                     title: drag_title,
+                    path: tab.path.clone(),
                     source_index: tab_index,
                 },
                 {
@@ -1555,7 +1567,8 @@ impl EditorView {
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
                     cx.stop_propagation();
                     this.open_tab_context_menu(context_tab_id.clone(), event.position, cx);
                 }),
@@ -1638,6 +1651,7 @@ impl EditorView {
 
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let ts = &self.styles.tab_bar;
+        let inner_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
         let end_drop_indicator_color = ts.tab_drop_indicator_color;
         let end_drop_indicator_width = ts.tab_drop_indicator_width_px;
         let current_tab_ids: Vec<String> = self.tabs.iter().map(|tab| tab.id.clone()).collect();
@@ -1657,7 +1671,7 @@ impl EditorView {
         let tab_plus_gap_width = self.scaled(ts.tab_spacer_width_px);
         tab_items.push(
             div()
-                .h(px(self.tab_bar_height()))
+                .h(px(inner_height))
                 .w(px(self.scaled(ts.tab_new_width_px)))
                 .flex_none()
                 .flex()
@@ -1679,7 +1693,7 @@ impl EditorView {
         tab_items.push(
             div()
                 .id("tab-bar-plus-spacer")
-                .h(px(self.tab_bar_height()))
+                .h(px(inner_height))
                 .w(px(tab_plus_gap_width))
                 .flex_none()
                 .on_mouse_down(
@@ -1694,7 +1708,7 @@ impl EditorView {
             div()
                 .id("tab-bar-drag-spacer")
                 .flex_1()
-                .h_full()
+                .h(px(inner_height))
                 .min_w(px(0.0))
                 .drag_over::<DraggedTab>(move |style, dragged, _, _| {
                     if Self::tab_drop_changes_order_for(
@@ -1736,9 +1750,9 @@ impl EditorView {
                 .into_any_element(),
         );
 
-        let chat_active = self.utility_panel == Some(RightUtilityPanel::Chat);
-        let info_active = self.utility_panel == Some(RightUtilityPanel::Info);
-        let git_active = self.utility_panel == Some(RightUtilityPanel::GitHistory);
+        let chat_active = self.is_utility_panel_active(RightUtilityPanel::Chat);
+        let info_active = self.is_utility_panel_active(RightUtilityPanel::Info);
+        let git_active = self.is_utility_panel_active(RightUtilityPanel::GitHistory);
         let can_nav_back = self.can_navigate_tab_history_back();
         let can_nav_forward = self.can_navigate_tab_history_forward();
         let history_button_size = self.tab_bar_height();
@@ -1751,7 +1765,7 @@ impl EditorView {
                 div()
                     .id(id)
                     .w(px(history_button_size))
-                    .h_full()
+                    .h(px(inner_height))
                     .flex_none()
                     .flex()
                     .items_center()
@@ -1786,7 +1800,7 @@ impl EditorView {
             };
         let left_controls = div()
             .id("tab-bar-left-controls")
-            .h_full()
+            .h(px(inner_height))
             .flex_none()
             .flex()
             .items_center()
@@ -1813,7 +1827,7 @@ impl EditorView {
         };
         let left_controls_group = div()
             .id("tab-bar-left-group")
-            .h_full()
+            .h(px(inner_height))
             .flex_none()
             .flex()
             .items_center()
@@ -1821,7 +1835,7 @@ impl EditorView {
             .child(left_controls);
         let action_buttons = div()
             .id("tab-bar-actions")
-            .h(px(self.tab_bar_height()))
+            .h(px(inner_height))
             .flex_none()
             .flex()
             .items_center()
@@ -1863,13 +1877,12 @@ impl EditorView {
 
         div()
             .id("tab-bar")
+            .relative()
             .w_full()
             .h(px(self.tab_bar_height()))
             .flex()
-            .items_center()
+            .items_start()
             .bg(ts.tab_bar_bg)
-            .border_b(px(ts.tab_bar_border_width_px))
-            .border_color(ts.tab_bar_border_color)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -1905,6 +1918,15 @@ impl EditorView {
                     }
                 }),
             )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(ts.tab_bar_border_width_px))
+                    .bg(ts.tab_bar_border_color),
+            )
             .child(left_controls_group)
             .child(
                 div()
@@ -1913,7 +1935,7 @@ impl EditorView {
                     .h_full()
                     .min_w(px(0.0))
                     .flex()
-                    .items_center()
+                    .items_start()
                     .overflow_x_scroll()
                     .track_scroll(&self.tab_bar_scroll_handle)
                     .children(tab_items),
