@@ -1,7 +1,8 @@
-use std::ops::Range;
 use std::path::PathBuf;
 
 use gpui::{Pixels, Point};
+
+use crate::markdown::LineDecoration;
 
 use super::{config_store, history_store};
 
@@ -152,7 +153,7 @@ pub(crate) struct GitDiffState {
 pub(crate) struct GitDiffRow {
     pub kind: GitDiffRowKind,
     pub text: String,
-    pub inline_highlights: Vec<Range<usize>>,
+    pub decoration: LineDecoration,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

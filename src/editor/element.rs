@@ -192,6 +192,8 @@ fn build_precise_table_layout(
                     0,
                     font_size,
                     theme,
+                    crate::theme::with_alpha(theme.git_status_added, 0.24),
+                    crate::theme::with_alpha(theme.text_danger, 0.28),
                     theme.link,
                     FontWeight::BOLD,
                     None,
@@ -1428,6 +1430,13 @@ impl Element for EditorElement {
                 .block_preview
                 .as_ref()
                 .filter(|_| !block_preview_active);
+            let attached_block_preview = decoration.block_preview.as_ref().filter(|preview| {
+                if block_preview_active {
+                    line_idx == preview.end_line
+                } else {
+                    preview.is_anchor
+                }
+            });
             if let Some(preview) = collapsed_block_preview
                 && !preview.is_anchor
             {
@@ -1492,6 +1501,8 @@ impl Element for EditorElement {
                     collapsed_task_prefix_display_columns,
                     font_size,
                     theme,
+                    editor.styles.selection.selection_diff_added_inline_bg,
+                    editor.styles.selection.selection_diff_removed_inline_bg,
                     editor.styles.wiki_link.wiki_link_text_color,
                     editor.styles.wiki_link.wiki_link_text_weight,
                     Some(editor.styles.table.front_matter_key_text_color),
@@ -1666,7 +1677,7 @@ impl Element for EditorElement {
             } else {
                 0.0
             };
-            let generated_preview_extra_height = if let Some(preview) = collapsed_block_preview {
+            let generated_preview_extra_height = if let Some(preview) = attached_block_preview {
                 if let Some(Some(img_data)) = image_cache.get(&preview.cache_key) {
                     let img_size = img_data.size(0);
                     let img_w = img_size.width.0 as f32;
@@ -2110,6 +2121,8 @@ impl Element for EditorElement {
                                         0,
                                         font_size,
                                         theme,
+                                        editor.styles.selection.selection_diff_added_inline_bg,
+                                        editor.styles.selection.selection_diff_removed_inline_bg,
                                         editor.styles.wiki_link.wiki_link_text_color,
                                         editor.styles.wiki_link.wiki_link_text_weight,
                                         None,
@@ -2617,7 +2630,7 @@ impl Element for EditorElement {
                 }
             }
 
-            if let Some(preview) = collapsed_block_preview {
+            if let Some(preview) = attached_block_preview {
                 if let Some(Some(img_data)) = image_cache.get(&preview.cache_key) {
                     let img_size = img_data.size(0);
                     let img_w = img_size.width.0 as f32;

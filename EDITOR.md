@@ -85,6 +85,83 @@ fn greet(name: &str) {
 }
 ```
 
+## 数学公式与 Mermaid 预览
+
+### LaTeX 数学公式
+
+下面给出几个稍复杂一些的展示公式，便于观察块级预览在多行、矩阵、分段函数和优化目标下的表现。
+
+$$
+\begin{aligned}
+\nabla \cdot \mathbf{E} &= \frac{\rho}{\varepsilon_0} \\
+\nabla \times \mathbf{B} - \mu_0 \varepsilon_0 \frac{\partial \mathbf{E}}{\partial t} &= \mu_0 \mathbf{J} \\
+\nabla \cdot \mathbf{B} &= 0 \\
+\nabla \times \mathbf{E} &= -\frac{\partial \mathbf{B}}{\partial t}
+\end{aligned}
+$$
+
+$$
+\operatorname*{arg\,min}_{\theta \in \mathbb{R}^n}
+\left(
+\frac{1}{m}\sum_{i=1}^{m} \ell\bigl(f_{\theta}(x_i), y_i\bigr)
++ \lambda \lVert \theta \rVert_2^2
+\right)
+$$
+
+$$
+A = \begin{bmatrix}
+1 & \alpha & \alpha^2 \\
+0 & 1 & 2\alpha \\
+0 & 0 & 1
+\end{bmatrix},
+\qquad
+f(x) =
+\begin{cases}
+x^2 \sin \frac{1}{x}, & x \ne 0 \\
+0, & x = 0
+\end{cases}
+$$
+
+### Mermaid 图表示例
+
+先放一个偏流程编排的图，里面包含条件判断、子图和异步保存路径。
+
+```mermaid
+flowchart LR
+  A[打开文稿] --> B{是否有未保存修改}
+  B -->|是| C[写入本地快照]
+  B -->|否| D[直接进入编辑区]
+  C --> D
+  D --> E[触发 Markdown 解析]
+  E --> F[计算标题与列表装饰]
+  E --> G[提取 LaTeX 与 Mermaid 块]
+  G --> H[生成 SVG 预览卡片]
+  H --> I[缓存图像并回流布局]
+  I --> J[绘制正文与侧边栏]
+
+  subgraph AutoSave[自动保存]
+    C --> K[延迟 500ms 去抖]
+    K --> L[写入磁盘]
+  end
+```
+
+再放一个时序图，方便观察多参与者和往返调用下的预览效果。
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant E as Editor
+  participant P as Parser
+  participant C as Cache
+
+  U->>E: 编辑 Mermaid 或公式块
+  E->>P: reparse(buffer)
+  P-->>E: block_preview(start_line, end_line)
+  E->>C: refresh_generated_block_previews()
+  C-->>E: 返回 SVG 图像
+  E-->>U: 在文稿中显示预览
+```
+
 ## 行内语法
 
 - 可以使用**加粗**或者带有 *italic* 斜体语法来表示强调。

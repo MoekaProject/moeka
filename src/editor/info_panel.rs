@@ -24,6 +24,15 @@ unsafe extern "C" {}
 use super::*;
 
 #[derive(Clone)]
+struct PendingGitDiffRow {
+    kind: GitDiffRowKind,
+    text: String,
+    inline_highlights: Vec<Range<usize>>,
+    old_line_index: Option<usize>,
+    new_line_index: Option<usize>,
+}
+
+#[derive(Clone)]
 struct InfoPanelRow {
     label: String,
     value: String,
@@ -658,12 +667,14 @@ fn build_git_diff_rows(
     target_text: &str,
 ) -> Vec<GitDiffRow> {
     let diff = TextDiff::from_lines(base_text, target_text);
-    let mut rows = Vec::new();
+    let base_decorations = crate::markdown::parse_decorations(base_text);
+    let target_decorations = crate::markdown::parse_decorations(target_text);
+    let mut pending_rows = Vec::new();
 
     for op in diff.ops() {
         for change in diff.iter_inline_changes(op) {
             let (text, inline_highlights) = build_inline_change_text_and_highlights(&change);
-            rows.push(GitDiffRow {
+            pending_rows.push(PendingGitDiffRow {
                 kind: match change.tag() {
                     ChangeTag::Equal => GitDiffRowKind::Context,
                     ChangeTag::Delete => GitDiffRowKind::Removed,
@@ -671,19 +682,114 @@ fn build_git_diff_rows(
                 },
                 inline_highlights,
                 text,
+                old_line_index: change.old_index(),
+                new_line_index: change.new_index(),
             });
         }
     }
+
+    let mut rows = pending_rows
+        .into_iter()
+        .map(|row| build_git_diff_row(row, &base_decorations, &target_decorations))
+        .collect::<Vec<_>>();
+
+    normalize_diff_table_metadata(&mut rows);
 
     if rows.is_empty() {
         rows.push(GitDiffRow {
             kind: GitDiffRowKind::Context,
             text: crate::i18n::translate(language, crate::i18n::TextKey::NoTextDiff).to_string(),
-            inline_highlights: Vec::new(),
+            decoration: crate::markdown::LineDecoration::default(),
         });
     }
 
     rows
+}
+
+fn build_git_diff_row(
+    row: PendingGitDiffRow,
+    base_decorations: &[crate::markdown::LineDecoration],
+    target_decorations: &[crate::markdown::LineDecoration],
+) -> GitDiffRow {
+    let mut decoration = match row.kind {
+        GitDiffRowKind::Context | GitDiffRowKind::Added => row
+            .new_line_index
+            .and_then(|index| target_decorations.get(index).cloned())
+            .or_else(|| {
+                row.old_line_index
+                    .and_then(|index| base_decorations.get(index).cloned())
+            })
+            .unwrap_or_default(),
+        GitDiffRowKind::Removed => row
+            .old_line_index
+            .and_then(|index| base_decorations.get(index).cloned())
+            .unwrap_or_default(),
+    };
+
+    decoration.diff_added_spans.clear();
+    decoration.diff_removed_spans.clear();
+    match row.kind {
+        GitDiffRowKind::Context => {}
+        GitDiffRowKind::Added => {
+            decoration.diff_added_spans = row.inline_highlights.clone();
+        }
+        GitDiffRowKind::Removed => {
+            decoration.diff_removed_spans = row.inline_highlights.clone();
+        }
+    }
+
+    GitDiffRow {
+        kind: row.kind,
+        text: row.text,
+        decoration,
+    }
+}
+
+fn normalize_diff_table_metadata(rows: &mut [GitDiffRow]) {
+    let mut row_index = 0usize;
+    while row_index < rows.len() {
+        if rows[row_index].decoration.table_info.is_none() {
+            row_index += 1;
+            continue;
+        }
+
+        let table_start = row_index;
+        let mut table_end = row_index + 1;
+        let mut column_widths = Vec::new();
+
+        while table_end < rows.len() && rows[table_end].decoration.table_info.is_some() {
+            table_end += 1;
+        }
+
+        for row in &rows[table_start..table_end] {
+            let Some(table_info) = row.decoration.table_info.as_ref() else {
+                continue;
+            };
+            if column_widths.len() < table_info.column_widths.len() {
+                column_widths.resize(table_info.column_widths.len(), 3);
+            }
+            for (column_index, width) in table_info.column_widths.iter().enumerate() {
+                column_widths[column_index] = column_widths[column_index].max(*width);
+            }
+        }
+
+        for row in &mut rows[table_start..table_end] {
+            let Some(table_info) = row.decoration.table_info.as_mut() else {
+                continue;
+            };
+            table_info.table_start_line = table_start;
+            table_info.table_end_line = table_end;
+            if table_info.column_widths.len() < column_widths.len() {
+                table_info.column_widths.resize(column_widths.len(), 3);
+            }
+            for (column_index, width) in column_widths.iter().enumerate() {
+                table_info.column_widths[column_index] =
+                    table_info.column_widths[column_index].max(*width);
+            }
+        }
+
+        row_index = table_end;
+    }
 }
 
 fn build_inline_change_text_and_highlights(
@@ -945,6 +1051,9 @@ impl EditorView {
         let Some(context) = self.git_repo_context() else {
             return;
         };
+        if !is_markdown_file(&context.file_path) {
+            return;
+        }
         let diff_title = format!(
             "{} {}",
             self.t(crate::i18n::TextKey::Diff),
@@ -2064,17 +2173,23 @@ mod tests {
             GitDiffRow {
                 kind: GitDiffRowKind::Context,
                 text: "alpha".to_string(),
-                inline_highlights: Vec::new(),
+                decoration: crate::markdown::LineDecoration::default(),
             },
             GitDiffRow {
                 kind: GitDiffRowKind::Removed,
                 text: "before".to_string(),
-                inline_highlights: vec![0..6],
+                decoration: crate::markdown::LineDecoration {
+                    diff_removed_spans: vec![0..6],
+                    ..crate::markdown::LineDecoration::default()
+                },
             },
             GitDiffRow {
                 kind: GitDiffRowKind::Added,
                 text: "after".to_string(),
-                inline_highlights: vec![0..5],
+                decoration: crate::markdown::LineDecoration {
+                    diff_added_spans: vec![0..5],
+                    ..crate::markdown::LineDecoration::default()
+                },
             },
         ];
 
@@ -2094,7 +2209,8 @@ mod tests {
                 crate::i18n::TextKey::NoTextDiff
             )
         );
-        assert!(rows[0].inline_highlights.is_empty());
+        assert!(rows[0].decoration.diff_added_spans.is_empty());
+        assert!(rows[0].decoration.diff_removed_spans.is_empty());
     }
 
     #[test]
@@ -2124,9 +2240,9 @@ mod tests {
 
         assert_eq!(rows.len(), 2);
         assert!(matches!(rows[0].kind, GitDiffRowKind::Removed));
-        assert_eq!(rows[0].inline_highlights, vec![7..10]);
+        assert_eq!(rows[0].decoration.diff_removed_spans, vec![7..10]);
         assert!(matches!(rows[1].kind, GitDiffRowKind::Added));
-        assert_eq!(rows[1].inline_highlights, vec![7..10]);
+        assert_eq!(rows[1].decoration.diff_added_spans, vec![7..10]);
     }
 
     #[test]
@@ -2135,6 +2251,99 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert!(matches!(rows[0].kind, GitDiffRowKind::Added));
-        assert_eq!(rows[0].inline_highlights, vec![0..7]);
+        assert_eq!(rows[0].decoration.diff_added_spans, vec![0..7]);
+    }
+
+    #[test]
+    fn diff_rows_preserve_code_block_decorations() {
+        let rows = build_git_diff_rows(
+            crate::i18n::UiLanguage::English,
+            "```rust\nlet old_value = 1;\n```\n",
+            "```rust\nlet new_value = 2;\n```\n",
+        );
+
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(
+            rows[0].decoration.block_type,
+            crate::markdown::BlockType::CodeBlockFence
+        ));
+        assert!(matches!(
+            rows[1].decoration.block_type,
+            crate::markdown::BlockType::CodeBlock
+        ));
+        assert!(matches!(
+            rows[2].decoration.block_type,
+            crate::markdown::BlockType::CodeBlock
+        ));
+        assert!(matches!(
+            rows[3].decoration.block_type,
+            crate::markdown::BlockType::CodeBlockFence
+        ));
+    }
+
+    #[test]
+    fn diff_rows_preserve_ordered_and_unordered_list_decorations() {
+        let unordered_rows = build_git_diff_rows(
+            crate::i18n::UiLanguage::English,
+            "- old item\n",
+            "- new item\n",
+        );
+        assert!(matches!(
+            unordered_rows[0].decoration.block_type,
+            crate::markdown::BlockType::UnorderedList
+        ));
+        assert!(matches!(
+            unordered_rows[1].decoration.block_type,
+            crate::markdown::BlockType::UnorderedList
+        ));
+
+        let ordered_rows = build_git_diff_rows(
+            crate::i18n::UiLanguage::English,
+            "1. old item\n",
+            "1. new item\n",
+        );
+        assert!(matches!(
+            ordered_rows[0].decoration.block_type,
+            crate::markdown::BlockType::OrderedList
+        ));
+        assert!(matches!(
+            ordered_rows[1].decoration.block_type,
+            crate::markdown::BlockType::OrderedList
+        ));
+    }
+
+    #[test]
+    fn diff_rows_preserve_image_decorations() {
+        let rows = build_git_diff_rows(
+            crate::i18n::UiLanguage::English,
+            "![old](assets/old.png)\n",
+            "![new](assets/new.png)\n",
+        );
+
+        assert_eq!(
+            rows[0].decoration.image_path.as_deref(),
+            Some("assets/old.png")
+        );
+        assert_eq!(
+            rows[1].decoration.image_path.as_deref(),
+            Some("assets/new.png")
+        );
+    }
+
+    #[test]
+    fn diff_rows_normalize_table_metadata_for_replacements() {
+        let rows = build_git_diff_rows(
+            crate::i18n::UiLanguage::English,
+            "| Name | Value |\n| --- | --- |\n| old | 1 |\n",
+            "| Name | Value |\n| --- | --- |\n| new | 22 |\n",
+        );
+
+        assert_eq!(rows.len(), 4);
+        for row in &rows {
+            let table_info = row.decoration.table_info.as_ref().expect("table row decoration");
+            assert_eq!(table_info.table_start_line, 0);
+            assert_eq!(table_info.table_end_line, 4);
+            assert_eq!(table_info.column_widths.len(), 2);
+        }
     }
 }

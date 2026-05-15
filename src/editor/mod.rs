@@ -2876,9 +2876,13 @@ impl EditorView {
             .cloned()
             .unwrap_or(FileKind::Markdown);
         let git_diff_rows = self.active_git_diff_state().map(|diff| diff.rows.clone());
-        self.decorations = parse_decorations_for_file_kind(self.buffer.text(), &file_kind);
-        if let Some(rows) = git_diff_rows.as_deref() {
-            apply_git_diff_decorations(&mut self.decorations, rows);
+        if let Some(rows) = git_diff_rows {
+            self.decorations = rows.into_iter().map(|row| row.decoration).collect();
+            if self.decorations.is_empty() {
+                self.decorations.push(LineDecoration::default());
+            }
+        } else {
+            self.decorations = parse_decorations_for_file_kind(self.buffer.text(), &file_kind);
         }
         self.refresh_generated_block_previews();
         self.layout_dirty = true;
@@ -5159,23 +5163,6 @@ fn plain_text_decorations(text: &str, code_language: Option<String>) -> Vec<Line
         }
     }
     decorations
-}
-
-fn apply_git_diff_decorations(decorations: &mut [LineDecoration], rows: &[GitDiffRow]) {
-    for (decoration, row) in decorations.iter_mut().zip(rows.iter()) {
-        decoration.diff_added_spans.clear();
-        decoration.diff_removed_spans.clear();
-
-        match row.kind {
-            GitDiffRowKind::Context => {}
-            GitDiffRowKind::Added => {
-                decoration.diff_added_spans = row.inline_highlights.clone();
-            }
-            GitDiffRowKind::Removed => {
-                decoration.diff_removed_spans = row.inline_highlights.clone();
-            }
-        }
-    }
 }
 
 impl EditorView {

@@ -1708,6 +1708,8 @@ mod tests {
             0,
             16.0,
             &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             None,
@@ -1812,6 +1814,8 @@ mod tests {
             0,
             16.0,
             &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             None,
@@ -2637,6 +2641,8 @@ pub(crate) fn build_text_runs_for_display(
     collapsed_task_prefix_chars: usize,
     _font_size: f32,
     theme: &Theme,
+    diff_inline_added_bg: Hsla,
+    diff_inline_removed_bg: Hsla,
     wiki_link_text_color: Hsla,
     wiki_link_text_weight: FontWeight,
     front_matter_key_text_color: Option<Hsla>,
@@ -2956,24 +2962,20 @@ pub(crate) fn build_text_runs_for_display(
         }
     }
 
-    let diff_removed_bg = crate::theme::with_alpha(theme.text_danger, 0.24);
     for span in &decoration.diff_removed_spans {
         let start = span.start.min(buf_len);
         let end = span.end.min(buf_len);
         for index in start..end {
-            buf_colors[index] = theme.text_danger;
-            buf_bg_colors[index] = Some(diff_removed_bg);
+            buf_bg_colors[index] = Some(diff_inline_removed_bg);
             buf_strikethroughs[index] = true;
         }
     }
 
-    let diff_added_bg = crate::theme::with_alpha(theme.git_status_added, 0.18);
     for span in &decoration.diff_added_spans {
         let start = span.start.min(buf_len);
         let end = span.end.min(buf_len);
         for index in start..end {
-            buf_colors[index] = theme.git_status_added;
-            buf_bg_colors[index] = Some(diff_added_bg);
+            buf_bg_colors[index] = Some(diff_inline_added_bg);
         }
     }
 
