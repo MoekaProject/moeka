@@ -26,6 +26,7 @@ pub(crate) struct EditorPrepaintState {
     cursor_quads: Vec<PaintQuad>,
     selection_quads: Vec<PaintQuad>,
     search_match_quads: Vec<PaintQuad>,
+    diff_line_bgs: Vec<PaintQuad>,
     line_highlight: Option<PaintQuad>,
     code_block_bgs: Vec<PaintQuad>,
     unordered_list_markers: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
@@ -75,6 +76,15 @@ struct PrepaintLine {
     segments: Option<Vec<(WrappedLine, Point<Pixels>)>>,
     /// True if this line is a table row rendered via per-cell block mode.
     is_table_block: bool,
+}
+
+fn diff_line_background(editor: &EditorView, line_idx: usize) -> Option<Hsla> {
+    let row = editor.active_git_diff_state()?.rows.get(line_idx)?;
+    match row.kind {
+        GitDiffRowKind::Added => Some(editor.styles.selection.selection_diff_added_line_bg),
+        GitDiffRowKind::Removed => Some(editor.styles.selection.selection_diff_removed_line_bg),
+        GitDiffRowKind::Context => None,
+    }
 }
 
 fn build_precise_table_layout(
@@ -621,6 +631,7 @@ impl Element for EditorElement {
         let mut image_borders: Vec<PaintQuad> = Vec::new();
         let mut table_borders: Vec<PaintQuad> = Vec::new();
         let mut table_bgs: Vec<PaintQuad> = Vec::new();
+        let mut diff_line_bgs: Vec<PaintQuad> = Vec::new();
         let mut table_cell_texts: Vec<(WrappedLine, Point<Pixels>, Pixels)> = Vec::new();
         let mut table_click_areas_local: Vec<(Bounds<Pixels>, usize, usize, usize)> = Vec::new();
         let mut table_col_handle_areas_local: Vec<(Bounds<Pixels>, usize, usize)> = Vec::new();
@@ -1113,6 +1124,16 @@ impl Element for EditorElement {
                     gutter_styles.gutter_line_number_text_color,
                     gutter_styles.gutter_line_number_active_text_color,
                 );
+
+                if let Some(diff_bg) = diff_line_background(editor, line_idx) {
+                    diff_line_bgs.push(fill(
+                        Bounds::new(
+                            point(px(origin_x), px(line_top)),
+                            size(px(viewport_width), px(total_line_height)),
+                        ),
+                        diff_bg,
+                    ));
+                }
 
                 if editor.selected_handle.is_none()
                     && is_cursor_line
@@ -2895,6 +2916,15 @@ impl Element for EditorElement {
                 .table_info
                 .as_ref()
                 .is_some_and(|ti| !ti.is_front_matter && line_idx == ti.table_start_line);
+            if let Some(diff_bg) = diff_line_background(editor, line_idx) {
+                diff_line_bgs.push(fill(
+                    Bounds::new(
+                        point(px(origin_x), px(line_top)),
+                        size(px(viewport_width), px(total_line_height)),
+                    ),
+                    diff_bg,
+                ));
+            }
             if editor.selected_handle.is_none()
                 && is_cursor_line
                 && !any_selection
@@ -3687,6 +3717,7 @@ impl Element for EditorElement {
             cursor_quads,
             selection_quads,
             search_match_quads,
+            diff_line_bgs,
             line_highlight,
             code_block_bgs,
             unordered_list_markers,
@@ -3759,6 +3790,10 @@ impl Element for EditorElement {
         }
 
         for quad in prepaint.table_bgs.drain(..) {
+            window.paint_quad(quad);
+        }
+
+        for quad in prepaint.diff_line_bgs.drain(..) {
             window.paint_quad(quad);
         }
 

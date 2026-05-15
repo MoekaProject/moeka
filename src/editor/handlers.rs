@@ -80,6 +80,9 @@ impl EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
         self.checkpoint();
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
@@ -237,6 +240,9 @@ impl EditorView {
                 self.table_delete_row(table_start_line, index, cx);
             }
             self.pause_blinking(cx);
+            return;
+        }
+        if self.active_tab_is_read_only() {
             return;
         }
         self.checkpoint();
@@ -618,6 +624,9 @@ impl EditorView {
             }
             return;
         }
+        if self.active_tab_is_read_only() {
+            return;
+        }
         if self.wiki_link_start.is_some() {
             self.confirm_wiki_link_selection(cx);
             return;
@@ -737,6 +746,9 @@ impl EditorView {
     }
 
     pub(crate) fn on_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
         self.checkpoint();
         let (line_indices, has_selection, has_list_line) =
             self.collect_line_indices_for_block_indent();
@@ -764,6 +776,9 @@ impl EditorView {
     }
 
     pub(crate) fn on_back_tab(&mut self, _: &BackTab, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
         self.checkpoint();
         let (line_indices, has_selection, has_list_line) =
             self.collect_line_indices_for_block_indent();
@@ -837,6 +852,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
         self.checkpoint();
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
@@ -1207,6 +1225,9 @@ impl EditorView {
         if self.sidebar_edit.is_some() {
             return;
         }
+        if self.active_tab_is_read_only() {
+            return;
+        }
         self.checkpoint();
         let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
         let end = self.buffer.line_end(line);
@@ -1226,6 +1247,9 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         if self.sidebar_edit.is_some() {
+            return;
+        }
+        if self.active_tab_is_read_only() {
             return;
         }
         self.checkpoint();
@@ -1249,6 +1273,9 @@ impl EditorView {
         if self.sidebar_edit.is_some() {
             return;
         }
+        if self.active_tab_is_read_only() {
+            return;
+        }
         self.checkpoint();
         let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
         let start = self.buffer.line_start(line);
@@ -1270,6 +1297,9 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         if self.sidebar_edit.is_some() {
+            return;
+        }
+        if self.active_tab_is_read_only() {
             return;
         }
         self.checkpoint();
@@ -1306,6 +1336,9 @@ impl EditorView {
         if self.sidebar_edit.is_some() {
             return;
         }
+        if self.active_tab_is_read_only() {
+            return;
+        }
         let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
         if line == 0 {
             return;
@@ -1339,6 +1372,9 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         if self.sidebar_edit.is_some() {
+            return;
+        }
+        if self.active_tab_is_read_only() {
             return;
         }
         let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);

@@ -502,7 +502,7 @@ impl EditorView {
 
     pub(crate) fn persist_active_tab_state(&mut self) {
         if let Some(index) = self.active_tab_index() {
-            if self.tabs[index].kind == TabKind::Editor {
+            if matches!(self.tabs[index].kind, TabKind::Editor | TabKind::Diff) {
                 if self.tabs[index]
                     .file_kind
                     .as_ref()
@@ -525,7 +525,11 @@ impl EditorView {
         session_store::persist_session(self);
     }
 
-    fn activate_tab_by_index_without_persist(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn activate_tab_by_index_without_persist(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
         if index >= self.tabs.len() {
             return;
         }
@@ -534,7 +538,7 @@ impl EditorView {
         self.active_tab_id = Some(tab.id.clone());
         self.current_file_path = tab.path.clone();
         self.editor_left_aligned = tab.editor_left_aligned;
-        if tab.kind == TabKind::Editor {
+        if matches!(tab.kind, TabKind::Editor | TabKind::Diff) {
             if tab
                 .file_kind
                 .as_ref()
@@ -1077,6 +1081,9 @@ impl EditorView {
         let item_radius = self.scaled(es.editor_path_bar_item_radius_px);
         let item_hover_text_color = es.editor_path_bar_item_hover_text_color;
         let item_opacity = es.editor_path_bar_item_opacity;
+        let diff_label = self
+            .active_git_diff_state()
+            .map(|diff| format!("{} -> {}", diff.source_label, diff.target_label));
         let mut breadcrumb = div()
             .id("editor-path-bar-content")
             .flex_1()
@@ -1187,6 +1194,26 @@ impl EditorView {
             .text_size(px(self.scaled(es.editor_path_bar_font_size_px)))
             .text_color(es.editor_path_bar_text_color)
             .child(breadcrumb)
+            .when_some(diff_label, |this, label| {
+                this.child(
+                    div()
+                        .pl(px(action_gap))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .child(
+                            div()
+                                .px(px(self.scaled(8.0)))
+                                .py(px(self.scaled(3.0)))
+                                .rounded(px(self.scaled(999.0)))
+                                .bg(self.theme.bg_hover)
+                                .text_color(es.editor_path_bar_text_color)
+                                .opacity(es.editor_path_bar_item_opacity)
+                                .whitespace_nowrap()
+                                .child(label),
+                        ),
+                )
+            })
             .when(self.active_tab_supports_text_search(), |this| {
                 this.child(
                     div()
@@ -1329,12 +1356,7 @@ impl EditorView {
         let drop_indicator_color = ts.tab_drop_indicator_color;
         let drop_indicator_width = ts.tab_drop_indicator_width_px;
         let source_opacity = ts.tab_drag_source_opacity;
-        let tab_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
-        let tab_surface_height = if is_active {
-            self.tab_bar_height()
-        } else {
-            tab_height
-        };
+        let tab_surface_height = self.tab_bar_height();
         let tab_bg = if is_active {
             ts.tab_item_active_bg
         } else {
@@ -1440,6 +1462,7 @@ impl EditorView {
             }))
             .child(
                 div()
+                    .relative()
                     .h(px(tab_surface_height))
                     .pl(px(self.scaled(ts.tab_item_padding_left_px)))
                     .pr(px(self.scaled(ts.tab_item_padding_right_px)))
@@ -1512,7 +1535,20 @@ impl EditorView {
                                     }),
                                 ),
                         )
-                    }),
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .h(px(ts.tab_bar_border_width_px))
+                            .bg(if is_active {
+                                gpui::transparent_black()
+                            } else {
+                                ts.tab_bar_border_color
+                            }),
+                    ),
             )
             // Drag initiation: create ghost element
             .on_drag(

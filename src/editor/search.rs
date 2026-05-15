@@ -247,6 +247,9 @@ impl EditorView {
     }
 
     pub(crate) fn replace_current_match(&mut self, cx: &mut Context<Self>) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
         let Some(index) = self.search_current_index else {
             return;
         };
@@ -280,6 +283,9 @@ impl EditorView {
     }
 
     pub(crate) fn replace_all_matches(&mut self, cx: &mut Context<Self>) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
         if self.search_matches.is_empty() {
             return;
         }

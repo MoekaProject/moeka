@@ -222,6 +222,8 @@ pub(crate) fn raw_wiki_link_ranges(
 pub struct LineDecoration {
     pub block_type: BlockType,
     pub inline_spans: Vec<InlineSpan>,
+    pub diff_added_spans: Vec<Range<usize>>,
+    pub diff_removed_spans: Vec<Range<usize>>,
     pub syntax_ranges: Vec<SyntaxRange>,
     pub display_replacements: Vec<DisplayReplacement>,
     pub block_preview: Option<BlockPreview>,
@@ -261,6 +263,8 @@ impl Default for LineDecoration {
         Self {
             block_type: BlockType::Normal,
             inline_spans: Vec::new(),
+            diff_added_spans: Vec::new(),
+            diff_removed_spans: Vec::new(),
             syntax_ranges: Vec::new(),
             display_replacements: Vec::new(),
             block_preview: None,

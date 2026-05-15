@@ -17,7 +17,7 @@ printpdf = "0.7"
 pulldown-cmark = { version = "0.13.0", default-features = false, features = [
   "html",
 ] }
-similar = "2"
+similar = { version = "2", features = ["inline", "unicode"] }
 unicode-segmentation = "1.10"
 image = "0.25"
 smallvec = "1.6"

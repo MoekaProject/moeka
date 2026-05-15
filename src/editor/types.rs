@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::path::PathBuf;
 
 use gpui::{Pixels, Point};
@@ -150,9 +151,8 @@ pub(crate) struct GitDiffState {
 #[derive(Clone, Debug)]
 pub(crate) struct GitDiffRow {
     pub kind: GitDiffRowKind,
-    pub old_line_number: Option<usize>,
-    pub new_line_number: Option<usize>,
     pub text: String,
+    pub inline_highlights: Vec<Range<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

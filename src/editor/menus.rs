@@ -942,6 +942,16 @@ impl EditorView {
         action: FormatMenuAction,
         cx: &mut Context<Self>,
     ) {
+        if self.active_tab_is_read_only() {
+            self.context_menu = None;
+            self.context_submenu = None;
+            self.context_submenu_aim = None;
+            if action == FormatMenuAction::Copy {
+                self.copy_selection_to_clipboard(cx);
+            }
+            self.close_context_menu(cx);
+            return;
+        }
         if let Some(start) = self.slash_menu_start.take() {
             let end = self.cursor.offset;
             if end > start {

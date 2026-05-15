@@ -1,4 +1,5 @@
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
@@ -10,7 +11,7 @@ use gpui::{
 #[cfg(not(target_os = "macos"))]
 use printpdf::{Mm, PdfDocument};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd, html::push_html};
-use similar::{ChangeTag, TextDiff};
+use similar::{ChangeTag, InlineChange, TextDiff};
 use unicode_segmentation::UnicodeSegmentation;
 
 #[cfg(target_os = "macos")]
@@ -657,54 +658,83 @@ fn build_git_diff_rows(
     target_text: &str,
 ) -> Vec<GitDiffRow> {
     let diff = TextDiff::from_lines(base_text, target_text);
-    let mut old_line_number = 1usize;
-    let mut new_line_number = 1usize;
     let mut rows = Vec::new();
 
-    for change in diff.iter_all_changes() {
-        let text = change.to_string().trim_end_matches('\n').to_string();
-        match change.tag() {
-            ChangeTag::Equal => {
-                rows.push(GitDiffRow {
-                    kind: GitDiffRowKind::Context,
-                    old_line_number: Some(old_line_number),
-                    new_line_number: Some(new_line_number),
-                    text,
-                });
-                old_line_number += 1;
-                new_line_number += 1;
-            }
-            ChangeTag::Delete => {
-                rows.push(GitDiffRow {
-                    kind: GitDiffRowKind::Removed,
-                    old_line_number: Some(old_line_number),
-                    new_line_number: None,
-                    text,
-                });
-                old_line_number += 1;
-            }
-            ChangeTag::Insert => {
-                rows.push(GitDiffRow {
-                    kind: GitDiffRowKind::Added,
-                    old_line_number: None,
-                    new_line_number: Some(new_line_number),
-                    text,
-                });
-                new_line_number += 1;
-            }
+    for op in diff.ops() {
+        for change in diff.iter_inline_changes(op) {
+            let (text, inline_highlights) = build_inline_change_text_and_highlights(&change);
+            rows.push(GitDiffRow {
+                kind: match change.tag() {
+                    ChangeTag::Equal => GitDiffRowKind::Context,
+                    ChangeTag::Delete => GitDiffRowKind::Removed,
+                    ChangeTag::Insert => GitDiffRowKind::Added,
+                },
+                inline_highlights,
+                text,
+            });
         }
     }
 
     if rows.is_empty() {
         rows.push(GitDiffRow {
             kind: GitDiffRowKind::Context,
-            old_line_number: None,
-            new_line_number: None,
             text: crate::i18n::translate(language, crate::i18n::TextKey::NoTextDiff).to_string(),
+            inline_highlights: Vec::new(),
         });
     }
 
     rows
+}
+
+fn build_inline_change_text_and_highlights(
+    change: &InlineChange<'_, str>,
+) -> (String, Vec<Range<usize>>) {
+    let mut text = String::new();
+    let mut ranges = Vec::new();
+
+    for (emphasized, value) in change.iter_strings_lossy() {
+        let segment = value.trim_end_matches('\n');
+        let start = text.len();
+        text.push_str(segment);
+        let end = text.len();
+        if emphasized {
+            if start < end {
+                ranges.push(start..end);
+            }
+        }
+    }
+
+    if ranges.is_empty() && !matches!(change.tag(), ChangeTag::Equal) && !text.is_empty() {
+        ranges.push(0..text.len());
+    }
+
+    (text, merge_adjacent_inline_ranges(ranges))
+}
+
+fn merge_adjacent_inline_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    if ranges.is_empty() {
+        return ranges;
+    }
+
+    ranges.sort_by(|left, right| left.start.cmp(&right.start).then(left.end.cmp(&right.end)));
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(last) = merged.last_mut()
+            && range.start <= last.end
+        {
+            last.end = last.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged
+}
+
+fn build_git_diff_snapshot_text(rows: &[GitDiffRow]) -> String {
+    rows.iter()
+        .map(|row| row.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl EditorView {
@@ -864,13 +894,24 @@ impl EditorView {
         diff: GitDiffState,
         cx: &mut Context<Self>,
     ) {
+        let snapshot = EditorSnapshot {
+            text: build_git_diff_snapshot_text(&diff.rows),
+            cursor_offset: 0,
+            cursor_anchor: 0,
+            scroll_offset: 0.0,
+            extra_cursors: Vec::new(),
+        };
         if let Some(index) = self.tabs.iter().position(|tab| tab.kind == TabKind::Diff) {
             self.tabs[index].title = diff_title;
             self.tabs[index].path = Some(path);
+            self.tabs[index].file_kind = Some(FileKind::Markdown);
+            self.tabs[index].snapshot = snapshot;
             self.tabs[index].git_diff = Some(diff);
-            self.git_diff_scroll_handle
-                .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
-            self.activate_tab_by_index(index, cx);
+            if self.active_tab_index() == Some(index) {
+                self.activate_tab_by_index_without_persist(index, cx);
+            } else {
+                self.activate_tab_by_index(index, cx);
+            }
             return;
         }
 
@@ -884,15 +925,9 @@ impl EditorView {
             title: diff_title,
             kind: TabKind::Diff,
             path: Some(path),
-            file_kind: None,
+            file_kind: Some(FileKind::Markdown),
             editor_left_aligned: false,
-            snapshot: EditorSnapshot {
-                text: String::new(),
-                cursor_offset: 0,
-                cursor_anchor: 0,
-                scroll_offset: 0.0,
-                extra_cursors: Vec::new(),
-            },
+            snapshot,
             image_view: ImageViewState::default(),
             git_diff: Some(diff),
             is_preview: false,
@@ -903,8 +938,6 @@ impl EditorView {
             history: history_store::TabHistory::default(),
         };
         self.tabs.insert(insert_index, tab);
-        self.git_diff_scroll_handle
-            .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         self.activate_tab_by_index(insert_index, cx);
     }
 
@@ -1645,172 +1678,6 @@ impl EditorView {
             .into_any_element()
     }
 
-    pub(crate) fn render_git_diff_view(&mut self, _cx: &mut Context<Self>) -> AnyElement {
-        let Some(diff) = self.active_git_diff_state() else {
-            return div().into_any_element();
-        };
-
-        let line_number_color = self
-            .styles
-            .utility_panel
-            .utility_panel_item_label_text_color;
-        let text_color = self.styles.editor.editor_text_color;
-        let added = gpui::rgb(0x2da44e);
-        let removed = gpui::rgb(0xcf222e);
-        let added_color: gpui::Hsla = added.into();
-        let removed_color: gpui::Hsla = removed.into();
-        let added_bg = gpui::Hsla {
-            a: 0.12,
-            ..added_color
-        };
-        let removed_bg = gpui::Hsla {
-            a: 0.12,
-            ..removed_color
-        };
-
-        let row_height =
-            self.scaled(self.styles.utility_panel.utility_panel_item_font_size_px * 1.8);
-        let header_height = self.scaled(self.styles.utility_panel.utility_panel_header_height_px);
-        let prefix_height = header_height;
-        let (visible_start, visible_end, top_spacer_height, bottom_spacer_height) = self
-            .visible_uniform_list_range(
-                &self.git_diff_scroll_handle,
-                prefix_height,
-                row_height,
-                diff.rows.len(),
-                16,
-            );
-        let mut children = vec![
-            div()
-                .px(px(16.0))
-                .h(px(header_height))
-                .flex()
-                .flex_col()
-                .justify_center()
-                .gap(px(4.0))
-                .border_b(px(1.0))
-                .border_color(self.styles.utility_panel.utility_panel_border_color)
-                .child(
-                    div()
-                        .text_size(px(self.scaled(
-                            self.styles.utility_panel.utility_panel_header_font_size_px,
-                        )))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(self.styles.utility_panel.utility_panel_header_text_color)
-                        .child(format!("{} -> {}", diff.source_label, diff.target_label)),
-                )
-                .into_any_element(),
-        ];
-
-        if top_spacer_height > 0.0 {
-            children.push(
-                div()
-                    .w_full()
-                    .h(px(top_spacer_height))
-                    .flex_none()
-                    .into_any_element(),
-            );
-        }
-
-        for row in diff.rows[visible_start..visible_end].iter() {
-            let background = match row.kind {
-                GitDiffRowKind::Context => gpui::transparent_black(),
-                GitDiffRowKind::Added => added_bg,
-                GitDiffRowKind::Removed => removed_bg,
-            };
-            let prefix = match row.kind {
-                GitDiffRowKind::Context => " ",
-                GitDiffRowKind::Added => "+",
-                GitDiffRowKind::Removed => "-",
-            };
-            let old_number = row
-                .old_line_number
-                .map(|value| value.to_string())
-                .unwrap_or_default();
-            let new_number = row
-                .new_line_number
-                .map(|value| value.to_string())
-                .unwrap_or_default();
-
-            children.push(
-                div()
-                    .px(px(16.0))
-                    .h(px(row_height))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .bg(background)
-                    .overflow_hidden()
-                    .font_family("Menlo")
-                    .text_size(px(12.0))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(34.0))
-                            .text_color(line_number_color)
-                            .whitespace_nowrap()
-                            .child(old_number),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(34.0))
-                            .text_color(line_number_color)
-                            .whitespace_nowrap()
-                            .child(new_number),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(12.0))
-                            .text_color(match row.kind {
-                                GitDiffRowKind::Added => added_color,
-                                GitDiffRowKind::Removed => removed_color,
-                                GitDiffRowKind::Context => line_number_color,
-                            })
-                            .child(prefix),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_color(text_color)
-                            .whitespace_nowrap()
-                            .child(if row.text.is_empty() {
-                                SharedString::from(" ")
-                            } else {
-                                SharedString::from(row.text.clone())
-                            }),
-                    )
-                    .into_any_element(),
-            );
-        }
-
-        if bottom_spacer_height > 0.0 {
-            children.push(
-                div()
-                    .w_full()
-                    .h(px(bottom_spacer_height))
-                    .flex_none()
-                    .into_any_element(),
-            );
-        }
-
-        div()
-            .id("git-diff-view")
-            .h_full()
-            .w_full()
-            .bg(self.styles.editor.editor_bg)
-            .overflow_y_scroll()
-            .overflow_x_scroll()
-            .track_scroll(&self.git_diff_scroll_handle)
-            .flex()
-            .flex_col()
-            .children(children)
-            .into_any_element()
-    }
-
     pub(crate) fn render_utility_panel(
         &mut self,
         is_chat_focused: bool,
@@ -2098,7 +1965,8 @@ impl EditorView {
 #[cfg(test)]
 mod tests {
     use super::{
-        InfoPanelReferenceTarget, build_html_document, external_reference_host,
+        GitDiffRow, GitDiffRowKind, InfoPanelReferenceTarget, build_git_diff_rows,
+        build_git_diff_snapshot_text, build_html_document, external_reference_host,
         fallback_reference_label, path_reference_name, reference_scheme,
     };
     use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
@@ -2169,5 +2037,104 @@ mod tests {
 
         assert!(html.contains("@page{size:A4;margin:18mm;}"));
         assert!(html.contains("<base href=\"file:///tmp/demo/\">"));
+    }
+
+    #[test]
+    fn diff_rows_emit_removed_line_before_added_line_for_replacements() {
+        let rows = build_git_diff_rows(
+            crate::i18n::UiLanguage::English,
+            "alpha\nbefore\nomega\n",
+            "alpha\nafter\nomega\n",
+        );
+
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(rows[0].kind, GitDiffRowKind::Context));
+        assert_eq!(rows[0].text, "alpha");
+        assert!(matches!(rows[1].kind, GitDiffRowKind::Removed));
+        assert_eq!(rows[1].text, "before");
+        assert!(matches!(rows[2].kind, GitDiffRowKind::Added));
+        assert_eq!(rows[2].text, "after");
+        assert!(matches!(rows[3].kind, GitDiffRowKind::Context));
+        assert_eq!(rows[3].text, "omega");
+    }
+
+    #[test]
+    fn diff_snapshot_text_preserves_row_order() {
+        let rows = vec![
+            GitDiffRow {
+                kind: GitDiffRowKind::Context,
+                text: "alpha".to_string(),
+                inline_highlights: Vec::new(),
+            },
+            GitDiffRow {
+                kind: GitDiffRowKind::Removed,
+                text: "before".to_string(),
+                inline_highlights: vec![0..6],
+            },
+            GitDiffRow {
+                kind: GitDiffRowKind::Added,
+                text: "after".to_string(),
+                inline_highlights: vec![0..5],
+            },
+        ];
+
+        assert_eq!(build_git_diff_snapshot_text(&rows), "alpha\nbefore\nafter");
+    }
+
+    #[test]
+    fn diff_rows_use_empty_state_for_identical_empty_text() {
+        let rows = build_git_diff_rows(crate::i18n::UiLanguage::English, "", "");
+
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0].kind, GitDiffRowKind::Context));
+        assert_eq!(
+            rows[0].text,
+            crate::i18n::translate(
+                crate::i18n::UiLanguage::English,
+                crate::i18n::TextKey::NoTextDiff
+            )
+        );
+        assert!(rows[0].inline_highlights.is_empty());
+    }
+
+    #[test]
+    fn diff_rows_preserve_multibyte_replacement_order() {
+        let rows = build_git_diff_rows(
+            crate::i18n::UiLanguage::ChineseSimplified,
+            "你好\n世界\n",
+            "您好\n世界\n",
+        );
+
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(rows[0].kind, GitDiffRowKind::Removed));
+        assert_eq!(rows[0].text, "你好");
+        assert!(matches!(rows[1].kind, GitDiffRowKind::Added));
+        assert_eq!(rows[1].text, "您好");
+        assert!(matches!(rows[2].kind, GitDiffRowKind::Context));
+        assert_eq!(rows[2].text, "世界");
+    }
+
+    #[test]
+    fn diff_rows_capture_inline_highlights_for_replacements() {
+        let rows = build_git_diff_rows(
+            crate::i18n::UiLanguage::English,
+            "prefix old suffix\n",
+            "prefix new suffix\n",
+        );
+
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0].kind, GitDiffRowKind::Removed));
+        assert_eq!(rows[0].inline_highlights, vec![7..10]);
+        assert!(matches!(rows[1].kind, GitDiffRowKind::Added));
+        assert_eq!(rows[1].inline_highlights, vec![7..10]);
+    }
+
+    #[test]
+    fn diff_rows_highlight_entire_unpaired_insertions() {
+        let rows = build_git_diff_rows(crate::i18n::UiLanguage::English, "", "**new**\n");
+
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0].kind, GitDiffRowKind::Added));
+        assert_eq!(rows[0].inline_highlights, vec![0..7]);
     }
 }

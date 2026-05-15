@@ -90,7 +90,13 @@ impl EditorView {
                                 ))
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                        window.prevent_default();
+                                        cx.stop_propagation();
+                                        this.tab_drag_candidate_id = None;
+                                        this.tab_dragging_id = None;
+                                        this.chat_tab_drag_candidate_id = None;
+                                        this.chat_tab_dragging_id = None;
                                         this.utility_panel_resizing = true;
                                         cx.notify();
                                     }),
@@ -510,7 +516,6 @@ impl Render for EditorView {
                                                             .cursor(
                                                                 if self.active_tab_is_image()
                                                                     || self.active_tab_is_binary()
-                                                                    || self.active_tab_is_diff()
                                                                     || self.hovering_checkbox
                                                                     || self.hovering_fold_line.is_some()
                                                                     || self.hovering_image_edit_line.is_some()
@@ -520,53 +525,51 @@ impl Render for EditorView {
                                                                     CursorStyle::IBeam
                                                                 },
                                                             )
-                                                            .when(!self.active_tab_is_diff(), |this| {
-                                                                this.on_mouse_down(
-                                                                    MouseButton::Left,
-                                                                    cx.listener(|this, event, window, cx| {
-                                                                        this.focused_sidebar_path = None;
-                                                                        this.on_mouse_down(event, window, cx);
-                                                                    }),
-                                                                )
-                                                                .on_mouse_down(
-                                                                    MouseButton::Right,
-                                                                    cx.listener(Self::on_editor_context_menu),
-                                                                )
-                                                                .on_mouse_up(
-                                                                    MouseButton::Left,
-                                                                    cx.listener(Self::on_mouse_up),
-                                                                )
-                                                                .on_mouse_up_out(
-                                                                    MouseButton::Left,
-                                                                    cx.listener(Self::on_mouse_up),
-                                                                )
-                                                                .on_hover(cx.listener(
-                                                                    |this, hovering: &bool, _window, cx| {
-                                                                        if !*hovering {
-                                                                            let had_hover = this
-                                                                                .hovered_editor_position
-                                                                                .take()
-                                                                                .is_some();
-                                                                            let toolbar_changed = if this
-                                                                                .toolbar_corner_hovered
-                                                                            {
-                                                                                this.toolbar_corner_hovered =
-                                                                                    false;
-                                                                                this.sync_toolbar_opacity(cx);
-                                                                                true
-                                                                            } else {
-                                                                                false
-                                                                            };
-                                                                            this.clear_gutter_fold_hover(cx);
-                                                                            if had_hover || toolbar_changed {
-                                                                                cx.notify();
-                                                                            }
+                                                            .on_mouse_down(
+                                                                MouseButton::Left,
+                                                                cx.listener(|this, event, window, cx| {
+                                                                    this.focused_sidebar_path = None;
+                                                                    this.on_mouse_down(event, window, cx);
+                                                                }),
+                                                            )
+                                                            .on_mouse_down(
+                                                                MouseButton::Right,
+                                                                cx.listener(Self::on_editor_context_menu),
+                                                            )
+                                                            .on_mouse_up(
+                                                                MouseButton::Left,
+                                                                cx.listener(Self::on_mouse_up),
+                                                            )
+                                                            .on_mouse_up_out(
+                                                                MouseButton::Left,
+                                                                cx.listener(Self::on_mouse_up),
+                                                            )
+                                                            .on_hover(cx.listener(
+                                                                |this, hovering: &bool, _window, cx| {
+                                                                    if !*hovering {
+                                                                        let had_hover = this
+                                                                            .hovered_editor_position
+                                                                            .take()
+                                                                            .is_some();
+                                                                        let toolbar_changed = if this
+                                                                            .toolbar_corner_hovered
+                                                                        {
+                                                                            this.toolbar_corner_hovered =
+                                                                                false;
+                                                                            this.sync_toolbar_opacity(cx);
+                                                                            true
+                                                                        } else {
+                                                                            false
+                                                                        };
+                                                                        this.clear_gutter_fold_hover(cx);
+                                                                        if had_hover || toolbar_changed {
+                                                                            cx.notify();
                                                                         }
-                                                                    },
-                                                                ))
-                                                                .on_mouse_move(cx.listener(Self::on_mouse_move))
-                                                                .on_scroll_wheel(cx.listener(Self::on_scroll))
-                                                            })
+                                                                    }
+                                                                },
+                                                            ))
+                                                            .on_mouse_move(cx.listener(Self::on_mouse_move))
+                                                            .on_scroll_wheel(cx.listener(Self::on_scroll))
                                                             .drag_over::<DraggedSidebarItems>(
                                                                 move |style, _, _, _| style,
                                                             )
@@ -595,8 +598,6 @@ impl Render for EditorView {
                                                                     editor: cx.entity().clone(),
                                                                 }
                                                                 .into_any_element()
-                                                            } else if self.active_tab_is_diff() {
-                                                                self.render_git_diff_view(cx)
                                                             } else if self.active_tab_is_binary() {
                                                                 self.render_binary_placeholder(cx)
                                                             } else {
@@ -902,8 +903,14 @@ impl Render for EditorView {
                                                             cx.listener(
                                                                 |this: &mut Self,
                                                                  _: &MouseDownEvent,
-                                                                 _,
+                                                                 window,
                                                                  cx| {
+                                                                    window.prevent_default();
+                                                                    cx.stop_propagation();
+                                                                    this.tab_drag_candidate_id = None;
+                                                                    this.tab_dragging_id = None;
+                                                                    this.chat_tab_drag_candidate_id = None;
+                                                                    this.chat_tab_dragging_id = None;
                                                                     this.utility_panel_resizing = true;
                                                                     cx.notify();
                                                                 },
@@ -957,26 +964,38 @@ impl Render for EditorView {
                         .utility_panel
                         .utility_panel_resize_active_indicator_color;
                     if self.should_render_bottom_chat_panel() {
+                        let left = if self.should_render_sidebar_panel() {
+                            self.sidebar_width()
+                        } else {
+                            0.0
+                        };
+                        let width = (self.last_window_width - left).max(0.0);
                         let y = (self.last_window_height - self.utility_panel_width()).max(0.0);
                         Some(
                             div()
                                 .absolute()
-                                .left_0()
+                                .left(px(left))
                                 .top(px(y))
-                                .w_full()
+                                .w(px(width))
                                 .h(px(iw))
                                 .bg(ic)
                                 .into_any_element(),
                         )
                     } else {
+                        let top = if self.tabs.is_empty() {
+                            0.0
+                        } else {
+                            self.tab_bar_height()
+                        };
+                        let height = (self.last_window_height - top).max(0.0);
                         let x = (self.last_window_width - self.utility_panel_width()).max(0.0);
                         Some(
                             div()
                                 .absolute()
                                 .left(px(x))
-                                .top_0()
+                                .top(px(top))
                                 .w(px(iw))
-                                .h_full()
+                                .h(px(height))
                                 .bg(ic)
                                 .into_any_element(),
                         )

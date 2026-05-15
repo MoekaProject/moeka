@@ -2414,12 +2414,7 @@ impl EditorView {
         let drop_indicator_width = ts.tab_drop_indicator_width_px;
         let source_opacity = ts.tab_drag_source_opacity;
         let agent_icon_size = self.scaled(ts.tab_item_icon_size_px);
-        let tab_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
-        let tab_surface_height = if is_active {
-            self.tab_bar_height()
-        } else {
-            tab_height
-        };
+        let tab_surface_height = self.tab_bar_height();
         let tab_bg = if is_active {
             ts.tab_item_active_bg
         } else {
@@ -2505,6 +2500,7 @@ impl EditorView {
             }))
             .child(
                 div()
+                    .relative()
                     .h(px(tab_surface_height))
                     .pl(px(self.scaled(ts.tab_item_padding_left_px)))
                     .pr(px(self.scaled(ts.tab_item_padding_right_px)))
@@ -2568,6 +2564,19 @@ impl EditorView {
                                     this.close_chat_tab(&close_id, cx);
                                 }),
                             ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .h(px(ts.tab_bar_border_width_px))
+                            .bg(if is_active {
+                                gpui::transparent_black()
+                            } else {
+                                ts.tab_bar_border_color
+                            }),
                     ),
             )
             .on_drag(

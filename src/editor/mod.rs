@@ -840,7 +840,6 @@ pub struct EditorView {
     pub(crate) outline_resizing: bool,
     pub(crate) outline_scroll_handle: ScrollHandle,
     pub(crate) git_history_scroll_handle: ScrollHandle,
-    pub(crate) git_diff_scroll_handle: ScrollHandle,
     pub(crate) info_panel_cache_tab_id: Option<String>,
     pub(crate) info_panel_cache_result: Option<Option<info_panel::InfoPanelData>>,
     pub(crate) git_history_cache_path: Option<PathBuf>,
@@ -1203,7 +1202,6 @@ impl EditorView {
             outline_resizing: false,
             outline_scroll_handle: ScrollHandle::new(),
             git_history_scroll_handle: ScrollHandle::new(),
-            git_diff_scroll_handle: ScrollHandle::new(),
             info_panel_cache_tab_id: None,
             info_panel_cache_result: None,
             git_history_cache_path: None,
@@ -2877,7 +2875,11 @@ impl EditorView {
             .active_file_kind()
             .cloned()
             .unwrap_or(FileKind::Markdown);
+        let git_diff_rows = self.active_git_diff_state().map(|diff| diff.rows.clone());
         self.decorations = parse_decorations_for_file_kind(self.buffer.text(), &file_kind);
+        if let Some(rows) = git_diff_rows.as_deref() {
+            apply_git_diff_decorations(&mut self.decorations, rows);
+        }
         self.refresh_generated_block_previews();
         self.layout_dirty = true;
         self.invalidate_info_panel_cache();
@@ -2961,7 +2963,9 @@ impl EditorView {
     }
 
     pub(crate) fn active_tab_supports_persistent_save(&self) -> bool {
-        self.active_file_kind()
+        !self.active_tab_is_read_only()
+            && self
+                .active_file_kind()
             .is_some_and(FileKind::supports_persistent_save)
     }
 
@@ -3011,6 +3015,10 @@ impl EditorView {
             .as_ref()
             .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
             .is_some_and(|tab| tab.kind == TabKind::Diff)
+    }
+
+    pub(crate) fn active_tab_is_read_only(&self) -> bool {
+        self.active_tab_is_diff()
     }
 
     pub(crate) fn active_image_view_state(&self) -> Option<ImageViewState> {
@@ -3893,6 +3901,9 @@ impl EditorView {
     }
 
     pub(crate) fn cut_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
         let texts = self.multi_cursor_selected_texts();
         if texts.is_empty() {
             return;
@@ -3937,6 +3948,9 @@ impl EditorView {
     }
 
     pub(crate) fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
         let Some(item) = cx.read_from_clipboard() else {
             return;
         };
@@ -5145,6 +5159,23 @@ fn plain_text_decorations(text: &str, code_language: Option<String>) -> Vec<Line
         }
     }
     decorations
+}
+
+fn apply_git_diff_decorations(decorations: &mut [LineDecoration], rows: &[GitDiffRow]) {
+    for (decoration, row) in decorations.iter_mut().zip(rows.iter()) {
+        decoration.diff_added_spans.clear();
+        decoration.diff_removed_spans.clear();
+
+        match row.kind {
+            GitDiffRowKind::Context => {}
+            GitDiffRowKind::Added => {
+                decoration.diff_added_spans = row.inline_highlights.clone();
+            }
+            GitDiffRowKind::Removed => {
+                decoration.diff_removed_spans = row.inline_highlights.clone();
+            }
+        }
+    }
 }
 
 impl EditorView {

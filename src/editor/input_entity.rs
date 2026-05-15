@@ -92,7 +92,7 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_supports_text_buffer() {
+        if !self.active_tab_supports_text_buffer() || self.active_tab_is_read_only() {
             return;
         }
         let cursor_line_before = self.cursor_line();
@@ -288,7 +288,7 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_supports_text_buffer() {
+        if !self.active_tab_supports_text_buffer() || self.active_tab_is_read_only() {
             return;
         }
         let cursor_line_before = self.cursor_line();

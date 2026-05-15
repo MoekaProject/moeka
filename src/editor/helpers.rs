@@ -2956,6 +2956,27 @@ pub(crate) fn build_text_runs_for_display(
         }
     }
 
+    let diff_removed_bg = crate::theme::with_alpha(theme.text_danger, 0.24);
+    for span in &decoration.diff_removed_spans {
+        let start = span.start.min(buf_len);
+        let end = span.end.min(buf_len);
+        for index in start..end {
+            buf_colors[index] = theme.text_danger;
+            buf_bg_colors[index] = Some(diff_removed_bg);
+            buf_strikethroughs[index] = true;
+        }
+    }
+
+    let diff_added_bg = crate::theme::with_alpha(theme.git_status_added, 0.18);
+    for span in &decoration.diff_added_spans {
+        let start = span.start.min(buf_len);
+        let end = span.end.min(buf_len);
+        for index in start..end {
+            buf_colors[index] = theme.git_status_added;
+            buf_bg_colors[index] = Some(diff_added_bg);
+        }
+    }
+
     let mut colors: Vec<Hsla> = Vec::with_capacity(disp_len);
     let mut weights: Vec<FontWeight> = Vec::with_capacity(disp_len);
     let mut font_styles: Vec<FontStyle> = Vec::with_capacity(disp_len);
