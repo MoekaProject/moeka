@@ -38,6 +38,8 @@ trash = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 emojis = "0.6"
 portable-pty = "0.9.0"
+mathjax-svg-rs = "0.4"
+mermaid-rs-renderer = { version = "0.2.2", default-features = false }
 resvg = { version = "0.45.1", default-features = false, features = [
   "text",
   "system-fonts",

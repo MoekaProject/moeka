@@ -209,6 +209,10 @@ impl EditorView {
         y
     }
 
+    pub(crate) fn text_y_offset_for_line(&self, line: usize) -> f32 {
+        self.line_y_offset(line) + self.block_padding_for_line(line).0
+    }
+
     pub(crate) fn total_content_height(&self) -> f32 {
         self.line_y_offset(self.buffer.line_count()) + self.padding_bottom()
     }

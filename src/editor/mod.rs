@@ -52,8 +52,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Local;
 use gpui::{
-    ClipboardEntry, ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point, Render,
-    RenderImage, ScrollHandle, SharedString, Task, WrappedLine,
+    Bounds, ClipboardEntry, ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point,
+    Render, RenderImage, ScrollHandle, SharedString, Task, WrappedLine,
 };
 
 use crate::actions::*;
@@ -684,6 +684,11 @@ fn finalize_multi_cursor_edits(
     (cursor_positions, ordered_list_updates)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingPreviewReveal {
+    pub(crate) scroll_offset: f32,
+}
+
 // ── EditorView ──────────────────────────────────────────────────────
 
 pub struct EditorView {
@@ -703,6 +708,7 @@ pub struct EditorView {
     pub(crate) line_display_info: Vec<Option<LineDisplayInfo>>,
     pub(crate) layout_dirty: bool,
     pub(crate) pending_scroll_to_cursor: bool,
+    pub(crate) pending_preview_reveal: Option<PendingPreviewReveal>,
     pub(crate) last_viewport_height: f32,
     pub(crate) last_viewport_width: f32,
     // Cursor blink state
@@ -717,6 +723,7 @@ pub struct EditorView {
     pub(crate) hovering_checkbox: bool,
     pub(crate) hovering_checkbox_line: Option<usize>,
     pub(crate) image_click_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
+    pub(crate) generated_preview_click_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) code_block_hover_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) code_block_copy_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_code_block_start: Option<usize>,
@@ -752,6 +759,8 @@ pub struct EditorView {
     pub(crate) last_content_left: f32,
     pub(crate) last_text_width: f32,
     pub(crate) content_origin: Point<Pixels>,
+    pub(crate) last_stable_input_bounds: Option<Bounds<Pixels>>,
+    pub(crate) pending_input_bounds: Option<Bounds<Pixels>>,
     pub(crate) last_mouse_down_target: Option<(Point<Pixels>, usize)>,
     pub(crate) context_menu: Option<ContextMenu>,
     pub(crate) context_submenu: Option<ContextMenuKind>,
@@ -1039,6 +1048,7 @@ impl EditorView {
             line_display_info: Vec::new(),
             layout_dirty: false,
             pending_scroll_to_cursor: false,
+            pending_preview_reveal: None,
             last_viewport_height: 600.0,
             last_viewport_width: init_max_width,
             cursor_opacity: init_cursor_opacity,
@@ -1051,6 +1061,7 @@ impl EditorView {
             hovering_checkbox: false,
             hovering_checkbox_line: None,
             image_click_areas: Vec::new(),
+            generated_preview_click_areas: Vec::new(),
             code_block_hover_areas: Vec::new(),
             code_block_copy_areas: Vec::new(),
             hovering_code_block_start: None,
@@ -1122,6 +1133,8 @@ impl EditorView {
             last_content_left: init_padding_left,
             last_text_width: init_max_width - init_padding_left - init_padding_right,
             content_origin: Point::default(),
+            last_stable_input_bounds: None,
+            pending_input_bounds: None,
             last_mouse_down_target: None,
             context_menu: None,
             context_submenu: None,
@@ -2905,8 +2918,11 @@ impl EditorView {
                 continue;
             }
 
-            let svg =
-                helpers::build_generated_block_preview_svg(preview.kind, &preview.source_text);
+            let svg = helpers::build_generated_block_preview_svg(
+                preview.kind,
+                &preview.source_text,
+                &self.theme,
+            );
             let image = helpers::load_render_image_from_svg(&svg).ok().map(Arc::new);
             self.image_cache.insert(preview.cache_key.clone(), image);
             self.generated_preview_keys
@@ -2970,7 +2986,7 @@ impl EditorView {
         !self.active_tab_is_read_only()
             && self
                 .active_file_kind()
-            .is_some_and(FileKind::supports_persistent_save)
+                .is_some_and(FileKind::supports_persistent_save)
     }
 
     pub(crate) fn sync_active_tab_dirty_state(&mut self) {

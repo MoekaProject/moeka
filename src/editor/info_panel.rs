@@ -2340,7 +2340,11 @@ mod tests {
 
         assert_eq!(rows.len(), 4);
         for row in &rows {
-            let table_info = row.decoration.table_info.as_ref().expect("table row decoration");
+            let table_info = row
+                .decoration
+                .table_info
+                .as_ref()
+                .expect("table row decoration");
             assert_eq!(table_info.table_start_line, 0);
             assert_eq!(table_info.table_end_line, 4);
             assert_eq!(table_info.column_widths.len(), 2);

@@ -814,6 +814,8 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
     // This prevents typing a new opening ``` from "stealing" the closing
     // ``` of an existing code block below.
     revalidate_code_fences(&mut decorations, text, &line_starts);
+    assign_fenced_math_block_previews(&mut decorations, text, &line_starts);
+    decorate_math_block_previews_as_code_blocks(&mut decorations, text, &line_starts);
 
     detect_front_matter(&mut decorations, text, &line_starts);
 
@@ -856,6 +858,145 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
         }
     }
     decorations
+}
+
+fn decorate_math_block_previews_as_code_blocks(
+    decorations: &mut [LineDecoration],
+    text: &str,
+    line_starts: &[usize],
+) {
+    let line_count = decorations.len();
+    if line_count == 0 {
+        return;
+    }
+
+    for anchor_line in 0..line_count {
+        let Some(preview) = decorations[anchor_line].block_preview.clone() else {
+            continue;
+        };
+        if !preview.is_anchor || preview.kind != BlockPreviewKind::Math {
+            continue;
+        }
+
+        let start_line = preview.start_line.min(line_count.saturating_sub(1));
+        let end_line = preview.end_line.min(line_count.saturating_sub(1));
+        let start_col = preview
+            .source_range
+            .start
+            .saturating_sub(*line_starts.get(start_line).unwrap_or(&preview.source_range.start));
+        let end_line_start = line_starts
+            .get(end_line)
+            .copied()
+            .unwrap_or(preview.source_range.end);
+        let end_col = preview.source_range.end.saturating_sub(end_line_start);
+
+        for line in start_line..=end_line {
+            let line_len = get_line_content(text, line_starts, line, line_count).len();
+            decorations[line].code_language = Some("latex".to_string());
+
+            if start_line == end_line {
+                decorations[line].block_type = BlockType::CodeBlockFence;
+                let range_start = start_col.min(line_len);
+                let range_end = end_col.min(line_len).max(range_start);
+                decorations[line].syntax_ranges.push(SyntaxRange {
+                    range: range_start..range_end,
+                    trigger_range: range_start..range_end,
+                });
+            } else if line == start_line {
+                decorations[line].block_type = BlockType::CodeBlockFence;
+                let range_start = start_col.min(line_len);
+                decorations[line].syntax_ranges.push(SyntaxRange {
+                    range: range_start..line_len,
+                    trigger_range: range_start..line_len,
+                });
+            } else if line == end_line {
+                decorations[line].block_type = BlockType::CodeBlockFence;
+                let range_end = end_col.min(line_len);
+                decorations[line].syntax_ranges.push(SyntaxRange {
+                    range: 0..range_end,
+                    trigger_range: 0..range_end,
+                });
+            } else {
+                decorations[line].block_type = BlockType::CodeBlock;
+            }
+        }
+    }
+}
+
+fn assign_fenced_math_block_previews(
+    decorations: &mut [LineDecoration],
+    text: &str,
+    line_starts: &[usize],
+) {
+    let line_count = decorations.len();
+    if line_count == 0 {
+        return;
+    }
+
+    let mut line = 0;
+    while line < line_count {
+        let opener = get_line_content(text, line_starts, line, line_count);
+        if opener.trim() != "$$" || decorations[line].block_type != BlockType::Normal {
+            line += 1;
+            continue;
+        }
+        if decorations[line]
+            .block_preview
+            .as_ref()
+            .is_some_and(|preview| preview.kind == BlockPreviewKind::Math)
+        {
+            line += 1;
+            continue;
+        }
+
+        let mut close_line = line + 1;
+        while close_line < line_count {
+            let closer = get_line_content(text, line_starts, close_line, line_count);
+            if closer.trim() == "$$" && decorations[close_line].block_type == BlockType::Normal {
+                break;
+            }
+            close_line += 1;
+        }
+
+        if close_line >= line_count {
+            line += 1;
+            continue;
+        }
+
+        let already_has_math_preview = (line..=close_line).any(|idx| {
+            decorations[idx]
+                .block_preview
+                .as_ref()
+                .is_some_and(|preview| preview.kind == BlockPreviewKind::Math)
+        });
+
+        if !already_has_math_preview {
+            let source_text = if close_line > line + 1 {
+                ((line + 1)..close_line)
+                    .map(|idx| get_line_content(text, line_starts, idx, line_count))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                String::new()
+            };
+            let start_col = opener.find("$$").unwrap_or(0);
+            let end_col = get_line_content(text, line_starts, close_line, line_count)
+                .rfind("$$")
+                .unwrap_or(0)
+                + 2;
+            let source_range = (line_starts[line] + start_col)..(line_starts[close_line] + end_col);
+            assign_block_preview(
+                decorations,
+                source_range,
+                line,
+                close_line,
+                BlockPreviewKind::Math,
+                source_text.trim().to_string(),
+            );
+        }
+
+        line = close_line + 1;
+    }
 }
 
 fn parse_front_matter_entry(content: &str) -> (Vec<String>, Vec<Range<usize>>) {
@@ -1739,7 +1880,7 @@ fn assign_block_preview(
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockPreviewKind, parse_decorations, raw_wiki_link_ranges};
+    use super::{BlockPreviewKind, BlockType, parse_decorations, raw_wiki_link_ranges};
 
     #[test]
     fn wiki_link_ranges_ignore_inline_code_tokens() {
@@ -1860,6 +2001,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_decorations_treats_display_math_as_code_block_group() {
+        let text = "$$\n\\frac{a}{b} \\to c\n$$\n";
+        let decorations = parse_decorations(text);
+
+        assert_eq!(decorations[0].block_type, BlockType::CodeBlockFence);
+        assert_eq!(decorations[1].block_type, BlockType::CodeBlock);
+        assert_eq!(decorations[2].block_type, BlockType::CodeBlockFence);
+        assert_eq!(decorations[0].code_language.as_deref(), Some("latex"));
+        assert_eq!(decorations[1].code_language.as_deref(), Some("latex"));
+        assert_eq!(decorations[2].code_language.as_deref(), Some("latex"));
+    }
+
+    #[test]
     fn parse_decorations_handles_editor_document_without_utf8_boundary_panics() {
         let text = include_str!("../EDITOR.md");
         let decorations = parse_decorations(text);
@@ -1875,5 +2029,24 @@ mod tests {
                 .iter()
                 .any(|decoration| !decoration.footnote_references.is_empty())
         );
+    }
+
+    #[test]
+    fn parse_decorations_detects_all_editor_math_block_previews() {
+        let text = include_str!("../EDITOR.md");
+        let decorations = parse_decorations(text);
+
+        let math_previews: Vec<_> = decorations
+            .iter()
+            .filter_map(|decoration| decoration.block_preview.as_ref())
+            .filter(|preview| preview.is_anchor && preview.kind == BlockPreviewKind::Math)
+            .collect();
+
+        assert_eq!(math_previews.len(), 3);
+        assert!(math_previews.iter().any(|preview| {
+            preview
+                .source_text
+                .contains(r"\operatorname*{arg\,min}_{\theta \in \mathbb{R}^n}")
+        }));
     }
 }

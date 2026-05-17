@@ -178,8 +178,8 @@ impl EditorView {
         let pos_y: f32 = position.y.into();
         let origin_y: f32 = self.content_origin.y.into();
         let y = (pos_y - origin_y) + self.scroll_offset;
-        let line_top_y = self.line_y_offset(line);
-        let local_y = (y - line_top_y).max(0.0);
+        let text_top_y = self.text_y_offset_for_line(line);
+        let local_y = (y - text_top_y).max(0.0);
         let visual_line_idx = (local_y / info.line_height) as usize;
 
         if visual_line_idx >= downstream_visual_idx {

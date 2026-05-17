@@ -625,6 +625,7 @@ impl Element for EditorElement {
         let mut gutter_fold_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
         let mut checkbox_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut image_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
+        let mut generated_preview_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut display_info_cache: Vec<Option<LineDisplayInfo>> = Vec::with_capacity(line_count);
         let has_valid_cache = editor.line_display_info.len() == line_count
             && (editor.last_text_width - text_width).abs() < 0.5;
@@ -808,7 +809,11 @@ impl Element for EditorElement {
 
         for line_idx in 0..line_count {
             let is_cursor_line_early = line_idx == cursor_line;
-            if has_valid_cache && !is_cursor_line_early {
+            let line_has_block_preview = decorations
+                .get(line_idx)
+                .and_then(|decoration| decoration.block_preview.as_ref())
+                .is_some();
+            if has_valid_cache && !is_cursor_line_early && !line_has_block_preview {
                 if let Some(Some(cached)) = editor.line_display_info.get(line_idx) {
                     let cached_h =
                         cached.line_height * cached.visual_line_count as f32 + cached.extra_height;
@@ -1430,17 +1435,37 @@ impl Element for EditorElement {
                 .block_preview
                 .as_ref()
                 .filter(|_| !block_preview_active);
-            let attached_block_preview = decoration.block_preview.as_ref().filter(|preview| {
-                if block_preview_active {
-                    line_idx == preview.end_line
-                } else {
-                    preview.is_anchor
-                }
-            });
             if let Some(preview) = collapsed_block_preview
                 && !preview.is_anchor
             {
-                display_info_cache.push(None);
+                let blank_run = TextRun {
+                    len: 1,
+                    font: body_font.clone(),
+                    color: gpui::transparent_black(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let wrapped_line = window
+                    .text_system()
+                    .shape_text(" ".into(), px(font_size), &[blank_run], None, None)
+                    .ok()
+                    .and_then(|lines| lines.into_iter().next());
+                display_info_cache.push(wrapped_line.map(|wrapped_line| LineDisplayInfo {
+                    display_text: String::new(),
+                    display_to_buffer: Vec::new(),
+                    buffer_to_display: vec![0; line_content.len()],
+                    base_runs: Vec::new(),
+                    font_size,
+                    line_height: 0.0,
+                    visual_line_count: 0,
+                    wrapped_line,
+                    wrap_boundary_upstream_xs: HashMap::new(),
+                    extra_height: 0.0,
+                    indent_px: 0.0,
+                    content_x: editor_left + editor.padding_left(),
+                    selection_padding_left_px: 0.0,
+                }));
                 continue;
             }
             let (mut display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
@@ -1677,14 +1702,14 @@ impl Element for EditorElement {
             } else {
                 0.0
             };
-            let generated_preview_extra_height = if let Some(preview) = attached_block_preview {
+            let generated_preview_extra_height = if let Some(preview) = collapsed_block_preview {
                 if let Some(Some(img_data)) = image_cache.get(&preview.cache_key) {
                     let img_size = img_data.size(0);
                     let img_w = img_size.width.0 as f32;
                     let img_h = img_size.height.0 as f32;
                     if img_w > 0.0 && img_h > 0.0 {
                         let (_, display_h) =
-                            helpers::compute_image_preview_size(img_w, img_h, text_width);
+                            helpers::compute_generated_preview_size(img_w, img_h, text_width);
                         display_h + image_gap_top + image_gap_bottom
                     } else {
                         0.0
@@ -2630,14 +2655,14 @@ impl Element for EditorElement {
                 }
             }
 
-            if let Some(preview) = attached_block_preview {
+            if let Some(preview) = collapsed_block_preview {
                 if let Some(Some(img_data)) = image_cache.get(&preview.cache_key) {
                     let img_size = img_data.size(0);
                     let img_w = img_size.width.0 as f32;
                     let img_h = img_size.height.0 as f32;
                     if img_w > 0.0 && img_h > 0.0 {
                         let (display_w, display_h) =
-                            helpers::compute_image_preview_size(img_w, img_h, text_width);
+                            helpers::compute_generated_preview_size(img_w, img_h, text_width);
                         let img_top = text_line_top + text_line_height + image_gap_top;
                         let img_left = editor_left
                             + editor.padding_left()
@@ -2647,14 +2672,7 @@ impl Element for EditorElement {
                             size(px(display_w), px(display_h)),
                         );
                         image_previews.push((img_bounds, img_data.clone()));
-                        image_borders.push(quad(
-                            img_bounds,
-                            Corners::all(px(18.0)),
-                            gpui::transparent_black(),
-                            px(1.0),
-                            theme.border_decorative,
-                            BorderStyle::default(),
-                        ));
+                        generated_preview_hit_areas.push((img_bounds, line_idx));
                     }
                 }
             }
@@ -3376,7 +3394,9 @@ impl Element for EditorElement {
                     &mut inline_overlays,
                     window,
                     wrapped,
-                    line_content.get(superscript_range.clone()).unwrap_or_default(),
+                    line_content
+                        .get(superscript_range.clone())
+                        .unwrap_or_default(),
                     disp_start..disp_end,
                     &body_font,
                     &body_cjk_font,
@@ -3407,7 +3427,9 @@ impl Element for EditorElement {
                     &mut inline_overlays,
                     window,
                     wrapped,
-                    line_content.get(subscript_range.clone()).unwrap_or_default(),
+                    line_content
+                        .get(subscript_range.clone())
+                        .unwrap_or_default(),
                     disp_start..disp_end,
                     &body_font,
                     &body_cjk_font,
@@ -3682,6 +3704,7 @@ impl Element for EditorElement {
             editor.last_viewport_width = viewport_width;
             editor.checkbox_areas = checkbox_hit_areas.clone();
             editor.image_click_areas = image_hit_areas.clone();
+            editor.generated_preview_click_areas = generated_preview_hit_areas.clone();
             editor.code_block_hover_areas = code_block_hover_areas_local.clone();
             editor.code_block_copy_areas = code_block_copy_areas_local.clone();
             editor.table_click_areas = table_click_areas_local.clone();
@@ -3695,8 +3718,17 @@ impl Element for EditorElement {
             editor.last_text_width = text_width;
             editor.content_origin = bounds.origin;
             editor.layout_dirty = false;
+            let mut did_adjust_preview_reveal = false;
+            if let Some(pending) = editor.pending_preview_reveal.take() {
+                editor.pending_scroll_to_cursor = false;
+                editor.scroll_offset = pending.scroll_offset;
+                editor.clamp_scroll();
+                did_adjust_preview_reveal = true;
+            }
             if editor.pending_scroll_to_cursor {
                 editor.scroll_to_cursor();
+                cx.notify();
+            } else if did_adjust_preview_reveal {
                 cx.notify();
             }
         });

@@ -5,6 +5,7 @@ use std::time::Duration;
 use gpui::{
     Bounds, Context, FontFallbacks, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, Point, ScrollWheelEvent, SharedString, TextRun, Window, WrappedLine, point, px,
+    size,
 };
 
 use crate::markdown::{BlockType, InlineKind};
@@ -296,6 +297,20 @@ impl EditorView {
             }
         }
 
+        if let Some((bounds, line_idx)) = self
+            .generated_preview_click_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(bounds, line)| (bounds.clone(), *line))
+        {
+            if self.activate_block_preview_from_click(line_idx, &bounds, event.position) {
+                self.clear_wrap_boundary_affinity();
+                self.is_selecting = false;
+                cx.notify();
+                return;
+            }
+        }
+
         if let Some(line) = self
             .checkbox_areas
             .iter()
@@ -343,10 +358,20 @@ impl EditorView {
                         self.select_word_at_offset(offset);
                         self.is_selecting = false;
                     } else if event.modifiers.shift {
+                        self.maybe_schedule_preview_reveal_for_click(
+                            self.cursor.offset,
+                            offset,
+                            event.position,
+                        );
                         self.cursor.select_to(offset, &self.buffer);
                         self.clear_wrap_boundary_affinity();
                         self.is_selecting = false;
                     } else {
+                        self.maybe_schedule_preview_reveal_for_click(
+                            self.cursor.offset,
+                            offset,
+                            event.position,
+                        );
                         self.cursor.move_to(offset, &self.buffer);
                         self.clear_wrap_boundary_affinity();
                         self.is_selecting = true;
@@ -446,8 +471,10 @@ impl EditorView {
 
         self.clear_extra_cursors();
         if event.modifiers.shift {
+            self.maybe_schedule_preview_reveal_for_click(prev_offset, offset, event.position);
             self.cursor.select_to(offset, &self.buffer);
         } else {
+            self.maybe_schedule_preview_reveal_for_click(prev_offset, offset, event.position);
             self.cursor.move_to(offset, &self.buffer);
             self.maybe_auto_select_link_url(prev_offset, true, cx);
         }
@@ -462,6 +489,120 @@ impl EditorView {
         self.cursor.anchor = target.full_range.start.min(self.buffer.len());
         self.cursor.offset = target.full_range.end.min(self.buffer.len());
         true
+    }
+
+    fn activate_block_preview_from_click(
+        &mut self,
+        line_idx: usize,
+        bounds: &Bounds<Pixels>,
+        position: Point<Pixels>,
+    ) -> bool {
+        let Some(preview) = self
+            .decorations
+            .get(line_idx)
+            .and_then(|decoration| decoration.block_preview.as_ref())
+            .cloned()
+        else {
+            return false;
+        };
+
+        let target_offset = self.block_preview_offset_for_click(&preview, bounds, position);
+        self.clear_extra_cursors();
+        self.cursor.anchor = target_offset;
+        self.cursor.offset = target_offset;
+        self.pending_scroll_to_cursor = false;
+        self.pending_input_bounds = Some(self.provisional_input_bounds_for_click(position));
+        self.pending_preview_reveal = Some(PendingPreviewReveal {
+            scroll_offset: self.scroll_offset,
+        });
+        self.last_mouse_down_target = Some((position, target_offset));
+        true
+    }
+
+    fn maybe_schedule_preview_reveal_for_click(
+        &mut self,
+        previous_offset: usize,
+        next_offset: usize,
+        position: Point<Pixels>,
+    ) {
+        let previous_preview = self.preview_cache_key_for_offset(previous_offset);
+        let next_preview = self.preview_cache_key_for_offset(next_offset);
+        if previous_preview == next_preview {
+            return;
+        }
+        if previous_preview.is_none() && next_preview.is_none() {
+            return;
+        }
+
+        self.pending_scroll_to_cursor = false;
+        self.pending_input_bounds = Some(self.provisional_input_bounds_for_click(position));
+        self.pending_preview_reveal = Some(PendingPreviewReveal {
+            scroll_offset: self.scroll_offset,
+        });
+    }
+
+    fn preview_cache_key_for_offset(&self, offset: usize) -> Option<&str> {
+        let line = self.buffer.offset_to_line_col(offset.min(self.buffer.len())).0;
+        self.decorations
+            .get(line)
+            .and_then(|decoration| decoration.block_preview.as_ref())
+            .map(|preview| preview.cache_key.as_str())
+    }
+
+    fn provisional_input_bounds_for_click(&self, position: Point<Pixels>) -> Bounds<Pixels> {
+        let line_height = self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
+        Bounds::new(
+            point(position.x, position.y - px(line_height * 0.5)),
+            size(px(self.base_font_size() * 0.6), px(line_height)),
+        )
+    }
+
+    fn block_preview_offset_for_click(
+        &self,
+        preview: &crate::markdown::BlockPreview,
+        bounds: &Bounds<Pixels>,
+        position: Point<Pixels>,
+    ) -> usize {
+        let (content_start_line, content_end_line) = if preview.end_line > preview.start_line + 1 {
+            (preview.start_line + 1, preview.end_line - 1)
+        } else {
+            (preview.start_line, preview.end_line)
+        };
+        let line_count = content_end_line
+            .saturating_sub(content_start_line)
+            .saturating_add(1)
+            .max(1);
+        let relative_y = if bounds.size.height > px(0.0) {
+            ((f32::from(position.y) - f32::from(bounds.origin.y)) / f32::from(bounds.size.height))
+                .clamp(0.0, 0.999_999)
+        } else {
+            0.0
+        };
+        let target_line = content_start_line
+            + ((relative_y * line_count as f32).floor() as usize).min(line_count - 1);
+        let line_content = self.buffer.line_content(target_line);
+        let relative_x = if bounds.size.width > px(0.0) {
+            ((f32::from(position.x) - f32::from(bounds.origin.x)) / f32::from(bounds.size.width))
+                .clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let target_column = ((line_content.chars().count() as f32) * relative_x).round() as usize;
+        let line_byte_offset = Self::nth_char_boundary(line_content, target_column);
+
+        (self.buffer.line_start(target_line) + line_byte_offset)
+            .clamp(preview.source_range.start, preview.source_range.end.min(self.buffer.len()))
+    }
+
+    fn nth_char_boundary(text: &str, char_index: usize) -> usize {
+        if char_index == 0 {
+            return 0;
+        }
+
+        text.char_indices()
+            .map(|(index, _)| index)
+            .nth(char_index)
+            .unwrap_or(text.len())
     }
 
     pub(crate) fn maybe_auto_select_link_url(
@@ -1699,8 +1840,8 @@ impl EditorView {
         }
 
         if let Some(Some(info)) = self.line_display_info.get(line) {
-            let line_top_y = self.line_y_offset(line);
-            let local_y = (y - line_top_y).max(0.0);
+            let text_top_y = self.text_y_offset_for_line(line);
+            let local_y = (y - text_top_y).max(0.0);
             let visual_line_idx = (local_y / info.line_height) as usize;
             let indent_adjust = if info.indent_px > 0.0 && visual_line_idx > 0 {
                 info.indent_px

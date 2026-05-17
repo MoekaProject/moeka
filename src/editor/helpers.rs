@@ -16,6 +16,8 @@ use syntect::highlighting::{
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 
 use image::{Frame, RgbaImage};
+use mathjax_svg_rs::{HorizontalAlign, Options as MathJaxOptions};
+use mermaid_rs_renderer::{RenderOptions as MermaidRenderOptions, Theme as MermaidTheme};
 use resvg::tiny_skia::{Pixmap, Transform};
 
 use crate::markdown::{
@@ -25,6 +27,8 @@ use crate::markdown::{
 use crate::theme::Theme;
 
 use super::*;
+
+const GENERATED_PREVIEW_RASTER_SCALE: f32 = 2.0;
 
 /// Calculate the display width of a string, counting CJK characters as 2 columns.
 pub(crate) fn display_width(s: &str) -> usize {
@@ -1139,6 +1143,21 @@ pub(crate) fn compute_image_preview_size(
     (max_width, image_height * scale)
 }
 
+pub(crate) fn compute_generated_preview_size(
+    image_width: f32,
+    image_height: f32,
+    max_width: f32,
+) -> (f32, f32) {
+    if image_width <= 0.0 || image_height <= 0.0 || max_width <= 0.0 {
+        return (0.0, 0.0);
+    }
+
+    let logical_width = image_width / GENERATED_PREVIEW_RASTER_SCALE;
+    let logical_height = image_height / GENERATED_PREVIEW_RASTER_SCALE;
+    let scale = (max_width / logical_width).min(1.0);
+    (logical_width * scale, logical_height * scale)
+}
+
 pub(crate) fn image_syntax_range(line_content: &str) -> Option<Range<usize>> {
     let start = line_content.find("![")?;
     let suffix = &line_content[start..];
@@ -1466,8 +1485,9 @@ mod tests {
     use crate::theme::Theme;
 
     use super::{
-        build_display_text, build_text_runs_for_display, compute_display_prefix_bytes,
-        prefix_is_folded, task_prefix_is_folded,
+        build_display_text, build_generated_block_preview_svg, build_text_runs_for_display,
+        compute_display_prefix_bytes, compute_generated_preview_size, prefix_is_folded,
+        task_prefix_is_folded,
     };
 
     #[test]
@@ -1666,6 +1686,60 @@ mod tests {
         );
 
         assert_eq!(display_text, line);
+    }
+
+    #[test]
+    fn generated_math_block_preview_renders_svg() {
+        let theme = Theme::one_dark();
+        let svg = build_generated_block_preview_svg(
+            markdown::BlockPreviewKind::Math,
+            r"\int_0^1 x^2 \, dx = \frac{1}{3}",
+            &theme,
+        );
+        let text_color = crate::theme::hsla_to_hex_rgba(theme.text_primary).to_lowercase();
+
+        assert!(svg.contains("<svg"));
+        assert!(!svg.contains("LaTeX preview failed"));
+        assert!(svg.to_lowercase().contains(&text_color));
+    }
+
+    #[test]
+    fn generated_complex_math_block_preview_renders_svg() {
+        let theme = Theme::one_dark();
+        let svg = build_generated_block_preview_svg(
+            markdown::BlockPreviewKind::Math,
+            r"\operatorname*{arg\,min}_{\theta \in \mathbb{R}^n}
+\left(
+\frac{1}{m}\sum_{i=1}^{m} \ell\bigl(f_{\theta}(x_i), y_i\bigr)
++ \lambda \lVert \theta \rVert_2^2
+\right)",
+            &theme,
+        );
+
+        assert!(svg.contains("<svg"));
+        assert!(!svg.contains("LaTeX preview failed"));
+    }
+
+    #[test]
+    fn generated_mermaid_block_preview_renders_svg() {
+        let theme = Theme::one_dark();
+        let svg = build_generated_block_preview_svg(
+            markdown::BlockPreviewKind::Mermaid,
+            "flowchart LR\n    A[Start] --> B{Decision}\n    B -->|Yes| C[OK]\n    B -->|No| D[Cancel]",
+            &theme,
+        );
+        let text_color = crate::theme::hsla_to_hex_rgba(theme.text_primary).to_lowercase();
+
+        assert!(svg.contains("<svg"));
+        assert!(!svg.contains("Mermaid preview failed"));
+        assert!(svg.contains("fill=\"none\""));
+        assert!(svg.to_lowercase().contains(&text_color));
+    }
+
+    #[test]
+    fn compute_generated_preview_size_preserves_intrinsic_width_when_possible() {
+        assert_eq!(compute_generated_preview_size(640.0, 320.0, 800.0), (320.0, 160.0));
+        assert_eq!(compute_generated_preview_size(1280.0, 640.0, 320.0), (320.0, 160.0));
     }
 
     #[test]
@@ -2457,15 +2531,29 @@ fn load_render_image_from_bytes(bytes: &[u8]) -> anyhow::Result<RenderImage> {
 }
 
 pub(crate) fn load_render_image_from_svg(svg: &str) -> anyhow::Result<RenderImage> {
-    let options = usvg::Options::default();
+    let mut options = usvg::Options::default();
+    options.fontdb = generated_preview_fontdb().clone();
     let tree = usvg::Tree::from_str(svg, &options)?;
     let size = tree.size().to_int_size();
-    let mut pixmap = Pixmap::new(size.width(), size.height())
+    let raster_width = ((size.width() as f32) * GENERATED_PREVIEW_RASTER_SCALE)
+        .round()
+        .max(1.0) as u32;
+    let raster_height = ((size.height() as f32) * GENERATED_PREVIEW_RASTER_SCALE)
+        .round()
+        .max(1.0) as u32;
+    let mut pixmap = Pixmap::new(raster_width, raster_height)
         .ok_or_else(|| anyhow::anyhow!("failed to allocate SVG pixmap"))?;
     let mut pixmap_mut = pixmap.as_mut();
-    resvg::render(&tree, Transform::default(), &mut pixmap_mut);
+    resvg::render(
+        &tree,
+        Transform::from_scale(
+            GENERATED_PREVIEW_RASTER_SCALE,
+            GENERATED_PREVIEW_RASTER_SCALE,
+        ),
+        &mut pixmap_mut,
+    );
 
-    let mut buffer = RgbaImage::from_raw(size.width(), size.height(), pixmap.take())
+    let mut buffer = RgbaImage::from_raw(raster_width, raster_height, pixmap.take())
         .ok_or_else(|| anyhow::anyhow!("failed to convert SVG pixmap"))?;
     for pixel in buffer.chunks_exact_mut(4) {
         pixel.swap(0, 2);
@@ -2474,57 +2562,174 @@ pub(crate) fn load_render_image_from_svg(svg: &str) -> anyhow::Result<RenderImag
     Ok(RenderImage::new([Frame::new(buffer)]))
 }
 
+fn generated_preview_fontdb() -> &'static Arc<usvg::fontdb::Database> {
+    static FONT_DB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+
+    FONT_DB.get_or_init(|| {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        Arc::new(fontdb)
+    })
+}
+
 pub(crate) fn build_generated_block_preview_svg(
     kind: BlockPreviewKind,
     source_text: &str,
+    theme: &Theme,
 ) -> String {
     let normalized = source_text.trim();
-    match kind {
-        BlockPreviewKind::Math => build_math_block_preview_svg(normalized),
-        BlockPreviewKind::Mermaid => build_mermaid_block_preview_svg(normalized),
+    let rendered = match kind {
+        BlockPreviewKind::Math => render_math_block_preview_svg(normalized, theme),
+        BlockPreviewKind::Mermaid => render_mermaid_block_preview_svg(normalized, theme),
+    };
+
+    match rendered {
+        Ok(svg) if svg.contains("<svg") => svg,
+        Ok(_) => build_generated_block_preview_error_svg(
+            kind,
+            "renderer returned invalid SVG",
+            theme,
+        ),
+        Err(error) => build_generated_block_preview_error_svg(kind, &error.to_string(), theme),
     }
 }
 
-fn build_math_block_preview_svg(source_text: &str) -> String {
-    let lines = wrap_svg_text(source_text, 28, 4);
-    let width = 840;
-    let height = 180 + lines.len() as i32 * 30;
-    let line_height = 30;
+fn render_math_block_preview_svg(source_text: &str, theme: &Theme) -> anyhow::Result<String> {
+    let options = MathJaxOptions {
+        font_size: 24.0,
+        horizontal_align: HorizontalAlign::Center,
+    };
+    let svg = mathjax_svg_rs::render_tex(source_text, &options)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    Ok(apply_math_preview_theme(&svg, theme))
+}
+
+fn render_mermaid_block_preview_svg(source_text: &str, theme: &Theme) -> anyhow::Result<String> {
+    let mut options =
+        MermaidRenderOptions::default().with_preferred_aspect_ratio_parts(16.0, 9.0);
+    options.theme = build_mermaid_preview_theme(theme);
+    mermaid_rs_renderer::render_with_options(source_text, options)
+}
+
+fn build_generated_block_preview_error_svg(
+    kind: BlockPreviewKind,
+    message: &str,
+    theme: &Theme,
+) -> String {
+    let title = match kind {
+        BlockPreviewKind::Math => "LaTeX preview failed",
+        BlockPreviewKind::Mermaid => "Mermaid preview failed",
+    };
+    let title_color = svg_color(theme.text_danger);
+    let text_color = svg_color(theme.text_secondary);
+    let lines = wrap_svg_text(message, 52, 5);
+    let width = 920;
+    let height = 140 + lines.len() as i32 * 24;
     let mut text_nodes = String::new();
 
     for (index, line) in lines.iter().enumerate() {
-        let y = 104 + index as i32 * line_height;
+        let y = 102 + index as i32 * 24;
         text_nodes.push_str(&format!(
-            "<text x=\"420\" y=\"{y}\" text-anchor=\"middle\" font-family=\"Times New Roman, STSong, serif\" font-size=\"28\" font-style=\"italic\" fill=\"#E9E2D0\">{}</text>",
+            "<text x=\"48\" y=\"{y}\" font-family=\"Menlo, Monaco, monospace\" font-size=\"16\" fill=\"{text_color}\">{}</text>",
             escape_svg_text(line)
         ));
     }
 
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"><defs><linearGradient id=\"bg\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#23262F\"/><stop offset=\"100%\" stop-color=\"#14161C\"/></linearGradient></defs><rect x=\"18\" y=\"18\" width=\"804\" height=\"{inner_height}\" rx=\"28\" fill=\"url(#bg)\"/><rect x=\"44\" y=\"42\" width=\"146\" height=\"30\" rx=\"15\" fill=\"#3A3F4B\"/><text x=\"117\" y=\"62\" text-anchor=\"middle\" font-family=\"Helvetica, Arial, sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"#F6C177\">KaTeX Preview</text>{text_nodes}</svg>",
-        inner_height = height - 36,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"><text x=\"48\" y=\"62\" font-family=\"Helvetica, Arial, sans-serif\" font-size=\"18\" font-weight=\"700\" fill=\"{title_color}\">{title}</text>{text_nodes}</svg>",
+        title = escape_svg_text(title),
+        title_color = title_color,
     )
 }
 
-fn build_mermaid_block_preview_svg(source_text: &str) -> String {
-    let lines = wrap_svg_text(source_text, 40, 8);
-    let width = 920;
-    let height = 188 + lines.len() as i32 * 26;
-    let line_height = 24;
-    let mut code_nodes = String::new();
+fn build_mermaid_preview_theme(theme: &Theme) -> MermaidTheme {
+    let mut preview_theme = MermaidTheme::modern();
+    let text_primary = svg_color(theme.text_primary);
+    let text_secondary = svg_color(theme.text_secondary);
 
-    for (index, line) in lines.iter().enumerate() {
-        let y = 112 + index as i32 * line_height;
-        code_nodes.push_str(&format!(
-            "<text x=\"86\" y=\"{y}\" font-family=\"Menlo, Monaco, monospace\" font-size=\"19\" fill=\"#D7E3FF\">{}</text>",
-            escape_svg_text(line)
-        ));
+    preview_theme.font_family = "-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif".to_string();
+    preview_theme.background = "none".to_string();
+    preview_theme.primary_color = "none".to_string();
+    preview_theme.secondary_color = "none".to_string();
+    preview_theme.tertiary_color = "none".to_string();
+    preview_theme.primary_text_color = text_primary.clone();
+    preview_theme.text_color = text_primary.clone();
+    preview_theme.primary_border_color = text_secondary.clone();
+    preview_theme.line_color = text_secondary.clone();
+    preview_theme.edge_label_background = "none".to_string();
+    preview_theme.cluster_background = "none".to_string();
+    preview_theme.cluster_border = text_secondary.clone();
+    preview_theme.sequence_actor_fill = "none".to_string();
+    preview_theme.sequence_actor_border = text_secondary.clone();
+    preview_theme.sequence_actor_line = text_secondary.clone();
+    preview_theme.sequence_note_fill = "none".to_string();
+    preview_theme.sequence_note_border = text_secondary.clone();
+    preview_theme.sequence_activation_fill = "none".to_string();
+    preview_theme.sequence_activation_border = text_secondary.clone();
+    preview_theme.pie_title_text_color = text_primary.clone();
+    preview_theme.pie_section_text_color = text_primary.clone();
+    preview_theme.pie_legend_text_color = text_primary.clone();
+    preview_theme.pie_stroke_color = text_secondary.clone();
+    preview_theme.pie_outer_stroke_color = text_secondary;
+
+    preview_theme
+}
+
+fn apply_math_preview_theme(svg: &str, theme: &Theme) -> String {
+    let text_color = svg_color(theme.text_primary);
+    let mut themed = append_svg_root_style(svg, &format!("color:{text_color};"));
+
+    for (from, to) in [
+        ("fill=\"black\"", format!("fill=\"{text_color}\"")),
+        ("stroke=\"black\"", format!("stroke=\"{text_color}\"")),
+        ("fill=\"#000\"", format!("fill=\"{text_color}\"")),
+        ("stroke=\"#000\"", format!("stroke=\"{text_color}\"")),
+        ("fill=\"#000000\"", format!("fill=\"{text_color}\"")),
+        ("stroke=\"#000000\"", format!("stroke=\"{text_color}\"")),
+        ("color: black", format!("color: {text_color}")),
+        ("color:black", format!("color:{text_color}")),
+    ] {
+        themed = themed.replace(from, &to);
     }
 
-    format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"><defs><linearGradient id=\"card\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#11243B\"/><stop offset=\"100%\" stop-color=\"#0A1322\"/></linearGradient></defs><rect x=\"18\" y=\"18\" width=\"884\" height=\"{inner_height}\" rx=\"28\" fill=\"url(#card)\"/><rect x=\"54\" y=\"48\" width=\"156\" height=\"32\" rx=\"16\" fill=\"#1F4B99\"/><text x=\"132\" y=\"69\" text-anchor=\"middle\" font-family=\"Helvetica, Arial, sans-serif\" font-size=\"14\" font-weight=\"700\" fill=\"#F4F8FF\">Mermaid Preview</text><path d=\"M708 84h70\" stroke=\"#73C7FF\" stroke-width=\"4\" stroke-linecap=\"round\"/><rect x=\"620\" y=\"66\" width=\"88\" height=\"36\" rx=\"18\" fill=\"#1C6DD0\"/><rect x=\"778\" y=\"66\" width=\"88\" height=\"36\" rx=\"18\" fill=\"#16A085\"/><text x=\"664\" y=\"89\" text-anchor=\"middle\" font-family=\"Helvetica, Arial, sans-serif\" font-size=\"16\" font-weight=\"700\" fill=\"#F5FBFF\">A</text><text x=\"822\" y=\"89\" text-anchor=\"middle\" font-family=\"Helvetica, Arial, sans-serif\" font-size=\"16\" font-weight=\"700\" fill=\"#F5FBFF\">B</text>{code_nodes}</svg>",
-        inner_height = height - 36,
-    )
+    themed
+}
+
+fn append_svg_root_style(svg: &str, style_fragment: &str) -> String {
+    let Some(svg_start) = svg.find("<svg") else {
+        return svg.to_string();
+    };
+    let Some(tag_end_rel) = svg[svg_start..].find('>') else {
+        return svg.to_string();
+    };
+    let tag_end = svg_start + tag_end_rel;
+    let opening_tag = &svg[svg_start..tag_end];
+
+    if let Some(style_attr_rel) = opening_tag.find("style=\"") {
+        let style_value_start = svg_start + style_attr_rel + 7;
+        let Some(style_value_end_rel) = svg[style_value_start..].find('"') else {
+            return svg.to_string();
+        };
+        let style_value_end = style_value_start + style_value_end_rel;
+        let mut merged = String::with_capacity(svg.len() + style_fragment.len() + 1);
+        merged.push_str(&svg[..style_value_end]);
+        if !svg[style_value_start..style_value_end].trim_end().ends_with(';') {
+            merged.push(';');
+        }
+        merged.push_str(style_fragment);
+        merged.push_str(&svg[style_value_end..]);
+        return merged;
+    }
+
+    let mut merged = String::with_capacity(svg.len() + style_fragment.len() + 9);
+    merged.push_str(&svg[..tag_end]);
+    merged.push_str(&format!(" style=\"{style_fragment}\""));
+    merged.push_str(&svg[tag_end..]);
+    merged
+}
+
+fn svg_color(color: Hsla) -> String {
+    crate::theme::hsla_to_hex_rgba(color)
 }
 
 fn wrap_svg_text(source_text: &str, max_chars: usize, max_lines: usize) -> Vec<String> {

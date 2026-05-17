@@ -407,9 +407,35 @@ impl EntityInputHandler for EditorView {
         } else {
             queried_range.start
         };
+        if self.layout_dirty
+            && let Some(bounds) = self.pending_input_bounds
+        {
+            ime_debug_log(format!(
+                "bounds_for_range using pending input bounds during layout_dirty anchor_utf8={} -> x={} y={} w={} h={}",
+                anchor_offset,
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height)
+            ));
+            return Some(bounds);
+        }
+        if self.layout_dirty
+            && let Some(bounds) = self.last_stable_input_bounds
+        {
+            ime_debug_log(format!(
+                "bounds_for_range using cached stable bounds during layout_dirty anchor_utf8={} -> x={} y={} w={} h={}",
+                anchor_offset,
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height)
+            ));
+            return Some(bounds);
+        }
         let (line, col) = self.buffer.offset_to_line_col(anchor_offset);
         let origin_y: f32 = bounds.origin.y.into();
-        let line_top_y = origin_y + self.line_y_offset(line) - self.scroll_offset;
+        let text_top_y = origin_y + self.text_y_offset_for_line(line) - self.scroll_offset;
 
         if let Some(table_info) = self
             .decorations
@@ -467,10 +493,13 @@ impl EntityInputHandler for EditorView {
                 "bounds_for_range table line={} col={} cell_col={} visual_row={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",
                 line, col, cell_col, visual_row, queried_range, anchor_offset, x, y, line_height
             ));
-            return Some(Bounds::new(
+            let bounds = Bounds::new(
                 point(px(x), px(y)),
                 size(px(self.base_font_size() * 0.6), px(line_height)),
-            ));
+            );
+            self.pending_input_bounds = None;
+            self.last_stable_input_bounds = Some(bounds);
+            return Some(bounds);
         }
 
         let line_info = if self.layout_dirty {
@@ -525,15 +554,18 @@ impl EntityInputHandler for EditorView {
             )
             .unwrap_or_default();
             let x = info.content_x + f32::from(pos.x);
-            let y = line_top_y + f32::from(pos.y);
+            let y = text_top_y + f32::from(pos.y);
             ime_debug_log(format!(
                 "bounds_for_range normal line={} col={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",
                 line, col, queried_range, anchor_offset, x, y, info.line_height
             ));
-            Some(Bounds::new(
+            let bounds = Bounds::new(
                 point(px(x), px(y)),
                 size(px(info.font_size * 0.6), px(info.line_height)),
-            ))
+            );
+            self.pending_input_bounds = None;
+            self.last_stable_input_bounds = Some(bounds);
+            Some(bounds)
         } else {
             let block_type = if line < self.decorations.len() {
                 &self.decorations[line].block_type
@@ -542,10 +574,13 @@ impl EntityInputHandler for EditorView {
             };
             let line_height = self.line_height_for_block(block_type);
             let x = self.last_content_left + col as f32 * self.base_font_size() * 0.6;
-            Some(Bounds::new(
-                point(px(x), px(line_top_y)),
+            let bounds = Bounds::new(
+                point(px(x), px(text_top_y)),
                 size(px(self.base_font_size() * 0.6), px(line_height)),
-            ))
+            );
+            self.pending_input_bounds = None;
+            self.last_stable_input_bounds = Some(bounds);
+            Some(bounds)
         }
     }
 
