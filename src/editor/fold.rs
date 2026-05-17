@@ -184,6 +184,48 @@ impl EditorView {
         self.pause_blinking(cx);
     }
 
+    pub(crate) fn toggle_generated_preview_fold(&mut self, line: usize, cx: &mut Context<Self>) {
+        let Some(preview) = self
+            .decorations
+            .get(line)
+            .and_then(|decoration| decoration.block_preview.as_ref())
+            .cloned()
+            .filter(|preview| preview.is_anchor)
+        else {
+            self.toggle_fold(line, cx);
+            return;
+        };
+
+        let preview_key = preview.cache_key.clone();
+        let selection_ranges = std::iter::once(self.cursor.selection_range())
+            .chain(self.extra_cursors.iter().map(|cursor| cursor.selection_range()))
+            .collect::<Vec<_>>();
+        let preview_is_active = helpers::block_preview_is_active(
+            &preview,
+            self.cursor_line(),
+            &selection_ranges,
+        );
+
+        if self
+            .preview_overlay_state()
+            .is_some_and(|overlay| overlay.line_idx == preview.start_line)
+        {
+            self.close_preview_overlay();
+        }
+
+        if self.expanded_generated_preview_keys.remove(&preview_key) || preview_is_active {
+            self.folded_sections.insert(preview.start_line);
+        } else if self.folded_sections.remove(&preview.start_line) {
+            self.expanded_generated_preview_keys.insert(preview_key);
+        } else {
+            self.expanded_generated_preview_keys.insert(preview_key);
+        }
+
+        self.line_display_info.clear();
+        cx.notify();
+        self.pause_blinking(cx);
+    }
+
     pub(crate) fn toggle_image_fold(&mut self, line: usize, cx: &mut Context<Self>) {
         if !self.folded_image_previews.remove(&line) {
             self.folded_image_previews.insert(line);

@@ -1,6 +1,6 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use gpui::{
     Bounds, Font, FontStyle, FontWeight, Hsla, LineLayout, PaintQuad, Pixels, ShapedGlyph,
@@ -16,7 +16,7 @@ use syntect::highlighting::{
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 
 use image::{Frame, RgbaImage};
-use mathjax_svg_rs::{HorizontalAlign, Options as MathJaxOptions};
+use mathjax_svg_rs::{HorizontalAlign, MathJax, Options as MathJaxOptions};
 use mermaid_rs_renderer::{RenderOptions as MermaidRenderOptions, Theme as MermaidTheme};
 use resvg::tiny_skia::{Pixmap, Transform};
 
@@ -29,6 +29,7 @@ use crate::theme::Theme;
 use super::*;
 
 const GENERATED_PREVIEW_RASTER_SCALE: f32 = 2.0;
+const GENERATED_PREVIEW_MATH_DISPLAY_SCALE: f32 = 1.5;
 
 /// Calculate the display width of a string, counting CJK characters as 2 columns.
 pub(crate) fn display_width(s: &str) -> usize {
@@ -163,7 +164,9 @@ pub(crate) fn active_ranges_have_non_eol_position(
 }
 
 fn active_ranges_have_selection(active_ranges: &[Range<usize>]) -> bool {
-    active_ranges.iter().any(|active_range| active_range.start != active_range.end)
+    active_ranges
+        .iter()
+        .any(|active_range| active_range.start != active_range.end)
 }
 
 fn heading_syntax_is_active(decoration: &LineDecoration, active_ranges: &[Range<usize>]) -> bool {
@@ -1158,6 +1161,43 @@ pub(crate) fn compute_generated_preview_size(
     (logical_width * scale, logical_height * scale)
 }
 
+pub(crate) fn compute_generated_preview_size_for_kind(
+    image_width: f32,
+    image_height: f32,
+    max_width: f32,
+    kind: BlockPreviewKind,
+) -> (f32, f32) {
+    match kind {
+        BlockPreviewKind::Math => compute_generated_preview_size_scaled(
+            image_width,
+            image_height,
+            max_width,
+            GENERATED_PREVIEW_MATH_DISPLAY_SCALE,
+        ),
+        BlockPreviewKind::Mermaid => {
+            compute_generated_preview_size(image_width, image_height, max_width)
+        }
+    }
+}
+
+fn compute_generated_preview_size_scaled(
+    image_width: f32,
+    image_height: f32,
+    max_width: f32,
+    display_scale: f32,
+) -> (f32, f32) {
+    if image_width <= 0.0 || image_height <= 0.0 || max_width <= 0.0 {
+        return (0.0, 0.0);
+    }
+
+    let logical_width = image_width / GENERATED_PREVIEW_RASTER_SCALE;
+    let logical_height = image_height / GENERATED_PREVIEW_RASTER_SCALE;
+    let scaled_width = logical_width * display_scale.max(0.1);
+    let scaled_height = logical_height * display_scale.max(0.1);
+    let scale = (max_width / scaled_width).min(1.0);
+    (scaled_width * scale, scaled_height * scale)
+}
+
 pub(crate) fn image_syntax_range(line_content: &str) -> Option<Range<usize>> {
     let start = line_content.find("![")?;
     let suffix = &line_content[start..];
@@ -1738,8 +1778,14 @@ mod tests {
 
     #[test]
     fn compute_generated_preview_size_preserves_intrinsic_width_when_possible() {
-        assert_eq!(compute_generated_preview_size(640.0, 320.0, 800.0), (320.0, 160.0));
-        assert_eq!(compute_generated_preview_size(1280.0, 640.0, 320.0), (320.0, 160.0));
+        assert_eq!(
+            compute_generated_preview_size(640.0, 320.0, 800.0),
+            (320.0, 160.0)
+        );
+        assert_eq!(
+            compute_generated_preview_size(1280.0, 640.0, 320.0),
+            (320.0, 160.0)
+        );
     }
 
     #[test]
@@ -2572,6 +2618,11 @@ fn generated_preview_fontdb() -> &'static Arc<usvg::fontdb::Database> {
     })
 }
 
+fn generated_mathjax_renderer() -> &'static Mutex<MathJax> {
+    static MATHJAX: OnceLock<Mutex<MathJax>> = OnceLock::new();
+    MATHJAX.get_or_init(|| Mutex::new(MathJax::new()))
+}
+
 pub(crate) fn build_generated_block_preview_svg(
     kind: BlockPreviewKind,
     source_text: &str,
@@ -2585,28 +2636,78 @@ pub(crate) fn build_generated_block_preview_svg(
 
     match rendered {
         Ok(svg) if svg.contains("<svg") => svg,
-        Ok(_) => build_generated_block_preview_error_svg(
-            kind,
-            "renderer returned invalid SVG",
-            theme,
-        ),
+        Ok(_) => {
+            build_generated_block_preview_error_svg(kind, "renderer returned invalid SVG", theme)
+        }
         Err(error) => build_generated_block_preview_error_svg(kind, &error.to_string(), theme),
     }
 }
 
 fn render_math_block_preview_svg(source_text: &str, theme: &Theme) -> anyhow::Result<String> {
     let options = MathJaxOptions {
-        font_size: 24.0,
+        font_size: 36.0,
         horizontal_align: HorizontalAlign::Center,
     };
-    let svg = mathjax_svg_rs::render_tex(source_text, &options)
-        .map_err(|error| anyhow::anyhow!(error))?;
+    let normalized_source = normalize_math_preview_source(source_text);
+    let svg = render_mathjax_preview_svg(&normalized_source, &options)?;
     Ok(apply_math_preview_theme(&svg, theme))
 }
 
+fn normalize_math_preview_source(source_text: &str) -> String {
+    let mut normalized = source_text.trim().to_string();
+
+    for (from, to) in [
+        ("\\operatorname*{arg\\,min}", "\\arg\\min"),
+        ("\\operatorname*{arg\\min}", "\\arg\\min"),
+        ("\\operatorname{arg\\,min}", "\\arg\\min"),
+        ("\\operatorname{arg\\min}", "\\arg\\min"),
+        ("\\lVert", "\\Vert"),
+        ("\\rVert", "\\Vert"),
+    ] {
+        normalized = normalized.replace(from, to);
+    }
+
+    for token in ["\\bigl", "\\bigr", "\\Bigl", "\\Bigr"] {
+        normalized = normalized.replace(token, "");
+    }
+
+    normalized
+}
+
+fn mathjax_error_requires_reset(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("worker thread is unavailable")
+        || normalized.contains("stopped before rendering finished")
+        || normalized.contains("failed to call render function")
+        || normalized.contains("runtimelimit")
+}
+
+fn render_mathjax_preview_svg(
+    source_text: &str,
+    options: &MathJaxOptions,
+) -> anyhow::Result<String> {
+    let mut renderer = generated_mathjax_renderer()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    match renderer.render_tex(source_text, options) {
+        Ok(svg) => Ok(svg),
+        Err(error) => {
+            let message = error.to_string();
+            if !mathjax_error_requires_reset(&message) {
+                return Err(anyhow::anyhow!(message));
+            }
+
+            *renderer = MathJax::new();
+            renderer.render_tex(source_text, options).map_err(|retry_error| {
+                anyhow::anyhow!("{}; retry failed: {}", message, retry_error)
+            })
+        }
+    }
+}
+
 fn render_mermaid_block_preview_svg(source_text: &str, theme: &Theme) -> anyhow::Result<String> {
-    let mut options =
-        MermaidRenderOptions::default().with_preferred_aspect_ratio_parts(16.0, 9.0);
+    let mut options = MermaidRenderOptions::default().with_preferred_aspect_ratio_parts(16.0, 9.0);
     options.theme = build_mermaid_preview_theme(theme);
     mermaid_rs_renderer::render_with_options(source_text, options)
 }
@@ -2713,7 +2814,10 @@ fn append_svg_root_style(svg: &str, style_fragment: &str) -> String {
         let style_value_end = style_value_start + style_value_end_rel;
         let mut merged = String::with_capacity(svg.len() + style_fragment.len() + 1);
         merged.push_str(&svg[..style_value_end]);
-        if !svg[style_value_start..style_value_end].trim_end().ends_with(';') {
+        if !svg[style_value_start..style_value_end]
+            .trim_end()
+            .ends_with(';')
+        {
             merged.push(';');
         }
         merged.push_str(style_fragment);

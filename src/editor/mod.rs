@@ -52,8 +52,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Local;
 use gpui::{
-    Bounds, ClipboardEntry, ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point,
-    Render, RenderImage, ScrollHandle, SharedString, Task, WrappedLine,
+    Bounds, ClipboardEntry, ClipboardItem, Context, FocusHandle, Focusable, Pixels, Point, Render,
+    RenderImage, ScrollHandle, SharedString, Task, WrappedLine,
 };
 
 use crate::actions::*;
@@ -724,6 +724,11 @@ pub struct EditorView {
     pub(crate) hovering_checkbox_line: Option<usize>,
     pub(crate) image_click_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) generated_preview_click_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
+    pub(crate) generated_preview_image_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
+    pub(crate) generated_preview_zoom_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
+    pub(crate) hovering_image_preview_line: Option<usize>,
+    pub(crate) hovering_generated_preview_line: Option<usize>,
+    pub(crate) hovering_generated_preview_zoom_line: Option<usize>,
     pub(crate) code_block_hover_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) code_block_copy_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_code_block_start: Option<usize>,
@@ -761,6 +766,9 @@ pub struct EditorView {
     pub(crate) content_origin: Point<Pixels>,
     pub(crate) last_stable_input_bounds: Option<Bounds<Pixels>>,
     pub(crate) pending_input_bounds: Option<Bounds<Pixels>>,
+    pub(crate) preview_overlay: Option<PreviewOverlayState>,
+    pub(crate) preview_overlay_bounds: Option<Bounds<Pixels>>,
+    pub(crate) preview_overlay_image_bounds: Option<Bounds<Pixels>>,
     pub(crate) last_mouse_down_target: Option<(Point<Pixels>, usize)>,
     pub(crate) context_menu: Option<ContextMenu>,
     pub(crate) context_submenu: Option<ContextMenuKind>,
@@ -774,6 +782,7 @@ pub struct EditorView {
     pub(crate) folded_sections: HashSet<usize>,
     pub(crate) folded_image_previews: HashSet<usize>,
     pub(crate) generated_preview_keys: HashSet<String>,
+    pub(crate) expanded_generated_preview_keys: HashSet<String>,
     pub(crate) gutter_fold_areas: Vec<(gpui::Bounds<Pixels>, usize, bool)>,
     pub(crate) image_edit_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_image_edit_line: Option<usize>,
@@ -1062,6 +1071,11 @@ impl EditorView {
             hovering_checkbox_line: None,
             image_click_areas: Vec::new(),
             generated_preview_click_areas: Vec::new(),
+            generated_preview_image_areas: Vec::new(),
+            generated_preview_zoom_areas: Vec::new(),
+            hovering_image_preview_line: None,
+            hovering_generated_preview_line: None,
+            hovering_generated_preview_zoom_line: None,
             code_block_hover_areas: Vec::new(),
             code_block_copy_areas: Vec::new(),
             hovering_code_block_start: None,
@@ -1135,6 +1149,9 @@ impl EditorView {
             content_origin: Point::default(),
             last_stable_input_bounds: None,
             pending_input_bounds: None,
+            preview_overlay: None,
+            preview_overlay_bounds: None,
+            preview_overlay_image_bounds: None,
             last_mouse_down_target: None,
             context_menu: None,
             context_submenu: None,
@@ -1148,6 +1165,7 @@ impl EditorView {
             folded_sections: HashSet::new(),
             folded_image_previews: HashSet::new(),
             generated_preview_keys: HashSet::new(),
+            expanded_generated_preview_keys: HashSet::new(),
             gutter_fold_areas: Vec::new(),
             image_edit_areas: Vec::new(),
             hovering_image_edit_line: None,
@@ -2903,9 +2921,15 @@ impl EditorView {
     }
 
     fn refresh_generated_block_previews(&mut self) {
-        for key in self.generated_preview_keys.drain() {
-            self.image_cache.remove(&key);
-        }
+        self.refresh_generated_block_previews_with_mode(false);
+    }
+
+    pub(crate) fn rerender_generated_block_previews(&mut self) {
+        self.refresh_generated_block_previews_with_mode(true);
+    }
+
+    fn refresh_generated_block_previews_with_mode(&mut self, force: bool) {
+        let mut next_generated_keys = HashSet::new();
 
         for decoration in &self.decorations {
             let Some(preview) = decoration.block_preview.as_ref() else {
@@ -2914,7 +2938,11 @@ impl EditorView {
             if !preview.is_anchor || preview.source_text.is_empty() {
                 continue;
             }
-            if self.generated_preview_keys.contains(&preview.cache_key) {
+            next_generated_keys.insert(preview.cache_key.clone());
+            if !force
+                && self.generated_preview_keys.contains(&preview.cache_key)
+                && self.image_cache.contains_key(&preview.cache_key)
+            {
                 continue;
             }
 
@@ -2925,9 +2953,21 @@ impl EditorView {
             );
             let image = helpers::load_render_image_from_svg(&svg).ok().map(Arc::new);
             self.image_cache.insert(preview.cache_key.clone(), image);
-            self.generated_preview_keys
-                .insert(preview.cache_key.clone());
         }
+
+        let stale_keys: Vec<_> = self
+            .generated_preview_keys
+            .difference(&next_generated_keys)
+            .cloned()
+            .collect();
+        for key in stale_keys {
+            self.image_cache.remove(&key);
+        }
+
+        self.expanded_generated_preview_keys
+            .retain(|key| next_generated_keys.contains(key));
+
+        self.generated_preview_keys = next_generated_keys;
     }
 
     pub(crate) fn active_file_kind(&self) -> Option<&FileKind> {
@@ -3086,6 +3126,56 @@ impl EditorView {
                 image_view.pan_y = 0.0;
             }
         }
+    }
+
+    pub(crate) fn preview_overlay_state(&self) -> Option<&PreviewOverlayState> {
+        self.preview_overlay.as_ref()
+    }
+
+    pub(crate) fn preview_overlay_state_mut(&mut self) -> Option<&mut PreviewOverlayState> {
+        self.preview_overlay.as_mut()
+    }
+
+    pub(crate) fn close_preview_overlay(&mut self) {
+        self.preview_overlay = None;
+        self.preview_overlay_bounds = None;
+        self.preview_overlay_image_bounds = None;
+        self.image_drag_state = None;
+    }
+
+    pub(crate) fn preview_overlay_dimensions(&self) -> Option<(f32, f32)> {
+        let overlay = self.preview_overlay.as_ref()?;
+        let image = self.image_cache.get(&overlay.cache_key)?.as_ref()?;
+        let size = image.size(0);
+        Some((size.width.0 as f32, size.height.0 as f32))
+    }
+
+    pub(crate) fn clamp_preview_overlay_view(&mut self) {
+        let Some(bounds) = self.preview_overlay_bounds else {
+            return;
+        };
+        let Some((image_width, image_height)) = self.preview_overlay_dimensions() else {
+            return;
+        };
+        let Some(overlay) = self.preview_overlay.as_mut() else {
+            return;
+        };
+
+        let view = &mut overlay.view;
+        view.zoom_factor = view.zoom_factor.clamp(1.0, 6.0);
+
+        let viewport_width = f32::from(bounds.size.width).max(1.0);
+        let viewport_height = f32::from(bounds.size.height).max(1.0);
+        let fit_scale = (viewport_width / image_width)
+            .min(viewport_height / image_height)
+            .min(1.0);
+        let display_width = image_width * fit_scale * view.zoom_factor;
+        let display_height = image_height * fit_scale * view.zoom_factor;
+        let limit_x = ((display_width - viewport_width) / 2.0).max(0.0);
+        let limit_y = ((display_height - viewport_height) / 2.0).max(0.0);
+
+        view.pan_x = view.pan_x.clamp(-limit_x, limit_x);
+        view.pan_y = view.pan_y.clamp(-limit_y, limit_y);
     }
 
     pub(crate) fn active_image_dimensions(&self) -> Option<(f32, f32)> {

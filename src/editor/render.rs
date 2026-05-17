@@ -329,6 +329,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_find_in_files))
             .on_action(cx.listener(Self::on_quick_open))
             .on_action(cx.listener(Self::on_escape))
+            .on_key_down(cx.listener(Self::on_preview_overlay_key_down))
             .on_action(cx.listener(Self::on_toggle_outline))
             .on_action(cx.listener(Self::on_toggle_info_panel))
             .on_action(cx.listener(Self::on_toggle_git_history))

@@ -1,4 +1,4 @@
-use gpui::{Context, Window};
+use gpui::{Context, KeyDownEvent, Window};
 
 use crate::actions::*;
 use crate::markdown::{self, BlockType};
@@ -22,6 +22,11 @@ impl EditorView {
     }
 
     pub(crate) fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.preview_overlay.is_some() {
+            self.close_preview_overlay();
+            cx.notify();
+            return;
+        }
         if self.settings_font_picker.is_some() {
             self.close_font_picker(cx);
             return;
@@ -57,6 +62,24 @@ impl EditorView {
         }
         if self.focused_sidebar_path.is_some() {
             self.focused_sidebar_path = None;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn on_preview_overlay_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.preview_overlay.is_none() {
+            return;
+        }
+
+        if matches!(event.keystroke.key.as_ref(), "escape" | "space" | " ") {
+            window.prevent_default();
+            cx.stop_propagation();
+            self.close_preview_overlay();
             cx.notify();
         }
     }

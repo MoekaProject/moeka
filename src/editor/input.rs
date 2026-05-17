@@ -191,6 +191,57 @@ impl EditorView {
     ) {
         self.last_mouse_down_target = None;
 
+        if event.button == MouseButton::Left {
+            if let Some(line_idx) = self
+                .generated_preview_zoom_areas
+                .iter()
+                .find(|(bounds, _)| bounds.contains(&event.position))
+                .map(|(_, line)| *line)
+            {
+                if self.toggle_generated_preview_overlay(line_idx) {
+                    self.clear_wrap_boundary_affinity();
+                    self.is_selecting = false;
+                    self.selection_drag_position = None;
+                    self.image_drag_state = None;
+                    cx.notify();
+                    return;
+                }
+            }
+
+            if let Some(bounds) = self.preview_overlay_image_bounds {
+                if bounds.contains(&event.position) {
+                    if event.click_count >= 2 {
+                        if let Some(overlay) = self.preview_overlay_state_mut() {
+                            overlay.view = ImageViewState::default();
+                        }
+                        self.clamp_preview_overlay_view();
+                        self.image_drag_state = None;
+                        cx.notify();
+                        return;
+                    }
+
+                    if let Some(state) = self.preview_overlay_state() {
+                        self.image_drag_state = Some(ImageDragState {
+                            start_position: event.position,
+                            start_pan_x: state.view.pan_x,
+                            start_pan_y: state.view.pan_y,
+                        });
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+
+            if self.preview_overlay.is_some() {
+                self.close_preview_overlay();
+                self.clear_wrap_boundary_affinity();
+                self.is_selecting = false;
+                self.selection_drag_position = None;
+                cx.notify();
+                return;
+            }
+        }
+
         if self.active_tab_is_image() && event.button == MouseButton::Left {
             if event.click_count >= 2 {
                 self.reset_active_image_view();
@@ -232,6 +283,13 @@ impl EditorView {
         {
             if is_image_fold {
                 self.toggle_image_fold(line_idx, cx);
+            } else if self
+                .decorations
+                .get(line_idx)
+                .and_then(|decoration| decoration.block_preview.as_ref())
+                .is_some_and(|preview| preview.is_anchor)
+            {
+                self.toggle_generated_preview_fold(line_idx, cx);
             } else {
                 self.toggle_fold(line_idx, cx);
             }
@@ -303,7 +361,10 @@ impl EditorView {
             .find(|(bounds, _)| bounds.contains(&event.position))
             .map(|(bounds, line)| (bounds.clone(), *line))
         {
-            if self.activate_block_preview_from_click(line_idx, &bounds, event.position) {
+            let image_bounds = self
+                .generated_preview_image_bounds_for_line(line_idx)
+                .unwrap_or(bounds);
+            if self.activate_block_preview_from_click(line_idx, &image_bounds, event.position) {
                 self.clear_wrap_boundary_affinity();
                 self.is_selecting = false;
                 cx.notify();
@@ -491,6 +552,48 @@ impl EditorView {
         true
     }
 
+    fn generated_preview_image_bounds_for_line(&self, line_idx: usize) -> Option<Bounds<Pixels>> {
+        self.generated_preview_image_areas
+            .iter()
+            .find(|(_, line)| *line == line_idx)
+            .map(|(bounds, _)| bounds.clone())
+    }
+
+    fn toggle_generated_preview_overlay(&mut self, line_idx: usize) -> bool {
+        if self
+            .preview_overlay_state()
+            .is_some_and(|overlay| overlay.line_idx == line_idx)
+        {
+            self.close_preview_overlay();
+            return true;
+        }
+
+        let has_preview_bounds = self.generated_preview_image_bounds_for_line(line_idx).is_some()
+            || self
+                .generated_preview_click_areas
+                .iter()
+                .any(|(_, line)| *line == line_idx);
+        if !has_preview_bounds {
+            return false;
+        }
+        let Some(preview) = self
+            .decorations
+            .get(line_idx)
+            .and_then(|decoration| decoration.block_preview.as_ref())
+        else {
+            return false;
+        };
+
+        self.preview_overlay = Some(PreviewOverlayState {
+            cache_key: preview.cache_key.clone(),
+            line_idx,
+            view: ImageViewState::default(),
+        });
+        self.preview_overlay_bounds = None;
+        self.preview_overlay_image_bounds = None;
+        true
+    }
+
     fn activate_block_preview_from_click(
         &mut self,
         line_idx: usize,
@@ -507,6 +610,7 @@ impl EditorView {
         };
 
         let target_offset = self.block_preview_offset_for_click(&preview, bounds, position);
+        self.folded_sections.remove(&preview.start_line);
         self.clear_extra_cursors();
         self.cursor.anchor = target_offset;
         self.cursor.offset = target_offset;
@@ -843,11 +947,18 @@ impl EditorView {
 
     pub(crate) fn on_mouse_up(
         &mut self,
-        _event: &MouseUpEvent,
+        event: &MouseUpEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.image_drag_state.take().is_some() {
+        if let Some(drag) = self.image_drag_state.take() {
+            if self.preview_overlay.is_some() {
+                let moved_x = (f32::from(event.position.x) - f32::from(drag.start_position.x)).abs();
+                let moved_y = (f32::from(event.position.y) - f32::from(drag.start_position.y)).abs();
+                if moved_x < 4.0 && moved_y < 4.0 {
+                    self.close_preview_overlay();
+                }
+            }
             cx.notify();
             return;
         }
@@ -932,6 +1043,23 @@ impl EditorView {
     ) {
         let toolbar_hover_changed = self.update_toolbar_corner_hover(event.position, cx);
         self.hovered_editor_position = Some(event.position);
+        if self.preview_overlay.is_some() {
+            if let Some(drag) = self.image_drag_state {
+                if let Some(overlay) = self.preview_overlay_state_mut() {
+                    overlay.view.pan_x = drag.start_pan_x
+                        + (f32::from(event.position.x) - f32::from(drag.start_position.x));
+                    overlay.view.pan_y = drag.start_pan_y
+                        + (f32::from(event.position.y) - f32::from(drag.start_position.y));
+                }
+                self.clamp_preview_overlay_view();
+                if toolbar_hover_changed {
+                    cx.notify();
+                }
+                cx.notify();
+                return;
+            }
+        }
+
         if self.active_tab_is_image() {
             if let Some(drag) = self.image_drag_state {
                 if let Some(image_view) = self.active_image_view_state_mut() {
@@ -1003,6 +1131,44 @@ impl EditorView {
         if hovering_checkbox_line != self.hovering_checkbox_line {
             self.hovering_checkbox_line = hovering_checkbox_line;
             self.hovering_checkbox = self.hovering_checkbox_line.is_some();
+            cx.notify();
+        }
+
+        let hovering_image_preview = self
+            .image_click_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(_, line)| *line);
+        if hovering_image_preview != self.hovering_image_preview_line {
+            self.hovering_image_preview_line = hovering_image_preview;
+            cx.notify();
+        }
+
+        let hovering_generated_preview = self
+            .generated_preview_click_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(_, line)| *line)
+            .or_else(|| {
+                let bounds = self.preview_overlay_bounds?;
+                if bounds.contains(&event.position) {
+                    self.preview_overlay_state().map(|overlay| overlay.line_idx)
+                } else {
+                    None
+                }
+            });
+        if hovering_generated_preview != self.hovering_generated_preview_line {
+            self.hovering_generated_preview_line = hovering_generated_preview;
+            cx.notify();
+        }
+
+        let hovering_generated_preview_zoom = self
+            .generated_preview_zoom_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(_, line)| *line);
+        if hovering_generated_preview_zoom != self.hovering_generated_preview_zoom_line {
+            self.hovering_generated_preview_zoom_line = hovering_generated_preview_zoom;
             cx.notify();
         }
 
@@ -1757,6 +1923,23 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.preview_overlay.is_some() {
+            let delta_y: f32 = event.delta.pixel_delta(px(40.0)).y.into();
+            if delta_y != 0.0 {
+                let zoom_ratio = 1.0 + (delta_y.abs() / 300.0).clamp(0.05, 0.35);
+                if let Some(overlay) = self.preview_overlay_state_mut() {
+                    if delta_y < 0.0 {
+                        overlay.view.zoom_factor *= zoom_ratio;
+                    } else {
+                        overlay.view.zoom_factor /= zoom_ratio;
+                    }
+                }
+                self.clamp_preview_overlay_view();
+                cx.notify();
+            }
+            return;
+        }
+
         if self.active_tab_is_image() {
             let delta_y: f32 = event.delta.pixel_delta(px(40.0)).y.into();
             if delta_y != 0.0 {

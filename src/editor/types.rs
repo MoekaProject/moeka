@@ -123,6 +123,13 @@ pub(crate) struct ImageDragState {
     pub start_pan_y: f32,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PreviewOverlayState {
+    pub cache_key: String,
+    pub line_idx: usize,
+    pub view: ImageViewState,
+}
+
 #[derive(Clone)]
 pub(crate) struct OpenTab {
     pub id: String,

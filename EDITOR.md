@@ -101,10 +101,10 @@ $$
 $$
 
 $$
-\operatorname*{arg\,min}_{\theta \in \mathbb{R}^n}
+\arg\min_{\theta \in \mathbb{R}^n}
 \left(
-\frac{1}{m}\sum_{i=1}^{m} \ell\bigl(f_{\theta}(x_i), y_i\bigr)
-+ \lambda \lVert \theta \rVert_2^2
+\frac{1}{m}\sum_{i=1}^{m} \ell\left(f_{\theta}(x_i), y_i\right)
++ \lambda \Vert \theta \Vert_2^2
 \right)
 $$
 
