@@ -52,6 +52,7 @@ pub(crate) enum ChatPanelPlacement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChatAgentCli {
     GithubCopilot,
+    Terminal,
     OpenAICodex,
     ClaudeCode,
     GeminiCli,

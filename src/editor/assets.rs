@@ -43,6 +43,7 @@ pub(crate) const MENU_UNPIN_SVG_PATH: &str = "assets/icons/menu/unpin.svg";
 pub(crate) const MENU_LOCATE_TREE_SVG_PATH: &str = "assets/icons/menu/locate-tree.svg";
 pub(crate) const MENU_AT_SVG_PATH: &str = "assets/icons/menu/at.svg";
 pub(crate) const MENU_COPILOT_SVG_PATH: &str = "assets/icons/menu/copilot.svg";
+pub(crate) const MENU_TERMINAL_SVG_PATH: &str = "assets/icons/menu/terminal.svg";
 pub(crate) const MENU_CODEX_SVG_PATH: &str = "assets/icons/menu/codex.svg";
 pub(crate) const MENU_CLAUDE_SVG_PATH: &str = "assets/icons/menu/claude.svg";
 pub(crate) const MENU_GEMINI_SVG_PATH: &str = "assets/icons/menu/gemini.svg";

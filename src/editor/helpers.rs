@@ -1499,6 +1499,10 @@ fn syntax_lookup_candidates(language: &str) -> Vec<String> {
             push_syntax_candidate(&mut candidates, "markdown");
             push_syntax_candidate(&mut candidates, "Markdown");
         }
+        "mermaid" | "mmd" => {
+            push_syntax_candidate(&mut candidates, "mermaid");
+            push_syntax_candidate(&mut candidates, "Mermaid");
+        }
         "objc" | "objective-c" => {
             push_syntax_candidate(&mut candidates, "objective-c");
             push_syntax_candidate(&mut candidates, "Objective-C");
@@ -1553,6 +1557,324 @@ fn syntax_lookup_candidates(language: &str) -> Vec<String> {
     }
 
     candidates
+}
+
+fn mermaid_highlight_color(theme: &Theme, red: u8, green: u8, blue: u8) -> Hsla {
+    adjust_code_block_highlight_color_for_theme(
+        syntect_color_to_hsla(SyntectColor {
+            r: red,
+            g: green,
+            b: blue,
+            a: 0xFF,
+        }),
+        theme,
+    )
+}
+
+fn apply_highlight_range(
+    range: Range<usize>,
+    color: Hsla,
+    weight: FontWeight,
+    style: FontStyle,
+    colors: &mut [Hsla],
+    weights: &mut [FontWeight],
+    styles: &mut [FontStyle],
+) {
+    let start = range.start.min(colors.len());
+    let end = range.end.min(colors.len());
+    for index in start..end {
+        colors[index] = color;
+        weights[index] = weight;
+        styles[index] = style;
+    }
+}
+
+fn is_mermaid_word_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')
+}
+
+fn is_mermaid_language(language: &str) -> bool {
+    let token = language
+        .trim()
+        .trim_matches('`')
+        .split(|ch: char| {
+            ch.is_whitespace() || matches!(ch, ',' | '{' | '}' | '[' | ']' | '(' | ')')
+        })
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    matches!(token.as_str(), "mermaid" | "mmd")
+}
+
+fn apply_mermaid_block_highlighting(
+    line_content: &str,
+    theme: &Theme,
+    colors: &mut [Hsla],
+    weights: &mut [FontWeight],
+    styles: &mut [FontStyle],
+) {
+    if line_content.is_empty() {
+        return;
+    }
+
+    let comment_color = mermaid_highlight_color(theme, 127, 132, 142);
+    let keyword_color = mermaid_highlight_color(theme, 198, 120, 221);
+    let direction_color = mermaid_highlight_color(theme, 209, 154, 102);
+    let string_color = mermaid_highlight_color(theme, 152, 195, 121);
+    let operator_color = mermaid_highlight_color(theme, 86, 182, 194);
+    let number_color = mermaid_highlight_color(theme, 209, 154, 102);
+
+    let trimmed = line_content.trim_start();
+    if trimmed.starts_with("%%") && !trimmed.starts_with("%%{") {
+        apply_highlight_range(
+            0..line_content.len(),
+            comment_color,
+            FontWeight::NORMAL,
+            FontStyle::Italic,
+            colors,
+            weights,
+            styles,
+        );
+        return;
+    }
+
+    let mut string_ranges = Vec::new();
+    let mut byte_index = 0usize;
+    while byte_index < line_content.len() {
+        let mut chars = line_content[byte_index..].char_indices();
+        let Some((_, ch)) = chars.next() else {
+            break;
+        };
+        let ch_len = ch.len_utf8();
+        if matches!(ch, '"' | '\'') {
+            let start = byte_index;
+            byte_index += ch_len;
+            while byte_index < line_content.len() {
+                let mut inner_chars = line_content[byte_index..].char_indices();
+                let Some((_, next_ch)) = inner_chars.next() else {
+                    break;
+                };
+                byte_index += next_ch.len_utf8();
+                if next_ch == ch {
+                    break;
+                }
+            }
+            let range = start..byte_index.min(line_content.len());
+            apply_highlight_range(
+                range.clone(),
+                string_color,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                colors,
+                weights,
+                styles,
+            );
+            string_ranges.push(range);
+            continue;
+        }
+        byte_index += ch_len;
+    }
+
+    let range_contains = |byte: usize| {
+        string_ranges
+            .iter()
+            .any(|range| byte >= range.start && byte < range.end)
+    };
+
+    let mut index = 0usize;
+    while index < line_content.len() {
+        if range_contains(index) {
+            if let Some(range) = string_ranges
+                .iter()
+                .find(|range| index >= range.start && index < range.end)
+            {
+                index = range.end;
+                continue;
+            }
+        }
+
+        let mut chars = line_content[index..].char_indices();
+        let Some((_, ch)) = chars.next() else {
+            break;
+        };
+        let ch_len = ch.len_utf8();
+
+        if ch.is_ascii_whitespace() {
+            index += ch_len;
+            continue;
+        }
+
+        if ch.is_ascii_digit() {
+            let start = index;
+            index += ch_len;
+            while index < line_content.len() {
+                let mut inner_chars = line_content[index..].char_indices();
+                let Some((_, next_ch)) = inner_chars.next() else {
+                    break;
+                };
+                if next_ch.is_ascii_digit() || matches!(next_ch, '.' | '_') {
+                    index += next_ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            apply_highlight_range(
+                start..index,
+                number_color,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                colors,
+                weights,
+                styles,
+            );
+            continue;
+        }
+
+        if is_mermaid_word_char(ch) {
+            let start = index;
+            index += ch_len;
+            while index < line_content.len() {
+                let mut inner_chars = line_content[index..].char_indices();
+                let Some((_, next_ch)) = inner_chars.next() else {
+                    break;
+                };
+                if is_mermaid_word_char(next_ch) {
+                    index += next_ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+
+            let token = &line_content[start..index];
+            let lowered = token.to_ascii_lowercase();
+            let is_keyword = matches!(
+                lowered.as_str(),
+                "graph"
+                    | "flowchart"
+                    | "sequencediagram"
+                    | "classdiagram"
+                    | "statediagram"
+                    | "statediagram-v2"
+                    | "erdiagram"
+                    | "journey"
+                    | "gantt"
+                    | "mindmap"
+                    | "timeline"
+                    | "pie"
+                    | "requirementdiagram"
+                    | "gitgraph"
+                    | "c4context"
+                    | "c4container"
+                    | "c4component"
+                    | "c4dynamic"
+                    | "c4deployment"
+                    | "xychart"
+                    | "xychart-beta"
+                    | "block-beta"
+                    | "packet-beta"
+                    | "architecture-beta"
+                    | "quadrantchart"
+                    | "sankey-beta"
+                    | "subgraph"
+                    | "end"
+                    | "direction"
+                    | "participant"
+                    | "actor"
+                    | "note"
+                    | "autonumber"
+                    | "loop"
+                    | "alt"
+                    | "else"
+                    | "opt"
+                    | "par"
+                    | "and"
+                    | "break"
+                    | "critical"
+                    | "option"
+                    | "rect"
+                    | "destroy"
+                    | "activate"
+                    | "deactivate"
+                    | "create"
+                    | "box"
+                    | "title"
+                    | "section"
+                    | "style"
+                    | "linkstyle"
+                    | "click"
+                    | "classdef"
+                    | "class"
+                    | "namespace"
+                    | "state"
+                    | "choice"
+                    | "fork"
+                    | "join"
+                    | "as"
+                    | "accdescr"
+                    | "acctitle"
+            );
+            let is_direction = matches!(lowered.as_str(), "tb" | "td" | "bt" | "lr" | "rl");
+            if is_keyword || is_direction {
+                apply_highlight_range(
+                    start..index,
+                    if is_direction {
+                        direction_color
+                    } else {
+                        keyword_color
+                    },
+                    FontWeight::BOLD,
+                    FontStyle::Normal,
+                    colors,
+                    weights,
+                    styles,
+                );
+            }
+            continue;
+        }
+
+        if matches!(ch, '[' | ']' | '{' | '}' | '(' | ')' | '|' | ':' | ';' | ',') {
+            apply_highlight_range(
+                index..(index + ch_len),
+                operator_color,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                colors,
+                weights,
+                styles,
+            );
+            index += ch_len;
+            continue;
+        }
+
+        if matches!(ch, '-' | '=' | '>' | '<' | '.' | '+' | '~' | '/') {
+            let start = index;
+            index += ch_len;
+            while index < line_content.len() {
+                let mut inner_chars = line_content[index..].char_indices();
+                let Some((_, next_ch)) = inner_chars.next() else {
+                    break;
+                };
+                if matches!(next_ch, '-' | '=' | '>' | '<' | '.' | '+' | '~' | '/') {
+                    index += next_ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            apply_highlight_range(
+                start..index,
+                operator_color,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                colors,
+                weights,
+                styles,
+            );
+            continue;
+        }
+
+        index += ch_len;
+    }
 }
 
 #[cfg(test)]
@@ -2566,6 +2888,11 @@ pub(crate) fn apply_code_block_highlighting(
     styles: &mut [FontStyle],
 ) {
     if line_content.is_empty() {
+        return;
+    }
+
+    if is_mermaid_language(language) {
+        apply_mermaid_block_highlighting(line_content, theme, colors, weights, styles);
         return;
     }
 

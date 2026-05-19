@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
+use std::env;
 
 use alacritty_terminal::{
     event::{Event as AlacTermEvent, EventListener},
@@ -12,7 +13,7 @@ use alacritty_terminal::{
     index::{Column, Line, Point as AlacPoint},
     sync::FairMutex,
     term::{
-        Config, RenderableCursor, Term,
+        Config, RenderableCursor, Term, TermMode,
         cell::{Cell, Flags},
     },
     vte::ansi::{Color as AlacColor, CursorShape as AlacCursorShape, NamedColor, Processor, Rgb},
@@ -739,9 +740,10 @@ impl ChatTab {
 }
 
 impl ChatAgentCli {
-    pub(crate) fn all() -> [Self; 4] {
+    pub(crate) fn all() -> [Self; 5] {
         [
             Self::GithubCopilot,
+            Self::Terminal,
             Self::OpenAICodex,
             Self::ClaudeCode,
             Self::GeminiCli,
@@ -751,6 +753,7 @@ impl ChatAgentCli {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::GithubCopilot => "Github Copilot",
+            Self::Terminal => "终端",
             Self::OpenAICodex => "OpenAI Codex",
             Self::ClaudeCode => "Claude Code",
             Self::GeminiCli => "Gemini CLI",
@@ -760,15 +763,24 @@ impl ChatAgentCli {
     pub(crate) fn command_name(self) -> &'static str {
         match self {
             Self::GithubCopilot => "copilot",
+            Self::Terminal => "/bin/zsh",
             Self::OpenAICodex => "codex",
             Self::ClaudeCode => "claude",
             Self::GeminiCli => "gemini",
         }
     }
 
+    pub(crate) fn build_command(self) -> CommandBuilder {
+        match self {
+            Self::Terminal => CommandBuilder::new(chat_terminal_default_shell_program()),
+            _ => CommandBuilder::new(self.command_name()),
+        }
+    }
+
     pub(crate) fn icon_path(self) -> &'static str {
         match self {
             Self::GithubCopilot => MENU_COPILOT_SVG_PATH,
+            Self::Terminal => MENU_TERMINAL_SVG_PATH,
             Self::OpenAICodex => MENU_CODEX_SVG_PATH,
             Self::ClaudeCode => MENU_CLAUDE_SVG_PATH,
             Self::GeminiCli => MENU_GEMINI_SVG_PATH,
@@ -798,7 +810,7 @@ impl ChatTerminalSession {
             pixel_height: 0,
         })?;
 
-        let mut command = CommandBuilder::new(agent_cli.command_name());
+        let mut command = agent_cli.build_command();
         command.cwd(cwd.clone());
 
         let child = pair.slave.spawn_command(command)?;
@@ -873,6 +885,93 @@ impl ChatTerminalSession {
         writer.write_all(bytes)?;
         writer.flush()?;
         Ok(())
+    }
+
+    fn term_mode(&self) -> TermMode {
+        self.runtime
+            .as_ref()
+            .map(|runtime| *runtime.term.lock().mode())
+            .unwrap_or(TermMode::NONE)
+    }
+
+    fn mouse_mode(&self, shift: bool) -> bool {
+        !shift && self.term_mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    fn alternate_scroll_mode(&self, shift: bool) -> bool {
+        let mode = self.term_mode();
+        !shift
+            && !mode.intersects(TermMode::MOUSE_MODE)
+            && mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
+    }
+
+    fn write_mouse_report(
+        &self,
+        row: usize,
+        col: usize,
+        button: u8,
+        released: bool,
+        shift: bool,
+        alt: bool,
+        control: bool,
+    ) -> anyhow::Result<()> {
+        let mode = self.term_mode();
+        let mut modifier_bits = 0;
+        if shift {
+            modifier_bits += 4;
+        }
+        if alt {
+            modifier_bits += 8;
+        }
+        if control {
+            modifier_bits += 16;
+        }
+
+        if mode.contains(TermMode::SGR_MOUSE) {
+            let state = if released { 'm' } else { 'M' };
+            let message = format!(
+                "\x1b[<{};{};{}{}",
+                button + modifier_bits,
+                col + 1,
+                row + 1,
+                state
+            );
+            return self.write_bytes(message.as_bytes());
+        }
+
+        let utf8 = mode.contains(TermMode::UTF8_MOUSE);
+        let max_point = if utf8 { 2015 } else { 223 };
+        if row >= max_point || col >= max_point {
+            return Ok(());
+        }
+
+        let reported_button = if released {
+            3 + modifier_bits
+        } else {
+            button + modifier_bits
+        };
+        let mut message = vec![b'\x1b', b'[', b'M', 32 + reported_button];
+
+        let mouse_pos_encode = |position: usize| {
+            let position = 32 + 1 + position;
+            let first = 0xC0 + position / 64;
+            let second = 0x80 + (position & 63);
+            [first as u8, second as u8]
+        };
+
+        if utf8 && col >= 95 {
+            message.extend_from_slice(&mouse_pos_encode(col));
+        } else {
+            message.push(32 + 1 + col as u8);
+        }
+
+        if utf8 && row >= 95 {
+            message.extend_from_slice(&mouse_pos_encode(row));
+        } else {
+            message.push(32 + 1 + row as u8);
+        }
+
+        self.write_bytes(&message)
     }
 
     fn scroll_display(&mut self, scroll: Scroll) {
@@ -1179,6 +1278,22 @@ fn terminal_color_to_hsla(
     }
 }
 
+fn chat_terminal_default_shell_program() -> String {
+    env::var("SHELL")
+        .ok()
+        .filter(|shell| !shell.trim().is_empty())
+        .unwrap_or_else(|| "/bin/zsh".to_string())
+}
+
+fn chat_terminal_mouse_button_code(button: MouseButton) -> Option<u8> {
+    match button {
+        MouseButton::Left => Some(0),
+        MouseButton::Middle => Some(1),
+        MouseButton::Right => Some(2),
+        _ => None,
+    }
+}
+
 fn should_route_chat_terminal_text_input(keystroke: &gpui::Keystroke) -> bool {
     keystroke.key_char.is_some()
         && !keystroke.modifiers.control
@@ -1391,10 +1506,24 @@ impl EditorView {
         self.chat_terminal_marked_text = None;
         self.chat_terminal_selection = None;
         self.chat_terminal_selecting = false;
+        self.chat_terminal_mouse_scroll_px = point(Pixels::ZERO, Pixels::ZERO);
+        self.chat_terminal_mouse_left_pressed = false;
+        self.chat_terminal_mouse_middle_pressed = false;
+        self.chat_terminal_mouse_right_pressed = false;
+        self.chat_terminal_last_mouse_cell = None;
     }
 
     fn focus_chat_terminal_panel(&self, window: &mut Window) {
         window.focus(&self.chat_panel_focus_handle);
+    }
+
+    fn set_chat_terminal_mouse_button_state(&mut self, button: MouseButton, pressed: bool) {
+        match button {
+            MouseButton::Left => self.chat_terminal_mouse_left_pressed = pressed,
+            MouseButton::Middle => self.chat_terminal_mouse_middle_pressed = pressed,
+            MouseButton::Right => self.chat_terminal_mouse_right_pressed = pressed,
+            _ => {}
+        }
     }
 
     fn ensure_default_chat_tab(&mut self) {
@@ -1483,11 +1612,28 @@ impl EditorView {
         self.chat_terminal_scroll_px = Pixels::ZERO;
         self.chat_terminal_input_bounds = None;
         self.clear_chat_terminal_interaction_state();
+        self.scroll_chat_tab_bar_to_end(cx);
         if self.utility_panel == Some(RightUtilityPanel::Chat) {
             self.open_chat_terminal(cx);
         } else {
             cx.notify();
         }
+    }
+
+    fn scroll_chat_tab_bar_to_end(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(16))
+                .await;
+            let _ = this.update(cx, |this, _| {
+                let offset = this.chat_tab_bar_scroll_handle.offset();
+                let max_offset = this.chat_tab_bar_scroll_handle.max_offset();
+                let target_x = -max_offset.width.max(px(0.0));
+                this.chat_tab_bar_scroll_handle
+                    .set_offset(point(target_x, offset.y));
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn switch_to_chat_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
@@ -2058,7 +2204,11 @@ impl EditorView {
         self.chat_terminal_selection = None;
         self.chat_terminal_selecting = false;
 
-        let (_, _, line_height) = self.chat_terminal_metrics();
+        let (_, cell_width, line_height) = self.chat_terminal_metrics();
+        if self.forward_chat_terminal_protocol_scroll(event, cell_width, line_height) {
+            cx.notify();
+            return;
+        }
         let Some(delta) = self.chat_terminal_scroll_lines(event, line_height) else {
             return;
         };
@@ -2264,6 +2414,263 @@ impl EditorView {
         })
     }
 
+    fn on_chat_tab_bar_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let delta = event.delta.pixel_delta(px(self.tab_bar_height().max(1.0)));
+        let delta_x = f32::from(delta.x);
+        let delta_y = f32::from(delta.y);
+        let horizontal_delta = if delta_x.abs() > delta_y.abs() {
+            delta.x
+        } else {
+            delta.y
+        };
+        if horizontal_delta == Pixels::ZERO {
+            return;
+        }
+
+        let offset = self.chat_tab_bar_scroll_handle.offset();
+        let max_offset = self.chat_tab_bar_scroll_handle.max_offset();
+        if max_offset.width <= Pixels::ZERO {
+            return;
+        }
+
+        let min_x = -max_offset.width.max(px(0.0));
+        let next_x = (offset.x - horizontal_delta).clamp(min_x, Pixels::ZERO);
+        self.chat_tab_bar_scroll_handle
+            .set_offset(point(next_x, offset.y));
+        cx.stop_propagation();
+    }
+
+    fn chat_terminal_mouse_event_cell(
+        &self,
+        position: Point<Pixels>,
+    ) -> Option<(usize, usize)> {
+        let (row, col) = self.chat_terminal_cell_from_position(position)?;
+        Some((
+            row,
+            self.chat_terminal_normalized_col(row, col).unwrap_or(col),
+        ))
+    }
+
+    fn send_chat_terminal_mouse_button_report(
+        &mut self,
+        button: MouseButton,
+        position: Point<Pixels>,
+        shift: bool,
+        alt: bool,
+        control: bool,
+    ) -> bool {
+        let is_mouse_mode = self
+            .active_chat_terminal()
+            .is_some_and(|session| session.mouse_mode(shift));
+        if !is_mouse_mode {
+            return false;
+        }
+        let Some(button_code) = chat_terminal_mouse_button_code(button) else {
+            return false;
+        };
+        let Some((row, col)) = self.chat_terminal_mouse_event_cell(position) else {
+            return false;
+        };
+
+        self.chat_terminal_selection = None;
+        self.chat_terminal_selecting = false;
+        self.chat_terminal_last_mouse_cell = Some((row, col));
+        self.set_chat_terminal_mouse_button_state(button, true);
+        if let Some(session) = self.active_chat_terminal() {
+            let _ = session.write_mouse_report(row, col, button_code, false, shift, alt, control);
+        }
+        true
+    }
+
+    fn send_chat_terminal_mouse_release_report(
+        &mut self,
+        button: MouseButton,
+        position: Point<Pixels>,
+        shift: bool,
+        alt: bool,
+        control: bool,
+    ) -> bool {
+        let is_mouse_mode = self
+            .active_chat_terminal()
+            .is_some_and(|session| session.mouse_mode(shift));
+        self.set_chat_terminal_mouse_button_state(button, false);
+        if !is_mouse_mode {
+            self.chat_terminal_last_mouse_cell = None;
+            return false;
+        }
+        let Some(button_code) = chat_terminal_mouse_button_code(button) else {
+            self.chat_terminal_last_mouse_cell = None;
+            return false;
+        };
+        let cell = self
+            .chat_terminal_mouse_event_cell(position)
+            .or(self.chat_terminal_last_mouse_cell);
+        self.chat_terminal_last_mouse_cell = None;
+        let Some((row, col)) = cell else {
+            return false;
+        };
+        if let Some(session) = self.active_chat_terminal() {
+            let _ = session.write_mouse_report(row, col, button_code, true, shift, alt, control);
+        }
+        true
+    }
+
+    fn send_chat_terminal_mouse_motion_report(
+        &mut self,
+        position: Point<Pixels>,
+        shift: bool,
+        alt: bool,
+        control: bool,
+    ) -> bool {
+        let Some(mode) = self.active_chat_terminal().map(ChatTerminalSession::term_mode) else {
+            return false;
+        };
+        if shift || !mode.intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
+            return false;
+        }
+        let Some((row, col)) = self.chat_terminal_mouse_event_cell(position) else {
+            return false;
+        };
+        if self.chat_terminal_last_mouse_cell == Some((row, col)) {
+            return true;
+        }
+        self.chat_terminal_last_mouse_cell = Some((row, col));
+
+        let button_code = if self.chat_terminal_mouse_left_pressed {
+            Some(32)
+        } else if self.chat_terminal_mouse_middle_pressed {
+            Some(33)
+        } else if self.chat_terminal_mouse_right_pressed {
+            Some(34)
+        } else if mode.contains(TermMode::MOUSE_MOTION) {
+            Some(35)
+        } else {
+            None
+        };
+        if let Some(button_code) = button_code
+            && let Some(session) = self.active_chat_terminal()
+        {
+            let _ = session.write_mouse_report(row, col, button_code, false, shift, alt, control);
+        }
+        true
+    }
+
+    fn forward_chat_terminal_protocol_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        cell_width: f32,
+        line_height: f32,
+    ) -> bool {
+        let modifiers = event.modifiers;
+        let Some(session) = self.active_chat_terminal() else {
+            return false;
+        };
+        let mode = session.term_mode();
+
+        if !modifiers.shift && mode.intersects(TermMode::MOUSE_MODE) {
+            match event.touch_phase {
+                TouchPhase::Started => {
+                    self.chat_terminal_mouse_scroll_px = point(Pixels::ZERO, Pixels::ZERO);
+                    return true;
+                }
+                TouchPhase::Ended => return true,
+                TouchPhase::Moved => {}
+            }
+
+            let Some((row, col)) = self.chat_terminal_mouse_event_cell(event.position) else {
+                return true;
+            };
+            let delta = event.delta.pixel_delta(px(line_height.max(1.0)));
+            let step_width = px(cell_width.max(1.0));
+            let step_height = px(line_height.max(1.0));
+            self.chat_terminal_mouse_scroll_px.x += delta.x;
+            self.chat_terminal_mouse_scroll_px.y += delta.y;
+
+            let vertical_steps = (self.chat_terminal_mouse_scroll_px.y / step_height) as i32;
+            let horizontal_steps = (self.chat_terminal_mouse_scroll_px.x / step_width) as i32;
+            if let Some(session) = self.active_chat_terminal() {
+                for _ in 0..vertical_steps.abs() {
+                    let button_code = if vertical_steps > 0 { 64 } else { 65 };
+                    let _ = session.write_mouse_report(
+                        row,
+                        col,
+                        button_code,
+                        false,
+                        modifiers.shift,
+                        modifiers.alt,
+                        modifiers.control,
+                    );
+                }
+                for _ in 0..horizontal_steps.abs() {
+                    let button_code = if horizontal_steps > 0 { 66 } else { 67 };
+                    let _ = session.write_mouse_report(
+                        row,
+                        col,
+                        button_code,
+                        false,
+                        modifiers.shift,
+                        modifiers.alt,
+                        modifiers.control,
+                    );
+                }
+            }
+
+            self.chat_terminal_last_mouse_cell = Some((row, col));
+            self.chat_terminal_mouse_scroll_px.x %= step_width;
+            self.chat_terminal_mouse_scroll_px.y %= step_height;
+            return true;
+        }
+
+        if session.alternate_scroll_mode(modifiers.shift) {
+            match event.touch_phase {
+                TouchPhase::Started => {
+                    self.chat_terminal_mouse_scroll_px = point(Pixels::ZERO, Pixels::ZERO);
+                    return true;
+                }
+                TouchPhase::Ended => return true,
+                TouchPhase::Moved => {}
+            }
+
+            let delta = event.delta.pixel_delta(px(line_height.max(1.0)));
+            let step_width = px(cell_width.max(1.0));
+            let step_height = px(line_height.max(1.0));
+            self.chat_terminal_mouse_scroll_px.x += delta.x;
+            self.chat_terminal_mouse_scroll_px.y += delta.y;
+
+            let vertical_steps = (self.chat_terminal_mouse_scroll_px.y / step_height) as i32;
+            let horizontal_steps = (self.chat_terminal_mouse_scroll_px.x / step_width) as i32;
+            let mut bytes = Vec::new();
+            for _ in 0..vertical_steps.abs() {
+                bytes.extend_from_slice(if vertical_steps > 0 {
+                    b"\x1bOA"
+                } else {
+                    b"\x1bOB"
+                });
+            }
+            for _ in 0..horizontal_steps.abs() {
+                bytes.extend_from_slice(if horizontal_steps > 0 {
+                    b"\x1bOD"
+                } else {
+                    b"\x1bOC"
+                });
+            }
+            if !bytes.is_empty() && let Some(session) = self.active_chat_terminal() {
+                let _ = session.write_bytes(&bytes);
+            }
+
+            self.chat_terminal_mouse_scroll_px.x %= step_width;
+            self.chat_terminal_mouse_scroll_px.y %= step_height;
+            return true;
+        }
+
+        false
+    }
+
     fn on_chat_terminal_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -2273,6 +2680,16 @@ impl EditorView {
         self.focus_chat_terminal_panel(window);
         cx.stop_propagation();
         self.chat_terminal_marked_text = None;
+        if self.send_chat_terminal_mouse_button_report(
+            MouseButton::Left,
+            event.position,
+            event.modifiers.shift,
+            event.modifiers.alt,
+            event.modifiers.control,
+        ) {
+            cx.notify();
+            return;
+        }
         if let Some((row, col)) = self.chat_terminal_cell_from_position(event.position) {
             let col = self.chat_terminal_normalized_col(row, col).unwrap_or(col);
             self.chat_terminal_selection = if event.click_count >= 2 {
@@ -2288,12 +2705,40 @@ impl EditorView {
         }
     }
 
+    fn on_chat_terminal_middle_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_chat_terminal_panel(window);
+        cx.stop_propagation();
+        self.chat_terminal_marked_text = None;
+        if self.send_chat_terminal_mouse_button_report(
+            MouseButton::Middle,
+            event.position,
+            event.modifiers.shift,
+            event.modifiers.alt,
+            event.modifiers.control,
+        ) {
+            cx.notify();
+        }
+    }
+
     fn on_chat_terminal_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.send_chat_terminal_mouse_motion_report(
+            event.position,
+            event.modifiers.shift,
+            event.modifiers.alt,
+            event.modifiers.control,
+        ) {
+            return;
+        }
         if !self.chat_terminal_selecting || !event.dragging() {
             return;
         }
@@ -2320,6 +2765,16 @@ impl EditorView {
         window.prevent_default();
         cx.stop_propagation();
         self.chat_terminal_marked_text = None;
+        if self.send_chat_terminal_mouse_button_report(
+            MouseButton::Right,
+            event.position,
+            event.modifiers.shift,
+            event.modifiers.alt,
+            event.modifiers.control,
+        ) {
+            cx.notify();
+            return;
+        }
         if let Some((row, col)) = self.chat_terminal_cell_from_position(event.position) {
             let col = self.chat_terminal_normalized_col(row, col).unwrap_or(col);
             let keep_selection = self
@@ -2335,10 +2790,19 @@ impl EditorView {
 
     fn on_chat_terminal_mouse_up(
         &mut self,
-        _event: &MouseUpEvent,
+        event: &MouseUpEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.send_chat_terminal_mouse_release_report(
+            MouseButton::Left,
+            event.position,
+            event.modifiers.shift,
+            event.modifiers.alt,
+            event.modifiers.control,
+        ) {
+            return;
+        }
         self.chat_terminal_selecting = false;
         if self
             .chat_terminal_selection
@@ -2347,6 +2811,36 @@ impl EditorView {
             self.chat_terminal_selection = None;
         }
         cx.notify();
+    }
+
+    fn on_chat_terminal_right_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let _ = self.send_chat_terminal_mouse_release_report(
+            MouseButton::Right,
+            event.position,
+            event.modifiers.shift,
+            event.modifiers.alt,
+            event.modifiers.control,
+        );
+    }
+
+    fn on_chat_terminal_middle_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let _ = self.send_chat_terminal_mouse_release_report(
+            MouseButton::Middle,
+            event.position,
+            event.modifiers.shift,
+            event.modifiers.alt,
+            event.modifiers.control,
+        );
     }
 
     fn render_chat_tab_title_label(&self, tab: &ChatTab, is_active: bool) -> AnyElement {
@@ -2664,6 +3158,7 @@ impl EditorView {
         let new_hover_color = ts.tab_new_hover_text_color;
         let new_hover_bg = ts.tab_item_hover_bg;
         let tab_plus_gap_width = self.scaled(ts.tab_spacer_width_px);
+        let end_drop_target_width = self.scaled(ts.tab_new_width_px + ts.tab_spacer_width_px);
         tab_items.push(
             div()
                 .h(px(inner_height))
@@ -2692,39 +3187,37 @@ impl EditorView {
                 .flex_none()
                 .into_any_element(),
         );
-        tab_items.push(
-            div()
-                .flex_1()
-                .h(px(inner_height))
-                .min_w(px(0.0))
-                .drag_over::<DraggedChatTab>(move |style, dragged, _, _| {
-                    if Self::chat_tab_drop_changes_order_for(
-                        &current_tab_ids,
-                        &dragged.tab_id,
-                        ChatTabDropTarget::End,
-                    ) {
-                        style
-                            .border_l(px(end_drop_indicator_width))
-                            .border_color(end_drop_indicator_color)
-                    } else {
-                        style
-                    }
-                })
-                .on_drop(cx.listener(move |this, dragged: &DraggedChatTab, _, cx| {
-                    let current_tab_ids: Vec<String> =
-                        this.chat_tabs.iter().map(|tab| tab.id.clone()).collect();
-                    if Self::chat_tab_drop_changes_order_for(
-                        &current_tab_ids,
-                        &dragged.tab_id,
-                        ChatTabDropTarget::End,
-                    ) {
-                        this.reorder_chat_tab_to_end(&dragged.tab_id, cx);
-                    }
-                    this.chat_tab_drag_candidate_id = None;
-                    this.chat_tab_dragging_id = None;
-                }))
-                .into_any_element(),
-        );
+        let end_drop_target = div()
+            .h(px(inner_height))
+            .w(px(end_drop_target_width))
+            .flex_none()
+            .drag_over::<DraggedChatTab>(move |style, dragged, _, _| {
+                if Self::chat_tab_drop_changes_order_for(
+                    &current_tab_ids,
+                    &dragged.tab_id,
+                    ChatTabDropTarget::End,
+                ) {
+                    style
+                        .border_l(px(end_drop_indicator_width))
+                        .border_color(end_drop_indicator_color)
+                } else {
+                    style
+                }
+            })
+            .on_drop(cx.listener(move |this, dragged: &DraggedChatTab, _, cx| {
+                let current_tab_ids: Vec<String> =
+                    this.chat_tabs.iter().map(|tab| tab.id.clone()).collect();
+                if Self::chat_tab_drop_changes_order_for(
+                    &current_tab_ids,
+                    &dragged.tab_id,
+                    ChatTabDropTarget::End,
+                ) {
+                    this.reorder_chat_tab_to_end(&dragged.tab_id, cx);
+                }
+                this.chat_tab_drag_candidate_id = None;
+                this.chat_tab_dragging_id = None;
+            }))
+            .into_any_element();
 
         div()
             .id("chat-tab-bar")
@@ -2734,6 +3227,7 @@ impl EditorView {
             .flex()
             .items_start()
             .bg(ts.tab_bar_bg)
+            .on_scroll_wheel(cx.listener(Self::on_chat_tab_bar_scroll))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -2781,7 +3275,19 @@ impl EditorView {
                     .h(px(ts.tab_bar_border_width_px))
                     .bg(ts.tab_bar_border_color),
             )
-            .children(tab_items)
+            .child(
+                div()
+                    .id("chat-tab-bar-scroll")
+                    .flex_1()
+                    .h_full()
+                    .min_w(px(0.0))
+                    .flex()
+                    .items_start()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.chat_tab_bar_scroll_handle)
+                    .children(tab_items)
+                    .child(end_drop_target),
+            )
             .into_any_element()
     }
 
@@ -2922,14 +3428,34 @@ impl EditorView {
                 MouseButton::Right,
                 cx.listener(Self::on_chat_terminal_context_menu),
             )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(Self::on_chat_terminal_middle_mouse_down),
+            )
             .on_mouse_move(cx.listener(Self::on_chat_terminal_mouse_move))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(Self::on_chat_terminal_mouse_up),
             )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(Self::on_chat_terminal_right_mouse_up),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(Self::on_chat_terminal_middle_mouse_up),
+            )
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(Self::on_chat_terminal_mouse_up),
+            )
+            .on_mouse_up_out(
+                MouseButton::Right,
+                cx.listener(Self::on_chat_terminal_right_mouse_up),
+            )
+            .on_mouse_up_out(
+                MouseButton::Middle,
+                cx.listener(Self::on_chat_terminal_middle_mouse_up),
             )
             .cursor(CursorStyle::Arrow)
             .h_full()

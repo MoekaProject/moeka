@@ -192,6 +192,22 @@ impl EditorView {
 
         if event.button == MouseButton::Left {
             if let Some(line_idx) = self
+                .image_preview_zoom_areas
+                .iter()
+                .find(|(bounds, _)| bounds.contains(&event.position))
+                .map(|(_, line)| *line)
+            {
+                if self.toggle_image_preview_overlay(line_idx) {
+                    self.clear_wrap_boundary_affinity();
+                    self.is_selecting = false;
+                    self.selection_drag_position = None;
+                    self.image_drag_state = None;
+                    cx.notify();
+                    return;
+                }
+            }
+
+            if let Some(line_idx) = self
                 .generated_preview_zoom_areas
                 .iter()
                 .find(|(bounds, _)| bounds.contains(&event.position))
@@ -558,6 +574,50 @@ impl EditorView {
             .map(|(bounds, _)| bounds.clone())
     }
 
+    fn image_preview_bounds_for_line(&self, line_idx: usize) -> Option<Bounds<Pixels>> {
+        self.image_click_areas
+            .iter()
+            .find(|(_, line)| *line == line_idx)
+            .map(|(bounds, _)| bounds.clone())
+    }
+
+    fn toggle_image_preview_overlay(&mut self, line_idx: usize) -> bool {
+        let Some(cache_key) = self
+            .decorations
+            .get(line_idx)
+            .and_then(|decoration| decoration.image_path.as_ref())
+            .cloned()
+        else {
+            return false;
+        };
+
+        if self.preview_overlay_state().is_some_and(|overlay| {
+            overlay.line_idx == line_idx && overlay.cache_key == cache_key
+        }) {
+            self.close_preview_overlay();
+            return true;
+        }
+
+        let has_preview_bounds = self.image_preview_bounds_for_line(line_idx).is_some();
+        if !has_preview_bounds
+            || !self
+                .image_cache
+                .get(&cache_key)
+                .is_some_and(|entry| entry.is_some())
+        {
+            return false;
+        }
+
+        self.preview_overlay = Some(PreviewOverlayState {
+            cache_key,
+            line_idx,
+            view: ImageViewState::default(),
+        });
+        self.preview_overlay_bounds = None;
+        self.preview_overlay_image_bounds = None;
+        true
+    }
+
     fn toggle_generated_preview_overlay(&mut self, line_idx: usize) -> bool {
         if self
             .preview_overlay_state()
@@ -668,51 +728,16 @@ impl EditorView {
     fn block_preview_offset_for_click(
         &self,
         preview: &crate::markdown::BlockPreview,
-        bounds: &Bounds<Pixels>,
-        position: Point<Pixels>,
+        _bounds: &Bounds<Pixels>,
+        _position: Point<Pixels>,
     ) -> usize {
         let (content_start_line, content_end_line) = if preview.end_line > preview.start_line + 1 {
             (preview.start_line + 1, preview.end_line - 1)
         } else {
             (preview.start_line, preview.end_line)
         };
-        let line_count = content_end_line
-            .saturating_sub(content_start_line)
-            .saturating_add(1)
-            .max(1);
-        let relative_y = if bounds.size.height > px(0.0) {
-            ((f32::from(position.y) - f32::from(bounds.origin.y)) / f32::from(bounds.size.height))
-                .clamp(0.0, 0.999_999)
-        } else {
-            0.0
-        };
-        let target_line = content_start_line
-            + ((relative_y * line_count as f32).floor() as usize).min(line_count - 1);
-        let line_content = self.buffer.line_content(target_line);
-        let relative_x = if bounds.size.width > px(0.0) {
-            ((f32::from(position.x) - f32::from(bounds.origin.x)) / f32::from(bounds.size.width))
-                .clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let target_column = ((line_content.chars().count() as f32) * relative_x).round() as usize;
-        let line_byte_offset = Self::nth_char_boundary(line_content, target_column);
-
-        (self.buffer.line_start(target_line) + line_byte_offset).clamp(
-            preview.source_range.start,
-            preview.source_range.end.min(self.buffer.len()),
-        )
-    }
-
-    fn nth_char_boundary(text: &str, char_index: usize) -> usize {
-        if char_index == 0 {
-            return 0;
-        }
-
-        text.char_indices()
-            .map(|(index, _)| index)
-            .nth(char_index)
-            .unwrap_or(text.len())
+        let target_line = content_start_line.min(content_end_line);
+        self.buffer.line_end(target_line).min(self.buffer.len())
     }
 
     pub(crate) fn maybe_auto_select_link_url(

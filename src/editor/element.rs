@@ -38,7 +38,7 @@ pub(crate) struct EditorPrepaintState {
     /// HR dashed lines: (y_position, start_x, width)
     hr_lines: Vec<(f32, f32, f32)>,
     /// Image previews to paint: (bounds, image_data)
-    image_previews: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
+    image_previews: Vec<(Bounds<Pixels>, Arc<RenderImage>, Pixels)>,
     image_borders: Vec<PaintQuad>,
     /// Table cell borders and backgrounds
     table_borders: Vec<PaintQuad>,
@@ -664,11 +664,12 @@ impl Element for EditorElement {
         let mut generated_preview_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut generated_preview_image_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut generated_preview_zoom_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
+        let mut image_preview_zoom_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut display_info_cache: Vec<Option<LineDisplayInfo>> = Vec::with_capacity(line_count);
         let has_valid_cache = editor.line_display_info.len() == line_count
             && (editor.last_text_width - text_width).abs() < 0.5;
         let mut hr_lines: Vec<(f32, f32, f32)> = Vec::new();
-        let mut image_previews: Vec<(Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
+        let mut image_previews: Vec<(Bounds<Pixels>, Arc<RenderImage>, Pixels)> = Vec::new();
         let mut image_borders: Vec<PaintQuad> = Vec::new();
         let mut table_borders: Vec<PaintQuad> = Vec::new();
         let mut table_bgs: Vec<PaintQuad> = Vec::new();
@@ -686,7 +687,9 @@ impl Element for EditorElement {
         let mut code_block_copy_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut code_block_copy_button_bounds: HashMap<usize, Bounds<Pixels>> = HashMap::new();
         let mut code_block_copy_buttons: Vec<CodeBlockCopyButtonPaint> = Vec::new();
-        let mut preview_zoom_button_targets: Vec<(Bounds<Pixels>, usize, bool)> = Vec::new();
+        let mut image_zoom_button_targets: Vec<(Bounds<Pixels>, usize)> = Vec::new();
+        let mut preview_zoom_button_targets: Vec<(Bounds<Pixels>, usize, bool, Option<usize>)> =
+            Vec::new();
         let mut preview_zoom_buttons: Vec<CodeBlockCopyButtonPaint> = Vec::new();
         let mut unordered_list_markers: Vec<(WrappedLine, Point<Pixels>, Pixels)> = Vec::new();
         let mut inline_overlays: Vec<(ShapedLine, Point<Pixels>, Pixels)> = Vec::new();
@@ -1717,6 +1720,9 @@ impl Element for EditorElement {
             let image_gap_top = editor.scaled(editor.styles.image_preview.image_gap_top_px);
             let image_gap_bottom = editor.scaled(editor.styles.image_preview.image_gap_bottom_px);
             let generated_preview_gap_bottom = text_line_height + image_gap_top;
+            let image_styles = &editor.styles.image_preview;
+            let image_corner_radius = px(editor.scaled(image_styles.image_border_radius_px));
+            let image_border_width = px(editor.scaled(image_styles.image_active_border_width_px));
 
             let image_active = decoration.image_path.is_some()
                 && helpers::is_image_syntax_active(
@@ -2687,16 +2693,24 @@ impl Element for EditorElement {
                                 point(px(img_left), px(img_top)),
                                 size(px(display_w), px(display_h)),
                             );
-                            image_previews.push((img_bounds, img_data.clone()));
+                            image_previews.push((
+                                img_bounds,
+                                img_data.clone(),
+                                image_corner_radius,
+                            ));
                             image_hit_areas.push((img_bounds, line_idx));
-                            if image_active || editor.hovering_image_preview_line == Some(line_idx)
-                            {
+                            let image_zoom_visible = image_active
+                                || editor.hovering_image_preview_line == Some(line_idx);
+                            if image_zoom_visible {
+                                image_zoom_button_targets.push((img_bounds, line_idx));
+                            }
+                            if image_zoom_visible {
                                 image_borders.push(quad(
                                     img_bounds,
-                                    Corners::all(px(10.0)),
+                                    Corners::all(image_corner_radius),
                                     gpui::transparent_black(),
-                                    px(2.0),
-                                    theme.cursor,
+                                    image_border_width,
+                                    image_styles.image_active_border_color,
                                     BorderStyle::default(),
                                 ));
                             }
@@ -2737,7 +2751,7 @@ impl Element for EditorElement {
                             point(px(img_left), px(img_top)),
                             size(px(display_w), px(display_h)),
                         );
-                        image_previews.push((img_bounds, img_data.clone()));
+                        image_previews.push((img_bounds, img_data.clone(), px(10.0)));
                         generated_preview_hit_areas.push((block_bounds, line_idx));
                         generated_preview_image_areas.push((img_bounds, line_idx));
                         if editor.hovering_generated_preview_line == Some(line_idx)
@@ -2757,7 +2771,12 @@ impl Element for EditorElement {
                             || editor.hovering_generated_preview_zoom_line == Some(line_idx))
                             && !overlay_open
                         {
-                            preview_zoom_button_targets.push((block_bounds, line_idx, false));
+                            preview_zoom_button_targets.push((
+                                block_bounds,
+                                preview.start_line,
+                                false,
+                                Some(preview.start_line),
+                            ));
                         }
                     }
                 }
@@ -3731,8 +3750,29 @@ impl Element for EditorElement {
                 button_padding_x
             };
 
+            let collapsed_preview_anchor = editor
+                .decorations
+                .get(*start_line)
+                .and_then(|decoration| decoration.block_preview.as_ref())
+                .filter(|preview| preview.is_anchor)
+                .filter(|preview| !editor.folded_sections.contains(&preview.start_line))
+                .filter(|preview| {
+                    !helpers::block_preview_is_active(preview, cursor_line, &all_sel_ranges)
+                });
+            let group_syntax_collapsed = code_block_group_range(*start_line).is_some_and(
+                |(group_start, group_end)| {
+                    !active_code_fence_group
+                        .is_some_and(|(active_start, active_end)| {
+                            group_start == active_start && group_end == active_end
+                        })
+                },
+            );
+            let folded_action_group = collapsed_preview_anchor.is_some() || group_syntax_collapsed;
+
             let is_copied = editor.copied_code_block_start == Some(*start_line);
-            let is_visible = editor.hovering_code_block_start == Some(*start_line) || is_copied;
+            let is_visible = folded_action_group
+                || editor.hovering_code_block_start == Some(*start_line)
+                || is_copied;
             if !is_visible {
                 continue;
             }
@@ -3813,13 +3853,37 @@ impl Element for EditorElement {
                 ),
                 line_height: px(button_text_line_height),
             });
+
+            if preview_zoom_button_targets
+                .iter()
+                .all(|(_, line_idx, _, _)| *line_idx != *start_line)
+                && editor
+                    .decorations
+                    .get(*start_line)
+                    .and_then(|decoration| decoration.block_preview.as_ref())
+                    .filter(|preview| preview.is_anchor)
+                    .is_some_and(|preview| {
+                        image_cache
+                            .get(&preview.cache_key)
+                            .is_some_and(|entry| entry.is_some())
+                    })
+            {
+                preview_zoom_button_targets.push((
+                    group_bounds,
+                    *start_line,
+                    false,
+                    Some(*start_line),
+                ));
+            }
         }
 
         let mut preview_zoom_hitboxes = Vec::new();
-        let preview_button_gap = editor.scaled(5.0);
+        let preview_button_gap = 5.0;
 
         if !overlay_active {
-            for (target_bounds, line_idx, is_active) in &preview_zoom_button_targets {
+            for (target_bounds, line_idx, is_active, copy_button_line) in
+                &preview_zoom_button_targets
+            {
                 let is_button_hovered =
                     editor.hovering_generated_preview_zoom_line == Some(*line_idx);
                 let (button_bg, button_text_color, button_border_color) = if *is_active {
@@ -3862,16 +3926,22 @@ impl Element for EditorElement {
                 let target_top = f32::from(target_bounds.origin.y);
                 let target_width = f32::from(target_bounds.size.width);
                 let min_button_left = (target_left + editor.scaled(12.0)).round();
-                let copy_button_left = code_block_copy_button_bounds
-                    .get(line_idx)
+                let copy_button_bounds =
+                    code_block_copy_button_bounds.get(&copy_button_line.unwrap_or(*line_idx));
+                let copy_button_left = copy_button_bounds
                     .map(|bounds| f32::from(bounds.origin.x).round())
                     .unwrap_or_else(|| {
                         (target_left + target_width - button_right - zoom_button_width).round()
                     });
+                let button_height = copy_button_bounds
+                    .map(|bounds| f32::from(bounds.size.height).round())
+                    .unwrap_or(button_height);
                 let zoom_x = (copy_button_left - preview_button_gap - zoom_button_width)
                     .max(min_button_left)
                     .round();
-                let button_y = (target_top + button_top).round();
+                let button_y = copy_button_bounds
+                    .map(|bounds| f32::from(bounds.origin.y).round())
+                    .unwrap_or((target_top + button_top).round());
                 let zoom_bounds = Bounds::new(
                     point(px(zoom_x), px(button_y)),
                     size(px(zoom_button_width), px(button_height)),
@@ -3897,6 +3967,57 @@ impl Element for EditorElement {
                     line_height: px(button_text_line_height),
                 });
             }
+
+            for (target_bounds, line_idx) in &image_zoom_button_targets {
+                let Some((zoom_label, zoom_button_width_raw, button_height_raw)) =
+                    shape_preview_button(
+                        window,
+                        &button_font,
+                        button_font_size,
+                        button_padding_x,
+                        button_padding_y,
+                        button_text_line_height,
+                        "ZOOM",
+                        code_block_styles.code_block_copy_button_text_color,
+                    )
+                else {
+                    continue;
+                };
+                let zoom_button_width = zoom_button_width_raw.ceil();
+                let button_height = button_height_raw.ceil();
+                let target_left = f32::from(target_bounds.origin.x);
+                let target_top = f32::from(target_bounds.origin.y);
+                let target_width = f32::from(target_bounds.size.width);
+                let min_button_left = (target_left + editor.scaled(12.0)).round();
+                let zoom_x = (target_left + target_width - button_right - zoom_button_width)
+                    .max(min_button_left)
+                    .round();
+                let button_y = (target_top + button_top).round();
+                let zoom_bounds = Bounds::new(
+                    point(px(zoom_x), px(button_y)),
+                    size(px(zoom_button_width), px(button_height)),
+                );
+
+                image_preview_zoom_areas_local.push((zoom_bounds, *line_idx));
+                preview_zoom_hitboxes
+                    .push(window.insert_hitbox(zoom_bounds, HitboxBehavior::Normal));
+                preview_zoom_buttons.push(CodeBlockCopyButtonPaint {
+                    quad: quad(
+                        zoom_bounds,
+                        Corners::all(button_radius),
+                        code_block_styles.code_block_copy_button_bg,
+                        button_border_width,
+                        code_block_styles.code_block_copy_button_border_color,
+                        BorderStyle::default(),
+                    ),
+                    label: zoom_label,
+                    origin: point(
+                        px(zoom_x + button_padding_x),
+                        px(button_y + button_padding_y),
+                    ),
+                    line_height: px(button_text_line_height),
+                });
+            }
         }
 
         self.editor.update(cx, |editor, cx| {
@@ -3905,6 +4026,7 @@ impl Element for EditorElement {
             editor.last_viewport_width = viewport_width;
             editor.checkbox_areas = checkbox_hit_areas.clone();
             editor.image_click_areas = image_hit_areas.clone();
+            editor.image_preview_zoom_areas = image_preview_zoom_areas_local.clone();
             editor.generated_preview_click_areas = generated_preview_hit_areas.clone();
             editor.generated_preview_image_areas = generated_preview_image_areas.clone();
             editor.generated_preview_zoom_areas = generated_preview_zoom_areas_local.clone();
@@ -4176,11 +4298,11 @@ impl Element for EditorElement {
         }
 
         // Image previews
-        for (img_bounds, img_data) in &prepaint.image_previews {
+        for (img_bounds, img_data, corner_radius) in &prepaint.image_previews {
             window
                 .paint_image(
                     *img_bounds,
-                    Corners::all(px(10.0)),
+                    Corners::all(*corner_radius),
                     img_data.clone(),
                     0,
                     false,
