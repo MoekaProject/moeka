@@ -196,7 +196,6 @@ impl EditorView {
             return;
         };
 
-        let preview_key = preview.cache_key.clone();
         let selection_ranges = std::iter::once(self.cursor.selection_range())
             .chain(self.extra_cursors.iter().map(|cursor| cursor.selection_range()))
             .collect::<Vec<_>>();
@@ -213,12 +212,15 @@ impl EditorView {
             self.close_preview_overlay();
         }
 
-        if self.expanded_generated_preview_keys.remove(&preview_key) || preview_is_active {
+        if self.folded_sections.contains(&preview.start_line) {
+            self.folded_sections.remove(&preview.start_line);
+        } else if let Some(range) = self.fold_range_for_line(preview.start_line) {
             self.folded_sections.insert(preview.start_line);
-        } else if self.folded_sections.remove(&preview.start_line) {
-            self.expanded_generated_preview_keys.insert(preview_key);
-        } else {
-            self.expanded_generated_preview_keys.insert(preview_key);
+            if range.contains(&self.cursor_line()) || preview_is_active {
+                let new_offset = self.buffer.line_end(preview.start_line);
+                self.cursor.move_to(new_offset, &self.buffer);
+                self.scroll_to_cursor();
+            }
         }
 
         self.line_display_info.clear();

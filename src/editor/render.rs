@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use gpui::{
-    AnyElement, App, Bounds, CursorStyle, ExternalPaths, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Render, SharedString, Window, deferred, div, img, prelude::*, px,
+    AnyElement, App, Bounds, ContentMask, Corners, CursorStyle, ExternalPaths, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Render, SharedString, Window, canvas, deferred, div, fill,
+    img, prelude::*, px,
 };
 
 use super::tooltip::{TooltipState, toolbar_anchor_bounds};
@@ -803,6 +806,168 @@ impl Render for EditorView {
                                                                 },
                                                             ))
                                                     }))
+                                                    .when(self.preview_overlay_state().is_some(), |this| {
+                                                        let editor_handle = cx.entity().clone();
+                                                        this.child(deferred(
+                                                            canvas(
+                                                                move |bounds, window, cx| {
+                                                                    editor_handle.update(cx, |editor, _| {
+                                                                        let Some(overlay) = editor.preview_overlay_state().cloned() else {
+                                                                            editor.preview_overlay_bounds = None;
+                                                                            editor.preview_overlay_image_bounds = None;
+                                                                            return None;
+                                                                        };
+                                                                        let Some(preview_kind) = editor
+                                                                            .decorations
+                                                                            .get(overlay.line_idx)
+                                                                            .and_then(|decoration| decoration.block_preview.as_ref())
+                                                                            .map(|preview| preview.kind)
+                                                                        else {
+                                                                            editor.preview_overlay_bounds = None;
+                                                                            editor.preview_overlay_image_bounds = None;
+                                                                            return None;
+                                                                        };
+                                                                        let Some(base_image) = editor
+                                                                            .image_cache
+                                                                            .get(&overlay.cache_key)
+                                                                            .and_then(|image| image.as_ref())
+                                                                            .cloned()
+                                                                        else {
+                                                                            editor.preview_overlay_bounds = None;
+                                                                            editor.preview_overlay_image_bounds = None;
+                                                                            return None;
+                                                                        };
+
+                                                                        let base_size = base_image.size(0);
+                                                                        let base_width = base_size.width.0 as f32;
+                                                                        let base_height = base_size.height.0 as f32;
+                                                                        let (intrinsic_width, intrinsic_height) =
+                                                                            helpers::intrinsic_generated_preview_size_for_kind(
+                                                                                base_width,
+                                                                                base_height,
+                                                                                preview_kind,
+                                                                            );
+                                                                        if intrinsic_width <= 0.0 || intrinsic_height <= 0.0 {
+                                                                            editor.preview_overlay_bounds = None;
+                                                                            editor.preview_overlay_image_bounds = None;
+                                                                            return None;
+                                                                        }
+
+                                                                        let overlay_bounds = bounds;
+                                                                        let overlay_width = f32::from(bounds.size.width).max(1.0);
+                                                                        let overlay_height = f32::from(bounds.size.height).max(1.0);
+                                                                        let fit_scale = (overlay_width / intrinsic_width.max(1.0))
+                                                                            .min(overlay_height / intrinsic_height.max(1.0))
+                                                                            .min(1.0);
+                                                                        let base_display_width = intrinsic_width * fit_scale;
+                                                                        let base_display_height = intrinsic_height * fit_scale;
+                                                                        let display_width =
+                                                                            base_display_width * overlay.view.zoom_factor;
+                                                                        let display_height =
+                                                                            base_display_height * overlay.view.zoom_factor;
+                                                                        let image_left = f32::from(bounds.origin.x)
+                                                                            + (overlay_width - display_width) * 0.5
+                                                                            + overlay.view.pan_x;
+                                                                        let image_top = f32::from(bounds.origin.y)
+                                                                            + (overlay_height - display_height) * 0.5
+                                                                            + overlay.view.pan_y;
+                                                                        let overlay_image_bounds = Bounds::new(
+                                                                            gpui::point(px(image_left), px(image_top)),
+                                                                            gpui::size(px(display_width), px(display_height)),
+                                                                        );
+
+                                                                        let display_scale = (display_width / intrinsic_width.max(1.0))
+                                                                            .max(display_height / intrinsic_height.max(1.0));
+                                                                        let minimum_raster_scale = editor
+                                                                            .decorations
+                                                                            .get(overlay.line_idx)
+                                                                            .and_then(|decoration| decoration.block_preview.as_ref())
+                                                                            .map(|preview| helpers::generated_preview_raster_scale(preview.kind))
+                                                                            .unwrap_or(helpers::GENERATED_PREVIEW_RASTER_SCALE);
+                                                                        let desired_raster_scale =
+                                                                            (display_scale * window.scale_factor())
+                                                                                .max(minimum_raster_scale);
+                                                                        let scale_key = ((desired_raster_scale * 100.0)
+                                                                            .round()
+                                                                            .clamp(
+                                                                                minimum_raster_scale * 100.0,
+                                                                                1600.0,
+                                                                            )) as u16;
+
+                                                                        let cached_overlay_image = editor
+                                                                            .generated_preview_overlay_cache
+                                                                            .get(&overlay.cache_key)
+                                                                            .and_then(|(cached_scale_key, cached_image)| {
+                                                                                (*cached_scale_key == scale_key)
+                                                                                    .then(|| cached_image.clone())
+                                                                            });
+                                                                        let svg = editor
+                                                                            .generated_preview_svg_cache
+                                                                            .get(&overlay.cache_key)
+                                                                            .cloned();
+                                                                        let image = if let Some(cached_overlay_image) = cached_overlay_image {
+                                                                            cached_overlay_image
+                                                                        } else if let Some(svg) = svg {
+                                                                            match helpers::load_render_image_from_svg_with_scale(
+                                                                                svg.as_ref(),
+                                                                                scale_key as f32 / 100.0,
+                                                                            )
+                                                                            .map(Arc::new)
+                                                                            {
+                                                                                Ok(image) => {
+                                                                                    editor.generated_preview_overlay_cache.insert(
+                                                                                        overlay.cache_key.clone(),
+                                                                                        (scale_key, image.clone()),
+                                                                                    );
+                                                                                    image
+                                                                                }
+                                                                                Err(_) => base_image.clone(),
+                                                                            }
+                                                                        } else {
+                                                                            base_image.clone()
+                                                                        };
+
+                                                                        editor.preview_overlay_bounds = Some(overlay_bounds);
+                                                                        editor.preview_overlay_image_bounds =
+                                                                            Some(overlay_image_bounds);
+
+                                                                        Some((
+                                                                            overlay_bounds,
+                                                                            overlay_image_bounds,
+                                                                            image,
+                                                                            editor.styles.editor.editor_bg,
+                                                                        ))
+                                                                    })
+                                                                },
+                                                                move |_bounds, overlay_paint, window, _cx| {
+                                                                    if let Some((overlay_bounds, overlay_image_bounds, img_data, background)) = overlay_paint {
+                                                                        window.paint_quad(fill(overlay_bounds, background));
+                                                                        window.with_content_mask(
+                                                                            Some(ContentMask {
+                                                                                bounds: overlay_bounds,
+                                                                            }),
+                                                                            |window| {
+                                                                                window
+                                                                                    .paint_image(
+                                                                                        overlay_image_bounds,
+                                                                                        Corners::all(px(10.0)),
+                                                                                        img_data,
+                                                                                        0,
+                                                                                        false,
+                                                                                    )
+                                                                                    .ok();
+                                                                            },
+                                                                        );
+                                                                    }
+                                                                },
+                                                            )
+                                                            .absolute()
+                                                            .left(px(0.0))
+                                                            .top(px(0.0))
+                                                            .right(px(0.0))
+                                                            .bottom(px(0.0)),
+                                                        ))
+                                                    })
                                                     .when_some(
                                                         self.render_tooltip_overlay(editor_pane_width),
                                                         |this, tooltip| this.child(tooltip),

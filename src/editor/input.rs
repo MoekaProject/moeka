@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use gpui::{
     Bounds, Context, FontFallbacks, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, ScrollWheelEvent, SharedString, TextRun, Window, WrappedLine, point, px,
-    size,
+    Pixels, Point, ScrollWheelEvent, SharedString, TextRun, Window, WrappedLine, point, px, size,
 };
 
 use crate::markdown::{BlockType, InlineKind};
@@ -568,7 +567,9 @@ impl EditorView {
             return true;
         }
 
-        let has_preview_bounds = self.generated_preview_image_bounds_for_line(line_idx).is_some()
+        let has_preview_bounds = self
+            .generated_preview_image_bounds_for_line(line_idx)
+            .is_some()
             || self
                 .generated_preview_click_areas
                 .iter()
@@ -583,7 +584,6 @@ impl EditorView {
         else {
             return false;
         };
-
         self.preview_overlay = Some(PreviewOverlayState {
             cache_key: preview.cache_key.clone(),
             line_idx,
@@ -646,7 +646,10 @@ impl EditorView {
     }
 
     fn preview_cache_key_for_offset(&self, offset: usize) -> Option<&str> {
-        let line = self.buffer.offset_to_line_col(offset.min(self.buffer.len())).0;
+        let line = self
+            .buffer
+            .offset_to_line_col(offset.min(self.buffer.len()))
+            .0;
         self.decorations
             .get(line)
             .and_then(|decoration| decoration.block_preview.as_ref())
@@ -654,7 +657,8 @@ impl EditorView {
     }
 
     fn provisional_input_bounds_for_click(&self, position: Point<Pixels>) -> Bounds<Pixels> {
-        let line_height = self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
+        let line_height =
+            self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
         Bounds::new(
             point(position.x, position.y - px(line_height * 0.5)),
             size(px(self.base_font_size() * 0.6), px(line_height)),
@@ -694,8 +698,10 @@ impl EditorView {
         let target_column = ((line_content.chars().count() as f32) * relative_x).round() as usize;
         let line_byte_offset = Self::nth_char_boundary(line_content, target_column);
 
-        (self.buffer.line_start(target_line) + line_byte_offset)
-            .clamp(preview.source_range.start, preview.source_range.end.min(self.buffer.len()))
+        (self.buffer.line_start(target_line) + line_byte_offset).clamp(
+            preview.source_range.start,
+            preview.source_range.end.min(self.buffer.len()),
+        )
     }
 
     fn nth_char_boundary(text: &str, char_index: usize) -> usize {
@@ -953,8 +959,10 @@ impl EditorView {
     ) {
         if let Some(drag) = self.image_drag_state.take() {
             if self.preview_overlay.is_some() {
-                let moved_x = (f32::from(event.position.x) - f32::from(drag.start_position.x)).abs();
-                let moved_y = (f32::from(event.position.y) - f32::from(drag.start_position.y)).abs();
+                let moved_x =
+                    (f32::from(event.position.x) - f32::from(drag.start_position.x)).abs();
+                let moved_y =
+                    (f32::from(event.position.y) - f32::from(drag.start_position.y)).abs();
                 if moved_x < 4.0 && moved_y < 4.0 {
                     self.close_preview_overlay();
                 }
@@ -1926,16 +1934,26 @@ impl EditorView {
         if self.preview_overlay.is_some() {
             let delta_y: f32 = event.delta.pixel_delta(px(40.0)).y.into();
             if delta_y != 0.0 {
-                let zoom_ratio = 1.0 + (delta_y.abs() / 300.0).clamp(0.05, 0.35);
-                if let Some(overlay) = self.preview_overlay_state_mut() {
-                    if delta_y < 0.0 {
-                        overlay.view.zoom_factor *= zoom_ratio;
-                    } else {
-                        overlay.view.zoom_factor /= zoom_ratio;
+                let overlay_kind = self
+                    .preview_overlay_state()
+                    .and_then(|overlay| {
+                        self.decorations
+                            .get(overlay.line_idx)
+                            .and_then(|decoration| decoration.block_preview.as_ref())
+                    })
+                    .map(|preview| preview.kind);
+                if overlay_kind != Some(crate::markdown::BlockPreviewKind::Mermaid) {
+                    let zoom_ratio = 1.0 + (delta_y.abs() / 300.0).clamp(0.05, 0.35);
+                    if let Some(overlay) = self.preview_overlay_state_mut() {
+                        if delta_y < 0.0 {
+                            overlay.view.zoom_factor /= zoom_ratio;
+                        } else {
+                            overlay.view.zoom_factor *= zoom_ratio;
+                        }
                     }
+                    self.clamp_preview_overlay_view();
+                    cx.notify();
                 }
-                self.clamp_preview_overlay_view();
-                cx.notify();
             }
             return;
         }

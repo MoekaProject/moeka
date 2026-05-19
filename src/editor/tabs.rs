@@ -553,7 +553,6 @@ impl EditorView {
             }
             self.marked_range = None;
             self.close_preview_overlay();
-            self.expanded_generated_preview_keys.clear();
             self.toolbar_hidden_by_scroll = self.scroll_offset > 0.5;
             self.toolbar_corner_hovered = false;
             self.sync_toolbar_opacity(cx);

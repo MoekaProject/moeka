@@ -750,6 +750,8 @@ pub struct EditorView {
     /// Which specific handle is selected: (table_start_line, is_column, index)
     pub(crate) selected_handle: Option<(usize, bool, usize)>,
     pub(crate) image_cache: HashMap<String, Option<Arc<RenderImage>>>,
+    pub(crate) generated_preview_svg_cache: HashMap<String, Arc<str>>,
+    pub(crate) generated_preview_overlay_cache: HashMap<String, (u16, Arc<RenderImage>)>,
     pub(crate) sidebar_root: PathBuf,
     pub(crate) expanded_dirs: HashSet<PathBuf>,
     /// 多选：所有选中的 sidebar 路径
@@ -782,7 +784,6 @@ pub struct EditorView {
     pub(crate) folded_sections: HashSet<usize>,
     pub(crate) folded_image_previews: HashSet<usize>,
     pub(crate) generated_preview_keys: HashSet<String>,
-    pub(crate) expanded_generated_preview_keys: HashSet<String>,
     pub(crate) gutter_fold_areas: Vec<(gpui::Bounds<Pixels>, usize, bool)>,
     pub(crate) image_edit_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_image_edit_line: Option<usize>,
@@ -1090,6 +1091,8 @@ impl EditorView {
             hovering_handle: None,
             selected_handle: None,
             image_cache: HashMap::new(),
+            generated_preview_svg_cache: HashMap::new(),
+            generated_preview_overlay_cache: HashMap::new(),
             sidebar_root: sidebar_root.clone(),
             expanded_dirs,
             selected_sidebar_paths: HashSet::new(),
@@ -1165,7 +1168,6 @@ impl EditorView {
             folded_sections: HashSet::new(),
             folded_image_previews: HashSet::new(),
             generated_preview_keys: HashSet::new(),
-            expanded_generated_preview_keys: HashSet::new(),
             gutter_fold_areas: Vec::new(),
             image_edit_areas: Vec::new(),
             hovering_image_edit_line: None,
@@ -2940,8 +2942,10 @@ impl EditorView {
             }
             next_generated_keys.insert(preview.cache_key.clone());
             if !force
-                && self.generated_preview_keys.contains(&preview.cache_key)
                 && self.image_cache.contains_key(&preview.cache_key)
+                && self
+                    .generated_preview_svg_cache
+                    .contains_key(&preview.cache_key)
             {
                 continue;
             }
@@ -2951,21 +2955,15 @@ impl EditorView {
                 &preview.source_text,
                 &self.theme,
             );
-            let image = helpers::load_render_image_from_svg(&svg).ok().map(Arc::new);
+            self.generated_preview_svg_cache
+                .insert(preview.cache_key.clone(), Arc::<str>::from(svg.clone()));
+            let image = helpers::load_generated_preview_image_from_svg(&svg, preview.kind)
+                .ok()
+                .map(Arc::new);
             self.image_cache.insert(preview.cache_key.clone(), image);
+            self.generated_preview_overlay_cache
+                .remove(&preview.cache_key);
         }
-
-        let stale_keys: Vec<_> = self
-            .generated_preview_keys
-            .difference(&next_generated_keys)
-            .cloned()
-            .collect();
-        for key in stale_keys {
-            self.image_cache.remove(&key);
-        }
-
-        self.expanded_generated_preview_keys
-            .retain(|key| next_generated_keys.contains(key));
 
         self.generated_preview_keys = next_generated_keys;
     }
