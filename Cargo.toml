@@ -39,7 +39,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 emojis = "0.6"
 portable-pty = "0.9.0"
 mathjax-svg-rs = "0.4"
-mermaid-text = "0.56.0"
+mermaid-text = { path = "vendor/mermaid-text" }
 resvg = { version = "0.45.1", default-features = false, features = [
   "text",
   "system-fonts",

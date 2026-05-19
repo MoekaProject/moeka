@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -32,6 +31,16 @@ pub(crate) const GENERATED_PREVIEW_RASTER_SCALE: f32 = 2.0;
 pub(crate) const GENERATED_PREVIEW_MATH_RASTER_SCALE: f32 = 3.0;
 const GENERATED_PREVIEW_MATH_DISPLAY_SCALE: f32 = 1.5;
 const GENERATED_PREVIEW_MERMAID_TEXT_COLUMN_BUDGET: usize = 84;
+const GENERATED_PREVIEW_DEFAULT_MONOSPACE_FONT_FAMILY: &str =
+    "ui-monospace, Menlo, Monaco, Consolas, monospace";
+const GENERATED_PREVIEW_DEFAULT_CJK_FONT_FAMILY: &str =
+    "PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, sans-serif";
+
+#[derive(Clone, Copy)]
+pub(crate) struct GeneratedPreviewFontFamilies<'a> {
+    pub monospace: &'a str,
+    pub body_cjk: &'a str,
+}
 
 pub(crate) fn generated_preview_raster_scale(kind: BlockPreviewKind) -> f32 {
     match kind {
@@ -1556,10 +1565,17 @@ mod tests {
     use crate::theme::Theme;
 
     use super::{
-        build_display_text, build_generated_block_preview_svg, build_text_runs_for_display,
-        compute_display_prefix_bytes, compute_generated_preview_size, prefix_is_folded,
-        task_prefix_is_folded,
+        GeneratedPreviewFontFamilies, build_display_text, build_generated_block_preview_svg,
+        build_text_runs_for_display, compute_display_prefix_bytes, compute_generated_preview_size,
+        prefix_is_folded, task_prefix_is_folded,
     };
+
+    fn generated_preview_fonts() -> GeneratedPreviewFontFamilies<'static> {
+        GeneratedPreviewFontFamilies {
+            monospace: "Menlo",
+            body_cjk: "PingFang SC",
+        }
+    }
 
     #[test]
     fn regular_prefix_hides_at_trailing_edge() {
@@ -1766,6 +1782,7 @@ mod tests {
             markdown::BlockPreviewKind::Math,
             r"\int_0^1 x^2 \, dx = \frac{1}{3}",
             &theme,
+            generated_preview_fonts(),
         );
         let text_color = crate::theme::hsla_to_hex_rgba(theme.text_primary).to_lowercase();
 
@@ -1785,6 +1802,7 @@ mod tests {
 + \lambda \lVert \theta \rVert_2^2
 \right)",
             &theme,
+            generated_preview_fonts(),
         );
 
         assert!(svg.contains("<svg"));
@@ -1798,6 +1816,7 @@ mod tests {
             markdown::BlockPreviewKind::Mermaid,
             "flowchart LR\n    A[Start] --> B{Decision}\n    B -->|Yes| C[OK]\n    B -->|No| D[Cancel]",
             &theme,
+            generated_preview_fonts(),
         );
         let text_color = crate::theme::hsla_to_hex_rgba(theme.text_bright).to_lowercase();
 
@@ -1817,6 +1836,7 @@ mod tests {
             markdown::BlockPreviewKind::Math,
             r"\int_0^1 x^2 \, dx = \frac{1}{3}",
             &theme,
+            generated_preview_fonts(),
         );
 
         assert!(svg.contains("<svg"));
@@ -1834,12 +1854,76 @@ mod tests {
             markdown::BlockPreviewKind::Mermaid,
             "sequenceDiagram\n    participant U as 用户\n    participant E as 编辑器\n    U->>E: 编辑 Mermaid 或公式块\n    E-->>U: 立即更新预览",
             &theme,
+            generated_preview_fonts(),
         );
 
         assert!(svg.contains("<svg"));
         assert!(!svg.contains("Mermaid preview failed"));
         assert!(svg.contains("编辑 Mermaid 或公式块"));
         assert!(svg.contains("立即更新预览"));
+    }
+
+    #[test]
+    fn generated_mermaid_block_preview_does_not_need_ascii_token_substitutions() {
+        let theme = Theme::one_dark();
+        let mut occupied_tokens = String::new();
+
+        for first in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".chars() {
+            for second in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".chars() {
+                occupied_tokens.push(first);
+                occupied_tokens.push(second);
+                occupied_tokens.push(' ');
+            }
+        }
+
+        let source = format!(
+            "%% {occupied_tokens}\nsequenceDiagram\n    participant U as 用户\n    U->>U: 不再需要 ASCII token 替换"
+        );
+        let svg = build_generated_block_preview_svg(
+            markdown::BlockPreviewKind::Mermaid,
+            &source,
+            &theme,
+            generated_preview_fonts(),
+        );
+
+        assert!(svg.contains("<svg"));
+        assert!(!svg.contains("Mermaid preview failed"));
+        assert!(svg.contains("不再需要 ASCII token 替换"));
+    }
+
+    #[test]
+    fn generated_mermaid_block_preview_uses_configured_code_font_with_cjk_fallback() {
+        let theme = Theme::one_dark();
+        let svg = build_generated_block_preview_svg(
+            markdown::BlockPreviewKind::Mermaid,
+            "flowchart LR\n    A[代码] --> B[预览]",
+            &theme,
+            GeneratedPreviewFontFamilies {
+                monospace: "Fira Code",
+                body_cjk: "PingFang SC",
+            },
+        );
+
+        assert!(svg.contains("font-family=\"Fira Code, PingFang SC"));
+        assert!(svg.contains("ui-monospace"));
+    }
+
+    #[test]
+    fn generated_mermaid_block_preview_sanitizes_system_font_sentinel() {
+        let theme = Theme::one_dark();
+        let svg = build_generated_block_preview_svg(
+            markdown::BlockPreviewKind::Mermaid,
+            "flowchart LR\n    A[中文] --> B[System]",
+            &theme,
+            GeneratedPreviewFontFamilies {
+                monospace: ".SystemUIFont",
+                body_cjk: ".SystemUIFont",
+            },
+        );
+
+        assert!(!svg.contains(".SystemUIFont"));
+        assert!(svg.contains("ui-monospace"));
+        assert!(svg.contains("PingFang SC"));
     }
 
     #[test]
@@ -2697,11 +2781,14 @@ pub(crate) fn build_generated_block_preview_svg(
     kind: BlockPreviewKind,
     source_text: &str,
     theme: &Theme,
+    font_families: GeneratedPreviewFontFamilies<'_>,
 ) -> String {
     let normalized = source_text.trim();
     let rendered = match kind {
         BlockPreviewKind::Math => render_math_block_preview_svg(normalized, theme),
-        BlockPreviewKind::Mermaid => render_mermaid_block_preview_svg(normalized, theme),
+        BlockPreviewKind::Mermaid => {
+            render_mermaid_block_preview_svg(normalized, theme, font_families)
+        }
     };
 
     match rendered {
@@ -2785,97 +2872,20 @@ fn render_mathjax_preview_svg(
     }
 }
 
-fn render_mermaid_block_preview_svg(source_text: &str, theme: &Theme) -> anyhow::Result<String> {
-    let (encoded_source, replacements) = encode_mermaid_text_source(source_text)?;
-    let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        mermaid_text::render_with_width(
-            &encoded_source,
-            Some(GENERATED_PREVIEW_MERMAID_TEXT_COLUMN_BUDGET),
-        )
-    }))
-    .map_err(|payload| {
-        anyhow::anyhow!(
-            "mermaid-text panicked: {}",
-            mermaid_text_panic_message(payload)
-        )
-    })??;
-    let rendered = decode_mermaid_text_output(&rendered, &replacements);
-    Ok(build_mermaid_text_preview_svg(&rendered, theme))
-}
-
-fn encode_mermaid_text_source(
+fn render_mermaid_block_preview_svg(
     source_text: &str,
-) -> anyhow::Result<(String, Vec<(String, String)>)> {
-    const TOKEN_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-
-    let mut encoded = String::with_capacity(source_text.len());
-    let mut tokens_by_char = HashMap::<char, String>::new();
-    let mut used_tokens = HashSet::<String>::new();
-    let mut replacements = Vec::<(String, String)>::new();
-
-    for ch in source_text.chars() {
-        if ch.is_ascii() {
-            encoded.push(ch);
-            continue;
-        }
-
-        let token = if let Some(existing) = tokens_by_char.get(&ch) {
-            existing.clone()
-        } else {
-            let Some(token) = next_mermaid_ascii_token(source_text, &used_tokens, TOKEN_CHARS)
-            else {
-                return Err(anyhow::anyhow!(
-                    "failed to build ASCII-safe Mermaid source for non-ASCII text"
-                ));
-            };
-            used_tokens.insert(token.clone());
-            tokens_by_char.insert(ch, token.clone());
-            replacements.push((token.clone(), ch.to_string()));
-            token
-        };
-
-        encoded.push_str(&token);
-    }
-
-    Ok((encoded, replacements))
-}
-
-fn next_mermaid_ascii_token(
-    source_text: &str,
-    used_tokens: &HashSet<String>,
-    token_chars: &[u8],
-) -> Option<String> {
-    for first in token_chars {
-        for second in token_chars {
-            let token = format!("{}{}", *first as char, *second as char);
-            if source_text.contains(&token) || used_tokens.contains(&token) {
-                continue;
-            }
-            return Some(token);
-        }
-    }
-
-    None
-}
-
-fn decode_mermaid_text_output(rendered: &str, replacements: &[(String, String)]) -> String {
-    let mut decoded = rendered.to_string();
-    for (token, original) in replacements {
-        decoded = decoded.replace(token, original);
-    }
-    decoded
-}
-
-fn mermaid_text_panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-    let payload = payload.as_ref();
-
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic".to_string()
-    }
+    theme: &Theme,
+    font_families: GeneratedPreviewFontFamilies<'_>,
+) -> anyhow::Result<String> {
+    let rendered = mermaid_text::render_with_width(
+        source_text,
+        Some(GENERATED_PREVIEW_MERMAID_TEXT_COLUMN_BUDGET),
+    )?;
+    Ok(build_mermaid_text_preview_svg(
+        &rendered,
+        theme,
+        font_families,
+    ))
 }
 
 fn build_generated_block_preview_error_svg(
@@ -2912,7 +2922,11 @@ fn build_generated_block_preview_error_svg(
     )
 }
 
-fn build_mermaid_text_preview_svg(rendered_text: &str, theme: &Theme) -> String {
+fn build_mermaid_text_preview_svg(
+    rendered_text: &str,
+    theme: &Theme,
+    font_families: GeneratedPreviewFontFamilies<'_>,
+) -> String {
     let rendered_text = rendered_text.trim_end_matches('\n');
     let lines: Vec<&str> = if rendered_text.is_empty() {
         vec![""]
@@ -2926,7 +2940,7 @@ fn build_mermaid_text_preview_svg(rendered_text: &str, theme: &Theme) -> String 
         .unwrap_or(1)
         .max(1);
 
-    let font_family = "SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace";
+    let font_family = escape_svg_text(&build_generated_preview_font_family(font_families));
     let font_size = 18.0;
     let char_width = 11.0;
     let line_height = 24.0;
@@ -2949,6 +2963,54 @@ fn build_mermaid_text_preview_svg(rendered_text: &str, theme: &Theme) -> String 
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"><g style=\"text-rendering:geometricPrecision;shape-rendering:geometricPrecision;font-variant-ligatures:none;\">{text_nodes}</g></svg>",
         text_nodes = text_nodes,
     )
+}
+
+fn build_generated_preview_font_family(font_families: GeneratedPreviewFontFamilies<'_>) -> String {
+    let mut families = Vec::<String>::new();
+
+    push_generated_preview_font_families(
+        &mut families,
+        sanitize_generated_preview_font_family(font_families.monospace, true),
+    );
+    push_generated_preview_font_families(
+        &mut families,
+        sanitize_generated_preview_font_family(font_families.body_cjk, false),
+    );
+    push_generated_preview_font_families(
+        &mut families,
+        GENERATED_PREVIEW_DEFAULT_MONOSPACE_FONT_FAMILY,
+    );
+
+    families.join(", ")
+}
+
+fn sanitize_generated_preview_font_family(configured: &str, monospace: bool) -> &str {
+    let configured = configured.trim();
+    if configured.is_empty() || configured == ".SystemUIFont" {
+        if monospace {
+            GENERATED_PREVIEW_DEFAULT_MONOSPACE_FONT_FAMILY
+        } else {
+            GENERATED_PREVIEW_DEFAULT_CJK_FONT_FAMILY
+        }
+    } else {
+        configured
+    }
+}
+
+fn push_generated_preview_font_families(families: &mut Vec<String>, configured: &str) {
+    for family in configured
+        .split(',')
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+    {
+        if families
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(family))
+        {
+            continue;
+        }
+        families.push(family.to_string());
+    }
 }
 
 fn apply_math_preview_theme(svg: &str, theme: &Theme) -> String {

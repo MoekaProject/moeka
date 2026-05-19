@@ -2954,6 +2954,10 @@ impl EditorView {
                 preview.kind,
                 &preview.source_text,
                 &self.theme,
+                helpers::GeneratedPreviewFontFamilies {
+                    monospace: self.styles.editor.editor_monospace_font_family,
+                    body_cjk: self.styles.editor.editor_body_cjk_font_family,
+                },
             );
             self.generated_preview_svg_cache
                 .insert(preview.cache_key.clone(), Arc::<str>::from(svg.clone()));
