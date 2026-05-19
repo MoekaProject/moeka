@@ -2746,7 +2746,7 @@ impl Element for EditorElement {
                         {
                             image_borders.push(quad(
                                 block_bounds,
-                                Corners::all(px(10.0)),
+                                Corners::all(px(0.0)),
                                 gpui::transparent_black(),
                                 px(2.0),
                                 theme.cursor,
@@ -3678,7 +3678,7 @@ impl Element for EditorElement {
             px(editor.scaled(code_block_styles.code_block_border_width_px));
         let code_block_radius = px(editor.scaled(code_block_styles.code_block_radius_px));
         let overlay_active = editor.preview_overlay_state().is_some();
-        let preview_action_button_padding_x = 6.0;
+        let preview_action_button_padding_x = button_padding_x;
         for (start_line, group) in &code_block_group_bounds {
             code_block_bgs.push(quad(
                 Bounds::new(
@@ -3816,7 +3816,7 @@ impl Element for EditorElement {
         }
 
         let mut preview_zoom_hitboxes = Vec::new();
-        let preview_button_gap = 5.0;
+        let preview_button_gap = editor.scaled(5.0);
 
         if !overlay_active {
             for (target_bounds, line_idx, is_active) in &preview_zoom_button_targets {

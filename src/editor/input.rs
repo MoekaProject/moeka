@@ -1934,26 +1934,16 @@ impl EditorView {
         if self.preview_overlay.is_some() {
             let delta_y: f32 = event.delta.pixel_delta(px(40.0)).y.into();
             if delta_y != 0.0 {
-                let overlay_kind = self
-                    .preview_overlay_state()
-                    .and_then(|overlay| {
-                        self.decorations
-                            .get(overlay.line_idx)
-                            .and_then(|decoration| decoration.block_preview.as_ref())
-                    })
-                    .map(|preview| preview.kind);
-                if overlay_kind != Some(crate::markdown::BlockPreviewKind::Mermaid) {
-                    let zoom_ratio = 1.0 + (delta_y.abs() / 300.0).clamp(0.05, 0.35);
-                    if let Some(overlay) = self.preview_overlay_state_mut() {
-                        if delta_y < 0.0 {
-                            overlay.view.zoom_factor /= zoom_ratio;
-                        } else {
-                            overlay.view.zoom_factor *= zoom_ratio;
-                        }
+                let zoom_ratio = 1.0 + (delta_y.abs() / 300.0).clamp(0.05, 0.35);
+                if let Some(overlay) = self.preview_overlay_state_mut() {
+                    if delta_y < 0.0 {
+                        overlay.view.zoom_factor /= zoom_ratio;
+                    } else {
+                        overlay.view.zoom_factor *= zoom_ratio;
                     }
-                    self.clamp_preview_overlay_view();
-                    cx.notify();
                 }
+                self.clamp_preview_overlay_view();
+                cx.notify();
             }
             return;
         }
