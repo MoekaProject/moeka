@@ -190,6 +190,10 @@ impl EditorView {
     ) {
         self.last_mouse_down_target = None;
 
+        if self.active_tab_supports_text_buffer() {
+            window.focus(&self.focus_handle(cx));
+        }
+
         if event.button == MouseButton::Left {
             if let Some(line_idx) = self
                 .image_preview_zoom_areas
@@ -591,9 +595,10 @@ impl EditorView {
             return false;
         };
 
-        if self.preview_overlay_state().is_some_and(|overlay| {
-            overlay.line_idx == line_idx && overlay.cache_key == cache_key
-        }) {
+        if self
+            .preview_overlay_state()
+            .is_some_and(|overlay| overlay.line_idx == line_idx && overlay.cache_key == cache_key)
+        {
             self.close_preview_overlay();
             return true;
         }
@@ -716,11 +721,49 @@ impl EditorView {
             .map(|preview| preview.cache_key.as_str())
     }
 
-    fn provisional_input_bounds_for_click(&self, position: Point<Pixels>) -> Bounds<Pixels> {
-        let line_height =
-            self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
+    fn provisional_input_bounds_for_click(&self, _position: Point<Pixels>) -> Bounds<Pixels> {
+        let anchor_offset = self.buffer.clamp_offset(self.cursor.offset);
+        let (line, col) = self.buffer.offset_to_line_col(anchor_offset);
+        let text_top_y = f32::from(self.content_origin.y) + self.text_y_offset_for_line(line)
+            - self.scroll_offset;
+
+        if let Some(info) = self
+            .line_display_info
+            .get(line)
+            .and_then(|info| info.as_ref())
+        {
+            let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
+            let affinity = self
+                .wrap_boundary_affinity
+                .and_then(|current| (current.offset == anchor_offset).then_some(current.kind));
+            let pos = Self::visual_position_for_wrapped_display(
+                &info.wrapped_line,
+                &info.display_text,
+                disp_col,
+                info.line_height,
+                info.indent_px,
+                &info.wrap_boundary_upstream_xs,
+                affinity,
+            )
+            .unwrap_or_default();
+            return Bounds::new(
+                point(
+                    px(info.content_x + f32::from(pos.x)),
+                    px(text_top_y + f32::from(pos.y)),
+                ),
+                size(px(info.font_size * 0.6), px(info.line_height)),
+            );
+        }
+
+        let block_type = if line < self.decorations.len() {
+            &self.decorations[line].block_type
+        } else {
+            &BlockType::Normal
+        };
+        let line_height = self.line_height_for_block(block_type);
+        let x = self.last_content_left + col as f32 * self.base_font_size() * 0.6;
         Bounds::new(
-            point(position.x, position.y - px(line_height * 0.5)),
+            point(px(x), px(text_top_y)),
             size(px(self.base_font_size() * 0.6), px(line_height)),
         )
     }
@@ -2024,17 +2067,6 @@ impl EditorView {
             return self.cursor.offset;
         }
 
-        let content_top = origin_y + self.padding_top();
-        if pos_y + 0.5 < content_top {
-            profile::log_event("cursor.offset_for_position.above_content", || {
-                format!(
-                    "pos=({pos_x:.1},{pos_y:.1}) content_top={content_top:.1} origin_y={origin_y:.1} scroll={:.1}",
-                    self.scroll_offset
-                )
-            });
-            return self.cursor.offset;
-        }
-
         let y = (pos_y - origin_y) + self.scroll_offset;
         let content_bottom = self.total_content_height() - self.padding_bottom();
         if y >= content_bottom {
@@ -2044,8 +2076,9 @@ impl EditorView {
         let line = self.line_at_y(y);
         if line == 0 && y > self.padding_top() + self.visual_height_for_line(0) {
             profile::log_event("cursor.offset_for_position.suspect_line0", || {
+                let padding_top = origin_y + self.padding_top();
                 format!(
-                    "pos=({pos_x:.1},{pos_y:.1}) y={y:.1} content_top={content_top:.1} scroll={:.1}",
+                    "pos=({pos_x:.1},{pos_y:.1}) y={y:.1} content_top={padding_top:.1} scroll={:.1}",
                     self.scroll_offset
                 )
             });

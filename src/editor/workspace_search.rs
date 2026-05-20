@@ -113,7 +113,7 @@ impl EditorView {
         cx.notify();
     }
 
-    fn clear_workspace_search_preview_state(&mut self) {
+    pub(crate) fn clear_workspace_search_preview_state(&mut self) {
         self.workspace_search_selected_match = None;
         self.workspace_search_highlight_path = None;
         self.workspace_search_highlight_ranges.clear();

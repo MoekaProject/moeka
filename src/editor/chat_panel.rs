@@ -1,3 +1,4 @@
+use std::env;
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -5,7 +6,6 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use std::env;
 
 use alacritty_terminal::{
     event::{Event as AlacTermEvent, EventListener},
@@ -326,8 +326,15 @@ impl Element for ChatTerminalInputElement {
         _window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let _ = self.editor.update(cx, |editor, _| {
+        let _ = self.editor.update(cx, |editor, cx| {
+            let bounds_changed = editor
+                .chat_terminal_input_bounds
+                .is_none_or(|current| current != bounds);
             editor.chat_terminal_input_bounds = Some(bounds);
+            if bounds_changed {
+                editor.resize_chat_terminal();
+                cx.notify();
+            }
         });
         bounds
     }
@@ -752,8 +759,8 @@ impl ChatAgentCli {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::GithubCopilot => "Github Copilot",
             Self::Terminal => "终端",
+            Self::GithubCopilot => "Github Copilot",
             Self::OpenAICodex => "OpenAI Codex",
             Self::ClaudeCode => "Claude Code",
             Self::GeminiCli => "Gemini CLI",
@@ -1597,8 +1604,16 @@ impl EditorView {
     }
 
     pub(crate) fn create_chat_tab(&mut self, cx: &mut Context<Self>) {
-        let id = self.next_tab_identity();
         let agent_cli = self.next_chat_tab_agent_cli();
+        self.create_chat_tab_with_agent(agent_cli, cx);
+    }
+
+    pub(crate) fn create_chat_tab_with_agent(
+        &mut self,
+        agent_cli: ChatAgentCli,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.next_tab_identity();
         let instance_index = self.next_chat_tab_instance_index(agent_cli);
         let insert_index = self
             .active_chat_tab_index()
@@ -2148,22 +2163,35 @@ impl EditorView {
 
     fn resize_chat_terminal(&mut self) {
         let (_, cell_width, cell_height) = self.chat_terminal_metrics();
-        let terminal_padding =
-            self.scaled(self.styles.utility_panel.utility_panel_terminal_padding_px);
-        let tab_bar_height = self.tab_bar_height();
-        let panel_width = if self.chat_panel_placement == ChatPanelPlacement::Bottom {
-            (self.last_window_width
-                - self.sidebar_width()
-                - self.right_panel_width()
-                - terminal_padding * 2.0)
-                .max(220.0)
+        let (panel_width, panel_height) = if let Some(bounds) = self.chat_terminal_input_bounds {
+            (
+                f32::from(bounds.size.width).max(220.0),
+                f32::from(bounds.size.height).max(120.0),
+            )
         } else {
-            (self.utility_panel_width() - terminal_padding * 2.0).max(220.0)
-        };
-        let panel_height = if self.chat_panel_placement == ChatPanelPlacement::Bottom {
-            (self.utility_panel_width() - terminal_padding * 2.0 - tab_bar_height).max(120.0)
-        } else {
-            (self.last_window_height - terminal_padding * 2.0 - tab_bar_height).max(240.0)
+            let terminal_padding =
+                self.scaled(self.styles.utility_panel.utility_panel_terminal_padding_px);
+            let border_width = self.scaled(self.styles.utility_panel.utility_panel_border_width_px);
+            let tab_bar_height = self.tab_bar_height();
+            let panel_width = if self.chat_panel_placement == ChatPanelPlacement::Bottom {
+                (self.last_window_width
+                    - self.sidebar_width()
+                    - self.right_panel_width()
+                    - terminal_padding * 2.0)
+                    .max(220.0)
+            } else {
+                (self.utility_panel_width() - terminal_padding * 2.0 - border_width).max(220.0)
+            };
+            let panel_height = if self.chat_panel_placement == ChatPanelPlacement::Bottom {
+                (self.utility_panel_width()
+                    - terminal_padding * 2.0
+                    - tab_bar_height
+                    - border_width)
+                    .max(120.0)
+            } else {
+                (self.last_window_height - terminal_padding * 2.0 - tab_bar_height).max(240.0)
+            };
+            (panel_width, panel_height)
         };
         let cols = (panel_width / cell_width.max(1.0)).floor() as u16;
         let rows = (panel_height / cell_height.max(1.0)).floor() as u16;
@@ -2296,6 +2324,17 @@ impl EditorView {
         previous_non_spacer_terminal_col(row_cells, col)
     }
 
+    fn chat_terminal_mouse_event_cell(
+        &self,
+        position: Point<Pixels>,
+    ) -> Option<(usize, usize)> {
+        let (row, col) = self.chat_terminal_cell_from_position(position)?;
+        Some((
+            row,
+            self.chat_terminal_normalized_col(row, col).unwrap_or(col),
+        ))
+    }
+
     pub(crate) fn copy_chat_terminal_selection(&self, cx: &mut Context<Self>) -> bool {
         let Some(selection) = self.chat_terminal_selection else {
             return false;
@@ -2414,48 +2453,6 @@ impl EditorView {
         })
     }
 
-    fn on_chat_tab_bar_scroll(
-        &mut self,
-        event: &ScrollWheelEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let delta = event.delta.pixel_delta(px(self.tab_bar_height().max(1.0)));
-        let delta_x = f32::from(delta.x);
-        let delta_y = f32::from(delta.y);
-        let horizontal_delta = if delta_x.abs() > delta_y.abs() {
-            delta.x
-        } else {
-            delta.y
-        };
-        if horizontal_delta == Pixels::ZERO {
-            return;
-        }
-
-        let offset = self.chat_tab_bar_scroll_handle.offset();
-        let max_offset = self.chat_tab_bar_scroll_handle.max_offset();
-        if max_offset.width <= Pixels::ZERO {
-            return;
-        }
-
-        let min_x = -max_offset.width.max(px(0.0));
-        let next_x = (offset.x - horizontal_delta).clamp(min_x, Pixels::ZERO);
-        self.chat_tab_bar_scroll_handle
-            .set_offset(point(next_x, offset.y));
-        cx.stop_propagation();
-    }
-
-    fn chat_terminal_mouse_event_cell(
-        &self,
-        position: Point<Pixels>,
-    ) -> Option<(usize, usize)> {
-        let (row, col) = self.chat_terminal_cell_from_position(position)?;
-        Some((
-            row,
-            self.chat_terminal_normalized_col(row, col).unwrap_or(col),
-        ))
-    }
-
     fn send_chat_terminal_mouse_button_report(
         &mut self,
         button: MouseButton,
@@ -2527,7 +2524,10 @@ impl EditorView {
         alt: bool,
         control: bool,
     ) -> bool {
-        let Some(mode) = self.active_chat_terminal().map(ChatTerminalSession::term_mode) else {
+        let Some(mode) = self
+            .active_chat_terminal()
+            .map(ChatTerminalSession::term_mode)
+        else {
             return false;
         };
         if shift || !mode.intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
@@ -2659,7 +2659,9 @@ impl EditorView {
                     b"\x1bOC"
                 });
             }
-            if !bytes.is_empty() && let Some(session) = self.active_chat_terminal() {
+            if !bytes.is_empty()
+                && let Some(session) = self.active_chat_terminal()
+            {
                 let _ = session.write_bytes(&bytes);
             }
 
@@ -3149,7 +3151,7 @@ impl EditorView {
         let end_drop_indicator_width = ts.tab_drop_indicator_width_px;
         let current_tab_ids: Vec<String> =
             self.chat_tabs.iter().map(|tab| tab.id.clone()).collect();
-        let mut tab_items: Vec<AnyElement> = self
+        let tab_items: Vec<AnyElement> = self
             .chat_tabs
             .iter()
             .map(|tab| self.render_chat_tab(tab, cx))
@@ -3157,36 +3159,35 @@ impl EditorView {
 
         let new_hover_color = ts.tab_new_hover_text_color;
         let new_hover_bg = ts.tab_item_hover_bg;
-        let tab_plus_gap_width = self.scaled(ts.tab_spacer_width_px);
         let end_drop_target_width = self.scaled(ts.tab_new_width_px + ts.tab_spacer_width_px);
-        tab_items.push(
-            div()
-                .h(px(inner_height))
-                .w(px(self.scaled(ts.tab_new_width_px)))
-                .flex_none()
-                .flex()
-                .justify_center()
-                .items_center()
-                .text_size(px(self.scaled(ts.tab_new_font_size_px)))
-                .text_color(ts.tab_new_text_color)
-                .hover(move |style| style.text_color(new_hover_color).bg(new_hover_bg))
-                .child("+")
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.create_chat_tab(cx);
-                    }),
-                )
-                .into_any_element(),
-        );
-        tab_items.push(
-            div()
-                .h(px(inner_height))
-                .w(px(tab_plus_gap_width))
-                .flex_none()
-                .into_any_element(),
-        );
+        let new_tab_button = div()
+            .id("chat-tab-bar-new")
+            .h(px(inner_height))
+            .w(px(self.scaled(ts.tab_new_width_px)))
+            .flex_none()
+            .flex()
+            .justify_center()
+            .items_center()
+            .text_size(px(self.scaled(ts.tab_new_font_size_px)))
+            .text_color(ts.tab_new_text_color)
+            .hover(move |style| style.text_color(new_hover_color).bg(new_hover_bg))
+            .child("+")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.create_chat_tab(cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.open_chat_tab_create_context_menu(event.position, cx);
+                }),
+            )
+            .into_any_element();
         let end_drop_target = div()
             .h(px(inner_height))
             .w(px(end_drop_target_width))
@@ -3227,7 +3228,6 @@ impl EditorView {
             .flex()
             .items_start()
             .bg(ts.tab_bar_bg)
-            .on_scroll_wheel(cx.listener(Self::on_chat_tab_bar_scroll))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -3286,6 +3286,7 @@ impl EditorView {
                     .overflow_x_scroll()
                     .track_scroll(&self.chat_tab_bar_scroll_handle)
                     .children(tab_items)
+                    .child(new_tab_button)
                     .child(end_drop_target),
             )
             .into_any_element()

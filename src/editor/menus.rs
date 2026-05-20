@@ -868,6 +868,22 @@ impl EditorView {
         cx.notify();
     }
 
+    pub(crate) fn open_chat_tab_create_context_menu(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = Some(ContextMenu {
+            position,
+            kind: ContextMenuKind::ChatTabCreate,
+        });
+        self.context_submenu = None;
+        self.context_submenu_aim = None;
+        self.context_submenu_hovered = false;
+        self.sidebar_edit = None;
+        cx.notify();
+    }
+
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         let had_menu = self.context_menu.take().is_some();
         let had_submenu = self.context_submenu.take().is_some();
@@ -1367,14 +1383,7 @@ impl EditorView {
         let hover_bg = ms.menu_item_hover_bg;
         let text_color = ms.menu_item_text_color;
         let check_size = self.scaled(wss.ws_menu_item_check_size_px);
-        let icon_size = self.scaled(
-            ms.menu_format_icon_size_px
-                + if icon_path.ends_with("copilot.svg") {
-                    5.0
-                } else {
-                    3.0
-                },
-        );
+        let icon_size = self.scaled(ms.menu_format_icon_size_px);
         let gap = self.scaled(wss.ws_menu_item_action_icon_gap_px);
         let icon_column_width = check_size.max(icon_size);
 
@@ -3363,6 +3372,30 @@ impl EditorView {
                 (
                     items,
                     self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                )
+            }
+            ContextMenuKind::ChatTabCreate => {
+                let mut items = Vec::new();
+                for agent_cli in ChatAgentCli::all() {
+                    items.push(self.render_context_menu_item_with_icon(
+                        agent_cli.label(),
+                        agent_cli.icon_path(),
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.create_chat_tab_with_agent(agent_cli, cx);
+                        },
+                    ));
+                }
+                (
+                    items,
+                    self.scaled(
+                        self.styles
+                            .context_menu
+                            .menu_sidebar_width_px
+                            .max(self.styles.context_menu.menu_tab_width_px),
+                    ),
                 )
             }
             ContextMenuKind::ChatTab { tab_id } => {

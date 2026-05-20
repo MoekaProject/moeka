@@ -1315,10 +1315,9 @@ impl EditorView {
                     )
                 },
             )
-            .when(
-                show_workspace_bar && !self.workspace_search_visible,
-                |this: gpui::Stateful<gpui::Div>| this.child(self.render_workspace_bar(cx)),
-            )
+            .when(show_workspace_bar, |this: gpui::Stateful<gpui::Div>| {
+                this.child(self.render_workspace_bar(cx))
+            })
             .into_any_element()
     }
 

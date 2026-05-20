@@ -1373,10 +1373,10 @@ impl Styles {
             selection: SelectionStyles {
                 selection_color: theme.selection,
                 selection_line_highlight_color: theme.line_highlight,
-                selection_diff_added_line_bg: with_alpha(theme.git_status_added, 0.12),
-                selection_diff_removed_line_bg: with_alpha(theme.text_danger, 0.12),
-                selection_diff_added_inline_bg: with_alpha(theme.git_status_added, 0.24),
-                selection_diff_removed_inline_bg: with_alpha(theme.text_danger, 0.28),
+                selection_diff_added_line_bg: with_alpha(theme.diff_added_bg, 0.14),
+                selection_diff_removed_line_bg: with_alpha(theme.diff_removed_bg, 0.14),
+                selection_diff_added_inline_bg: with_alpha(theme.diff_added_bg, 0.42),
+                selection_diff_removed_inline_bg: with_alpha(theme.diff_removed_bg, 0.44),
                 selection_trailing_width_factor: 0.4,
             },
             checkbox: CheckboxStyles {

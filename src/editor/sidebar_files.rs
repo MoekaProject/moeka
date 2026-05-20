@@ -437,6 +437,23 @@ impl EditorView {
         self.sidebar_root = path.clone();
         self.sidebar_visible = true;
         self.sidebar_resizing = false;
+        self.workspace_search_visible = false;
+        self.workspace_search_query.clear();
+        self.workspace_search_results.clear();
+        self.workspace_search_focus_sub = None;
+        self.workspace_search_blur_sub = None;
+        self.workspace_search_task = None;
+        self.workspace_search_input_focused = false;
+        self.workspace_search_render_limit = 100;
+        self.workspace_search_selected_match = None;
+        self.workspace_search_highlight_path = None;
+        self.workspace_search_highlight_ranges.clear();
+        self.workspace_search_highlight_current_index = None;
+        if let Some(editor) = &self.workspace_search_editor {
+            editor.update(cx, |input, cx| {
+                input.set_text("", cx);
+            });
+        }
         self.expanded_dirs.clear();
         self.expanded_dirs.insert(path);
         self.selected_sidebar_paths.clear();

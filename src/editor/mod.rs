@@ -348,6 +348,7 @@ pub(crate) enum ContextMenuKind {
         col: usize,
     },
     Terminal,
+    ChatTabCreate,
     ChatTab {
         tab_id: String,
     },
@@ -1818,14 +1819,20 @@ impl EditorView {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let toolbar_styles = &self.styles.toolbar;
-        let hover_height = self.scaled(toolbar_styles.toolbar_reveal_hover_height_px);
         let left = f32::from(self.content_origin.x);
         let top = f32::from(self.content_origin.y);
         let right = (left + self.last_viewport_width.max(1.0)).max(left + 1.0);
+        let bottom = (top + self.last_viewport_height.max(1.0)).max(top + 1.0);
+        let content_left = self.last_content_left.max(left);
+        let content_right =
+            (self.last_content_left + self.last_text_width).clamp(content_left, right);
         let x = f32::from(position.x);
         let y = f32::from(position.y);
-        let hovering = y >= top && y <= top + hover_height && x >= left && x <= right;
+        let hovering = y >= top
+            && y <= bottom
+            && x >= left
+            && x <= right
+            && (x < content_left || x > content_right);
         let changed = hovering != self.toolbar_corner_hovered;
         self.toolbar_corner_hovered = hovering;
         if changed {

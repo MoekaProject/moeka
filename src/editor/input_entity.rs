@@ -407,19 +407,14 @@ impl EntityInputHandler for EditorView {
         } else {
             queried_range.start
         };
-        if self.layout_dirty
-            && let Some(bounds) = self.pending_input_bounds
-        {
-            ime_debug_log(format!(
-                "bounds_for_range using pending input bounds during layout_dirty anchor_utf8={} -> x={} y={} w={} h={}",
-                anchor_offset,
-                f32::from(bounds.origin.x),
-                f32::from(bounds.origin.y),
-                f32::from(bounds.size.width),
-                f32::from(bounds.size.height)
-            ));
-            return Some(bounds);
-        }
+        let editor_bounds = if self.last_viewport_width > 0.0 && self.last_viewport_height > 0.0 {
+            Bounds::new(
+                self.content_origin,
+                size(px(self.last_viewport_width), px(self.last_viewport_height)),
+            )
+        } else {
+            bounds
+        };
         if self.layout_dirty
             && let Some(bounds) = self.last_stable_input_bounds
         {
@@ -433,8 +428,21 @@ impl EntityInputHandler for EditorView {
             ));
             return Some(bounds);
         }
+        if self.layout_dirty
+            && let Some(bounds) = self.pending_input_bounds
+        {
+            ime_debug_log(format!(
+                "bounds_for_range using pending input bounds during layout_dirty anchor_utf8={} -> x={} y={} w={} h={}",
+                anchor_offset,
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height)
+            ));
+            return Some(bounds);
+        }
         let (line, col) = self.buffer.offset_to_line_col(anchor_offset);
-        let origin_y: f32 = bounds.origin.y.into();
+        let origin_y: f32 = editor_bounds.origin.y.into();
         let text_top_y = origin_y + self.text_y_offset_for_line(line) - self.scroll_offset;
 
         if let Some(table_info) = self
@@ -503,7 +511,7 @@ impl EntityInputHandler for EditorView {
         }
 
         let line_info = if self.layout_dirty {
-            self.inline_line_display_info(window, line, bounds)
+            self.inline_line_display_info(window, line, editor_bounds)
                 .or_else(|| {
                     self.line_display_info
                         .get(line)
@@ -535,7 +543,7 @@ impl EntityInputHandler for EditorView {
                     indent_px: info.indent_px,
                     content_x: info.content_x,
                 })
-                .or_else(|| self.inline_line_display_info(window, line, bounds))
+                .or_else(|| self.inline_line_display_info(window, line, editor_bounds))
         };
 
         if let Some(info) = line_info {

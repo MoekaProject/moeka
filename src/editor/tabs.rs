@@ -1193,6 +1193,12 @@ impl EditorView {
             .border_color(es.editor_path_bar_border_color)
             .text_size(px(self.scaled(es.editor_path_bar_font_size_px)))
             .text_color(es.editor_path_bar_text_color)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event, window, cx| {
+                    this.on_mouse_down(event, window, cx);
+                }),
+            )
             .child(breadcrumb)
             .when_some(diff_label, |this, label| {
                 this.child(

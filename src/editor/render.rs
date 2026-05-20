@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Corners, CursorStyle, ExternalPaths, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Render, SharedString, Window, canvas, deferred, div, fill,
-    img, prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, Render, SharedString, Window, canvas, deferred, div, fill, img,
+    prelude::*, px,
 };
 
 use super::tooltip::{TooltipState, toolbar_anchor_bounds};
@@ -219,6 +219,9 @@ impl Render for EditorView {
         if self.utility_panel == Some(RightUtilityPanel::Chat)
             && self.chat_panel_focus_handle.is_focused(window)
         {
+            window.invalidate_character_coordinates();
+        }
+        if self.focus_handle.is_focused(window) && self.active_tab_supports_text_buffer() {
             window.invalidate_character_coordinates();
         }
         let chat_panel_focused = self.chat_panel_focus_handle.is_focused(window);
@@ -619,10 +622,10 @@ impl Render for EditorView {
                                                             .styles
                                                             .toolbar
                                                             .toolbar_secondary_hover_opacity;
-                                                        let toolbar_top = self.scaled(
+                                                                let toolbar_min_top = self.scaled(
                                                             self.styles.toolbar.toolbar_offset_top_px,
                                                         );
-                                                        let toolbar_left = self.scaled(
+                                                                let toolbar_min_left = self.scaled(
                                                             self.styles.toolbar.toolbar_offset_left_px,
                                                         );
                                                         let primary_btn_size = self.scaled(
@@ -645,6 +648,8 @@ impl Render for EditorView {
                                                                 .toolbar
                                                                 .toolbar_secondary_icon_size_px,
                                                         );
+                                                        let toolbar_left = toolbar_min_left.round();
+                                                        let toolbar_top = toolbar_min_top.round();
                                                         let sidebar_anchor = toolbar_anchor_bounds(
                                                             toolbar_left,
                                                             toolbar_top,
@@ -715,10 +720,10 @@ impl Render for EditorView {
                                                             .toolbar_secondary_hover_opacity;
                                                         let toolbar_gap =
                                                             self.scaled(self.styles.toolbar.toolbar_gap_px);
-                                                        let toolbar_top = self.scaled(
+                                                        let toolbar_min_top = self.scaled(
                                                             self.styles.toolbar.toolbar_offset_top_px,
                                                         );
-                                                        let toolbar_right = self.scaled(
+                                                        let toolbar_min_right = self.scaled(
                                                             self.styles.toolbar.toolbar_offset_left_px,
                                                         );
                                                         let secondary_btn_size = self.scaled(
@@ -732,6 +737,8 @@ impl Render for EditorView {
                                                                 .toolbar_secondary_icon_size_px,
                                                         );
                                                         let secondary_btn_width = secondary_btn_size;
+                                                        let toolbar_right = toolbar_min_right.round();
+                                                        let toolbar_top = toolbar_min_top.round();
                                                         let outline_active = self
                                                             .is_utility_panel_active(
                                                                 RightUtilityPanel::Outline,

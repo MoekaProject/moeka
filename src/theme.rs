@@ -105,6 +105,8 @@ pub enum ThemeColorField {
     GutterHeading,
     GitStatusAdded,
     GitStatusModified,
+    DiffAddedBg,
+    DiffRemovedBg,
 }
 
 impl ThemeColorField {
@@ -129,7 +131,7 @@ impl ThemeColorField {
         Self::BorderDecorative,
     ];
 
-    pub const EDITOR_FIELDS: [Self; 18] = [
+    pub const EDITOR_FIELDS: [Self; 20] = [
         Self::BgCode,
         Self::BgCodeInline,
         Self::BorderCodeBlock,
@@ -148,6 +150,8 @@ impl ThemeColorField {
         Self::GutterHeading,
         Self::GitStatusAdded,
         Self::GitStatusModified,
+        Self::DiffAddedBg,
+        Self::DiffRemovedBg,
     ];
 
     pub fn label(self) -> &'static str {
@@ -188,6 +192,8 @@ impl ThemeColorField {
             Self::GutterHeading => "gutter_heading",
             Self::GitStatusAdded => "git_status_added",
             Self::GitStatusModified => "git_status_modified",
+            Self::DiffAddedBg => "diff_added_bg",
+            Self::DiffRemovedBg => "diff_removed_bg",
         }
     }
 }
@@ -252,6 +258,8 @@ pub struct Theme {
     pub gutter_heading: Hsla,
     pub git_status_added: Hsla,
     pub git_status_modified: Hsla,
+    pub diff_added_bg: Hsla,
+    pub diff_removed_bg: Hsla,
 }
 
 impl Theme {
@@ -293,6 +301,8 @@ impl Theme {
             ThemeColorField::GutterHeading => self.gutter_heading,
             ThemeColorField::GitStatusAdded => self.git_status_added,
             ThemeColorField::GitStatusModified => self.git_status_modified,
+            ThemeColorField::DiffAddedBg => self.diff_added_bg,
+            ThemeColorField::DiffRemovedBg => self.diff_removed_bg,
         }
     }
 
@@ -334,6 +344,8 @@ impl Theme {
             ThemeColorField::GutterHeading => self.gutter_heading = color,
             ThemeColorField::GitStatusAdded => self.git_status_added = color,
             ThemeColorField::GitStatusModified => self.git_status_modified = color,
+            ThemeColorField::DiffAddedBg => self.diff_added_bg = color,
+            ThemeColorField::DiffRemovedBg => self.diff_removed_bg = color,
         }
     }
 }
@@ -413,6 +425,8 @@ impl Theme {
             gutter_heading: with_alpha(crate::hex_hsla!("#abb2bf"), 0.2),
             git_status_added: crate::hex_hsla!("#3aa675"),
             git_status_modified: crate::hex_hsla!("#3aa675"),
+            diff_added_bg: crate::hex_hsla!("#1b5e42"),
+            diff_removed_bg: crate::hex_hsla!("#7a2738"),
         }
     }
 
@@ -458,6 +472,8 @@ impl Theme {
             gutter_heading: with_alpha(crate::hex_hsla!("#37352F"), 0.2),
             git_status_added: crate::hex_hsla!("#3AA675"),
             git_status_modified: crate::hex_hsla!("#3AA675"),
+            diff_added_bg: crate::hex_hsla!("#217a4b"),
+            diff_removed_bg: crate::hex_hsla!("#a44040"),
         }
     }
 
@@ -503,6 +519,8 @@ impl Theme {
             gutter_heading: with_alpha(crate::hex_hsla!("#383A42"), 0.2),
             git_status_added: crate::hex_hsla!("#2F8F63"),
             git_status_modified: crate::hex_hsla!("#2F8F63"),
+            diff_added_bg: crate::hex_hsla!("#1d6f46"),
+            diff_removed_bg: crate::hex_hsla!("#a33b3b"),
         }
     }
 
@@ -548,6 +566,8 @@ impl Theme {
             gutter_heading: with_alpha(crate::hex_hsla!("#abb2bf"), 0.2),
             git_status_added: crate::hex_hsla!("#3aa675"),
             git_status_modified: crate::hex_hsla!("#3aa675"),
+            diff_added_bg: crate::hex_hsla!("#1a5e40"),
+            diff_removed_bg: crate::hex_hsla!("#7a2a37"),
         }
     }
 }

@@ -1833,7 +1833,10 @@ fn apply_mermaid_block_highlighting(
             continue;
         }
 
-        if matches!(ch, '[' | ']' | '{' | '}' | '(' | ')' | '|' | ':' | ';' | ',') {
+        if matches!(
+            ch,
+            '[' | ']' | '{' | '}' | '(' | ')' | '|' | ':' | ';' | ','
+        ) {
             apply_highlight_range(
                 index..(index + ch_len),
                 operator_color,
@@ -3585,8 +3588,14 @@ pub(crate) fn build_text_runs_for_display(
     let mut buf_font_roles: Vec<FontRole> = vec![FontRole::BodyLatin; buf_len];
     let mut assign_font_roles =
         |range: Range<usize>, latin_role: FontRole, non_latin_role: FontRole| {
-            let start = range.start.min(buf_len);
-            let end = range.end.min(buf_len);
+            let mut start = range.start.min(buf_len);
+            let mut end = range.end.min(buf_len);
+            while start > 0 && !line_content.is_char_boundary(start) {
+                start -= 1;
+            }
+            while end < buf_len && !line_content.is_char_boundary(end) {
+                end += 1;
+            }
             if start >= end {
                 return;
             }

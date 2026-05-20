@@ -11,7 +11,7 @@ use gpui::{
 #[cfg(not(target_os = "macos"))]
 use printpdf::{Mm, PdfDocument};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd, html::push_html};
-use similar::{ChangeTag, InlineChange, TextDiff};
+use similar::{Algorithm, ChangeTag, InlineChange, TextDiff};
 use unicode_segmentation::UnicodeSegmentation;
 
 #[cfg(target_os = "macos")]
@@ -666,7 +666,9 @@ fn build_git_diff_rows(
     base_text: &str,
     target_text: &str,
 ) -> Vec<GitDiffRow> {
-    let diff = TextDiff::from_lines(base_text, target_text);
+    let diff = TextDiff::configure()
+        .algorithm(Algorithm::Patience)
+        .diff_lines(base_text, target_text);
     let base_decorations = crate::markdown::parse_decorations(base_text);
     let target_decorations = crate::markdown::parse_decorations(target_text);
     let mut pending_rows = Vec::new();
