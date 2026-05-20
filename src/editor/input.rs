@@ -1683,8 +1683,11 @@ impl EditorView {
         let line_start_offset = self.buffer.line_start(line_idx);
         let line_end_offset = self.buffer.line_end(line_idx);
         let is_cursor_line = line_idx == self.cursor_line();
-        let heading_content_start = matches!(decoration.block_type, BlockType::Heading(_))
-            .then(|| self.line_content_start_col(line_idx).min(line_content.len()));
+        let heading_content_start =
+            matches!(decoration.block_type, BlockType::Heading(_)).then(|| {
+                self.line_content_start_col(line_idx)
+                    .min(line_content.len())
+            });
         let font_size = self.font_size_for_block(&decoration.block_type);
         let line_height = self.line_height_for_block(&decoration.block_type);
         let ime_active_on_line = self

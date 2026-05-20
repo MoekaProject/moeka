@@ -264,7 +264,6 @@ struct ChatTerminalSurfaceElement {
     cursor_row: Option<usize>,
     cursor_col: usize,
     cursor_visible: bool,
-    cursor_shape: AlacCursorShape,
     default_fg: Hsla,
     default_bg: Hsla,
     cursor_color: Hsla,
@@ -410,9 +409,33 @@ impl Element for ChatTerminalSurfaceElement {
     ) {
         let editor = self.editor.read(cx);
         let (body_font_size, cell_width, cell_height) = editor.chat_terminal_metrics();
+        let cursor_width = editor.styles.cursor.cursor_width_px.max(1.0);
+        let cursor_height =
+            cell_height * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
+        let cursor_opacity = if editor.chat_terminal_selecting {
+            editor.styles.cursor.cursor_opacity_max
+        } else {
+            editor.cursor_opacity
+        };
+        let mut cursor_color = self.cursor_color;
+        cursor_color.a *= cursor_opacity;
         let rows = EditorView::chat_terminal_rows(&self.snapshot);
         let base_font = editor.chat_terminal_font(window);
         let origin = bounds.origin;
+
+        let cursor_bounds = |row_index: usize, col_index: usize| {
+            Bounds::new(
+                point(
+                    origin.x + px(col_index as f32 * cell_width),
+                    origin.y
+                        + px(
+                            row_index as f32 * cell_height
+                                + (cell_height - cursor_height) / 2.0,
+                        ),
+                ),
+                size(px(cursor_width), px(cursor_height)),
+            )
+        };
 
         let mut batches: Vec<ChatTerminalPaintBatch> = Vec::new();
 
@@ -450,10 +473,6 @@ impl Element for ChatTerminalSurfaceElement {
                 let is_cursor = self.cursor_visible
                     && self.cursor_row == Some(row_index)
                     && col_index == self.cursor_col;
-                if is_cursor && self.cursor_shape == AlacCursorShape::Block {
-                    std::mem::swap(&mut fg, &mut bg);
-                    bg = self.cursor_color;
-                }
 
                 if bg != self.default_bg {
                     let width = if cell.flags.contains(Flags::WIDE_CHAR) {
@@ -483,28 +502,8 @@ impl Element for ChatTerminalSurfaceElement {
                 let text = normalize_cell_char(cell);
                 let has_visible_text = cell.c != ' ' || cell.zerowidth().is_some();
                 if !has_visible_text {
-                    if is_cursor && self.cursor_shape == AlacCursorShape::Beam {
-                        window.paint_quad(fill(
-                            Bounds::new(
-                                point(
-                                    origin.x + px(col_index as f32 * cell_width),
-                                    origin.y + px(row_index as f32 * cell_height),
-                                ),
-                                size(px(2.0), px(cell_height)),
-                            ),
-                            self.cursor_color,
-                        ));
-                    } else if is_cursor && self.cursor_shape == AlacCursorShape::Underline {
-                        window.paint_quad(fill(
-                            Bounds::new(
-                                point(
-                                    origin.x + px(col_index as f32 * cell_width),
-                                    origin.y + px((row_index as f32 + 1.0) * cell_height - 2.0),
-                                ),
-                                size(px(cell_width), px(2.0)),
-                            ),
-                            self.cursor_color,
-                        ));
+                    if is_cursor {
+                        window.paint_quad(fill(cursor_bounds(row_index, col_index), cursor_color));
                     }
                     continue;
                 }
@@ -546,28 +545,8 @@ impl Element for ChatTerminalSurfaceElement {
                     ));
                 }
 
-                if is_cursor && self.cursor_shape == AlacCursorShape::Beam {
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            point(
-                                origin.x + px(col_index as f32 * cell_width),
-                                origin.y + px(row_index as f32 * cell_height),
-                            ),
-                            size(px(2.0), px(cell_height)),
-                        ),
-                        self.cursor_color,
-                    ));
-                } else if is_cursor && self.cursor_shape == AlacCursorShape::Underline {
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            point(
-                                origin.x + px(col_index as f32 * cell_width),
-                                origin.y + px((row_index as f32 + 1.0) * cell_height - 2.0),
-                            ),
-                            size(px(cell_width), px(2.0)),
-                        ),
-                        self.cursor_color,
-                    ));
+                if is_cursor {
+                    window.paint_quad(fill(cursor_bounds(row_index, col_index), cursor_color));
                 }
             }
         }
@@ -618,6 +597,7 @@ impl InputHandler for ChatTerminalInputHandler {
     ) {
         self.editor.update(cx, |editor, editor_cx| {
             editor.chat_terminal_marked_text = None;
+            editor.pause_cursor_blinking(editor_cx);
             if let Some(session) = editor.active_chat_terminal_mut() {
                 let _ = session.write_bytes(text.as_bytes());
             }
@@ -636,6 +616,7 @@ impl InputHandler for ChatTerminalInputHandler {
     ) {
         self.editor.update(cx, |editor, editor_cx| {
             editor.chat_terminal_marked_text = (!new_text.is_empty()).then(|| new_text.to_string());
+            editor.pause_cursor_blinking(editor_cx);
             editor_cx.notify();
         });
         window.invalidate_character_coordinates();
@@ -1866,6 +1847,7 @@ impl EditorView {
         self.focus_chat_terminal_panel(window);
         cx.stop_propagation();
         self.chat_terminal_marked_text = None;
+        self.pause_cursor_blinking(cx);
         if let Some(session) = self.active_chat_terminal_mut() {
             let _ = session.write_bytes(bytes);
         }
@@ -1886,6 +1868,7 @@ impl EditorView {
         if self.active_chat_terminal().is_none() {
             self.open_chat_terminal(cx);
         }
+        self.pause_cursor_blinking(cx);
         if let Some(session) = self.active_chat_terminal_mut() {
             let _ = session.write_bytes(text.as_bytes());
         }
@@ -2034,6 +2017,18 @@ impl EditorView {
 
         self.resize_chat_terminal();
         cx.notify();
+    }
+
+    pub(crate) fn place_chat_panel(
+        &mut self,
+        placement: ChatPanelPlacement,
+        cx: &mut Context<Self>,
+    ) {
+        self.utility_panel_resizing = false;
+        self.chat_panel_visible = true;
+        self.chat_panel_placement = placement;
+        self.set_visible_utility_panel(Some(RightUtilityPanel::Chat), cx);
+        self.open_chat_terminal(cx);
     }
 
     pub(crate) fn select_chat_tab_agent_cli(
@@ -2194,7 +2189,15 @@ impl EditorView {
             (panel_width, panel_height)
         };
         let cols = (panel_width / cell_width.max(1.0)).floor() as u16;
-        let rows = (panel_height / cell_height.max(1.0)).floor() as u16;
+        let row_height = cell_height.max(1.0);
+        let raw_rows = panel_height / row_height;
+        let whole_rows = raw_rows.floor();
+        let trailing_gap = panel_height - whole_rows * row_height;
+        let rows = if trailing_gap >= row_height * 0.6 {
+            whole_rows as u16 + 1
+        } else {
+            whole_rows as u16
+        };
         if let Some(session) = self.active_chat_terminal_mut() {
             if session.rows != rows.max(2) || session.cols != cols.max(20) {
                 session.resize(rows, cols);
@@ -2216,6 +2219,7 @@ impl EditorView {
         let Some(bytes) = keystroke_to_terminal_bytes(&event.keystroke) else {
             return;
         };
+        self.pause_cursor_blinking(cx);
         if let Some(session) = self.active_chat_terminal_mut() {
             let _ = session.write_bytes(&bytes);
         }
@@ -2290,6 +2294,7 @@ impl EditorView {
         let Some(text) = item.text() else {
             return;
         };
+        self.pause_cursor_blinking(cx);
         if let Some(session) = self.active_chat_terminal_mut() {
             let _ = session.write_bytes(text.as_bytes());
         }
@@ -3304,7 +3309,11 @@ impl EditorView {
         let default_bg = self.styles.editor.editor_bg;
         let cursor_color = self.theme.cursor;
         let palette = terminal_theme_palette(&self.theme, default_bg);
-        let content_opacity = if is_focused { 1.0 } else { 0.8 };
+        let content_opacity = if is_focused {
+            1.0
+        } else {
+            ups.utility_panel_terminal_inactive_opacity
+        };
         let file_drop_bg = self.styles.editor.editor_file_drop_bg;
 
         let snapshot = self
@@ -3318,7 +3327,6 @@ impl EditorView {
             Some(ChatTerminalStatus::Running)
         ) && snapshot.cursor.shape != AlacCursorShape::Hidden
             && cursor_row.is_some();
-        let cursor_shape = snapshot.cursor.shape;
         let selection = self
             .chat_terminal_selection
             .filter(|selection| !selection.is_empty())
@@ -3499,7 +3507,6 @@ impl EditorView {
                                 cursor_row,
                                 cursor_col,
                                 cursor_visible,
-                                cursor_shape,
                                 default_fg,
                                 default_bg,
                                 cursor_color,

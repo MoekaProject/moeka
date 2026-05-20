@@ -2946,12 +2946,10 @@ impl EditorView {
         .detach();
     }
 
-    pub(crate) fn pause_blinking(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn pause_cursor_blinking(&mut self, cx: &mut Context<Self>) {
         self.cursor_opacity = self.styles.cursor.cursor_opacity_max;
         self.cursor_opacity_direction = -1.0;
         let epoch = self.next_blink_epoch();
-        self.persist_active_tab_state();
-        self.schedule_temp_save_for_active_tab(cx);
         cx.notify();
         let pause_delay = self.styles.cursor.blink_pause_delay();
         cx.spawn(async move |this, cx| {
@@ -2964,6 +2962,12 @@ impl EditorView {
             .ok();
         })
         .detach();
+    }
+
+    pub(crate) fn pause_blinking(&mut self, cx: &mut Context<Self>) {
+        self.persist_active_tab_state();
+        self.schedule_temp_save_for_active_tab(cx);
+        self.pause_cursor_blinking(cx);
     }
 
     // ── Shared utilities ────────────────────────────────────────────
@@ -3229,7 +3233,7 @@ impl EditorView {
         };
 
         let view = &mut overlay.view;
-        view.zoom_factor = view.zoom_factor.clamp(1.0, 6.0);
+        view.zoom_factor = view.zoom_factor.clamp(0.1, 6.0);
 
         let viewport_width = f32::from(bounds.size.width).max(1.0);
         let viewport_height = f32::from(bounds.size.height).max(1.0);

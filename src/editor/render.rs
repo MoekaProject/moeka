@@ -10,6 +10,151 @@ use super::tooltip::{TooltipState, toolbar_anchor_bounds};
 use super::*;
 
 impl EditorView {
+    fn render_chat_panel_drop_targets(
+        &self,
+        editor_pane_width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let zone_margin = self.scaled(
+            self.styles
+                .utility_panel
+                .utility_panel_drop_target_margin_px,
+        );
+        let zone_radius = self.scaled(
+            self.styles
+                .utility_panel
+                .utility_panel_drop_target_radius_px,
+        );
+        let right_zone_width =
+            (editor_pane_width * 0.28).clamp(self.scaled(160.0), self.scaled(240.0));
+        let bottom_zone_height =
+            (self.last_window_height * 0.22).clamp(self.scaled(120.0), self.scaled(190.0));
+        let border_width = self.scaled(
+            self.styles
+                .utility_panel
+                .utility_panel_drop_target_border_width_px,
+        );
+        let drop_target_bg = self.styles.utility_panel.utility_panel_drop_target_bg;
+        let drop_target_active_bg = self
+            .styles
+            .utility_panel
+            .utility_panel_drop_target_active_bg;
+        let drop_target_border_color = self
+            .styles
+            .utility_panel
+            .utility_panel_drop_target_border_color;
+        let drop_target_active_border_color = self
+            .styles
+            .utility_panel
+            .utility_panel_drop_target_active_border_color;
+        let drop_target_label_bg = self.styles.utility_panel.utility_panel_drop_target_label_bg;
+        let drop_target_label_text_color = self
+            .styles
+            .utility_panel
+            .utility_panel_drop_target_label_text_color;
+        let label_font_size = self.scaled(
+            self.styles
+                .utility_panel
+                .utility_panel_drop_target_label_font_size_px,
+        );
+        let label_padding_x = self.scaled(
+            self.styles
+                .utility_panel
+                .utility_panel_drop_target_label_padding_x_px,
+        );
+        let label_padding_y = self.scaled(
+            self.styles
+                .utility_panel
+                .utility_panel_drop_target_label_padding_y_px,
+        );
+
+        let right_zone = div()
+            .absolute()
+            .right(px(zone_margin))
+            .top(px(zone_margin))
+            .bottom(px(zone_margin))
+            .w(px(right_zone_width))
+            .rounded(px(zone_radius))
+            .border(px(border_width))
+            .border_color(drop_target_border_color)
+            .bg(drop_target_bg)
+            .cursor(CursorStyle::Arrow)
+            .flex()
+            .items_center()
+            .justify_center()
+            .drag_over::<DraggedChatTab>(move |style, _, _, _| {
+                style
+                    .bg(drop_target_active_bg)
+                    .border_color(drop_target_active_border_color)
+            })
+            .on_drop(cx.listener(|this, dragged: &DraggedChatTab, _, cx| {
+                this.switch_to_chat_tab(&dragged.tab_id, cx);
+                this.place_chat_panel(ChatPanelPlacement::Right, cx);
+                this.chat_tab_drag_candidate_id = None;
+                this.chat_tab_dragging_id = None;
+            }))
+            .child(
+                div()
+                    .px(px(label_padding_x))
+                    .py(px(label_padding_y))
+                    .rounded_full()
+                    .bg(drop_target_label_bg)
+                    .text_size(px(label_font_size))
+                    .text_color(drop_target_label_text_color)
+                    .child("终端放在右侧"),
+            )
+            .into_any_element();
+
+        let bottom_zone = div()
+            .absolute()
+            .left(px(zone_margin))
+            .right(px(zone_margin))
+            .bottom(px(zone_margin))
+            .h(px(bottom_zone_height))
+            .rounded(px(zone_radius))
+            .border(px(border_width))
+            .border_color(drop_target_border_color)
+            .bg(drop_target_bg)
+            .cursor(CursorStyle::Arrow)
+            .flex()
+            .items_center()
+            .justify_center()
+            .drag_over::<DraggedChatTab>(move |style, _, _, _| {
+                style
+                    .bg(drop_target_active_bg)
+                    .border_color(drop_target_active_border_color)
+            })
+            .on_drop(cx.listener(|this, dragged: &DraggedChatTab, _, cx| {
+                this.switch_to_chat_tab(&dragged.tab_id, cx);
+                this.place_chat_panel(ChatPanelPlacement::Bottom, cx);
+                this.chat_tab_drag_candidate_id = None;
+                this.chat_tab_dragging_id = None;
+            }))
+            .child(
+                div()
+                    .px(px(label_padding_x))
+                    .py(px(label_padding_y))
+                    .rounded_full()
+                    .bg(drop_target_label_bg)
+                    .text_size(px(label_font_size))
+                    .text_color(drop_target_label_text_color)
+                    .child("终端放到下方"),
+            )
+            .into_any_element();
+
+        div()
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .right(px(0.0))
+            .bottom(px(0.0))
+            .child(match self.chat_panel_placement {
+                ChatPanelPlacement::Right => bottom_zone,
+                ChatPanelPlacement::Bottom => right_zone,
+            })
+            .into_any_element()
+    }
+
     fn render_right_panels(
         &mut self,
         chat_panel_focused: bool,
@@ -620,6 +765,16 @@ impl Render for EditorView {
                                                                 }
                                                                 .into_any_element()
                                                             })
+                                                            .when(
+                                                                self.chat_tab_drag_candidate_id.is_some()
+                                                                    || self.chat_tab_dragging_id.is_some(),
+                                                                |this| {
+                                                                    this.child(self.render_chat_panel_drop_targets(
+                                                                        editor_pane_width,
+                                                                        cx,
+                                                                    ))
+                                                                },
+                                                            )
                                                             .when(render_editor_toolbar, |this| this.child({
                                                         let primary_hover = self
                                                             .styles

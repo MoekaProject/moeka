@@ -3662,6 +3662,31 @@ pub(crate) fn build_text_runs_for_display(
         }
     }
 
+    let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+    let trimmed = &line_content[leading_ws..];
+    match decoration.block_type {
+        BlockType::UnorderedList => {
+            if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+                assign_font_roles(
+                    0..(leading_ws + 2).min(buf_len),
+                    FontRole::Monospace,
+                    FontRole::Monospace,
+                );
+            }
+        }
+        BlockType::OrderedList => {
+            let prefix_len = markdown::ordered_list_prefix_len(trimmed);
+            if prefix_len > 0 {
+                assign_font_roles(
+                    0..(leading_ws + prefix_len).min(buf_len),
+                    FontRole::Monospace,
+                    FontRole::Monospace,
+                );
+            }
+        }
+        _ => {}
+    }
+
     match &decoration.block_type {
         BlockType::Heading(_) => {
             for c in buf_colors.iter_mut() {

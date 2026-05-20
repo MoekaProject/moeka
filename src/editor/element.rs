@@ -74,7 +74,8 @@ fn shape_preview_button(
     window: &Window,
     button_font: &Font,
     button_font_size: f32,
-    button_padding_x: f32,
+    button_padding_left_x: f32,
+    button_padding_right_x: f32,
     button_padding_y: f32,
     button_text_line_height: f32,
     label_text: &str,
@@ -99,7 +100,7 @@ fn shape_preview_button(
         )
         .ok()?;
     let label = label_lines.into_iter().next()?;
-    let button_width = f32::from(label.width()) + button_padding_x * 2.0;
+    let button_width = f32::from(label.width()) + button_padding_left_x + button_padding_right_x;
     let button_height = button_text_line_height + button_padding_y * 2.0;
     Some((label, button_width, button_height))
 }
@@ -3661,13 +3662,17 @@ impl Element for EditorElement {
                         None,
                     ) && let Some(marker_wrapped) = marker_wrapped_lines.pop()
                     {
-                        let marker_x = content_x
-                            + f32::from(
-                                wrapped
-                                    .position_for_index(leading_ws, px(line_height))
-                                    .unwrap_or_default()
-                                    .x,
-                            );
+                        let marker_x = if leading_ws == 0 {
+                            base_content_x
+                        } else {
+                            content_x
+                                + f32::from(
+                                    wrapped
+                                        .position_for_index(leading_ws, px(line_height))
+                                        .unwrap_or_default()
+                                        .x,
+                                )
+                        };
                         let marker_offset = editor.scaled(
                             editor
                                 .styles
@@ -3716,7 +3721,8 @@ impl Element for EditorElement {
             px(editor.scaled(code_block_styles.code_block_border_width_px));
         let code_block_radius = px(editor.scaled(code_block_styles.code_block_radius_px));
         let overlay_active = editor.preview_overlay_state().is_some();
-        let preview_action_button_padding_x = button_padding_x;
+        let preview_outer_button_padding_x = button_padding_x;
+        let preview_inner_button_padding_x = editor.scaled(3.0);
         for (start_line, group) in &code_block_group_bounds {
             code_block_bgs.push(quad(
                 Bounds::new(
@@ -3757,17 +3763,6 @@ impl Element for EditorElement {
                 .filter(|language| !language.trim().is_empty())
                 .map(|language| language.to_uppercase())
                 .unwrap_or_else(|| "CODE".to_string());
-            let button_padding_x_for_group = if editor
-                .decorations
-                .get(*start_line)
-                .and_then(|decoration| decoration.block_preview.as_ref())
-                .filter(|preview| preview.is_anchor)
-                .is_some()
-            {
-                preview_action_button_padding_x
-            } else {
-                button_padding_x
-            };
 
             let preview_anchor = editor
                 .decorations
@@ -3816,8 +3811,13 @@ impl Element for EditorElement {
                     code_block_styles.code_block_copy_button_copied_border_color,
                 )
             } else if preview_anchor.is_some() {
+                let preview_label = match preview_anchor.map(|preview| preview.kind) {
+                    Some(crate::markdown::BlockPreviewKind::Mermaid) => "MERMAID",
+                    Some(crate::markdown::BlockPreviewKind::Math) => "LATEX",
+                    None => "COPY",
+                };
                 (
-                    editor.t(crate::i18n::TextKey::Copy).to_string(),
+                    preview_label.to_string(),
                     if is_button_hovered {
                         code_block_styles.code_block_copy_button_hover_bg
                     } else {
@@ -3849,29 +3849,29 @@ impl Element for EditorElement {
                     code_block_styles.code_block_copy_button_border_color,
                 )
             };
-
-            let label_run = TextRun {
-                len: label_text.len(),
-                font: button_font.clone(),
-                color: button_text_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let Ok(label_lines) = window.text_system().shape_text(
-                label_text.clone().into(),
-                px(button_font_size),
-                &[label_run],
-                None,
-                None,
+            let (copy_button_padding_left_x, copy_button_padding_right_x) =
+                if preview_anchor.is_some() {
+                    (
+                        preview_inner_button_padding_x,
+                        preview_outer_button_padding_x,
+                    )
+                } else {
+                    (button_padding_x, button_padding_x)
+                };
+            let Some((label, button_width_raw, _)) = shape_preview_button(
+                window,
+                &button_font,
+                button_font_size,
+                copy_button_padding_left_x,
+                copy_button_padding_right_x,
+                button_padding_y,
+                button_text_line_height,
+                &label_text,
+                button_text_color,
             ) else {
                 continue;
             };
-            let Some(label) = label_lines.into_iter().next() else {
-                continue;
-            };
-
-            let button_width = (f32::from(label.width()) + button_padding_x_for_group * 2.0).ceil();
+            let button_width = button_width_raw.ceil();
             let mut preview_zoom_button = None;
             if editor
                 .decorations
@@ -3904,7 +3904,8 @@ impl Element for EditorElement {
                         window,
                         &button_font,
                         button_font_size,
-                        preview_action_button_padding_x,
+                        preview_outer_button_padding_x,
+                        preview_inner_button_padding_x,
                         button_padding_y,
                         button_text_line_height,
                         "ZOOM",
@@ -3970,7 +3971,7 @@ impl Element for EditorElement {
                 ),
                 label,
                 origin: point(
-                    px(button_x + button_padding_x_for_group),
+                    px(button_x + copy_button_padding_left_x),
                     px(button_y + button_padding_y),
                 ),
                 line_height: px(button_text_line_height),
@@ -3999,7 +4000,7 @@ impl Element for EditorElement {
                     ),
                     label: zoom_label,
                     origin: point(
-                        px(zoom_x + preview_action_button_padding_x),
+                        px(zoom_x + preview_outer_button_padding_x),
                         px(button_y + button_padding_y),
                     ),
                     line_height: px(button_text_line_height),
@@ -4014,6 +4015,7 @@ impl Element for EditorElement {
                         window,
                         &button_font,
                         button_font_size,
+                        button_padding_x,
                         button_padding_x,
                         button_padding_y,
                         button_text_line_height,
