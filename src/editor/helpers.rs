@@ -1155,13 +1155,16 @@ pub(crate) fn compute_image_preview_size(
     image_width: f32,
     image_height: f32,
     max_width: f32,
+    raster_scale: f32,
 ) -> (f32, f32) {
     if image_width <= 0.0 || image_height <= 0.0 || max_width <= 0.0 {
         return (0.0, 0.0);
     }
 
-    let scale = max_width / image_width;
-    (max_width, image_height * scale)
+    let logical_width = image_width / raster_scale.max(1.0);
+    let logical_height = image_height / raster_scale.max(1.0);
+    let scale = (max_width / logical_width).min(1.0);
+    (logical_width * scale, logical_height * scale)
 }
 
 pub(crate) fn compute_generated_preview_size(
@@ -3473,21 +3476,17 @@ pub(crate) fn load_render_image_from_url(url: &str) -> anyhow::Result<RenderImag
     load_render_image_from_bytes(&bytes)
 }
 
-/// Show a native macOS file picker (via osascript) and return the chosen path.
 pub(crate) fn pick_image_file_blocking() -> Option<PathBuf> {
-    let script =
-        r#"POSIX path of (choose file of type {"public.image"} with prompt "Choose Image")"#;
-    let output = std::process::Command::new("osascript")
-        .args(["-e", script])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !s.is_empty() {
-            return Some(PathBuf::from(s));
-        }
-    }
-    None
+    rfd::FileDialog::new()
+        .set_title("Choose Image")
+        .add_filter(
+            "Images",
+            &[
+                "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg",
+                "heic", "heif", "avif",
+            ],
+        )
+        .pick_file()
 }
 
 pub(crate) fn pick_folder_blocking(title: &str) -> Option<PathBuf> {

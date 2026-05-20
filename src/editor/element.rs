@@ -789,6 +789,7 @@ impl Element for EditorElement {
         };
 
         let image_cache = &editor.image_cache;
+        let window_scale_factor = window.scale_factor().max(1.0);
         let table_cell_padding_px = editor.scaled(editor.styles.table.table_cell_padding_px);
         let table_cell_padding_chars = if table_cell_padding_px <= 0.0 {
             0
@@ -1763,8 +1764,12 @@ impl Element for EditorElement {
                     let img_w = img_size.width.0 as f32;
                     let img_h = img_size.height.0 as f32;
                     if img_w > 0.0 && img_h > 0.0 {
-                        let (_, display_h) =
-                            helpers::compute_image_preview_size(img_w, img_h, text_width);
+                        let (_, display_h) = helpers::compute_image_preview_size(
+                            img_w,
+                            img_h,
+                            text_width,
+                            window_scale_factor,
+                        );
                         display_h + image_gap_top + image_gap_bottom
                     } else {
                         0.0
@@ -2705,8 +2710,12 @@ impl Element for EditorElement {
                         let img_w = img_size.width.0 as f32;
                         let img_h = img_size.height.0 as f32;
                         if img_w > 0.0 && img_h > 0.0 {
-                            let (display_w, display_h) =
-                                helpers::compute_image_preview_size(img_w, img_h, text_width);
+                            let (display_w, display_h) = helpers::compute_image_preview_size(
+                                img_w,
+                                img_h,
+                                text_width,
+                                window_scale_factor,
+                            );
                             let img_top = text_line_top + text_line_height + image_gap_top;
                             let img_left = editor_left
                                 + editor.padding_left()
