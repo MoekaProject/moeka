@@ -410,8 +410,7 @@ impl Element for ChatTerminalSurfaceElement {
         let editor = self.editor.read(cx);
         let (body_font_size, cell_width, cell_height) = editor.chat_terminal_metrics();
         let cursor_width = editor.styles.cursor.cursor_width_px.max(1.0);
-        let cursor_height =
-            cell_height * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
+        let cursor_height = cell_height * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
         let cursor_opacity = if editor.chat_terminal_selecting {
             editor.styles.cursor.cursor_opacity_max
         } else {
@@ -428,10 +427,7 @@ impl Element for ChatTerminalSurfaceElement {
                 point(
                     origin.x + px(col_index as f32 * cell_width),
                     origin.y
-                        + px(
-                            row_index as f32 * cell_height
-                                + (cell_height - cursor_height) / 2.0,
-                        ),
+                        + px(row_index as f32 * cell_height + (cell_height - cursor_height) / 2.0),
                 ),
                 size(px(cursor_width), px(cursor_height)),
             )
