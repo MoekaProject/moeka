@@ -85,7 +85,14 @@ impl EditorView {
                                             let new_width =
                                                 window_width - f32::from(event.position.x);
                                             let new_width = new_width.clamp(min_w, max_w);
-                                            this.utility_panel_custom_width = Some(new_width);
+                                            if let Some(panel) =
+                                                this.active_resizable_utility_panel()
+                                            {
+                                                this.set_utility_panel_custom_width_for(
+                                                    panel,
+                                                    Some(new_width),
+                                                );
+                                            }
                                             this.set_utility_panel_width_immediately(new_width);
                                             cx.notify();
                                         }
@@ -1064,8 +1071,14 @@ impl Render for EditorView {
                                                                         window_height - f32::from(event.position.y);
                                                                     let new_height =
                                                                         new_height.clamp(min_h, max_h);
-                                                                    this.utility_panel_custom_width =
-                                                                        Some(new_height);
+                                                                    if let Some(panel) =
+                                                                        this.active_resizable_utility_panel()
+                                                                    {
+                                                                        this.set_utility_panel_custom_width_for(
+                                                                            panel,
+                                                                            Some(new_height),
+                                                                        );
+                                                                    }
                                                                     this.set_utility_panel_width_immediately(
                                                                         new_height,
                                                                     );
@@ -1220,7 +1233,9 @@ impl Render for EditorView {
                                 } else {
                                     (window_width - f32::from(event.position.x)).clamp(min_w, max_w)
                                 };
-                                this.utility_panel_custom_width = Some(new_size);
+                                if let Some(panel) = this.active_resizable_utility_panel() {
+                                    this.set_utility_panel_custom_width_for(panel, Some(new_size));
+                                }
                                 this.set_utility_panel_width_immediately(new_size);
                                 cx.notify();
                             }

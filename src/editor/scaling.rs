@@ -11,6 +11,9 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let previous_panel = self.utility_panel;
+        if next_panel != Some(RightUtilityPanel::Chat) {
+            self.chat_panel_visible = false;
+        }
         self.utility_panel = next_panel;
 
         if next_panel == Some(RightUtilityPanel::Info) {
@@ -482,6 +485,7 @@ impl EditorView {
             return;
         }
 
+        self.chat_panel_visible = false;
         self.last_non_chat_utility_panel = Some(panel);
         self.set_visible_utility_panel(Some(panel), cx);
     }

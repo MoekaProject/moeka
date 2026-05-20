@@ -1683,6 +1683,8 @@ impl EditorView {
         let line_start_offset = self.buffer.line_start(line_idx);
         let line_end_offset = self.buffer.line_end(line_idx);
         let is_cursor_line = line_idx == self.cursor_line();
+        let heading_content_start = matches!(decoration.block_type, BlockType::Heading(_))
+            .then(|| self.line_content_start_col(line_idx).min(line_content.len()));
         let font_size = self.font_size_for_block(&decoration.block_type);
         let line_height = self.line_height_for_block(&decoration.block_type);
         let ime_active_on_line = self
@@ -1735,7 +1737,20 @@ impl EditorView {
                 None
             }
         } else if ime_active_on_line {
-            Some(line_content.len())
+            if let Some(content_start) = heading_content_start {
+                if is_cursor_line {
+                    Some(
+                        self.cursor
+                            .offset
+                            .saturating_sub(line_start_offset)
+                            .max(content_start),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                Some(line_content.len())
+            }
         } else if is_cursor_line {
             Some(self.cursor.offset.saturating_sub(line_start_offset))
         } else {
@@ -1766,15 +1781,13 @@ impl EditorView {
             })
             .collect();
         for marked in self.marked_ranges() {
+            if heading_content_start.is_some() && ime_active_on_line {
+                continue;
+            }
             if marked.end <= line_start_offset || marked.start >= line_end_offset {
                 continue;
             }
-            if matches!(decoration.block_type, BlockType::Heading(_))
-                && marked.end >= line_end_offset
-            {
-                continue;
-            }
-            let start = marked
+            let mut start = marked
                 .start
                 .saturating_sub(line_start_offset)
                 .min(line_content.len());
@@ -1782,6 +1795,12 @@ impl EditorView {
                 .end
                 .saturating_sub(line_start_offset)
                 .min(line_content.len());
+            if let Some(content_start) = heading_content_start {
+                if end <= content_start {
+                    continue;
+                }
+                start = start.max(content_start);
+            }
             active_ranges.push(start..end);
         }
         if active_ranges.is_empty()

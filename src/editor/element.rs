@@ -920,6 +920,12 @@ impl Element for EditorElement {
             } else {
                 false
             };
+            let heading_content_start = matches!(decoration.block_type, BlockType::Heading(_))
+                .then(|| {
+                    editor
+                        .line_content_start_col(line_idx)
+                        .min(line_content.len())
+                });
             let ime_active_on_line = editor.marked_range.as_ref().is_some_and(|marked| {
                 marked.start < line_end_offset && marked.end > line_start_offset
             });
@@ -972,7 +978,20 @@ impl Element for EditorElement {
                     None
                 }
             } else if ime_active_on_line {
-                Some(line_content.len())
+                if let Some(content_start) = heading_content_start {
+                    if is_cursor_line {
+                        Some(
+                            cursor
+                                .offset
+                                .saturating_sub(line_start_offset)
+                                .max(content_start),
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(line_content.len())
+                }
             } else if is_cursor_line {
                 Some(cursor.offset.saturating_sub(line_start_offset))
             } else if cursor_in_table {
@@ -999,15 +1018,13 @@ impl Element for EditorElement {
                 })
                 .collect();
             for marked in editor.marked_ranges() {
+                if heading_content_start.is_some() && ime_active_on_line {
+                    continue;
+                }
                 if marked.end <= line_start_offset || marked.start >= line_end_offset {
                     continue;
                 }
-                if matches!(decoration.block_type, BlockType::Heading(_))
-                    && marked.end >= line_end_offset
-                {
-                    continue;
-                }
-                let start = marked
+                let mut start = marked
                     .start
                     .saturating_sub(line_start_offset)
                     .min(line_content.len());
@@ -1015,6 +1032,12 @@ impl Element for EditorElement {
                     .end
                     .saturating_sub(line_start_offset)
                     .min(line_content.len());
+                if let Some(content_start) = heading_content_start {
+                    if end <= content_start {
+                        continue;
+                    }
+                    start = start.max(content_start);
+                }
                 active_ranges.push(start..end);
             }
             if active_ranges.is_empty()
@@ -3635,8 +3658,7 @@ impl Element for EditorElement {
                                     .position_for_index(leading_ws, px(line_height))
                                     .unwrap_or_default()
                                     .x,
-                            )
-                            + editor.scaled(2.0);
+                            );
                         let marker_offset = editor.scaled(
                             editor
                                 .styles
@@ -3738,15 +3760,17 @@ impl Element for EditorElement {
                 button_padding_x
             };
 
-            let collapsed_preview_anchor = editor
+            let preview_anchor = editor
                 .decorations
                 .get(*start_line)
                 .and_then(|decoration| decoration.block_preview.as_ref())
-                .filter(|preview| preview.is_anchor)
+                .filter(|preview| preview.is_anchor);
+            let preview_is_active = preview_anchor.is_some_and(|preview| {
+                helpers::block_preview_is_active(preview, cursor_line, &all_sel_ranges)
+            });
+            let collapsed_preview_anchor = preview_anchor
                 .filter(|preview| !editor.folded_sections.contains(&preview.start_line))
-                .filter(|preview| {
-                    !helpers::block_preview_is_active(preview, cursor_line, &all_sel_ranges)
-                });
+                .filter(|_| !preview_is_active);
             let group_syntax_collapsed =
                 code_block_group_range(*start_line).is_some_and(|(group_start, group_end)| {
                     !active_code_fence_group.is_some_and(|(active_start, active_end)| {
@@ -3756,9 +3780,20 @@ impl Element for EditorElement {
             let folded_action_group = collapsed_preview_anchor.is_some() || group_syntax_collapsed;
 
             let is_copied = editor.copied_code_block_start == Some(*start_line);
-            let is_visible = folded_action_group
-                || editor.hovering_code_block_start == Some(*start_line)
-                || is_copied;
+            let preview_actions_visible = preview_anchor.is_some()
+                && (preview_is_active
+                    || editor.hovering_code_block_start == Some(*start_line)
+                    || editor.hovering_generated_preview_line == Some(*start_line)
+                    || editor.hovering_code_block_copy_start == Some(*start_line)
+                    || editor.hovering_generated_preview_zoom_line == Some(*start_line)
+                    || is_copied);
+            let is_visible = if preview_anchor.is_some() {
+                preview_actions_visible
+            } else {
+                folded_action_group
+                    || editor.hovering_code_block_start == Some(*start_line)
+                    || is_copied
+            };
             if !is_visible {
                 continue;
             }
@@ -3770,6 +3805,25 @@ impl Element for EditorElement {
                     code_block_styles.code_block_copy_button_copied_bg,
                     code_block_styles.code_block_copy_button_copied_text_color,
                     code_block_styles.code_block_copy_button_copied_border_color,
+                )
+            } else if preview_anchor.is_some() {
+                (
+                    editor.t(crate::i18n::TextKey::Copy).to_string(),
+                    if is_button_hovered {
+                        code_block_styles.code_block_copy_button_hover_bg
+                    } else {
+                        code_block_styles.code_block_copy_button_bg
+                    },
+                    if is_button_hovered {
+                        code_block_styles.code_block_copy_button_hover_text_color
+                    } else {
+                        code_block_styles.code_block_copy_button_text_color
+                    },
+                    if is_button_hovered {
+                        code_block_styles.code_block_copy_button_hover_border_color
+                    } else {
+                        code_block_styles.code_block_copy_button_border_color
+                    },
                 )
             } else if is_button_hovered {
                 (
@@ -3866,19 +3920,13 @@ impl Element for EditorElement {
                         .max(*zoom_height)
                 })
                 .unwrap_or_else(|| (button_text_line_height + button_padding_y * 2.0).ceil());
-            let action_anchor_bounds = generated_preview_image_areas
+            let action_anchor_bounds = generated_preview_hit_areas
                 .iter()
                 .find(|(_, line_idx)| *line_idx == *start_line)
                 .map(|(bounds, _)| *bounds)
-                .or_else(|| {
-                    generated_preview_hit_areas
-                        .iter()
-                        .find(|(_, line_idx)| *line_idx == *start_line)
-                        .map(|(bounds, _)| *bounds)
-                })
                 .unwrap_or(group_bounds);
             let action_anchor_left = f32::from(action_anchor_bounds.origin.x);
-            let image_anchor_top = f32::from(action_anchor_bounds.origin.y);
+            let action_anchor_top = f32::from(action_anchor_bounds.origin.y);
             let action_anchor_width = f32::from(action_anchor_bounds.size.width);
             let action_group_width = preview_zoom_button
                 .as_ref()
@@ -3893,7 +3941,7 @@ impl Element for EditorElement {
                 .map(|(_, zoom_width, _, _, _)| action_group_x + zoom_width + preview_button_gap)
                 .unwrap_or(action_group_x)
                 .round();
-            let button_y = (image_anchor_top + button_top).round();
+            let button_y = (action_anchor_top + button_top).round();
             let button_bounds = Bounds::new(
                 point(px(button_x), px(button_y)),
                 size(px(button_width), px(button_height)),

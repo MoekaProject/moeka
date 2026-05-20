@@ -872,6 +872,9 @@ pub struct EditorView {
     pub(crate) last_non_chat_utility_panel: Option<RightUtilityPanel>,
     pub(crate) chat_panel_placement: ChatPanelPlacement,
     pub(crate) utility_panel_custom_width: Option<f32>,
+    pub(crate) chat_panel_custom_size: Option<f32>,
+    pub(crate) info_panel_custom_width: Option<f32>,
+    pub(crate) git_history_panel_custom_width: Option<f32>,
     pub(crate) utility_panel_resizing: bool,
     pub(crate) utility_panel_display_width: f32,
     pub(crate) utility_panel_layout_width: f32,
@@ -1255,6 +1258,9 @@ impl EditorView {
             last_non_chat_utility_panel: None,
             chat_panel_placement: ChatPanelPlacement::Right,
             utility_panel_custom_width: None,
+            chat_panel_custom_size: None,
+            info_panel_custom_width: None,
+            git_history_panel_custom_width: None,
             utility_panel_resizing: false,
             utility_panel_display_width: 0.0,
             utility_panel_layout_width: 0.0,
@@ -1498,8 +1504,35 @@ impl EditorView {
     }
 
     pub(crate) fn utility_panel_target_width(&self) -> f32 {
-        self.utility_panel_custom_width
+        self.utility_panel
+            .and_then(|panel| self.utility_panel_custom_width_for(panel))
             .unwrap_or_else(|| self.scaled(self.styles.utility_panel.utility_panel_width_px))
+    }
+
+    pub(crate) fn utility_panel_custom_width_for(&self, panel: RightUtilityPanel) -> Option<f32> {
+        match panel {
+            RightUtilityPanel::Outline => self.utility_panel_custom_width,
+            RightUtilityPanel::Chat => self.chat_panel_custom_size,
+            RightUtilityPanel::Info => self.info_panel_custom_width,
+            RightUtilityPanel::GitHistory => self.git_history_panel_custom_width,
+        }
+    }
+
+    pub(crate) fn set_utility_panel_custom_width_for(
+        &mut self,
+        panel: RightUtilityPanel,
+        width: Option<f32>,
+    ) {
+        match panel {
+            RightUtilityPanel::Outline => self.utility_panel_custom_width = width,
+            RightUtilityPanel::Chat => self.chat_panel_custom_size = width,
+            RightUtilityPanel::Info => self.info_panel_custom_width = width,
+            RightUtilityPanel::GitHistory => self.git_history_panel_custom_width = width,
+        }
+    }
+
+    pub(crate) fn active_resizable_utility_panel(&self) -> Option<RightUtilityPanel> {
+        self.displayed_utility_panel.or(self.utility_panel)
     }
 
     pub(crate) fn utility_panel_width(&self) -> f32 {
@@ -1522,14 +1555,7 @@ impl EditorView {
     }
 
     pub(crate) fn is_utility_panel_active(&self, panel: RightUtilityPanel) -> bool {
-        match panel {
-            RightUtilityPanel::Chat => {
-                self.chat_panel_visible || self.utility_panel == Some(RightUtilityPanel::Chat)
-            }
-            _ => {
-                self.utility_panel == Some(panel) || self.last_non_chat_utility_panel == Some(panel)
-            }
-        }
+        self.utility_panel == Some(panel)
     }
 
     pub(crate) fn should_render_bottom_chat_panel(&self) -> bool {
@@ -1828,11 +1854,29 @@ impl EditorView {
             (self.last_content_left + self.last_text_width).clamp(content_left, right);
         let x = f32::from(position.x);
         let y = f32::from(position.y);
-        let hovering = y >= top
+        let toolbar_left = left + self.scaled(self.styles.toolbar.toolbar_offset_left_px);
+        let toolbar_gap = self.scaled(self.styles.toolbar.toolbar_gap_px);
+        let primary_btn_size = self.scaled(self.styles.toolbar.toolbar_primary_btn_size_px);
+        let secondary_btn_size = self.scaled(self.styles.toolbar.toolbar_secondary_btn_size_px);
+        let left_toolbar_right = toolbar_left + primary_btn_size + toolbar_gap + secondary_btn_size;
+        let right_toolbar_left = right
+            - self.scaled(self.styles.toolbar.toolbar_offset_left_px)
+            - secondary_btn_size * 2.0
+            - toolbar_gap;
+        let toolbar_overlaps_content =
+            left_toolbar_right > content_left || right_toolbar_left < content_right;
+        let hovering_side_gutters = y >= top
             && y <= bottom
             && x >= left
             && x <= right
             && (x < content_left || x > content_right);
+        let hovering_top_reveal = toolbar_overlaps_content
+            && y >= top
+            && y <= (top + self.scaled(self.styles.toolbar.toolbar_reveal_hover_height_px))
+                .min(bottom)
+            && x >= left
+            && x <= right;
+        let hovering = hovering_side_gutters || hovering_top_reveal;
         let changed = hovering != self.toolbar_corner_hovered;
         self.toolbar_corner_hovered = hovering;
         if changed {

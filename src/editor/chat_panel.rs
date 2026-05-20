@@ -2324,10 +2324,7 @@ impl EditorView {
         previous_non_spacer_terminal_col(row_cells, col)
     }
 
-    fn chat_terminal_mouse_event_cell(
-        &self,
-        position: Point<Pixels>,
-    ) -> Option<(usize, usize)> {
+    fn chat_terminal_mouse_event_cell(&self, position: Point<Pixels>) -> Option<(usize, usize)> {
         let (row, col) = self.chat_terminal_cell_from_position(position)?;
         Some((
             row,
