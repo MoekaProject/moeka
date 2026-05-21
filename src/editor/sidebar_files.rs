@@ -462,6 +462,7 @@ impl EditorView {
         self.sidebar_error = None;
         self.invalidate_sidebar_items_cache();
         self.sidebar_git_statuses.clear();
+        self.sidebar_git_statuses_task = None;
         self.invalidate_sidebar_git_statuses();
         self.reset_sidebar_render_limit();
         self.context_menu = None;
@@ -489,6 +490,7 @@ impl EditorView {
             self.sidebar_git_statuses.clear();
             self.sidebar_git_statuses_dirty = false;
             self.sidebar_git_statuses_scanned_at = None;
+            self.sidebar_git_statuses_task = None;
             self.context_menu = None;
             self._watcher_task = None;
             cx.notify();

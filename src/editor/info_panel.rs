@@ -95,6 +95,103 @@ struct GitRepoContext {
     relative_path: String,
 }
 
+fn git_repo_context_for_file(file_path: &Path) -> Option<GitRepoContext> {
+    let file_dir = file_path.parent()?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(file_dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let repo_root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    let relative_path = file_path
+        .strip_prefix(&repo_root)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Some(GitRepoContext {
+        repo_root,
+        file_path: file_path.to_path_buf(),
+        relative_path,
+    })
+}
+
+fn collect_git_history_items_for_context(
+    language: crate::i18n::UiLanguage,
+    context: &GitRepoContext,
+) -> Option<Vec<GitHistoryItem>> {
+    let mut items = Vec::new();
+    let status_output = run_git_command(
+        &context.repo_root,
+        &["status", "--porcelain=v1", "--", context.relative_path.as_str()],
+    )
+    .unwrap_or_default();
+
+    if !status_output.trim().is_empty() {
+        items.push(GitHistoryItem {
+            commit_hash: None,
+            short_hash: crate::i18n::translate(language, crate::i18n::TextKey::WorkingTree)
+                .to_string(),
+            message: crate::i18n::translate(language, crate::i18n::TextKey::UncommittedChanges)
+                .to_string(),
+            time_label: crate::i18n::translate(language, crate::i18n::TextKey::Current)
+                .to_string(),
+            is_working_tree: true,
+        });
+    }
+
+    let log_output = run_git_command(
+        &context.repo_root,
+        &[
+            "log",
+            "--follow",
+            "--format=%H%x1f%s%x1f%ct",
+            "--",
+            context.relative_path.as_str(),
+        ],
+    )
+    .unwrap_or_default();
+
+    for line in log_output.lines() {
+        let mut parts = line.split('\x1f');
+        let Some(commit_hash) = parts.next() else {
+            continue;
+        };
+        let Some(message) = parts.next() else {
+            continue;
+        };
+        let Some(timestamp) = parts.next() else {
+            continue;
+        };
+        let short_hash = commit_hash.chars().take(8).collect::<String>();
+        let time_label = timestamp
+            .parse::<i64>()
+            .map(|value| crate::i18n::format_unix_timestamp_relative(language, value))
+            .unwrap_or_else(|_| crate::i18n::format_relative_time(language, SystemTime::now()));
+        items.push(GitHistoryItem {
+            commit_hash: Some(commit_hash.to_string()),
+            short_hash,
+            message: message.to_string(),
+            time_label,
+            is_working_tree: false,
+        });
+    }
+
+    Some(items)
+}
+
+fn collect_git_history_items_for_file(
+    language: crate::i18n::UiLanguage,
+    file_path: &Path,
+) -> Option<Vec<GitHistoryItem>> {
+    let context = git_repo_context_for_file(file_path)?;
+    collect_git_history_items_for_context(language, &context)
+}
+
 fn format_file_size(size: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
@@ -907,9 +1004,9 @@ impl EditorView {
     }
 
     pub(crate) fn invalidate_git_history_cache(&mut self) {
-        self.git_history_cache_path = None;
-        self.git_history_cache_result = None;
+        self.git_history_cache_dirty = true;
         self.git_history_cache_scanned_at = None;
+        self.git_history_refresh_epoch = self.git_history_refresh_epoch.wrapping_add(1);
     }
 
     pub(crate) fn invalidate_active_file_panel_caches(&mut self) {
@@ -933,46 +1030,81 @@ impl EditorView {
         self.info_panel_cache_result.clone().flatten()
     }
 
-    fn cached_git_history_items(&mut self) -> Option<Vec<GitHistoryItem>> {
+    fn schedule_git_history_refresh(&mut self, cx: &mut Context<Self>) {
+        if !self.git_history_cache_dirty || self.git_history_refresh_task.is_some() {
+            return;
+        }
+
+        let Some(requested_file_path) = self.git_history_cache_path.clone() else {
+            self.git_history_cache_result = None;
+            self.git_history_cache_scanned_at = Some(SystemTime::now());
+            self.git_history_cache_dirty = false;
+            return;
+        };
+
+        let epoch = self.git_history_refresh_epoch;
+        let language = self.ui_language;
+        let delay = remaining_refresh_delay(
+            self.git_history_cache_scanned_at,
+            GIT_HISTORY_REFRESH_MIN_INTERVAL_MS,
+        );
+        let background_file_path = requested_file_path.clone();
+        let task = cx.spawn(async move |this, cx| {
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+
+            let items = cx
+                .background_executor()
+                .spawn(async move { collect_git_history_items_for_file(language, &background_file_path) })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.git_history_refresh_task = None;
+
+                if this.git_history_cache_path.as_ref() != Some(&requested_file_path)
+                    || this.git_history_refresh_epoch != epoch
+                {
+                    if this.git_history_cache_dirty {
+                        this.schedule_git_history_refresh(cx);
+                    }
+                    return;
+                }
+
+                this.git_history_cache_result = Some(items);
+                this.git_history_cache_scanned_at = Some(SystemTime::now());
+                this.git_history_cache_dirty = false;
+                cx.notify();
+            })
+            .ok();
+        });
+        self.git_history_refresh_task = Some(task);
+    }
+
+    fn cached_git_history_items(&mut self, cx: &mut Context<Self>) -> Option<Vec<GitHistoryItem>> {
         let current_path = self.current_file_path.clone();
-        if self.git_history_cache_path == current_path && self.git_history_cache_result.is_some() {
-            return self.git_history_cache_result.clone().flatten();
+        if self.git_history_cache_path != current_path {
+            self.git_history_cache_path = current_path.clone();
+            self.git_history_cache_result = None;
+            self.git_history_cache_scanned_at = None;
+            self.git_history_cache_dirty = true;
+            self.git_history_refresh_epoch = self.git_history_refresh_epoch.wrapping_add(1);
+            self.git_history_refresh_task = None;
         }
 
-        let mut profile_scope = profile::ProfileScope::new("utility_panel.git_history_refresh");
-        if let Some(path) = current_path.as_ref() {
-            profile_scope.set_note(format!("path={}", path.display()));
+        if self.git_history_cache_dirty {
+            if let Some(path) = current_path.as_ref() {
+                let mut profile_scope = profile::ProfileScope::new("utility_panel.git_history_refresh");
+                profile_scope.set_note(format!("path={}", path.display()));
+            }
+            self.schedule_git_history_refresh(cx);
         }
 
-        self.git_history_cache_path = current_path;
-        self.git_history_cache_result = Some(self.collect_git_history_items());
-        self.git_history_cache_scanned_at = Some(SystemTime::now());
         self.git_history_cache_result.clone().flatten()
     }
 
     fn git_repo_context_for_path(&self, file_path: &Path) -> Option<GitRepoContext> {
-        let file_dir = file_path.parent()?;
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(file_dir)
-            .args(["rev-parse", "--show-toplevel"])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-
-        let repo_root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
-        let relative_path = file_path
-            .strip_prefix(&repo_root)
-            .ok()?
-            .to_string_lossy()
-            .replace('\\', "/");
-        Some(GitRepoContext {
-            repo_root,
-            file_path: file_path.to_path_buf(),
-            relative_path,
-        })
+        git_repo_context_for_file(file_path)
     }
 
     fn git_repo_context(&self) -> Option<GitRepoContext> {
@@ -1216,72 +1348,6 @@ impl EditorView {
         };
         self.scroll_to_line(target_line, cx);
         self.request_editor_focus(cx);
-    }
-
-    fn collect_git_history_items(&self) -> Option<Vec<GitHistoryItem>> {
-        let context = self.git_repo_context()?;
-        let mut items = Vec::new();
-        let status_output = run_git_command(
-            &context.repo_root,
-            &[
-                "status",
-                "--porcelain=v1",
-                "--",
-                context.relative_path.as_str(),
-            ],
-        )
-        .unwrap_or_default();
-
-        if !status_output.trim().is_empty() {
-            items.push(GitHistoryItem {
-                commit_hash: None,
-                short_hash: self.t(crate::i18n::TextKey::WorkingTree).to_string(),
-                message: self.t(crate::i18n::TextKey::UncommittedChanges).to_string(),
-                time_label: self.t(crate::i18n::TextKey::Current).to_string(),
-                is_working_tree: true,
-            });
-        }
-
-        let log_output = run_git_command(
-            &context.repo_root,
-            &[
-                "log",
-                "--follow",
-                "--format=%H%x1f%s%x1f%ct",
-                "--",
-                context.relative_path.as_str(),
-            ],
-        )
-        .unwrap_or_default();
-
-        for line in log_output.lines() {
-            let mut parts = line.split('\x1f');
-            let Some(commit_hash) = parts.next() else {
-                continue;
-            };
-            let Some(message) = parts.next() else {
-                continue;
-            };
-            let Some(timestamp) = parts.next() else {
-                continue;
-            };
-            let short_hash = commit_hash.chars().take(8).collect::<String>();
-            let time_label = timestamp
-                .parse::<i64>()
-                .map(|value| crate::i18n::format_unix_timestamp_relative(self.ui_language, value))
-                .unwrap_or_else(|_| {
-                    crate::i18n::format_relative_time(self.ui_language, SystemTime::now())
-                });
-            items.push(GitHistoryItem {
-                commit_hash: Some(commit_hash.to_string()),
-                short_hash,
-                message: message.to_string(),
-                time_label,
-                is_working_tree: false,
-            });
-        }
-
-        Some(items)
     }
 
     fn current_file_text_for_git_diff(&self, path: &Path) -> String {
@@ -2243,7 +2309,7 @@ impl EditorView {
     }
 
     pub(crate) fn render_git_history_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let history_items = self.cached_git_history_items();
+        let history_items = self.cached_git_history_items(cx);
         let ups = &self.styles.utility_panel;
         let top_spacer = self.scaled(ups.utility_panel_top_spacer_height_px);
         let bottom_spacer = self.scaled(ups.utility_panel_bottom_spacer_height_px);
@@ -2302,6 +2368,9 @@ impl EditorView {
                         ))
                         .into_any_element(),
                 );
+            }
+            None if self.git_history_refresh_task.is_some() => {
+                children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
             }
             None => {
                 children.push(

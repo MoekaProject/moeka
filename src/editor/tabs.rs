@@ -1067,6 +1067,39 @@ impl EditorView {
         segments
     }
 
+    fn diff_path_bar_navigation_labels(&self) -> (&'static str, &'static str, &'static str) {
+        let show_only_changes = self.active_git_diff_show_only_changes();
+        match self.ui_language {
+            crate::i18n::UiLanguage::ChineseSimplified => (
+                if show_only_changes {
+                    "展开"
+                } else {
+                    "折叠"
+                },
+                "上一个",
+                "下一个",
+            ),
+            crate::i18n::UiLanguage::ChineseTraditional => (
+                if show_only_changes {
+                    "展開"
+                } else {
+                    "摺疊"
+                },
+                "上一個",
+                "下一個",
+            ),
+            _ => (
+                if show_only_changes {
+                    "Expand"
+                } else {
+                    "Collapse"
+                },
+                "Prev",
+                "Next",
+            ),
+        }
+    }
+
     pub(crate) fn render_active_tab_path_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let es = &self.styles.editor;
         let gap = self.scaled(es.editor_path_bar_gap_px);
@@ -1080,6 +1113,8 @@ impl EditorView {
         let item_radius = self.scaled(es.editor_path_bar_item_radius_px);
         let item_hover_text_color = es.editor_path_bar_item_hover_text_color;
         let item_opacity = es.editor_path_bar_item_opacity;
+        let diff_group_gap = self.scaled(es.editor_path_bar_diff_group_gap_px);
+        let diff_navigation_labels = self.diff_path_bar_navigation_labels();
         let diff_label = self
             .active_git_diff_state()
             .map(|diff| (diff.source_label.clone(), diff.target_label.clone()));
@@ -1200,16 +1235,86 @@ impl EditorView {
             )
             .child(breadcrumb)
             .when_some(diff_label, |this, (source_label, target_label)| {
+                let (toggle_label, previous_label, next_label) = diff_navigation_labels;
+                let diff_button =
+                    |icon_path: &'static str,
+                     label: &'static str,
+                     enabled: bool,
+                     handler: fn(&mut Self, &mut Context<Self>)| {
+                        let mut button = div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(gap))
+                            .whitespace_nowrap()
+                            .cursor(CursorStyle::Arrow)
+                            .opacity(if enabled {
+                                item_opacity
+                            } else {
+                                item_opacity * 0.55
+                            })
+                            .child(
+                                svg()
+                                    .path(icon_path)
+                                    .size(px(action_icon_size))
+                                    .flex_none()
+                                    .text_color(es.editor_path_bar_text_color),
+                            )
+                            .child(label);
+
+                        if enabled {
+                            button = button.hover(move |style| style.opacity(1.0)).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    handler(this, cx);
+                                }),
+                            );
+                        }
+
+                        button
+                    };
+
                 this.child(
                     div()
                         .pl(px(action_gap))
                         .flex()
                         .flex_none()
                         .items_center()
-                        .gap(px(gap))
+                        .gap(px(diff_group_gap))
                         .text_color(es.editor_path_bar_text_color)
-                        .opacity(es.editor_path_bar_item_opacity)
-                        .child(div().flex_none().whitespace_nowrap().child(source_label))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .gap(px(gap))
+                                .child(diff_button(
+                                    "assets/icons/filetree/workspace-expand.svg",
+                                    toggle_label,
+                                    true,
+                                    Self::toggle_git_diff_show_only_changes,
+                                ))
+                                .child(diff_button(
+                                    "assets/icons/arrow-up-circle.svg",
+                                    previous_label,
+                                    self.can_navigate_previous_git_diff_row(),
+                                    Self::navigate_previous_git_diff_row,
+                                ))
+                                .child(diff_button(
+                                    "assets/icons/arrow-down-circle.svg",
+                                    next_label,
+                                    self.can_navigate_next_git_diff_row(),
+                                    Self::navigate_next_git_diff_row,
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .opacity(item_opacity)
+                                .child(source_label),
+                        )
                         .child(
                             svg()
                                 .path("assets/icons/right.svg")
@@ -1217,7 +1322,13 @@ impl EditorView {
                                 .flex_none()
                                 .text_color(es.editor_path_bar_separator_color),
                         )
-                        .child(div().flex_none().whitespace_nowrap().child(target_label)),
+                        .child(
+                            div()
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .opacity(item_opacity)
+                                .child(target_label),
+                        ),
                 )
             })
             .when(self.active_tab_supports_text_search(), |this| {

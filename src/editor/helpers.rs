@@ -3514,8 +3514,8 @@ pub(crate) fn pick_image_file_blocking() -> Option<PathBuf> {
         .add_filter(
             "Images",
             &[
-                "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg",
-                "heic", "heif", "avif",
+                "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg", "heic", "heif",
+                "avif",
             ],
         )
         .pick_file()

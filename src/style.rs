@@ -24,7 +24,6 @@ pub struct Styles {
     pub utility_panel: UtilityPanelStyles,
     pub tab_bar: TabBarStyles,
     pub toolbar: ToolbarStyles,
-    pub diff_viewer: DiffViewerStyles,
     pub tooltip: TooltipStyles,
     pub cursor: CursorStyles,
     pub code_block: CodeBlockStyles,
@@ -100,6 +99,7 @@ pub struct EditorStyles {
     pub editor_path_bar_item_radius_px: f32,
     pub editor_path_bar_item_hover_text_color: Hsla,
     pub editor_path_bar_item_opacity: f32,
+    pub editor_path_bar_diff_group_gap_px: f32,
     pub editor_path_bar_action_gap_px: f32,
     pub editor_path_bar_action_btn_size_px: f32,
     pub editor_path_bar_action_icon_size_px: f32,
@@ -455,24 +455,6 @@ pub struct ToolbarStyles {
     pub toolbar_btn_shadow: bool,
     pub toolbar_btn_bg: Hsla,
     pub toolbar_btn_radius_px: f32,
-}
-
-// ── Diff Viewer ────────────────────────────────────────────────────
-
-pub struct DiffViewerStyles {
-    pub diff_viewer_controls_offset_top_px: f32,
-    pub diff_viewer_controls_offset_right_px: f32,
-    pub diff_viewer_controls_gap_px: f32,
-    pub diff_viewer_control_width_px: f32,
-    pub diff_viewer_control_height_px: f32,
-    pub diff_viewer_control_radius_px: f32,
-    pub diff_viewer_control_border_width_px: f32,
-    pub diff_viewer_control_font_size_px: f32,
-    pub diff_viewer_control_bg: Hsla,
-    pub diff_viewer_control_hover_bg: Hsla,
-    pub diff_viewer_control_border_color: Hsla,
-    pub diff_viewer_control_text_color: Hsla,
-    pub diff_viewer_control_disabled_opacity: f32,
 }
 
 // ── Tooltip ─────────────────────────────────────────────────────────
@@ -1047,6 +1029,7 @@ impl Styles {
                 editor_path_bar_item_radius_px: 5.0,
                 editor_path_bar_item_hover_text_color: theme.text_primary,
                 editor_path_bar_item_opacity: 0.68,
+                editor_path_bar_diff_group_gap_px: 10.0,
                 editor_path_bar_action_gap_px: 2.0,
                 editor_path_bar_action_btn_size_px: 20.0,
                 editor_path_bar_action_icon_size_px: 14.0,
@@ -1353,21 +1336,6 @@ impl Styles {
                 toolbar_btn_shadow: false,
                 toolbar_btn_bg: with_alpha(theme.bg_elevated, 0.85),
                 toolbar_btn_radius_px: 8.0,
-            },
-            diff_viewer: DiffViewerStyles {
-                diff_viewer_controls_offset_top_px: 12.0,
-                diff_viewer_controls_offset_right_px: 12.0,
-                diff_viewer_controls_gap_px: 6.0,
-                diff_viewer_control_width_px: 28.0,
-                diff_viewer_control_height_px: 28.0,
-                diff_viewer_control_radius_px: 0.0,
-                diff_viewer_control_border_width_px: 1.0,
-                diff_viewer_control_font_size_px: ui_font_size_sm_px,
-                diff_viewer_control_bg: with_alpha(theme.bg_elevated, 0.95),
-                diff_viewer_control_hover_bg: theme.bg_hover,
-                diff_viewer_control_border_color: with_alpha(theme.border_primary, 0.9),
-                diff_viewer_control_text_color: theme.text_secondary,
-                diff_viewer_control_disabled_opacity: 0.42,
             },
             tooltip: TooltipStyles {
                 tooltip_delay_ms: 1000,

@@ -65,6 +65,27 @@ use crate::theme::{EditorThemeMode, Theme, ThemeColorField, ThemeKind};
 
 const CODE_BLOCK_COPY_FEEDBACK_MS: u64 = 1200;
 const PANEL_ANIMATION_FRAME_MS: u64 = 8;
+const SIDEBAR_GIT_STATUS_REFRESH_MIN_INTERVAL_MS: u64 = 350;
+const GIT_HISTORY_REFRESH_MIN_INTERVAL_MS: u64 = 350;
+
+#[derive(Clone, Copy, Default)]
+struct GitMetadataImpact {
+    affects_sidebar_status: bool,
+    affects_history: bool,
+    affects_working_tree_diff: bool,
+}
+
+impl GitMetadataImpact {
+    fn any(self) -> bool {
+        self.affects_sidebar_status || self.affects_history || self.affects_working_tree_diff
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.affects_sidebar_status |= other.affects_sidebar_status;
+        self.affects_history |= other.affects_history;
+        self.affects_working_tree_diff |= other.affects_working_tree_diff;
+    }
+}
 
 fn ease_in_out_cubic(t: f32) -> f32 {
     if t < 0.5 {
@@ -79,6 +100,17 @@ fn text_tab_is_dirty(saved_text: Option<&str>, current_text: &str) -> bool {
         Some(saved_text) => saved_text != current_text,
         None => !current_text.is_empty(),
     }
+}
+
+fn remaining_refresh_delay(scanned_at: Option<SystemTime>, minimum_interval_ms: u64) -> Duration {
+    let Some(scanned_at) = scanned_at else {
+        return Duration::ZERO;
+    };
+    let minimum_interval = Duration::from_millis(minimum_interval_ms);
+    let Ok(elapsed) = scanned_at.elapsed() else {
+        return Duration::ZERO;
+    };
+    minimum_interval.saturating_sub(elapsed)
 }
 
 // ── Platform helpers ────────────────────────────────────────────────
@@ -854,6 +886,8 @@ pub struct EditorView {
     pub(crate) sidebar_git_statuses: HashMap<PathBuf, SidebarGitStatus>,
     pub(crate) sidebar_git_statuses_dirty: bool,
     pub(crate) sidebar_git_statuses_scanned_at: Option<SystemTime>,
+    pub(crate) sidebar_git_statuses_refresh_epoch: usize,
+    pub(crate) sidebar_git_statuses_task: Option<Task<()>>,
     pub(crate) workspaces: Vec<PathBuf>,
     pub(crate) _watcher_task: Option<Task<()>>,
     pub(crate) temp_save_tasks: HashMap<String, Task<()>>,
@@ -865,7 +899,10 @@ pub struct EditorView {
     pub(crate) info_panel_cache_result: Option<Option<info_panel::InfoPanelData>>,
     pub(crate) git_history_cache_path: Option<PathBuf>,
     pub(crate) git_history_cache_result: Option<Option<Vec<info_panel::GitHistoryItem>>>,
+    pub(crate) git_history_cache_dirty: bool,
     pub(crate) git_history_cache_scanned_at: Option<SystemTime>,
+    pub(crate) git_history_refresh_epoch: usize,
+    pub(crate) git_history_refresh_task: Option<Task<()>>,
     pub(crate) utility_panel: Option<RightUtilityPanel>,
     pub(crate) displayed_utility_panel: Option<RightUtilityPanel>,
     pub(crate) chat_panel_visible: bool,
@@ -1240,6 +1277,8 @@ impl EditorView {
             sidebar_git_statuses: HashMap::new(),
             sidebar_git_statuses_dirty: true,
             sidebar_git_statuses_scanned_at: None,
+            sidebar_git_statuses_refresh_epoch: 0,
+            sidebar_git_statuses_task: None,
             workspaces: Vec::new(),
             _watcher_task: None,
             temp_save_tasks: HashMap::new(),
@@ -1251,7 +1290,10 @@ impl EditorView {
             info_panel_cache_result: None,
             git_history_cache_path: None,
             git_history_cache_result: None,
+            git_history_cache_dirty: true,
             git_history_cache_scanned_at: None,
+            git_history_refresh_epoch: 0,
+            git_history_refresh_task: None,
             utility_panel: None,
             displayed_utility_panel: None,
             chat_panel_visible: false,
@@ -2004,7 +2046,7 @@ impl EditorView {
             return;
         }
 
-        let pending = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let pending = Arc::new(std::sync::Mutex::new(HashSet::<PathBuf>::new()));
         let pending_writer = pending.clone();
 
         let mut watcher = match notify::recommended_watcher(
@@ -2039,7 +2081,7 @@ impl EditorView {
                         Ok(g) => g,
                         Err(_) => break,
                     };
-                    std::mem::take(&mut *guard)
+                    guard.drain().collect()
                 };
 
                 if changed_paths.is_empty() {
@@ -2114,6 +2156,43 @@ impl EditorView {
             .any(|component| component.as_os_str().to_str() == Some(".git"))
     }
 
+    fn git_metadata_change_impact(&self, path: &Path) -> GitMetadataImpact {
+        let mut components = path.components();
+        while let Some(component) = components.next() {
+            if component.as_os_str().to_str() != Some(".git") {
+                continue;
+            }
+
+            let category = components
+                .next()
+                .and_then(|component| component.as_os_str().to_str());
+
+            return match category {
+                None => GitMetadataImpact {
+                    affects_sidebar_status: true,
+                    affects_history: true,
+                    affects_working_tree_diff: true,
+                },
+                Some(
+                    "HEAD" | "refs" | "packed-refs" | "rebase-apply" | "rebase-merge" | "sequencer"
+                    | "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD" | "ORIG_HEAD",
+                ) => GitMetadataImpact {
+                    affects_sidebar_status: true,
+                    affects_history: true,
+                    affects_working_tree_diff: true,
+                },
+                Some("index" | "index.lock") => GitMetadataImpact {
+                    affects_sidebar_status: true,
+                    affects_history: true,
+                    affects_working_tree_diff: false,
+                },
+                _ => GitMetadataImpact::default(),
+            };
+        }
+
+        GitMetadataImpact::default()
+    }
+
     fn fs_change_affects_git_status(&self, path: &Path) -> bool {
         match std::fs::symlink_metadata(path) {
             Ok(metadata) => !metadata.is_dir(),
@@ -2123,7 +2202,8 @@ impl EditorView {
 
     pub(crate) fn handle_fs_events(&mut self, changed_paths: &[PathBuf], cx: &mut Context<Self>) {
         let mut changed_paths_in_workspace = Vec::new();
-        let mut git_metadata_changed = false;
+        let mut seen_paths_in_workspace = HashSet::new();
+        let mut git_metadata_impact = GitMetadataImpact::default();
         for path in changed_paths.iter().map(PathBuf::as_path) {
             if !path.starts_with(&self.sidebar_root) {
                 continue;
@@ -2132,16 +2212,19 @@ impl EditorView {
                 continue;
             }
             if self.is_git_metadata_change_path(path) {
-                git_metadata_changed = true;
+                git_metadata_impact.merge(self.git_metadata_change_impact(path));
                 continue;
             }
             if self.path_contains_ignored_workspace_component(path) {
                 continue;
             }
-            changed_paths_in_workspace.push(path);
+            let owned_path = path.to_path_buf();
+            if seen_paths_in_workspace.insert(owned_path.clone()) {
+                changed_paths_in_workspace.push(owned_path);
+            }
         }
 
-        if changed_paths_in_workspace.is_empty() && !git_metadata_changed {
+        if changed_paths_in_workspace.is_empty() && !git_metadata_impact.any() {
             return;
         }
 
@@ -2149,34 +2232,47 @@ impl EditorView {
         let current_file_hit = self.current_file_path.as_ref().is_some_and(|current_path| {
             changed_paths_in_workspace
                 .iter()
-                .any(|path| *path == current_path || current_path.starts_with(path))
+                .any(|path| path == current_path || current_path.starts_with(path))
         });
-        let mut needs_notify = true;
+        let mut needs_notify = false;
         let mut active_tab_needs_reload = false;
         let mut diff_tabs_to_refresh = Vec::new();
         if !changed_paths_in_workspace.is_empty() {
             self.invalidate_sidebar_items_cache();
+            needs_notify = true;
         }
-        if git_metadata_changed
+        let git_status_changed = git_metadata_impact.affects_sidebar_status
             || changed_paths_in_workspace
-            .iter()
-            .any(|path| self.fs_change_affects_git_status(path))
-        {
+                .iter()
+                .any(|path| self.fs_change_affects_git_status(path));
+        if git_status_changed {
             self.invalidate_sidebar_git_statuses();
+            needs_notify = true;
+        }
+        if git_metadata_impact.affects_history {
             self.invalidate_git_history_cache();
+            needs_notify = true;
         }
         if current_file_hit {
             self.invalidate_info_panel_cache();
             self.invalidate_git_history_cache();
+            needs_notify = true;
         }
 
         for (tab_index, tab) in self.tabs.iter_mut().enumerate() {
             if let Some(ref tab_path) = tab.path {
                 let path_changed = changed_paths_in_workspace
                     .iter()
-                    .any(|path| *path == tab_path || tab_path.starts_with(path));
-                if path_changed || (git_metadata_changed && tab.kind == TabKind::Diff) {
+                    .any(|path| path == tab_path || tab_path.starts_with(path));
+                let should_refresh_diff = tab.git_diff.as_ref().is_some_and(|diff| {
+                    diff.source == GitDiffSource::WorkingTree
+                        && (path_changed || git_metadata_impact.affects_working_tree_diff)
+                });
+                if path_changed || should_refresh_diff {
                     if tab.kind == TabKind::Diff {
+                        if !should_refresh_diff {
+                            continue;
+                        }
                         let exists = tab_path.exists();
                         if tab.is_deleted == exists {
                             tab.is_deleted = !exists;

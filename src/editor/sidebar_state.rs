@@ -7,6 +7,82 @@ use gpui::{Context, Pixels, px};
 
 use super::{profile, *};
 
+fn sidebar_git_repo_root_for_path(sidebar_root: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(sidebar_root)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    ))
+}
+
+fn collect_sidebar_git_statuses_for_root(sidebar_root: &Path) -> HashMap<PathBuf, SidebarGitStatus> {
+    let Some(repo_root) = sidebar_git_repo_root_for_path(sidebar_root) else {
+        return HashMap::new();
+    };
+
+    let relative_root = sidebar_root
+        .strip_prefix(&repo_root)
+        .ok()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| path.to_string_lossy().replace('\\', "/"));
+
+    let mut args = vec![
+        "status".to_string(),
+        "--porcelain=v1".to_string(),
+        "--untracked-files=all".to_string(),
+    ];
+    if let Some(relative_root) = relative_root {
+        args.push("--".to_string());
+        args.push(relative_root);
+    }
+
+    let mut statuses = HashMap::new();
+    if let Ok(output) = Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(&args)
+        .output()
+        && output.status.success()
+    {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let Some((relative_path, status)) = EditorView::parse_sidebar_git_status_line(line)
+            else {
+                continue;
+            };
+
+            let absolute_path = repo_root.join(relative_path);
+            if !absolute_path.starts_with(sidebar_root) {
+                continue;
+            }
+
+            let mut current = Some(absolute_path);
+            while let Some(path) = current {
+                if !path.starts_with(sidebar_root) {
+                    break;
+                }
+
+                let merged = EditorView::merge_sidebar_git_status(statuses.get(&path).copied(), status);
+                statuses.insert(path.clone(), merged);
+
+                if path == sidebar_root {
+                    break;
+                }
+                current = path.parent().map(Path::to_path_buf);
+            }
+        }
+    }
+
+    statuses
+}
+
 impl EditorView {
     pub(super) fn sidebar_item_height_px(&self) -> f32 {
         self.scaled(self.styles.sidebar.sidebar_item_height_px)
@@ -253,22 +329,6 @@ impl EditorView {
         self.sidebar_git_statuses_dirty || self.sidebar_git_statuses_scanned_at.is_none()
     }
 
-    fn sidebar_git_repo_root(&self) -> Option<PathBuf> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.sidebar_root)
-            .args(["rev-parse", "--show-toplevel"])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-
-        Some(PathBuf::from(
-            String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        ))
-    }
-
     fn merge_sidebar_git_status(
         current: Option<SidebarGitStatus>,
         next: SidebarGitStatus,
@@ -310,87 +370,66 @@ impl EditorView {
         Some((normalized_path, status))
     }
 
-    pub(super) fn refresh_sidebar_git_statuses_if_needed(&mut self) {
+    fn schedule_sidebar_git_status_refresh(&mut self, cx: &mut Context<Self>) {
+        if !self.sidebar_git_status_refresh_due() || self.sidebar_git_statuses_task.is_some() {
+            return;
+        }
+
+        let requested_sidebar_root = self.sidebar_root.clone();
+        let epoch = self.sidebar_git_statuses_refresh_epoch;
+        let delay = remaining_refresh_delay(
+            self.sidebar_git_statuses_scanned_at,
+            SIDEBAR_GIT_STATUS_REFRESH_MIN_INTERVAL_MS,
+        );
+        let background_sidebar_root = requested_sidebar_root.clone();
+        let task = cx.spawn(async move |this, cx| {
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+
+            let statuses = cx
+                .background_executor()
+                .spawn(async move { collect_sidebar_git_statuses_for_root(&background_sidebar_root) })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.sidebar_git_statuses_task = None;
+
+                if this.sidebar_root != requested_sidebar_root
+                    || this.sidebar_git_statuses_refresh_epoch != epoch
+                {
+                    if this.sidebar_git_status_refresh_due() {
+                        this.schedule_sidebar_git_status_refresh(cx);
+                    }
+                    return;
+                }
+
+                if profile::enabled() {
+                    let mut profile_scope = profile::ProfileScope::new("sidebar.git_status_refresh");
+                    profile_scope.set_note(format!(
+                        "repo_root={} entries={} dirty_was={}",
+                        requested_sidebar_root.display(),
+                        statuses.len(),
+                        this.sidebar_git_statuses_dirty
+                    ));
+                }
+
+                this.sidebar_git_statuses = statuses;
+                this.sidebar_git_statuses_dirty = false;
+                this.sidebar_git_statuses_scanned_at = Some(SystemTime::now());
+                cx.notify();
+            })
+            .ok();
+        });
+        self.sidebar_git_statuses_task = Some(task);
+    }
+
+    pub(super) fn refresh_sidebar_git_statuses_if_needed(&mut self, cx: &mut Context<Self>) {
         if !self.sidebar_git_status_refresh_due() {
             return;
         }
 
-        let mut profile_scope = profile::ProfileScope::new("sidebar.git_status_refresh");
-
-        let Some(repo_root) = self.sidebar_git_repo_root() else {
-            self.sidebar_git_statuses.clear();
-            self.sidebar_git_statuses_dirty = false;
-            self.sidebar_git_statuses_scanned_at = Some(SystemTime::now());
-            profile_scope.set_note("repo_root=none entries=0");
-            return;
-        };
-
-        let relative_root = self
-            .sidebar_root
-            .strip_prefix(&repo_root)
-            .ok()
-            .filter(|path| !path.as_os_str().is_empty())
-            .map(|path| path.to_string_lossy().replace('\\', "/"));
-
-        let mut args = vec![
-            "status".to_string(),
-            "--porcelain=v1".to_string(),
-            "--untracked-files=all".to_string(),
-        ];
-        if let Some(relative_root) = relative_root {
-            args.push("--".to_string());
-            args.push(relative_root);
-        }
-
-        let mut statuses = HashMap::new();
-        if let Ok(output) = Command::new("git")
-            .arg("-C")
-            .arg(&repo_root)
-            .args(&args)
-            .output()
-            && output.status.success()
-        {
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                let Some((relative_path, status)) = Self::parse_sidebar_git_status_line(line)
-                else {
-                    continue;
-                };
-
-                let absolute_path = repo_root.join(relative_path);
-                if !absolute_path.starts_with(&self.sidebar_root) {
-                    continue;
-                }
-
-                let mut current = Some(absolute_path);
-                while let Some(path) = current {
-                    if !path.starts_with(&self.sidebar_root) {
-                        break;
-                    }
-
-                    let merged =
-                        Self::merge_sidebar_git_status(statuses.get(&path).copied(), status);
-                    statuses.insert(path.clone(), merged);
-
-                    if path == self.sidebar_root {
-                        break;
-                    }
-                    current = path.parent().map(Path::to_path_buf);
-                }
-            }
-        }
-
-        if profile::enabled() {
-            profile_scope.set_note(format!(
-                "repo_root={} entries={} dirty_was={}",
-                repo_root.display(),
-                statuses.len(),
-                self.sidebar_git_statuses_dirty
-            ));
-        }
-
-        self.sidebar_git_statuses = statuses;
-        self.sidebar_git_statuses_dirty = false;
-        self.sidebar_git_statuses_scanned_at = Some(SystemTime::now());
+        self.schedule_sidebar_git_status_refresh(cx);
     }
 
     pub(super) fn sidebar_git_status_color(

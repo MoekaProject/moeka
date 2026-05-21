@@ -936,7 +936,7 @@ impl EditorView {
     pub(crate) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let has_root = self.sidebar_root.exists() && self.sidebar_error.is_none();
         if has_root {
-            self.refresh_sidebar_git_statuses_if_needed();
+            self.refresh_sidebar_git_statuses_if_needed(cx);
         }
         let starred_files = if has_root {
             self.visible_starred_sidebar_files()

@@ -14,6 +14,8 @@ impl EditorView {
     pub(crate) fn invalidate_sidebar_git_statuses(&mut self) {
         self.sidebar_git_statuses_dirty = true;
         self.sidebar_git_statuses_scanned_at = None;
+        self.sidebar_git_statuses_refresh_epoch =
+            self.sidebar_git_statuses_refresh_epoch.wrapping_add(1);
     }
 
     pub(super) fn reset_sidebar_render_limit(&mut self) {
