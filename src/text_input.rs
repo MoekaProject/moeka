@@ -9,7 +9,10 @@ use gpui::{
     deferred, div, fill, point, prelude::*, px, relative, size,
 };
 
-use crate::style::TextInputStyles;
+use crate::{
+    buffer::{clamp_grapheme_boundary, next_grapheme_boundary, prev_grapheme_boundary},
+    style::TextInputStyles,
+};
 
 // ── Events ──────────────────────────────────────────────────────────
 
@@ -160,7 +163,7 @@ impl TextInput {
     }
 
     fn move_cursor(&mut self, offset: usize, extend_selection: bool) {
-        self.cursor_offset = offset.min(self.text.len());
+        self.cursor_offset = clamp_grapheme_boundary(&self.text, offset);
         if !extend_selection {
             self.selection_anchor = self.cursor_offset;
         }
@@ -184,25 +187,11 @@ impl TextInput {
     }
 
     fn prev_char_boundary(&self, offset: usize) -> usize {
-        if offset == 0 {
-            return 0;
-        }
-        let mut pos = offset - 1;
-        while pos > 0 && !self.text.is_char_boundary(pos) {
-            pos -= 1;
-        }
-        pos
+        prev_grapheme_boundary(&self.text, offset)
     }
 
     fn next_char_boundary(&self, offset: usize) -> usize {
-        if offset >= self.text.len() {
-            return self.text.len();
-        }
-        let mut pos = offset + 1;
-        while pos < self.text.len() && !self.text.is_char_boundary(pos) {
-            pos += 1;
-        }
-        pos
+        next_grapheme_boundary(&self.text, offset)
     }
 
     fn prev_word_boundary(&self, offset: usize) -> usize {

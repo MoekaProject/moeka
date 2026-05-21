@@ -2109,13 +2109,9 @@ impl EditorView {
         })
     }
 
-    fn should_ignore_fs_change_path(&self, path: &Path) -> bool {
-        if !path.starts_with(&self.sidebar_root) {
-            return true;
-        }
-
-        self.is_internal_temp_change_path(path)
-            || self.path_contains_ignored_workspace_component(path)
+    fn is_git_metadata_change_path(&self, path: &Path) -> bool {
+        path.components()
+            .any(|component| component.as_os_str().to_str() == Some(".git"))
     }
 
     fn fs_change_affects_git_status(&self, path: &Path) -> bool {
@@ -2126,40 +2122,70 @@ impl EditorView {
     }
 
     pub(crate) fn handle_fs_events(&mut self, changed_paths: &[PathBuf], cx: &mut Context<Self>) {
-        let changed_paths: Vec<&Path> = changed_paths
-            .iter()
-            .map(PathBuf::as_path)
-            .filter(|path| !self.should_ignore_fs_change_path(path))
-            .collect();
-        if changed_paths.is_empty() {
+        let mut changed_paths_in_workspace = Vec::new();
+        let mut git_metadata_changed = false;
+        for path in changed_paths.iter().map(PathBuf::as_path) {
+            if !path.starts_with(&self.sidebar_root) {
+                continue;
+            }
+            if self.is_internal_temp_change_path(path) {
+                continue;
+            }
+            if self.is_git_metadata_change_path(path) {
+                git_metadata_changed = true;
+                continue;
+            }
+            if self.path_contains_ignored_workspace_component(path) {
+                continue;
+            }
+            changed_paths_in_workspace.push(path);
+        }
+
+        if changed_paths_in_workspace.is_empty() && !git_metadata_changed {
             return;
         }
 
         let active_tab_id = self.active_tab_id.clone();
         let current_file_hit = self.current_file_path.as_ref().is_some_and(|current_path| {
-            changed_paths
+            changed_paths_in_workspace
                 .iter()
                 .any(|path| *path == current_path || current_path.starts_with(path))
         });
         let mut needs_notify = true;
         let mut active_tab_needs_reload = false;
-        self.invalidate_sidebar_items_cache();
-        if changed_paths
+        let mut diff_tabs_to_refresh = Vec::new();
+        if !changed_paths_in_workspace.is_empty() {
+            self.invalidate_sidebar_items_cache();
+        }
+        if git_metadata_changed
+            || changed_paths_in_workspace
             .iter()
             .any(|path| self.fs_change_affects_git_status(path))
         {
             self.invalidate_sidebar_git_statuses();
+            self.invalidate_git_history_cache();
         }
         if current_file_hit {
-            self.invalidate_active_file_panel_caches();
+            self.invalidate_info_panel_cache();
+            self.invalidate_git_history_cache();
         }
 
-        for tab in &mut self.tabs {
+        for (tab_index, tab) in self.tabs.iter_mut().enumerate() {
             if let Some(ref tab_path) = tab.path {
-                if changed_paths
+                let path_changed = changed_paths_in_workspace
                     .iter()
-                    .any(|path| *path == tab_path || tab_path.starts_with(path))
-                {
+                    .any(|path| *path == tab_path || tab_path.starts_with(path));
+                if path_changed || (git_metadata_changed && tab.kind == TabKind::Diff) {
+                    if tab.kind == TabKind::Diff {
+                        let exists = tab_path.exists();
+                        if tab.is_deleted == exists {
+                            tab.is_deleted = !exists;
+                            needs_notify = true;
+                        }
+                        diff_tabs_to_refresh.push(tab_index);
+                        continue;
+                    }
+
                     if !tab_path.exists() {
                         if !tab.is_deleted {
                             tab.is_deleted = true;
@@ -2190,6 +2216,15 @@ impl EditorView {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        for tab_index in diff_tabs_to_refresh {
+            if self.refresh_git_diff_tab(tab_index) {
+                needs_notify = true;
+                if let Some(tab) = self.tabs.get(tab_index) {
+                    active_tab_needs_reload |= active_tab_id.as_deref() == Some(tab.id.as_str());
                 }
             }
         }

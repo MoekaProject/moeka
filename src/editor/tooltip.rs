@@ -133,6 +133,7 @@ impl EditorView {
         let subtitle_font_size = self.scaled(ts.tooltip_subtitle_font_size_px);
         let subtitle_shortcut_style = ShortcutRenderStyle {
             font_size_px: subtitle_font_size,
+            font_family: self.styles.ui_font_family,
             text_color: ts.tooltip_subtitle_text_color,
             gap_px: self.scaled(ts.tooltip_shortcut_gap_px),
         };

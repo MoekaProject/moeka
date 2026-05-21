@@ -1620,7 +1620,9 @@ impl EditorView {
             let _ = this.update(cx, |this, _| {
                 let offset = this.chat_tab_bar_scroll_handle.offset();
                 let max_offset = this.chat_tab_bar_scroll_handle.max_offset();
-                let target_x = -max_offset.width.max(px(0.0));
+                let trailing_reserved =
+                    this.scaled(this.styles.tab_bar.tab_end_drop_target_width_px);
+                let target_x = -((max_offset.width - px(trailing_reserved)).max(px(0.0)));
                 this.chat_tab_bar_scroll_handle
                     .set_offset(point(target_x, offset.y));
             });
@@ -3157,7 +3159,7 @@ impl EditorView {
 
         let new_hover_color = ts.tab_new_hover_text_color;
         let new_hover_bg = ts.tab_item_hover_bg;
-        let end_drop_target_width = self.scaled(ts.tab_new_width_px + ts.tab_spacer_width_px);
+        let end_drop_target_width = self.scaled(ts.tab_end_drop_target_width_px);
         let new_tab_button = div()
             .id("chat-tab-bar-new")
             .h(px(inner_height))
@@ -3166,9 +3168,16 @@ impl EditorView {
             .flex()
             .justify_center()
             .items_center()
+            .border_r(px(ts.tab_item_border_width_px))
+            .border_color(gpui::transparent_black())
             .text_size(px(self.scaled(ts.tab_new_font_size_px)))
             .text_color(ts.tab_new_text_color)
-            .hover(move |style| style.text_color(new_hover_color).bg(new_hover_bg))
+            .hover(move |style| {
+                style
+                    .text_color(new_hover_color)
+                    .bg(new_hover_bg)
+                    .border_color(ts.tab_item_border_color)
+            })
             .child("+")
             .on_mouse_down(
                 MouseButton::Left,

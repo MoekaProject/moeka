@@ -3,13 +3,101 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Corners, CursorStyle, ExternalPaths, MouseButton,
     MouseDownEvent, MouseMoveEvent, Render, SharedString, Window, canvas, deferred, div, fill, img,
-    prelude::*, px,
+    prelude::*, px, svg,
 };
 
 use super::tooltip::{TooltipState, toolbar_anchor_bounds};
 use super::*;
 
 impl EditorView {
+    fn render_diff_viewer_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let dvs = &self.styles.diff_viewer;
+        let control_width = self.scaled(dvs.diff_viewer_control_width_px);
+        let control_height = self.scaled(dvs.diff_viewer_control_height_px);
+        let border_width = self.scaled(dvs.diff_viewer_control_border_width_px);
+        let border_radius = self.scaled(dvs.diff_viewer_control_radius_px);
+        let gap = self.scaled(dvs.diff_viewer_controls_gap_px);
+        let font_size = self.scaled(dvs.diff_viewer_control_font_size_px);
+        let content_right = self.last_content_left + self.last_text_width;
+        let max_left = (self.last_viewport_width - control_width).max(0.0);
+        let controls_left = (content_right + self.scaled(dvs.diff_viewer_controls_offset_right_px))
+            .min(max_left)
+            .max(0.0);
+        let controls_top = self.scaled(dvs.diff_viewer_controls_offset_top_px);
+        let button_bg = dvs.diff_viewer_control_bg;
+        let button_hover_bg = dvs.diff_viewer_control_hover_bg;
+        let button_border_color = dvs.diff_viewer_control_border_color;
+        let button_text_color = dvs.diff_viewer_control_text_color;
+        let disabled_opacity = dvs.diff_viewer_control_disabled_opacity;
+
+        let control_button = |content: AnyElement,
+                              enabled: bool,
+                              handler: fn(&mut Self, &mut Context<Self>)| {
+            let mut button = div()
+                .w(px(control_width))
+                .h(px(control_height))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .cursor(CursorStyle::Arrow)
+                .bg(button_bg)
+                .border(px(border_width))
+                .border_color(button_border_color)
+                .rounded(px(border_radius))
+                .text_size(px(font_size))
+                .text_color(button_text_color)
+                .opacity(if enabled { 1.0 } else { disabled_opacity })
+                .child(content);
+
+            if enabled {
+                button = button
+                    .hover(move |style| style.bg(button_hover_bg))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            handler(this, cx);
+                        }),
+                    );
+            }
+
+            button.into_any_element()
+        };
+
+        div()
+            .absolute()
+            .left(px(controls_left))
+            .top(px(controls_top))
+            .flex()
+            .flex_col()
+            .gap(px(gap))
+            .child(control_button(
+                svg()
+                    .path(if self.active_git_diff_show_only_changes() {
+                        "assets/icons/fold-expanded.svg"
+                    } else {
+                        "assets/icons/fold.svg"
+                    })
+                    .size(px(font_size))
+                    .text_color(button_text_color)
+                    .into_any_element(),
+                true,
+                Self::toggle_git_diff_show_only_changes,
+            ))
+            .child(control_button(
+                div().child("^").into_any_element(),
+                self.can_navigate_previous_git_diff_row(),
+                Self::navigate_previous_git_diff_row,
+            ))
+            .child(control_button(
+                div().child("v").into_any_element(),
+                self.can_navigate_next_git_diff_row(),
+                Self::navigate_next_git_diff_row,
+            ))
+            .into_any_element()
+    }
+
     fn render_chat_panel_drop_targets(
         &self,
         editor_pane_width: f32,
@@ -765,16 +853,15 @@ impl Render for EditorView {
                                                                 }
                                                                 .into_any_element()
                                                             })
-                                                            .when(
-                                                                self.chat_tab_drag_candidate_id.is_some()
-                                                                    || self.chat_tab_dragging_id.is_some(),
-                                                                |this| {
-                                                                    this.child(self.render_chat_panel_drop_targets(
-                                                                        editor_pane_width,
-                                                                        cx,
-                                                                    ))
-                                                                },
-                                                            )
+                                                            .when(self.chat_tab_dragging_id.is_some(), |this| {
+                                                                this.child(self.render_chat_panel_drop_targets(
+                                                                    editor_pane_width,
+                                                                    cx,
+                                                                ))
+                                                            })
+                                                            .when(self.active_tab_is_diff(), |this| {
+                                                                this.child(self.render_diff_viewer_controls(cx))
+                                                            })
                                                             .when(render_editor_toolbar, |this| this.child({
                                                         let primary_hover = self
                                                             .styles

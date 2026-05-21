@@ -1,3 +1,5 @@
+use unicode_segmentation::UnicodeSegmentation;
+
 /// A simple text buffer backed by a String with cached line start offsets.
 pub struct Buffer {
     text: String,
@@ -113,6 +115,18 @@ impl Buffer {
         o
     }
 
+    pub fn clamp_grapheme_offset(&self, offset: usize) -> usize {
+        clamp_grapheme_boundary(&self.text, offset)
+    }
+
+    pub fn prev_grapheme_boundary(&self, offset: usize) -> usize {
+        prev_grapheme_boundary(&self.text, offset)
+    }
+
+    pub fn next_grapheme_boundary(&self, offset: usize) -> usize {
+        next_grapheme_boundary(&self.text, offset)
+    }
+
     fn rebuild_line_starts(&mut self) {
         self.line_starts.clear();
         self.line_starts.push(0);
@@ -137,4 +151,80 @@ fn snap_char_start(text: &str, offset: usize) -> usize {
         o -= 1;
     }
     o
+}
+
+pub fn clamp_grapheme_boundary(text: &str, offset: usize) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+
+    let offset = snap_char_start(text, offset.min(text.len()));
+    if offset >= text.len() {
+        return text.len();
+    }
+
+    text.grapheme_indices(true)
+        .rev()
+        .find_map(|(idx, _)| if idx <= offset { Some(idx) } else { None })
+        .unwrap_or(0)
+}
+
+pub fn prev_grapheme_boundary(text: &str, offset: usize) -> usize {
+    let offset = clamp_grapheme_boundary(text, offset);
+    if offset == 0 {
+        return 0;
+    }
+
+    text.grapheme_indices(true)
+        .rev()
+        .find_map(|(idx, _)| if idx < offset { Some(idx) } else { None })
+        .unwrap_or(0)
+}
+
+pub fn next_grapheme_boundary(text: &str, offset: usize) -> usize {
+    let offset = offset.min(text.len());
+    if offset >= text.len() {
+        return text.len();
+    }
+
+    let offset = clamp_grapheme_boundary(text, offset);
+    text.grapheme_indices(true)
+        .find_map(|(idx, _)| if idx > offset { Some(idx) } else { None })
+        .unwrap_or(text.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Buffer, clamp_grapheme_boundary, next_grapheme_boundary, prev_grapheme_boundary};
+
+    #[test]
+    fn grapheme_helpers_treat_combining_sequence_as_single_cursor_stop() {
+        let text = "a\u{0301}b";
+        let combining_boundary = text
+            .char_indices()
+            .nth(1)
+            .map(|(idx, _)| idx)
+            .expect("combining mark boundary");
+        let b_offset = text.find('b').expect("b offset");
+
+        assert_eq!(clamp_grapheme_boundary(text, combining_boundary), 0);
+        assert_eq!(prev_grapheme_boundary(text, b_offset), 0);
+        assert_eq!(next_grapheme_boundary(text, 0), b_offset);
+    }
+
+    #[test]
+    fn buffer_grapheme_methods_keep_emoji_modifier_together() {
+        let buffer = Buffer::from_text("👍🏻!");
+        let modifier_boundary = buffer
+            .text()
+            .char_indices()
+            .nth(1)
+            .map(|(idx, _)| idx)
+            .expect("emoji modifier boundary");
+        let bang_offset = buffer.text().find('!').expect("bang offset");
+
+        assert_eq!(buffer.clamp_grapheme_offset(modifier_boundary), 0);
+        assert_eq!(buffer.prev_grapheme_boundary(bang_offset), 0);
+        assert_eq!(buffer.next_grapheme_boundary(0), bang_offset);
+    }
 }

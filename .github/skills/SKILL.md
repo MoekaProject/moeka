@@ -92,6 +92,9 @@ Simple text buffer with a `line_starts: Vec<usize>` index. Provides:
 - `line_count()`, `line_content(n)`, `line_start(n)`, `line_end(n)`
 - `offset_to_line_col()`, `line_col_to_offset()`
 - `replace(range, text)` — core edit operation
+- User-input boundary helpers live here: `clamp_grapheme_offset()`, `prev_grapheme_boundary()`, `next_grapheme_boundary()`
+
+User-facing caret motion, selection repair, and IME remapping should reuse the grapheme helpers in `buffer.rs`. Do not open-code `is_char_boundary()` loops in `cursor.rs`, `text_input.rs`, or IME paths for caret movement.
 
 ### Cursor (`cursor.rs`)
 
@@ -248,6 +251,12 @@ For each line:
 1. Keyboard: keybinding → gpui action → `on_action(cx.listener(Self::on_*))` in render.rs → handler in `handlers.rs`
 2. Mouse: `on_mouse_down/move/up` in render.rs → handler in `input.rs` → `offset_for_position()` hit-test
 3. IME: macOS text input enters through `EntityInputHandler` in `input_entity.rs`, which delegates shared offset/display helpers in `input.rs`
+
+### Unicode & History Maintenance Rules
+
+- Treat caret movement as grapheme-based, not raw UTF-8 char-boundary-based. `clamp_offset()` is for safe byte slicing; cursor placement and IME selection updates should prefer `clamp_grapheme_offset()`.
+- When remapping IME multi-cursor offsets after text replacement, combine delta application and grapheme clamping in one helper instead of repeating `apply_offset_delta(...)` plus manual clamping at every field.
+- If multiple action handlers only differ by which history stack they read from, extract the shared snapshot-restore flow instead of duplicating tab snapshot sync, dirty-state sync, session persistence, and blink reset logic.
 
 ## Key Subsystems
 

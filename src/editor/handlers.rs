@@ -8,17 +8,31 @@ use super::*;
 impl EditorView {
     // ── Action handlers ─────────────────────────────────────────────
 
-    pub(crate) fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+    fn apply_history_snapshot(
+        &mut self,
+        cx: &mut Context<Self>,
+        take_snapshot: impl FnOnce(
+            &mut history_store::TabHistory,
+            &EditorSnapshot,
+        ) -> Option<EditorSnapshot>,
+    ) {
         let current = self.current_snapshot();
-        if let Some(index) = self.active_tab_index()
-            && let Some(snapshot) = self.tabs[index].history.take_undo(&current)
-        {
-            self.restore_snapshot(snapshot);
-            self.tabs[index].snapshot = self.current_snapshot();
-            self.sync_active_tab_dirty_state();
-            session_store::persist_session(self);
-            self.pause_blinking(cx);
-        }
+        let Some(index) = self.active_tab_index() else {
+            return;
+        };
+        let Some(snapshot) = take_snapshot(&mut self.tabs[index].history, &current) else {
+            return;
+        };
+
+        self.restore_snapshot(snapshot);
+        self.tabs[index].snapshot = self.current_snapshot();
+        self.sync_active_tab_dirty_state();
+        session_store::persist_session(self);
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_history_snapshot(cx, |history, current| history.take_undo(current));
     }
 
     pub(crate) fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
@@ -85,16 +99,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
-        let current = self.current_snapshot();
-        if let Some(index) = self.active_tab_index()
-            && let Some(snapshot) = self.tabs[index].history.take_redo(&current)
-        {
-            self.restore_snapshot(snapshot);
-            self.tabs[index].snapshot = self.current_snapshot();
-            self.sync_active_tab_dirty_state();
-            session_store::persist_session(self);
-            self.pause_blinking(cx);
-        }
+        self.apply_history_snapshot(cx, |history, current| history.take_redo(current));
     }
 
     pub(crate) fn on_backspace(

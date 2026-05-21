@@ -913,9 +913,8 @@ impl EditorView {
             this.update(cx, |this, _| {
                 let offset = this.tab_bar_scroll_handle.offset();
                 let max_offset = this.tab_bar_scroll_handle.max_offset();
-                let trailing_reserved = this.scaled(
-                    this.styles.tab_bar.tab_new_width_px + this.styles.tab_bar.tab_spacer_width_px,
-                );
+                let trailing_reserved =
+                    this.scaled(this.styles.tab_bar.tab_end_drop_target_width_px);
                 let target_x = -((max_offset.width - px(trailing_reserved)).max(px(0.0)));
                 this.tab_bar_scroll_handle
                     .set_offset(gpui::point(target_x, offset.y));
@@ -1083,7 +1082,7 @@ impl EditorView {
         let item_opacity = es.editor_path_bar_item_opacity;
         let diff_label = self
             .active_git_diff_state()
-            .map(|diff| format!("{} -> {}", diff.source_label, diff.target_label));
+            .map(|diff| (diff.source_label.clone(), diff.target_label.clone()));
         let mut breadcrumb = div()
             .id("editor-path-bar-content")
             .flex_1()
@@ -1200,24 +1199,25 @@ impl EditorView {
                 }),
             )
             .child(breadcrumb)
-            .when_some(diff_label, |this, label| {
+            .when_some(diff_label, |this, (source_label, target_label)| {
                 this.child(
                     div()
                         .pl(px(action_gap))
                         .flex()
                         .flex_none()
                         .items_center()
+                        .gap(px(gap))
+                        .text_color(es.editor_path_bar_text_color)
+                        .opacity(es.editor_path_bar_item_opacity)
+                        .child(div().flex_none().whitespace_nowrap().child(source_label))
                         .child(
-                            div()
-                                .px(px(self.scaled(8.0)))
-                                .py(px(self.scaled(3.0)))
-                                .rounded(px(self.scaled(999.0)))
-                                .bg(self.theme.bg_hover)
-                                .text_color(es.editor_path_bar_text_color)
-                                .opacity(es.editor_path_bar_item_opacity)
-                                .whitespace_nowrap()
-                                .child(label),
-                        ),
+                            svg()
+                                .path("assets/icons/right.svg")
+                                .size(px(separator_size))
+                                .flex_none()
+                                .text_color(es.editor_path_bar_separator_color),
+                        )
+                        .child(div().flex_none().whitespace_nowrap().child(target_label)),
                 )
             })
             .when(self.active_tab_supports_text_search(), |this| {
@@ -1284,7 +1284,7 @@ impl EditorView {
                 .text_size(px(self.scaled(ts.tab_item_badge_font_size_px)))
                 .text_color(ts.tab_item_badge_text_color)
                 .opacity(opacity)
-                .child(self.t(crate::i18n::TextKey::Diff))
+                .child("DIFF")
                 .into_any_element();
         }
 
@@ -1710,7 +1710,7 @@ impl EditorView {
 
         let new_hover_color = ts.tab_new_hover_text_color;
         let new_hover_bg = ts.tab_item_hover_bg;
-        let tab_plus_gap_width = self.scaled(ts.tab_spacer_width_px);
+        let end_drop_target_width = self.scaled(ts.tab_end_drop_target_width_px);
         tab_items.push(
             div()
                 .h(px(inner_height))
@@ -1719,9 +1719,16 @@ impl EditorView {
                 .flex()
                 .justify_center()
                 .items_center()
+                .border_r(px(ts.tab_item_border_width_px))
+                .border_color(gpui::transparent_black())
                 .text_size(px(self.scaled(ts.tab_new_font_size_px)))
                 .text_color(ts.tab_new_text_color)
-                .hover(move |style| style.text_color(new_hover_color).bg(new_hover_bg))
+                .hover(move |style| {
+                    style
+                        .text_color(new_hover_color)
+                        .bg(new_hover_bg)
+                        .border_color(ts.tab_item_border_color)
+                })
                 .child("+")
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1734,24 +1741,10 @@ impl EditorView {
         );
         tab_items.push(
             div()
-                .id("tab-bar-plus-spacer")
+                .id("tab-bar-end-drop-target")
                 .h(px(inner_height))
-                .w(px(tab_plus_gap_width))
+                .w(px(end_drop_target_width))
                 .flex_none()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(Self::on_tab_bar_drag_space_mouse_down),
-                )
-                .into_any_element(),
-        );
-
-        // Trailing spacer that fills remaining tab-bar space and supports drop-to-end.
-        tab_items.push(
-            div()
-                .id("tab-bar-drag-spacer")
-                .flex_1()
-                .h(px(inner_height))
-                .min_w(px(0.0))
                 .drag_over::<DraggedTab>(move |style, dragged, _, _| {
                     if Self::tab_drop_changes_order_for(
                         &current_tab_ids,
@@ -1980,6 +1973,10 @@ impl EditorView {
                     .items_start()
                     .overflow_x_scroll()
                     .track_scroll(&self.tab_bar_scroll_handle)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+                    )
                     .children(tab_items),
             )
             .child(action_buttons)

@@ -1550,6 +1550,7 @@ impl EditorView {
             icon_path.map(|path| SharedString::from(path.to_string()));
         let shortcut_style = ShortcutRenderStyle {
             font_size_px: self.scaled(ms.menu_shortcut_font_size_px),
+            font_family: ms.menu_shortcut_font_family,
             text_color: ms.menu_shortcut_text_color,
             gap_px: self.scaled(ms.menu_shortcut_gap_px),
         };
@@ -3376,7 +3377,9 @@ impl EditorView {
             }
             ContextMenuKind::ChatTabCreate => {
                 let mut items = Vec::new();
-                for agent_cli in ChatAgentCli::all() {
+                let mut agent_clis = ChatAgentCli::all();
+                agent_clis.sort_by_key(|agent_cli| !matches!(agent_cli, ChatAgentCli::Terminal));
+                for agent_cli in agent_clis {
                     items.push(self.render_context_menu_item_with_icon(
                         agent_cli.label(),
                         agent_cli.icon_path(),

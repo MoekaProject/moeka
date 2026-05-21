@@ -696,6 +696,7 @@ fn build_git_diff_rows(
         .collect::<Vec<_>>();
 
     normalize_diff_table_metadata(&mut rows);
+    normalize_diff_block_preview_metadata(&mut rows);
 
     if rows.is_empty() {
         rows.push(GitDiffRow {
@@ -794,6 +795,43 @@ fn normalize_diff_table_metadata(rows: &mut [GitDiffRow]) {
     }
 }
 
+fn normalize_diff_block_preview_metadata(rows: &mut [GitDiffRow]) {
+    let mut row_index = 0usize;
+    while row_index < rows.len() {
+        let Some(preview) = rows[row_index].decoration.block_preview.as_ref() else {
+            row_index += 1;
+            continue;
+        };
+
+        let group_kind = rows[row_index].kind;
+        let group_cache_key = preview.cache_key.clone();
+        let group_start = row_index;
+        let mut group_end = row_index + 1;
+
+        while group_end < rows.len() {
+            let Some(next_preview) = rows[group_end].decoration.block_preview.as_ref() else {
+                break;
+            };
+            if rows[group_end].kind != group_kind || next_preview.cache_key != group_cache_key {
+                break;
+            }
+            group_end += 1;
+        }
+
+        let normalized_end_line = group_end.saturating_sub(1);
+        for (line_index, row) in rows[group_start..group_end].iter_mut().enumerate() {
+            let Some(preview) = row.decoration.block_preview.as_mut() else {
+                continue;
+            };
+            preview.start_line = group_start;
+            preview.end_line = normalized_end_line;
+            preview.is_anchor = line_index == 0;
+        }
+
+        row_index = group_end;
+    }
+}
+
 fn build_inline_change_text_and_highlights(
     change: &InlineChange<'_, str>,
 ) -> (String, Vec<Range<usize>>) {
@@ -843,6 +881,23 @@ fn build_git_diff_snapshot_text(rows: &[GitDiffRow]) -> String {
         .map(|row| row.text.as_str())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn visible_git_diff_rows(rows: &[GitDiffRow], show_only_changes: bool) -> Vec<GitDiffRow> {
+    if !show_only_changes {
+        return rows.to_vec();
+    }
+
+    let filtered = rows
+        .iter()
+        .filter(|row| row.kind != GitDiffRowKind::Context)
+        .cloned()
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        rows.to_vec()
+    } else {
+        filtered
+    }
 }
 
 impl EditorView {
@@ -895,8 +950,7 @@ impl EditorView {
         self.git_history_cache_result.clone().flatten()
     }
 
-    fn git_repo_context(&self) -> Option<GitRepoContext> {
-        let file_path = self.current_file_path.clone()?;
+    fn git_repo_context_for_path(&self, file_path: &Path) -> Option<GitRepoContext> {
         let file_dir = file_path.parent()?;
         let output = Command::new("git")
             .arg("-C")
@@ -916,9 +970,252 @@ impl EditorView {
             .replace('\\', "/");
         Some(GitRepoContext {
             repo_root,
-            file_path,
+            file_path: file_path.to_path_buf(),
             relative_path,
         })
+    }
+
+    fn git_repo_context(&self) -> Option<GitRepoContext> {
+        let file_path = self.current_file_path.clone()?;
+        self.git_repo_context_for_path(&file_path)
+    }
+
+    fn build_git_diff_state_for_source(
+        &self,
+        path: &Path,
+        source: GitDiffSource,
+    ) -> Option<GitDiffState> {
+        let context = self.git_repo_context_for_path(path)?;
+        let (source_label, target_label, base_text, target_text) = match &source {
+            GitDiffSource::WorkingTree => {
+                let base_text =
+                    git_show_file_at_revision(&context.repo_root, "HEAD", &context.relative_path);
+                let target_text = self.current_file_text_for_git_diff(&context.file_path);
+                (
+                    if base_text.is_empty() {
+                        self.t(crate::i18n::TextKey::EmptyFile).to_string()
+                    } else {
+                        "HEAD".to_string()
+                    },
+                    self.t(crate::i18n::TextKey::WorkingTree).to_string(),
+                    base_text,
+                    target_text,
+                )
+            }
+            GitDiffSource::Commit {
+                commit_hash,
+                short_hash,
+            } => {
+                let parent_revision = format!("{commit_hash}^");
+                let base_text = git_show_file_at_revision(
+                    &context.repo_root,
+                    &parent_revision,
+                    &context.relative_path,
+                );
+                let target_text = git_show_file_at_revision(
+                    &context.repo_root,
+                    commit_hash,
+                    &context.relative_path,
+                );
+                (
+                    format!("{short_hash}^"),
+                    short_hash.clone(),
+                    base_text,
+                    target_text,
+                )
+            }
+        };
+
+        Some(GitDiffState {
+            source,
+            source_label,
+            target_label,
+            all_rows: build_git_diff_rows(self.ui_language, &base_text, &target_text),
+            rows: Vec::new(),
+            show_only_changes: false,
+        })
+        .map(|mut diff| {
+            diff.rows = visible_git_diff_rows(&diff.all_rows, diff.show_only_changes);
+            diff
+        })
+    }
+
+    pub(crate) fn refresh_git_diff_tab(&mut self, tab_index: usize) -> bool {
+        let Some(tab) = self.tabs.get(tab_index) else {
+            return false;
+        };
+        if tab.kind != TabKind::Diff {
+            return false;
+        }
+        let Some(path) = tab.path.clone() else {
+            return false;
+        };
+        let Some((source, show_only_changes)) = tab
+            .git_diff
+            .as_ref()
+            .map(|diff| (diff.source.clone(), diff.show_only_changes))
+        else {
+            return false;
+        };
+        let Some(mut diff) = self.build_git_diff_state_for_source(&path, source) else {
+            return false;
+        };
+        diff.show_only_changes = show_only_changes;
+        diff.rows = visible_git_diff_rows(&diff.all_rows, diff.show_only_changes);
+
+        let snapshot_text = build_git_diff_snapshot_text(&diff.rows);
+        let tab = &mut self.tabs[tab_index];
+        tab.snapshot.text = snapshot_text;
+        tab.snapshot.cursor_offset = tab.snapshot.cursor_offset.min(tab.snapshot.text.len());
+        tab.snapshot.cursor_anchor = tab.snapshot.cursor_anchor.min(tab.snapshot.text.len());
+        tab.git_diff = Some(diff);
+        true
+    }
+
+    fn active_git_diff_tab_index(&self) -> Option<usize> {
+        self.active_tab_index()
+            .filter(|index| self.tabs.get(*index).is_some_and(|tab| tab.kind == TabKind::Diff))
+    }
+
+    fn sync_git_diff_tab_snapshot(&mut self, tab_index: usize) {
+        let Some(tab) = self.tabs.get_mut(tab_index) else {
+            return;
+        };
+        let Some(diff) = tab.git_diff.as_ref() else {
+            return;
+        };
+        tab.snapshot.text = build_git_diff_snapshot_text(&diff.rows);
+        tab.snapshot.cursor_offset = tab.snapshot.cursor_offset.min(tab.snapshot.text.len());
+        tab.snapshot.cursor_anchor = tab.snapshot.cursor_anchor.min(tab.snapshot.text.len());
+    }
+
+    fn reload_active_git_diff_snapshot(&mut self) {
+        let Some(tab_index) = self.active_git_diff_tab_index() else {
+            return;
+        };
+        let Some(snapshot) = self.tabs.get(tab_index).map(|tab| tab.snapshot.clone()) else {
+            return;
+        };
+        self.buffer = crate::buffer::Buffer::from_text(&snapshot.text);
+        self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
+        self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());
+        self.reset_cursor_visual_targeting();
+        self.reparse();
+    }
+
+    fn first_diff_row_line(rows: &[GitDiffRow]) -> Option<usize> {
+        rows.iter()
+            .position(|row| row.kind != GitDiffRowKind::Context)
+    }
+
+    fn nearest_diff_row_line(rows: &[GitDiffRow], current_line: usize) -> Option<usize> {
+        if rows.is_empty() {
+            return None;
+        }
+        if rows
+            .get(current_line)
+            .is_some_and(|row| row.kind != GitDiffRowKind::Context)
+        {
+            return Some(current_line);
+        }
+        rows.iter()
+            .enumerate()
+            .skip(current_line)
+            .find(|(_, row)| row.kind != GitDiffRowKind::Context)
+            .map(|(index, _)| index)
+            .or_else(|| {
+                rows.iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, row)| row.kind != GitDiffRowKind::Context)
+                    .map(|(index, _)| index)
+            })
+    }
+
+    fn adjacent_diff_row_line(
+        rows: &[GitDiffRow],
+        current_line: usize,
+        forward: bool,
+    ) -> Option<usize> {
+        if forward {
+            rows.iter()
+                .enumerate()
+                .skip(current_line.saturating_add(1))
+                .find(|(_, row)| row.kind != GitDiffRowKind::Context)
+                .map(|(index, _)| index)
+        } else {
+            rows.iter()
+                .enumerate()
+                .take(current_line)
+                .rev()
+                .find(|(_, row)| row.kind != GitDiffRowKind::Context)
+                .map(|(index, _)| index)
+        }
+    }
+
+    pub(crate) fn active_git_diff_show_only_changes(&self) -> bool {
+        self.active_git_diff_state()
+            .is_some_and(|diff| diff.show_only_changes)
+    }
+
+    pub(crate) fn can_navigate_previous_git_diff_row(&self) -> bool {
+        self.active_git_diff_state().is_some_and(|diff| {
+            Self::adjacent_diff_row_line(&diff.rows, self.cursor_line(), false).is_some()
+        })
+    }
+
+    pub(crate) fn can_navigate_next_git_diff_row(&self) -> bool {
+        self.active_git_diff_state().is_some_and(|diff| {
+            Self::adjacent_diff_row_line(&diff.rows, self.cursor_line(), true).is_some()
+        })
+    }
+
+    pub(crate) fn toggle_git_diff_show_only_changes(&mut self, cx: &mut Context<Self>) {
+        let Some(tab_index) = self.active_git_diff_tab_index() else {
+            return;
+        };
+        let current_line = self.cursor_line();
+
+        let target_line = {
+            let Some(diff) = self.tabs.get_mut(tab_index).and_then(|tab| tab.git_diff.as_mut())
+            else {
+                return;
+            };
+            diff.show_only_changes = !diff.show_only_changes;
+            diff.rows = visible_git_diff_rows(&diff.all_rows, diff.show_only_changes);
+            Self::nearest_diff_row_line(&diff.rows, current_line)
+                .or_else(|| Self::first_diff_row_line(&diff.rows))
+                .unwrap_or(0)
+        };
+
+        self.sync_git_diff_tab_snapshot(tab_index);
+        self.reload_active_git_diff_snapshot();
+        self.scroll_to_line(target_line, cx);
+        self.request_editor_focus(cx);
+    }
+
+    pub(crate) fn navigate_previous_git_diff_row(&mut self, cx: &mut Context<Self>) {
+        let Some(diff) = self.active_git_diff_state() else {
+            return;
+        };
+        let Some(target_line) = Self::adjacent_diff_row_line(&diff.rows, self.cursor_line(), false)
+        else {
+            return;
+        };
+        self.scroll_to_line(target_line, cx);
+        self.request_editor_focus(cx);
+    }
+
+    pub(crate) fn navigate_next_git_diff_row(&mut self, cx: &mut Context<Self>) {
+        let Some(diff) = self.active_git_diff_state() else {
+            return;
+        };
+        let Some(target_line) = Self::adjacent_diff_row_line(&diff.rows, self.cursor_line(), true)
+        else {
+            return;
+        };
+        self.scroll_to_line(target_line, cx);
+        self.request_editor_focus(cx);
     }
 
     fn collect_git_history_items(&self) -> Option<Vec<GitHistoryItem>> {
@@ -1056,48 +1353,19 @@ impl EditorView {
         if !is_markdown_file(&context.file_path) {
             return;
         }
-        let diff_title = format!(
-            "{} {}",
-            self.t(crate::i18n::TextKey::Diff),
-            Self::title_for_path(&context.file_path)
-        );
+        let diff_title = Self::title_for_path(&context.file_path);
 
-        let (source_label, target_label, base_text, target_text) = if item.is_working_tree {
-            let base_text =
-                git_show_file_at_revision(&context.repo_root, "HEAD", &context.relative_path);
-            let target_text = self.current_file_text_for_git_diff(&context.file_path);
-            (
-                if base_text.is_empty() {
-                    self.t(crate::i18n::TextKey::EmptyFile).to_string()
-                } else {
-                    "HEAD".to_string()
-                },
-                self.t(crate::i18n::TextKey::WorkingTree).to_string(),
-                base_text,
-                target_text,
-            )
+        let source = if item.is_working_tree {
+            GitDiffSource::WorkingTree
         } else {
-            let commit_hash = item.commit_hash.clone().unwrap_or_default();
-            let parent_revision = format!("{commit_hash}^");
-            let base_text = git_show_file_at_revision(
-                &context.repo_root,
-                &parent_revision,
-                &context.relative_path,
-            );
-            let target_text =
-                git_show_file_at_revision(&context.repo_root, &commit_hash, &context.relative_path);
-            (
-                format!("{}^", item.short_hash),
-                item.short_hash.clone(),
-                base_text,
-                target_text,
-            )
+            GitDiffSource::Commit {
+                commit_hash: item.commit_hash.clone().unwrap_or_default(),
+                short_hash: item.short_hash.clone(),
+            }
         };
 
-        let diff = GitDiffState {
-            source_label,
-            target_label,
-            rows: build_git_diff_rows(self.ui_language, &base_text, &target_text),
+        let Some(diff) = self.build_git_diff_state_for_source(&context.file_path, source) else {
+            return;
         };
 
         self.open_git_diff_tab(diff_title, context.file_path, diff, cx);
@@ -2351,5 +2619,71 @@ mod tests {
             assert_eq!(table_info.table_end_line, 4);
             assert_eq!(table_info.column_widths.len(), 2);
         }
+    }
+
+    #[test]
+    fn diff_rows_normalize_math_block_preview_metadata_for_replacements() {
+        let rows = build_git_diff_rows(
+            crate::i18n::UiLanguage::English,
+            "$$\na + b\n$$\n",
+            "$$\na + c\n$$\n",
+        );
+
+        let removed_preview = rows[0]
+            .decoration
+            .block_preview
+            .as_ref()
+            .expect("removed math preview");
+        let added_preview = rows[2]
+            .decoration
+            .block_preview
+            .as_ref()
+            .expect("added math preview");
+
+        assert!(matches!(rows[0].kind, GitDiffRowKind::Removed));
+        assert!(removed_preview.is_anchor);
+        assert_eq!(removed_preview.start_line, 0);
+        assert_eq!(removed_preview.end_line, 1);
+
+        assert!(matches!(rows[1].kind, GitDiffRowKind::Removed));
+        assert!(!rows[1]
+            .decoration
+            .block_preview
+            .as_ref()
+            .expect("removed math continuation")
+            .is_anchor);
+
+        assert!(matches!(rows[2].kind, GitDiffRowKind::Added));
+        assert!(added_preview.is_anchor);
+        assert_eq!(added_preview.start_line, 2);
+        assert_eq!(added_preview.end_line, 3);
+    }
+
+    #[test]
+    fn diff_rows_normalize_mermaid_block_preview_metadata_for_replacements() {
+        let rows = build_git_diff_rows(
+            crate::i18n::UiLanguage::English,
+            "```mermaid\ngraph TD\nA-->B\n```\n",
+            "```mermaid\ngraph TD\nA-->C\n```\n",
+        );
+
+        let removed_preview = rows[0]
+            .decoration
+            .block_preview
+            .as_ref()
+            .expect("removed mermaid preview");
+        let added_preview = rows[3]
+            .decoration
+            .block_preview
+            .as_ref()
+            .expect("added mermaid preview");
+
+        assert!(removed_preview.is_anchor);
+        assert_eq!(removed_preview.start_line, 0);
+        assert_eq!(removed_preview.end_line, 2);
+
+        assert!(added_preview.is_anchor);
+        assert_eq!(added_preview.start_line, 3);
+        assert_eq!(added_preview.end_line, 5);
     }
 }

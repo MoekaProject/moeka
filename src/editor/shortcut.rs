@@ -1,8 +1,9 @@
-use gpui::{AnyElement, Hsla, div, prelude::*, px};
+use gpui::{AnyElement, Hsla, SharedString, div, prelude::*, px};
 
 #[derive(Clone, Copy)]
 pub(crate) struct ShortcutRenderStyle {
     pub font_size_px: f32,
+    pub font_family: &'static str,
     pub text_color: Hsla,
     pub gap_px: f32,
 }
@@ -14,6 +15,7 @@ pub(crate) fn render_shortcut(shortcut: &str, style: ShortcutRenderStyle) -> Any
         .flex()
         .items_center()
         .gap(px(style.gap_px))
+        .font_family(SharedString::from(style.font_family))
         .children(tokens.into_iter().map(|token| {
             let width = estimate_token_width(&token, style.font_size_px);
             div()

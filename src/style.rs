@@ -24,6 +24,7 @@ pub struct Styles {
     pub utility_panel: UtilityPanelStyles,
     pub tab_bar: TabBarStyles,
     pub toolbar: ToolbarStyles,
+    pub diff_viewer: DiffViewerStyles,
     pub tooltip: TooltipStyles,
     pub cursor: CursorStyles,
     pub code_block: CodeBlockStyles,
@@ -399,8 +400,8 @@ pub struct TabBarStyles {
     pub tab_new_font_size_px: f32,
     pub tab_new_text_color: Hsla,
     pub tab_new_hover_text_color: Hsla,
-    // Left spacer when sidebar is hidden
-    pub tab_spacer_width_px: f32,
+    // Fixed trailing drop target after the new-tab button
+    pub tab_end_drop_target_width_px: f32,
     // Tab drag ghost
     pub tab_drag_ghost_opacity: f32,
     pub tab_drag_source_opacity: f32,
@@ -454,6 +455,24 @@ pub struct ToolbarStyles {
     pub toolbar_btn_shadow: bool,
     pub toolbar_btn_bg: Hsla,
     pub toolbar_btn_radius_px: f32,
+}
+
+// ── Diff Viewer ────────────────────────────────────────────────────
+
+pub struct DiffViewerStyles {
+    pub diff_viewer_controls_offset_top_px: f32,
+    pub diff_viewer_controls_offset_right_px: f32,
+    pub diff_viewer_controls_gap_px: f32,
+    pub diff_viewer_control_width_px: f32,
+    pub diff_viewer_control_height_px: f32,
+    pub diff_viewer_control_radius_px: f32,
+    pub diff_viewer_control_border_width_px: f32,
+    pub diff_viewer_control_font_size_px: f32,
+    pub diff_viewer_control_bg: Hsla,
+    pub diff_viewer_control_hover_bg: Hsla,
+    pub diff_viewer_control_border_color: Hsla,
+    pub diff_viewer_control_text_color: Hsla,
+    pub diff_viewer_control_disabled_opacity: f32,
 }
 
 // ── Tooltip ─────────────────────────────────────────────────────────
@@ -557,6 +576,9 @@ pub struct SelectionStyles {
     pub selection_diff_removed_line_bg: Hsla,
     pub selection_diff_added_inline_bg: Hsla,
     pub selection_diff_removed_inline_bg: Hsla,
+    pub selection_diff_added_inline_border_color: Hsla,
+    pub selection_diff_removed_inline_border_color: Hsla,
+    pub selection_diff_inline_border_width_px: f32,
     pub selection_trailing_width_factor: f32,
 }
 
@@ -720,6 +742,7 @@ pub struct ContextMenuStyles {
     pub menu_separator_color: Hsla,
     // Shortcut label
     pub menu_shortcut_font_size_px: f32,
+    pub menu_shortcut_font_family: &'static str,
     pub menu_shortcut_text_color: Hsla,
     pub menu_shortcut_gap_px: f32,
     pub menu_shortcut_key_min_width_px: f32,
@@ -1212,10 +1235,10 @@ impl Styles {
                 utility_panel_drop_target_margin_px: 5.0,
                 utility_panel_drop_target_border_width_px: 1.0,
                 utility_panel_drop_target_radius_px: 0.0,
-                utility_panel_drop_target_bg: with_alpha(theme.text_accent, 0.18),
-                utility_panel_drop_target_active_bg: with_alpha(theme.text_accent, 0.38),
-                utility_panel_drop_target_border_color: with_alpha(theme.text_accent, 0.4),
-                utility_panel_drop_target_active_border_color: theme.text_accent,
+                utility_panel_drop_target_bg: with_alpha(theme.bg_hover, 0.7),
+                utility_panel_drop_target_active_bg: with_alpha(theme.bg_hover, 0.9),
+                utility_panel_drop_target_border_color: with_alpha(theme.border_decorative, 0.4),
+                utility_panel_drop_target_active_border_color: theme.border_decorative,
                 utility_panel_drop_target_label_bg: with_alpha(theme.bg_secondary, 0.9),
                 utility_panel_drop_target_label_text_color: theme.text_bright,
                 utility_panel_drop_target_label_font_size_px: ui_font_size_sm_px - 1.0,
@@ -1283,7 +1306,7 @@ impl Styles {
                 tab_new_font_size_px: ui_font_size_xl_px,
                 tab_new_text_color: theme.text_secondary,
                 tab_new_hover_text_color: theme.text_bright,
-                tab_spacer_width_px: 84.0,
+                tab_end_drop_target_width_px: 18.0,
                 tab_drag_ghost_opacity: 0.7,
                 tab_drag_source_opacity: 0.3,
                 tab_drop_indicator_width_px: 2.0,
@@ -1330,6 +1353,21 @@ impl Styles {
                 toolbar_btn_shadow: false,
                 toolbar_btn_bg: with_alpha(theme.bg_elevated, 0.85),
                 toolbar_btn_radius_px: 8.0,
+            },
+            diff_viewer: DiffViewerStyles {
+                diff_viewer_controls_offset_top_px: 12.0,
+                diff_viewer_controls_offset_right_px: 12.0,
+                diff_viewer_controls_gap_px: 6.0,
+                diff_viewer_control_width_px: 28.0,
+                diff_viewer_control_height_px: 28.0,
+                diff_viewer_control_radius_px: 0.0,
+                diff_viewer_control_border_width_px: 1.0,
+                diff_viewer_control_font_size_px: ui_font_size_sm_px,
+                diff_viewer_control_bg: with_alpha(theme.bg_elevated, 0.95),
+                diff_viewer_control_hover_bg: theme.bg_hover,
+                diff_viewer_control_border_color: with_alpha(theme.border_primary, 0.9),
+                diff_viewer_control_text_color: theme.text_secondary,
+                diff_viewer_control_disabled_opacity: 0.42,
             },
             tooltip: TooltipStyles {
                 tooltip_delay_ms: 1000,
@@ -1401,8 +1439,11 @@ impl Styles {
                 selection_line_highlight_color: theme.line_highlight,
                 selection_diff_added_line_bg: with_alpha(theme.diff_added_bg, 0.3),
                 selection_diff_removed_line_bg: with_alpha(theme.diff_removed_bg, 0.3),
-                selection_diff_added_inline_bg: with_alpha(theme.diff_added_bg, 1.0),
-                selection_diff_removed_inline_bg: with_alpha(theme.diff_removed_bg, 1.0),
+                selection_diff_added_inline_bg: with_alpha(theme.diff_added_bg, 0.9),
+                selection_diff_removed_inline_bg: with_alpha(theme.diff_removed_bg, 0.9),
+                selection_diff_added_inline_border_color: with_alpha(theme.diff_added_bg, 1.0),
+                selection_diff_removed_inline_border_color: with_alpha(theme.diff_removed_bg, 1.0),
+                selection_diff_inline_border_width_px: 1.0,
                 selection_trailing_width_factor: 0.4,
             },
             checkbox: CheckboxStyles {
@@ -1501,6 +1542,11 @@ impl Styles {
                 menu_item_hover_bg: theme.bg_hover,
                 menu_item_selected_bg: theme.bg_hover,
                 menu_shortcut_font_size_px: ui_font_size_sm_px - 0.5,
+                menu_shortcut_font_family: if cfg!(target_os = "macos") {
+                    "BlinkMacSystemFont"
+                } else {
+                    ".SystemUIFont"
+                },
                 menu_shortcut_text_color: theme.text_secondary,
                 menu_shortcut_gap_px: 4.0,
                 menu_shortcut_key_min_width_px: 16.0,

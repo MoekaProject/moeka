@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::cursor::Cursor;
+use crate::{buffer::Buffer, cursor::Cursor};
 
 use super::*;
 
@@ -98,6 +98,10 @@ fn auto_paired_delimiter_matches(open: char, close: char) -> bool {
     )
 }
 
+fn clamp_ime_offset(buffer: &Buffer, offset: usize, cumulative_delta: isize) -> usize {
+    buffer.clamp_grapheme_offset(apply_offset_delta(offset, cumulative_delta))
+}
+
 impl EditorView {
     pub(crate) fn should_skip_auto_closing_delimiter(&self, new_text: &str) -> bool {
         if !is_auto_closing_delimiter(new_text) {
@@ -160,8 +164,13 @@ impl EditorView {
                 .extra_marked_ranges
                 .get(index)
                 .cloned()
-                .unwrap_or_else(|| cursor.offset.min(cursor.anchor)..cursor.offset.max(cursor.anchor));
-            all.push((range.start.min(range.end)..range.end.max(range.start), false));
+                .unwrap_or_else(|| {
+                    cursor.offset.min(cursor.anchor)..cursor.offset.max(cursor.anchor)
+                });
+            all.push((
+                range.start.min(range.end)..range.end.max(range.start),
+                false,
+            ));
         }
 
         all.sort_by(|left, right| {
@@ -226,19 +235,11 @@ impl EditorView {
 
         let mut cumulative_delta = 0isize;
         for edit in edits {
-            let anchor = self
-                .buffer
-                .clamp_offset(apply_offset_delta(edit.selection_start, cumulative_delta));
-            let offset = self
-                .buffer
-                .clamp_offset(apply_offset_delta(edit.selection_end, cumulative_delta));
+            let anchor = clamp_ime_offset(&self.buffer, edit.selection_start, cumulative_delta);
+            let offset = clamp_ime_offset(&self.buffer, edit.selection_end, cumulative_delta);
             let marked_range = edit.marked_range.map(|range| {
-                let start = self
-                    .buffer
-                    .clamp_offset(apply_offset_delta(range.start, cumulative_delta));
-                let end = self
-                    .buffer
-                    .clamp_offset(apply_offset_delta(range.end, cumulative_delta));
+                let start = clamp_ime_offset(&self.buffer, range.start, cumulative_delta);
+                let end = clamp_ime_offset(&self.buffer, range.end, cumulative_delta);
                 start..end
             });
 
@@ -281,7 +282,9 @@ impl EditorView {
 
 #[cfg(test)]
 mod tests {
-    use super::code_block_autocomplete_range;
+    use crate::buffer::Buffer;
+
+    use super::{clamp_ime_offset, code_block_autocomplete_range};
 
     #[test]
     fn third_backtick_triggers_code_block_autocomplete() {
@@ -291,5 +294,25 @@ mod tests {
     #[test]
     fn fourth_backtick_does_not_retrigger_code_block_autocomplete() {
         assert_eq!(code_block_autocomplete_range("```", 3, "`"), None);
+    }
+
+    #[test]
+    fn clamp_ime_offset_snaps_into_grapheme_boundary() {
+        let buffer = Buffer::from_text("a\u{0301}b");
+        let combining_boundary = buffer
+            .text()
+            .char_indices()
+            .nth(1)
+            .map(|(idx, _)| idx)
+            .expect("combining mark boundary");
+
+        assert_eq!(clamp_ime_offset(&buffer, combining_boundary, 0), 0);
+    }
+
+    #[test]
+    fn clamp_ime_offset_saturates_negative_delta() {
+        let buffer = Buffer::from_text("abc");
+
+        assert_eq!(clamp_ime_offset(&buffer, 1, -10), 0);
     }
 }

@@ -1054,7 +1054,7 @@ pub(crate) fn compute_table_layout(
     }
 }
 
-pub(crate) fn build_selection_quads(
+pub(crate) fn build_highlight_bounds(
     display_text: &str,
     runs: &[TextRun],
     wrapped: &WrappedLine,
@@ -1066,15 +1066,14 @@ pub(crate) fn build_selection_quads(
     font_size: f32,
     indent_px: f32,
     leading_padding_px: f32,
-    selection_color: Hsla,
     letter_spacing: f32,
     window: &mut Window,
-) -> Vec<PaintQuad> {
+) -> Vec<Bounds<Pixels>> {
     if disp_start >= disp_end {
         return Vec::new();
     }
 
-    let mut quads = Vec::new();
+    let mut bounds_list = Vec::new();
     let mut segment_start = 0usize;
     for (segment_index, segment_end) in wrap_boundary_byte_indices(wrapped)
         .into_iter()
@@ -1130,25 +1129,58 @@ pub(crate) fn build_selection_quads(
 
             let indent = if segment_index > 0 { indent_px } else { 0.0 };
             let segment_y = line_top + segment_index as f32 * line_height;
-            quads.push(fill(
-                Bounds::from_corners(
-                    point(
-                        px(if overlap_start == segment_start {
-                            content_x - leading_padding_px
-                        } else {
-                            content_x + indent + start_x
-                        }),
-                        px(segment_y),
-                    ),
-                    point(px(content_x + indent + end_x), px(segment_y + line_height)),
+            bounds_list.push(Bounds::from_corners(
+                point(
+                    px(if overlap_start == segment_start {
+                        content_x - leading_padding_px
+                    } else {
+                        content_x + indent + start_x
+                    }),
+                    px(segment_y),
                 ),
-                selection_color,
+                point(px(content_x + indent + end_x), px(segment_y + line_height)),
             ));
         }
         segment_start = segment_end;
     }
 
-    quads
+    bounds_list
+}
+
+pub(crate) fn build_selection_quads(
+    display_text: &str,
+    runs: &[TextRun],
+    wrapped: &WrappedLine,
+    disp_start: usize,
+    disp_end: usize,
+    content_x: f32,
+    line_top: f32,
+    line_height: f32,
+    font_size: f32,
+    indent_px: f32,
+    leading_padding_px: f32,
+    selection_color: Hsla,
+    letter_spacing: f32,
+    window: &mut Window,
+) -> Vec<PaintQuad> {
+    build_highlight_bounds(
+        display_text,
+        runs,
+        wrapped,
+        disp_start,
+        disp_end,
+        content_x,
+        line_top,
+        line_height,
+        font_size,
+        indent_px,
+        leading_padding_px,
+        letter_spacing,
+        window,
+    )
+    .into_iter()
+    .map(|bounds| fill(bounds, selection_color))
+    .collect()
 }
 
 pub(crate) fn compute_image_preview_size(

@@ -1,5 +1,4 @@
 use crate::buffer::Buffer;
-use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Cursor {
@@ -26,13 +25,13 @@ impl Cursor {
     }
 
     pub fn move_to(&mut self, offset: usize, buffer: &Buffer) {
-        let offset = buffer.clamp_offset(offset);
+        let offset = buffer.clamp_grapheme_offset(offset);
         self.offset = offset;
         self.anchor = offset;
     }
 
     pub fn select_to(&mut self, offset: usize, buffer: &Buffer) {
-        self.offset = buffer.clamp_offset(offset);
+        self.offset = buffer.clamp_grapheme_offset(offset);
     }
 
     pub fn move_left(&mut self, buffer: &Buffer) {
@@ -40,7 +39,7 @@ impl Cursor {
             let start = self.selection_range().start;
             self.move_to(start, buffer);
         } else {
-            let prev = prev_grapheme_boundary(buffer.text(), self.offset);
+            let prev = buffer.prev_grapheme_boundary(self.offset);
             self.move_to(prev, buffer);
         }
     }
@@ -50,7 +49,7 @@ impl Cursor {
             let end = self.selection_range().end;
             self.move_to(end, buffer);
         } else {
-            let next = next_grapheme_boundary(buffer.text(), self.offset);
+            let next = buffer.next_grapheme_boundary(self.offset);
             self.move_to(next, buffer);
         }
     }
@@ -88,12 +87,12 @@ impl Cursor {
     }
 
     pub fn select_left(&mut self, buffer: &Buffer) {
-        let prev = prev_grapheme_boundary(buffer.text(), self.offset);
+        let prev = buffer.prev_grapheme_boundary(self.offset);
         self.select_to(prev, buffer);
     }
 
     pub fn select_right(&mut self, buffer: &Buffer) {
-        let next = next_grapheme_boundary(buffer.text(), self.offset);
+        let next = buffer.next_grapheme_boundary(self.offset);
         self.select_to(next, buffer);
     }
 
@@ -147,7 +146,7 @@ impl Cursor {
             buffer.delete(range.clone());
             self.move_to(range.start, buffer);
         } else if self.offset > 0 {
-            let prev = prev_grapheme_boundary(buffer.text(), self.offset);
+            let prev = buffer.prev_grapheme_boundary(self.offset);
             buffer.delete(prev..self.offset);
             self.move_to(prev, buffer);
         }
@@ -159,7 +158,7 @@ impl Cursor {
             buffer.delete(range.clone());
             self.move_to(range.start, buffer);
         } else if self.offset < buffer.len() {
-            let next = next_grapheme_boundary(buffer.text(), self.offset);
+            let next = buffer.next_grapheme_boundary(self.offset);
             buffer.delete(self.offset..next);
         }
     }
@@ -185,19 +184,6 @@ impl Cursor {
             self.move_to(prev, buffer);
         }
     }
-}
-
-fn prev_grapheme_boundary(text: &str, offset: usize) -> usize {
-    text.grapheme_indices(true)
-        .rev()
-        .find_map(|(idx, _)| if idx < offset { Some(idx) } else { None })
-        .unwrap_or(0)
-}
-
-fn next_grapheme_boundary(text: &str, offset: usize) -> usize {
-    text.grapheme_indices(true)
-        .find_map(|(idx, _)| if idx > offset { Some(idx) } else { None })
-        .unwrap_or(text.len())
 }
 
 fn prev_word_boundary(text: &str, offset: usize) -> usize {

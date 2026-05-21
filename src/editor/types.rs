@@ -152,9 +152,21 @@ pub(crate) struct OpenTab {
 
 #[derive(Clone, Debug)]
 pub(crate) struct GitDiffState {
+    pub source: GitDiffSource,
     pub source_label: String,
     pub target_label: String,
+    pub all_rows: Vec<GitDiffRow>,
     pub rows: Vec<GitDiffRow>,
+    pub show_only_changes: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GitDiffSource {
+    WorkingTree,
+    Commit {
+        commit_hash: String,
+        short_hash: String,
+    },
 }
 
 #[derive(Clone, Debug)]

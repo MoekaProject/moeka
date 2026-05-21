@@ -27,6 +27,7 @@ pub(crate) struct EditorPrepaintState {
     selection_quads: Vec<PaintQuad>,
     search_match_quads: Vec<PaintQuad>,
     diff_line_bgs: Vec<PaintQuad>,
+    diff_inline_quads: Vec<PaintQuad>,
     line_highlight: Option<PaintQuad>,
     code_block_bgs: Vec<PaintQuad>,
     unordered_list_markers: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
@@ -121,6 +122,66 @@ fn diff_line_background(editor: &EditorView, line_idx: usize) -> Option<Hsla> {
         GitDiffRowKind::Added => Some(editor.styles.selection.selection_diff_added_line_bg),
         GitDiffRowKind::Removed => Some(editor.styles.selection.selection_diff_removed_line_bg),
         GitDiffRowKind::Context => None,
+    }
+}
+
+fn push_diff_inline_highlight_quads(
+    quads: &mut Vec<PaintQuad>,
+    spans: &[Range<usize>],
+    display_text: &str,
+    line_content_len: usize,
+    buffer_to_display: &[usize],
+    runs: &[TextRun],
+    wrapped: &WrappedLine,
+    content_x: f32,
+    text_line_top: f32,
+    line_height: f32,
+    font_size: f32,
+    indent_px: f32,
+    fill_color: Hsla,
+    border_color: Hsla,
+    border_width_px: f32,
+    letter_spacing: f32,
+    window: &mut Window,
+) {
+    if spans.is_empty() {
+        return;
+    }
+
+    for span in spans {
+        let start = span.start.min(line_content_len);
+        let end = span.end.min(line_content_len);
+        if start >= end {
+            continue;
+        }
+
+        let disp_start = helpers::buffer_to_display_offset(buffer_to_display, start);
+        let disp_end = helpers::buffer_to_display_offset(buffer_to_display, end);
+        for bounds in helpers::build_highlight_bounds(
+            display_text,
+            runs,
+            wrapped,
+            disp_start,
+            disp_end,
+            content_x,
+            text_line_top,
+            line_height,
+            font_size,
+            indent_px,
+            0.0,
+            letter_spacing,
+            window,
+        ) {
+            quads.push(fill(bounds, fill_color));
+            quads.push(quad(
+                bounds,
+                Corners::all(px(0.0)),
+                gpui::transparent_black(),
+                px(border_width_px),
+                border_color,
+                BorderStyle::default(),
+            ));
+        }
     }
 }
 
@@ -675,6 +736,7 @@ impl Element for EditorElement {
         let mut table_borders: Vec<PaintQuad> = Vec::new();
         let mut table_bgs: Vec<PaintQuad> = Vec::new();
         let mut diff_line_bgs: Vec<PaintQuad> = Vec::new();
+        let mut diff_inline_quads: Vec<PaintQuad> = Vec::new();
         let mut table_cell_texts: Vec<(WrappedLine, Point<Pixels>, Pixels)> = Vec::new();
         let mut table_click_areas_local: Vec<(Bounds<Pixels>, usize, usize, usize)> = Vec::new();
         let mut table_col_handle_areas_local: Vec<(Bounds<Pixels>, usize, usize)> = Vec::new();
@@ -1211,6 +1273,46 @@ impl Element for EditorElement {
                         diff_bg,
                     ));
                 }
+
+                let selection_styles = &editor.styles.selection;
+                push_diff_inline_highlight_quads(
+                    &mut diff_inline_quads,
+                    &decoration.diff_removed_spans,
+                    &cached.display_text,
+                    line_content.len(),
+                    &cached.buffer_to_display,
+                    &runs,
+                    &cached.wrapped_line,
+                    content_x,
+                    text_line_top,
+                    line_height,
+                    font_size,
+                    cached.indent_px,
+                    selection_styles.selection_diff_removed_inline_bg,
+                    selection_styles.selection_diff_removed_inline_border_color,
+                    editor.scaled(selection_styles.selection_diff_inline_border_width_px),
+                    editor_styles.editor_letter_spacing_px,
+                    window,
+                );
+                push_diff_inline_highlight_quads(
+                    &mut diff_inline_quads,
+                    &decoration.diff_added_spans,
+                    &cached.display_text,
+                    line_content.len(),
+                    &cached.buffer_to_display,
+                    &runs,
+                    &cached.wrapped_line,
+                    content_x,
+                    text_line_top,
+                    line_height,
+                    font_size,
+                    cached.indent_px,
+                    selection_styles.selection_diff_added_inline_bg,
+                    selection_styles.selection_diff_added_inline_border_color,
+                    editor.scaled(selection_styles.selection_diff_inline_border_width_px),
+                    editor_styles.editor_letter_spacing_px,
+                    window,
+                );
 
                 if editor.selected_handle.is_none()
                     && is_cursor_line
@@ -3089,6 +3191,45 @@ impl Element for EditorElement {
                     diff_bg,
                 ));
             }
+            let selection_styles = &editor.styles.selection;
+            push_diff_inline_highlight_quads(
+                &mut diff_inline_quads,
+                &decoration.diff_removed_spans,
+                &display_text,
+                line_content.len(),
+                &buffer_to_display,
+                &runs,
+                wrapped,
+                content_x,
+                text_line_top,
+                line_height,
+                font_size,
+                indent_px,
+                selection_styles.selection_diff_removed_inline_bg,
+                selection_styles.selection_diff_removed_inline_border_color,
+                editor.scaled(selection_styles.selection_diff_inline_border_width_px),
+                letter_spacing,
+                window,
+            );
+            push_diff_inline_highlight_quads(
+                &mut diff_inline_quads,
+                &decoration.diff_added_spans,
+                &display_text,
+                line_content.len(),
+                &buffer_to_display,
+                &runs,
+                wrapped,
+                content_x,
+                text_line_top,
+                line_height,
+                font_size,
+                indent_px,
+                selection_styles.selection_diff_added_inline_bg,
+                selection_styles.selection_diff_added_inline_border_color,
+                editor.scaled(selection_styles.selection_diff_inline_border_width_px),
+                letter_spacing,
+                window,
+            );
             if editor.selected_handle.is_none()
                 && is_cursor_line
                 && !any_selection
@@ -4132,6 +4273,7 @@ impl Element for EditorElement {
             selection_quads,
             search_match_quads,
             diff_line_bgs,
+            diff_inline_quads,
             line_highlight,
             code_block_bgs,
             unordered_list_markers,
@@ -4216,6 +4358,10 @@ impl Element for EditorElement {
         }
 
         for quad in prepaint.diff_line_bgs.drain(..) {
+            window.paint_quad(quad);
+        }
+
+        for quad in prepaint.diff_inline_quads.drain(..) {
             window.paint_quad(quad);
         }
 
