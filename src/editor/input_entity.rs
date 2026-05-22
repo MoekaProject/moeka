@@ -445,10 +445,11 @@ impl EntityInputHandler for EditorView {
         let origin_y: f32 = editor_bounds.origin.y.into();
         let text_top_y = origin_y + self.text_y_offset_for_line(line) - self.scroll_offset;
 
-        if let Some(table_info) = self
-            .decorations
-            .get(line)
-            .and_then(|decoration| decoration.table_info.as_ref())
+        if !self.active_tab_is_diff()
+            && let Some(table_info) = self
+                .decorations
+                .get(line)
+                .and_then(|decoration| decoration.table_info.as_ref())
             && !table_info.is_separator
         {
             let table_start_line = table_info.table_start_line;

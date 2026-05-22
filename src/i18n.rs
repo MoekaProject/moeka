@@ -383,6 +383,37 @@ pub(crate) fn delete_path_message(language: UiLanguage, name: &str) -> String {
     }
 }
 
+pub(crate) fn delete_items_message(language: UiLanguage, count: usize) -> String {
+    match language {
+        UiLanguage::English => {
+            format!("Delete {count} items? This action cannot be undone.")
+        }
+        UiLanguage::ChineseSimplified => format!("确定要删除 {count} 项吗？此操作不可撤销。"),
+        UiLanguage::ChineseTraditional => format!("確定要刪除 {count} 項嗎？此操作無法復原。"),
+        UiLanguage::Japanese => format!("{count} 件を削除しますか？この操作は元に戻せません。"),
+        UiLanguage::Korean => format!("{count}개 항목을 삭제할까요? 이 작업은 되돌릴 수 없습니다."),
+        UiLanguage::French => {
+            format!("Supprimer {count} éléments ? Cette action est irréversible.")
+        }
+        UiLanguage::German => {
+            format!("{count} Elemente löschen? Diese Aktion kann nicht rückgängig gemacht werden.")
+        }
+        UiLanguage::Spanish => {
+            format!("¿Eliminar {count} elementos? Esta acción no se puede deshacer.")
+        }
+        UiLanguage::Portuguese => {
+            format!("Excluir {count} itens? Esta ação não pode ser desfeita.")
+        }
+        UiLanguage::Russian => {
+            format!("Удалить {count} элементов? Это действие нельзя отменить.")
+        }
+        UiLanguage::Arabic => format!("هل تريد حذف {count} عناصر؟ لا يمكن التراجع عن هذا الإجراء."),
+        UiLanguage::Hindi => {
+            format!("क्या आप {count} आइटम हटाना चाहते हैं? यह कार्रवाई वापस नहीं ली जा सकती।")
+        }
+    }
+}
+
 pub(crate) fn workspace_search_progress(
     language: UiLanguage,
     total_matches: usize,

@@ -632,6 +632,7 @@ pub(crate) enum DialogAction {
     CloseTabUnsaved { tab_id: String },
     SaveAndCloseTab { tab_id: String },
     DeletePath { path: PathBuf },
+    DeletePaths { paths: Vec<PathBuf> },
     DismissOnly,
 }
 
@@ -2376,6 +2377,9 @@ impl EditorView {
             DialogAction::DeletePath { path } => {
                 self.delete_path(path, cx);
             }
+            DialogAction::DeletePaths { paths } => {
+                self.delete_paths_to_trash(&paths, cx);
+            }
             DialogAction::DismissOnly => {}
         }
         cx.notify();
@@ -2447,7 +2451,7 @@ impl EditorView {
                     self.close_tab(&tab_id, cx);
                 }
             }
-            DialogAction::DeletePath { .. } => {
+            DialogAction::DeletePath { .. } | DialogAction::DeletePaths { .. } => {
                 // No save action for delete
             }
             DialogAction::DismissOnly => {
@@ -3131,6 +3135,11 @@ impl EditorView {
     }
 
     fn refresh_generated_block_previews_with_mode(&mut self, force: bool) {
+        if self.active_tab_is_diff() {
+            self.generated_preview_keys.clear();
+            return;
+        }
+
         let mut next_generated_keys = HashSet::new();
 
         for decoration in &self.decorations {
@@ -4335,6 +4344,21 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_current_line_prefix(&mut self, prefix: &str) {
+        if self.extra_cursors.is_empty() {
+            self.toggle_current_line_prefix_single(prefix);
+            return;
+        }
+
+        self.apply_single_cursor_edit_to_all_cursors(
+            |this, offset, anchor| {
+                let (start_line, _) = this.buffer.offset_to_line_col(offset.min(anchor));
+                this.buffer.line_start(start_line)
+            },
+            |this| this.toggle_current_line_prefix_single(prefix),
+        );
+    }
+
+    fn toggle_current_line_prefix_single(&mut self, prefix: &str) {
         let selection = self.cursor.selection_range();
         let selection_start = selection.start.min(selection.end);
         let selection_end = selection.start.max(selection.end);
@@ -4459,6 +4483,21 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_horizontal_rule_at_cursor(&mut self) {
+        if self.extra_cursors.is_empty() {
+            self.toggle_horizontal_rule_at_cursor_single();
+            return;
+        }
+
+        self.apply_single_cursor_edit_to_all_cursors(
+            |this, offset, _anchor| {
+                let (line, _) = this.buffer.offset_to_line_col(offset);
+                this.buffer.line_start(line)
+            },
+            |this| this.toggle_horizontal_rule_at_cursor_single(),
+        );
+    }
+
+    fn toggle_horizontal_rule_at_cursor_single(&mut self) {
         let line = self.cursor_line();
         let line_start = self.buffer.line_start(line);
         let line_end = self.buffer.line_end(line);
@@ -4475,6 +4514,65 @@ impl EditorView {
             &self.buffer,
         );
         self.reparse();
+        self.scroll_to_cursor();
+    }
+
+    fn apply_single_cursor_edit_to_all_cursors(
+        &mut self,
+        mut edit_start_for_cursor: impl FnMut(&Self, usize, usize) -> usize,
+        mut apply_single: impl FnMut(&mut Self),
+    ) {
+        let targets = self.collect_multi_cursor_targets_desc();
+        let mut resolved = Vec::with_capacity(targets.len());
+
+        for (offset, anchor, is_primary) in targets {
+            let edit_start = edit_start_for_cursor(self, offset, anchor).min(self.buffer.len());
+            self.extra_cursors.clear();
+            self.cursor.offset = offset.min(self.buffer.len());
+            self.cursor.anchor = anchor.min(self.buffer.len());
+
+            let before_len = self.buffer.len();
+            apply_single(self);
+            let delta = self.buffer.len() as isize - before_len as isize;
+
+            for (resolved_offset, resolved_anchor, _) in &mut resolved {
+                if *resolved_offset >= edit_start {
+                    *resolved_offset = apply_offset_delta(*resolved_offset, delta);
+                }
+                if *resolved_anchor >= edit_start {
+                    *resolved_anchor = apply_offset_delta(*resolved_anchor, delta);
+                }
+            }
+
+            resolved.push((
+                self.cursor.offset.min(self.buffer.len()),
+                self.cursor.anchor.min(self.buffer.len()),
+                is_primary,
+            ));
+        }
+
+        self.extra_cursors.clear();
+        let mut primary_cursor = None;
+        for (offset, anchor, is_primary) in resolved {
+            let cursor = Cursor {
+                offset: offset.min(self.buffer.len()),
+                anchor: anchor.min(self.buffer.len()),
+            };
+            if is_primary {
+                primary_cursor = Some(cursor);
+            } else {
+                self.extra_cursors.push(cursor);
+            }
+        }
+
+        if let Some(primary_cursor) = primary_cursor {
+            self.cursor = primary_cursor;
+        }
+
+        if !self.extra_cursors.is_empty() {
+            self.dedup_cursors();
+        }
+
         self.scroll_to_cursor();
     }
 
@@ -4562,6 +4660,27 @@ impl EditorView {
         }
     }
 
+    pub(crate) fn normalize_ordered_lists_near_all_cursors(
+        &mut self,
+        preserve_current_number: bool,
+    ) {
+        let mut lines: Vec<usize> = self
+            .all_cursors_snapshot()
+            .into_iter()
+            .map(|cursor| {
+                self.buffer
+                    .offset_to_line_col(cursor.offset.min(cursor.anchor))
+                    .0
+            })
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+
+        for line in lines {
+            self.normalize_ordered_list_near_line(line, preserve_current_number);
+        }
+    }
+
     pub(crate) fn indent_selected_list_lines(&mut self) {
         let (lines, _, has_list_line) = self.collect_line_indices_for_block_indent();
         if !has_list_line {
@@ -4636,6 +4755,18 @@ impl EditorView {
     }
 
     pub(crate) fn insert_link_or_image(&mut self, prefix: &str, suffix: &str, placeholder: &str) {
+        if self.extra_cursors.is_empty() {
+            self.insert_link_or_image_single(prefix, suffix, placeholder);
+            return;
+        }
+
+        self.apply_single_cursor_edit_to_all_cursors(
+            |_this, offset, anchor| offset.min(anchor),
+            |this| this.insert_link_or_image_single(prefix, suffix, placeholder),
+        );
+    }
+
+    fn insert_link_or_image_single(&mut self, prefix: &str, suffix: &str, placeholder: &str) {
         let range = self.cursor.selection_range();
         let selected = self.buffer.text()[range.clone()].to_string();
         let replacement = if selected.is_empty() {
@@ -4670,6 +4801,22 @@ impl EditorView {
     }
 
     pub(crate) fn wrap_current_lines_as_code_block(&mut self) {
+        if self.extra_cursors.is_empty() {
+            self.wrap_current_lines_as_code_block_single();
+            return;
+        }
+
+        self.apply_single_cursor_edit_to_all_cursors(
+            |this, offset, anchor| {
+                let (start_line, _) =
+                    this.line_span_for_range(offset.min(anchor)..offset.max(anchor));
+                this.buffer.line_start(start_line)
+            },
+            |this| this.wrap_current_lines_as_code_block_single(),
+        );
+    }
+
+    fn wrap_current_lines_as_code_block_single(&mut self) {
         let selection = self.cursor.selection_range();
         let (start_line, end_line) = self.selected_line_span();
         let block_start = self.buffer.line_start(start_line);
@@ -4726,6 +4873,18 @@ impl EditorView {
     }
 
     pub(crate) fn apply_wrap(&mut self, prefix: &str, suffix: &str) {
+        if self.extra_cursors.is_empty() {
+            self.apply_wrap_single(prefix, suffix);
+            return;
+        }
+
+        self.apply_single_cursor_edit_to_all_cursors(
+            |_this, offset, anchor| offset.min(anchor),
+            |this| this.apply_wrap_single(prefix, suffix),
+        );
+    }
+
+    fn apply_wrap_single(&mut self, prefix: &str, suffix: &str) {
         let offset = self.cursor.offset;
         let (line, col) = self.buffer.offset_to_line_col(offset);
         let line_content = self.buffer.line_content(line).to_string();
@@ -4818,6 +4977,21 @@ impl EditorView {
     }
 
     pub(crate) fn apply_heading(&mut self, level: u8) {
+        if self.extra_cursors.is_empty() {
+            self.apply_heading_single(level);
+            return;
+        }
+
+        self.apply_single_cursor_edit_to_all_cursors(
+            |this, offset, _anchor| {
+                let (line, _) = this.buffer.offset_to_line_col(offset);
+                this.buffer.line_start(line)
+            },
+            |this| this.apply_heading_single(level),
+        );
+    }
+
+    fn apply_heading_single(&mut self, level: u8) {
         let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
         let line_start = self.buffer.line_start(line);
         let line_end = self.buffer.line_end(line);

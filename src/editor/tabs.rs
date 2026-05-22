@@ -63,6 +63,30 @@ impl EditorView {
             .and_then(|tab| tab.git_diff.as_ref())
     }
 
+    pub(crate) fn active_git_diff_progress(&self) -> Option<(usize, usize)> {
+        let diff = self.active_git_diff_state()?;
+        let diff_lines: Vec<usize> = diff
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| (row.kind != GitDiffRowKind::Context).then_some(index))
+            .collect();
+
+        let total = diff_lines.len();
+        if total == 0 {
+            return Some((0, 0));
+        }
+
+        let current_line = self.cursor_line();
+        let current_index = diff_lines
+            .iter()
+            .position(|&line| line == current_line)
+            .or_else(|| diff_lines.iter().position(|&line| line >= current_line))
+            .unwrap_or(total.saturating_sub(1));
+
+        Some((current_index + 1, total))
+    }
+
     pub(crate) fn request_editor_focus(&mut self, cx: &mut Context<Self>) {
         self.focused_sidebar_path = None;
         self.pending_editor_focus = true;
@@ -1114,6 +1138,7 @@ impl EditorView {
         let item_hover_text_color = es.editor_path_bar_item_hover_text_color;
         let item_opacity = es.editor_path_bar_item_opacity;
         let diff_group_gap = self.scaled(es.editor_path_bar_diff_group_gap_px);
+        let diff_button_label_gap = self.scaled(es.editor_path_bar_diff_button_label_gap_px);
         let diff_navigation_labels = self.diff_path_bar_navigation_labels();
         let diff_label = self
             .active_git_diff_state()
@@ -1236,6 +1261,7 @@ impl EditorView {
             .child(breadcrumb)
             .when_some(diff_label, |this, (source_label, target_label)| {
                 let (toggle_label, previous_label, next_label) = diff_navigation_labels;
+                let diff_progress = self.active_git_diff_progress();
                 let diff_button =
                     |icon_path: &'static str,
                      label: &'static str,
@@ -1281,16 +1307,16 @@ impl EditorView {
                         .flex()
                         .flex_none()
                         .items_center()
-                        .gap(px(diff_group_gap))
                         .text_color(es.editor_path_bar_text_color)
                         .child(
                             div()
                                 .flex()
                                 .flex_none()
                                 .items_center()
-                                .gap(px(gap))
+                                .gap(px(diff_group_gap))
+                                .mr(px(diff_button_label_gap))
                                 .child(diff_button(
-                                    "assets/icons/filetree/workspace-expand.svg",
+                                    "assets/icons/expand.svg",
                                     toggle_label,
                                     true,
                                     Self::toggle_git_diff_show_only_changes,
@@ -1306,35 +1332,55 @@ impl EditorView {
                                     next_label,
                                     self.can_navigate_next_git_diff_row(),
                                     Self::navigate_next_git_diff_row,
-                                )),
+                                ))
+                                .when_some(diff_progress, |this, (current, total)| {
+                                    this.child(
+                                        div()
+                                            .flex_none()
+                                            .whitespace_nowrap()
+                                            .opacity(item_opacity)
+                                            .child(format!("[{current}/{total}]")),
+                                    )
+                                }),
                         )
                         .child(
                             div()
+                                .flex()
                                 .flex_none()
-                                .whitespace_nowrap()
-                                .opacity(item_opacity)
-                                .child(source_label),
-                        )
-                        .child(
-                            svg()
-                                .path("assets/icons/right.svg")
-                                .size(px(separator_size))
-                                .flex_none()
-                                .text_color(es.editor_path_bar_separator_color),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .whitespace_nowrap()
-                                .opacity(item_opacity)
-                                .child(target_label),
+                                .items_center()
+                                .gap(px(self.scaled(es.editor_path_bar_diff_label_arrow_gap_px)))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .whitespace_nowrap()
+                                        .opacity(item_opacity)
+                                        .child(source_label),
+                                )
+                                .child(
+                                    svg()
+                                        .path("assets/icons/right.svg")
+                                        .size(px(separator_size))
+                                        .flex_none()
+                                        .text_color(es.editor_path_bar_separator_color),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .whitespace_nowrap()
+                                        .opacity(item_opacity)
+                                        .child(target_label),
+                                ),
                         ),
                 )
             })
             .when(self.active_tab_supports_text_search(), |this| {
                 this.child(
                     div()
-                        .pl(px(action_gap))
+                        .pl(px(if self.active_git_diff_state().is_some() {
+                            self.scaled(es.editor_path_bar_diff_search_gap_px)
+                        } else {
+                            action_gap
+                        }))
                         .pr(px(self.scaled(es.editor_path_bar_action_padding_right_px)))
                         .flex()
                         .items_center()

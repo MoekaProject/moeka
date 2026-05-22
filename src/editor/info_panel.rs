@@ -127,7 +127,12 @@ fn collect_git_history_items_for_context(
     let mut items = Vec::new();
     let status_output = run_git_command(
         &context.repo_root,
-        &["status", "--porcelain=v1", "--", context.relative_path.as_str()],
+        &[
+            "status",
+            "--porcelain=v1",
+            "--",
+            context.relative_path.as_str(),
+        ],
     )
     .unwrap_or_default();
 
@@ -138,8 +143,7 @@ fn collect_git_history_items_for_context(
                 .to_string(),
             message: crate::i18n::translate(language, crate::i18n::TextKey::UncommittedChanges)
                 .to_string(),
-            time_label: crate::i18n::translate(language, crate::i18n::TextKey::Current)
-                .to_string(),
+            time_label: crate::i18n::translate(language, crate::i18n::TextKey::Current).to_string(),
             is_working_tree: true,
         });
     }
@@ -800,6 +804,8 @@ fn build_git_diff_rows(
             kind: GitDiffRowKind::Context,
             text: crate::i18n::translate(language, crate::i18n::TextKey::NoTextDiff).to_string(),
             decoration: crate::markdown::LineDecoration::default(),
+            source_line_number: None,
+            is_hunk_label: false,
         });
     }
 
@@ -811,6 +817,14 @@ fn build_git_diff_row(
     base_decorations: &[crate::markdown::LineDecoration],
     target_decorations: &[crate::markdown::LineDecoration],
 ) -> GitDiffRow {
+    let source_line_number = match row.kind {
+        GitDiffRowKind::Removed => row.old_line_index,
+        GitDiffRowKind::Context | GitDiffRowKind::Added => {
+            row.new_line_index.or(row.old_line_index)
+        }
+    }
+    .map(|index| index + 1);
+
     let mut decoration = match row.kind {
         GitDiffRowKind::Context | GitDiffRowKind::Added => row
             .new_line_index
@@ -838,10 +852,31 @@ fn build_git_diff_row(
         }
     }
 
+    if decoration
+        .table_info
+        .as_ref()
+        .is_some_and(|table_info| !table_info.is_front_matter)
+    {
+        decoration.block_type = crate::markdown::BlockType::CodeBlock;
+        decoration.code_language = Some("table".to_string());
+    }
+
     GitDiffRow {
         kind: row.kind,
         text: row.text,
         decoration,
+        source_line_number,
+        is_hunk_label: false,
+    }
+}
+
+fn build_git_diff_line_label_row(line_number: usize) -> GitDiffRow {
+    GitDiffRow {
+        kind: GitDiffRowKind::Context,
+        text: format!("L{line_number}"),
+        decoration: crate::markdown::LineDecoration::default(),
+        source_line_number: Some(line_number),
+        is_hunk_label: true,
     }
 }
 
@@ -985,11 +1020,46 @@ fn visible_git_diff_rows(rows: &[GitDiffRow], show_only_changes: bool) -> Vec<Gi
         return rows.to_vec();
     }
 
-    let filtered = rows
-        .iter()
-        .filter(|row| row.kind != GitDiffRowKind::Context)
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut included = vec![false; rows.len()];
+    for (row_index, row) in rows.iter().enumerate() {
+        if row.kind == GitDiffRowKind::Context {
+            continue;
+        }
+
+        included[row_index] = true;
+        if let Some(table_info) = row
+            .decoration
+            .table_info
+            .as_ref()
+            .filter(|table_info| !table_info.is_front_matter)
+        {
+            let table_start = table_info.table_start_line.min(rows.len());
+            let table_end = table_info.table_end_line.min(rows.len());
+            for included_row in &mut included[table_start..table_end] {
+                *included_row = true;
+            }
+        }
+    }
+
+    let mut filtered = Vec::new();
+    let mut at_hunk_start = true;
+
+    for (row_index, row) in rows.iter().enumerate() {
+        if !included[row_index] {
+            at_hunk_start = true;
+            continue;
+        }
+
+        if at_hunk_start {
+            if let Some(line_number) = row.source_line_number {
+                filtered.push(build_git_diff_line_label_row(line_number));
+            }
+            at_hunk_start = false;
+        }
+
+        filtered.push(row.clone());
+    }
+
     if filtered.is_empty() {
         rows.to_vec()
     } else {
@@ -1056,7 +1126,9 @@ impl EditorView {
 
             let items = cx
                 .background_executor()
-                .spawn(async move { collect_git_history_items_for_file(language, &background_file_path) })
+                .spawn(async move {
+                    collect_git_history_items_for_file(language, &background_file_path)
+                })
                 .await;
 
             this.update(cx, |this, cx| {
@@ -1094,7 +1166,8 @@ impl EditorView {
 
         if self.git_history_cache_dirty {
             if let Some(path) = current_path.as_ref() {
-                let mut profile_scope = profile::ProfileScope::new("utility_panel.git_history_refresh");
+                let mut profile_scope =
+                    profile::ProfileScope::new("utility_panel.git_history_refresh");
                 profile_scope.set_note(format!("path={}", path.display()));
             }
             self.schedule_git_history_refresh(cx);
@@ -1205,8 +1278,11 @@ impl EditorView {
     }
 
     fn active_git_diff_tab_index(&self) -> Option<usize> {
-        self.active_tab_index()
-            .filter(|index| self.tabs.get(*index).is_some_and(|tab| tab.kind == TabKind::Diff))
+        self.active_tab_index().filter(|index| {
+            self.tabs
+                .get(*index)
+                .is_some_and(|tab| tab.kind == TabKind::Diff)
+        })
     }
 
     fn sync_git_diff_tab_snapshot(&mut self, tab_index: usize) {
@@ -1309,7 +1385,10 @@ impl EditorView {
         let current_line = self.cursor_line();
 
         let target_line = {
-            let Some(diff) = self.tabs.get_mut(tab_index).and_then(|tab| tab.git_diff.as_mut())
+            let Some(diff) = self
+                .tabs
+                .get_mut(tab_index)
+                .and_then(|tab| tab.git_diff.as_mut())
             else {
                 return;
             };
@@ -2067,6 +2146,18 @@ impl EditorView {
         let row_padding_y = self.scaled(ups.utility_panel_item_gap_px * 0.5);
         let row_gap = self.scaled(ups.utility_panel_item_gap_px * 0.4);
         let row_height = font_size * 2.0 + row_gap + row_padding_y * 2.0;
+        let is_active = self.active_git_diff_state().is_some_and(|diff| match (&diff.source, item.is_working_tree, item.commit_hash.as_deref()) {
+            (GitDiffSource::WorkingTree, true, _) => true,
+            (GitDiffSource::Commit { commit_hash, .. }, false, Some(item_hash)) => {
+                commit_hash == item_hash
+            }
+            _ => false,
+        });
+        let row_bg = if is_active {
+            ups.utility_panel_button_hover_bg
+        } else {
+            gpui::transparent_black()
+        };
         div()
             .px(px(self.scaled(ups.utility_panel_section_padding_x_px)))
             .py(px(row_padding_y))
@@ -2075,6 +2166,7 @@ impl EditorView {
             .flex()
             .flex_col()
             .gap(px(row_gap))
+            .bg(row_bg)
             .overflow_hidden()
             .cursor(CursorStyle::Arrow)
             .hover(move |style| style.bg(ups.utility_panel_button_hover_bg))
@@ -2415,7 +2507,7 @@ mod tests {
     use super::{
         GitDiffRow, GitDiffRowKind, InfoPanelReferenceTarget, build_git_diff_rows,
         build_git_diff_snapshot_text, build_html_document, external_reference_host,
-        fallback_reference_label, path_reference_name, reference_scheme,
+        fallback_reference_label, path_reference_name, reference_scheme, visible_git_diff_rows,
     };
     use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
     use std::path::PathBuf;
@@ -2513,6 +2605,8 @@ mod tests {
                 kind: GitDiffRowKind::Context,
                 text: "alpha".to_string(),
                 decoration: crate::markdown::LineDecoration::default(),
+                source_line_number: Some(1),
+                is_hunk_label: false,
             },
             GitDiffRow {
                 kind: GitDiffRowKind::Removed,
@@ -2521,6 +2615,8 @@ mod tests {
                     diff_removed_spans: vec![0..6],
                     ..crate::markdown::LineDecoration::default()
                 },
+                source_line_number: Some(2),
+                is_hunk_label: false,
             },
             GitDiffRow {
                 kind: GitDiffRowKind::Added,
@@ -2529,10 +2625,64 @@ mod tests {
                     diff_added_spans: vec![0..5],
                     ..crate::markdown::LineDecoration::default()
                 },
+                source_line_number: Some(2),
+                is_hunk_label: false,
             },
         ];
 
         assert_eq!(build_git_diff_snapshot_text(&rows), "alpha\nbefore\nafter");
+    }
+
+    #[test]
+    fn collapsed_diff_rows_insert_line_label_before_hunk() {
+        let rows = vec![
+            GitDiffRow {
+                kind: GitDiffRowKind::Context,
+                text: "alpha".to_string(),
+                decoration: crate::markdown::LineDecoration::default(),
+                source_line_number: Some(11),
+                is_hunk_label: false,
+            },
+            GitDiffRow {
+                kind: GitDiffRowKind::Removed,
+                text: "before".to_string(),
+                decoration: crate::markdown::LineDecoration::default(),
+                source_line_number: Some(12),
+                is_hunk_label: false,
+            },
+            GitDiffRow {
+                kind: GitDiffRowKind::Added,
+                text: "after".to_string(),
+                decoration: crate::markdown::LineDecoration::default(),
+                source_line_number: Some(12),
+                is_hunk_label: false,
+            },
+        ];
+
+        let visible = visible_git_diff_rows(&rows, true);
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].text, "L12");
+        assert!(visible[0].is_hunk_label);
+        assert_eq!(visible[1].text, "before");
+        assert_eq!(visible[2].text, "after");
+    }
+
+    #[test]
+    fn collapsed_diff_rows_keep_full_table_block_when_changed() {
+        let rows = build_git_diff_rows(
+            crate::i18n::UiLanguage::English,
+            "| Name | Value |\n| --- | --- |\n| keep | 1 |\n",
+            "| Name | Value |\n| --- | --- |\n| keep | 2 |\n",
+        );
+
+        let visible = visible_git_diff_rows(&rows, true);
+        assert_eq!(visible.len(), 5);
+        assert_eq!(visible[0].text, "L1");
+        assert!(visible[0].is_hunk_label);
+        assert_eq!(visible[1].text, "| Name | Value |");
+        assert_eq!(visible[2].text, "| --- | --- |");
+        assert_eq!(visible[3].text, "| keep | 1 |");
+        assert_eq!(visible[4].text, "| keep | 2 |");
     }
 
     #[test]
@@ -2715,12 +2865,14 @@ mod tests {
         assert_eq!(removed_preview.end_line, 1);
 
         assert!(matches!(rows[1].kind, GitDiffRowKind::Removed));
-        assert!(!rows[1]
-            .decoration
-            .block_preview
-            .as_ref()
-            .expect("removed math continuation")
-            .is_anchor);
+        assert!(
+            !rows[1]
+                .decoration
+                .block_preview
+                .as_ref()
+                .expect("removed math continuation")
+                .is_anchor
+        );
 
         assert!(matches!(rows[2].kind, GitDiffRowKind::Added));
         assert!(added_preview.is_anchor);

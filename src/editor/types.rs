@@ -174,6 +174,8 @@ pub(crate) struct GitDiffRow {
     pub kind: GitDiffRowKind,
     pub text: String,
     pub decoration: LineDecoration,
+    pub source_line_number: Option<usize>,
+    pub is_hunk_label: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

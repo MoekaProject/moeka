@@ -125,6 +125,109 @@ fn diff_line_background(editor: &EditorView, line_idx: usize) -> Option<Hsla> {
     }
 }
 
+fn diff_hunk_label_text_color(editor: &EditorView, line_idx: usize) -> Option<Hsla> {
+    let row = editor.active_git_diff_state()?.rows.get(line_idx)?;
+    row.is_hunk_label.then_some(
+        editor
+            .styles
+            .editor
+            .editor_diff_collapsed_line_label_text_color,
+    )
+}
+
+fn diff_table_syntax_color_ranges(
+    line_content: &str,
+    table_info: &crate::markdown::TableLineInfo,
+) -> Vec<Range<usize>> {
+    let line_len = line_content.len();
+    if table_info.is_separator {
+        return (line_len > 0).then_some(0..line_len).into_iter().collect();
+    }
+
+    let mut ranges = Vec::new();
+    let mut cursor = 0usize;
+    for cell_range in &table_info.cell_ranges {
+        let start = cell_range.start.min(line_len);
+        let end = cell_range.end.min(line_len).max(start);
+        if cursor < start {
+            ranges.push(cursor..start);
+        }
+        cursor = end;
+    }
+    if cursor < line_len {
+        ranges.push(cursor..line_len);
+    }
+    ranges
+}
+
+fn apply_display_text_color_ranges(
+    runs: &mut Vec<TextRun>,
+    display_text: &str,
+    ranges: &[Range<usize>],
+    color: Hsla,
+) {
+    if runs.is_empty() || display_text.is_empty() || ranges.is_empty() {
+        return;
+    }
+
+    let mut byte_colors: Vec<Option<Hsla>> = vec![None; display_text.len()];
+    for range in ranges {
+        let start = range.start.min(display_text.len());
+        let end = range.end.min(display_text.len()).max(start);
+        for entry in byte_colors.iter_mut().take(end).skip(start) {
+            *entry = Some(color);
+        }
+    }
+
+    let original_runs = std::mem::take(runs);
+    let mut styled_runs = Vec::with_capacity(original_runs.len());
+    let mut run_start = 0usize;
+    for run in original_runs {
+        let run_end = run_start + run.len;
+        let mut segment_start = run_start;
+        let mut segment_color = byte_colors
+            .get(run_start)
+            .copied()
+            .flatten()
+            .unwrap_or(run.color);
+        let mut cursor = run_start;
+
+        while cursor < run_end {
+            let next = display_text[cursor..run_end]
+                .chars()
+                .next()
+                .map(|ch| cursor + ch.len_utf8())
+                .unwrap_or(run_end);
+            let next_color = if next < run_end {
+                byte_colors
+                    .get(next)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(run.color)
+            } else {
+                segment_color
+            };
+            if next < run_end && next_color != segment_color {
+                let mut segment_run = run.clone();
+                segment_run.len = next - segment_start;
+                segment_run.color = segment_color;
+                styled_runs.push(segment_run);
+                segment_start = next;
+                segment_color = next_color;
+            }
+            cursor = next;
+        }
+
+        let mut segment_run = run;
+        segment_run.len = run_end - segment_start;
+        segment_run.color = segment_color;
+        styled_runs.push(segment_run);
+        run_start = run_end;
+    }
+
+    *runs = styled_runs;
+}
+
 fn push_diff_inline_highlight_quads(
     quads: &mut Vec<PaintQuad>,
     spans: &[Range<usize>],
@@ -1596,13 +1699,23 @@ impl Element for EditorElement {
                 y += total_line_height;
                 continue;
             }
+            let active_tab_is_diff = editor.active_tab_is_diff();
             let code_block_syntax_active = active_code_fence_group
                 .is_some_and(|(start, end)| line_idx >= start && line_idx <= end)
                 || active_front_matter_group
                     .is_some_and(|(start, end)| line_idx >= start && line_idx <= end);
-            let block_preview_active = decoration.block_preview.as_ref().is_some_and(|preview| {
-                helpers::block_preview_is_active(preview, cursor_line, &all_sel_ranges)
-            });
+            let diff_table_syntax_line = active_tab_is_diff
+                && decoration
+                    .table_info
+                    .as_ref()
+                    .is_some_and(|ti| !ti.is_front_matter);
+            let block_preview_active = if active_tab_is_diff {
+                decoration.block_preview.is_some()
+            } else {
+                decoration.block_preview.as_ref().is_some_and(|preview| {
+                    helpers::block_preview_is_active(preview, cursor_line, &all_sel_ranges)
+                })
+            };
             let collapsed_block_preview = decoration
                 .block_preview
                 .as_ref()
@@ -1650,9 +1763,17 @@ impl Element for EditorElement {
                         false,
                     )
                 } else {
+                    let render_decoration =
+                        diff_table_syntax_line.then(|| crate::markdown::LineDecoration {
+                            block_type: BlockType::CodeBlock,
+                            diff_added_spans: decoration.diff_added_spans.clone(),
+                            diff_removed_spans: decoration.diff_removed_spans.clone(),
+                            ..crate::markdown::LineDecoration::default()
+                        });
+                    let render_decoration = render_decoration.as_ref().unwrap_or(&decoration);
                     helpers::build_display_text(
                         line_content,
-                        &decoration,
+                        render_decoration,
                         &active_ranges,
                         code_block_syntax_active,
                         table_width_chars,
@@ -1666,9 +1787,17 @@ impl Element for EditorElement {
                         editor.styles.editor.editor_superscript_scale_factor,
                     )
                 };
+            let render_decoration =
+                diff_table_syntax_line.then(|| crate::markdown::LineDecoration {
+                    block_type: BlockType::CodeBlock,
+                    diff_added_spans: decoration.diff_added_spans.clone(),
+                    diff_removed_spans: decoration.diff_removed_spans.clone(),
+                    ..crate::markdown::LineDecoration::default()
+                });
+            let render_decoration = render_decoration.as_ref().unwrap_or(&decoration);
             editor.apply_list_display_styles(
                 line_content,
-                &decoration,
+                render_decoration,
                 &mut display_text,
                 prefix_collapsed,
             );
@@ -1687,7 +1816,7 @@ impl Element for EditorElement {
                     &display_text,
                     line_content,
                     &display_to_buffer,
-                    &decoration,
+                    render_decoration,
                     &active_ranges,
                     code_block_syntax_active,
                     prefix_collapsed,
@@ -1738,6 +1867,20 @@ impl Element for EditorElement {
                         editor.styles.search.search_match_text_color,
                         editor.styles.search.search_match_active_text_color,
                     );
+                }
+                if diff_table_syntax_line && let Some(table_info) = decoration.table_info.as_ref() {
+                    let syntax_ranges = diff_table_syntax_color_ranges(line_content, table_info);
+                    apply_display_text_color_ranges(
+                        &mut runs,
+                        &display_text,
+                        &syntax_ranges,
+                        theme.syntax_marker,
+                    );
+                }
+                if let Some(text_color) = diff_hunk_label_text_color(editor, line_idx) {
+                    for run in &mut runs {
+                        run.color = text_color;
+                    }
                 }
                 runs
             };
@@ -1907,7 +2050,7 @@ impl Element for EditorElement {
             };
 
             // Compute table block extra height for header line (table rendered as block below)
-            let table_extra_height = if *block_type == BlockType::Table {
+            let table_extra_height = if *block_type == BlockType::Table && !active_tab_is_diff {
                 if let Some(ref ti) = decoration.table_info {
                     if ti.is_header && !ti.is_front_matter {
                         let layout = table_layout_cache
@@ -2065,6 +2208,7 @@ impl Element for EditorElement {
 
             let origin = point(px(content_x), px(text_line_top));
             let is_table_source_row = *block_type == BlockType::Table
+                && !active_tab_is_diff
                 && decoration
                     .table_info
                     .as_ref()
@@ -2090,6 +2234,7 @@ impl Element for EditorElement {
             // Code block-like background
             if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence)
                 || is_front_matter_line
+                || diff_table_syntax_line
             {
                 let corner_r = px(editor.scaled(editor.styles.code_block.code_block_radius_px));
                 let side_inset = if editor.theme_kind.is_dark() {
@@ -2097,7 +2242,7 @@ impl Element for EditorElement {
                 } else {
                     editor.scaled(editor.styles.code_block.code_block_border_width_px)
                 };
-                let (group_start, group_end) = if is_front_matter_line {
+                let (group_start, group_end) = if is_front_matter_line || diff_table_syntax_line {
                     let table_info = decoration.table_info.as_ref();
                     let start = table_info.map(|ti| ti.table_start_line).unwrap_or(line_idx);
                     let end = table_info
@@ -2148,7 +2293,7 @@ impl Element for EditorElement {
             }
 
             // Table rendering (independent visual block on header line)
-            if *block_type == BlockType::Table {
+            if *block_type == BlockType::Table && !active_tab_is_diff {
                 if let Some(ref ti) = decoration.table_info {
                     if ti.is_header && !ti.is_front_matter {
                         let table_styles = &editor.styles.table;
@@ -3761,6 +3906,7 @@ impl Element for EditorElement {
 
             // Determine if this is a table row with per-cell rendering
             let is_table_block_line = *block_type == BlockType::Table
+                && !active_tab_is_diff
                 && decoration
                     .table_info
                     .as_ref()

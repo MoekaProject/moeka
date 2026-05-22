@@ -1037,7 +1037,7 @@ impl EditorView {
         }
         self.checkpoint();
         self.toggle_current_line_prefix("1. ");
-        self.normalize_ordered_list_near_line(self.cursor_line(), true);
+        self.normalize_ordered_lists_near_all_cursors(true);
         self.reparse();
         self.pause_blinking(cx);
     }
@@ -1432,10 +1432,55 @@ impl EditorView {
         self.pause_blinking(cx);
     }
 
+    fn format_markdown_tables_for_save(&self, text: &str) -> String {
+        let decorations = crate::markdown::parse_decorations(text);
+        let mut lines = text
+            .split('\n')
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        let mut table_ranges = Vec::new();
+
+        for (line_index, decoration) in decorations.iter().enumerate() {
+            let Some(table_info) = decoration.table_info.as_ref() else {
+                continue;
+            };
+            if table_info.is_front_matter
+                || !table_info.is_header
+                || table_info.table_start_line != line_index
+            {
+                continue;
+            }
+            table_ranges.push((table_info.table_start_line, table_info.table_end_line));
+        }
+
+        table_ranges.sort_unstable();
+        table_ranges.dedup();
+
+        for (start_line, end_line) in table_ranges.into_iter().rev() {
+            if start_line >= end_line || end_line > lines.len() {
+                continue;
+            }
+            let formatted = crate::table_ops::serialize_table(
+                &crate::table_ops::parse_table_block(&lines[start_line..end_line]),
+            );
+            lines.splice(start_line..end_line, formatted);
+        }
+
+        lines.join("\n")
+    }
+
     fn normalize_text_for_save(&mut self) -> String {
-        let mut text = self.buffer.text().to_string();
+        let original_text = self.buffer.text().to_string();
+        let mut text = if self.active_tab_is_markdown() {
+            self.format_markdown_tables_for_save(&original_text)
+        } else {
+            original_text.clone()
+        };
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
+        }
+
+        if text != original_text {
             self.buffer = Buffer::from_text(&text);
             self.cursor.offset = self.cursor.offset.min(self.buffer.len());
             self.cursor.anchor = self.cursor.anchor.min(self.buffer.len());

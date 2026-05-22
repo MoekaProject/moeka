@@ -9,6 +9,21 @@ use gpui::{
 use super::*;
 
 impl EditorView {
+    fn sidebar_git_status_marker(
+        status: Option<SidebarGitStatus>,
+        is_dir: bool,
+    ) -> Option<&'static str> {
+        if is_dir {
+            return None;
+        }
+
+        match status {
+            Some(SidebarGitStatus::Added) => Some("A"),
+            Some(SidebarGitStatus::Modified) => Some("M"),
+            None => None,
+        }
+    }
+
     fn render_sidebar_name_label(&self, name: &str, color: gpui::Hsla) -> AnyElement {
         let ss = &self.styles.sidebar;
         let (base, suffix) = split_file_name_for_display(name);
@@ -21,12 +36,18 @@ impl EditorView {
             .items_center()
             .text_size(px(self.scaled(ss.sidebar_item_font_size_px)))
             .text_color(color)
-            .child(div().whitespace_nowrap().child(base.to_string()))
+            .child(
+                div()
+                    .whitespace_nowrap()
+                    .text_color(color)
+                    .child(base.to_string()),
+            )
             .when_some(suffix, |this, suffix| {
                 this.child(
                     div()
                         .flex_none()
                         .whitespace_nowrap()
+                        .text_color(color)
                         .opacity(ss.sidebar_item_suffix_opacity)
                         .child(suffix.to_string()),
                 )
@@ -292,7 +313,6 @@ impl EditorView {
         let icon_color = ss.sidebar_header_icon_color;
         let title_color = ss.sidebar_header_text_color;
         let is_collapsed = self.sidebar_starred_collapsed;
-        let starred_count = starred_files.len();
 
         let header = div()
             .w_full()
@@ -321,16 +341,6 @@ impl EditorView {
                     .truncate()
                     .child(self.t(crate::i18n::TextKey::StarredFiles)),
             )
-            .when(starred_count > 0, |this| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
-                        .text_color(title_color)
-                        .opacity(ss.sidebar_item_suffix_opacity)
-                        .child(starred_count.to_string()),
-                )
-            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -370,8 +380,9 @@ impl EditorView {
         let ss = &self.styles.sidebar;
         let is_selected = self.is_sidebar_item_selected(&path);
         let is_focused = self.focused_sidebar_path.as_deref() == Some(path.as_path());
-        let git_status_color =
-            self.sidebar_git_status_color(self.sidebar_git_statuses.get(&path).copied());
+        let normalized_path = Self::normalize_sidebar_path(&path);
+        let git_status = self.sidebar_git_statuses.get(&normalized_path).copied();
+        let git_status_color = self.sidebar_git_status_color(git_status);
         let row_bg = if is_selected {
             ss.sidebar_item_selected_bg
         } else {
@@ -627,8 +638,10 @@ impl EditorView {
         let path = item.path.clone();
         let is_dir = item.is_dir;
         let ss = &self.styles.sidebar;
-        let git_status_color =
-            self.sidebar_git_status_color(self.sidebar_git_statuses.get(&path).copied());
+        let normalized_path = Self::normalize_sidebar_path(&path);
+        let git_status = self.sidebar_git_statuses.get(&normalized_path).copied();
+        let git_status_color = self.sidebar_git_status_color(git_status);
+        let git_status_marker = Self::sidebar_git_status_marker(git_status, is_dir);
         let shift = ss.sidebar_item_left_shift_px;
         let is_root_level = item.depth == 0;
         let left_padding = if is_root_level {
@@ -826,7 +839,17 @@ impl EditorView {
                             }),
                     )
                     .child(indicator)
-                    .child(self.render_sidebar_name_label(&item.name, label_color)),
+                    .child(self.render_sidebar_name_label(&item.name, label_color))
+                    .when_some(git_status_marker, |this, marker| {
+                        this.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(self.scaled(ss.sidebar_item_font_size_px)))
+                                .text_color(label_color)
+                                .font_weight(FontWeight::EXTRA_BOLD)
+                                .child(marker),
+                        )
+                    }),
             )
             .on_click({
                 let path = path.clone();

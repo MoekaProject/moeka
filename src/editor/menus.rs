@@ -1077,7 +1077,7 @@ impl EditorView {
             FormatMenuAction::OrderedList => {
                 self.checkpoint();
                 self.toggle_current_line_prefix("1. ");
-                self.normalize_ordered_list_near_line(self.cursor_line(), true);
+                self.normalize_ordered_lists_near_all_cursors(true);
                 self.reparse();
                 self.pause_blinking(cx);
             }
@@ -1911,11 +1911,7 @@ impl EditorView {
                 true,
                 cx,
                 move |this, _, cx| {
-                    if selected.len() == 1 {
-                        this.delete_path(selected[0].clone(), cx);
-                    } else {
-                        this.delete_paths_to_trash(&selected, cx);
-                    }
+                    this.show_sidebar_delete_dialog(selected.clone(), cx);
                 },
             ));
         }
@@ -2069,7 +2065,7 @@ impl EditorView {
                 true,
                 cx,
                 move |this, _, cx| {
-                    this.delete_path(delete_path.clone(), cx);
+                    this.show_sidebar_delete_dialog(vec![delete_path.clone()], cx);
                 },
             ));
         }

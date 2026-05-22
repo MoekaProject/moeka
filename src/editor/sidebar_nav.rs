@@ -103,11 +103,20 @@ impl EditorView {
             Some(path) => path,
             None => return,
         };
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        self.show_dialog(
+        self.show_sidebar_delete_dialog(vec![path], cx);
+    }
+    
+    pub(crate) fn show_sidebar_delete_dialog(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+
+        let dialog = if paths.len() == 1 {
+            let path = paths[0].clone();
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
             Dialog {
                 title: self.t(crate::i18n::TextKey::Delete).to_string(),
                 message: crate::i18n::delete_path_message(self.ui_language, &name),
@@ -116,8 +125,19 @@ impl EditorView {
                 cancel_label: self.t(crate::i18n::TextKey::Cancel).to_string(),
                 is_danger: true,
                 action: DialogAction::DeletePath { path },
-            },
-            cx,
-        );
+            }
+        } else {
+            Dialog {
+                title: self.t(crate::i18n::TextKey::Delete).to_string(),
+                message: crate::i18n::delete_items_message(self.ui_language, paths.len()),
+                save_label: None,
+                confirm_label: crate::i18n::delete_items_label(self.ui_language, paths.len()),
+                cancel_label: self.t(crate::i18n::TextKey::Cancel).to_string(),
+                is_danger: true,
+                action: DialogAction::DeletePaths { paths },
+            }
+        };
+
+        self.show_dialog(dialog, cx);
     }
 }

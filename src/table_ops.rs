@@ -60,6 +60,51 @@ fn pad_cells(cells: &[String], count: usize) -> Vec<String> {
     result
 }
 
+fn cell_display_width(text: &str) -> usize {
+    text.chars()
+        .map(|ch| {
+            let code = ch as u32;
+            if (0x1100..=0x115F).contains(&code)
+                || (0x2E80..=0x33BF).contains(&code)
+                || (0x3040..=0x9FFF).contains(&code)
+                || (0xA000..=0xA4CF).contains(&code)
+                || (0xAC00..=0xD7AF).contains(&code)
+                || (0xF900..=0xFAFF).contains(&code)
+                || (0xFE30..=0xFE6F).contains(&code)
+                || (0xFF01..=0xFF60).contains(&code)
+                || (0xFFE0..=0xFFE6).contains(&code)
+                || (0x20000..=0x2FA1F).contains(&code)
+            {
+                2
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
+fn pad_cell_to_width(cell: &str, width: usize) -> String {
+    let padding = width.saturating_sub(cell_display_width(cell));
+    if padding == 0 {
+        cell.to_string()
+    } else {
+        format!("{cell}{}", " ".repeat(padding))
+    }
+}
+
+fn table_column_widths(model: &TableModel, col_count: usize) -> Vec<usize> {
+    let mut widths = vec![1; col_count];
+    for (index, cell) in pad_cells(&model.header_cells, col_count).iter().enumerate() {
+        widths[index] = widths[index].max(cell_display_width(cell));
+    }
+    for row in &model.data_rows {
+        for (index, cell) in pad_cells(row, col_count).iter().enumerate() {
+            widths[index] = widths[index].max(cell_display_width(cell));
+        }
+    }
+    widths
+}
+
 pub fn parse_table_block(lines: &[String]) -> TableModel {
     if lines.is_empty() {
         return TableModel {
@@ -103,17 +148,32 @@ pub fn parse_table_block(lines: &[String]) -> TableModel {
     }
 }
 
-fn serialize_row(cells: &[String]) -> String {
-    format!("| {} |", cells.join(" | "))
+fn serialize_row(cells: &[String], widths: &[usize]) -> String {
+    let padded = cells
+        .iter()
+        .enumerate()
+        .map(|(index, cell)| pad_cell_to_width(cell, widths.get(index).copied().unwrap_or(1)))
+        .collect::<Vec<_>>();
+    format!("| {} |", padded.join(" | "))
 }
 
-fn serialize_align_row(aligns: &[TableAlign]) -> String {
+fn serialize_align_row(aligns: &[TableAlign], widths: &[usize]) -> String {
     let cells: Vec<String> = aligns
         .iter()
-        .map(|a| match a {
-            TableAlign::Left => "---".to_string(),
-            TableAlign::Center => ":---:".to_string(),
-            TableAlign::Right => "---:".to_string(),
+        .enumerate()
+        .map(|(index, align)| {
+            let width = widths.get(index).copied().unwrap_or(1);
+            match align {
+                TableAlign::Left => "-".repeat(width.max(3)),
+                TableAlign::Center => {
+                    let width = width.max(5);
+                    format!(":{}:", "-".repeat(width - 2))
+                }
+                TableAlign::Right => {
+                    let width = width.max(4);
+                    format!("{}:", "-".repeat(width - 1))
+                }
+            }
         })
         .collect();
     format!("| {} |", cells.join(" | "))
@@ -124,10 +184,11 @@ pub fn serialize_table(model: &TableModel) -> Vec<String> {
     let header = pad_cells(&model.header_cells, col_count);
     let mut aligns = model.aligns.clone();
     aligns.resize(col_count, TableAlign::Left);
+    let widths = table_column_widths(model, col_count);
 
-    let mut result = vec![serialize_row(&header), serialize_align_row(&aligns)];
+    let mut result = vec![serialize_row(&header, &widths), serialize_align_row(&aligns, &widths)];
     for row in &model.data_rows {
-        result.push(serialize_row(&pad_cells(row, col_count)));
+        result.push(serialize_row(&pad_cells(row, col_count), &widths));
     }
     result
 }
@@ -353,8 +414,22 @@ mod tests {
 
         let output = serialize_table(&model);
         assert_eq!(output.len(), 4);
-        assert_eq!(output[0], "| Name | Age |");
-        assert_eq!(output[1], "| --- | --- |");
+        assert_eq!(output[0], "| Name  | Age |");
+        assert_eq!(output[1], "| ----- | --- |");
+    }
+
+    #[test]
+    fn test_serialize_table_pads_columns_to_max_width() {
+        let input = lines(&[
+            "| Key | Longer value |",
+            "| --- | ---: |",
+            "| Value | x |",
+        ]);
+
+        let output = serialize_table(&parse_table_block(&input));
+        assert_eq!(output[0], "| Key   | Longer value |");
+        assert_eq!(output[1], "| ----- | -----------: |");
+        assert_eq!(output[2], "| Value | x            |");
     }
 
     #[test]

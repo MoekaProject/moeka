@@ -28,7 +28,9 @@ fn collect_sidebar_git_statuses_for_root(sidebar_root: &Path) -> HashMap<PathBuf
         return HashMap::new();
     };
 
-    let relative_root = sidebar_root
+    let normalized_sidebar_root = EditorView::normalize_sidebar_path(sidebar_root);
+
+    let relative_root = normalized_sidebar_root
         .strip_prefix(&repo_root)
         .ok()
         .filter(|path| !path.as_os_str().is_empty())
@@ -39,9 +41,9 @@ fn collect_sidebar_git_statuses_for_root(sidebar_root: &Path) -> HashMap<PathBuf
         "--porcelain=v1".to_string(),
         "--untracked-files=all".to_string(),
     ];
-    if let Some(relative_root) = relative_root {
+    if let Some(relative_root) = relative_root.as_deref() {
         args.push("--".to_string());
-        args.push(relative_root);
+        args.push(relative_root.to_string());
     }
 
     let mut statuses = HashMap::new();
@@ -58,21 +60,38 @@ fn collect_sidebar_git_statuses_for_root(sidebar_root: &Path) -> HashMap<PathBuf
                 continue;
             };
 
-            let absolute_path = repo_root.join(relative_path);
-            if !absolute_path.starts_with(sidebar_root) {
+            let relative_to_sidebar = if let Some(relative_root) = relative_root.as_deref() {
+                if relative_path == relative_root {
+                    ""
+                } else if let Some(stripped) = relative_path
+                    .strip_prefix(relative_root)
+                    .and_then(|path| path.strip_prefix('/'))
+                {
+                    stripped
+                } else {
+                    continue;
+                }
+            } else {
+                relative_path.as_str()
+            };
+
+            let absolute_path = EditorView::normalize_sidebar_path(
+                &normalized_sidebar_root.join(relative_to_sidebar),
+            );
+            if !absolute_path.starts_with(&normalized_sidebar_root) {
                 continue;
             }
 
             let mut current = Some(absolute_path);
             while let Some(path) = current {
-                if !path.starts_with(sidebar_root) {
+                if !path.starts_with(&normalized_sidebar_root) {
                     break;
                 }
 
                 let merged = EditorView::merge_sidebar_git_status(statuses.get(&path).copied(), status);
                 statuses.insert(path.clone(), merged);
 
-                if path == sidebar_root {
+                if path == normalized_sidebar_root {
                     break;
                 }
                 current = path.parent().map(Path::to_path_buf);
