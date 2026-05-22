@@ -56,7 +56,7 @@ fn default_light_theme() -> String {
 }
 
 fn default_ui_font() -> String {
-    ".SystemUIFont".to_string()
+    "Menlo".to_string()
 }
 
 fn default_language() -> String {
@@ -84,7 +84,7 @@ fn default_body_latin_font() -> String {
 }
 
 fn default_body_cjk_font() -> String {
-    "PingFang SC".to_string()
+    "Menlo".to_string()
 }
 
 fn default_code_font() -> String {
@@ -321,6 +321,16 @@ pub(crate) fn theme_kind_to_string(kind: ThemeKind) -> String {
 mod tests {
     use super::AppSettings;
     use crate::theme::EditorThemeMode;
+
+    #[test]
+    fn default_fonts_are_all_menlo() {
+        let settings = AppSettings::default();
+
+        assert_eq!(settings.ui_font, "Menlo");
+        assert_eq!(settings.body_latin_font, "Menlo");
+        assert_eq!(settings.body_cjk_font, "Menlo");
+        assert_eq!(settings.code_font, "Menlo");
+    }
 
     #[test]
     fn editor_theme_mode_defaults_to_colorful() {

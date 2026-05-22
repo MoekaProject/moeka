@@ -1933,7 +1933,7 @@ mod tests {
     fn generated_preview_fonts() -> GeneratedPreviewFontFamilies<'static> {
         GeneratedPreviewFontFamilies {
             monospace: "Menlo",
-            body_cjk: "PingFang SC",
+            body_cjk: "Menlo",
         }
     }
 
