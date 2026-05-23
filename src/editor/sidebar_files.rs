@@ -467,6 +467,7 @@ impl EditorView {
         self.reset_sidebar_render_limit();
         self.context_menu = None;
         self.start_watching(cx);
+        self.sync_sidebar_width_animation(cx);
         cx.notify();
         session_store::persist_session(self);
     }

@@ -1025,6 +1025,10 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.stop_editor_scrollbar_drag(event.position, cx) {
+            return;
+        }
+
         if let Some(drag) = self.image_drag_state.take() {
             if self.preview_overlay.is_some() {
                 let moved_x =
@@ -1119,6 +1123,16 @@ impl EditorView {
     ) {
         let toolbar_hover_changed = self.update_toolbar_corner_hover(event.position, cx);
         self.hovered_editor_position = Some(event.position);
+        let dragging_scrollbar = self.update_editor_scrollbar_drag(event.position, cx);
+        let scrollbar_hovered =
+            dragging_scrollbar || self.editor_scrollbar_region_contains(event.position);
+        self.set_editor_scrollbar_hovered(scrollbar_hovered, cx);
+        if dragging_scrollbar {
+            if toolbar_hover_changed {
+                cx.notify();
+            }
+            return;
+        }
         if self.preview_overlay.is_some() {
             if let Some(drag) = self.image_drag_state {
                 if let Some(overlay) = self.preview_overlay_state_mut() {
@@ -2072,6 +2086,7 @@ impl EditorView {
             self.toolbar_corner_hovered = false;
         }
         self.sync_toolbar_opacity(cx);
+        self.reveal_editor_scrollbar(cx);
         cx.notify();
     }
 

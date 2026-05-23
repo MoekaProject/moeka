@@ -954,6 +954,28 @@ impl EditorView {
         id
     }
 
+    pub(crate) fn open_welcome_tab(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == WELCOME_TAB_ID && tab.path.is_none())
+        {
+            self.activate_tab_by_index(index, cx);
+            return;
+        }
+
+        self.persist_active_tab_state();
+        self.tabs.push(super::builtin_welcome_tab(self.ui_language));
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == WELCOME_TAB_ID && tab.path.is_none())
+        {
+            self.activate_tab_by_index(index, cx);
+        }
+        session_store::persist_session(self);
+    }
+
     pub(crate) fn open_settings_tab(&mut self, cx: &mut Context<Self>) {
         // Singleton: if a settings tab already exists, switch to it
         if self.tabs.iter().any(|t| t.kind == TabKind::Settings) {

@@ -19,6 +19,7 @@ use crate::{
 pub enum TextInputEvent {
     Changed,
     Submit,
+    SubmitBackward,
     Escape,
     MoveUp,
     MoveDown,
@@ -57,6 +58,7 @@ gpui::actions!(
         TextInputPickerUp,
         TextInputPickerDown,
         TextInputSubmit,
+        TextInputSubmitBackward,
     ]
 );
 
@@ -817,6 +819,11 @@ impl Render for TextInput {
             .on_action(cx.listener(|_this, _: &TextInputSubmit, _window, cx| {
                 cx.emit(TextInputEvent::Submit);
             }))
+            .on_action(
+                cx.listener(|_this, _: &TextInputSubmitBackward, _window, cx| {
+                    cx.emit(TextInputEvent::SubmitBackward);
+                }),
+            )
             .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
                 if event.keystroke.key == "escape" {
                     cx.emit(TextInputEvent::Escape);

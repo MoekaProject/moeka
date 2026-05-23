@@ -10,7 +10,7 @@ use crate::i18n::{TextKey, UiLanguage, language_picker_options};
 use crate::theme::{EditorThemeMode, ThemeKind};
 
 use super::{
-    EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, THEME_DARK_MINI_SVG_PATH,
+    DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, THEME_DARK_MINI_SVG_PATH,
     THEME_LIGHT_MINI_SVG_PATH,
 };
 
@@ -71,18 +71,62 @@ impl EditorView {
                     .flex()
                     .flex_col()
                     .gap(px(self.scaled(32.0)))
-                    // Title
                     .child(
                         div()
-                            .text_size(px(self.scaled(self.styles.ui_font_size_px + 9.0)))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(self.theme.text_bright)
-                                .child(self.t(TextKey::SettingsPanelTitle)),
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(self.scaled(12.0)))
+                            .child(
+                                div()
+                                    .text_size(px(self.scaled(self.styles.ui_font_size_px + 9.0)))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(self.theme.text_bright)
+                                    .child(self.t(TextKey::SettingsPanelTitle)),
+                            )
+                            .child(self.render_settings_help_button(cx)),
                     )
-                    // Theme section
                     .child(self.render_theme_section(cx))
-                    // Font settings
                     .child(self.render_font_section(window, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn render_settings_help_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let height = self.scaled(30.0);
+        let icon_size = self.scaled(15.0);
+
+        div()
+            .id("settings-help-button")
+            .h(px(height))
+            .px(px(self.scaled(12.0)))
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(6.0)))
+            .rounded(px(self.scaled(8.0)))
+            .border(px(1.0))
+            .border_color(self.theme.border_primary)
+            .bg(self.theme.bg_secondary)
+            .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
+            .text_color(self.theme.text_primary)
+            .cursor(CursorStyle::Arrow)
+            .hover({
+                let hover_bg = self.theme.bg_hover;
+                move |style| style.bg(hover_bg)
+            })
+            .child(
+                svg()
+                    .path(DOC_SVG_PATH)
+                    .size(px(icon_size))
+                    .text_color(self.theme.text_secondary),
+            )
+            .child(self.t(TextKey::HelpManual))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.open_welcome_tab(cx);
+                }),
             )
             .into_any_element()
     }
@@ -191,7 +235,7 @@ impl EditorView {
             .flex()
             .flex_col()
             .gap(px(self.scaled(16.0)))
-                    .child(self.render_section_heading(self.t(TextKey::ThemeSection)))
+            .child(self.render_section_heading(self.t(TextKey::ThemeSection)))
             .child(
                 div()
                     .w_full()
@@ -1107,55 +1151,53 @@ impl EditorView {
         let editor = cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
         cx.subscribe(
             &editor,
-            |this, editor, event: &crate::text_input::TextInputEvent, cx| {
-                match event {
-                    crate::text_input::TextInputEvent::Changed => {
-                        let query = editor.read(cx).text().to_lowercase();
-                        if let Some(picker) = &mut this.settings_font_picker {
-                            if query.is_empty() {
-                                picker.filtered = picker.all_options.clone();
-                            } else {
-                                picker.filtered = picker
-                                    .all_options
-                                    .iter()
-                                    .filter(|option| option.search_text.contains(&query))
-                                    .cloned()
-                                    .collect();
-                            }
-                            picker.selected_index = 0;
-                            cx.notify();
+            |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Changed => {
+                    let query = editor.read(cx).text().to_lowercase();
+                    if let Some(picker) = &mut this.settings_font_picker {
+                        if query.is_empty() {
+                            picker.filtered = picker.all_options.clone();
+                        } else {
+                            picker.filtered = picker
+                                .all_options
+                                .iter()
+                                .filter(|option| option.search_text.contains(&query))
+                                .cloned()
+                                .collect();
+                        }
+                        picker.selected_index = 0;
+                        cx.notify();
+                    }
+                }
+                crate::text_input::TextInputEvent::Submit
+                | crate::text_input::TextInputEvent::SubmitBackward => {
+                    if let Some(picker) = &this.settings_font_picker {
+                        if let Some(option) = picker.filtered.get(picker.selected_index).cloned() {
+                            this.apply_font_selection(option.value, cx);
+                            return;
                         }
                     }
-                    crate::text_input::TextInputEvent::Submit => {
-                        if let Some(picker) = &this.settings_font_picker {
-                            if let Some(option) = picker.filtered.get(picker.selected_index).cloned()
-                            {
-                                this.apply_font_selection(option.value, cx);
-                                return;
-                            }
+                    this.close_font_picker(cx);
+                }
+                crate::text_input::TextInputEvent::Escape => {
+                    this.close_font_picker(cx);
+                }
+                crate::text_input::TextInputEvent::MoveUp => {
+                    if let Some(picker) = &mut this.settings_font_picker {
+                        if picker.selected_index > 0 {
+                            picker.selected_index -= 1;
+                            picker.scroll_handle.scroll_to_item(picker.selected_index);
                         }
-                        this.close_font_picker(cx);
+                        cx.notify();
                     }
-                    crate::text_input::TextInputEvent::Escape => {
-                        this.close_font_picker(cx);
-                    }
-                    crate::text_input::TextInputEvent::MoveUp => {
-                        if let Some(picker) = &mut this.settings_font_picker {
-                            if picker.selected_index > 0 {
-                                picker.selected_index -= 1;
-                                picker.scroll_handle.scroll_to_item(picker.selected_index);
-                            }
-                            cx.notify();
+                }
+                crate::text_input::TextInputEvent::MoveDown => {
+                    if let Some(picker) = &mut this.settings_font_picker {
+                        if picker.selected_index + 1 < picker.filtered.len() {
+                            picker.selected_index += 1;
+                            picker.scroll_handle.scroll_to_item(picker.selected_index);
                         }
-                    }
-                    crate::text_input::TextInputEvent::MoveDown => {
-                        if let Some(picker) = &mut this.settings_font_picker {
-                            if picker.selected_index + 1 < picker.filtered.len() {
-                                picker.selected_index += 1;
-                                picker.scroll_handle.scroll_to_item(picker.selected_index);
-                            }
-                            cx.notify();
-                        }
+                        cx.notify();
                     }
                 }
             },

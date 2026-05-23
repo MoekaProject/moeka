@@ -3158,10 +3158,18 @@ pub(crate) fn build_generated_block_preview_svg(
 
     match rendered {
         Ok(svg) if svg.contains("<svg") => svg,
-        Ok(_) => {
-            build_generated_block_preview_error_svg(kind, "renderer returned invalid SVG", theme)
-        }
-        Err(error) => build_generated_block_preview_error_svg(kind, &error.to_string(), theme),
+        Ok(_) => build_generated_block_preview_error_svg(
+            kind,
+            "renderer returned invalid SVG",
+            theme,
+            font_families,
+        ),
+        Err(error) => build_generated_block_preview_error_svg(
+            kind,
+            &error.to_string(),
+            theme,
+            font_families,
+        ),
     }
 }
 
@@ -3257,6 +3265,7 @@ fn build_generated_block_preview_error_svg(
     kind: BlockPreviewKind,
     message: &str,
     theme: &Theme,
+    font_families: GeneratedPreviewFontFamilies<'_>,
 ) -> String {
     let title = match kind {
         BlockPreviewKind::Math => "LaTeX preview failed",
@@ -3268,11 +3277,12 @@ fn build_generated_block_preview_error_svg(
     let width = 920;
     let height = 140 + lines.len() as i32 * 24;
     let mut text_nodes = String::new();
+    let font_family = build_generated_preview_font_family(font_families);
 
     for (index, line) in lines.iter().enumerate() {
         let y = 102 + index as i32 * 24;
         text_nodes.push_str(&format!(
-            "<text x=\"48\" y=\"{y}\" font-family=\"Menlo, Monaco, monospace\" font-size=\"16\" fill=\"{text_color}\">{}</text>",
+            "<text x=\"48\" y=\"{y}\" font-family=\"{font_family}\" font-size=\"16\" fill=\"{text_color}\">{}</text>",
             escape_svg_text(line)
         ));
     }
@@ -3280,8 +3290,9 @@ fn build_generated_block_preview_error_svg(
     let background = svg_color(theme.bg_primary);
 
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"><rect width=\"100%\" height=\"100%\" fill=\"{background}\"/><text x=\"48\" y=\"62\" font-family=\"Helvetica, Arial, sans-serif\" font-size=\"18\" font-weight=\"700\" fill=\"{title_color}\">{title}</text>{text_nodes}</svg>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"><rect width=\"100%\" height=\"100%\" fill=\"{background}\"/><text x=\"48\" y=\"62\" font-family=\"{font_family}\" font-size=\"18\" font-weight=\"700\" fill=\"{title_color}\">{title}</text>{text_nodes}</svg>",
         background = background,
+        font_family = font_family,
         title = escape_svg_text(title),
         title_color = title_color,
     )
@@ -3318,10 +3329,18 @@ fn build_mermaid_text_preview_svg(
 
     for (index, line) in lines.iter().enumerate() {
         let y = padding_y + font_size + index as f32 * line_height;
-        text_nodes.push_str(&format!(
-            "<text x=\"{padding_x}\" y=\"{y}\" xml:space=\"preserve\" font-family=\"{font_family}\" font-size=\"{font_size}\" fill=\"{text_color}\">{}</text>",
-            escape_svg_text(line)
-        ));
+        let mut column = 0usize;
+        for ch in line.chars() {
+            let width = char_display_width(ch);
+            if ch != ' ' {
+                let x = padding_x + column as f32 * char_width;
+                text_nodes.push_str(&format!(
+                    "<text x=\"{x}\" y=\"{y}\" font-family=\"{font_family}\" font-size=\"{font_size}\" fill=\"{text_color}\">{}</text>",
+                    escape_svg_text(&ch.to_string())
+                ));
+            }
+            column += width;
+        }
     }
 
     format!(
@@ -3368,13 +3387,22 @@ fn push_generated_preview_font_families(families: &mut Vec<String>, configured: 
         .map(str::trim)
         .filter(|family| !family.is_empty())
     {
+        let normalized = family.trim_matches(|ch| ch == '\'' || ch == '"');
         if families
             .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(family))
+            .any(|existing| {
+                existing
+                    .trim_matches(|ch| ch == '\'' || ch == '"')
+                    .eq_ignore_ascii_case(normalized)
+            })
         {
             continue;
         }
-        families.push(family.to_string());
+        families.push(if normalized.contains(char::is_whitespace) {
+            format!("'{}'", normalized.replace('\'', "\\'"))
+        } else {
+            normalized.to_string()
+        });
     }
 }
 

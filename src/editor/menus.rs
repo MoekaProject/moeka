@@ -3616,6 +3616,16 @@ impl EditorView {
                         this.open_settings_tab(cx);
                     },
                 ));
+                items.push(self.render_context_menu_item_with_icon(
+                    self.t(crate::i18n::TextKey::HelpManual),
+                    DOC_SVG_PATH,
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.open_welcome_tab(cx);
+                    },
+                ));
                 (items, self.scaled(wss.ws_menu_width_px))
             }
             ContextMenuKind::Table {

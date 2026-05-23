@@ -67,6 +67,7 @@ const CODE_BLOCK_COPY_FEEDBACK_MS: u64 = 1200;
 const PANEL_ANIMATION_FRAME_MS: u64 = 8;
 const SIDEBAR_GIT_STATUS_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 const GIT_HISTORY_REFRESH_MIN_INTERVAL_MS: u64 = 350;
+pub(super) const WELCOME_TAB_ID: &str = "welcome-1";
 
 #[derive(Clone, Copy, Default)]
 struct GitMetadataImpact {
@@ -398,6 +399,14 @@ pub(crate) enum TableDragState {
         source_row: usize,
         current_y: f32,
     },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct EditorScrollbarDragState {
+    pub start_position_y: f32,
+    pub start_thumb_top: f32,
+    pub track_travel: f32,
+    pub max_scroll: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -742,6 +751,7 @@ pub struct EditorView {
     pub(crate) line_display_info: Vec<Option<LineDisplayInfo>>,
     pub(crate) layout_dirty: bool,
     pub(crate) pending_scroll_to_cursor: bool,
+    pub(crate) pending_center_cursor_in_view: bool,
     pub(crate) pending_preview_reveal: Option<PendingPreviewReveal>,
     pub(crate) last_viewport_height: f32,
     pub(crate) last_viewport_width: f32,
@@ -831,6 +841,15 @@ pub struct EditorView {
     pub(crate) image_drag_state: Option<ImageDragState>,
     pub(crate) command_held: bool,
     pub(crate) hovered_editor_position: Option<Point<Pixels>>,
+    pub(crate) editor_scrollbar_hovered: bool,
+    pub(crate) editor_scrollbar_revealed: bool,
+    pub(crate) editor_scrollbar_opacity: f32,
+    pub(crate) editor_scrollbar_opacity_target: f32,
+    pub(crate) editor_scrollbar_opacity_epoch: usize,
+    pub(crate) editor_scrollbar_opacity_task: Option<Task<()>>,
+    pub(crate) editor_scrollbar_idle_epoch: usize,
+    pub(crate) editor_scrollbar_idle_task: Option<Task<()>>,
+    pub(crate) editor_scrollbar_drag: Option<EditorScrollbarDragState>,
     pub(crate) sidebar_custom_width: Option<f32>,
     pub(crate) sidebar_resizing: bool,
     pub(crate) sidebar_display_width: f32,
@@ -1049,20 +1068,11 @@ impl EditorView {
         let sidebar_root = PathBuf::new();
         let expanded_dirs = HashSet::new();
         let sidebar_error = None;
-        let initial_text = default_document_text();
-        let first_line_end = initial_text.find('\n').unwrap_or(initial_text.len());
-        let buffer = Buffer::from_text(&initial_text);
-        let decorations = markdown::parse_decorations(buffer.text());
-        let initial_snapshot = EditorSnapshot {
-            text: initial_text,
-            cursor_offset: first_line_end,
-            cursor_anchor: first_line_end,
-            scroll_offset: 0.0,
-            extra_cursors: Vec::new(),
-        };
-        // Load persisted settings
         let app_settings = AppSettings::load();
         let ui_language = app_settings.ui_language();
+        let welcome_tab = builtin_welcome_tab(ui_language);
+        let buffer = Buffer::from_text(&welcome_tab.snapshot.text);
+        let decorations = markdown::parse_decorations(buffer.text());
         let theme_kind = app_settings.theme_kind();
         let editor_theme_mode = app_settings.editor_theme_mode_for_appearance(theme_kind.is_dark());
         let theme = crate::theme::apply_editor_theme_mode(
@@ -1090,6 +1100,7 @@ impl EditorView {
         let init_padding_left = styles.editor.editor_padding_left_px;
         let init_padding_right = styles.editor.editor_padding_right_px;
         let init_cursor_opacity = styles.cursor.cursor_opacity_max;
+        let init_scrollbar_opacity = styles.editor.editor_scrollbar_idle_opacity;
         let mut this = Self {
             buffer,
             cursor: Cursor::new(),
@@ -1107,6 +1118,7 @@ impl EditorView {
             line_display_info: Vec::new(),
             layout_dirty: false,
             pending_scroll_to_cursor: false,
+            pending_center_cursor_in_view: false,
             pending_preview_reveal: None,
             last_viewport_height: 600.0,
             last_viewport_width: init_max_width,
@@ -1148,53 +1160,9 @@ impl EditorView {
             selected_sidebar_paths: HashSet::new(),
             current_file_path: None,
             sidebar_error,
-            tabs: vec![
-                OpenTab {
-                    id: "welcome-1".to_string(),
-                    title: crate::i18n::translate(ui_language, TextKey::WelcomeTitle).to_string(),
-                    kind: TabKind::Editor,
-                    path: None,
-                    file_kind: Some(FileKind::Markdown),
-                    editor_left_aligned: false,
-                    snapshot: initial_snapshot,
-                    image_view: ImageViewState::default(),
-                    git_diff: None,
-                    is_preview: false,
-                    is_dirty: false,
-                    is_deleted: false,
-                    is_pinned: false,
-                    recovery: config_store::TabRecoveryState::default(),
-                    history: history_store::TabHistory::new(
-                        Some(history_store::default_source_identity("welcome-1", None)),
-                        Some(history_store::default_journal_path("welcome-1", None)),
-                    ),
-                },
-                OpenTab {
-                    id: "settings-1".to_string(),
-                    title: crate::i18n::translate(ui_language, TextKey::SettingsTitle).to_string(),
-                    kind: TabKind::Settings,
-                    path: None,
-                    file_kind: None,
-                    editor_left_aligned: false,
-                    snapshot: EditorSnapshot {
-                        text: String::new(),
-                        cursor_offset: 0,
-                        cursor_anchor: 0,
-                        scroll_offset: 0.0,
-                        extra_cursors: Vec::new(),
-                    },
-                    image_view: ImageViewState::default(),
-                    git_diff: None,
-                    is_preview: false,
-                    is_dirty: false,
-                    is_deleted: false,
-                    is_pinned: false,
-                    recovery: config_store::TabRecoveryState::default(),
-                    history: history_store::TabHistory::default(),
-                },
-            ],
-            active_tab_id: Some("settings-1".to_string()),
-            next_tab_id: 2,
+            tabs: vec![welcome_tab],
+            active_tab_id: Some(WELCOME_TAB_ID.to_string()),
+            next_tab_id: 1,
             last_editor_left: 0.0,
             last_editor_width: init_max_width,
             last_content_left: init_padding_left,
@@ -1230,6 +1198,15 @@ impl EditorView {
             image_drag_state: None,
             command_held: false,
             hovered_editor_position: None,
+            editor_scrollbar_hovered: false,
+            editor_scrollbar_revealed: false,
+            editor_scrollbar_opacity: init_scrollbar_opacity,
+            editor_scrollbar_opacity_target: init_scrollbar_opacity,
+            editor_scrollbar_opacity_epoch: 0,
+            editor_scrollbar_opacity_task: None,
+            editor_scrollbar_idle_epoch: 0,
+            editor_scrollbar_idle_task: None,
+            editor_scrollbar_drag: None,
             sidebar_custom_width: None,
             sidebar_resizing: false,
             sidebar_display_width: 0.0,
@@ -1252,7 +1229,7 @@ impl EditorView {
             tab_drag_candidate_id: None,
             tab_dragging_id: None,
             recently_closed_tabs: Vec::new(),
-            tab_navigation_history: vec![TabNavigationTarget::Settings],
+            tab_navigation_history: vec![TabNavigationTarget::LiveTab(WELCOME_TAB_ID.to_string())],
             tab_navigation_index: 0,
             tab_navigation_suspended: false,
             dialog: None,
@@ -1442,7 +1419,7 @@ impl EditorView {
         for tab in &mut self.tabs {
             if tab.kind == TabKind::Settings {
                 tab.title = settings_title.clone();
-            } else if tab.id == "welcome-1" && tab.path.is_none() {
+            } else if tab.id == WELCOME_TAB_ID && tab.path.is_none() {
                 tab.title = welcome_title.clone();
             }
         }
@@ -1521,6 +1498,257 @@ impl EditorView {
                     .await;
             }
         }));
+    }
+
+    fn editor_scrollbar_can_show(&self) -> bool {
+        let last_line_height =
+            self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
+        let max_scroll =
+            (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0);
+        !self.active_tab_is_image() && !self.active_tab_is_binary() && max_scroll > 1.0
+    }
+
+    pub(crate) fn editor_scrollbar_region_contains(&self, position: Point<Pixels>) -> bool {
+        if !self.editor_scrollbar_can_show() {
+            return false;
+        }
+
+        let left = f32::from(self.content_origin.x);
+        let top = f32::from(self.content_origin.y);
+        let right = left + self.last_viewport_width.max(1.0);
+        let bottom = top + self.last_viewport_height.max(1.0);
+        let x = f32::from(position.x);
+        let y = f32::from(position.y);
+        let hit_width = self.scaled(self.styles.editor.editor_scrollbar_hit_width_px);
+        x >= right - hit_width && x <= right && y >= top && y <= bottom
+    }
+
+    pub(crate) fn editor_scrollbar_thumb_geometry(&self) -> Option<(f32, f32)> {
+        if !self.editor_scrollbar_can_show() {
+            return None;
+        }
+
+        let viewport_height = self.last_viewport_height.max(1.0);
+        let total_content_height = self.total_content_height().max(1.0);
+        let min_thumb_height = self.scaled(self.styles.editor.editor_scrollbar_min_thumb_height_px);
+        let thumb_height = (viewport_height * (viewport_height / total_content_height))
+            .clamp(min_thumb_height, viewport_height.max(min_thumb_height));
+
+        let last_line_height =
+            self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
+        let max_scroll =
+            (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0);
+        if max_scroll <= 0.0 {
+            return None;
+        }
+
+        let track_travel = (viewport_height - thumb_height).max(0.0);
+        let thumb_top = (self.scroll_offset / max_scroll).clamp(0.0, 1.0) * track_travel;
+        Some((thumb_top, thumb_height))
+    }
+
+    fn editor_scrollbar_max_scroll(&self) -> f32 {
+        let last_line_height =
+            self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
+        (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0)
+    }
+
+    fn desired_editor_scrollbar_opacity(&self) -> f32 {
+        if !self.editor_scrollbar_can_show() {
+            0.0
+        } else if self.editor_scrollbar_hovered || self.editor_scrollbar_drag.is_some() {
+            self.styles.editor.editor_scrollbar_hover_opacity
+        } else if self.editor_scrollbar_revealed {
+            self.styles.editor.editor_scrollbar_opacity
+        } else {
+            self.styles.editor.editor_scrollbar_idle_opacity
+        }
+    }
+
+    fn sync_editor_scrollbar_opacity(&mut self, cx: &mut Context<Self>) {
+        let target = self.desired_editor_scrollbar_opacity();
+
+        if (self.editor_scrollbar_opacity_target - target).abs() > 0.001 {
+            self.editor_scrollbar_opacity_target = target;
+        } else if self.editor_scrollbar_opacity_task.is_some()
+            || (self.editor_scrollbar_opacity - target).abs() <= 0.01
+        {
+            return;
+        }
+
+        self.editor_scrollbar_opacity_epoch += 1;
+        let epoch = self.editor_scrollbar_opacity_epoch;
+        let duration_ms = self.styles.editor.editor_scrollbar_fade_animation_ms.max(1);
+        let step = (16.0 / duration_ms as f32).clamp(0.08, 1.0);
+
+        self.editor_scrollbar_opacity_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.editor_scrollbar_opacity_epoch != epoch {
+                            return true;
+                        }
+
+                        let diff =
+                            this.editor_scrollbar_opacity_target - this.editor_scrollbar_opacity;
+                        if diff.abs() <= 0.01 {
+                            this.editor_scrollbar_opacity = this.editor_scrollbar_opacity_target;
+                            this.editor_scrollbar_opacity_task = None;
+                            cx.notify();
+                            return true;
+                        }
+
+                        this.editor_scrollbar_opacity += diff * step;
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+
+                if done {
+                    return;
+                }
+
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+            }
+        }));
+    }
+
+    fn cancel_editor_scrollbar_idle_fade(&mut self) {
+        self.editor_scrollbar_idle_epoch += 1;
+        self.editor_scrollbar_idle_task = None;
+    }
+
+    fn schedule_editor_scrollbar_idle_fade(&mut self, cx: &mut Context<Self>) {
+        if !self.editor_scrollbar_can_show() {
+            self.editor_scrollbar_revealed = false;
+            self.cancel_editor_scrollbar_idle_fade();
+            self.sync_editor_scrollbar_opacity(cx);
+            return;
+        }
+
+        self.editor_scrollbar_idle_epoch += 1;
+        let epoch = self.editor_scrollbar_idle_epoch;
+        let delay_ms = self.styles.editor.editor_scrollbar_idle_delay_ms;
+        self.editor_scrollbar_idle_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(delay_ms))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.editor_scrollbar_idle_epoch != epoch {
+                    return;
+                }
+
+                this.editor_scrollbar_idle_task = None;
+                if this.editor_scrollbar_hovered || this.editor_scrollbar_drag.is_some() {
+                    return;
+                }
+
+                this.editor_scrollbar_revealed = false;
+                this.sync_editor_scrollbar_opacity(cx);
+            });
+        }));
+    }
+
+    pub(crate) fn reveal_editor_scrollbar(&mut self, cx: &mut Context<Self>) {
+        if !self.editor_scrollbar_can_show() {
+            return;
+        }
+
+        self.editor_scrollbar_revealed = true;
+        self.cancel_editor_scrollbar_idle_fade();
+        self.sync_editor_scrollbar_opacity(cx);
+        if !self.editor_scrollbar_hovered && self.editor_scrollbar_drag.is_none() {
+            self.schedule_editor_scrollbar_idle_fade(cx);
+        }
+    }
+
+    pub(crate) fn set_editor_scrollbar_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.editor_scrollbar_hovered == hovered {
+            return;
+        }
+
+        self.editor_scrollbar_hovered = hovered;
+        if hovered {
+            self.cancel_editor_scrollbar_idle_fade();
+        } else if self.editor_scrollbar_revealed && self.editor_scrollbar_drag.is_none() {
+            self.schedule_editor_scrollbar_idle_fade(cx);
+        }
+        self.sync_editor_scrollbar_opacity(cx);
+    }
+
+    pub(crate) fn start_editor_scrollbar_drag(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((thumb_top, thumb_height)) = self.editor_scrollbar_thumb_geometry() else {
+            return;
+        };
+        let track_travel = (self.last_viewport_height.max(1.0) - thumb_height).max(0.0);
+        let max_scroll = self.editor_scrollbar_max_scroll();
+        if max_scroll <= 0.0 {
+            return;
+        }
+
+        self.editor_scrollbar_revealed = true;
+        self.cancel_editor_scrollbar_idle_fade();
+        self.editor_scrollbar_drag = Some(EditorScrollbarDragState {
+            start_position_y: f32::from(position.y),
+            start_thumb_top: thumb_top,
+            track_travel,
+            max_scroll,
+        });
+        self.editor_scrollbar_hovered = true;
+        self.sync_editor_scrollbar_opacity(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn update_editor_scrollbar_drag(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(drag) = self.editor_scrollbar_drag else {
+            return false;
+        };
+
+        let delta_y = f32::from(position.y) - drag.start_position_y;
+        let thumb_top = (drag.start_thumb_top + delta_y).clamp(0.0, drag.track_travel);
+        self.scroll_offset = if drag.track_travel <= 0.0 {
+            0.0
+        } else {
+            thumb_top / drag.track_travel * drag.max_scroll
+        };
+        self.clamp_scroll();
+        self.toolbar_hidden_by_scroll = self.scroll_offset > 0.5;
+        if self.toolbar_hidden_by_scroll {
+            self.toolbar_corner_hovered = false;
+        }
+        self.sync_toolbar_opacity(cx);
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn stop_editor_scrollbar_drag(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.editor_scrollbar_drag.take().is_none() {
+            return false;
+        }
+
+        self.editor_scrollbar_hovered = self.editor_scrollbar_region_contains(position);
+        if self.editor_scrollbar_hovered {
+            self.cancel_editor_scrollbar_idle_fade();
+        } else if self.editor_scrollbar_revealed {
+            self.schedule_editor_scrollbar_idle_fade(cx);
+        }
+        self.sync_editor_scrollbar_opacity(cx);
+        cx.notify();
+        true
     }
 
     pub(crate) fn sidebar_target_width(&self) -> f32 {
@@ -3112,6 +3340,11 @@ impl EditorView {
             .active_file_kind()
             .cloned()
             .unwrap_or(FileKind::Markdown);
+        self.search_matches.clear();
+        self.search_current_index = None;
+        self.workspace_search_highlight_path = None;
+        self.workspace_search_highlight_ranges.clear();
+        self.workspace_search_highlight_current_index = None;
         let git_diff_rows = self.active_git_diff_state().map(|diff| diff.rows.clone());
         if let Some(rows) = git_diff_rows {
             self.decorations = rows.into_iter().map(|row| row.decoration).collect();
@@ -5775,6 +6008,38 @@ pub(crate) fn default_document_text() -> String {
     crate::resolve_runtime_path("EDITOR.md")
         .and_then(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_else(|| include_str!("../../EDITOR.md").to_string())
+}
+
+pub(super) fn builtin_welcome_tab(ui_language: UiLanguage) -> OpenTab {
+    let initial_text = default_document_text();
+    let first_line_end = initial_text.find('\n').unwrap_or(initial_text.len());
+
+    OpenTab {
+        id: WELCOME_TAB_ID.to_string(),
+        title: crate::i18n::translate(ui_language, TextKey::WelcomeTitle).to_string(),
+        kind: TabKind::Editor,
+        path: None,
+        file_kind: Some(FileKind::Markdown),
+        editor_left_aligned: false,
+        snapshot: EditorSnapshot {
+            text: initial_text,
+            cursor_offset: first_line_end,
+            cursor_anchor: first_line_end,
+            scroll_offset: 0.0,
+            extra_cursors: Vec::new(),
+        },
+        image_view: ImageViewState::default(),
+        git_diff: None,
+        is_preview: false,
+        is_dirty: false,
+        is_deleted: false,
+        is_pinned: false,
+        recovery: config_store::TabRecoveryState::default(),
+        history: history_store::TabHistory::new(
+            Some(history_store::default_source_identity(WELCOME_TAB_ID, None)),
+            Some(history_store::default_journal_path(WELCOME_TAB_ID, None)),
+        ),
+    }
 }
 
 pub(crate) fn classify_word_char(ch: char) -> WordCharClass {

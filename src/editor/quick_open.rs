@@ -56,7 +56,8 @@ impl EditorView {
                         this.quick_open_query = query;
                         this.run_quick_open_search(cx);
                     }
-                    crate::text_input::TextInputEvent::Submit => {
+                    crate::text_input::TextInputEvent::Submit
+                    | crate::text_input::TextInputEvent::SubmitBackward => {
                         this.confirm_quick_open(cx);
                     }
                     crate::text_input::TextInputEvent::Escape => {}

@@ -58,7 +58,8 @@ impl EditorView {
                         this.workspace_search_query = query;
                         this.run_workspace_search(cx);
                     }
-                    crate::text_input::TextInputEvent::Submit => {
+                    crate::text_input::TextInputEvent::Submit
+                    | crate::text_input::TextInputEvent::SubmitBackward => {
                         this.commit_workspace_search_selected_match(cx);
                     }
                     crate::text_input::TextInputEvent::Escape => {}
@@ -206,8 +207,7 @@ impl EditorView {
         self.workspace_search_highlight_current_index = Some(0);
         self.cursor.offset = search_match.byte_offset.min(self.buffer.len());
         self.cursor.anchor = self.cursor.offset;
-        self.scroll_to_cursor();
-        cx.notify();
+        self.center_cursor_in_view(cx);
     }
 
     fn preview_workspace_search_match_at(
@@ -640,10 +640,14 @@ impl EditorView {
                 if remaining_rows == 0 {
                     break;
                 }
-                let file_name = result
-                    .path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
+                let file_name = self
+                    .relative_path_for_path(&result.path)
+                    .or_else(|| {
+                        result
+                            .path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                    })
                     .unwrap_or_default();
                 let match_count = result.matches.len();
 

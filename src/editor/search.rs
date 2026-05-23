@@ -115,6 +115,9 @@ impl EditorView {
                     crate::text_input::TextInputEvent::Submit => {
                         this.search_navigate(true, cx);
                     }
+                    crate::text_input::TextInputEvent::SubmitBackward => {
+                        this.search_navigate(false, cx);
+                    }
                     crate::text_input::TextInputEvent::Escape => {}
                     _ => {}
                 },
@@ -156,7 +159,8 @@ impl EditorView {
                             .unwrap_or_default();
                         this.search_replace = replace;
                     }
-                    crate::text_input::TextInputEvent::Submit => {
+                    crate::text_input::TextInputEvent::Submit
+                    | crate::text_input::TextInputEvent::SubmitBackward => {
                         this.replace_current_match(cx);
                     }
                     crate::text_input::TextInputEvent::Escape => {}
@@ -222,28 +226,48 @@ impl EditorView {
     }
 
     pub(crate) fn search_navigate(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let reran_search = if self.search_matches.is_empty() && !self.search_query.is_empty() {
+            self.run_search(cx);
+            true
+        } else {
+            false
+        };
+
         if self.search_matches.is_empty() {
             return;
         }
 
         let count = self.search_matches.len();
-        let index = match self.search_current_index {
-            Some(current) => {
+        let index = match (reran_search, self.search_current_index) {
+            (true, Some(current)) => {
+                if forward {
+                    current
+                } else {
+                    (current + count - 1) % count
+                }
+            }
+            (true, None) => {
+                if forward {
+                    0
+                } else {
+                    count - 1
+                }
+            }
+            (false, Some(current)) => {
                 if forward {
                     (current + 1) % count
                 } else {
                     (current + count - 1) % count
                 }
             }
-            None => 0,
+            (false, None) => 0,
         };
 
         self.search_current_index = Some(index);
         let range = &self.search_matches[index];
         self.cursor.offset = range.start;
         self.cursor.anchor = range.start;
-        self.scroll_to_cursor();
-        cx.notify();
+        self.center_cursor_in_view(cx);
     }
 
     pub(crate) fn replace_current_match(&mut self, cx: &mut Context<Self>) {

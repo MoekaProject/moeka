@@ -266,6 +266,86 @@ impl EditorView {
         }
     }
 
+    fn sync_outline_scroll_position(&self) {
+        if self.utility_panel == Some(RightUtilityPanel::Outline)
+            && let Some(active_line) = self.active_outline_heading_line()
+        {
+            let headings = self.collect_outline_headings();
+            if let Some(index) = headings
+                .iter()
+                .position(|heading| heading.line == active_line)
+            {
+                self.outline_scroll_handle.scroll_to_item(index + 2);
+            }
+        }
+    }
+
+    fn animate_scroll_to(&mut self, target_scroll: f32, cx: &mut Context<Self>) {
+        let start_scroll = self.scroll_offset;
+        self.scroll_offset = target_scroll;
+        self.clamp_scroll();
+        let final_scroll = self.scroll_offset;
+
+        if (final_scroll - start_scroll).abs() < 1.0 {
+            self.scroll_offset = final_scroll;
+            self.sync_outline_scroll_position();
+            cx.notify();
+            return;
+        }
+
+        self.scroll_anim_epoch += 1;
+        let epoch = self.scroll_anim_epoch;
+        self.scroll_offset = start_scroll;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let total_steps = 14u32;
+            let step_ms = 16u64;
+            for step in 1..=total_steps {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(step_ms))
+                    .await;
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.scroll_anim_epoch != epoch {
+                            return true;
+                        }
+
+                        let t = step as f32 / total_steps as f32;
+                        let ease = 1.0 - (1.0 - t).powi(3);
+                        this.scroll_offset = start_scroll + (final_scroll - start_scroll) * ease;
+                        this.clamp_scroll();
+                        this.sync_outline_scroll_position();
+                        cx.notify();
+                        step == total_steps
+                    })
+                    .unwrap_or(true);
+                if done {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn center_cursor_in_view(&mut self, cx: &mut Context<Self>) {
+        if self.layout_dirty {
+            self.pending_center_cursor_in_view = true;
+            self.pending_scroll_to_cursor = false;
+            return;
+        }
+
+        self.pending_center_cursor_in_view = false;
+        self.pending_scroll_to_cursor = false;
+        let cursor_line = self.cursor_line();
+        let cursor_y = self.line_y_offset(cursor_line);
+        let cursor_line_height = self.visual_height_for_line(cursor_line);
+        let target_scroll = (cursor_y + cursor_line_height * 0.5
+            - self.last_viewport_height * 0.5)
+            .max(0.0);
+        self.animate_scroll_to(target_scroll, cx);
+    }
+
     pub(crate) fn clamp_scroll(&mut self) {
         // Allow scrolling the last line to the top (like Monaco's scrollBeyondLastLine)
         let last_line_height =

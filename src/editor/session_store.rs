@@ -53,13 +53,6 @@ pub(crate) fn restore_session(editor: &mut EditorView) {
         return;
     }
 
-    if !restored_tabs
-        .iter()
-        .any(|tab| tab.kind == TabKind::Settings)
-    {
-        restored_tabs.insert(0, settings_tab("settings-1".to_string()));
-    }
-
     editor.tabs = restored_tabs;
     editor.active_tab_id = config
         .session
@@ -179,6 +172,7 @@ fn resolve_snapshot(
         .temp_path
         .as_ref()
         .and_then(|path| fs::read_to_string(path).ok());
+    let has_temp_text = temp_text.is_some();
 
     match record.path.as_ref() {
         Some(path) if path.exists() => {
@@ -239,6 +233,24 @@ fn resolve_snapshot(
             };
             (None, snapshot, true)
         }),
+        None if record.id == super::WELCOME_TAB_ID
+            && file_kind.is_some_and(FileKind::supports_text_buffer) =>
+        {
+            let text = temp_text.unwrap_or_else(super::default_document_text);
+            let snapshot = EditorSnapshot {
+                cursor_offset: record.view.cursor_offset.min(text.len()),
+                cursor_anchor: record.view.cursor_anchor.min(text.len()),
+                scroll_offset: record.view.scroll_offset,
+                extra_cursors: record
+                    .view
+                    .extra_cursors
+                    .iter()
+                    .map(|(offset, anchor)| ((*offset).min(text.len()), (*anchor).min(text.len())))
+                    .collect(),
+                text,
+            };
+            Some((None, snapshot, has_temp_text))
+        }
         None if file_kind.is_some_and(FileKind::supports_text_buffer) => temp_text.map(|text| {
             let snapshot = EditorSnapshot {
                 cursor_offset: record.view.cursor_offset.min(text.len()),

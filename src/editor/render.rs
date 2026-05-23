@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Corners, CursorStyle, ExternalPaths, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Render, SharedString, Window, canvas, deferred, div, fill, img,
-    prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Window, canvas, deferred,
+    div, fill, img, prelude::*, px,
 };
 
 use super::tooltip::{TooltipState, toolbar_anchor_bounds};
@@ -386,6 +386,48 @@ impl Render for EditorView {
                 || self.toolbar_opacity_task.is_some()
                 || self.toolbar_opacity > self.styles.toolbar.toolbar_hidden_opacity + 0.01);
         let ws = &self.styles.window;
+        let editor = cx.entity().clone();
+        window.on_mouse_event({
+            let editor = editor.clone();
+            move |event: &MouseMoveEvent, phase, _window, cx| {
+                if !phase.capture() {
+                    return;
+                }
+
+                let handled = editor.update(cx, |this, cx| {
+                    if this.editor_scrollbar_drag.is_none() {
+                        return false;
+                    }
+
+                    if event.dragging() {
+                        this.hovered_editor_position = Some(event.position);
+                        this.set_editor_scrollbar_hovered(true, cx);
+                        this.update_editor_scrollbar_drag(event.position, cx);
+                    } else {
+                        this.stop_editor_scrollbar_drag(event.position, cx);
+                    }
+                    true
+                });
+                if handled {
+                    cx.stop_propagation();
+                }
+            }
+        });
+        window.on_mouse_event({
+            let editor = editor.clone();
+            move |event: &MouseUpEvent, phase, _window, cx| {
+                if !phase.capture() || event.button != MouseButton::Left {
+                    return;
+                }
+
+                let handled = editor.update(cx, |this, cx| {
+                    this.stop_editor_scrollbar_drag(event.position, cx)
+                });
+                if handled {
+                    cx.stop_propagation();
+                }
+            }
+        });
         // Store window bounds for menu positioning
         let wb = window.bounds();
         self.last_window_width = f32::from(wb.size.width);
@@ -710,6 +752,9 @@ impl Render for EditorView {
                                                                             .hovered_editor_position
                                                                             .take()
                                                                             .is_some();
+                                                                        if this.editor_scrollbar_drag.is_none() {
+                                                                            this.set_editor_scrollbar_hovered(false, cx);
+                                                                        }
                                                                         let toolbar_changed = if this
                                                                             .toolbar_corner_hovered
                                                                         {
@@ -765,6 +810,60 @@ impl Render for EditorView {
                                                                 }
                                                                 .into_any_element()
                                                             })
+                                                            .when_some(
+                                                                self.editor_scrollbar_thumb_geometry(),
+                                                                |this, (thumb_top, thumb_height)| {
+                                                                    let thumb_width = self.scaled(
+                                                                        self.styles
+                                                                            .editor
+                                                                            .editor_scrollbar_width_px,
+                                                                    );
+                                                                    let hit_width = self.scaled(
+                                                                        self.styles
+                                                                            .editor
+                                                                            .editor_scrollbar_hit_width_px,
+                                                                    );
+                                                                    let right_inset =
+                                                                        ((hit_width - thumb_width)
+                                                                            / 2.0)
+                                                                            .max(0.0);
+                                                                    let thumb_radius = self.scaled(
+                                                                        self.styles
+                                                                            .editor
+                                                                            .editor_scrollbar_radius_px,
+                                                                    );
+                                                                    let mut thumb_color = self
+                                                                        .styles
+                                                                        .editor
+                                                                        .editor_scrollbar_thumb_color;
+                                                                    thumb_color.a *= self
+                                                                        .editor_scrollbar_opacity
+                                                                        .clamp(0.0, 1.0);
+                                                                    this.child(
+                                                                        div()
+                                                                            .absolute()
+                                                                            .top_0()
+                                                                            .right(px(0.0))
+                                                                            .h_full()
+                                                                            .w(px(hit_width))
+                                                                            .child(
+                                                                                div()
+                                                                                    .absolute()
+                                                                                    .top(px(thumb_top))
+                                                                                    .right(px(right_inset))
+                                                                                    .w(px(thumb_width))
+                                                                                    .h(px(thumb_height))
+                                                                                    .cursor(CursorStyle::Arrow)
+                                                                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                                                                        cx.stop_propagation();
+                                                                                        this.start_editor_scrollbar_drag(event.position, cx);
+                                                                                    }))
+                                                                                    .rounded(px(thumb_radius))
+                                                                                    .bg(thumb_color),
+                                                                            ),
+                                                                    )
+                                                                },
+                                                            )
                                                             .when(self.chat_tab_dragging_id.is_some(), |this| {
                                                                 this.child(self.render_chat_panel_drop_targets(
                                                                     editor_pane_width,

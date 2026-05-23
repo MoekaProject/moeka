@@ -323,6 +323,11 @@ fn main() {
             KeyBinding::new("up", text_input::TextInputPickerUp, Some("TextInput")),
             KeyBinding::new("down", text_input::TextInputPickerDown, Some("TextInput")),
             KeyBinding::new("enter", text_input::TextInputSubmit, Some("TextInput")),
+            KeyBinding::new(
+                "shift-enter",
+                text_input::TextInputSubmitBackward,
+                Some("TextInput"),
+            ),
         ]);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -331,7 +336,7 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
-                    size(px(800.0), px(640.0)),
+                    size(px(1024.0), px(768.0)),
                     cx,
                 ))),
                 titlebar: Some(TitlebarOptions {

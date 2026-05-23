@@ -802,6 +802,7 @@ impl Element for EditorElement {
 
         let mut y = origin_y + editor.padding_top();
         let line_count = buffer.line_count();
+        let mut _last_line_height = 0.0_f32;
 
         // Collect all cursor selection ranges (primary + extra)
         let mut all_sel_ranges: Vec<std::ops::Range<usize>> =
@@ -932,6 +933,30 @@ impl Element for EditorElement {
                 editor.base_font_size() * 0.6
             }
         };
+
+        if buffer.text().is_empty() {
+            let placeholder = "键入 / 命令或右键插入格式...";
+            let placeholder_runs = inline_overlay_runs(
+                placeholder,
+                &body_font,
+                &body_cjk_font,
+                crate::theme::with_alpha(
+                    theme.text_secondary,
+                    editor.styles.editor.editor_empty_placeholder_opacity,
+                ),
+            );
+            let shaped = window.text_system().shape_line(
+                SharedString::from(placeholder),
+                px(editor.base_font_size()),
+                &placeholder_runs,
+                None,
+            );
+            inline_overlays.push((
+                shaped,
+                point(px(editor_left + editor.padding_left()), px(y)),
+                px(editor.visual_height_for_line(0)),
+            ));
+        }
         let body_space_width = {
             let test_run = TextRun {
                 len: 1,
@@ -1297,6 +1322,7 @@ impl Element for EditorElement {
 
                 if line_bottom < origin_y || line_top > origin_y + viewport_height {
                     y += total_line_height;
+                    _last_line_height = total_line_height;
                     continue;
                 }
 
@@ -1697,6 +1723,7 @@ impl Element for EditorElement {
                 });
 
                 y += total_line_height;
+                _last_line_height = total_line_height;
                 continue;
             }
             let active_tab_is_diff = editor.active_tab_is_diff();
@@ -2158,6 +2185,7 @@ impl Element for EditorElement {
 
             if line_bottom < origin_y || line_top > origin_y + viewport_height {
                 y += total_line_height;
+                _last_line_height = total_line_height;
                 continue;
             }
 
@@ -3983,8 +4011,8 @@ impl Element for EditorElement {
             }
 
             y += total_line_height;
+            _last_line_height = total_line_height;
         }
-
         if editor.preview_overlay_state().is_none() {
             preview_overlay_bounds_local = None;
             preview_overlay_image_bounds_local = None;
@@ -4377,11 +4405,14 @@ impl Element for EditorElement {
             let mut did_adjust_preview_reveal = false;
             if let Some(pending) = editor.pending_preview_reveal.take() {
                 editor.pending_scroll_to_cursor = false;
+                editor.pending_center_cursor_in_view = false;
                 editor.scroll_offset = pending.scroll_offset;
                 editor.clamp_scroll();
                 did_adjust_preview_reveal = true;
             }
-            if editor.pending_scroll_to_cursor {
+            if editor.pending_center_cursor_in_view {
+                editor.center_cursor_in_view(cx);
+            } else if editor.pending_scroll_to_cursor {
                 editor.scroll_to_cursor();
                 cx.notify();
             } else if did_adjust_preview_reveal {
@@ -4464,6 +4495,7 @@ impl Element for EditorElement {
             None if editor.hovering_image_preview_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_generated_preview_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_generated_preview_zoom_line.is_some() => CursorStyle::Arrow,
+            None if editor.editor_scrollbar_hovered => CursorStyle::Arrow,
             None => CursorStyle::IBeam,
         };
         window.set_cursor_style(cursor_style, &prepaint.hitbox);
