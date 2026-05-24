@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Corners, CursorStyle, ExternalPaths, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Window, canvas, deferred,
-    div, fill, img, prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Window, canvas,
+    deferred, div, fill, img, prelude::*, px,
 };
 
 use super::tooltip::{TooltipState, toolbar_anchor_bounds};
@@ -526,6 +526,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_toggle_replace))
             .on_action(cx.listener(Self::on_replace_next))
             .on_action(cx.listener(Self::on_replace_all))
+            .on_action(cx.listener(Self::on_open_file_dialog))
             .on_action(cx.listener(Self::on_find_in_files))
             .on_action(cx.listener(Self::on_quick_open))
             .on_action(cx.listener(Self::on_escape))

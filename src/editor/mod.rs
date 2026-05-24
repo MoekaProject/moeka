@@ -5527,6 +5527,10 @@ impl EditorView {
         None
     }
 
+    pub(crate) fn normalize_all_ordered_lists(&mut self) {
+        normalize_ordered_list_numbers_in_buffer(&mut self.buffer);
+    }
+
     pub(crate) fn renumber_ordered_list_block_from(
         &mut self,
         start_line: usize,
@@ -5568,6 +5572,39 @@ impl EditorView {
         }
     }
 
+    fn previous_ordered_list_number_before(&self, line: usize, indent: usize) -> Option<u32> {
+        if line == 0 {
+            return None;
+        }
+
+        for prev_line in (0..line).rev() {
+            let line_content = self.buffer.line_content(prev_line).to_string();
+            let trimmed = line_content.trim();
+            if trimmed.is_empty() {
+                break;
+            }
+
+            let leading_ws =
+                line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+            if leading_ws > indent {
+                continue;
+            }
+            if leading_ws < indent {
+                break;
+            }
+
+            let Some((_, prev_indent, prev_number)) = self.ordered_list_prefix_info(prev_line)
+            else {
+                break;
+            };
+            if prev_indent == indent {
+                return Some(prev_number);
+            }
+        }
+
+        None
+    }
+
     pub(crate) fn normalize_ordered_list_near_line(
         &mut self,
         line: usize,
@@ -5595,16 +5632,84 @@ impl EditorView {
             return;
         }
 
-        let starting_number = if target_line > 0 {
-            self.ordered_list_prefix_info(target_line - 1)
-                .filter(|(_, prev_indent, _)| *prev_indent == indent)
-                .map(|(_, _, prev_number)| prev_number + 1)
-                .unwrap_or(1)
-        } else {
-            1
-        };
+        let starting_number = self
+            .previous_ordered_list_number_before(target_line, indent)
+            .map(|prev_number| prev_number + 1)
+            .unwrap_or(1);
 
         self.renumber_ordered_list_block_from(target_line, starting_number, indent);
+    }
+}
+
+fn normalize_ordered_list_numbers_in_buffer(buffer: &mut Buffer) {
+    if buffer.line_count() == 0 {
+        return;
+    }
+
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    let mut number_stack: Vec<(usize, u32)> = Vec::new();
+
+    for line in 0..buffer.line_count() {
+        let line_content = buffer.line_content(line).to_string();
+        if line_content.trim().is_empty() {
+            number_stack.clear();
+            continue;
+        }
+
+        let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+        while number_stack
+            .last()
+            .is_some_and(|(indent, _)| *indent > leading_ws)
+        {
+            number_stack.pop();
+        }
+
+        let trimmed = &line_content[leading_ws..];
+        let prefix_len = markdown::ordered_list_prefix_len(trimmed);
+        let current_number = if prefix_len >= 2 {
+            trimmed[..prefix_len - 2].parse::<u32>().ok()
+        } else {
+            None
+        };
+
+        let Some(current_number) = current_number else {
+            if number_stack
+                .last()
+                .is_some_and(|(indent, _)| *indent == leading_ws)
+            {
+                number_stack.pop();
+            }
+            continue;
+        };
+
+        let expected_number = match number_stack.last_mut() {
+            Some((indent, next_number)) if *indent == leading_ws => {
+                let expected = *next_number;
+                *next_number += 1;
+                expected
+            }
+            Some((indent, _)) if *indent < leading_ws => {
+                number_stack.push((leading_ws, 2));
+                1
+            }
+            _ => {
+                number_stack.push((leading_ws, 2));
+                1
+            }
+        };
+
+        if current_number == expected_number {
+            continue;
+        }
+
+        let number_text = &trimmed[..prefix_len - 2];
+        let number_start = buffer.line_start(line) + leading_ws;
+        let number_end = number_start + number_text.len();
+        edits.push((number_start, number_end, expected_number.to_string()));
+    }
+
+    for (number_start, number_end, new_number) in edits.into_iter().rev() {
+        buffer.replace(number_start..number_end, &new_number);
     }
 }
 
@@ -6078,9 +6183,11 @@ pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        heading_matches_anchor, markdown_reference_for_import_name, resolve_markdown_target_path,
+        heading_matches_anchor, markdown_reference_for_import_name,
+        normalize_ordered_list_numbers_in_buffer, resolve_markdown_target_path,
         split_markdown_target, text_tab_is_dirty, unique_import_path,
     };
+    use crate::buffer::Buffer;
 
     #[test]
     fn text_tab_is_dirty_detects_saved_file_revert() {
@@ -6157,5 +6264,23 @@ mod tests {
         );
 
         assert_eq!(resolved.as_deref(), Some(linked_file.as_path()));
+    }
+
+    #[test]
+    fn normalize_ordered_list_numbers_fixes_gap_after_deleted_item() {
+        let mut buffer = Buffer::from_text("1. one\n3. three\n4. four\n");
+
+        normalize_ordered_list_numbers_in_buffer(&mut buffer);
+
+        assert_eq!(buffer.text(), "1. one\n2. three\n3. four\n");
+    }
+
+    #[test]
+    fn normalize_ordered_list_numbers_keeps_outer_sequence_across_nested_content() {
+        let mut buffer = Buffer::from_text("1. one\n   - child\n4. four\n");
+
+        normalize_ordered_list_numbers_in_buffer(&mut buffer);
+
+        assert_eq!(buffer.text(), "1. one\n   - child\n2. four\n");
     }
 }

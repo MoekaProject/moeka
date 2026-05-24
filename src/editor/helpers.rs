@@ -3549,6 +3549,13 @@ pub(crate) fn pick_image_file_blocking() -> Option<PathBuf> {
         .pick_file()
 }
 
+pub(crate) fn pick_markdown_file_blocking(title: &str) -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title(title)
+        .add_filter("Markdown", &["md", "markdown"])
+        .pick_file()
+}
+
 pub(crate) fn pick_folder_blocking(title: &str) -> Option<PathBuf> {
     rfd::FileDialog::new().set_title(title).pick_folder()
 }

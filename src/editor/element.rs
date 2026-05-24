@@ -4316,16 +4316,12 @@ impl Element for EditorElement {
             let preview_is_active = preview_anchor.is_some_and(|preview| {
                 helpers::block_preview_is_active(preview, cursor_line, &all_sel_ranges)
             });
-            let collapsed_preview_anchor = preview_anchor
-                .filter(|preview| !editor.folded_sections.contains(&preview.start_line))
-                .filter(|_| !preview_is_active);
-            let group_syntax_collapsed =
+            let group_syntax_active =
                 code_block_group_range(*start_line).is_some_and(|(group_start, group_end)| {
-                    !active_code_fence_group.is_some_and(|(active_start, active_end)| {
+                    active_code_fence_group.is_some_and(|(active_start, active_end)| {
                         group_start == active_start && group_end == active_end
                     })
                 });
-            let folded_action_group = collapsed_preview_anchor.is_some() || group_syntax_collapsed;
 
             let is_copied = editor.copied_code_block_start == Some(*start_line);
             let preview_actions_visible = preview_anchor.is_some()
@@ -4338,8 +4334,9 @@ impl Element for EditorElement {
             let is_visible = if preview_anchor.is_some() {
                 preview_actions_visible
             } else {
-                folded_action_group
+                group_syntax_active
                     || editor.hovering_code_block_start == Some(*start_line)
+                    || editor.hovering_code_block_copy_start == Some(*start_line)
                     || is_copied
             };
             if !is_visible {

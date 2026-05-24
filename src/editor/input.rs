@@ -631,17 +631,6 @@ impl EditorView {
             self.close_preview_overlay();
             return true;
         }
-
-        let has_preview_bounds = self
-            .generated_preview_image_bounds_for_line(line_idx)
-            .is_some()
-            || self
-                .generated_preview_click_areas
-                .iter()
-                .any(|(_, line)| *line == line_idx);
-        if !has_preview_bounds {
-            return false;
-        }
         let Some(preview) = self
             .decorations
             .get(line_idx)
@@ -649,6 +638,13 @@ impl EditorView {
         else {
             return false;
         };
+        if !self
+            .image_cache
+            .get(&preview.cache_key)
+            .is_some_and(|entry| entry.is_some())
+        {
+            return false;
+        }
         self.preview_overlay = Some(PreviewOverlayState {
             cache_key: preview.cache_key.clone(),
             line_idx,

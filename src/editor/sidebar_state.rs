@@ -48,6 +48,8 @@ fn collect_sidebar_git_statuses_for_root(sidebar_root: &Path) -> HashMap<PathBuf
 
     let mut statuses = HashMap::new();
     if let Ok(output) = Command::new("git")
+        .arg("-c")
+        .arg("core.quotepath=false")
         .arg("-C")
         .arg(&repo_root)
         .args(&args)

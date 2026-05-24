@@ -122,6 +122,16 @@ impl EditorView {
         } else {
             false
         };
+        let selection_line_span = if self.cursor.has_selection() {
+            let (start_line, _) = self.buffer.offset_to_line_col(selection.start);
+            let end_probe = selection
+                .end
+                .saturating_sub(usize::from(selection.end > selection.start));
+            let (end_line, _) = self.buffer.offset_to_line_col(end_probe.min(self.buffer.len()));
+            Some((start_line, end_line))
+        } else {
+            None
+        };
         let touched_ordered_prefix = if self.cursor.has_selection() {
             self.ordered_list_prefix_touched_by_range(&selection)
         } else {
@@ -197,6 +207,8 @@ impl EditorView {
                 self.buffer.replace(del_start..del_end, "");
                 self.cursor.move_to(del_start, &self.buffer);
                 self.reparse();
+                self.normalize_all_ordered_lists();
+                self.reparse();
                 if !cursor_had_inline_headroom || self.cursor_line() != cursor_line_before {
                     self.scroll_to_cursor();
                 }
@@ -220,11 +232,17 @@ impl EditorView {
         }
         self.cursor.backspace(&mut self.buffer);
         self.reparse();
-        if let Some(line) = touched_ordered_prefix {
+        if let Some((start_line, end_line)) = selection_line_span
+            && (touched_ordered_prefix.is_some() || removes_line_break)
+        {
+            let _ = (start_line, end_line);
+            self.normalize_all_ordered_lists();
+            self.reparse();
+        } else if let Some(line) = touched_ordered_prefix {
             self.normalize_ordered_list_near_line(line, true);
             self.reparse();
         } else if removes_line_break {
-            self.normalize_ordered_list_near_line(self.cursor_line(), false);
+            self.normalize_all_ordered_lists();
             self.reparse();
         }
         if !cursor_had_inline_headroom
@@ -284,6 +302,16 @@ impl EditorView {
         } else {
             false
         };
+        let selection_line_span = if self.cursor.has_selection() {
+            let (start_line, _) = self.buffer.offset_to_line_col(selection.start);
+            let end_probe = selection
+                .end
+                .saturating_sub(usize::from(selection.end > selection.start));
+            let (end_line, _) = self.buffer.offset_to_line_col(end_probe.min(self.buffer.len()));
+            Some((start_line, end_line))
+        } else {
+            None
+        };
         let touched_ordered_prefix = if self.cursor.has_selection() {
             self.ordered_list_prefix_touched_by_range(&selection)
         } else {
@@ -303,11 +331,17 @@ impl EditorView {
         }
         self.cursor.delete(&mut self.buffer);
         self.reparse();
-        if let Some(line) = touched_ordered_prefix {
+        if let Some((start_line, end_line)) = selection_line_span
+            && (touched_ordered_prefix.is_some() || removes_line_break)
+        {
+            let _ = (start_line, end_line);
+            self.normalize_all_ordered_lists();
+            self.reparse();
+        } else if let Some(line) = touched_ordered_prefix {
             self.normalize_ordered_list_near_line(line, true);
             self.reparse();
         } else if removes_line_break {
-            self.normalize_ordered_list_near_line(self.cursor_line(), false);
+            self.normalize_all_ordered_lists();
             self.reparse();
         }
         if !cursor_had_inline_headroom
@@ -1349,7 +1383,7 @@ impl EditorView {
         self.cursor.anchor = self.cursor.offset;
         self.mark_active_tab_dirty();
         self.reparse();
-        self.normalize_ordered_list_near_line(self.cursor_line(), false);
+        self.normalize_all_ordered_lists();
         self.reparse();
         self.scroll_to_cursor();
         self.pause_blinking(cx);

@@ -7,6 +7,27 @@ use pinyin::ToPinyin;
 use super::*;
 
 impl EditorView {
+    pub(crate) fn on_open_file_dialog(
+        &mut self,
+        _: &OpenFileDialog,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = self.t(crate::i18n::TextKey::OpenFile).to_string();
+        cx.spawn(async move |this, cx| {
+            let maybe_path = cx
+                .background_executor()
+                .spawn(async move { helpers::pick_markdown_file_blocking(&title) })
+                .await;
+            if let Some(path) = maybe_path {
+                let _ = this.update(cx, |editor, cx| {
+                    editor.open_path_in_permanent_tab(path, true, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
     fn quick_open_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
         styles.text_input_padding_left_px =

@@ -88,6 +88,7 @@ actions!(
         ReplaceNext,
         ReplaceAll,
         // Global search
+        OpenFileDialog,
         FindInFiles,
         QuickOpen,
     ]

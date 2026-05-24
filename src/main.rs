@@ -241,6 +241,7 @@ fn main() {
             KeyBinding::new("cmd-h", ToggleReplace, Some("MarkdownEditor")),
             KeyBinding::new("cmd-shift-f", FindInFiles, Some("MarkdownEditor")),
             KeyBinding::new("cmd-p", QuickOpen, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-o", OpenFileDialog, None),
         ]);
 
         // TextInput keybindings
@@ -362,15 +363,11 @@ fn main() {
                                 disable_gpui_content_view_window_drag(ns_view);
                                 let ns_window: *mut objc::runtime::Object =
                                     msg_send![ns_view, window];
-                                // NSTitlebarSeparatorStyleNone = 0
                                 let () = msg_send![ns_window, setTitlebarSeparatorStyle: 0i64];
-                                // Use fully clear background (like Clipboarder's
-                                // transparent(true)) and re-enable shadow manually.
                                 let clear_color: *mut objc::runtime::Object =
                                     msg_send![class!(NSColor), clearColor];
                                 let () = msg_send![ns_window, setBackgroundColor: clear_color];
                                 let () = msg_send![ns_window, setHasShadow: true];
-                                // Prevent titlebar from starting window drag on mouse down
                                 let () = msg_send![ns_window, setMovableByWindowBackground: false];
                                 let content_view: *mut objc::runtime::Object =
                                     msg_send![ns_window, contentView];

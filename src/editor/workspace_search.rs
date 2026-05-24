@@ -37,7 +37,9 @@ impl EditorView {
         if self.workspace_search_editor.is_none() {
             let styles = self.workspace_search_text_input_styles();
             let initial_query = self.workspace_search_query.clone();
-            let placeholder = self.t(crate::i18n::TextKey::WorkspaceSearchPlaceholder).to_string();
+            let placeholder = self
+                .t(crate::i18n::TextKey::WorkspaceSearchPlaceholder)
+                .to_string();
             let editor = cx.new(move |cx| {
                 let mut input = crate::text_input::TextInput::new(styles, &placeholder, cx);
                 if !initial_query.is_empty() {
@@ -640,7 +642,7 @@ impl EditorView {
                 if remaining_rows == 0 {
                     break;
                 }
-                let file_name = self
+                let relative_path = self
                     .relative_path_for_path(&result.path)
                     .or_else(|| {
                         result
@@ -649,6 +651,16 @@ impl EditorView {
                             .map(|name| name.to_string_lossy().into_owned())
                     })
                     .unwrap_or_default();
+                let relative_path = std::path::Path::new(&relative_path);
+                let file_name = relative_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| relative_path.to_string_lossy().into_owned());
+                let directory_path = relative_path
+                    .parent()
+                    .map(|parent| parent.to_string_lossy().into_owned())
+                    .filter(|parent| !parent.is_empty() && parent != ".");
                 let match_count = result.matches.len();
 
                 children.push(
@@ -668,14 +680,38 @@ impl EditorView {
                         .child(
                             div()
                                 .flex_1()
+                                .min_w(px(0.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(
+                                    self.scaled(workspace_styles.ws_search_file_header_dir_gap_px)
+                                ))
                                 .text_size(px(self
                                     .scaled(workspace_styles.ws_search_file_header_font_size_px)))
-                                .text_color(workspace_styles.ws_search_file_header_text_color)
-                                .font_weight(FontWeight::BOLD)
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(file_name),
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(
+                                            workspace_styles.ws_search_file_header_text_color,
+                                        )
+                                        .font_weight(FontWeight::BOLD)
+                                        .child(file_name),
+                                )
+                                .when_some(directory_path, |this, directory_path| {
+                                    this.child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .text_color(
+                                                workspace_styles
+                                                    .ws_search_file_header_dir_text_color,
+                                            )
+                                            .child(directory_path),
+                                    )
+                                }),
                         )
                         .child(
                             div()
