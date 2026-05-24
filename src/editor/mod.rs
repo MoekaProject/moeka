@@ -1394,6 +1394,9 @@ impl EditorView {
             ui_language,
             app_settings,
         };
+        this.last_content_left = this.padding_left();
+        this.last_text_width = (init_max_width - this.padding_left() - this.padding_right())
+            .max(this.scaled(120.0));
         session_store::restore_session(&mut this);
         this.refresh_builtin_tab_titles();
         this.sync_panel_display_state();

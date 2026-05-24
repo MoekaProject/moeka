@@ -1285,7 +1285,7 @@ impl EditorView {
 
         let gutter_styles = &self.styles.gutter;
         let fold_hit_padding = self.scaled(gutter_styles.gutter_fold_hit_padding_px);
-        let pane_left = f32::from(self.content_origin.x);
+        let pane_left = self.last_editor_left;
         let hover_x = f32::from(event.position.x);
         let hovering_gutter_fold_area =
             hover_x >= pane_left && hover_x <= self.last_content_left + fold_hit_padding;

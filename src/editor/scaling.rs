@@ -65,8 +65,76 @@ impl EditorView {
         self.scaled(self.styles.editor.editor_font_size_px)
     }
 
+    pub(crate) fn gutter_left_inset(&self) -> f32 {
+        if self.active_tab_is_non_markdown_text() {
+            0.0
+        } else {
+            self.scaled(self.styles.editor.editor_padding_left_px)
+        }
+    }
+
+    pub(crate) fn gutter_line_number_width(&self) -> f32 {
+        if !self.active_tab_is_non_markdown_text() {
+            return 0.0;
+        }
+        let gutter_styles = &self.styles.gutter;
+        let line_number_digits = self.buffer.line_count().max(1).to_string().len() as f32;
+        let estimated_text_width =
+            line_number_digits * self.scaled(gutter_styles.gutter_line_number_font_size_px) * 0.6;
+        estimated_text_width.clamp(
+            self.scaled(gutter_styles.gutter_line_number_min_width_px),
+            self.scaled(gutter_styles.gutter_line_number_max_width_px),
+        )
+    }
+
+    pub(crate) fn gutter_column_gap(&self) -> f32 {
+        if self.active_tab_is_non_markdown_text() {
+            self.scaled(self.styles.gutter.gutter_column_gap_px)
+        } else {
+            0.0
+        }
+    }
+
+    pub(crate) fn gutter_icon_column_width(&self) -> f32 {
+        let gutter_styles = &self.styles.gutter;
+        let max_heading_icon_size = gutter_styles
+            .gutter_heading_h1_icon_size_px
+            .max(gutter_styles.gutter_heading_h2_icon_size_px)
+            .max(gutter_styles.gutter_heading_h3_icon_size_px)
+            .max(gutter_styles.gutter_heading_h4_icon_size_px);
+        self.scaled(
+            (gutter_styles.gutter_fold_icon_size_px + gutter_styles.gutter_fold_icon_offset_px)
+                .max(
+                    gutter_styles.gutter_blockquote_icon_size_px
+                        + gutter_styles.gutter_blockquote_icon_offset_px,
+                )
+                .max(max_heading_icon_size + gutter_styles.gutter_heading_icon_offset_px),
+        )
+    }
+
+    pub(crate) fn gutter_line_number_right_x(&self, editor_left: f32) -> f32 {
+        editor_left + self.gutter_left_inset() + self.gutter_line_number_width()
+    }
+
+    pub(crate) fn gutter_icon_column_left(&self, editor_left: f32) -> f32 {
+        self.gutter_line_number_right_x(editor_left) + self.gutter_column_gap()
+    }
+
+    pub(crate) fn gutter_icon_x(&self, editor_left: f32, icon_size: f32) -> f32 {
+        self.gutter_icon_column_left(editor_left)
+            + ((self.gutter_icon_column_width() - icon_size) / 2.0).max(0.0)
+    }
+
     pub(crate) fn padding_left(&self) -> f32 {
-        self.scaled(self.styles.editor.editor_padding_left_px)
+        if self.active_tab_is_non_markdown_text() {
+            self.gutter_left_inset()
+                + self.gutter_line_number_width()
+                + self.gutter_column_gap()
+                + self.gutter_icon_column_width()
+                + self.gutter_column_gap()
+        } else {
+            self.scaled(self.styles.editor.editor_padding_left_px)
+        }
     }
 
     pub(crate) fn padding_top(&self) -> f32 {
@@ -340,9 +408,8 @@ impl EditorView {
         let cursor_line = self.cursor_line();
         let cursor_y = self.line_y_offset(cursor_line);
         let cursor_line_height = self.visual_height_for_line(cursor_line);
-        let target_scroll = (cursor_y + cursor_line_height * 0.5
-            - self.last_viewport_height * 0.5)
-            .max(0.0);
+        let target_scroll =
+            (cursor_y + cursor_line_height * 0.5 - self.last_viewport_height * 0.5).max(0.0);
         self.animate_scroll_to(target_scroll, cx);
     }
 

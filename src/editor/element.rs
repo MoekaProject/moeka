@@ -22,6 +22,7 @@ pub(crate) struct EditorPrepaintState {
     hitbox: Hitbox,
     link_hitboxes: Vec<Hitbox>,
     lines: Vec<PrepaintLine>,
+    indent_guide_quads: Vec<PaintQuad>,
     whitespace_dots: Vec<PaintQuad>,
     cursor_quads: Vec<PaintQuad>,
     selection_quads: Vec<PaintQuad>,
@@ -590,6 +591,7 @@ fn push_gutter_line_number_label(
     gutter_right_x: f32,
     text_line_top: f32,
     line_height: f32,
+    vertical_offset: f32,
     right_gap: f32,
     text_color: Hsla,
     active_text_color: Hsla,
@@ -615,8 +617,86 @@ fn push_gutter_line_number_label(
     );
     let label_x = gutter_right_x - right_gap - f32::from(shaped.width);
     let metrics_height = f32::from(shaped.ascent + shaped.descent);
-    let label_y = text_line_top + (line_height - metrics_height) / 2.0 - 2.0;
+    let label_y = text_line_top + (line_height - metrics_height) / 2.0 - vertical_offset;
     gutter_labels.push((shaped, point(px(label_x), px(label_y)), px(line_height)));
+}
+
+fn leading_indent_columns(line: &str) -> usize {
+    let mut columns = 0usize;
+    for ch in line.chars() {
+        match ch {
+            ' ' => columns += 1,
+            '\t' => columns += 4 - (columns % 4),
+            _ => break,
+        }
+    }
+    columns
+}
+
+fn detect_indent_guide_step(buffer: &crate::buffer::Buffer, line_count: usize) -> usize {
+    let mut previous_indent = None;
+    let mut detected_step = usize::MAX;
+
+    for line_idx in 0..line_count {
+        let line = buffer.line_content(line_idx);
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let indent = leading_indent_columns(line);
+        if let Some(previous) = previous_indent
+            && indent > previous
+        {
+            detected_step = detected_step.min(indent - previous);
+        }
+        previous_indent = Some(indent);
+    }
+
+    if detected_step == usize::MAX {
+        4
+    } else {
+        detected_step.clamp(1, 8)
+    }
+}
+
+fn push_indent_guide_quads(
+    quads: &mut Vec<PaintQuad>,
+    line_content: &str,
+    content_x: f32,
+    line_top: f32,
+    total_line_height: f32,
+    char_width: f32,
+    indent_step_columns: usize,
+    guide_width: f32,
+    dash_len: f32,
+    gap_len: f32,
+    guide_color: Hsla,
+) {
+    if indent_step_columns == 0 || line_content.trim().is_empty() {
+        return;
+    }
+
+    let indent_columns = leading_indent_columns(line_content);
+    let guide_count = indent_columns / indent_step_columns;
+    if guide_count == 0 {
+        return;
+    }
+
+    let level_width = indent_step_columns as f32 * char_width;
+    let segment_step = (dash_len + gap_len).max(1.0);
+    for level in 0..guide_count {
+        let guide_x = content_x + level as f32 * level_width;
+        let mut y = line_top;
+        let line_bottom = line_top + total_line_height;
+        while y < line_bottom {
+            let height = dash_len.min(line_bottom - y);
+            quads.push(fill(
+                Bounds::new(point(px(guide_x), px(y)), size(px(guide_width), px(height))),
+                guide_color,
+            ));
+            y += segment_step;
+        }
+    }
 }
 
 fn inline_overlay_prefers_latin_font(ch: char) -> bool {
@@ -786,10 +866,12 @@ impl Element for EditorElement {
         let wrap_width = (text_width
             - editor.scaled(editor.styles.editor.editor_wrap_right_padding_px))
         .max(editor.scaled(120.0));
-        let gutter_right_x =
-            origin_x + editor.scaled(editor.styles.gutter.gutter_line_number_left_padding_px);
+        let gutter_right_x = editor.gutter_line_number_right_x(editor_left);
+        let gutter_icon_column_left = editor.gutter_icon_column_left(editor_left);
+        let gutter_icon_column_width = editor.gutter_icon_column_width();
 
         let mut lines = Vec::new();
+        let mut indent_guide_quads = Vec::new();
         let mut selection_quads = Vec::new();
         let mut search_match_quads: Vec<PaintQuad> = Vec::new();
         let mut line_highlight = None;
@@ -820,6 +902,21 @@ impl Element for EditorElement {
             all_cursor_offsets.push(ec.offset);
         }
         let any_selection = all_sel_ranges.iter().any(|r| r.start != r.end);
+        let mut active_line_numbers: HashSet<usize> = HashSet::new();
+        for &offset in &all_cursor_offsets {
+            active_line_numbers.insert(buffer.offset_to_line_col(offset).0);
+        }
+        for range in all_sel_ranges
+            .iter()
+            .filter(|range| range.start != range.end)
+        {
+            let start_line = buffer.offset_to_line_col(range.start).0;
+            let end_offset = range.end.saturating_sub(1).min(buffer.len());
+            let end_line = buffer.offset_to_line_col(end_offset).0;
+            for line in start_line..=end_line {
+                active_line_numbers.insert(line);
+            }
+        }
 
         let mut gutter_quads = Vec::new();
         let mut gutter_labels: Vec<(ShapedLine, Point<Pixels>, Pixels)> = Vec::new();
@@ -978,6 +1075,18 @@ impl Element for EditorElement {
                 base_char_width.max(1.0)
             }
         };
+        let show_indent_guides = editor.active_tab_is_non_markdown_text();
+        let indent_guide_step_columns = if show_indent_guides {
+            detect_indent_guide_step(buffer, line_count)
+        } else {
+            0
+        };
+        let indent_guide_color = editor.styles.editor.editor_indent_guide_color;
+        let indent_guide_width = editor.scaled(editor.styles.editor.editor_indent_guide_width_px);
+        let indent_guide_dash_len =
+            editor.scaled(editor.styles.editor.editor_indent_guide_dash_length_px);
+        let indent_guide_gap_len =
+            editor.scaled(editor.styles.editor.editor_indent_guide_gap_length_px);
 
         let image_cache = &editor.image_cache;
         let window_scale_factor = window.scale_factor().max(1.0);
@@ -1362,6 +1471,22 @@ impl Element for EditorElement {
                     );
                 }
                 let origin = point(px(content_x), px(text_line_top));
+                if show_indent_guides {
+                    push_indent_guide_quads(
+                        &mut indent_guide_quads,
+                        line_content,
+                        content_x,
+                        line_top,
+                        total_line_height,
+                        base_char_width,
+                        indent_guide_step_columns,
+                        indent_guide_width,
+                        indent_guide_dash_len,
+                        indent_guide_gap_len,
+                        indent_guide_color,
+                    );
+                }
+                let is_active_line_number = active_line_numbers.contains(&line_idx);
                 let skip_block_line_highlight = decoration
                     .table_info
                     .as_ref()
@@ -1382,16 +1507,68 @@ impl Element for EditorElement {
                     &mut gutter_labels,
                     window,
                     line_idx,
-                    is_cursor_line,
+                    is_active_line_number,
                     &monospace_font,
                     editor.scaled(gutter_styles.gutter_line_number_font_size_px),
                     gutter_right_x,
                     text_line_top,
                     line_height,
+                    editor.scaled(gutter_styles.gutter_line_number_vertical_offset_px),
                     editor.scaled(gutter_styles.gutter_line_number_right_gap_px),
                     gutter_styles.gutter_line_number_text_color,
                     gutter_styles.gutter_line_number_active_text_color,
                 );
+
+                let fold_range = if hidden_lines.contains(&line_idx) {
+                    None
+                } else {
+                    editor.fold_range_for_line(line_idx)
+                };
+                if fold_range.is_some() {
+                    let fi_size = editor.scaled(gutter_styles.gutter_fold_icon_size_px);
+                    let fi_hit_padding = editor.scaled(gutter_styles.gutter_fold_hit_padding_px);
+                    let fi_x = editor.gutter_icon_x(editor_left, fi_size);
+                    let fi_y = text_line_top + (line_height - fi_size) / 2.0;
+                    let reveal = editor.gutter_fold_reveal.max(0.0);
+                    let is_folded = editor.folded_sections.contains(&line_idx);
+                    let is_hovered = editor.hovering_gutter_fold_area
+                        || editor.hovering_fold_line == Some(line_idx);
+                    let fi_alpha = if is_folded {
+                        gutter_styles.gutter_fold_folded_opacity
+                    } else if is_hovered {
+                        gutter_styles.gutter_fold_hover_opacity * reveal
+                    } else {
+                        gutter_styles.gutter_fold_default_opacity * reveal
+                    };
+                    if fi_alpha > 0.0 {
+                        let mut fi_color = if is_folded {
+                            gutter_styles.gutter_fold_folded_color
+                        } else {
+                            gutter_styles.gutter_fold_hover_color
+                        };
+                        fi_color.a = fi_alpha;
+                        gutter_fold_icons.push((
+                            Bounds::new(point(px(fi_x), px(fi_y)), size(px(fi_size), px(fi_size))),
+                            if is_folded {
+                                FOLD_SVG_PATH
+                            } else {
+                                FOLD_EXPANDED_SVG_PATH
+                            },
+                            fi_color,
+                        ));
+                    }
+                    gutter_fold_hit_areas_local.push((
+                        Bounds::new(
+                            point(px(gutter_icon_column_left - fi_hit_padding), px(line_top)),
+                            size(
+                                px(gutter_icon_column_width + fi_hit_padding * 2.0),
+                                px(total_line_height),
+                            ),
+                        ),
+                        line_idx,
+                        false,
+                    ));
+                }
 
                 if let Some(diff_bg) = diff_line_background(editor, line_idx) {
                     diff_line_bgs.push(fill(
@@ -2235,6 +2412,22 @@ impl Element for EditorElement {
             };
 
             let origin = point(px(content_x), px(text_line_top));
+            if show_indent_guides {
+                push_indent_guide_quads(
+                    &mut indent_guide_quads,
+                    line_content,
+                    content_x,
+                    line_top,
+                    total_line_height,
+                    base_char_width,
+                    indent_guide_step_columns,
+                    indent_guide_width,
+                    indent_guide_dash_len,
+                    indent_guide_gap_len,
+                    indent_guide_color,
+                );
+            }
+            let is_active_line_number = active_line_numbers.contains(&line_idx);
             let is_table_source_row = *block_type == BlockType::Table
                 && !active_tab_is_diff
                 && decoration
@@ -3098,12 +3291,13 @@ impl Element for EditorElement {
                     &mut gutter_labels,
                     window,
                     line_idx,
-                    is_cursor_line,
+                    is_active_line_number,
                     &monospace_font,
                     editor.scaled(gutter_styles.gutter_line_number_font_size_px),
                     gutter_right_x,
                     text_line_top,
                     line_height,
+                    editor.scaled(gutter_styles.gutter_line_number_vertical_offset_px),
                     editor.scaled(gutter_styles.gutter_line_number_right_gap_px),
                     gutter_styles.gutter_line_number_text_color,
                     gutter_styles.gutter_line_number_active_text_color,
@@ -3128,7 +3322,11 @@ impl Element for EditorElement {
                         5 => HEADING_5_SVG_PATH,
                         _ => HEADING_6_SVG_PATH,
                     };
-                    let icon_x = editor_left + editor.padding_left() - icon_size - heading_offset;
+                    let icon_x = if editor.active_tab_is_non_markdown_text() {
+                        editor.gutter_icon_x(editor_left, icon_size)
+                    } else {
+                        editor_left + editor.padding_left() - icon_size - heading_offset
+                    };
                     let icon_y = gutter_center_y + 0.0 - icon_size / 2.0;
                     gutter_svgs.push((
                         Bounds::new(
@@ -3136,13 +3334,19 @@ impl Element for EditorElement {
                             size(px(icon_size), px(icon_size)),
                         ),
                         icon_path,
-                        theme.gutter_heading,
+                        gutter_styles.gutter_heading_color,
                     ));
                 }
                 BlockType::Blockquote => {
-                    let icon_size = 16.0_f32;
-                    let icon_x =
-                        editor_left + editor.padding_left() - icon_size - editor.scaled(10.0);
+                    let gutter_styles = &editor.styles.gutter;
+                    let icon_size = editor.scaled(gutter_styles.gutter_blockquote_icon_size_px);
+                    let icon_x = if editor.active_tab_is_non_markdown_text() {
+                        editor.gutter_icon_x(editor_left, icon_size)
+                    } else {
+                        editor_left + editor.padding_left()
+                            - icon_size
+                            - editor.scaled(gutter_styles.gutter_blockquote_icon_offset_px)
+                    };
                     let icon_y = gutter_center_y - 1.0 - icon_size / 2.0;
                     gutter_svgs.push((
                         Bounds::new(
@@ -3150,7 +3354,7 @@ impl Element for EditorElement {
                             size(px(icon_size), px(icon_size)),
                         ),
                         COMMENT_SVG_PATH,
-                        theme.border_decorative,
+                        gutter_styles.gutter_blockquote_icon_color,
                     ));
                 }
                 _ => {}
@@ -3232,8 +3436,11 @@ impl Element for EditorElement {
                 let fi_size = editor.scaled(gs.gutter_fold_icon_size_px);
                 let fi_offset = editor.scaled(gs.gutter_fold_icon_offset_px);
                 let fi_hit_padding = editor.scaled(gs.gutter_fold_hit_padding_px);
-                let fold_gutter_right_x = editor_left + editor.padding_left();
-                let fi_x = fold_gutter_right_x - fi_size - fi_offset;
+                let fi_x = if editor.active_tab_is_non_markdown_text() {
+                    editor.gutter_icon_x(editor_left, fi_size)
+                } else {
+                    editor_left + editor.padding_left() - fi_size - fi_offset
+                };
 
                 if fold_range.is_some() {
                     let is_folded = decoration
@@ -3244,7 +3451,8 @@ impl Element for EditorElement {
                             editor.folded_sections.contains(&preview.start_line)
                         })
                         || editor.folded_sections.contains(&line_idx);
-                    let is_hovered = editor.hovering_fold_line == Some(line_idx);
+                    let is_hovered = editor.hovering_gutter_fold_area
+                        || editor.hovering_fold_line == Some(line_idx);
                     let fi_y = text_line_top + (line_height - fi_size) / 2.0;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
                     let fi_alpha = if is_folded {
@@ -3272,13 +3480,23 @@ impl Element for EditorElement {
                         ));
                     }
                     gutter_fold_hit_areas_local.push((
-                        Bounds::new(
-                            point(px(fi_x - fi_hit_padding), px(line_top)),
-                            size(
-                                px(fi_size + fi_hit_padding * 2.0 + fi_offset),
-                                px(total_line_height),
-                            ),
-                        ),
+                        if editor.active_tab_is_non_markdown_text() {
+                            Bounds::new(
+                                point(px(gutter_icon_column_left - fi_hit_padding), px(line_top)),
+                                size(
+                                    px(gutter_icon_column_width + fi_hit_padding * 2.0),
+                                    px(total_line_height),
+                                ),
+                            )
+                        } else {
+                            Bounds::new(
+                                point(px(fi_x - fi_hit_padding), px(line_top)),
+                                size(
+                                    px(fi_size + fi_hit_padding * 2.0 + fi_offset),
+                                    px(total_line_height),
+                                ),
+                            )
+                        },
                         line_idx,
                         false,
                     ));
@@ -3291,7 +3509,8 @@ impl Element for EditorElement {
                     .is_some_and(|p| image_cache.get(p).is_some_and(|v| v.is_some()))
                 {
                     let is_img_folded = editor.folded_image_previews.contains(&line_idx);
-                    let is_hovered = editor.hovering_fold_line == Some(line_idx);
+                    let is_hovered = editor.hovering_gutter_fold_area
+                        || editor.hovering_fold_line == Some(line_idx);
                     let fi_y = text_line_top + (line_height - fi_size) / 2.0;
                     let gs = &editor.styles.gutter;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
@@ -3320,13 +3539,23 @@ impl Element for EditorElement {
                         ));
                     }
                     gutter_fold_hit_areas_local.push((
-                        Bounds::new(
-                            point(px(fi_x - fi_hit_padding), px(line_top)),
-                            size(
-                                px(fi_size + fi_hit_padding * 2.0 + fi_offset),
-                                px(total_line_height),
-                            ),
-                        ),
+                        if editor.active_tab_is_non_markdown_text() {
+                            Bounds::new(
+                                point(px(gutter_icon_column_left - fi_hit_padding), px(line_top)),
+                                size(
+                                    px(gutter_icon_column_width + fi_hit_padding * 2.0),
+                                    px(total_line_height),
+                                ),
+                            )
+                        } else {
+                            Bounds::new(
+                                point(px(fi_x - fi_hit_padding), px(line_top)),
+                                size(
+                                    px(fi_size + fi_hit_padding * 2.0 + fi_offset),
+                                    px(total_line_height),
+                                ),
+                            )
+                        },
                         line_idx,
                         true,
                     ));
@@ -4445,6 +4674,7 @@ impl Element for EditorElement {
             hitbox,
             link_hitboxes,
             lines,
+            indent_guide_quads,
             whitespace_dots,
             cursor_quads,
             selection_quads,
@@ -4536,6 +4766,10 @@ impl Element for EditorElement {
         }
 
         for quad in prepaint.diff_line_bgs.drain(..) {
+            window.paint_quad(quad);
+        }
+
+        for quad in prepaint.indent_guide_quads.drain(..) {
             window.paint_quad(quad);
         }
 
