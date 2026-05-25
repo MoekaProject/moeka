@@ -157,6 +157,14 @@ impl EditorView {
         }
     }
 
+    pub(crate) fn editor_uses_expanded_layout(&self) -> bool {
+        self.active_tab_is_non_markdown_text() || self.editor_left_aligned
+    }
+
+    pub(crate) fn editor_wraps_to_available_width(&self) -> bool {
+        !self.active_tab_is_non_markdown_text() || !self.editor_left_aligned
+    }
+
     pub(crate) fn tab_bar_height(&self) -> f32 {
         self.scaled(self.styles.tab_bar.tab_bar_height_px)
     }
@@ -565,6 +573,7 @@ impl EditorView {
 
     pub(crate) fn toggle_editor_alignment(&mut self, cx: &mut Context<Self>) {
         self.editor_left_aligned = !self.editor_left_aligned;
+        self.layout_dirty = true;
         if let Some(index) = self.active_tab_index() {
             self.tabs[index].editor_left_aligned = self.editor_left_aligned;
             session_store::persist_session(self);

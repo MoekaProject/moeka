@@ -18,6 +18,31 @@ enum TabDropTarget<'a> {
 }
 
 impl EditorView {
+    fn stash_active_tab_layout_cache(&mut self) {
+        let Some(active_tab_id) = self.active_tab_id.clone() else {
+            return;
+        };
+
+        if self.line_display_info.is_empty() {
+            self.tab_layout_cache.remove(&active_tab_id);
+            return;
+        }
+
+        self.tab_layout_cache.insert(
+            active_tab_id,
+            (std::mem::take(&mut self.line_display_info), self.last_text_width),
+        );
+    }
+
+    fn restore_layout_cache_for_tab(&mut self, tab_id: &str) {
+        if let Some((line_display_info, last_text_width)) = self.tab_layout_cache.remove(tab_id) {
+            self.line_display_info = line_display_info;
+            self.last_text_width = last_text_width;
+        } else {
+            self.line_display_info.clear();
+        }
+    }
+
     fn ensure_settings_tab_first(&mut self) {
         if let Some(index) = self
             .tabs
@@ -545,6 +570,7 @@ impl EditorView {
             return;
         }
         self.persist_active_tab_state();
+        self.stash_active_tab_layout_cache();
         self.activate_tab_by_index_without_persist(index, cx);
         session_store::persist_session(self);
     }
@@ -569,11 +595,13 @@ impl EditorView {
                 .is_some_and(FileKind::supports_text_buffer)
             {
                 self.restore_tab_snapshot_state(&tab.snapshot);
+                self.restore_layout_cache_for_tab(&tab.id);
             } else {
                 self.buffer = Buffer::from_text("");
                 self.cursor.offset = 0;
                 self.cursor.anchor = 0;
                 self.extra_cursors.clear();
+                self.line_display_info.clear();
             }
             self.marked_range = None;
             self.close_preview_overlay();

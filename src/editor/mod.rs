@@ -674,6 +674,8 @@ pub(crate) struct LineDisplayInfo {
     pub line_height: f32,
     pub visual_line_count: usize,
     pub wrapped_line: WrappedLine,
+    pub wrap_width_px: Option<f32>,
+    pub unwrapped_width_px: f32,
     pub wrap_boundary_upstream_xs: HashMap<usize, f32>,
     pub extra_height: f32,
     pub indent_px: f32,
@@ -804,6 +806,7 @@ pub struct EditorView {
     pub(crate) current_file_path: Option<PathBuf>,
     pub(crate) sidebar_error: Option<String>,
     pub(crate) tabs: Vec<OpenTab>,
+    pub(crate) tab_layout_cache: HashMap<String, (Vec<Option<LineDisplayInfo>>, f32)>,
     pub(crate) active_tab_id: Option<String>,
     pub(crate) next_tab_id: usize,
     pub(crate) last_editor_left: f32,
@@ -1161,6 +1164,7 @@ impl EditorView {
             current_file_path: None,
             sidebar_error,
             tabs: vec![welcome_tab],
+            tab_layout_cache: HashMap::new(),
             active_tab_id: Some(WELCOME_TAB_ID.to_string()),
             next_tab_id: 1,
             last_editor_left: 0.0,
@@ -1395,8 +1399,8 @@ impl EditorView {
             app_settings,
         };
         this.last_content_left = this.padding_left();
-        this.last_text_width = (init_max_width - this.padding_left() - this.padding_right())
-            .max(this.scaled(120.0));
+        this.last_text_width =
+            (init_max_width - this.padding_left() - this.padding_right()).max(this.scaled(120.0));
         session_store::restore_session(&mut this);
         this.refresh_builtin_tab_titles();
         this.sync_panel_display_state();
@@ -3343,6 +3347,7 @@ impl EditorView {
             .active_file_kind()
             .cloned()
             .unwrap_or(FileKind::Markdown);
+        self.line_display_info.clear();
         self.search_matches.clear();
         self.search_current_index = None;
         self.workspace_search_highlight_path = None;

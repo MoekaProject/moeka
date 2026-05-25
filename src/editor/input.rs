@@ -1533,7 +1533,7 @@ impl EditorView {
 
         let viewport_width: f32 = bounds.size.width.into();
         let origin_x: f32 = bounds.origin.x.into();
-        let expanded_layout = self.editor_left_aligned;
+        let expanded_layout = self.editor_uses_expanded_layout();
         let editor_width = if expanded_layout {
             viewport_width
         } else {
@@ -1915,11 +1915,17 @@ impl EditorView {
             base_wrap_width
         };
 
+        let wrap_width_param = if self.editor_wraps_to_available_width() {
+            Some(px(effective_wrap_width))
+        } else {
+            None
+        };
+
         let Ok(mut wrapped_lines) = window.text_system().shape_text(
             display_shared,
             px(font_size),
             &runs,
-            Some(px(effective_wrap_width)),
+            wrap_width_param,
             None,
         ) else {
             return None;

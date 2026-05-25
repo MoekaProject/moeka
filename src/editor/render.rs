@@ -918,6 +918,11 @@ impl Render for EditorView {
                                                             toolbar_top,
                                                             secondary_btn_size,
                                                         );
+                                                        let align_tooltip = if self.active_tab_is_non_markdown_text() {
+                                                            self.t(crate::i18n::TextKey::ToolbarWrapTooltip)
+                                                        } else {
+                                                            self.t(crate::i18n::TextKey::ToolbarAlignTooltip)
+                                                        };
                                                         self.sync_tooltip_anchor(
                                                             "toolbar-sidebar-toggle",
                                                             sidebar_anchor,
@@ -963,7 +968,7 @@ impl Render for EditorView {
                                                                 secondary_hover,
                                                                 EDITOR_ALIGN_LEFT_SVG_PATH,
                                                                 align_anchor,
-                                                                self.t(crate::i18n::TextKey::ToolbarAlignTooltip),
+                                                                align_tooltip,
                                                                 Some("⌘⇧L"),
                                                                 cx,
                                                                 |this, cx| {

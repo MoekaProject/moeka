@@ -616,8 +616,7 @@ fn push_gutter_line_number_label(
         None,
     );
     let label_x = gutter_right_x - right_gap - f32::from(shaped.width);
-    let metrics_height = f32::from(shaped.ascent + shaped.descent);
-    let label_y = text_line_top + (line_height - metrics_height) / 2.0 - vertical_offset;
+    let label_y = (text_line_top - vertical_offset).round();
     gutter_labels.push((shaped, point(px(label_x), px(label_y)), px(line_height)));
 }
 
@@ -634,10 +633,18 @@ fn leading_indent_columns(line: &str) -> usize {
 }
 
 fn detect_indent_guide_step(buffer: &crate::buffer::Buffer, line_count: usize) -> usize {
+    detect_indent_guide_step_in_range(buffer, 0, line_count)
+}
+
+fn detect_indent_guide_step_in_range(
+    buffer: &crate::buffer::Buffer,
+    start_line: usize,
+    end_line: usize,
+) -> usize {
     let mut previous_indent = None;
     let mut detected_step = usize::MAX;
 
-    for line_idx in 0..line_count {
+    for line_idx in start_line..end_line.min(buffer.line_count()) {
         let line = buffer.line_content(line_idx);
         if line.trim().is_empty() {
             continue;
@@ -683,6 +690,20 @@ fn push_indent_guide_quads(
     }
 
     let level_width = indent_step_columns as f32 * char_width;
+    if gap_len <= 0.0 {
+        for level in 0..guide_count {
+            let guide_x = content_x + level as f32 * level_width;
+            quads.push(fill(
+                Bounds::new(
+                    point(px(guide_x), px(line_top)),
+                    size(px(guide_width), px(total_line_height.max(0.0))),
+                ),
+                guide_color,
+            ));
+        }
+        return;
+    }
+
     let segment_step = (dash_len + gap_len).max(1.0);
     for level in 0..guide_count {
         let guide_x = content_x + level as f32 * level_width;
@@ -802,6 +823,23 @@ fn push_inline_text_overlay(
     overlays.push((shaped, overlay_origin, overlay_line_height));
 }
 
+fn non_markdown_cached_line_can_reuse(
+    cached: &LineDisplayInfo,
+    current_wrap_width: Option<f32>,
+) -> bool {
+    const WIDTH_TOLERANCE_PX: f32 = 0.5;
+
+    match current_wrap_width {
+        Some(current_wrap_width) => {
+            cached.wrap_width_px.is_some_and(|cached_wrap_width| {
+                (cached_wrap_width - current_wrap_width).abs() <= WIDTH_TOLERANCE_PX
+            }) || (cached.visual_line_count <= 1
+                && cached.unwrapped_width_px <= current_wrap_width + WIDTH_TOLERANCE_PX)
+        }
+        None => cached.wrap_width_px.is_none() || cached.visual_line_count <= 1,
+    }
+}
+
 impl Element for EditorElement {
     type RequestLayoutState = ();
     type PrepaintState = EditorPrepaintState;
@@ -849,7 +887,7 @@ impl Element for EditorElement {
         let viewport_width: f32 = bounds.size.width.into();
         let origin_x: f32 = bounds.origin.x.into();
         let origin_y: f32 = bounds.origin.y.into();
-        let expanded_layout = editor.editor_left_aligned;
+        let expanded_layout = editor.editor_uses_expanded_layout();
         let editor_width = if expanded_layout {
             viewport_width
         } else {
@@ -885,6 +923,7 @@ impl Element for EditorElement {
         let mut y = origin_y + editor.padding_top();
         let line_count = buffer.line_count();
         let mut _last_line_height = 0.0_f32;
+        let mut scroll_anchor_delta = 0.0_f32;
 
         // Collect all cursor selection ranges (primary + extra)
         let mut all_sel_ranges: Vec<std::ops::Range<usize>> =
@@ -931,6 +970,8 @@ impl Element for EditorElement {
         let mut display_info_cache: Vec<Option<LineDisplayInfo>> = Vec::with_capacity(line_count);
         let has_valid_cache = editor.line_display_info.len() == line_count
             && (editor.last_text_width - text_width).abs() < 0.5;
+        let wrap_width_changed = (editor.last_text_width - text_width).abs() >= 0.5;
+        const OFFSCREEN_WRAP_REFLOW_BUDGET_PER_FRAME: usize = 48;
         let mut hr_lines: Vec<(f32, f32, f32)> = Vec::new();
         let mut image_previews: Vec<(Bounds<Pixels>, Arc<RenderImage>, Pixels)> = Vec::new();
         let mut image_borders: Vec<PaintQuad> = Vec::new();
@@ -1075,8 +1116,8 @@ impl Element for EditorElement {
                 base_char_width.max(1.0)
             }
         };
-        let show_indent_guides = editor.active_tab_is_non_markdown_text();
-        let indent_guide_step_columns = if show_indent_guides {
+        let show_non_markdown_indent_guides = editor.active_tab_is_non_markdown_text();
+        let indent_guide_step_columns = if show_non_markdown_indent_guides {
             detect_indent_guide_step(buffer, line_count)
         } else {
             0
@@ -1087,6 +1128,30 @@ impl Element for EditorElement {
             editor.scaled(editor.styles.editor.editor_indent_guide_dash_length_px);
         let indent_guide_gap_len =
             editor.scaled(editor.styles.editor.editor_indent_guide_gap_length_px);
+        let non_markdown_cached_wrap_width = if editor.active_tab_is_non_markdown_text()
+            && editor.editor_wraps_to_available_width()
+        {
+            let letter_spacing = editor_styles.editor_letter_spacing_px;
+            Some(if letter_spacing > 0.0 {
+                wrap_width * editor.base_font_size() / (editor.base_font_size() + letter_spacing)
+            } else {
+                wrap_width
+            })
+        } else {
+            None
+        };
+        let defer_offscreen_wrap_reflow = editor.active_tab_is_non_markdown_text()
+            && editor.editor_wraps_to_available_width()
+            && wrap_width_changed;
+        let mut deferred_offscreen_wrap_lines = false;
+        let mut remaining_offscreen_wrap_reflows = if editor.active_tab_is_non_markdown_text()
+            && editor.editor_wraps_to_available_width()
+            && !wrap_width_changed
+        {
+            OFFSCREEN_WRAP_REFLOW_BUDGET_PER_FRAME
+        } else {
+            0
+        };
 
         let image_cache = &editor.image_cache;
         let window_scale_factor = window.scale_factor().max(1.0);
@@ -1152,6 +1217,13 @@ impl Element for EditorElement {
                     table_info.table_end_line.saturating_sub(1),
                 )
             });
+        let active_markdown_indent_guide_step_columns = active_code_fence_group
+            .map(|(start, end)| detect_indent_guide_step_in_range(buffer, start, end + 1))
+            .or_else(|| {
+                active_front_matter_group
+                    .map(|(start, end)| detect_indent_guide_step_in_range(buffer, start, end + 1))
+            })
+            .unwrap_or(0);
 
         for line_idx in 0..line_count {
             let is_cursor_line_early = line_idx == cursor_line;
@@ -1159,16 +1231,54 @@ impl Element for EditorElement {
                 .get(line_idx)
                 .and_then(|decoration| decoration.block_preview.as_ref())
                 .is_some();
-            if has_valid_cache && !is_cursor_line_early && !line_has_block_preview {
-                if let Some(Some(cached)) = editor.line_display_info.get(line_idx) {
+            let cached_line = editor.line_display_info.get(line_idx).and_then(|info| info.as_ref());
+            let mut cached_height_before_reflow = None;
+            let mut cached_line_above_viewport = false;
+            let can_reuse_non_markdown_cached_line = editor.active_tab_is_non_markdown_text()
+                && !is_cursor_line_early
+                && !line_has_block_preview
+                && cached_line.is_some_and(|cached| {
+                    non_markdown_cached_line_can_reuse(cached, non_markdown_cached_wrap_width)
+                });
+            if !is_cursor_line_early && !line_has_block_preview {
+                if let Some(cached) = cached_line {
                     let cached_h =
                         cached.line_height * cached.visual_line_count as f32 + cached.extra_height;
-                    let est_top = y - scroll_offset;
+                    let effective_scroll_offset = scroll_offset + scroll_anchor_delta;
+                    let est_top = y - effective_scroll_offset;
                     let est_bottom = est_top + cached_h;
-                    if est_bottom < origin_y || est_top > origin_y + viewport_height {
+                    cached_height_before_reflow = Some(cached_h);
+                    cached_line_above_viewport = est_bottom < origin_y;
+                    let is_offscreen = est_bottom < origin_y || est_top > origin_y + viewport_height;
+                    let is_stale_offscreen_non_markdown_line = editor.active_tab_is_non_markdown_text()
+                        && editor.editor_wraps_to_available_width()
+                        && is_offscreen
+                        && !can_reuse_non_markdown_cached_line;
+                    let should_defer_stale_offscreen_non_markdown_line =
+                        is_stale_offscreen_non_markdown_line
+                            && (defer_offscreen_wrap_reflow
+                                || remaining_offscreen_wrap_reflows == 0);
+                    let can_skip_offscreen = if editor.active_tab_is_non_markdown_text() {
+                        can_reuse_non_markdown_cached_line
+                            || should_defer_stale_offscreen_non_markdown_line
+                    } else {
+                        has_valid_cache
+                    };
+
+                    if is_offscreen && can_skip_offscreen {
+                        if should_defer_stale_offscreen_non_markdown_line {
+                            deferred_offscreen_wrap_lines = true;
+                        }
                         display_info_cache.push(Some(cached.clone()));
                         y += cached_h;
                         continue;
+                    }
+
+                    if is_stale_offscreen_non_markdown_line
+                        && !defer_offscreen_wrap_reflow
+                        && remaining_offscreen_wrap_reflows > 0
+                    {
+                        remaining_offscreen_wrap_reflows -= 1;
                     }
                 }
             }
@@ -1194,20 +1304,25 @@ impl Element for EditorElement {
                     .shape_text(" ".into(), px(font_size), &[blank_run], None, None)
                     .ok()
                     .and_then(|ls| ls.into_iter().next());
-                display_info_cache.push(wrapped_line.map(|wl| LineDisplayInfo {
-                    display_text: String::new(),
-                    display_to_buffer: Vec::new(),
-                    buffer_to_display: vec![0; line_content.len()],
-                    base_runs: Vec::new(),
-                    font_size,
-                    line_height: 0.0,
-                    visual_line_count: 0,
-                    wrapped_line: wl,
-                    wrap_boundary_upstream_xs: HashMap::new(),
-                    extra_height: 0.0,
-                    indent_px: 0.0,
-                    content_x: editor_left + editor.padding_left(),
-                    selection_padding_left_px: 0.0,
+                display_info_cache.push(wrapped_line.map(|wl| {
+                    let unwrapped_width_px = f32::from(wl.unwrapped_layout.width);
+                    LineDisplayInfo {
+                        display_text: String::new(),
+                        display_to_buffer: Vec::new(),
+                        buffer_to_display: vec![0; line_content.len()],
+                        base_runs: Vec::new(),
+                        font_size,
+                        line_height: 0.0,
+                        visual_line_count: 0,
+                        wrapped_line: wl,
+                        wrap_width_px: None,
+                        unwrapped_width_px,
+                        wrap_boundary_upstream_xs: HashMap::new(),
+                        extra_height: 0.0,
+                        indent_px: 0.0,
+                        content_x: editor_left + editor.padding_left(),
+                        selection_padding_left_px: 0.0,
+                    }
                 }));
                 continue;
             }
@@ -1369,20 +1484,25 @@ impl Element for EditorElement {
                     .shape_text(" ".into(), px(font_size), &[blank_run], None, None)
                     .ok()
                     .and_then(|lines| lines.into_iter().next());
-                display_info_cache.push(wrapped_line.map(|wrapped_line| LineDisplayInfo {
-                    display_text: String::new(),
-                    display_to_buffer: Vec::new(),
-                    buffer_to_display: vec![0; line_content.len()],
-                    base_runs: Vec::new(),
-                    font_size,
-                    line_height: 0.0,
-                    visual_line_count: 0,
-                    wrapped_line,
-                    wrap_boundary_upstream_xs: HashMap::new(),
-                    extra_height: 0.0,
-                    indent_px: 0.0,
-                    content_x: editor_left + editor.padding_left(),
-                    selection_padding_left_px: 0.0,
+                display_info_cache.push(wrapped_line.map(|wrapped_line| {
+                    let unwrapped_width_px = f32::from(wrapped_line.unwrapped_layout.width);
+                    LineDisplayInfo {
+                        display_text: String::new(),
+                        display_to_buffer: Vec::new(),
+                        buffer_to_display: vec![0; line_content.len()],
+                        base_runs: Vec::new(),
+                        font_size,
+                        line_height: 0.0,
+                        visual_line_count: 0,
+                        wrapped_line,
+                        wrap_width_px: None,
+                        unwrapped_width_px,
+                        wrap_boundary_upstream_xs: HashMap::new(),
+                        extra_height: 0.0,
+                        indent_px: 0.0,
+                        content_x: editor_left + editor.padding_left(),
+                        selection_padding_left_px: 0.0,
+                    }
                 }));
                 continue;
             }
@@ -1399,16 +1519,17 @@ impl Element for EditorElement {
             };
 
             if editor.active_tab_is_non_markdown_text()
-                && has_valid_cache
                 && !is_cursor_line_early
-                && let Some(Some(cached)) = editor.line_display_info.get(line_idx)
+                && can_reuse_non_markdown_cached_line
+                && let Some(cached) = cached_line
             {
                 let font_size = cached.font_size;
                 let line_height = cached.line_height;
                 let visual_line_count = cached.visual_line_count;
                 let text_line_height = line_height * visual_line_count as f32;
                 let total_line_height = text_line_height + cached.extra_height;
-                let line_top = y - scroll_offset;
+                let effective_scroll_offset = scroll_offset + scroll_anchor_delta;
+                let line_top = y - effective_scroll_offset;
                 let line_bottom = line_top + total_line_height;
                 let text_line_top = line_top;
                 let content_x = editor_left + editor.padding_left();
@@ -1422,6 +1543,8 @@ impl Element for EditorElement {
                     line_height,
                     visual_line_count,
                     wrapped_line: cached.wrapped_line.clone(),
+                    wrap_width_px: cached.wrap_width_px,
+                    unwrapped_width_px: cached.unwrapped_width_px,
                     wrap_boundary_upstream_xs: cached.wrap_boundary_upstream_xs.clone(),
                     extra_height: cached.extra_height,
                     indent_px: cached.indent_px,
@@ -1471,7 +1594,7 @@ impl Element for EditorElement {
                     );
                 }
                 let origin = point(px(content_x), px(text_line_top));
-                if show_indent_guides {
+                if show_non_markdown_indent_guides {
                     push_indent_guide_quads(
                         &mut indent_guide_quads,
                         line_content,
@@ -1941,20 +2064,25 @@ impl Element for EditorElement {
                     .shape_text(" ".into(), px(font_size), &[blank_run], None, None)
                     .ok()
                     .and_then(|lines| lines.into_iter().next());
-                display_info_cache.push(wrapped_line.map(|wrapped_line| LineDisplayInfo {
-                    display_text: String::new(),
-                    display_to_buffer: Vec::new(),
-                    buffer_to_display: vec![0; line_content.len()],
-                    base_runs: Vec::new(),
-                    font_size,
-                    line_height: 0.0,
-                    visual_line_count: 0,
-                    wrapped_line,
-                    wrap_boundary_upstream_xs: HashMap::new(),
-                    extra_height: 0.0,
-                    indent_px: 0.0,
-                    content_x: editor_left + editor.padding_left(),
-                    selection_padding_left_px: 0.0,
+                display_info_cache.push(wrapped_line.map(|wrapped_line| {
+                    let unwrapped_width_px = f32::from(wrapped_line.unwrapped_layout.width);
+                    LineDisplayInfo {
+                        display_text: String::new(),
+                        display_to_buffer: Vec::new(),
+                        buffer_to_display: vec![0; line_content.len()],
+                        base_runs: Vec::new(),
+                        font_size,
+                        line_height: 0.0,
+                        visual_line_count: 0,
+                        wrapped_line,
+                        wrap_width_px: None,
+                        unwrapped_width_px,
+                        wrap_boundary_upstream_xs: HashMap::new(),
+                        extra_height: 0.0,
+                        indent_px: 0.0,
+                        content_x: editor_left + editor.padding_left(),
+                        selection_padding_left_px: 0.0,
+                    }
                 }));
                 continue;
             }
@@ -2156,6 +2284,8 @@ impl Element for EditorElement {
 
             let wrap_width_param = if *block_type == BlockType::Table && !is_front_matter_line {
                 None
+            } else if !editor.editor_wraps_to_available_width() {
+                None
             } else {
                 Some(px(effective_wrap_width))
             };
@@ -2305,7 +2435,17 @@ impl Element for EditorElement {
                 + table_extra_height;
             let total_line_height = text_line_height + extra_height;
 
-            let line_top = y - scroll_offset;
+            if editor.active_tab_is_non_markdown_text()
+                && editor.editor_wraps_to_available_width()
+                && !can_reuse_non_markdown_cached_line
+                && cached_line_above_viewport
+                && let Some(cached_h) = cached_height_before_reflow
+            {
+                scroll_anchor_delta += total_line_height - cached_h;
+            }
+
+            let effective_scroll_offset = scroll_offset + scroll_anchor_delta;
+            let line_top = y - effective_scroll_offset;
             let line_bottom = line_top + total_line_height;
             let text_line_top = line_top + block_padding_top;
             let base_content_x =
@@ -2353,6 +2493,8 @@ impl Element for EditorElement {
                 line_height,
                 visual_line_count,
                 wrapped_line: wrapped.clone(),
+                wrap_width_px: wrapped.wrap_width.map(f32::from),
+                unwrapped_width_px: f32::from(wrapped.unwrapped_layout.width),
                 wrap_boundary_upstream_xs: wrap_boundary_upstream_xs.clone(),
                 extra_height,
                 indent_px,
@@ -2412,7 +2554,16 @@ impl Element for EditorElement {
             };
 
             let origin = point(px(content_x), px(text_line_top));
-            if show_indent_guides {
+            let show_line_indent_guides =
+                show_non_markdown_indent_guides || code_block_syntax_active;
+            let line_indent_guide_step_columns = if show_non_markdown_indent_guides {
+                indent_guide_step_columns
+            } else if code_block_syntax_active {
+                active_markdown_indent_guide_step_columns
+            } else {
+                0
+            };
+            if show_line_indent_guides {
                 push_indent_guide_quads(
                     &mut indent_guide_quads,
                     line_content,
@@ -2420,7 +2571,7 @@ impl Element for EditorElement {
                     line_top,
                     total_line_height,
                     base_char_width,
-                    indent_guide_step_columns,
+                    line_indent_guide_step_columns,
                     indent_guide_width,
                     indent_guide_dash_len,
                     indent_guide_gap_len,
@@ -4626,8 +4777,20 @@ impl Element for EditorElement {
             editor.last_editor_width = editor_width;
             editor.last_content_left = editor_left + editor.padding_left();
             editor.last_text_width = text_width;
+            if scroll_anchor_delta.abs() > 0.5
+                && editor.active_tab_is_non_markdown_text()
+                && editor.editor_wraps_to_available_width()
+                && editor.pending_preview_reveal.is_none()
+                && !editor.pending_center_cursor_in_view
+                && !editor.pending_scroll_to_cursor
+            {
+                editor.scroll_offset = (editor.scroll_offset + scroll_anchor_delta).max(0.0);
+            }
             editor.content_origin = bounds.origin;
             editor.layout_dirty = false;
+            if deferred_offscreen_wrap_lines {
+                cx.notify();
+            }
             let mut did_adjust_preview_reveal = false;
             if let Some(pending) = editor.pending_preview_reveal.take() {
                 editor.pending_scroll_to_cursor = false;
