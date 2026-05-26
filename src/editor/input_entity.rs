@@ -205,6 +205,7 @@ impl EntityInputHandler for EditorView {
             {
                 let snippet = "```\n\n```";
                 let cursor_offset = code_block_range.start + "```\n".len();
+                self.queue_non_markdown_line_display_transfer(&code_block_range, snippet);
                 self.buffer.replace(code_block_range, snippet);
                 self.cursor.move_to(cursor_offset, &self.buffer);
                 self.reparse();
@@ -219,6 +220,7 @@ impl EntityInputHandler for EditorView {
                 let mut paired_text = String::with_capacity(open.len() + close.len());
                 paired_text.push_str(open);
                 paired_text.push_str(close);
+                self.queue_non_markdown_line_display_transfer(&range, &paired_text);
                 self.buffer.replace(range.clone(), &paired_text);
                 self.cursor.move_to(range.start + open.len(), &self.buffer);
                 self.reparse();
@@ -230,6 +232,7 @@ impl EntityInputHandler for EditorView {
             }
         }
 
+        self.queue_non_markdown_line_display_transfer(&range, new_text);
         self.buffer.replace(range.clone(), new_text);
         let new_offset = range.start + new_text.len();
         self.cursor.move_to(new_offset, &self.buffer);
@@ -345,6 +348,7 @@ impl EntityInputHandler for EditorView {
         let range_spans_multiple_lines = range_start_line != range_end_line;
         let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
 
+        self.queue_non_markdown_line_display_transfer(&range, new_text);
         self.buffer.replace(range.clone(), new_text);
 
         let mark_start = range.start;

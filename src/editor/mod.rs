@@ -734,6 +734,57 @@ pub(crate) struct PendingPreviewReveal {
     pub(crate) scroll_offset: f32,
 }
 
+struct PendingLineDisplayTransfer {
+    cached_lines: Vec<Option<LineDisplayInfo>>,
+    start_line: usize,
+    old_end_line_exclusive: usize,
+    new_end_line_exclusive: usize,
+}
+
+impl PendingLineDisplayTransfer {
+    fn apply(self, new_line_count: usize) -> Vec<Option<LineDisplayInfo>> {
+        let mut next = vec![None; new_line_count];
+        let prefix_end = self
+            .start_line
+            .min(self.cached_lines.len())
+            .min(new_line_count);
+        next[..prefix_end].clone_from_slice(&self.cached_lines[..prefix_end]);
+
+        let old_suffix_start = self.old_end_line_exclusive.min(self.cached_lines.len());
+        let new_suffix_start = self.new_end_line_exclusive.min(new_line_count);
+        let suffix_len = self
+            .cached_lines
+            .len()
+            .saturating_sub(old_suffix_start)
+            .min(new_line_count.saturating_sub(new_suffix_start));
+
+        for idx in 0..suffix_len {
+            next[new_suffix_start + idx] = self.cached_lines[old_suffix_start + idx].clone();
+        }
+
+        next
+    }
+
+    fn apply_non_markdown_decoration_transfer(
+        &self,
+        decorations: &mut Vec<LineDecoration>,
+        code_language: Option<&str>,
+    ) {
+        let replace_start = self.start_line.min(decorations.len());
+        let replace_end = self.old_end_line_exclusive.min(decorations.len());
+        let inserted_line_count = self.new_end_line_exclusive.saturating_sub(self.start_line);
+        let mut default_decoration = LineDecoration::default();
+        if let Some(language) = code_language {
+            default_decoration.code_language = Some(language.to_string());
+        }
+
+        decorations.splice(
+            replace_start..replace_end,
+            (0..inserted_line_count).map(move |_| default_decoration.clone()),
+        );
+    }
+}
+
 // ── EditorView ──────────────────────────────────────────────────────
 
 pub struct EditorView {
@@ -751,6 +802,7 @@ pub struct EditorView {
     pub(crate) vertical_move_goal_x: Option<f32>,
     pub(crate) wrap_boundary_affinity: Option<WrapBoundaryAffinity>,
     pub(crate) line_display_info: Vec<Option<LineDisplayInfo>>,
+    pending_line_display_transfer: Option<PendingLineDisplayTransfer>,
     pub(crate) layout_dirty: bool,
     pub(crate) pending_scroll_to_cursor: bool,
     pub(crate) pending_center_cursor_in_view: bool,
@@ -1119,6 +1171,7 @@ impl EditorView {
             vertical_move_goal_x: None,
             wrap_boundary_affinity: None,
             line_display_info: Vec::new(),
+            pending_line_display_transfer: None,
             layout_dirty: false,
             pending_scroll_to_cursor: false,
             pending_center_cursor_in_view: false,
@@ -3347,6 +3400,7 @@ impl EditorView {
             .active_file_kind()
             .cloned()
             .unwrap_or(FileKind::Markdown);
+        let pending_line_display_transfer = self.pending_line_display_transfer.take();
         self.line_display_info.clear();
         self.search_matches.clear();
         self.search_current_index = None;
@@ -3359,8 +3413,26 @@ impl EditorView {
             if self.decorations.is_empty() {
                 self.decorations.push(LineDecoration::default());
             }
+        } else if matches!(file_kind, FileKind::Code { .. } | FileKind::Text) {
+            if let Some(transfer) = pending_line_display_transfer.as_ref() {
+                let code_language = match &file_kind {
+                    FileKind::Code { language } => Some(language.as_str()),
+                    _ => None,
+                };
+                transfer.apply_non_markdown_decoration_transfer(
+                    &mut self.decorations,
+                    code_language,
+                );
+            } else {
+                self.decorations = parse_decorations_for_file_kind(self.buffer.text(), &file_kind);
+            }
         } else {
             self.decorations = parse_decorations_for_file_kind(self.buffer.text(), &file_kind);
+        }
+        if matches!(file_kind, FileKind::Code { .. } | FileKind::Text)
+            && let Some(transfer) = pending_line_display_transfer
+        {
+            self.line_display_info = transfer.apply(self.buffer.line_count());
         }
         self.refresh_generated_block_previews();
         self.layout_dirty = true;
@@ -5994,6 +6066,32 @@ fn plain_text_decorations(text: &str, code_language: Option<String>) -> Vec<Line
 }
 
 impl EditorView {
+    fn queue_non_markdown_line_display_transfer(
+        &mut self,
+        replaced_range: &Range<usize>,
+        inserted_text: &str,
+    ) {
+        self.pending_line_display_transfer = None;
+        if !self.active_tab_is_non_markdown_text() || self.line_display_info.is_empty() {
+            return;
+        }
+
+        let start_line = self.buffer.offset_to_line_col(replaced_range.start).0;
+        let end_probe = replaced_range
+            .end
+            .saturating_sub(usize::from(replaced_range.end > replaced_range.start))
+            .min(self.buffer.len());
+        let old_end_line = self.buffer.offset_to_line_col(end_probe).0;
+        let new_line_count = inserted_text.bytes().filter(|byte| *byte == b'\n').count() + 1;
+
+        self.pending_line_display_transfer = Some(PendingLineDisplayTransfer {
+            cached_lines: std::mem::take(&mut self.line_display_info),
+            start_line,
+            old_end_line_exclusive: old_end_line + 1,
+            new_end_line_exclusive: start_line + new_line_count,
+        });
+    }
+
     fn find_anchor_line_in_current_buffer(&self, anchor: &str) -> Option<usize> {
         let anchor = anchor.trim();
         if anchor.is_empty() {

@@ -1231,7 +1231,10 @@ impl Element for EditorElement {
                 .get(line_idx)
                 .and_then(|decoration| decoration.block_preview.as_ref())
                 .is_some();
-            let cached_line = editor.line_display_info.get(line_idx).and_then(|info| info.as_ref());
+            let cached_line = editor
+                .line_display_info
+                .get(line_idx)
+                .and_then(|info| info.as_ref());
             let mut cached_height_before_reflow = None;
             let mut cached_line_above_viewport = false;
             let can_reuse_non_markdown_cached_line = editor.active_tab_is_non_markdown_text()
@@ -1249,8 +1252,10 @@ impl Element for EditorElement {
                     let est_bottom = est_top + cached_h;
                     cached_height_before_reflow = Some(cached_h);
                     cached_line_above_viewport = est_bottom < origin_y;
-                    let is_offscreen = est_bottom < origin_y || est_top > origin_y + viewport_height;
-                    let is_stale_offscreen_non_markdown_line = editor.active_tab_is_non_markdown_text()
+                    let is_offscreen =
+                        est_bottom < origin_y || est_top > origin_y + viewport_height;
+                    let is_stale_offscreen_non_markdown_line = editor
+                        .active_tab_is_non_markdown_text()
                         && editor.editor_wraps_to_available_width()
                         && is_offscreen
                         && !can_reuse_non_markdown_cached_line;
@@ -1327,6 +1332,28 @@ impl Element for EditorElement {
                 continue;
             }
             let is_cursor_line = line_idx == cursor_line;
+            let estimated_total_line_height =
+                line_height + block_padding_top + block_padding_bottom;
+            let effective_scroll_offset = scroll_offset + scroll_anchor_delta;
+            let estimated_line_top = y - effective_scroll_offset;
+            let should_defer_uncached_offscreen_non_markdown_line = editor
+                .active_tab_is_non_markdown_text()
+                && !is_cursor_line
+                && !line_has_block_preview
+                && cached_line.is_none()
+                && estimated_line_top > origin_y + viewport_height
+                && (!editor.editor_wraps_to_available_width()
+                    || defer_offscreen_wrap_reflow
+                    || remaining_offscreen_wrap_reflows == 0);
+
+            if should_defer_uncached_offscreen_non_markdown_line {
+                if editor.editor_wraps_to_available_width() {
+                    deferred_offscreen_wrap_lines = true;
+                }
+                display_info_cache.push(None);
+                y += estimated_total_line_height;
+                continue;
+            }
 
             let line_content = buffer.line_content(line_idx);
             let line_start_offset = buffer.line_start(line_idx);
@@ -2298,7 +2325,7 @@ impl Element for EditorElement {
                 None,
             ) else {
                 display_info_cache.push(None);
-                y += line_height;
+                y += estimated_total_line_height;
                 continue;
             };
 
@@ -2503,6 +2530,14 @@ impl Element for EditorElement {
             }));
 
             if line_bottom < origin_y || line_top > origin_y + viewport_height {
+                if editor.active_tab_is_non_markdown_text()
+                    && editor.editor_wraps_to_available_width()
+                    && cached_line.is_none()
+                    && line_top > origin_y + viewport_height
+                    && remaining_offscreen_wrap_reflows > 0
+                {
+                    remaining_offscreen_wrap_reflows -= 1;
+                }
                 y += total_line_height;
                 _last_line_height = total_line_height;
                 continue;

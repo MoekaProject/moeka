@@ -112,6 +112,7 @@ impl EditorView {
             return;
         }
         self.checkpoint();
+        let should_normalize_ordered_lists = self.active_tab_is_markdown();
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
         let selection = self.cursor.selection_range();
@@ -132,13 +133,16 @@ impl EditorView {
         } else {
             None
         };
-        let touched_ordered_prefix = if self.cursor.has_selection() {
-            self.ordered_list_prefix_touched_by_range(&selection)
+        let touched_ordered_prefix = if should_normalize_ordered_lists {
+            if self.cursor.has_selection() {
+                self.ordered_list_prefix_touched_by_range(&selection)
+            } else {
+                self.cursor.offset.checked_sub(1).and_then(|offset| {
+                    self.ordered_list_prefix_touched_by_range(&(offset..offset))
+                })
+            }
         } else {
-            self.cursor
-                .offset
-                .checked_sub(1)
-                .and_then(|offset| self.ordered_list_prefix_touched_by_range(&(offset..offset)))
+            None
         };
         let removes_line_break = if self.cursor.has_selection() {
             self.buffer.text()[selection.clone()].contains('\n')
@@ -204,6 +208,7 @@ impl EditorView {
             if prefix_len > 0 && col == leading_ws + prefix_len {
                 let del_start = line_start + leading_ws;
                 let del_end = line_start + leading_ws + prefix_len;
+                self.queue_non_markdown_line_display_transfer(&(del_start..del_end), "");
                 self.buffer.replace(del_start..del_end, "");
                 self.cursor.move_to(del_start, &self.buffer);
                 self.reparse();
@@ -217,6 +222,7 @@ impl EditorView {
             }
 
             if let Some(delete_range) = self.auto_paired_backspace_range() {
+                self.queue_non_markdown_line_display_transfer(&delete_range, "");
                 self.buffer.delete(delete_range.clone());
                 self.cursor.move_to(delete_range.start, &self.buffer);
                 self.reparse();
@@ -230,18 +236,30 @@ impl EditorView {
                 return;
             }
         }
+        let delete_range = if self.cursor.has_selection() {
+            Some(self.cursor.selection_range())
+        } else if self.cursor.offset > 0 {
+            let prev = self.buffer.prev_grapheme_boundary(self.cursor.offset);
+            Some(prev..self.cursor.offset)
+        } else {
+            None
+        };
+        if let Some(delete_range) = delete_range.as_ref() {
+            self.queue_non_markdown_line_display_transfer(delete_range, "");
+        }
         self.cursor.backspace(&mut self.buffer);
         self.reparse();
-        if let Some((start_line, end_line)) = selection_line_span
+        if should_normalize_ordered_lists
+            && let Some((start_line, end_line)) = selection_line_span
             && (touched_ordered_prefix.is_some() || removes_line_break)
         {
             let _ = (start_line, end_line);
             self.normalize_all_ordered_lists();
             self.reparse();
-        } else if let Some(line) = touched_ordered_prefix {
+        } else if should_normalize_ordered_lists && let Some(line) = touched_ordered_prefix {
             self.normalize_ordered_list_near_line(line, true);
             self.reparse();
-        } else if removes_line_break {
+        } else if should_normalize_ordered_lists && removes_line_break {
             self.normalize_all_ordered_lists();
             self.reparse();
         }
@@ -292,6 +310,7 @@ impl EditorView {
             return;
         }
         self.checkpoint();
+        let should_normalize_ordered_lists = self.active_tab_is_markdown();
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
         let selection = self.cursor.selection_range();
@@ -312,10 +331,14 @@ impl EditorView {
         } else {
             None
         };
-        let touched_ordered_prefix = if self.cursor.has_selection() {
-            self.ordered_list_prefix_touched_by_range(&selection)
+        let touched_ordered_prefix = if should_normalize_ordered_lists {
+            if self.cursor.has_selection() {
+                self.ordered_list_prefix_touched_by_range(&selection)
+            } else {
+                self.ordered_list_prefix_touched_by_range(&(self.cursor.offset..self.cursor.offset))
+            }
         } else {
-            self.ordered_list_prefix_touched_by_range(&(self.cursor.offset..self.cursor.offset))
+            None
         };
         let removes_line_break = if self.cursor.has_selection() {
             self.buffer.text()[selection.clone()].contains('\n')
@@ -329,18 +352,30 @@ impl EditorView {
             self.pause_blinking(cx);
             return;
         }
+        let delete_range = if self.cursor.has_selection() {
+            Some(self.cursor.selection_range())
+        } else if self.cursor.offset < self.buffer.len() {
+            let next = self.buffer.next_grapheme_boundary(self.cursor.offset);
+            Some(self.cursor.offset..next)
+        } else {
+            None
+        };
+        if let Some(delete_range) = delete_range.as_ref() {
+            self.queue_non_markdown_line_display_transfer(delete_range, "");
+        }
         self.cursor.delete(&mut self.buffer);
         self.reparse();
-        if let Some((start_line, end_line)) = selection_line_span
+        if should_normalize_ordered_lists
+            && let Some((start_line, end_line)) = selection_line_span
             && (touched_ordered_prefix.is_some() || removes_line_break)
         {
             let _ = (start_line, end_line);
             self.normalize_all_ordered_lists();
             self.reparse();
-        } else if let Some(line) = touched_ordered_prefix {
+        } else if should_normalize_ordered_lists && let Some(line) = touched_ordered_prefix {
             self.normalize_ordered_list_near_line(line, true);
             self.reparse();
-        } else if removes_line_break {
+        } else if should_normalize_ordered_lists && removes_line_break {
             self.normalize_all_ordered_lists();
             self.reparse();
         }
@@ -737,12 +772,15 @@ impl EditorView {
                 if marker_len > 0 && self.cursor.offset >= line_start + leading_ws + marker_len {
                     let text_after_marker = &line_content[leading_ws + marker_len..];
                     if text_after_marker.trim().is_empty() {
+                        self.queue_non_markdown_line_display_transfer(&(line_start..line_end), "\n");
                         self.buffer.replace(line_start..line_end, "");
                         self.cursor.move_to(line_start, &self.buffer);
                         self.cursor.insert(&mut self.buffer, "\n");
                     } else {
                         let marker = &trimmed[..marker_len];
                         let continuation = format!("\n{}{}", ws_str, marker);
+                        let insert_range = self.cursor.selection_range();
+                        self.queue_non_markdown_line_display_transfer(&insert_range, &continuation);
                         self.cursor.insert(&mut self.buffer, &continuation);
                     }
                     self.reparse();
@@ -756,6 +794,7 @@ impl EditorView {
                 if prefix_len > 0 && self.cursor.offset >= line_start + leading_ws + prefix_len {
                     let text_after_marker = &line_content[leading_ws + prefix_len..];
                     if text_after_marker.trim().is_empty() {
+                        self.queue_non_markdown_line_display_transfer(&(line_start..line_end), "\n");
                         self.buffer.replace(line_start..line_end, "");
                         self.cursor.move_to(line_start, &self.buffer);
                         self.cursor.insert(&mut self.buffer, "\n");
@@ -768,6 +807,8 @@ impl EditorView {
                             "+ "
                         };
                         let continuation = format!("\n{}{}[ ] ", ws_str, bullet);
+                        let insert_range = self.cursor.selection_range();
+                        self.queue_non_markdown_line_display_transfer(&insert_range, &continuation);
                         self.cursor.insert(&mut self.buffer, &continuation);
                     }
                     self.reparse();
@@ -782,6 +823,7 @@ impl EditorView {
                     let number: u32 = trimmed[..prefix_len.saturating_sub(2)].parse().unwrap_or(1);
                     let text_after_marker = &line_content[leading_ws + prefix_len..];
                     if text_after_marker.trim().is_empty() {
+                        self.queue_non_markdown_line_display_transfer(&(line_start..line_end), "\n");
                         self.buffer.replace(line_start..line_end, "");
                         self.cursor.move_to(line_start, &self.buffer);
                         self.cursor.insert(&mut self.buffer, "\n");
@@ -789,6 +831,8 @@ impl EditorView {
                         self.normalize_ordered_list_near_line(cursor_line, false);
                     } else {
                         let continuation = format!("\n{}{}. ", ws_str, number + 1);
+                        let insert_range = self.cursor.selection_range();
+                        self.queue_non_markdown_line_display_transfer(&insert_range, &continuation);
                         self.cursor.insert(&mut self.buffer, &continuation);
                         self.renumber_ordered_list_after(cursor_line + 2, number + 2, leading_ws);
                         self.reparse();
@@ -801,6 +845,8 @@ impl EditorView {
             _ => {}
         }
 
+        let insert_range = self.cursor.selection_range();
+        self.queue_non_markdown_line_display_transfer(&insert_range, "\n");
         self.cursor.insert(&mut self.buffer, "\n");
         self.reparse();
         self.scroll_to_cursor();
@@ -829,6 +875,8 @@ impl EditorView {
                 self.reparse();
                 self.scroll_to_cursor();
             } else {
+                let insert_range = self.cursor.selection_range();
+                self.queue_non_markdown_line_display_transfer(&insert_range, "  ");
                 self.cursor.insert(&mut self.buffer, "  ");
                 self.reparse();
                 self.scroll_to_cursor();
