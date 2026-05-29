@@ -33,7 +33,16 @@ impl EditorView {
             return;
         }
 
+        // If the sidebar was already visible (e.g. file tree), switching to the
+        // search panel is a panel-type switch: change width instantly with no
+        // animation. Only animate when the sidebar is appearing from hidden.
+        let was_sidebar_visible = self.sidebar_visible;
         self.sidebar_visible = true;
+        if was_sidebar_visible {
+            self.set_sidebar_width_immediately(self.sidebar_target_width());
+        } else {
+            self.sync_sidebar_width_animation(cx);
+        }
         if self.workspace_search_editor.is_none() {
             let styles = self.workspace_search_text_input_styles();
             let initial_query = self.workspace_search_query.clone();
@@ -112,6 +121,14 @@ impl EditorView {
         self.workspace_search_blur_sub = None;
         self.workspace_search_input_focused = false;
         self.clear_workspace_search_preview_state();
+        // If the sidebar remains visible (switching back to the file tree), this
+        // is a panel-type switch: change width instantly. Only animate when the
+        // sidebar is actually being hidden.
+        if self.sidebar_visible {
+            self.set_sidebar_width_immediately(self.sidebar_target_width());
+        } else {
+            self.sync_sidebar_width_animation(cx);
+        }
         window.focus(&self.focus_handle(cx));
         cx.notify();
     }

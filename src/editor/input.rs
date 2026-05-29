@@ -2042,10 +2042,13 @@ impl EditorView {
             if delta_y != 0.0 {
                 let zoom_ratio = 1.0 + (delta_y.abs() / 300.0).clamp(0.05, 0.35);
                 if let Some(overlay) = self.preview_overlay_state_mut() {
+                    // Match the image editor's direction so a trackpad two-finger
+                    // scroll zooms charts/formulas/images the same way everywhere:
+                    // scrolling up/away zooms in, scrolling down zooms out.
                     if delta_y < 0.0 {
-                        overlay.view.zoom_factor /= zoom_ratio;
-                    } else {
                         overlay.view.zoom_factor *= zoom_ratio;
+                    } else {
+                        overlay.view.zoom_factor /= zoom_ratio;
                     }
                 }
                 self.clamp_preview_overlay_view();

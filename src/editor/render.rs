@@ -584,7 +584,7 @@ impl Render for EditorView {
                                     let max_w = this
                                         .scaled(this.styles.sidebar.sidebar_resize_max_width_px);
                                     let new_width = new_width.clamp(min_w, max_w);
-                                    this.sidebar_custom_width = Some(new_width);
+                                    this.set_active_sidebar_custom_width(new_width);
                                     this.set_sidebar_width_immediately(new_width);
                                     cx.notify();
                                 }
@@ -959,12 +959,12 @@ impl Render for EditorView {
                                                                     }
                                                                 },
                                                             ))
-                                                            .child(self.render_toolbar_button(
+                                                            .when(self.active_tab_supports_text_buffer(), |this| this.child(self.render_toolbar_button(
                                                                 "toolbar-align-toggle",
                                                                 secondary_btn_size,
                                                                 secondary_btn_size,
                                                                 secondary_icon_size,
-                                                                1.0,
+                                                                if self.editor_left_aligned { 1.0 } else { 0.55 },
                                                                 secondary_hover,
                                                                 EDITOR_ALIGN_LEFT_SVG_PATH,
                                                                 align_anchor,
@@ -974,7 +974,7 @@ impl Render for EditorView {
                                                                 |this, cx| {
                                                                     this.toggle_editor_alignment(cx);
                                                                 },
-                                                            ))
+                                                            )))
                                                     }))
                                                     .when(render_editor_toolbar, |this| this.child({
                                                         let secondary_hover = self
@@ -1039,7 +1039,7 @@ impl Render for EditorView {
                                                             .items_center()
                                                             .gap(px(toolbar_gap))
                                                             .opacity(self.toolbar_opacity)
-                                                            .child(self.render_toolbar_button(
+                                                            .when(self.active_tab_is_markdown(), |this| this.child(self.render_toolbar_button(
                                                                 "toolbar-outline-toggle",
                                                                 secondary_btn_width,
                                                                 secondary_btn_size,
@@ -1054,7 +1054,7 @@ impl Render for EditorView {
                                                                 |this, cx| {
                                                                     this.toggle_outline_visibility(cx);
                                                                 },
-                                                            ))
+                                                            )))
                                                             .child(self.render_toolbar_button(
                                                                 "toolbar-theme-toggle",
                                                                 secondary_btn_width,
@@ -1472,7 +1472,7 @@ impl Render for EditorView {
                                 let max_w =
                                     this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
                                 let new_width = new_width.clamp(min_w, max_w);
-                                this.sidebar_custom_width = Some(new_width);
+                                this.set_active_sidebar_custom_width(new_width);
                                 this.set_sidebar_width_immediately(new_width);
                                 cx.notify();
                             } else if this.utility_panel_resizing {

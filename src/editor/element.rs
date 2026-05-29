@@ -470,7 +470,7 @@ fn push_whitespace_dot_quads(
         if index < skip_prefix_bytes {
             continue;
         }
-        if character != ' ' && character != '\t' {
+        if character != ' ' {
             continue;
         }
         let Some(start) = wrapped.position_for_index(index, px(line_height)) else {
@@ -1190,7 +1190,7 @@ impl Element for EditorElement {
             }
         };
 
-        if buffer.text().is_empty() {
+        if buffer.text().is_empty() && editor.active_tab_is_markdown() {
             let placeholder = "键入 / 命令或右键插入格式...";
             let placeholder_runs = inline_overlay_runs(
                 placeholder,
@@ -1342,6 +1342,9 @@ impl Element for EditorElement {
                     .map(|(start, end)| detect_indent_guide_step_in_range(buffer, start, end + 1))
             })
             .unwrap_or(0);
+
+        let selection_match_ranges = editor.selection_match_ranges();
+        let bracket_match_ranges = editor.bracket_match_ranges();
 
         for line_idx in render_start_line..render_end_line {
             let is_cursor_line_early = line_idx == cursor_line;
@@ -3952,6 +3955,93 @@ impl Element for EditorElement {
                 letter_spacing,
                 window,
             );
+            if !decoration.highlight_spans.is_empty() {
+                push_diff_inline_highlight_quads(
+                    &mut diff_inline_quads,
+                    &decoration.highlight_spans,
+                    &display_text,
+                    line_content.len(),
+                    &buffer_to_display,
+                    &runs,
+                    wrapped,
+                    content_x,
+                    text_line_top,
+                    line_height,
+                    font_size,
+                    indent_px,
+                    editor.styles.editor.editor_inline_highlight_bg,
+                    gpui::transparent_black(),
+                    0.0,
+                    letter_spacing,
+                    window,
+                );
+            }
+            if !selection_match_ranges.is_empty() {
+                let mut line_spans: Vec<std::ops::Range<usize>> = Vec::new();
+                for range in &selection_match_ranges {
+                    if range.end > line_start_offset && range.start < line_end_offset {
+                        let start = range.start.max(line_start_offset) - line_start_offset;
+                        let end = range.end.min(line_end_offset) - line_start_offset;
+                        if start < end {
+                            line_spans.push(start..end);
+                        }
+                    }
+                }
+                if !line_spans.is_empty() {
+                    push_diff_inline_highlight_quads(
+                        &mut diff_inline_quads,
+                        &line_spans,
+                        &display_text,
+                        line_content.len(),
+                        &buffer_to_display,
+                        &runs,
+                        wrapped,
+                        content_x,
+                        text_line_top,
+                        line_height,
+                        font_size,
+                        indent_px,
+                        gpui::transparent_black(),
+                        editor.styles.editor.editor_selection_match_border,
+                        editor.scaled(editor.styles.editor.editor_match_border_width_px),
+                        letter_spacing,
+                        window,
+                    );
+                }
+            }
+            if !bracket_match_ranges.is_empty() {
+                let mut line_spans: Vec<std::ops::Range<usize>> = Vec::new();
+                for range in &bracket_match_ranges {
+                    if range.end > line_start_offset && range.start < line_end_offset {
+                        let start = range.start.max(line_start_offset) - line_start_offset;
+                        let end = range.end.min(line_end_offset) - line_start_offset;
+                        if start < end {
+                            line_spans.push(start..end);
+                        }
+                    }
+                }
+                if !line_spans.is_empty() {
+                    push_diff_inline_highlight_quads(
+                        &mut diff_inline_quads,
+                        &line_spans,
+                        &display_text,
+                        line_content.len(),
+                        &buffer_to_display,
+                        &runs,
+                        wrapped,
+                        content_x,
+                        text_line_top,
+                        line_height,
+                        font_size,
+                        indent_px,
+                        gpui::transparent_black(),
+                        editor.styles.editor.editor_bracket_match_border,
+                        editor.scaled(editor.styles.editor.editor_match_border_width_px),
+                        letter_spacing,
+                        window,
+                    );
+                }
+            }
             if editor.selected_handle.is_none()
                 && is_cursor_line
                 && !any_selection

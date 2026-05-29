@@ -603,19 +603,32 @@ impl EditorView {
     fn screen_position_for_offset(&self, offset: usize) -> Point<Pixels> {
         let (line, col) = self.buffer.offset_to_line_col(offset);
         let origin_y: f32 = self.content_origin.y.into();
-        let y = origin_y + self.line_y_offset(line) - self.scroll_offset;
-        let line_height = self.visual_height_for_line(line);
-        let x = if let Some(Some(info)) = self.line_display_info.get(line) {
-            let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
-            let pos = info
-                .wrapped_line
-                .position_for_index(disp_col, gpui::px(info.line_height))
-                .unwrap_or_default();
-            info.content_x + f32::from(pos.x)
-        } else {
-            self.last_content_left + col as f32 * self.base_font_size() * 0.6
-        };
-        gpui::point(px(x), px(y + line_height))
+        // Top of the line's text content (after any block padding).
+        let text_top = origin_y + self.text_y_offset_for_line(line) - self.scroll_offset;
+        let (x, row_top_within, row_height) =
+            if let Some(Some(info)) = self.line_display_info.get(line) {
+                let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
+                let pos = info
+                    .wrapped_line
+                    .position_for_index(disp_col, gpui::px(info.line_height))
+                    .unwrap_or_default();
+                (
+                    info.content_x + f32::from(pos.x),
+                    f32::from(pos.y),
+                    info.line_height,
+                )
+            } else {
+                (
+                    self.last_content_left + col as f32 * self.base_font_size() * 0.6,
+                    0.0,
+                    self.visual_height_for_line(line),
+                )
+            };
+        // Anchor to the cursor's specific visual row (handles wrapped lines and
+        // block padding precisely) rather than the whole line block, so the menu
+        // sits exactly below/above the syntax being edited.
+        let row_top = text_top + row_top_within;
+        gpui::point(px(x), px(row_top + row_height))
     }
 
     pub(crate) fn cursor_screen_position(&self) -> Point<Pixels> {
@@ -791,11 +804,13 @@ impl EditorView {
 
     pub(crate) fn run_wiki_link_search(&mut self, cx: &mut Context<Self>) {
         self.wiki_link_search_task = None;
+        // Clear stale results immediately so the menu shows a "searching" state
+        // instead of flashing the previous query's matches.
+        self.wiki_link_search_results.clear();
 
         let root = self.sidebar_root.clone();
         let query = self.wiki_link_query.clone();
         if !root.exists() || query.trim().is_empty() {
-            self.wiki_link_search_results.clear();
             cx.notify();
             return;
         }
@@ -2597,9 +2612,7 @@ impl EditorView {
 
         let has_query = !self.wiki_link_query.trim().is_empty();
         let show_loading = if has_query {
-            self.wiki_link_search_task.is_some()
-                && self.wiki_link_search_results.is_empty()
-                && self.wiki_link_recent_results.is_empty()
+            self.wiki_link_search_task.is_some() && self.wiki_link_search_results.is_empty()
         } else {
             self.wiki_link_recent_task.is_some() && self.wiki_link_recent_results.is_empty()
         };
@@ -2610,32 +2623,19 @@ impl EditorView {
         }
 
         let search_items = if has_query {
-            if self.wiki_link_search_results.is_empty() && self.wiki_link_search_task.is_some() {
-                self.wiki_link_recent_results
-                    .iter()
-                    .map(|candidate| {
-                        (
-                            candidate.path.clone(),
-                            candidate.file_name.clone(),
-                            Vec::new(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                self.wiki_link_search_results
-                    .iter()
-                    .map(|result| {
-                        let path = &result.path;
-                        (
-                            path.clone(),
-                            path.file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| path.display().to_string()),
-                            result.file_name_match_indices.clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            }
+            self.wiki_link_search_results
+                .iter()
+                .map(|result| {
+                    let path = &result.path;
+                    (
+                        path.clone(),
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string()),
+                        result.file_name_match_indices.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
         } else {
             self.wiki_link_recent_results
                 .iter()
@@ -2662,6 +2662,15 @@ impl EditorView {
         for (index, (path, item, highlight_indices)) in search_items.into_iter().enumerate() {
             let is_selected = index == self.menu_selected_index;
             let hover_bg = ms.menu_item_hover_bg;
+            let directory_path = self
+                .relative_path_for_path(&path)
+                .map(std::path::PathBuf::from)
+                .and_then(|relative| {
+                    relative
+                        .parent()
+                        .map(|parent| parent.to_string_lossy().into_owned())
+                })
+                .filter(|parent| !parent.is_empty() && parent != ".");
             items.push(
                 div()
                     .id(SharedString::from(format!("wiki-link-item-{}", index)))
@@ -2687,6 +2696,20 @@ impl EditorView {
                         ms.menu_item_text_color,
                         self.styles.quick_open.quick_open_result_match_text_color,
                     ))
+                    .when_some(directory_path, |this, directory_path| {
+                        this.child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_size(px(self.scaled(ms.menu_item_font_size_px)))
+                                .text_color(ms.menu_item_text_color)
+                                .opacity(0.5)
+                                .child(directory_path),
+                        )
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
@@ -2721,8 +2744,7 @@ impl EditorView {
             .filter_map(|index| index.checked_sub(base_char_count))
             .collect::<Vec<_>>();
         div()
-            .flex_1()
-            .min_w(px(0.0))
+            .flex_none()
             .overflow_hidden()
             .flex()
             .gap(px(0.0))
@@ -2761,6 +2783,7 @@ impl EditorView {
 
         if let Some(label) = file_kind_badge_text(path) {
             return div()
+                .flex_none()
                 .min_w(px(self.scaled(ss.sidebar_item_badge_min_width_px)))
                 .h(px(self.scaled(ss.sidebar_item_badge_height_px)))
                 .px(px(self.scaled(ss.sidebar_item_badge_padding_x_px)))
@@ -2789,11 +2812,38 @@ impl EditorView {
             + self.scaled(ms.menu_padding_y_px) * 2.0
     }
 
+    /// Height of the anchor row for input-anchored menus (wiki-link and slash).
+    /// `menu.position` for these menus is the bottom of the cursor's visual row,
+    /// so when the menu opens upward it must be anchored above the top of that row.
+    fn context_menu_anchor_height(&self, kind: &ContextMenuKind) -> f32 {
+        let input_anchored = matches!(kind, ContextMenuKind::WikiLink)
+            || (matches!(kind, ContextMenuKind::Format) && self.slash_menu_start.is_some());
+        if !input_anchored {
+            return 0.0;
+        }
+        let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
+        if let Some(Some(info)) = self.line_display_info.get(line) {
+            info.line_height
+        } else {
+            self.visual_height_for_line(line)
+        }
+    }
+
     fn context_menu_panel_layout(
         &self,
         position: Point<Pixels>,
         width: f32,
         estimated_menu_height: f32,
+    ) -> ContextMenuPanelLayout {
+        self.context_menu_panel_layout_with_anchor(position, width, estimated_menu_height, 0.0)
+    }
+
+    fn context_menu_panel_layout_with_anchor(
+        &self,
+        position: Point<Pixels>,
+        width: f32,
+        estimated_menu_height: f32,
+        anchor_height: f32,
     ) -> ContextMenuPanelLayout {
         let ms = &self.styles.context_menu;
         let border_w = self.styles.window.window_border_width_px;
@@ -2802,11 +2852,15 @@ impl EditorView {
         let pos_x = (f32::from(position.x) - border_w).clamp(0.0, overlay_w);
         let pos_y = (f32::from(position.y) - border_w).clamp(0.0, overlay_h);
         let margin = self.scaled(ms.menu_max_height_margin_px).max(4.0);
+        // For input-anchored menus, `pos_y` is the bottom of the anchor line; the
+        // top of that line is `pos_y - anchor_height`. Upward-opening menus must
+        // be anchored above that top edge so they don't cover the syntax line.
+        let anchor_top_y = (pos_y - anchor_height).max(0.0);
 
         let space_right = overlay_w - pos_x - margin;
         let space_left = pos_x - margin;
         let space_below = overlay_h - pos_y - margin;
-        let space_above = pos_y - margin;
+        let space_above = anchor_top_y - margin;
 
         let open_right = space_right >= width || space_right >= space_left;
         let open_down = space_below >= estimated_menu_height || space_below >= space_above;
@@ -2819,7 +2873,7 @@ impl EditorView {
         let max_height = if open_down {
             (overlay_h - pos_y - margin).max(self.scaled(100.0))
         } else {
-            (pos_y - margin).max(self.scaled(100.0))
+            (anchor_top_y - margin).max(self.scaled(100.0))
         };
 
         ContextMenuPanelLayout {
@@ -2827,13 +2881,13 @@ impl EditorView {
             estimated_top: if open_down {
                 pos_y
             } else {
-                (pos_y - estimated_menu_height).max(margin)
+                (anchor_top_y - estimated_menu_height).max(margin)
             },
             max_height,
             bottom_anchor: if open_down {
                 None
             } else {
-                Some(overlay_h - pos_y)
+                Some(overlay_h - anchor_top_y)
             },
             overlay_width: overlay_w,
             overlay_height: overlay_h,
@@ -3464,7 +3518,9 @@ impl EditorView {
                     ));
                 }
                 items.push(self.render_context_menu_separator());
-                for agent_cli in ChatAgentCli::all() {
+                let mut agent_clis = ChatAgentCli::all();
+                agent_clis.sort_by_key(|agent_cli| !matches!(agent_cli, ChatAgentCli::Terminal));
+                for agent_cli in agent_clis {
                     let id = tab_id.clone();
                     let is_active = active_agent_cli == agent_cli;
                     items.push(self.render_context_menu_item_with_icon_and_check(
@@ -3753,7 +3809,13 @@ impl EditorView {
         };
 
         let estimated_menu_height = self.estimated_context_menu_height(items.len());
-        let layout = self.context_menu_panel_layout(menu.position, width, estimated_menu_height);
+        let anchor_height = self.context_menu_anchor_height(&menu.kind);
+        let layout = self.context_menu_panel_layout_with_anchor(
+            menu.position,
+            width,
+            estimated_menu_height,
+            anchor_height,
+        );
         let main_menu = self.render_context_menu_panel("context-menu", layout, width, items, cx);
 
         let submenu = if matches!(menu.kind, ContextMenuKind::Format)

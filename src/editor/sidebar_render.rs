@@ -344,6 +344,7 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
                     this.sidebar_starred_collapsed = !this.sidebar_starred_collapsed;
                     cx.notify();
                 }),
@@ -1146,10 +1147,27 @@ impl EditorView {
                 }
             } else {
                 let item_height = self.sidebar_item_height_px();
+                let prefix_height = self.sidebar_scroll_prefix_height(true);
+                let bottom_spacer = self.scaled(ss.sidebar_bottom_spacer_height_px);
+                let content_height =
+                    prefix_height + items.len() as f32 * item_height + bottom_spacer;
+                // Clamp the scroll offset so collapsing the starred section or
+                // filtering the tree (which shrinks the content) does not leave the
+                // list scrolled past its end, which would make items jump upward.
+                let viewport_height = f32::from(self.sidebar_scroll_handle.bounds().size.height);
+                if viewport_height > 0.0 {
+                    let scroll_y = -f32::from(self.sidebar_scroll_handle.offset().y);
+                    let max_scroll = (content_height - viewport_height).max(0.0);
+                    if scroll_y > max_scroll + 0.5 {
+                        let offset = self.sidebar_scroll_handle.offset();
+                        self.sidebar_scroll_handle
+                            .set_offset(gpui::point(offset.x, px(-max_scroll)));
+                    }
+                }
                 let (visible_start, visible_end, top_spacer_height, bottom_spacer_height) = self
                     .visible_uniform_list_range(
                         &self.sidebar_scroll_handle,
-                        self.sidebar_scroll_prefix_height(true),
+                        prefix_height,
                         item_height,
                         items.len(),
                         12,

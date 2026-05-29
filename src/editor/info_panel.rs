@@ -382,6 +382,20 @@ fn build_pdf_document_from_html_macos(
         ];
         let () = msg_send![web_view, setMediaStyle: nsstring("print")];
 
+        // Host the WebView inside an offscreen, never-shown window. The legacy
+        // WebHTMLView only flows and draws its content when it is attached to a
+        // window; without one the print operation snapshots a blank page.
+        let host_window: *mut objc::runtime::Object = msg_send![class!(NSWindow), alloc];
+        let host_window: *mut objc::runtime::Object = msg_send![
+            host_window,
+            initWithContentRect: frame
+            styleMask: 0u64
+            backing: 2u64
+            defer: false
+        ];
+        let () = msg_send![host_window, setReleasedWhenClosed: false];
+        let () = msg_send![host_window, setContentView: web_view];
+
         let main_frame: *mut objc::runtime::Object = msg_send![web_view, mainFrame];
         let base_url = source_file_path
             .and_then(Path::parent)
@@ -427,6 +441,11 @@ fn build_pdf_document_from_html_macos(
         };
         let () = msg_send![web_view, setFrame: full_rect];
 
+        // Force the freshly-resized document view to lay out before we snapshot
+        // it, otherwise WebKit may report stale geometry and emit a blank page.
+        let () = msg_send![document_view, setNeedsDisplay: true];
+        run_current_run_loop_for(0.05);
+
         let shared_print_info: *mut objc::runtime::Object =
             msg_send![class!(NSPrintInfo), sharedPrintInfo];
         let print_info: *mut objc::runtime::Object = msg_send![shared_print_info, copy];
@@ -440,10 +459,21 @@ fn build_pdf_document_from_html_macos(
         let () = msg_send![print_info, setVerticallyCentered: false];
 
         let pdf_data: *mut objc::runtime::Object = msg_send![class!(NSMutableData), data];
+        // Print the frame's document view rather than the top-level WebView.
+        // The legacy `WebView` host view draws nothing itself, so printing it
+        // produces a blank PDF; the rendered content lives in the document view.
+        let document_print_bounds: NSRect = msg_send![document_view, bounds];
+        let print_rect = NSRect {
+            origin: NSPoint { x: 0.0, y: 0.0 },
+            size: NSSize {
+                width: document_print_bounds.size.width.max(content_width),
+                height: document_print_bounds.size.height.max(page_height),
+            },
+        };
         let print_operation: *mut objc::runtime::Object = msg_send![
             class!(NSPrintOperation),
-            PDFOperationWithView: web_view
-            insideRect: full_rect
+            PDFOperationWithView: document_view
+            insideRect: print_rect
             toData: pdf_data
             printInfo: print_info
         ];
@@ -459,6 +489,7 @@ fn build_pdf_document_from_html_macos(
         let bytes_ptr: *const u8 = msg_send![pdf_data, bytes];
         let bytes = std::slice::from_raw_parts(bytes_ptr, length).to_vec();
 
+        let () = msg_send![host_window, close];
         let () = msg_send![autorelease_pool, drain];
         Ok(bytes)
     }
@@ -766,12 +797,22 @@ fn build_git_diff_rows(
     language: crate::i18n::UiLanguage,
     base_text: &str,
     target_text: &str,
+    is_markdown: bool,
+    code_language: Option<String>,
 ) -> Vec<GitDiffRow> {
     let diff = TextDiff::configure()
         .algorithm(Algorithm::Patience)
         .diff_lines(base_text, target_text);
-    let base_decorations = crate::markdown::parse_decorations(base_text);
-    let target_decorations = crate::markdown::parse_decorations(target_text);
+    let base_decorations = if is_markdown {
+        crate::markdown::parse_decorations(base_text)
+    } else {
+        super::plain_text_decorations(base_text, code_language.clone())
+    };
+    let target_decorations = if is_markdown {
+        crate::markdown::parse_decorations(target_text)
+    } else {
+        super::plain_text_decorations(target_text, code_language.clone())
+    };
     let mut pending_rows = Vec::new();
 
     for op in diff.ops() {
@@ -796,8 +837,10 @@ fn build_git_diff_rows(
         .map(|row| build_git_diff_row(row, &base_decorations, &target_decorations))
         .collect::<Vec<_>>();
 
-    normalize_diff_table_metadata(&mut rows);
-    normalize_diff_block_preview_metadata(&mut rows);
+    if is_markdown {
+        normalize_diff_table_metadata(&mut rows);
+        normalize_diff_block_preview_metadata(&mut rows);
+    }
 
     if rows.is_empty() {
         rows.push(GitDiffRow {
@@ -1231,11 +1274,24 @@ impl EditorView {
             }
         };
 
+        let file_kind = super::classify_file_kind_for_bytes(path, target_text.as_bytes());
+        let is_markdown = matches!(file_kind, FileKind::Markdown);
+        let code_language = match &file_kind {
+            FileKind::Code { language } => Some(language.clone()),
+            _ => None,
+        };
+
         Some(GitDiffState {
             source,
             source_label,
             target_label,
-            all_rows: build_git_diff_rows(self.ui_language, &base_text, &target_text),
+            all_rows: build_git_diff_rows(
+                self.ui_language,
+                &base_text,
+                &target_text,
+                is_markdown,
+                code_language,
+            ),
             rows: Vec::new(),
             show_only_changes: false,
         })
@@ -1316,6 +1372,43 @@ impl EditorView {
             .position(|row| row.kind != GitDiffRowKind::Context)
     }
 
+    /// Groups consecutive changed (non-context) rows into contiguous diff blocks
+    /// (hunks). Each returned range covers one block, which may span many lines.
+    fn diff_blocks(rows: &[GitDiffRow]) -> Vec<std::ops::Range<usize>> {
+        let mut blocks: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut start: Option<usize> = None;
+        for (index, row) in rows.iter().enumerate() {
+            if row.kind != GitDiffRowKind::Context {
+                if start.is_none() {
+                    start = Some(index);
+                }
+            } else if let Some(begin) = start.take() {
+                blocks.push(begin..index);
+            }
+        }
+        if let Some(begin) = start.take() {
+            blocks.push(begin..rows.len());
+        }
+        blocks
+    }
+
+    /// (current block index 1-based, total block count) for the active git diff.
+    pub(crate) fn active_git_diff_block_progress(&self) -> Option<(usize, usize)> {
+        let diff = self.active_git_diff_state()?;
+        let blocks = Self::diff_blocks(&diff.rows);
+        let total = blocks.len();
+        if total == 0 {
+            return Some((0, 0));
+        }
+        let current_line = self.cursor_line();
+        let current_index = blocks
+            .iter()
+            .position(|block| block.contains(&current_line))
+            .or_else(|| blocks.iter().position(|block| block.start >= current_line))
+            .unwrap_or(total - 1);
+        Some((current_index + 1, total))
+    }
+
     fn nearest_diff_row_line(rows: &[GitDiffRow], current_line: usize) -> Option<usize> {
         if rows.is_empty() {
             return None;
@@ -1345,25 +1438,43 @@ impl EditorView {
         current_line: usize,
         forward: bool,
     ) -> Option<usize> {
+        // Navigate between diff blocks (hunks) by jumping to their start line,
+        // so the [X/Y] counter (which counts blocks) stays in sync with the
+        // up/down navigation buttons.
+        let blocks = Self::diff_blocks(rows);
         if forward {
-            rows.iter()
-                .enumerate()
-                .skip(current_line.saturating_add(1))
-                .find(|(_, row)| row.kind != GitDiffRowKind::Context)
-                .map(|(index, _)| index)
+            blocks
+                .iter()
+                .map(|block| block.start)
+                .find(|&start| start > current_line)
         } else {
-            rows.iter()
-                .enumerate()
-                .take(current_line)
+            blocks
+                .iter()
+                .map(|block| block.start)
                 .rev()
-                .find(|(_, row)| row.kind != GitDiffRowKind::Context)
-                .map(|(index, _)| index)
+                .find(|&start| start < current_line)
         }
     }
 
     pub(crate) fn active_git_diff_show_only_changes(&self) -> bool {
         self.active_git_diff_state()
             .is_some_and(|diff| diff.show_only_changes)
+    }
+
+    /// Returns the (added, removed) line counts for the active git diff tab.
+    pub(crate) fn active_git_diff_added_removed_stats(&self) -> Option<(usize, usize)> {
+        self.active_git_diff_state().map(|diff| {
+            let mut added = 0usize;
+            let mut removed = 0usize;
+            for row in &diff.all_rows {
+                match row.kind {
+                    GitDiffRowKind::Added => added += 1,
+                    GitDiffRowKind::Removed => removed += 1,
+                    GitDiffRowKind::Context => {}
+                }
+            }
+            (added, removed)
+        })
     }
 
     pub(crate) fn can_navigate_previous_git_diff_row(&self) -> bool {
@@ -1451,10 +1562,11 @@ impl EditorView {
             scroll_offset: 0.0,
             extra_cursors: Vec::new(),
         };
+        let file_kind = super::classify_file_kind_for_bytes(&path, snapshot.text.as_bytes());
         if let Some(index) = self.tabs.iter().position(|tab| tab.kind == TabKind::Diff) {
             self.tabs[index].title = diff_title;
             self.tabs[index].path = Some(path);
-            self.tabs[index].file_kind = Some(FileKind::Markdown);
+            self.tabs[index].file_kind = Some(file_kind);
             self.tabs[index].snapshot = snapshot;
             self.tabs[index].git_diff = Some(diff);
             if self.active_tab_index() == Some(index) {
@@ -1475,7 +1587,7 @@ impl EditorView {
             title: diff_title,
             kind: TabKind::Diff,
             path: Some(path),
-            file_kind: Some(FileKind::Markdown),
+            file_kind: Some(file_kind),
             editor_left_aligned: false,
             snapshot,
             image_view: ImageViewState::default(),
@@ -1495,9 +1607,6 @@ impl EditorView {
         let Some(context) = self.git_repo_context() else {
             return;
         };
-        if !is_markdown_file(&context.file_path) {
-            return;
-        }
         let diff_title = Self::title_for_path(&context.file_path);
 
         let source = if item.is_working_tree {
@@ -2591,6 +2700,8 @@ mod tests {
             crate::i18n::UiLanguage::English,
             "alpha\nbefore\nomega\n",
             "alpha\nafter\nomega\n",
+            true,
+            None,
         );
 
         assert_eq!(rows.len(), 4);
@@ -2679,6 +2790,8 @@ mod tests {
             crate::i18n::UiLanguage::English,
             "| Name | Value |\n| --- | --- |\n| keep | 1 |\n",
             "| Name | Value |\n| --- | --- |\n| keep | 2 |\n",
+            true,
+            None,
         );
 
         let visible = visible_git_diff_rows(&rows, true);
@@ -2693,7 +2806,7 @@ mod tests {
 
     #[test]
     fn diff_rows_use_empty_state_for_identical_empty_text() {
-        let rows = build_git_diff_rows(crate::i18n::UiLanguage::English, "", "");
+        let rows = build_git_diff_rows(crate::i18n::UiLanguage::English, "", "", true, None);
 
         assert_eq!(rows.len(), 1);
         assert!(matches!(rows[0].kind, GitDiffRowKind::Context));
@@ -2714,6 +2827,8 @@ mod tests {
             crate::i18n::UiLanguage::ChineseSimplified,
             "你好\n世界\n",
             "您好\n世界\n",
+            true,
+            None,
         );
 
         assert_eq!(rows.len(), 3);
@@ -2731,6 +2846,8 @@ mod tests {
             crate::i18n::UiLanguage::English,
             "prefix old suffix\n",
             "prefix new suffix\n",
+            true,
+            None,
         );
 
         assert_eq!(rows.len(), 2);
@@ -2742,7 +2859,7 @@ mod tests {
 
     #[test]
     fn diff_rows_highlight_entire_unpaired_insertions() {
-        let rows = build_git_diff_rows(crate::i18n::UiLanguage::English, "", "**new**\n");
+        let rows = build_git_diff_rows(crate::i18n::UiLanguage::English, "", "**new**\n", true, None);
 
         assert_eq!(rows.len(), 1);
         assert!(matches!(rows[0].kind, GitDiffRowKind::Added));
@@ -2755,6 +2872,8 @@ mod tests {
             crate::i18n::UiLanguage::English,
             "```rust\nlet old_value = 1;\n```\n",
             "```rust\nlet new_value = 2;\n```\n",
+            true,
+            None,
         );
 
         assert_eq!(rows.len(), 4);
@@ -2782,6 +2901,8 @@ mod tests {
             crate::i18n::UiLanguage::English,
             "- old item\n",
             "- new item\n",
+            true,
+            None,
         );
         assert!(matches!(
             unordered_rows[0].decoration.block_type,
@@ -2796,6 +2917,8 @@ mod tests {
             crate::i18n::UiLanguage::English,
             "1. old item\n",
             "1. new item\n",
+            true,
+            None,
         );
         assert!(matches!(
             ordered_rows[0].decoration.block_type,
@@ -2813,6 +2936,8 @@ mod tests {
             crate::i18n::UiLanguage::English,
             "![old](assets/old.png)\n",
             "![new](assets/new.png)\n",
+            true,
+            None,
         );
 
         assert_eq!(
@@ -2831,6 +2956,8 @@ mod tests {
             crate::i18n::UiLanguage::English,
             "| Name | Value |\n| --- | --- |\n| old | 1 |\n",
             "| Name | Value |\n| --- | --- |\n| new | 22 |\n",
+            true,
+            None,
         );
 
         assert_eq!(rows.len(), 4);
@@ -2852,6 +2979,8 @@ mod tests {
             crate::i18n::UiLanguage::English,
             "$$\na + b\n$$\n",
             "$$\na + c\n$$\n",
+            true,
+            None,
         );
 
         let removed_preview = rows[0]
@@ -2892,6 +3021,8 @@ mod tests {
             crate::i18n::UiLanguage::English,
             "```mermaid\ngraph TD\nA-->B\n```\n",
             "```mermaid\ngraph TD\nA-->C\n```\n",
+            true,
+            None,
         );
 
         let removed_preview = rows[0]

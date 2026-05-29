@@ -88,27 +88,7 @@ impl EditorView {
     }
 
     pub(crate) fn active_git_diff_progress(&self) -> Option<(usize, usize)> {
-        let diff = self.active_git_diff_state()?;
-        let diff_lines: Vec<usize> = diff
-            .rows
-            .iter()
-            .enumerate()
-            .filter_map(|(index, row)| (row.kind != GitDiffRowKind::Context).then_some(index))
-            .collect();
-
-        let total = diff_lines.len();
-        if total == 0 {
-            return Some((0, 0));
-        }
-
-        let current_line = self.cursor_line();
-        let current_index = diff_lines
-            .iter()
-            .position(|&line| line == current_line)
-            .or_else(|| diff_lines.iter().position(|&line| line >= current_line))
-            .unwrap_or(total.saturating_sub(1));
-
-        Some((current_index + 1, total))
+        self.active_git_diff_block_progress()
     }
 
     pub(crate) fn request_editor_focus(&mut self, cx: &mut Context<Self>) {
@@ -413,12 +393,17 @@ impl EditorView {
         } else {
             String::new()
         };
-        let first_line_end = text.find('\n').unwrap_or(text.len());
+        let cursor_offset = if matches!(file_kind, FileKind::Markdown) {
+            first_markdown_heading_line_end(&text)
+                .unwrap_or_else(|| text.find('\n').unwrap_or(text.len()))
+        } else {
+            text.find('\n').unwrap_or(text.len())
+        };
         Some((
             EditorSnapshot {
                 text,
-                cursor_offset: first_line_end,
-                cursor_anchor: first_line_end,
+                cursor_offset,
+                cursor_anchor: cursor_offset,
                 scroll_offset: 0.0,
                 extra_cursors: Vec::new(),
             },
@@ -1364,6 +1349,40 @@ impl EditorView {
                                 .items_center()
                                 .gap(px(diff_group_gap))
                                 .mr(px(diff_button_label_gap))
+                                .when_some(diff_progress, |this, (current, total)| {
+                                    this.child(
+                                        div()
+                                            .flex_none()
+                                            .whitespace_nowrap()
+                                            .opacity(item_opacity)
+                                            .child(format!("[{current}/{total}]")),
+                                    )
+                                })
+                                .when_some(
+                                    self.active_git_diff_added_removed_stats(),
+                                    |this, (added, removed)| {
+                                        this.child(
+                                            div()
+                                                .flex()
+                                                .flex_none()
+                                                .items_center()
+                                                .gap(px(gap))
+                                                .whitespace_nowrap()
+                                                .child(
+                                                    div()
+                                                        .flex_none()
+                                                        .text_color(self.theme.git_status_added)
+                                                        .child(format!("+{added}")),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_none()
+                                                        .text_color(self.theme.text_danger)
+                                                        .child(format!("-{removed}")),
+                                                ),
+                                        )
+                                    },
+                                )
                                 .child(diff_button(
                                     "assets/icons/expand.svg",
                                     toggle_label,
@@ -1381,16 +1400,7 @@ impl EditorView {
                                     next_label,
                                     self.can_navigate_next_git_diff_row(),
                                     Self::navigate_next_git_diff_row,
-                                ))
-                                .when_some(diff_progress, |this, (current, total)| {
-                                    this.child(
-                                        div()
-                                            .flex_none()
-                                            .whitespace_nowrap()
-                                            .opacity(item_opacity)
-                                            .child(format!("[{current}/{total}]")),
-                                    )
-                                }),
+                                )),
                         )
                         .child(
                             div()
@@ -1782,11 +1792,21 @@ impl EditorView {
                 },
             )
             .on_drag_move(cx.listener(
-                move |this, _event: &DragMoveEvent<DraggedTab>, window, cx| {
+                move |this, event: &DragMoveEvent<DraggedTab>, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
                     this.tab_drag_candidate_id = Some(drag_tab_id.clone());
-                    this.tab_dragging_id = Some(drag_tab_id.clone());
+                    let moved_enough = this
+                        .tab_drag_press_position
+                        .map(|origin| {
+                            let dx = f32::from(event.event.position.x) - f32::from(origin.x);
+                            let dy = f32::from(event.event.position.y) - f32::from(origin.y);
+                            (dx * dx + dy * dy).sqrt() >= 4.0
+                        })
+                        .unwrap_or(true);
+                    if moved_enough {
+                        this.tab_dragging_id = Some(drag_tab_id.clone());
+                    }
                 },
             ))
             .on_mouse_move(
@@ -1795,7 +1815,17 @@ impl EditorView {
                         && (this.tab_drag_candidate_id.as_deref() == Some(hover_tab_id.as_str())
                             || this.tab_dragging_id.is_some())
                     {
-                        this.tab_dragging_id = Some(hover_tab_id.clone());
+                        let moved_enough = this
+                            .tab_drag_press_position
+                            .map(|origin| {
+                                let dx = f32::from(event.position.x) - f32::from(origin.x);
+                                let dy = f32::from(event.position.y) - f32::from(origin.y);
+                                (dx * dx + dy * dy).sqrt() >= 4.0
+                            })
+                            .unwrap_or(true);
+                        if moved_enough {
+                            this.tab_dragging_id = Some(hover_tab_id.clone());
+                        }
                         window.prevent_default();
                         cx.stop_propagation();
                     }
@@ -1806,6 +1836,7 @@ impl EditorView {
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     window.prevent_default();
                     this.tab_drag_candidate_id = Some(press_tab_id.clone());
+                    this.tab_drag_press_position = Some(event.position);
                     this.switch_to_tab(&tab_id, cx);
                     if event.click_count >= 2 {
                         this.promote_tab_to_permanent(&tab_id, cx);
@@ -2188,4 +2219,25 @@ impl EditorView {
             .child(action_buttons)
             .into_any_element()
     }
+}
+
+/// Returns the byte offset of the end of the first ATX markdown heading line
+/// (e.g. `# Title`, `## Section`) in `text`, or `None` if there is no heading.
+fn first_markdown_heading_line_end(text: &str) -> Option<usize> {
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        let trimmed_line = line.strip_suffix('\n').unwrap_or(line);
+        let content = trimmed_line.trim_start_matches([' ', '\t']);
+        let hashes = content.chars().take_while(|&c| c == '#').count();
+        if (1..=6).contains(&hashes)
+            && content[hashes..]
+                .chars()
+                .next()
+                .is_some_and(|c| c == ' ' || c == '\t')
+        {
+            return Some(offset + trimmed_line.len());
+        }
+        offset += line.len();
+    }
+    None
 }

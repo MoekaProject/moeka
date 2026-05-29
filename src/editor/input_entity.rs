@@ -120,7 +120,7 @@ impl EntityInputHandler for EditorView {
         ));
         let had_ime_composition = self.ime_composition_snapshot.is_some();
         if !had_ime_composition {
-            self.checkpoint();
+            self.checkpoint_for_typing(new_text);
         }
 
         if self.has_extra_cursors()
@@ -273,7 +273,7 @@ impl EntityInputHandler for EditorView {
                 self.ensure_wiki_link_menu_for_cursor(cx);
             }
         } else if self.maybe_open_wiki_link_menu_after_edit(cx) {
-        } else if new_text == "/" {
+        } else if new_text == "/" && self.active_tab_is_markdown() {
             let (line, col) = self.buffer.offset_to_line_col(new_offset);
             let line_content = self.buffer.line_content(line);
             let trimmed = line_content.trim();

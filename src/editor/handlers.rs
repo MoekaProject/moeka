@@ -25,6 +25,7 @@ impl EditorView {
         };
 
         self.restore_snapshot(snapshot);
+        self.reset_typing_checkpoint_grouping();
         self.tabs[index].snapshot = self.current_snapshot();
         self.sync_active_tab_dirty_state();
         session_store::persist_session(self);

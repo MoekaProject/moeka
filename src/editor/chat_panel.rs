@@ -454,6 +454,9 @@ impl Element for ChatTerminalSurfaceElement {
                 if cell.flags.contains(Flags::INVERSE) {
                     std::mem::swap(&mut fg, &mut bg);
                 }
+                if cell.flags.contains(Flags::DIM) {
+                    fg = terminal_dim_color(fg, self.default_bg);
+                }
 
                 if is_chat_terminal_spacer_cell(cell) {
                     continue;
@@ -1139,6 +1142,19 @@ fn terminal_emphasis_color(color: Hsla, is_dark: bool) -> Hsla {
     }
 }
 
+/// Blend a color toward the background to produce a muted/dim (gray) variant.
+/// Works for both light and dark themes since it always moves toward `background`.
+fn terminal_dim_color(color: Hsla, background: Hsla) -> Hsla {
+    const DIM_BLEND: f32 = 0.45;
+    let mix = |a: f32, b: f32| a + (b - a) * DIM_BLEND;
+    Hsla {
+        h: color.h,
+        s: (color.s * (1.0 - DIM_BLEND * 0.5)).clamp(0.0, 1.0),
+        l: mix(color.l, background.l).clamp(0.0, 1.0),
+        a: color.a,
+    }
+}
+
 fn terminal_theme_palette(theme: &crate::theme::Theme, panel_bg: Hsla) -> ChatTerminalPalette {
     let is_dark = panel_bg.l < 0.5;
     let neutral_black = if is_dark {
@@ -1243,7 +1259,16 @@ fn terminal_named_color(
         NamedColor::BrightCyan => palette.bright_cyan,
         NamedColor::BrightWhite => palette.bright_white,
         NamedColor::Cursor => default_fg,
-        _ => default_fg,
+        NamedColor::BrightForeground => default_fg,
+        NamedColor::DimForeground => terminal_dim_color(default_fg, default_bg),
+        NamedColor::DimBlack => terminal_dim_color(palette.black, default_bg),
+        NamedColor::DimRed => terminal_dim_color(palette.red, default_bg),
+        NamedColor::DimGreen => terminal_dim_color(palette.green, default_bg),
+        NamedColor::DimYellow => terminal_dim_color(palette.yellow, default_bg),
+        NamedColor::DimBlue => terminal_dim_color(palette.blue, default_bg),
+        NamedColor::DimMagenta => terminal_dim_color(palette.magenta, default_bg),
+        NamedColor::DimCyan => terminal_dim_color(palette.cyan, default_bg),
+        NamedColor::DimWhite => terminal_dim_color(palette.white, default_bg),
     }
 }
 

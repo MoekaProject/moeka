@@ -2509,6 +2509,61 @@ mod tests {
         assert_eq!(runs[2].color, theme.syntax_marker);
         assert_eq!(runs[2].background_color, None);
     }
+
+    #[test]
+    fn folded_highlight_keeps_yellow_background() {
+        let line = "==hi==";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let active_ranges: [Range<usize>; 0] = [];
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &active_ranges,
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &active_ranges,
+            false,
+            prefix_collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            0,
+            16.0,
+            &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::NORMAL,
+            None,
+        );
+
+        let highlight_bg = crate::theme::with_alpha(crate::hex_hsla!("#E5C07B"), 0.22);
+        assert!(
+            runs.iter()
+                .any(|run| run.background_color == Some(highlight_bg)),
+            "expected a run with the yellow highlight background after folding"
+        );
+    }
 }
 
 pub(crate) fn find_syntax_for_language(language: &str) -> Option<&'static SyntaxReference> {

@@ -66,6 +66,9 @@ use crate::theme::{EditorThemeMode, Theme, ThemeColorField, ThemeKind};
 
 const CODE_BLOCK_COPY_FEEDBACK_MS: u64 = 1200;
 const PANEL_ANIMATION_FRAME_MS: u64 = 8;
+/// Maximum gap between consecutive single-character edits for them to be merged
+/// into one undo step (time-interval undo grouping).
+const UNDO_GROUP_INTERVAL: Duration = Duration::from_millis(300);
 const SIDEBAR_GIT_STATUS_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 const GIT_HISTORY_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 pub(super) const WELCOME_TAB_ID: &str = "welcome-1";
@@ -102,6 +105,55 @@ fn text_tab_is_dirty(saved_text: Option<&str>, current_text: &str) -> bool {
         Some(saved_text) => saved_text != current_text,
         None => !current_text.is_empty(),
     }
+}
+
+/// Finds the nesting-aware matching bracket for the ASCII bracket located at
+/// `bracket_offset` (a byte offset). Brackets are ASCII so byte scanning is safe
+/// even for multi-byte UTF-8 text. Returns the partner's byte offset.
+fn matching_bracket_offset(text: &str, bracket_offset: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let ch = *bytes.get(bracket_offset)?;
+    let (open, close, forward) = match ch {
+        b'(' => (b'(', b')', true),
+        b'[' => (b'[', b']', true),
+        b'{' => (b'{', b'}', true),
+        b')' => (b'(', b')', false),
+        b']' => (b'[', b']', false),
+        b'}' => (b'{', b'}', false),
+        _ => return None,
+    };
+
+    let mut depth: i32 = 0;
+    if forward {
+        let mut i = bracket_offset;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == open {
+                depth += 1;
+            } else if b == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            i += 1;
+        }
+    } else {
+        let mut i = bracket_offset as isize;
+        while i >= 0 {
+            let b = bytes[i as usize];
+            if b == close {
+                depth += 1;
+            } else if b == open {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i as usize);
+                }
+            }
+            i -= 1;
+        }
+    }
+    None
 }
 
 fn remaining_refresh_delay(scanned_at: Option<SystemTime>, minimum_interval_ms: u64) -> Duration {
@@ -974,6 +1026,13 @@ pub struct EditorView {
     pub(crate) editor_scrollbar_idle_task: Option<Task<()>>,
     pub(crate) editor_scrollbar_drag: Option<EditorScrollbarDragState>,
     pub(crate) sidebar_custom_width: Option<f32>,
+    pub(crate) search_sidebar_custom_width: Option<f32>,
+    /// Time of the last grouped typing checkpoint, used to coalesce rapid
+    /// single-character edits into a single undo step (time-interval grouping).
+    pub(crate) last_typing_checkpoint_time: Option<Instant>,
+    /// Predicted cursor offset after the last grouped typing checkpoint. A new
+    /// edit is only coalesced if it continues contiguously from this offset.
+    pub(crate) last_typing_checkpoint_offset: Option<usize>,
     pub(crate) sidebar_resizing: bool,
     pub(crate) sidebar_display_width: f32,
     pub(crate) sidebar_layout_width: f32,
@@ -993,6 +1052,7 @@ pub struct EditorView {
     pub(crate) sidebar_visible: bool,
     pub(crate) editor_left_aligned: bool,
     pub(crate) tab_drag_candidate_id: Option<String>,
+    pub(crate) tab_drag_press_position: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) tab_dragging_id: Option<String>,
     pub(crate) recently_closed_tabs: Vec<OpenTab>,
     pub(crate) tab_navigation_history: Vec<TabNavigationTarget>,
@@ -1337,6 +1397,9 @@ impl EditorView {
             editor_scrollbar_idle_task: None,
             editor_scrollbar_drag: None,
             sidebar_custom_width: None,
+            search_sidebar_custom_width: None,
+            last_typing_checkpoint_time: None,
+            last_typing_checkpoint_offset: None,
             sidebar_resizing: false,
             sidebar_display_width: 0.0,
             sidebar_layout_width: 0.0,
@@ -1356,6 +1419,7 @@ impl EditorView {
             sidebar_visible: false,
             editor_left_aligned: false,
             tab_drag_candidate_id: None,
+            tab_drag_press_position: None,
             tab_dragging_id: None,
             recently_closed_tabs: Vec::new(),
             tab_navigation_history: vec![TabNavigationTarget::LiveTab(WELCOME_TAB_ID.to_string())],
@@ -1884,8 +1948,26 @@ impl EditorView {
     }
 
     pub(crate) fn sidebar_target_width(&self) -> f32 {
-        self.sidebar_custom_width
+        self.active_sidebar_custom_width()
             .unwrap_or_else(|| self.scaled(self.styles.sidebar.sidebar_width_px))
+    }
+
+    /// The custom width for the currently displayed left sidebar mode.
+    /// Workspace search and the file tree keep independent widths.
+    pub(crate) fn active_sidebar_custom_width(&self) -> Option<f32> {
+        if self.workspace_search_visible {
+            self.search_sidebar_custom_width
+        } else {
+            self.sidebar_custom_width
+        }
+    }
+
+    pub(crate) fn set_active_sidebar_custom_width(&mut self, width: f32) {
+        if self.workspace_search_visible {
+            self.search_sidebar_custom_width = Some(width);
+        } else {
+            self.sidebar_custom_width = Some(width);
+        }
     }
 
     pub(crate) fn sidebar_width(&self) -> f32 {
@@ -3554,8 +3636,9 @@ impl EditorView {
                 continue;
             }
             next_generated_keys.insert(preview.cache_key.clone());
+            let has_cached_image = self.image_cache.contains_key(&preview.cache_key);
             if !force
-                && self.image_cache.contains_key(&preview.cache_key)
+                && has_cached_image
                 && self
                     .generated_preview_svg_cache
                     .contains_key(&preview.cache_key)
@@ -3572,6 +3655,18 @@ impl EditorView {
                     body_cjk: self.styles.editor.editor_body_cjk_font_family,
                 },
             );
+            // The SVG fully determines the rasterized image. On a forced refresh
+            // (theme/font/settings change) only re-rasterize when the SVG actually
+            // changed; settings that do not affect previews (line height, letter
+            // spacing, UI font) leave it identical, so the cached image is reused
+            // instead of rebuilding every chart/formula.
+            let svg_unchanged = self
+                .generated_preview_svg_cache
+                .get(&preview.cache_key)
+                .is_some_and(|cached| cached.as_ref() == svg.as_str());
+            if force && has_cached_image && svg_unchanged {
+                continue;
+            }
             self.generated_preview_svg_cache
                 .insert(preview.cache_key.clone(), Arc::<str>::from(svg.clone()));
             let image = helpers::load_generated_preview_image_from_svg(&svg, preview.kind)
@@ -3599,6 +3694,91 @@ impl EditorView {
     pub(crate) fn active_tab_is_non_markdown_text(&self) -> bool {
         self.active_file_kind()
             .is_some_and(|file_kind| file_kind.supports_text_buffer() && !file_kind.is_markdown())
+    }
+
+    /// Buffer ranges of all occurrences of the currently selected text, excluding
+    /// the active selection itself. Returns empty for trivial/whitespace/multi-line
+    /// selections to avoid visual noise.
+    pub(crate) fn selection_match_ranges(&self) -> Vec<std::ops::Range<usize>> {
+        let sel = self.cursor.selection_range();
+        if sel.start >= sel.end {
+            return Vec::new();
+        }
+        let text = self.buffer.text();
+        if sel.end > text.len() {
+            return Vec::new();
+        }
+        let needle = &text[sel.start..sel.end];
+        if needle.is_empty()
+            || needle.len() > 200
+            || needle.contains('\n')
+            || needle.trim().is_empty()
+        {
+            return Vec::new();
+        }
+
+        let mut ranges = Vec::new();
+        let mut search_from = 0usize;
+        while let Some(rel) = text[search_from..].find(needle) {
+            let start = search_from + rel;
+            let end = start + needle.len();
+            if !(start == sel.start && end == sel.end) {
+                ranges.push(start..end);
+                if ranges.len() >= 500 {
+                    break;
+                }
+            }
+            search_from = end;
+        }
+        ranges
+    }
+
+    fn bracket_matching_enabled_at(&self, offset: usize) -> bool {
+        if self.active_tab_is_non_markdown_text() {
+            return true;
+        }
+        if !self.active_tab_is_markdown() {
+            return false;
+        }
+        let (line, _) = self.buffer.offset_to_line_col(offset);
+        self.decorations.get(line).is_some_and(|decoration| {
+            matches!(
+                decoration.block_type,
+                crate::markdown::BlockType::CodeBlock | crate::markdown::BlockType::CodeBlockFence
+            )
+        })
+    }
+
+    /// When the cursor sits next to a bracket (and bracket matching is enabled for
+    /// the current context), returns the two single-char buffer ranges of the
+    /// bracket and its nesting-aware partner.
+    pub(crate) fn bracket_match_ranges(&self) -> Vec<std::ops::Range<usize>> {
+        if self.cursor.has_selection() {
+            return Vec::new();
+        }
+        let cursor = self.cursor.offset;
+        if !self.bracket_matching_enabled_at(cursor) {
+            return Vec::new();
+        }
+        let text = self.buffer.text();
+        let bytes = text.as_bytes();
+        let is_bracket =
+            |b: u8| matches!(b, b'(' | b')' | b'[' | b']' | b'{' | b'}');
+
+        let bracket_pos = if cursor > 0 && cursor <= bytes.len() && is_bracket(bytes[cursor - 1]) {
+            Some(cursor - 1)
+        } else if cursor < bytes.len() && is_bracket(bytes[cursor]) {
+            Some(cursor)
+        } else {
+            None
+        };
+        let Some(pos) = bracket_pos else {
+            return Vec::new();
+        };
+        let Some(partner) = matching_bracket_offset(&text, pos) else {
+            return Vec::new();
+        };
+        vec![pos..pos + 1, partner..partner + 1]
     }
 
     pub(crate) fn active_tab_supports_text_search(&self) -> bool {
@@ -4526,7 +4706,52 @@ impl EditorView {
 
     pub(crate) fn checkpoint(&mut self) {
         self.ime_composition_snapshot = None;
+        self.reset_typing_checkpoint_grouping();
         self.push_undo_snapshot(self.current_snapshot());
+    }
+
+    /// Records an undo checkpoint for ordinary typing, coalescing consecutive
+    /// single-character insertions that happen within `UNDO_GROUP_INTERVAL` and
+    /// continue contiguously from the previous edit into a single undo step.
+    /// This mirrors editors like Zed, so undo reverts a "word"/burst of typing
+    /// at once instead of one Latin character at a time.
+    pub(crate) fn checkpoint_for_typing(&mut self, new_text: &str) {
+        self.ime_composition_snapshot = None;
+
+        let now = Instant::now();
+        let start = self.cursor.offset;
+        // Only plain single-character insertions (no newline, no selection or
+        // multi-cursor/marked state) are eligible for grouping. Everything else
+        // forces a fresh undo boundary.
+        let is_groupable = new_text.chars().count() == 1
+            && new_text != "\n"
+            && !self.cursor.has_selection()
+            && !self.has_extra_cursors()
+            && self.marked_range.is_none();
+
+        let within_interval = self
+            .last_typing_checkpoint_time
+            .is_some_and(|previous| now.duration_since(previous) < UNDO_GROUP_INTERVAL);
+        let contiguous = self.last_typing_checkpoint_offset == Some(start);
+        let coalesce = is_groupable && within_interval && contiguous;
+
+        if !coalesce {
+            self.push_undo_snapshot(self.current_snapshot());
+        }
+
+        if is_groupable {
+            self.last_typing_checkpoint_time = Some(now);
+            self.last_typing_checkpoint_offset = Some(start + new_text.len());
+        } else {
+            self.reset_typing_checkpoint_grouping();
+        }
+    }
+
+    /// Forces the next typing checkpoint to start a new undo group (e.g. after
+    /// undo/redo, cursor movement, or any non-typing edit).
+    pub(crate) fn reset_typing_checkpoint_grouping(&mut self) {
+        self.last_typing_checkpoint_time = None;
+        self.last_typing_checkpoint_offset = None;
     }
 
     pub(crate) fn copy_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
@@ -4991,8 +5216,14 @@ impl EditorView {
         if let Some(ref mut w) = self.sidebar_custom_width {
             *w = *w * (clamped / self.ui_scale);
         }
+        if let Some(ref mut w) = self.search_sidebar_custom_width {
+            *w = *w * (clamped / self.ui_scale);
+        }
         self.ui_scale = clamped;
         self.sync_overlay_text_input_styles(cx);
+        // Zooming changes the scaled font sizes, so the cached per-line layout
+        // (heights, wrapping, geometry) must be rebuilt to avoid geometry drift.
+        self.clear_line_display_info();
         self.clamp_scroll();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -5241,11 +5472,11 @@ impl EditorView {
         let leading_gap = if has_blank_line_before { "" } else { "\n" };
         let trailing_gap = if has_blank_line_after { "" } else { "\n\n" };
         let replacement = if block_text.ends_with('\n') {
-            format!("{leading_gap}```\n{block_text}```{trailing_gap}")
+            format!("{leading_gap}```bash\n{block_text}```{trailing_gap}")
         } else {
-            format!("{leading_gap}```\n{block_text}\n```{trailing_gap}")
+            format!("{leading_gap}```bash\n{block_text}\n```{trailing_gap}")
         };
-        let prefix_len = "```\n".len();
+        let prefix_len = "```bash\n".len();
         let body_start = block_start + leading_gap.len() + prefix_len;
         let replaced_len = block_end.saturating_sub(block_start);
         let replacement_len = replacement.len();

@@ -204,7 +204,7 @@ impl EditorView {
         let top_spacer = self.scaled(self.styles.utility_panel.utility_panel_top_spacer_height_px);
         let bottom_spacer = self.scaled(os.outline_bottom_spacer_height_px);
 
-        let mut items: Vec<AnyElement> = Vec::with_capacity(headings.len() + 3);
+        let mut items: Vec<AnyElement> = Vec::with_capacity(headings.len() + 5);
 
         items.push(div().h(px(top_spacer)).flex_shrink_0().into_any_element());
 
@@ -221,11 +221,35 @@ impl EditorView {
                 .into_any_element(),
         );
 
+        // Virtualize the heading list: only build elements for the visible window.
+        let (visible_start, visible_end, window_top_spacer, window_bottom_spacer) = self
+            .visible_uniform_list_range(
+                &self.outline_scroll_handle,
+                top_spacer + header_height,
+                item_height,
+                headings.len(),
+                6,
+            );
+
+        if window_top_spacer > 0.0 {
+            items.push(
+                div()
+                    .h(px(window_top_spacer))
+                    .flex_shrink_0()
+                    .into_any_element(),
+            );
+        }
+
         // Pre-compute which guide levels are active for each heading.
         // A guide at level L is active for heading[i] if there exists a later heading[j]
         // with level <= L+1 (i.e., it connects siblings at level L+1) and all headings
         // between i and j have level > L.
-        for (idx, heading) in headings.iter().enumerate() {
+        for (idx, heading) in headings
+            .iter()
+            .enumerate()
+            .skip(visible_start)
+            .take(visible_end.saturating_sub(visible_start))
+        {
             let is_active = active_line == Some(heading.line);
             let indent = padding_left + (heading.level.saturating_sub(1) as f32) * indent_step;
             let target_line = heading.line;
@@ -277,10 +301,11 @@ impl EditorView {
             items.push(
                 div()
                     .id(SharedString::from(format!("outline-{}", target_line)))
-                    .min_h(px(item_height))
+                    .h(px(item_height))
                     .w_full()
                     .flex_shrink_0()
                     .relative()
+                    .overflow_hidden()
                     .pl(px(indent))
                     .pr(px(padding_right))
                     .py(px(item_padding_y))
@@ -294,6 +319,9 @@ impl EditorView {
                         div()
                             .w_full()
                             .line_height(px(item_line_height))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
                             .child(title),
                     )
                     .on_mouse_down(
@@ -303,6 +331,15 @@ impl EditorView {
                             this.flash_outline_heading_line(target_line, cx);
                         }),
                     )
+                    .into_any_element(),
+            );
+        }
+
+        if window_bottom_spacer > 0.0 {
+            items.push(
+                div()
+                    .h(px(window_bottom_spacer))
+                    .flex_shrink_0()
                     .into_any_element(),
             );
         }
