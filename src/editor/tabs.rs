@@ -28,18 +28,17 @@ impl EditorView {
             return;
         }
 
-        self.tab_layout_cache.insert(
-            active_tab_id,
-            (std::mem::take(&mut self.line_display_info), self.last_text_width),
-        );
+        let line_display_info = self.take_line_display_info();
+        self.tab_layout_cache
+            .insert(active_tab_id, (line_display_info, self.last_text_width));
     }
 
     fn restore_layout_cache_for_tab(&mut self, tab_id: &str) {
         if let Some((line_display_info, last_text_width)) = self.tab_layout_cache.remove(tab_id) {
-            self.line_display_info = line_display_info;
+            self.set_line_display_info(line_display_info);
             self.last_text_width = last_text_width;
         } else {
-            self.line_display_info.clear();
+            self.clear_line_display_info();
         }
     }
 
@@ -601,7 +600,7 @@ impl EditorView {
                 self.cursor.offset = 0;
                 self.cursor.anchor = 0;
                 self.extra_cursors.clear();
-                self.line_display_info.clear();
+                self.clear_line_display_info();
             }
             self.marked_range = None;
             self.close_preview_overlay();

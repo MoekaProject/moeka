@@ -192,7 +192,7 @@ impl EditorView {
 
     pub(crate) fn finalize_settings_change(&mut self, cx: &mut Context<Self>) {
         self.app_settings.save();
-        self.line_display_info.clear();
+        self.clear_line_display_info();
         cx.notify();
     }
 
@@ -1442,7 +1442,7 @@ impl EditorView {
                 _ => {}
             }
             self.app_settings.save();
-            self.line_display_info.clear();
+            self.clear_line_display_info();
             cx.notify();
         }
     }

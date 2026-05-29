@@ -31,7 +31,8 @@ impl EditorView {
                     self.selected_sidebar_paths.clear();
                 }
                 for index in start..=end {
-                    self.selected_sidebar_paths.insert(items[index].path.clone());
+                    self.selected_sidebar_paths
+                        .insert(items[index].path.clone());
                 }
             } else {
                 if !cmd {

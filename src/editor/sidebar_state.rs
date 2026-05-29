@@ -23,7 +23,9 @@ fn sidebar_git_repo_root_for_path(sidebar_root: &Path) -> Option<PathBuf> {
     ))
 }
 
-fn collect_sidebar_git_statuses_for_root(sidebar_root: &Path) -> HashMap<PathBuf, SidebarGitStatus> {
+fn collect_sidebar_git_statuses_for_root(
+    sidebar_root: &Path,
+) -> HashMap<PathBuf, SidebarGitStatus> {
     let Some(repo_root) = sidebar_git_repo_root_for_path(sidebar_root) else {
         return HashMap::new();
     };
@@ -90,7 +92,8 @@ fn collect_sidebar_git_statuses_for_root(sidebar_root: &Path) -> HashMap<PathBuf
                     break;
                 }
 
-                let merged = EditorView::merge_sidebar_git_status(statuses.get(&path).copied(), status);
+                let merged =
+                    EditorView::merge_sidebar_git_status(statuses.get(&path).copied(), status);
                 statuses.insert(path.clone(), merged);
 
                 if path == normalized_sidebar_root {
@@ -410,7 +413,9 @@ impl EditorView {
 
             let statuses = cx
                 .background_executor()
-                .spawn(async move { collect_sidebar_git_statuses_for_root(&background_sidebar_root) })
+                .spawn(
+                    async move { collect_sidebar_git_statuses_for_root(&background_sidebar_root) },
+                )
                 .await;
 
             this.update(cx, |this, cx| {
@@ -426,7 +431,8 @@ impl EditorView {
                 }
 
                 if profile::enabled() {
-                    let mut profile_scope = profile::ProfileScope::new("sidebar.git_status_refresh");
+                    let mut profile_scope =
+                        profile::ProfileScope::new("sidebar.git_status_refresh");
                     profile_scope.set_note(format!(
                         "repo_root={} entries={} dirty_was={}",
                         requested_sidebar_root.display(),

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -26,6 +27,48 @@ use crate::markdown::{
 use crate::theme::Theme;
 
 use super::*;
+
+const CODE_HIGHLIGHT_CACHE_MAX_ENTRIES: usize = 8192;
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct CodeHighlightCacheKey {
+    language: String,
+    line_content: String,
+    light_theme: bool,
+}
+
+#[derive(Clone)]
+struct CodeHighlightSegment {
+    len: usize,
+    color: Hsla,
+    weight: FontWeight,
+    style: FontStyle,
+}
+
+fn code_highlight_cache()
+-> &'static Mutex<HashMap<CodeHighlightCacheKey, Vec<CodeHighlightSegment>>> {
+    static CACHE: OnceLock<Mutex<HashMap<CodeHighlightCacheKey, Vec<CodeHighlightSegment>>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn apply_code_highlight_segments(
+    segments: &[CodeHighlightSegment],
+    colors: &mut [Hsla],
+    weights: &mut [FontWeight],
+    styles: &mut [FontStyle],
+) {
+    let mut byte_pos = 0usize;
+    for segment in segments {
+        let end = (byte_pos + segment.len).min(colors.len());
+        for idx in byte_pos..end {
+            colors[idx] = segment.color;
+            weights[idx] = segment.weight;
+            styles[idx] = segment.style;
+        }
+        byte_pos = end;
+    }
+}
 
 pub(crate) const GENERATED_PREVIEW_RASTER_SCALE: f32 = 2.0;
 pub(crate) const GENERATED_PREVIEW_MATH_RASTER_SCALE: f32 = 3.0;
@@ -2934,38 +2977,65 @@ pub(crate) fn apply_code_block_highlighting(
         return;
     }
 
+    let cache_key = CodeHighlightCacheKey {
+        language: language.to_string(),
+        line_content: line_content.to_string(),
+        light_theme: theme.bg_primary.l >= 0.65,
+    };
+    if let Ok(cache) = code_highlight_cache().lock()
+        && let Some(segments) = cache.get(&cache_key).cloned()
+    {
+        apply_code_highlight_segments(&segments, colors, weights, styles);
+        return;
+    }
+
     let syntax_set = syntax_set();
     let syntax =
         find_syntax_for_language(language).unwrap_or_else(|| syntax_set.find_syntax_plain_text());
     let mut highlighter = HighlightLines::new(syntax, syntect_theme());
     if let Ok(ranges) = highlighter.highlight_line(line_content, syntax_set) {
         let mut byte_pos = 0usize;
+        let mut segments = Vec::with_capacity(ranges.len());
         for (style, piece) in &ranges {
             let end = (byte_pos + piece.len()).min(colors.len());
             let color = adjust_code_block_highlight_color_for_theme(
                 syntect_color_to_hsla(style.foreground),
                 theme,
             );
+            let weight = if style
+                .font_style
+                .contains(syntect::highlighting::FontStyle::BOLD)
+            {
+                FontWeight::BOLD
+            } else {
+                FontWeight::NORMAL
+            };
+            let font_style = if style
+                .font_style
+                .contains(syntect::highlighting::FontStyle::ITALIC)
+            {
+                FontStyle::Italic
+            } else {
+                FontStyle::Normal
+            };
+            segments.push(CodeHighlightSegment {
+                len: piece.len(),
+                color,
+                weight,
+                style: font_style,
+            });
             for idx in byte_pos..end {
                 colors[idx] = color;
-                weights[idx] = if style
-                    .font_style
-                    .contains(syntect::highlighting::FontStyle::BOLD)
-                {
-                    FontWeight::BOLD
-                } else {
-                    FontWeight::NORMAL
-                };
-                styles[idx] = if style
-                    .font_style
-                    .contains(syntect::highlighting::FontStyle::ITALIC)
-                {
-                    FontStyle::Italic
-                } else {
-                    FontStyle::Normal
-                };
+                weights[idx] = weight;
+                styles[idx] = font_style;
             }
             byte_pos = end;
+        }
+        if let Ok(mut cache) = code_highlight_cache().lock() {
+            if cache.len() >= CODE_HIGHLIGHT_CACHE_MAX_ENTRIES {
+                cache.clear();
+            }
+            cache.insert(cache_key, segments);
         }
     }
 }
@@ -3164,12 +3234,9 @@ pub(crate) fn build_generated_block_preview_svg(
             theme,
             font_families,
         ),
-        Err(error) => build_generated_block_preview_error_svg(
-            kind,
-            &error.to_string(),
-            theme,
-            font_families,
-        ),
+        Err(error) => {
+            build_generated_block_preview_error_svg(kind, &error.to_string(), theme, font_families)
+        }
     }
 }
 
@@ -3388,14 +3455,11 @@ fn push_generated_preview_font_families(families: &mut Vec<String>, configured: 
         .filter(|family| !family.is_empty())
     {
         let normalized = family.trim_matches(|ch| ch == '\'' || ch == '"');
-        if families
-            .iter()
-            .any(|existing| {
-                existing
-                    .trim_matches(|ch| ch == '\'' || ch == '"')
-                    .eq_ignore_ascii_case(normalized)
-            })
-        {
+        if families.iter().any(|existing| {
+            existing
+                .trim_matches(|ch| ch == '\'' || ch == '"')
+                .eq_ignore_ascii_case(normalized)
+        }) {
             continue;
         }
         families.push(if normalized.contains(char::is_whitespace) {

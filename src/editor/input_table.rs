@@ -134,6 +134,9 @@ mod tests {
         decorations[2].table_info = Some(table_line_info(false, 4));
         decorations[3].table_info = Some(table_line_info(false, 4));
 
-        assert_eq!(visible_table_line_indices(&decorations, 0), Some(vec![0, 2, 3]));
+        assert_eq!(
+            visible_table_line_indices(&decorations, 0),
+            Some(vec![0, 2, 3])
+        );
     }
 }

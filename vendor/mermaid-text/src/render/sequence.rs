@@ -1476,7 +1476,13 @@ mod tests {
         .unwrap();
         let out = render(&diag);
 
-        assert!(out.contains("编辑 Mermaid 或公式块"), "missing CJK message text in:\n{out}");
-        assert!(!out.contains("编 辑"), "unexpected extra padding in:\n{out}");
+        assert!(
+            out.contains("编辑 Mermaid 或公式块"),
+            "missing CJK message text in:\n{out}"
+        );
+        assert!(
+            !out.contains("编 辑"),
+            "unexpected extra padding in:\n{out}"
+        );
     }
 }

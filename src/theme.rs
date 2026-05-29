@@ -480,8 +480,8 @@ impl Theme {
     pub fn one_light() -> Self {
         Self {
             // Text
-            text_primary: crate::hex_hsla!("#535764"),
-            text_secondary: crate::hex_hsla!("#70748E"),
+            text_primary: crate::hex_hsla!("#30323B"),
+            text_secondary: crate::hex_hsla!("#5E6177"),
             text_bright: crate::hex_hsla!("#34363E"),
             text_accent: crate::hex_hsla!("#5C78E2"),
             text_danger: crate::hex_hsla!("#D3604F"),
@@ -493,8 +493,8 @@ impl Theme {
             bg_selected: crate::hex_hsla!("#DCE0F6"),
             bg_bar: crate::hex_hsla!("#F0F2FC"),
             bg_tab: crate::hex_hsla!("#F0F2FC"),
-            bg_tab_hover: crate::hex_hsla!("#F3F5FE"),
-            bg_tab_active: crate::hex_hsla!("#F9FAFF"),
+            bg_tab_hover: crate::hex_hsla!("#FFFFFF"),
+            bg_tab_active: crate::hex_hsla!("#FFFFFF"),
             bg_code: crate::hex_hsla!("#E3E8FF33"),
             bg_code_inline: crate::hex_hsla!("#ECEDEF"),
             // Border

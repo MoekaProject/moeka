@@ -105,8 +105,12 @@ impl EditorView {
         };
         self.show_sidebar_delete_dialog(vec![path], cx);
     }
-    
-    pub(crate) fn show_sidebar_delete_dialog(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+
+    pub(crate) fn show_sidebar_delete_dialog(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         if paths.is_empty() {
             return;
         }

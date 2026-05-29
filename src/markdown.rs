@@ -880,10 +880,11 @@ fn decorate_math_block_previews_as_code_blocks(
 
         let start_line = preview.start_line.min(line_count.saturating_sub(1));
         let end_line = preview.end_line.min(line_count.saturating_sub(1));
-        let start_col = preview
-            .source_range
-            .start
-            .saturating_sub(*line_starts.get(start_line).unwrap_or(&preview.source_range.start));
+        let start_col = preview.source_range.start.saturating_sub(
+            *line_starts
+                .get(start_line)
+                .unwrap_or(&preview.source_range.start),
+        );
         let end_line_start = line_starts
             .get(end_line)
             .copied()

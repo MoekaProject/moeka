@@ -107,9 +107,14 @@ impl EditorView {
                     .next_back()
                     .map(|(index, _)| index)
                     .unwrap_or(0);
-                let previous_pos = wrapped_line.position_for_index(previous_boundary, px(line_height))?;
+                let previous_pos =
+                    wrapped_line.position_for_index(previous_boundary, px(line_height))?;
                 let upstream_x = upstream_x
-                    + if upstream_visual_idx > 0 { indent_px } else { 0.0 };
+                    + if upstream_visual_idx > 0 {
+                        indent_px
+                    } else {
+                        0.0
+                    };
                 return Some(point(px(upstream_x), previous_pos.y));
             }
         }
@@ -127,9 +132,9 @@ impl EditorView {
         let (line, col) = self.buffer.offset_to_line_col(offset);
         let info = self.line_display_info.get(line)?.as_ref()?;
         let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
-        let affinity = self.wrap_boundary_affinity.and_then(|current| {
-            (current.offset == offset).then_some(current.kind)
-        });
+        let affinity = self
+            .wrap_boundary_affinity
+            .and_then(|current| (current.offset == offset).then_some(current.kind));
         let pos = Self::visual_position_for_wrapped_display(
             &info.wrapped_line,
             &info.display_text,
@@ -139,7 +144,10 @@ impl EditorView {
             &info.wrap_boundary_upstream_xs,
             affinity,
         )?;
-        Some(((f32::from(pos.y) / info.line_height) as usize, f32::from(pos.x)))
+        Some((
+            (f32::from(pos.y) / info.line_height) as usize,
+            f32::from(pos.x),
+        ))
     }
 
     pub(crate) fn cursor_visual_x(&self, offset: usize) -> Option<f32> {
@@ -235,7 +243,7 @@ impl EditorView {
 
 #[cfg(test)]
 mod tests {
-    use super::{utf16_offset_in_text_for_utf8, utf8_offset_in_text_for_utf16};
+    use super::{utf8_offset_in_text_for_utf16, utf16_offset_in_text_for_utf8};
 
     #[test]
     fn utf16_to_utf8_offset_handles_multibyte_chars() {

@@ -2998,14 +2998,24 @@ impl EditorView {
             .cursor(CursorStyle::Arrow)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_this, _event, _window, _cx| {}),
+                cx.listener(|_this, _event, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|_this, _event, _window, _cx| {}),
+                cx.listener(|_this, _event, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
             )
-            .on_mouse_move(cx.listener(|_this, _event, _window, _cx| {}))
-            .on_scroll_wheel(cx.listener(|_this, _event, _window, _cx| {}));
+            .on_mouse_move(cx.listener(|_this, _event, _window, cx| {
+                cx.stop_propagation();
+            }))
+            .on_scroll_wheel(cx.listener(|_this, _event, _window, cx| {
+                cx.stop_propagation();
+            }));
 
         let menu_div = if panel_id == "context-menu" {
             menu_div.on_mouse_down_out(cx.listener(|this, _event, _window, cx| {

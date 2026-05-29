@@ -186,7 +186,10 @@ pub fn serialize_table(model: &TableModel) -> Vec<String> {
     aligns.resize(col_count, TableAlign::Left);
     let widths = table_column_widths(model, col_count);
 
-    let mut result = vec![serialize_row(&header, &widths), serialize_align_row(&aligns, &widths)];
+    let mut result = vec![
+        serialize_row(&header, &widths),
+        serialize_align_row(&aligns, &widths),
+    ];
     for row in &model.data_rows {
         result.push(serialize_row(&pad_cells(row, col_count), &widths));
     }
@@ -420,11 +423,7 @@ mod tests {
 
     #[test]
     fn test_serialize_table_pads_columns_to_max_width() {
-        let input = lines(&[
-            "| Key | Longer value |",
-            "| --- | ---: |",
-            "| Value | x |",
-        ]);
+        let input = lines(&["| Key | Longer value |", "| --- | ---: |", "| Value | x |"]);
 
         let output = serialize_table(&parse_table_block(&input));
         assert_eq!(output[0], "| Key   | Longer value |");

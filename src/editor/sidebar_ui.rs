@@ -3,7 +3,11 @@ use gpui::Context;
 use super::*;
 
 impl EditorView {
-    pub(super) fn maybe_extend_sidebar_items(&mut self, total_items: usize, cx: &mut Context<Self>) {
+    pub(super) fn maybe_extend_sidebar_items(
+        &mut self,
+        total_items: usize,
+        cx: &mut Context<Self>,
+    ) {
         let _ = (total_items, cx);
     }
 

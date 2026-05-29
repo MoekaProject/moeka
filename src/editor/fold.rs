@@ -39,12 +39,9 @@ fn classify_region_marker(trimmed: &str) -> Option<RegionMarker> {
         ch.is_whitespace() || matches!(ch, '/' | '#' | '*' | ';' | '<' | '!' | '-')
     });
     let lower = normalized.to_ascii_lowercase();
-    if marker_keyword_matches(&lower, "endregion")
-        || marker_keyword_matches(&lower, "#endregion")
-    {
+    if marker_keyword_matches(&lower, "endregion") || marker_keyword_matches(&lower, "#endregion") {
         Some(RegionMarker::End)
-    } else if marker_keyword_matches(&lower, "region")
-        || marker_keyword_matches(&lower, "#region")
+    } else if marker_keyword_matches(&lower, "region") || marker_keyword_matches(&lower, "#region")
     {
         Some(RegionMarker::Start)
     } else {
@@ -379,7 +376,7 @@ impl EditorView {
                 cursor_moved = true;
             }
         }
-        self.line_display_info.clear();
+        self.clear_line_display_info();
         if cursor_moved {
             self.scroll_to_cursor();
         } else {
@@ -401,13 +398,14 @@ impl EditorView {
         };
 
         let selection_ranges = std::iter::once(self.cursor.selection_range())
-            .chain(self.extra_cursors.iter().map(|cursor| cursor.selection_range()))
+            .chain(
+                self.extra_cursors
+                    .iter()
+                    .map(|cursor| cursor.selection_range()),
+            )
             .collect::<Vec<_>>();
-        let preview_is_active = helpers::block_preview_is_active(
-            &preview,
-            self.cursor_line(),
-            &selection_ranges,
-        );
+        let preview_is_active =
+            helpers::block_preview_is_active(&preview, self.cursor_line(), &selection_ranges);
 
         if self
             .preview_overlay_state()
@@ -427,7 +425,7 @@ impl EditorView {
             }
         }
 
-        self.line_display_info.clear();
+        self.clear_line_display_info();
         cx.notify();
         self.pause_blinking(cx);
     }
@@ -436,7 +434,7 @@ impl EditorView {
         if !self.folded_image_previews.remove(&line) {
             self.folded_image_previews.insert(line);
         }
-        self.line_display_info.clear();
+        self.clear_line_display_info();
         cx.notify();
     }
 
@@ -487,7 +485,13 @@ mod tests {
 
     #[test]
     fn generic_fold_supports_brace_blocks() {
-        let lines = ["fn main() {", "    if ready {", "        work();", "    }", "}"];
+        let lines = [
+            "fn main() {",
+            "    if ready {",
+            "        work();",
+            "    }",
+            "}",
+        ];
 
         let range = generic_code_fold_range_for_line_impl(lines.len(), 0, |idx| lines[idx]);
 

@@ -62,7 +62,9 @@ impl EditorView {
 
         if self.quick_open_editor.is_none() {
             let styles = self.quick_open_text_input_styles();
-            let placeholder = self.t(crate::i18n::TextKey::QuickOpenPlaceholder).to_string();
+            let placeholder = self
+                .t(crate::i18n::TextKey::QuickOpenPlaceholder)
+                .to_string();
             let editor =
                 cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
             cx.subscribe(

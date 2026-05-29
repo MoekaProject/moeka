@@ -228,16 +228,16 @@ pub(crate) fn parse_link_style_directive(stmt: &str, graph: &mut Graph) {
 
     let delta = parse_edge_color_payload(rest);
 
-#[cfg(test)]
-#[allow(dead_code)]
-mod tests {
-    use super::strip_keyword_prefix;
+    #[cfg(test)]
+    #[allow(dead_code)]
+    mod tests {
+        use super::strip_keyword_prefix;
 
-    #[test]
-    fn strip_keyword_prefix_returns_none_for_cjk_prefix_without_panicking() {
-        assert_eq!(strip_keyword_prefix("用户 节点", "as"), None);
+        #[test]
+        fn strip_keyword_prefix_returns_none_for_cjk_prefix_without_panicking() {
+            assert_eq!(strip_keyword_prefix("用户 节点", "as"), None);
+        }
     }
-}
     for idx in target_indexes {
         let entry = graph.edge_styles.entry(idx).or_default();
         if delta.stroke.is_some() {

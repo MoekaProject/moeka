@@ -128,7 +128,9 @@ impl EditorView {
             let end_probe = selection
                 .end
                 .saturating_sub(usize::from(selection.end > selection.start));
-            let (end_line, _) = self.buffer.offset_to_line_col(end_probe.min(self.buffer.len()));
+            let (end_line, _) = self
+                .buffer
+                .offset_to_line_col(end_probe.min(self.buffer.len()));
             Some((start_line, end_line))
         } else {
             None
@@ -137,9 +139,10 @@ impl EditorView {
             if self.cursor.has_selection() {
                 self.ordered_list_prefix_touched_by_range(&selection)
             } else {
-                self.cursor.offset.checked_sub(1).and_then(|offset| {
-                    self.ordered_list_prefix_touched_by_range(&(offset..offset))
-                })
+                self.cursor
+                    .offset
+                    .checked_sub(1)
+                    .and_then(|offset| self.ordered_list_prefix_touched_by_range(&(offset..offset)))
             }
         } else {
             None
@@ -212,8 +215,10 @@ impl EditorView {
                 self.buffer.replace(del_start..del_end, "");
                 self.cursor.move_to(del_start, &self.buffer);
                 self.reparse();
-                self.normalize_all_ordered_lists();
-                self.reparse();
+                if should_normalize_ordered_lists {
+                    self.normalize_all_ordered_lists();
+                    self.reparse();
+                }
                 if !cursor_had_inline_headroom || self.cursor_line() != cursor_line_before {
                     self.scroll_to_cursor();
                 }
@@ -264,9 +269,9 @@ impl EditorView {
             self.reparse();
         }
         if !cursor_had_inline_headroom
-            || self.cursor_line() != cursor_line_before
-            || removes_line_break
-            || selection_spans_multiple_lines
+            || (!removes_line_break
+                && !selection_spans_multiple_lines
+                && self.cursor_line() != cursor_line_before)
         {
             self.scroll_to_cursor();
         }
@@ -326,7 +331,9 @@ impl EditorView {
             let end_probe = selection
                 .end
                 .saturating_sub(usize::from(selection.end > selection.start));
-            let (end_line, _) = self.buffer.offset_to_line_col(end_probe.min(self.buffer.len()));
+            let (end_line, _) = self
+                .buffer
+                .offset_to_line_col(end_probe.min(self.buffer.len()));
             Some((start_line, end_line))
         } else {
             None
@@ -380,9 +387,9 @@ impl EditorView {
             self.reparse();
         }
         if !cursor_had_inline_headroom
-            || self.cursor_line() != cursor_line_before
-            || removes_line_break
-            || selection_spans_multiple_lines
+            || (!removes_line_break
+                && !selection_spans_multiple_lines
+                && self.cursor_line() != cursor_line_before)
         {
             self.scroll_to_cursor();
         }
@@ -737,6 +744,8 @@ impl EditorView {
             return;
         }
         self.checkpoint();
+        let cursor_line_before = self.cursor_line();
+        let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
 
         if self.has_extra_cursors() {
             self.multi_cursor_enter();
@@ -772,7 +781,10 @@ impl EditorView {
                 if marker_len > 0 && self.cursor.offset >= line_start + leading_ws + marker_len {
                     let text_after_marker = &line_content[leading_ws + marker_len..];
                     if text_after_marker.trim().is_empty() {
-                        self.queue_non_markdown_line_display_transfer(&(line_start..line_end), "\n");
+                        self.queue_non_markdown_line_display_transfer(
+                            &(line_start..line_end),
+                            "\n",
+                        );
                         self.buffer.replace(line_start..line_end, "");
                         self.cursor.move_to(line_start, &self.buffer);
                         self.cursor.insert(&mut self.buffer, "\n");
@@ -784,7 +796,9 @@ impl EditorView {
                         self.cursor.insert(&mut self.buffer, &continuation);
                     }
                     self.reparse();
-                    self.scroll_to_cursor();
+                    if !cursor_had_inline_headroom {
+                        self.scroll_to_cursor();
+                    }
                     self.pause_blinking(cx);
                     return;
                 }
@@ -794,7 +808,10 @@ impl EditorView {
                 if prefix_len > 0 && self.cursor.offset >= line_start + leading_ws + prefix_len {
                     let text_after_marker = &line_content[leading_ws + prefix_len..];
                     if text_after_marker.trim().is_empty() {
-                        self.queue_non_markdown_line_display_transfer(&(line_start..line_end), "\n");
+                        self.queue_non_markdown_line_display_transfer(
+                            &(line_start..line_end),
+                            "\n",
+                        );
                         self.buffer.replace(line_start..line_end, "");
                         self.cursor.move_to(line_start, &self.buffer);
                         self.cursor.insert(&mut self.buffer, "\n");
@@ -812,7 +829,9 @@ impl EditorView {
                         self.cursor.insert(&mut self.buffer, &continuation);
                     }
                     self.reparse();
-                    self.scroll_to_cursor();
+                    if !cursor_had_inline_headroom {
+                        self.scroll_to_cursor();
+                    }
                     self.pause_blinking(cx);
                     return;
                 }
@@ -823,7 +842,10 @@ impl EditorView {
                     let number: u32 = trimmed[..prefix_len.saturating_sub(2)].parse().unwrap_or(1);
                     let text_after_marker = &line_content[leading_ws + prefix_len..];
                     if text_after_marker.trim().is_empty() {
-                        self.queue_non_markdown_line_display_transfer(&(line_start..line_end), "\n");
+                        self.queue_non_markdown_line_display_transfer(
+                            &(line_start..line_end),
+                            "\n",
+                        );
                         self.buffer.replace(line_start..line_end, "");
                         self.cursor.move_to(line_start, &self.buffer);
                         self.cursor.insert(&mut self.buffer, "\n");
@@ -837,7 +859,9 @@ impl EditorView {
                         self.renumber_ordered_list_after(cursor_line + 2, number + 2, leading_ws);
                         self.reparse();
                     }
-                    self.scroll_to_cursor();
+                    if !cursor_had_inline_headroom {
+                        self.scroll_to_cursor();
+                    }
                     self.pause_blinking(cx);
                     return;
                 }
@@ -849,7 +873,9 @@ impl EditorView {
         self.queue_non_markdown_line_display_transfer(&insert_range, "\n");
         self.cursor.insert(&mut self.buffer, "\n");
         self.reparse();
-        self.scroll_to_cursor();
+        if !cursor_had_inline_headroom && self.cursor_line() != cursor_line_before {
+            self.scroll_to_cursor();
+        }
         self.pause_blinking(cx);
     }
 

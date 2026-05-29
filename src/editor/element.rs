@@ -632,7 +632,7 @@ fn leading_indent_columns(line: &str) -> usize {
     columns
 }
 
-fn detect_indent_guide_step(buffer: &crate::buffer::Buffer, line_count: usize) -> usize {
+pub(super) fn detect_indent_guide_step(buffer: &crate::buffer::Buffer, line_count: usize) -> usize {
     detect_indent_guide_step_in_range(buffer, 0, line_count)
 }
 
@@ -920,10 +920,131 @@ impl Element for EditorElement {
         let mut link_underlines: Vec<PaintQuad> = Vec::new();
         let mut link_hitboxes: Vec<Hitbox> = Vec::new();
 
-        let mut y = origin_y + editor.padding_top();
         let line_count = buffer.line_count();
+        let has_valid_cache = editor.line_display_info.len() == line_count
+            && (editor.last_text_width - text_width).abs() < 0.5;
+        let wrap_width_changed = (editor.last_text_width - text_width).abs() >= 0.5;
+        const OFFSCREEN_WRAP_REFLOW_BUDGET_PER_FRAME: usize = 48;
+        const WINDOWED_PREPAINT_OVERSCAN_FACTOR: f32 = 0.75;
+        const WINDOWED_PREPAINT_CURSOR_CONTEXT_LINES: usize = 8;
+        let active_file_kind = editor.active_file_kind();
+        let active_tab_is_markdown = active_file_kind.is_some_and(FileKind::is_markdown);
+        let use_windowed_prepaint = !wrap_width_changed
+            && active_file_kind.is_some_and(|file_kind| {
+                if file_kind.is_markdown() {
+                    has_valid_cache
+                } else {
+                    file_kind.supports_text_buffer()
+                }
+            });
+        let (render_start_line, render_end_line) = if use_windowed_prepaint && line_count > 0 {
+            let overscan_height = viewport_height * WINDOWED_PREPAINT_OVERSCAN_FACTOR;
+            let mut start = editor
+                .line_at_y((scroll_offset - overscan_height).max(0.0))
+                .saturating_sub(WINDOWED_PREPAINT_CURSOR_CONTEXT_LINES);
+            let mut end = editor
+                .line_at_y(scroll_offset + viewport_height + overscan_height)
+                .saturating_add(1);
+
+            if editor.editor_wraps_to_available_width() {
+                end = end.saturating_add(OFFSCREEN_WRAP_REFLOW_BUDGET_PER_FRAME);
+            }
+
+            start = start.min(cursor_line.saturating_sub(WINDOWED_PREPAINT_CURSOR_CONTEXT_LINES));
+            end = end.max(cursor_line.saturating_add(WINDOWED_PREPAINT_CURSOR_CONTEXT_LINES + 1));
+
+            if active_tab_is_markdown {
+                let mut expanded = true;
+                while expanded {
+                    expanded = false;
+                    let scan_start = start.min(line_count);
+                    let scan_end = end.min(line_count);
+                    for line_idx in scan_start..scan_end {
+                        let Some(decoration) = decorations.get(line_idx) else {
+                            continue;
+                        };
+
+                        if matches!(
+                            decoration.block_type,
+                            BlockType::CodeBlock | BlockType::CodeBlockFence
+                        ) {
+                            let mut group_start = line_idx;
+                            while group_start > 0
+                                && matches!(
+                                    decorations
+                                        .get(group_start - 1)
+                                        .map(|decoration| &decoration.block_type),
+                                    Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
+                                )
+                            {
+                                group_start -= 1;
+                            }
+
+                            let mut group_end = line_idx.saturating_add(1);
+                            while group_end < line_count
+                                && matches!(
+                                    decorations
+                                        .get(group_end)
+                                        .map(|decoration| &decoration.block_type),
+                                    Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
+                                )
+                            {
+                                group_end += 1;
+                            }
+
+                            if group_start < start {
+                                start = group_start;
+                                expanded = true;
+                            }
+                            if group_end > end {
+                                end = group_end;
+                                expanded = true;
+                            }
+                        }
+
+                        if let Some(table_info) = decoration.table_info.as_ref()
+                            && !table_info.is_front_matter
+                        {
+                            if table_info.table_start_line < start {
+                                start = table_info.table_start_line;
+                                expanded = true;
+                            }
+                            if table_info.table_end_line > end {
+                                end = table_info.table_end_line;
+                                expanded = true;
+                            }
+                        }
+
+                        if let Some(preview) = decoration.block_preview.as_ref() {
+                            if preview.start_line < start {
+                                start = preview.start_line;
+                                expanded = true;
+                            }
+                            let preview_end = preview.end_line.saturating_add(1);
+                            if preview_end > end {
+                                end = preview_end;
+                                expanded = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            (start.min(line_count), end.min(line_count))
+        } else {
+            (0, line_count)
+        };
+        let mut y = origin_y
+            + if render_start_line == 0 {
+                editor.padding_top()
+            } else {
+                editor.line_y_offset(render_start_line)
+            };
         let mut _last_line_height = 0.0_f32;
         let mut scroll_anchor_delta = 0.0_f32;
+        let suppress_scroll_anchor_compensation = editor.pending_preview_reveal.is_some()
+            || editor.pending_center_cursor_in_view
+            || editor.pending_scroll_to_cursor;
 
         // Collect all cursor selection ranges (primary + extra)
         let mut all_sel_ranges: Vec<std::ops::Range<usize>> =
@@ -967,11 +1088,8 @@ impl Element for EditorElement {
         let mut generated_preview_image_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut generated_preview_zoom_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut image_preview_zoom_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
-        let mut display_info_cache: Vec<Option<LineDisplayInfo>> = Vec::with_capacity(line_count);
-        let has_valid_cache = editor.line_display_info.len() == line_count
-            && (editor.last_text_width - text_width).abs() < 0.5;
-        let wrap_width_changed = (editor.last_text_width - text_width).abs() >= 0.5;
-        const OFFSCREEN_WRAP_REFLOW_BUDGET_PER_FRAME: usize = 48;
+        let mut display_info_updates: Vec<(usize, Option<LineDisplayInfo>)> =
+            Vec::with_capacity(render_end_line.saturating_sub(render_start_line));
         let mut hr_lines: Vec<(f32, f32, f32)> = Vec::new();
         let mut image_previews: Vec<(Bounds<Pixels>, Arc<RenderImage>, Pixels)> = Vec::new();
         let mut image_borders: Vec<PaintQuad> = Vec::new();
@@ -1118,7 +1236,7 @@ impl Element for EditorElement {
         };
         let show_non_markdown_indent_guides = editor.active_tab_is_non_markdown_text();
         let indent_guide_step_columns = if show_non_markdown_indent_guides {
-            detect_indent_guide_step(buffer, line_count)
+            editor.cached_non_markdown_indent_guide_step()
         } else {
             0
         };
@@ -1225,7 +1343,7 @@ impl Element for EditorElement {
             })
             .unwrap_or(0);
 
-        for line_idx in 0..line_count {
+        for line_idx in render_start_line..render_end_line {
             let is_cursor_line_early = line_idx == cursor_line;
             let line_has_block_preview = decorations
                 .get(line_idx)
@@ -1274,7 +1392,7 @@ impl Element for EditorElement {
                         if should_defer_stale_offscreen_non_markdown_line {
                             deferred_offscreen_wrap_lines = true;
                         }
-                        display_info_cache.push(Some(cached.clone()));
+                        display_info_updates.push((line_idx, Some(cached.clone())));
                         y += cached_h;
                         continue;
                     }
@@ -1309,26 +1427,29 @@ impl Element for EditorElement {
                     .shape_text(" ".into(), px(font_size), &[blank_run], None, None)
                     .ok()
                     .and_then(|ls| ls.into_iter().next());
-                display_info_cache.push(wrapped_line.map(|wl| {
-                    let unwrapped_width_px = f32::from(wl.unwrapped_layout.width);
-                    LineDisplayInfo {
-                        display_text: String::new(),
-                        display_to_buffer: Vec::new(),
-                        buffer_to_display: vec![0; line_content.len()],
-                        base_runs: Vec::new(),
-                        font_size,
-                        line_height: 0.0,
-                        visual_line_count: 0,
-                        wrapped_line: wl,
-                        wrap_width_px: None,
-                        unwrapped_width_px,
-                        wrap_boundary_upstream_xs: HashMap::new(),
-                        extra_height: 0.0,
-                        indent_px: 0.0,
-                        content_x: editor_left + editor.padding_left(),
-                        selection_padding_left_px: 0.0,
-                    }
-                }));
+                display_info_updates.push((
+                    line_idx,
+                    wrapped_line.map(|wl| {
+                        let unwrapped_width_px = f32::from(wl.unwrapped_layout.width);
+                        LineDisplayInfo {
+                            display_text: String::new(),
+                            display_to_buffer: Vec::new(),
+                            buffer_to_display: vec![0; line_content.len()],
+                            base_runs: Vec::new(),
+                            font_size,
+                            line_height: 0.0,
+                            visual_line_count: 0,
+                            wrapped_line: wl,
+                            wrap_width_px: None,
+                            unwrapped_width_px,
+                            wrap_boundary_upstream_xs: HashMap::new(),
+                            extra_height: 0.0,
+                            indent_px: 0.0,
+                            content_x: editor_left + editor.padding_left(),
+                            selection_padding_left_px: 0.0,
+                        }
+                    }),
+                ));
                 continue;
             }
             let is_cursor_line = line_idx == cursor_line;
@@ -1350,7 +1471,7 @@ impl Element for EditorElement {
                 if editor.editor_wraps_to_available_width() {
                     deferred_offscreen_wrap_lines = true;
                 }
-                display_info_cache.push(None);
+                display_info_updates.push((line_idx, None));
                 y += estimated_total_line_height;
                 continue;
             }
@@ -1511,26 +1632,29 @@ impl Element for EditorElement {
                     .shape_text(" ".into(), px(font_size), &[blank_run], None, None)
                     .ok()
                     .and_then(|lines| lines.into_iter().next());
-                display_info_cache.push(wrapped_line.map(|wrapped_line| {
-                    let unwrapped_width_px = f32::from(wrapped_line.unwrapped_layout.width);
-                    LineDisplayInfo {
-                        display_text: String::new(),
-                        display_to_buffer: Vec::new(),
-                        buffer_to_display: vec![0; line_content.len()],
-                        base_runs: Vec::new(),
-                        font_size,
-                        line_height: 0.0,
-                        visual_line_count: 0,
-                        wrapped_line,
-                        wrap_width_px: None,
-                        unwrapped_width_px,
-                        wrap_boundary_upstream_xs: HashMap::new(),
-                        extra_height: 0.0,
-                        indent_px: 0.0,
-                        content_x: editor_left + editor.padding_left(),
-                        selection_padding_left_px: 0.0,
-                    }
-                }));
+                display_info_updates.push((
+                    line_idx,
+                    wrapped_line.map(|wrapped_line| {
+                        let unwrapped_width_px = f32::from(wrapped_line.unwrapped_layout.width);
+                        LineDisplayInfo {
+                            display_text: String::new(),
+                            display_to_buffer: Vec::new(),
+                            buffer_to_display: vec![0; line_content.len()],
+                            base_runs: Vec::new(),
+                            font_size,
+                            line_height: 0.0,
+                            visual_line_count: 0,
+                            wrapped_line,
+                            wrap_width_px: None,
+                            unwrapped_width_px,
+                            wrap_boundary_upstream_xs: HashMap::new(),
+                            extra_height: 0.0,
+                            indent_px: 0.0,
+                            content_x: editor_left + editor.padding_left(),
+                            selection_padding_left_px: 0.0,
+                        }
+                    }),
+                ));
                 continue;
             }
 
@@ -1561,23 +1685,26 @@ impl Element for EditorElement {
                 let text_line_top = line_top;
                 let content_x = editor_left + editor.padding_left();
 
-                display_info_cache.push(Some(LineDisplayInfo {
-                    display_text: cached.display_text.clone(),
-                    display_to_buffer: cached.display_to_buffer.clone(),
-                    buffer_to_display: cached.buffer_to_display.clone(),
-                    base_runs: cached.base_runs.clone(),
-                    font_size,
-                    line_height,
-                    visual_line_count,
-                    wrapped_line: cached.wrapped_line.clone(),
-                    wrap_width_px: cached.wrap_width_px,
-                    unwrapped_width_px: cached.unwrapped_width_px,
-                    wrap_boundary_upstream_xs: cached.wrap_boundary_upstream_xs.clone(),
-                    extra_height: cached.extra_height,
-                    indent_px: cached.indent_px,
-                    content_x,
-                    selection_padding_left_px: cached.selection_padding_left_px,
-                }));
+                display_info_updates.push((
+                    line_idx,
+                    Some(LineDisplayInfo {
+                        display_text: cached.display_text.clone(),
+                        display_to_buffer: cached.display_to_buffer.clone(),
+                        buffer_to_display: cached.buffer_to_display.clone(),
+                        base_runs: cached.base_runs.clone(),
+                        font_size,
+                        line_height,
+                        visual_line_count,
+                        wrapped_line: cached.wrapped_line.clone(),
+                        wrap_width_px: cached.wrap_width_px,
+                        unwrapped_width_px: cached.unwrapped_width_px,
+                        wrap_boundary_upstream_xs: cached.wrap_boundary_upstream_xs.clone(),
+                        extra_height: cached.extra_height,
+                        indent_px: cached.indent_px,
+                        content_x,
+                        selection_padding_left_px: cached.selection_padding_left_px,
+                    }),
+                ));
 
                 if line_bottom < origin_y || line_top > origin_y + viewport_height {
                     y += total_line_height;
@@ -2091,26 +2218,29 @@ impl Element for EditorElement {
                     .shape_text(" ".into(), px(font_size), &[blank_run], None, None)
                     .ok()
                     .and_then(|lines| lines.into_iter().next());
-                display_info_cache.push(wrapped_line.map(|wrapped_line| {
-                    let unwrapped_width_px = f32::from(wrapped_line.unwrapped_layout.width);
-                    LineDisplayInfo {
-                        display_text: String::new(),
-                        display_to_buffer: Vec::new(),
-                        buffer_to_display: vec![0; line_content.len()],
-                        base_runs: Vec::new(),
-                        font_size,
-                        line_height: 0.0,
-                        visual_line_count: 0,
-                        wrapped_line,
-                        wrap_width_px: None,
-                        unwrapped_width_px,
-                        wrap_boundary_upstream_xs: HashMap::new(),
-                        extra_height: 0.0,
-                        indent_px: 0.0,
-                        content_x: editor_left + editor.padding_left(),
-                        selection_padding_left_px: 0.0,
-                    }
-                }));
+                display_info_updates.push((
+                    line_idx,
+                    wrapped_line.map(|wrapped_line| {
+                        let unwrapped_width_px = f32::from(wrapped_line.unwrapped_layout.width);
+                        LineDisplayInfo {
+                            display_text: String::new(),
+                            display_to_buffer: Vec::new(),
+                            buffer_to_display: vec![0; line_content.len()],
+                            base_runs: Vec::new(),
+                            font_size,
+                            line_height: 0.0,
+                            visual_line_count: 0,
+                            wrapped_line,
+                            wrap_width_px: None,
+                            unwrapped_width_px,
+                            wrap_boundary_upstream_xs: HashMap::new(),
+                            extra_height: 0.0,
+                            indent_px: 0.0,
+                            content_x: editor_left + editor.padding_left(),
+                            selection_padding_left_px: 0.0,
+                        }
+                    }),
+                ));
                 continue;
             }
             let (mut display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
@@ -2324,7 +2454,7 @@ impl Element for EditorElement {
                 wrap_width_param,
                 None,
             ) else {
-                display_info_cache.push(None);
+                display_info_updates.push((line_idx, None));
                 y += estimated_total_line_height;
                 continue;
             };
@@ -2462,7 +2592,8 @@ impl Element for EditorElement {
                 + table_extra_height;
             let total_line_height = text_line_height + extra_height;
 
-            if editor.active_tab_is_non_markdown_text()
+            if !suppress_scroll_anchor_compensation
+                && editor.active_tab_is_non_markdown_text()
                 && editor.editor_wraps_to_available_width()
                 && !can_reuse_non_markdown_cached_line
                 && cached_line_above_viewport
@@ -2511,23 +2642,26 @@ impl Element for EditorElement {
                 letter_spacing,
             );
 
-            display_info_cache.push(Some(LineDisplayInfo {
-                display_text: display_text.clone(),
-                display_to_buffer: display_to_buffer.clone(),
-                buffer_to_display: buffer_to_display.clone(),
-                base_runs: runs.clone(),
-                font_size,
-                line_height,
-                visual_line_count,
-                wrapped_line: wrapped.clone(),
-                wrap_width_px: wrapped.wrap_width.map(f32::from),
-                unwrapped_width_px: f32::from(wrapped.unwrapped_layout.width),
-                wrap_boundary_upstream_xs: wrap_boundary_upstream_xs.clone(),
-                extra_height,
-                indent_px,
-                content_x,
-                selection_padding_left_px,
-            }));
+            display_info_updates.push((
+                line_idx,
+                Some(LineDisplayInfo {
+                    display_text: display_text.clone(),
+                    display_to_buffer: display_to_buffer.clone(),
+                    buffer_to_display: buffer_to_display.clone(),
+                    base_runs: runs.clone(),
+                    font_size,
+                    line_height,
+                    visual_line_count,
+                    wrapped_line: wrapped.clone(),
+                    wrap_width_px: wrapped.wrap_width.map(f32::from),
+                    unwrapped_width_px: f32::from(wrapped.unwrapped_layout.width),
+                    wrap_boundary_upstream_xs: wrap_boundary_upstream_xs.clone(),
+                    extra_height,
+                    indent_px,
+                    content_x,
+                    selection_padding_left_px,
+                }),
+            ));
 
             if line_bottom < origin_y || line_top > origin_y + viewport_height {
                 if editor.active_tab_is_non_markdown_text()
@@ -4790,7 +4924,7 @@ impl Element for EditorElement {
         }
 
         self.editor.update(cx, |editor, cx| {
-            editor.line_display_info = display_info_cache;
+            editor.apply_line_display_info_updates(line_count, display_info_updates);
             editor.last_viewport_height = viewport_height;
             editor.last_viewport_width = viewport_width;
             editor.checkbox_areas = checkbox_hit_areas.clone();

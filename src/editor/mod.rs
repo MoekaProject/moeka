@@ -43,6 +43,7 @@ pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
 pub(crate) use assets::*;
 pub(crate) use types::*;
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor as IoCursor;
 use std::ops::Range;
@@ -708,6 +709,41 @@ fn apply_offset_delta(offset: usize, delta: isize) -> usize {
     }
 }
 
+fn shift_line_after_transfer(
+    old_line: usize,
+    start_line: usize,
+    old_end_line_exclusive: usize,
+    new_end_line_exclusive: usize,
+) -> usize {
+    if old_line <= start_line {
+        old_line
+    } else if old_line <= old_end_line_exclusive {
+        new_end_line_exclusive
+    } else {
+        let old_suffix_distance = old_line - old_end_line_exclusive;
+        new_end_line_exclusive + old_suffix_distance
+    }
+}
+
+fn markdown_decoration_is_plain_text(decoration: &LineDecoration) -> bool {
+    matches!(decoration.block_type, BlockType::Normal)
+        && decoration.inline_spans.is_empty()
+        && decoration.diff_added_spans.is_empty()
+        && decoration.diff_removed_spans.is_empty()
+        && decoration.syntax_ranges.is_empty()
+        && decoration.display_replacements.is_empty()
+        && decoration.block_preview.is_none()
+        && decoration.highlight_spans.is_empty()
+        && decoration.superscript_spans.is_empty()
+        && decoration.subscript_spans.is_empty()
+        && decoration.wiki_links.is_empty()
+        && decoration.footnote_references.is_empty()
+        && decoration.footnote_definition_label.is_none()
+        && decoration.table_info.is_none()
+        && decoration.code_language.is_none()
+        && decoration.image_path.is_none()
+}
+
 fn finalize_multi_cursor_edits(
     mut edits: Vec<MultiCursorResolvedEdit>,
 ) -> (Vec<(usize, bool)>, Vec<(usize, bool)>) {
@@ -739,6 +775,9 @@ struct PendingLineDisplayTransfer {
     start_line: usize,
     old_end_line_exclusive: usize,
     new_end_line_exclusive: usize,
+    dirty_start_line: usize,
+    dirty_end_line_exclusive: usize,
+    markdown_plain_decoration_transfer: bool,
 }
 
 impl PendingLineDisplayTransfer {
@@ -762,6 +801,12 @@ impl PendingLineDisplayTransfer {
             next[new_suffix_start + idx] = self.cached_lines[old_suffix_start + idx].clone();
         }
 
+        let dirty_start = self.dirty_start_line.min(new_line_count);
+        let dirty_end = self.dirty_end_line_exclusive.min(new_line_count);
+        for line_idx in dirty_start..dirty_end {
+            next[line_idx] = None;
+        }
+
         next
     }
 
@@ -783,6 +828,25 @@ impl PendingLineDisplayTransfer {
             (0..inserted_line_count).map(move |_| default_decoration.clone()),
         );
     }
+
+    fn apply_markdown_plain_decoration_transfer(&self, decorations: &mut Vec<LineDecoration>) {
+        let replace_start = self.start_line.min(decorations.len());
+        let replace_end = self.old_end_line_exclusive.min(decorations.len());
+        let inserted_line_count = self.new_end_line_exclusive.saturating_sub(self.start_line);
+
+        decorations.splice(
+            replace_start..replace_end,
+            (0..inserted_line_count).map(|_| LineDecoration::default()),
+        );
+        if decorations.is_empty() {
+            decorations.push(LineDecoration::default());
+        }
+    }
+}
+
+#[derive(Default)]
+struct LineGeometryCacheState {
+    prefix_y_offsets: Vec<f32>,
 }
 
 // ── EditorView ──────────────────────────────────────────────────────
@@ -803,6 +867,10 @@ pub struct EditorView {
     pub(crate) wrap_boundary_affinity: Option<WrapBoundaryAffinity>,
     pub(crate) line_display_info: Vec<Option<LineDisplayInfo>>,
     pending_line_display_transfer: Option<PendingLineDisplayTransfer>,
+    line_geometry_cache_dirty: Cell<bool>,
+    line_geometry_cache: RefCell<LineGeometryCacheState>,
+    indent_guide_step_cache_dirty: Cell<bool>,
+    indent_guide_step_cache: Cell<usize>,
     pub(crate) layout_dirty: bool,
     pub(crate) pending_scroll_to_cursor: bool,
     pub(crate) pending_center_cursor_in_view: bool,
@@ -1172,6 +1240,10 @@ impl EditorView {
             wrap_boundary_affinity: None,
             line_display_info: Vec::new(),
             pending_line_display_transfer: None,
+            line_geometry_cache_dirty: Cell::new(true),
+            line_geometry_cache: RefCell::new(LineGeometryCacheState::default()),
+            indent_guide_step_cache_dirty: Cell::new(true),
+            indent_guide_step_cache: Cell::new(4),
             layout_dirty: false,
             pending_scroll_to_cursor: false,
             pending_center_cursor_in_view: false,
@@ -3401,7 +3473,8 @@ impl EditorView {
             .cloned()
             .unwrap_or(FileKind::Markdown);
         let pending_line_display_transfer = self.pending_line_display_transfer.take();
-        self.line_display_info.clear();
+        self.invalidate_indent_guide_step_cache();
+        self.clear_line_display_info();
         self.search_matches.clear();
         self.search_current_index = None;
         self.workspace_search_highlight_path = None;
@@ -3409,7 +3482,7 @@ impl EditorView {
         self.workspace_search_highlight_current_index = None;
         let git_diff_rows = self.active_git_diff_state().map(|diff| diff.rows.clone());
         if let Some(rows) = git_diff_rows {
-            self.decorations = rows.into_iter().map(|row| row.decoration).collect();
+            self.set_decorations(rows.into_iter().map(|row| row.decoration).collect());
             if self.decorations.is_empty() {
                 self.decorations.push(LineDecoration::default());
             }
@@ -3419,20 +3492,38 @@ impl EditorView {
                     FileKind::Code { language } => Some(language.as_str()),
                     _ => None,
                 };
-                transfer.apply_non_markdown_decoration_transfer(
-                    &mut self.decorations,
-                    code_language,
-                );
+                transfer
+                    .apply_non_markdown_decoration_transfer(&mut self.decorations, code_language);
+                self.invalidate_line_geometry_cache();
             } else {
-                self.decorations = parse_decorations_for_file_kind(self.buffer.text(), &file_kind);
+                self.set_decorations(parse_decorations_for_file_kind(
+                    self.buffer.text(),
+                    &file_kind,
+                ));
+            }
+        } else if matches!(file_kind, FileKind::Markdown)
+            && pending_line_display_transfer
+                .as_ref()
+                .is_some_and(|transfer| transfer.markdown_plain_decoration_transfer)
+        {
+            if let Some(transfer) = pending_line_display_transfer.as_ref() {
+                transfer.apply_markdown_plain_decoration_transfer(&mut self.decorations);
+                self.invalidate_line_geometry_cache();
             }
         } else {
-            self.decorations = parse_decorations_for_file_kind(self.buffer.text(), &file_kind);
+            self.set_decorations(parse_decorations_for_file_kind(
+                self.buffer.text(),
+                &file_kind,
+            ));
         }
-        if matches!(file_kind, FileKind::Code { .. } | FileKind::Text)
+        if (matches!(file_kind, FileKind::Code { .. } | FileKind::Text)
+            || matches!(file_kind, FileKind::Markdown)
+                && pending_line_display_transfer
+                    .as_ref()
+                    .is_some_and(|transfer| transfer.markdown_plain_decoration_transfer))
             && let Some(transfer) = pending_line_display_transfer
         {
-            self.line_display_info = transfer.apply(self.buffer.line_count());
+            self.set_line_display_info(transfer.apply(self.buffer.line_count()));
         }
         self.refresh_generated_block_previews();
         self.layout_dirty = true;
@@ -5399,7 +5490,8 @@ impl EditorView {
         self.ime_composition_snapshot = None;
         self.push_undo_snapshot(self.current_snapshot());
         self.buffer.replace(text_start..text_end, &new_text);
-        self.decorations = markdown::parse_decorations(self.buffer.text());
+        self.invalidate_indent_guide_step_cache();
+        self.set_decorations(markdown::parse_decorations(self.buffer.text()));
     }
 
     pub(crate) fn table_insert_row(
@@ -5503,7 +5595,8 @@ impl EditorView {
         self.buffer.replace(text_start..text_end, "");
         self.cursor.offset = text_start.min(self.buffer.len());
         self.cursor.anchor = self.cursor.offset;
-        self.decorations = markdown::parse_decorations(self.buffer.text());
+        self.invalidate_indent_guide_step_cache();
+        self.set_decorations(markdown::parse_decorations(self.buffer.text()));
         cx.notify();
     }
 
@@ -6066,13 +6159,75 @@ fn plain_text_decorations(text: &str, code_language: Option<String>) -> Vec<Line
 }
 
 impl EditorView {
+    fn invalidate_line_geometry_cache(&self) {
+        self.line_geometry_cache_dirty.set(true);
+    }
+
+    fn invalidate_indent_guide_step_cache(&self) {
+        self.indent_guide_step_cache_dirty.set(true);
+    }
+
+    fn cached_non_markdown_indent_guide_step(&self) -> usize {
+        if !self.indent_guide_step_cache_dirty.get() {
+            return self.indent_guide_step_cache.get();
+        }
+
+        let step = element::detect_indent_guide_step(&self.buffer, self.buffer.line_count());
+        self.indent_guide_step_cache.set(step);
+        self.indent_guide_step_cache_dirty.set(false);
+        step
+    }
+
+    fn clear_line_display_info(&mut self) {
+        self.line_display_info.clear();
+        self.invalidate_line_geometry_cache();
+    }
+
+    fn set_line_display_info(&mut self, line_display_info: Vec<Option<LineDisplayInfo>>) {
+        self.line_display_info = line_display_info;
+        self.invalidate_line_geometry_cache();
+    }
+
+    fn apply_line_display_info_updates(
+        &mut self,
+        line_count: usize,
+        updates: Vec<(usize, Option<LineDisplayInfo>)>,
+    ) {
+        if self.line_display_info.len() > line_count {
+            self.line_display_info.truncate(line_count);
+        } else if self.line_display_info.len() < line_count {
+            self.line_display_info.resize(line_count, None);
+        }
+
+        for (line_idx, info) in updates {
+            if line_idx < line_count {
+                self.line_display_info[line_idx] = info;
+            }
+        }
+
+        self.invalidate_line_geometry_cache();
+    }
+
+    fn take_line_display_info(&mut self) -> Vec<Option<LineDisplayInfo>> {
+        self.invalidate_line_geometry_cache();
+        std::mem::take(&mut self.line_display_info)
+    }
+
+    fn set_decorations(&mut self, decorations: Vec<LineDecoration>) {
+        self.decorations = decorations;
+        self.invalidate_line_geometry_cache();
+    }
+
     fn queue_non_markdown_line_display_transfer(
         &mut self,
         replaced_range: &Range<usize>,
         inserted_text: &str,
     ) {
         self.pending_line_display_transfer = None;
-        if !self.active_tab_is_non_markdown_text() || self.line_display_info.is_empty() {
+        let Some(file_kind) = self.active_file_kind().cloned() else {
+            return;
+        };
+        if !file_kind.supports_text_buffer() || self.line_display_info.is_empty() {
             return;
         }
 
@@ -6083,13 +6238,208 @@ impl EditorView {
             .min(self.buffer.len());
         let old_end_line = self.buffer.offset_to_line_col(end_probe).0;
         let new_line_count = inserted_text.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let old_end_line_exclusive = old_end_line + 1;
+        let new_end_line_exclusive = start_line + new_line_count;
+        let markdown_plain_decoration_transfer = file_kind.is_markdown()
+            && self.can_transfer_markdown_plain_decorations(
+                inserted_text,
+                start_line,
+                old_end_line_exclusive,
+            );
+        let dirty_range = if file_kind.is_markdown() {
+            let Some(dirty_range) = self.markdown_line_display_transfer_dirty_range(
+                replaced_range,
+                inserted_text,
+                start_line,
+                old_end_line_exclusive,
+                new_end_line_exclusive,
+            ) else {
+                return;
+            };
+            dirty_range
+        } else {
+            start_line..new_end_line_exclusive
+        };
 
         self.pending_line_display_transfer = Some(PendingLineDisplayTransfer {
-            cached_lines: std::mem::take(&mut self.line_display_info),
+            cached_lines: self.take_line_display_info(),
             start_line,
-            old_end_line_exclusive: old_end_line + 1,
-            new_end_line_exclusive: start_line + new_line_count,
+            old_end_line_exclusive,
+            new_end_line_exclusive,
+            dirty_start_line: dirty_range.start,
+            dirty_end_line_exclusive: dirty_range.end,
+            markdown_plain_decoration_transfer,
         });
+    }
+
+    fn can_transfer_markdown_plain_decorations(
+        &self,
+        inserted_text: &str,
+        start_line: usize,
+        old_end_line_exclusive: usize,
+    ) -> bool {
+        if inserted_text.contains('\n') || old_end_line_exclusive != start_line.saturating_add(1) {
+            return false;
+        }
+
+        if inserted_text.chars().any(|ch| {
+            matches!(
+                ch,
+                '#' | '*'
+                    | '_'
+                    | '`'
+                    | '~'
+                    | '['
+                    | ']'
+                    | '('
+                    | ')'
+                    | '!'
+                    | '<'
+                    | '>'
+                    | '|'
+                    | ':'
+                    | '-'
+                    | '+'
+                    | '='
+                    | '\\'
+                    | '$'
+            )
+        }) {
+            return false;
+        }
+
+        self.decorations
+            .get(start_line)
+            .is_some_and(markdown_decoration_is_plain_text)
+    }
+
+    fn markdown_line_display_transfer_dirty_range(
+        &self,
+        replaced_range: &Range<usize>,
+        inserted_text: &str,
+        start_line: usize,
+        old_end_line_exclusive: usize,
+        new_end_line_exclusive: usize,
+    ) -> Option<Range<usize>> {
+        const MARKDOWN_DIRTY_CONTEXT_LINES: usize = 8;
+
+        let line_count = self.buffer.line_count();
+        let touched_text = self.buffer.text().get(replaced_range.clone()).unwrap_or("");
+        let changed_text_can_toggle_fence = inserted_text.contains("```")
+            || inserted_text.contains("~~~")
+            || touched_text.contains("```")
+            || touched_text.contains("~~~")
+            || (inserted_text.contains('`')
+                && self.markdown_context_contains(start_line, old_end_line_exclusive, "``"))
+            || (inserted_text.contains('~')
+                && self.markdown_context_contains(start_line, old_end_line_exclusive, "~~"));
+        if changed_text_can_toggle_fence {
+            return None;
+        }
+
+        let mut dirty_start_old = start_line.saturating_sub(MARKDOWN_DIRTY_CONTEXT_LINES);
+        let mut dirty_end_old = old_end_line_exclusive
+            .saturating_add(MARKDOWN_DIRTY_CONTEXT_LINES)
+            .min(line_count);
+        let mut expanded = true;
+        while expanded {
+            expanded = false;
+            let scan_start = dirty_start_old.min(line_count);
+            let scan_end = dirty_end_old.min(line_count);
+            for line_idx in scan_start..scan_end {
+                let Some(decoration) = self.decorations.get(line_idx) else {
+                    continue;
+                };
+
+                if matches!(decoration.block_type, BlockType::CodeBlockFence) {
+                    let mut group_start = line_idx;
+                    while group_start > 0
+                        && matches!(
+                            self.decorations
+                                .get(group_start - 1)
+                                .map(|decoration| &decoration.block_type),
+                            Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
+                        )
+                    {
+                        group_start -= 1;
+                    }
+
+                    let mut group_end = line_idx.saturating_add(1);
+                    while group_end < line_count
+                        && matches!(
+                            self.decorations
+                                .get(group_end)
+                                .map(|decoration| &decoration.block_type),
+                            Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
+                        )
+                    {
+                        group_end += 1;
+                    }
+
+                    if group_start < dirty_start_old {
+                        dirty_start_old = group_start;
+                        expanded = true;
+                    }
+                    if group_end > dirty_end_old {
+                        dirty_end_old = group_end;
+                        expanded = true;
+                    }
+                }
+
+                if let Some(table_info) = decoration.table_info.as_ref()
+                    && !table_info.is_front_matter
+                {
+                    if table_info.table_start_line < dirty_start_old {
+                        dirty_start_old = table_info.table_start_line;
+                        expanded = true;
+                    }
+                    if table_info.table_end_line > dirty_end_old {
+                        dirty_end_old = table_info.table_end_line;
+                        expanded = true;
+                    }
+                }
+
+                if let Some(preview) = decoration.block_preview.as_ref() {
+                    if preview.start_line < dirty_start_old {
+                        dirty_start_old = preview.start_line;
+                        expanded = true;
+                    }
+                    let preview_end = preview.end_line.saturating_add(1);
+                    if preview_end > dirty_end_old {
+                        dirty_end_old = preview_end;
+                        expanded = true;
+                    }
+                }
+            }
+        }
+
+        let dirty_start = shift_line_after_transfer(
+            dirty_start_old,
+            start_line,
+            old_end_line_exclusive,
+            new_end_line_exclusive,
+        );
+        let dirty_end = shift_line_after_transfer(
+            dirty_end_old,
+            start_line,
+            old_end_line_exclusive,
+            new_end_line_exclusive,
+        )
+        .max(new_end_line_exclusive);
+
+        Some(dirty_start..dirty_end)
+    }
+
+    fn markdown_context_contains(
+        &self,
+        start_line: usize,
+        old_end_line_exclusive: usize,
+        needle: &str,
+    ) -> bool {
+        let line_count = self.buffer.line_count();
+        let scan_start = start_line.saturating_sub(1);
+        let scan_end = old_end_line_exclusive.saturating_add(1).min(line_count);
+        (scan_start..scan_end).any(|line_idx| self.buffer.line_content(line_idx).contains(needle))
     }
 
     fn find_anchor_line_in_current_buffer(&self, anchor: &str) -> Option<usize> {

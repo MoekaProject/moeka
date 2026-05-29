@@ -2146,12 +2146,18 @@ impl EditorView {
         let row_padding_y = self.scaled(ups.utility_panel_item_gap_px * 0.5);
         let row_gap = self.scaled(ups.utility_panel_item_gap_px * 0.4);
         let row_height = font_size * 2.0 + row_gap + row_padding_y * 2.0;
-        let is_active = self.active_git_diff_state().is_some_and(|diff| match (&diff.source, item.is_working_tree, item.commit_hash.as_deref()) {
-            (GitDiffSource::WorkingTree, true, _) => true,
-            (GitDiffSource::Commit { commit_hash, .. }, false, Some(item_hash)) => {
-                commit_hash == item_hash
+        let is_active = self.active_git_diff_state().is_some_and(|diff| {
+            match (
+                &diff.source,
+                item.is_working_tree,
+                item.commit_hash.as_deref(),
+            ) {
+                (GitDiffSource::WorkingTree, true, _) => true,
+                (GitDiffSource::Commit { commit_hash, .. }, false, Some(item_hash)) => {
+                    commit_hash == item_hash
+                }
+                _ => false,
             }
-            _ => false,
         });
         let row_bg = if is_active {
             ups.utility_panel_button_hover_bg

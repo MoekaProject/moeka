@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Corners, CursorStyle, ExternalPaths, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Window, canvas,
-    deferred, div, fill, img, prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Window, canvas, deferred,
+    div, fill, img, prelude::*, px,
 };
 
 use super::tooltip::{TooltipState, toolbar_anchor_bounds};

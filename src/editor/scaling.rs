@@ -266,10 +266,19 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn visual_height_for_line(&self, line: usize) -> f32 {
+    fn current_visual_height_for_line(&self, line: usize) -> f32 {
         if let Some(Some(info)) = self.line_display_info.get(line) {
             info.line_height * info.visual_line_count as f32 + info.extra_height
         } else {
+            if !self.folded_sections.is_empty()
+                && self.folded_sections.iter().any(|&fold_line| {
+                    self.fold_range_for_line(fold_line)
+                        .is_some_and(|range| range.contains(&line))
+                })
+            {
+                return 0.0;
+            }
+
             let block_type = if line < self.decorations.len() {
                 &self.decorations[line].block_type
             } else {
@@ -280,12 +289,36 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn line_y_offset(&self, target_line: usize) -> f32 {
-        let mut y = self.padding_top();
-        for line in 0..target_line.min(self.buffer.line_count()) {
-            y += self.visual_height_for_line(line);
+    fn ensure_line_geometry_cache(&self) {
+        let line_count = self.buffer.line_count();
+        if !self.line_geometry_cache_dirty.get()
+            && self.line_geometry_cache.borrow().prefix_y_offsets.len() == line_count + 1
+        {
+            return;
         }
-        y
+
+        let mut cache = self.line_geometry_cache.borrow_mut();
+        cache.prefix_y_offsets.clear();
+        cache.prefix_y_offsets.reserve(line_count + 1);
+
+        let mut y = self.padding_top();
+        cache.prefix_y_offsets.push(y);
+        for line in 0..line_count {
+            y += self.current_visual_height_for_line(line);
+            cache.prefix_y_offsets.push(y);
+        }
+
+        self.line_geometry_cache_dirty.set(false);
+    }
+
+    pub(crate) fn visual_height_for_line(&self, line: usize) -> f32 {
+        self.current_visual_height_for_line(line)
+    }
+
+    pub(crate) fn line_y_offset(&self, target_line: usize) -> f32 {
+        self.ensure_line_geometry_cache();
+        let target_line = target_line.min(self.buffer.line_count());
+        self.line_geometry_cache.borrow().prefix_y_offsets[target_line]
     }
 
     pub(crate) fn text_y_offset_for_line(&self, line: usize) -> f32 {
@@ -293,19 +326,34 @@ impl EditorView {
     }
 
     pub(crate) fn total_content_height(&self) -> f32 {
-        self.line_y_offset(self.buffer.line_count()) + self.padding_bottom()
+        self.ensure_line_geometry_cache();
+        self.line_geometry_cache.borrow().prefix_y_offsets[self.buffer.line_count()]
+            + self.padding_bottom()
     }
 
     pub(crate) fn line_at_y(&self, y: f32) -> usize {
-        let mut current_y = self.padding_top();
-        for line in 0..self.buffer.line_count() {
-            let lh = self.visual_height_for_line(line);
-            if y < current_y + lh {
-                return line;
-            }
-            current_y += lh;
+        let line_count = self.buffer.line_count();
+        if line_count == 0 {
+            return 0;
         }
-        self.buffer.line_count().saturating_sub(1)
+
+        self.ensure_line_geometry_cache();
+        let cache = self.line_geometry_cache.borrow();
+        let prefix = &cache.prefix_y_offsets;
+        let target_y = y.max(prefix[0]);
+
+        let mut low = 0usize;
+        let mut high = line_count;
+        while low < high {
+            let mid = (low + high) / 2;
+            if prefix[mid + 1] <= target_y {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        low.min(line_count.saturating_sub(1))
     }
 
     pub(crate) fn scroll_to_cursor(&mut self) {

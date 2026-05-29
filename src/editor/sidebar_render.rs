@@ -504,6 +504,7 @@ impl EditorView {
             )
             .on_click({
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    cx.stop_propagation();
                     let mods = event.modifiers();
                     let has_modifier = mods.platform || mods.shift;
                     this.sidebar_select_item(&click_path, mods.shift, mods.platform);
