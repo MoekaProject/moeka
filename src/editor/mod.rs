@@ -896,6 +896,33 @@ impl PendingLineDisplayTransfer {
     }
 }
 
+fn line_display_transfer_line_bounds(
+    buffer: &Buffer,
+    replaced_range: &Range<usize>,
+    inserted_text: &str,
+) -> (usize, usize, usize) {
+    let start = replaced_range.start.min(buffer.len());
+    let end = replaced_range.end.min(buffer.len());
+    let start_line = buffer.offset_to_line_col(start).0;
+    let end_probe = end
+        .saturating_sub(usize::from(end > start))
+        .min(buffer.len());
+    let old_end_line = buffer.offset_to_line_col(end_probe).0;
+    let mut old_end_line_exclusive = old_end_line + 1;
+
+    if end > start && end < buffer.len() {
+        let end_line = buffer.offset_to_line_col(end).0;
+        if end_line > old_end_line && end == buffer.line_start(end_line) {
+            old_end_line_exclusive = (end_line + 1).min(buffer.line_count());
+        }
+    }
+
+    let new_line_count = inserted_text.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let new_end_line_exclusive = start_line + new_line_count;
+
+    (start_line, old_end_line_exclusive, new_end_line_exclusive)
+}
+
 #[derive(Default)]
 struct LineGeometryCacheState {
     prefix_y_offsets: Vec<f32>,
@@ -1022,6 +1049,10 @@ pub struct EditorView {
     pub(crate) editor_scrollbar_opacity_target: f32,
     pub(crate) editor_scrollbar_opacity_epoch: usize,
     pub(crate) editor_scrollbar_opacity_task: Option<Task<()>>,
+    pub(crate) editor_scrollbar_width: f32,
+    pub(crate) editor_scrollbar_width_target: f32,
+    pub(crate) editor_scrollbar_width_epoch: usize,
+    pub(crate) editor_scrollbar_width_task: Option<Task<()>>,
     pub(crate) editor_scrollbar_idle_epoch: usize,
     pub(crate) editor_scrollbar_idle_task: Option<Task<()>>,
     pub(crate) editor_scrollbar_drag: Option<EditorScrollbarDragState>,
@@ -1284,6 +1315,7 @@ impl EditorView {
         let init_padding_right = styles.editor.editor_padding_right_px;
         let init_cursor_opacity = styles.cursor.cursor_opacity_max;
         let init_scrollbar_opacity = styles.editor.editor_scrollbar_idle_opacity;
+        let init_scrollbar_width = styles.editor.editor_scrollbar_width_px;
         let mut this = Self {
             buffer,
             cursor: Cursor::new(),
@@ -1393,6 +1425,10 @@ impl EditorView {
             editor_scrollbar_opacity_target: init_scrollbar_opacity,
             editor_scrollbar_opacity_epoch: 0,
             editor_scrollbar_opacity_task: None,
+            editor_scrollbar_width: init_scrollbar_width,
+            editor_scrollbar_width_target: init_scrollbar_width,
+            editor_scrollbar_width_epoch: 0,
+            editor_scrollbar_width_task: None,
             editor_scrollbar_idle_epoch: 0,
             editor_scrollbar_idle_task: None,
             editor_scrollbar_drag: None,
@@ -1704,6 +1740,32 @@ impl EditorView {
         !self.active_tab_is_image() && !self.active_tab_is_binary() && max_scroll > 1.0
     }
 
+    fn editor_scrollbar_track_top(&self) -> f32 {
+        self.scaled(self.styles.editor.editor_scrollbar_top_margin_px)
+    }
+
+    fn editor_scrollbar_track_height(&self) -> f32 {
+        (self.last_viewport_height.max(1.0) - self.editor_scrollbar_track_top()).max(1.0)
+    }
+
+    fn editor_scrollbar_hit_width(&self) -> f32 {
+        self.scaled(
+            self.styles
+                .editor
+                .editor_scrollbar_hit_width_px
+                .max(self.styles.editor.editor_scrollbar_width_px)
+                .max(self.styles.editor.editor_scrollbar_hover_width_px),
+        )
+    }
+
+    fn desired_editor_scrollbar_width(&self) -> f32 {
+        if self.editor_scrollbar_hovered || self.editor_scrollbar_drag.is_some() {
+            self.styles.editor.editor_scrollbar_hover_width_px
+        } else {
+            self.styles.editor.editor_scrollbar_width_px
+        }
+    }
+
     pub(crate) fn editor_scrollbar_region_contains(&self, position: Point<Pixels>) -> bool {
         if !self.editor_scrollbar_can_show() {
             return false;
@@ -1715,8 +1777,10 @@ impl EditorView {
         let bottom = top + self.last_viewport_height.max(1.0);
         let x = f32::from(position.x);
         let y = f32::from(position.y);
-        let hit_width = self.scaled(self.styles.editor.editor_scrollbar_hit_width_px);
-        x >= right - hit_width && x <= right && y >= top && y <= bottom
+        let hit_width = self.editor_scrollbar_hit_width();
+        let right_margin = self.scaled(self.styles.editor.editor_scrollbar_right_margin_px);
+        let track_top = top + self.editor_scrollbar_track_top();
+        x >= right - right_margin - hit_width && x <= right && y >= track_top && y <= bottom
     }
 
     pub(crate) fn editor_scrollbar_thumb_geometry(&self) -> Option<(f32, f32)> {
@@ -1724,7 +1788,8 @@ impl EditorView {
             return None;
         }
 
-        let viewport_height = self.last_viewport_height.max(1.0);
+        let track_top = self.editor_scrollbar_track_top();
+        let viewport_height = self.editor_scrollbar_track_height();
         let total_content_height = self.total_content_height().max(1.0);
         let min_thumb_height = self.scaled(self.styles.editor.editor_scrollbar_min_thumb_height_px);
         let thumb_height = (viewport_height * (viewport_height / total_content_height))
@@ -1739,7 +1804,8 @@ impl EditorView {
         }
 
         let track_travel = (viewport_height - thumb_height).max(0.0);
-        let thumb_top = (self.scroll_offset / max_scroll).clamp(0.0, 1.0) * track_travel;
+        let thumb_top =
+            track_top + (self.scroll_offset / max_scroll).clamp(0.0, 1.0) * track_travel;
         Some((thumb_top, thumb_height))
     }
 
@@ -1795,6 +1861,59 @@ impl EditorView {
                         }
 
                         this.editor_scrollbar_opacity += diff * step;
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+
+                if done {
+                    return;
+                }
+
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+            }
+        }));
+    }
+
+    fn sync_editor_scrollbar_width(&mut self, cx: &mut Context<Self>) {
+        let target = self.desired_editor_scrollbar_width();
+
+        if (self.editor_scrollbar_width_target - target).abs() > 0.001 {
+            self.editor_scrollbar_width_target = target;
+        } else if self.editor_scrollbar_width_task.is_some()
+            || (self.editor_scrollbar_width - target).abs() <= 0.01
+        {
+            return;
+        }
+
+        self.editor_scrollbar_width_epoch += 1;
+        let epoch = self.editor_scrollbar_width_epoch;
+        let duration_ms = self
+            .styles
+            .editor
+            .editor_scrollbar_width_animation_ms
+            .max(1);
+        let step = (16.0 / duration_ms as f32).clamp(0.08, 1.0);
+
+        self.editor_scrollbar_width_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.editor_scrollbar_width_epoch != epoch {
+                            return true;
+                        }
+
+                        let diff = this.editor_scrollbar_width_target - this.editor_scrollbar_width;
+                        if diff.abs() <= 0.01 {
+                            this.editor_scrollbar_width = this.editor_scrollbar_width_target;
+                            this.editor_scrollbar_width_task = None;
+                            cx.notify();
+                            return true;
+                        }
+
+                        this.editor_scrollbar_width += diff * step;
                         cx.notify();
                         false
                     })
@@ -1872,6 +1991,7 @@ impl EditorView {
             self.schedule_editor_scrollbar_idle_fade(cx);
         }
         self.sync_editor_scrollbar_opacity(cx);
+        self.sync_editor_scrollbar_width(cx);
     }
 
     pub(crate) fn start_editor_scrollbar_drag(
@@ -1882,7 +2002,8 @@ impl EditorView {
         let Some((thumb_top, thumb_height)) = self.editor_scrollbar_thumb_geometry() else {
             return;
         };
-        let track_travel = (self.last_viewport_height.max(1.0) - thumb_height).max(0.0);
+        let track_top = self.editor_scrollbar_track_top();
+        let track_travel = (self.editor_scrollbar_track_height() - thumb_height).max(0.0);
         let max_scroll = self.editor_scrollbar_max_scroll();
         if max_scroll <= 0.0 {
             return;
@@ -1892,12 +2013,13 @@ impl EditorView {
         self.cancel_editor_scrollbar_idle_fade();
         self.editor_scrollbar_drag = Some(EditorScrollbarDragState {
             start_position_y: f32::from(position.y),
-            start_thumb_top: thumb_top,
+            start_thumb_top: (thumb_top - track_top).max(0.0),
             track_travel,
             max_scroll,
         });
         self.editor_scrollbar_hovered = true;
         self.sync_editor_scrollbar_opacity(cx);
+        self.sync_editor_scrollbar_width(cx);
         cx.notify();
     }
 
@@ -1943,6 +2065,7 @@ impl EditorView {
             self.schedule_editor_scrollbar_idle_fade(cx);
         }
         self.sync_editor_scrollbar_opacity(cx);
+        self.sync_editor_scrollbar_width(cx);
         cx.notify();
         true
     }
@@ -3762,8 +3885,7 @@ impl EditorView {
         }
         let text = self.buffer.text();
         let bytes = text.as_bytes();
-        let is_bracket =
-            |b: u8| matches!(b, b'(' | b')' | b'[' | b']' | b'{' | b'}');
+        let is_bracket = |b: u8| matches!(b, b'(' | b')' | b'[' | b']' | b'{' | b'}');
 
         let bracket_pos = if cursor > 0 && cursor <= bytes.len() && is_bracket(bytes[cursor - 1]) {
             Some(cursor - 1)
@@ -6462,15 +6584,8 @@ impl EditorView {
             return;
         }
 
-        let start_line = self.buffer.offset_to_line_col(replaced_range.start).0;
-        let end_probe = replaced_range
-            .end
-            .saturating_sub(usize::from(replaced_range.end > replaced_range.start))
-            .min(self.buffer.len());
-        let old_end_line = self.buffer.offset_to_line_col(end_probe).0;
-        let new_line_count = inserted_text.bytes().filter(|byte| *byte == b'\n').count() + 1;
-        let old_end_line_exclusive = old_end_line + 1;
-        let new_end_line_exclusive = start_line + new_line_count;
+        let (start_line, old_end_line_exclusive, new_end_line_exclusive) =
+            line_display_transfer_line_bounds(&self.buffer, replaced_range, inserted_text);
         let markdown_plain_decoration_transfer = file_kind.is_markdown()
             && self.can_transfer_markdown_plain_decorations(
                 inserted_text,
@@ -6867,9 +6982,9 @@ pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        heading_matches_anchor, markdown_reference_for_import_name,
-        normalize_ordered_list_numbers_in_buffer, resolve_markdown_target_path,
-        split_markdown_target, text_tab_is_dirty, unique_import_path,
+        heading_matches_anchor, line_display_transfer_line_bounds,
+        markdown_reference_for_import_name, normalize_ordered_list_numbers_in_buffer,
+        resolve_markdown_target_path, split_markdown_target, text_tab_is_dirty, unique_import_path,
     };
     use crate::buffer::Buffer;
 
@@ -6883,6 +6998,39 @@ mod tests {
     fn text_tab_is_dirty_treats_empty_untitled_buffer_as_clean() {
         assert!(text_tab_is_dirty(None, "draft"));
         assert!(!text_tab_is_dirty(None, ""));
+    }
+
+    #[test]
+    fn line_display_transfer_includes_merged_line_after_newline_delete() {
+        let buffer = Buffer::from_text("alpha\nbeta\ngamma");
+        let range = buffer.line_end(0)..buffer.line_start(1);
+
+        assert_eq!(
+            line_display_transfer_line_bounds(&buffer, &range, ""),
+            (0, 2, 1)
+        );
+    }
+
+    #[test]
+    fn line_display_transfer_refreshes_shifted_neighbor_after_whole_line_delete() {
+        let buffer = Buffer::from_text("alpha\nbeta\ngamma");
+        let range = buffer.line_start(1)..buffer.line_start(2);
+
+        assert_eq!(
+            line_display_transfer_line_bounds(&buffer, &range, ""),
+            (1, 3, 2)
+        );
+    }
+
+    #[test]
+    fn line_display_transfer_keeps_inline_edit_bounds_local() {
+        let buffer = Buffer::from_text("alpha\nbeta\ngamma");
+        let range = 1..3;
+
+        assert_eq!(
+            line_display_transfer_line_bounds(&buffer, &range, "LP"),
+            (0, 1, 1)
+        );
     }
 
     #[test]

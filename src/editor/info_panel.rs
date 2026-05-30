@@ -2859,7 +2859,13 @@ mod tests {
 
     #[test]
     fn diff_rows_highlight_entire_unpaired_insertions() {
-        let rows = build_git_diff_rows(crate::i18n::UiLanguage::English, "", "**new**\n", true, None);
+        let rows = build_git_diff_rows(
+            crate::i18n::UiLanguage::English,
+            "",
+            "**new**\n",
+            true,
+            None,
+        );
 
         assert_eq!(rows.len(), 1);
         assert!(matches!(rows[0].kind, GitDiffRowKind::Added));

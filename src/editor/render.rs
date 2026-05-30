@@ -814,20 +814,13 @@ impl Render for EditorView {
                                                             .when_some(
                                                                 self.editor_scrollbar_thumb_geometry(),
                                                                 |this, (thumb_top, thumb_height)| {
-                                                                    let thumb_width = self.scaled(
+                                                                    let thumb_width = self.scaled(self.editor_scrollbar_width);
+                                                                    let hit_width = self.editor_scrollbar_hit_width();
+                                                                    let right_margin = self.scaled(
                                                                         self.styles
                                                                             .editor
-                                                                            .editor_scrollbar_width_px,
+                                                                            .editor_scrollbar_right_margin_px,
                                                                     );
-                                                                    let hit_width = self.scaled(
-                                                                        self.styles
-                                                                            .editor
-                                                                            .editor_scrollbar_hit_width_px,
-                                                                    );
-                                                                    let right_inset =
-                                                                        ((hit_width - thumb_width)
-                                                                            / 2.0)
-                                                                            .max(0.0);
                                                                     let thumb_radius = self.scaled(
                                                                         self.styles
                                                                             .editor
@@ -846,12 +839,12 @@ impl Render for EditorView {
                                                                             .top_0()
                                                                             .right(px(0.0))
                                                                             .h_full()
-                                                                            .w(px(hit_width))
+                                                                            .w(px(hit_width + right_margin))
                                                                             .child(
                                                                                 div()
                                                                                     .absolute()
                                                                                     .top(px(thumb_top))
-                                                                                    .right(px(right_inset))
+                                                                                    .right(px(right_margin))
                                                                                     .w(px(thumb_width))
                                                                                     .h(px(thumb_height))
                                                                                     .cursor(CursorStyle::Arrow)

@@ -31,9 +31,8 @@ impl EditorView {
         // Switching directly between two visible utility panels is a panel-type
         // switch: apply the width change instantly. Only animate when a panel is
         // appearing (none -> some) or disappearing (some -> none).
-        let is_type_switch = previous_panel.is_some()
-            && next_panel.is_some()
-            && previous_panel != next_panel;
+        let is_type_switch =
+            previous_panel.is_some() && next_panel.is_some() && previous_panel != next_panel;
         if is_type_switch {
             self.displayed_utility_panel = next_panel;
             self.set_utility_panel_width_immediately(self.utility_panel_target_width());
