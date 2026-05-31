@@ -1234,6 +1234,19 @@ impl EditorView {
             self.scaled(ss.sidebar_logo_size_px + 2.0 * ss.sidebar_logo_padding_y_px);
         let scroll_y = -f32::from(self.sidebar_scroll_handle.offset().y);
         let sticky_headers_visible = has_root && scroll_y >= logo_area_height;
+        let active_scroll_handle = if self.workspace_search_visible {
+            &self.workspace_search_scroll_handle
+        } else {
+            &self.sidebar_scroll_handle
+        };
+        let sidebar_scrollbar = self.render_scrollbar_for_handle(
+            PanelScrollbarKind::Sidebar,
+            active_scroll_handle,
+            self.sidebar_scrollbar_track_height(),
+            0.0,
+            self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
+            cx,
+        );
 
         div()
             .id("sidebar")
@@ -1267,6 +1280,7 @@ impl EditorView {
                             .overflow_y_scroll()
                             .track_scroll(&self.sidebar_scroll_handle)
                             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                                this.reveal_panel_scrollbar(PanelScrollbarKind::Sidebar, cx);
                                 let total_items = this.sidebar_items().len();
                                 this.maybe_extend_sidebar_items(total_items, cx);
                             }))
@@ -1360,6 +1374,7 @@ impl EditorView {
             .when(show_workspace_bar, |this: gpui::Stateful<gpui::Div>| {
                 this.child(self.render_workspace_bar(cx))
             })
+            .when_some(sidebar_scrollbar, |this, scrollbar| this.child(scrollbar))
             .into_any_element()
     }
 

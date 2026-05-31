@@ -351,19 +351,40 @@ impl EditorView {
                 .into_any_element(),
         );
 
+        let scrollbar = self.render_scrollbar_for_handle(
+            PanelScrollbarKind::Outline,
+            &self.outline_scroll_handle,
+            f32::from(self.outline_scroll_handle.bounds().size.height),
+            0.0,
+            self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
+            cx,
+        );
+
         div()
             .id("outline-panel")
             .h_full()
             .w_full()
             .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .overflow_y_scroll()
-            .track_scroll(&self.outline_scroll_handle)
+            .relative()
+            .overflow_hidden()
             .bg(os.outline_bg)
             .border_l(px(self.scaled(os.outline_border_width_px)))
             .border_color(os.outline_border_color)
-            .children(items)
+            .child(
+                div()
+                    .id("outline-panel-scroll")
+                    .h_full()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                        this.reveal_panel_scrollbar(PanelScrollbarKind::Outline, cx);
+                    }))
+                    .track_scroll(&self.outline_scroll_handle)
+                    .children(items),
+            )
+            .when_some(scrollbar, |this, scrollbar| this.child(scrollbar))
             .into_any_element()
     }
 }

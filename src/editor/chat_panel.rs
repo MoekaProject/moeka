@@ -74,6 +74,8 @@ pub(crate) struct ChatTerminalSnapshot {
     cols: u16,
     cells: Vec<ChatIndexedCell>,
     cursor: RenderableCursor,
+    display_offset: usize,
+    history_size: usize,
 }
 
 #[derive(Clone)]
@@ -698,6 +700,8 @@ impl Default for ChatTerminalSnapshot {
                 shape: AlacCursorShape::Block,
                 point: AlacPoint::new(Line(0), Column(0)),
             },
+            display_offset: 0,
+            history_size: 0,
         }
     }
 }
@@ -1008,6 +1012,8 @@ impl ChatTerminalSession {
 
         let term = runtime.term.lock();
         let content = term.renderable_content();
+        let display_offset = content.display_offset;
+        let history_size = term.grid().history_size();
         let mut cells = Vec::with_capacity(content.display_iter.size_hint().0);
         cells.extend(content.display_iter.map(|indexed| ChatIndexedCell {
             point: indexed.point,
@@ -1018,6 +1024,8 @@ impl ChatTerminalSession {
             cols: self.cols,
             cells,
             cursor: content.cursor,
+            display_offset,
+            history_size,
         };
     }
 
@@ -1454,6 +1462,48 @@ impl EditorView {
             fallback_cell_height
         };
         (body_font_size, cell_width, cell_height)
+    }
+
+    pub(crate) fn active_chat_terminal_scrollbar_metrics(&self) -> Option<(f32, f32, f32)> {
+        let session = self.active_chat_terminal()?;
+        let (_, _, cell_height) = self.chat_terminal_metrics();
+        let viewport_height = self
+            .chat_terminal_input_bounds
+            .map(|bounds| f32::from(bounds.size.height))
+            .unwrap_or_else(|| session.snapshot.rows.max(1) as f32 * cell_height);
+        let max_scroll = session.snapshot.history_size as f32 * cell_height;
+        let scroll_top = session
+            .snapshot
+            .history_size
+            .saturating_sub(session.snapshot.display_offset) as f32
+            * cell_height;
+
+        Some((viewport_height, max_scroll, scroll_top))
+    }
+
+    pub(crate) fn set_active_chat_terminal_scrollbar_top(
+        &mut self,
+        scroll_top: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let (_, _, cell_height) = self.chat_terminal_metrics();
+        let Some(session) = self.active_chat_terminal_mut() else {
+            return;
+        };
+
+        let history_size = session.snapshot.history_size;
+        let target_scroll_lines = (scroll_top / cell_height.max(1.0))
+            .round()
+            .clamp(0.0, history_size as f32) as usize;
+        let target_display_offset = history_size.saturating_sub(target_scroll_lines);
+        let current_display_offset = session.snapshot.display_offset;
+        let delta = target_display_offset as i32 - current_display_offset as i32;
+        if delta == 0 {
+            return;
+        }
+
+        session.scroll_display(Scroll::Delta(delta));
+        cx.notify();
     }
 
     fn chat_terminal_rows(snapshot: &ChatTerminalSnapshot) -> Vec<ChatTerminalRow> {
@@ -2258,6 +2308,7 @@ impl EditorView {
         cx.stop_propagation();
         self.chat_terminal_selection = None;
         self.chat_terminal_selecting = false;
+        self.reveal_panel_scrollbar(PanelScrollbarKind::ChatTerminal, cx);
 
         let (_, cell_width, line_height) = self.chat_terminal_metrics();
         if self.forward_chat_terminal_protocol_scroll(event, cell_width, line_height) {
@@ -3362,6 +3413,27 @@ impl EditorView {
             .filter(|selection| !selection.is_empty())
             .map(ChatTerminalSelection::normalized);
         let marked_text = self.chat_terminal_marked_text.clone();
+        let terminal_scrollbar = {
+            let viewport_height = self
+                .chat_terminal_input_bounds
+                .map(|bounds| f32::from(bounds.size.height))
+                .unwrap_or_else(|| snapshot.rows.max(1) as f32 * cell_height);
+            let max_scroll = snapshot.history_size as f32 * cell_height;
+            let scroll_top = snapshot
+                .history_size
+                .saturating_sub(snapshot.display_offset) as f32
+                * cell_height;
+            self.render_scrollbar_for_metrics(
+                PanelScrollbarKind::ChatTerminal,
+                viewport_height,
+                max_scroll,
+                scroll_top,
+                self.chat_terminal_scrollbar_track_height(),
+                0.0,
+                self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
+                cx,
+            )
+        };
 
         div()
             .id("chat-panel")
@@ -3593,6 +3665,7 @@ impl EditorView {
                             ),
                     ),
             )
+            .when_some(terminal_scrollbar, |this, scrollbar| this.child(scrollbar))
             .into_any_element()
     }
 }
@@ -3624,6 +3697,8 @@ mod tests {
                 shape: AlacCursorShape::Block,
                 point: AlacPoint::new(Line(cursor_line), Column(0)),
             },
+            display_offset: 0,
+            history_size: 0,
         }
     }
 

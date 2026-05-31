@@ -864,6 +864,7 @@ impl EditorView {
             .flex_1()
             .overflow_y_scroll()
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                this.reveal_panel_scrollbar(PanelScrollbarKind::Sidebar, cx);
                 this.maybe_extend_workspace_search_results(cx);
             }))
             .track_scroll(&self.workspace_search_scroll_handle)

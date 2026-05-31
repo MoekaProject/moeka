@@ -415,6 +415,25 @@ impl Render for EditorView {
         });
         window.on_mouse_event({
             let editor = editor.clone();
+            move |event: &MouseMoveEvent, phase, _window, cx| {
+                if !phase.capture() {
+                    return;
+                }
+
+                let handled = editor.update(cx, |this, cx| {
+                    if event.dragging() {
+                        this.update_panel_scrollbar_drag(event.position, cx)
+                    } else {
+                        this.stop_panel_scrollbar_drag(cx)
+                    }
+                });
+                if handled {
+                    cx.stop_propagation();
+                }
+            }
+        });
+        window.on_mouse_event({
+            let editor = editor.clone();
             move |event: &MouseUpEvent, phase, _window, cx| {
                 if !phase.capture() || event.button != MouseButton::Left {
                     return;
@@ -423,6 +442,19 @@ impl Render for EditorView {
                 let handled = editor.update(cx, |this, cx| {
                     this.stop_editor_scrollbar_drag(event.position, cx)
                 });
+                if handled {
+                    cx.stop_propagation();
+                }
+            }
+        });
+        window.on_mouse_event({
+            let editor = editor.clone();
+            move |event: &MouseUpEvent, phase, _window, cx| {
+                if !phase.capture() || event.button != MouseButton::Left {
+                    return;
+                }
+
+                let handled = editor.update(cx, |this, cx| this.stop_panel_scrollbar_drag(cx));
                 if handled {
                     cx.stop_propagation();
                 }

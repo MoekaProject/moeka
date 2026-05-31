@@ -21,6 +21,7 @@ mod profile;
 mod quick_open;
 mod render;
 mod scaling;
+mod scrollbar;
 mod search;
 mod session_store;
 pub(crate) mod settings_panel;
@@ -41,6 +42,7 @@ mod workspace_search;
 
 pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
 pub(crate) use assets::*;
+pub(crate) use scrollbar::{PanelScrollbarKind, PanelScrollbarState};
 pub(crate) use types::*;
 
 use std::cell::{Cell, RefCell};
@@ -1056,6 +1058,7 @@ pub struct EditorView {
     pub(crate) editor_scrollbar_idle_epoch: usize,
     pub(crate) editor_scrollbar_idle_task: Option<Task<()>>,
     pub(crate) editor_scrollbar_drag: Option<EditorScrollbarDragState>,
+    pub(crate) panel_scrollbars: HashMap<PanelScrollbarKind, PanelScrollbarState>,
     pub(crate) sidebar_custom_width: Option<f32>,
     pub(crate) search_sidebar_custom_width: Option<f32>,
     /// Time of the last grouped typing checkpoint, used to coalesce rapid
@@ -1128,6 +1131,7 @@ pub struct EditorView {
     pub(crate) temp_save_epochs: HashMap<String, usize>,
     pub(crate) outline_resizing: bool,
     pub(crate) outline_scroll_handle: ScrollHandle,
+    pub(crate) info_panel_scroll_handle: ScrollHandle,
     pub(crate) git_history_scroll_handle: ScrollHandle,
     pub(crate) info_panel_cache_tab_id: Option<String>,
     pub(crate) info_panel_cache_result: Option<Option<info_panel::InfoPanelData>>,
@@ -1432,6 +1436,15 @@ impl EditorView {
             editor_scrollbar_idle_epoch: 0,
             editor_scrollbar_idle_task: None,
             editor_scrollbar_drag: None,
+            panel_scrollbars: PanelScrollbarKind::ALL
+                .into_iter()
+                .map(|kind| {
+                    (
+                        kind,
+                        PanelScrollbarState::new(init_scrollbar_opacity, init_scrollbar_width),
+                    )
+                })
+                .collect(),
             sidebar_custom_width: None,
             search_sidebar_custom_width: None,
             last_typing_checkpoint_time: None,
@@ -1492,6 +1505,7 @@ impl EditorView {
             temp_save_epochs: HashMap::new(),
             outline_resizing: false,
             outline_scroll_handle: ScrollHandle::new(),
+            info_panel_scroll_handle: ScrollHandle::new(),
             git_history_scroll_handle: ScrollHandle::new(),
             info_panel_cache_tab_id: None,
             info_panel_cache_result: None,
@@ -1744,8 +1758,15 @@ impl EditorView {
         self.scaled(self.styles.editor.editor_scrollbar_top_margin_px)
     }
 
+    fn editor_scrollbar_track_bottom_margin(&self) -> f32 {
+        self.scaled(self.styles.editor.editor_scrollbar_bottom_margin_px)
+    }
+
     fn editor_scrollbar_track_height(&self) -> f32 {
-        (self.last_viewport_height.max(1.0) - self.editor_scrollbar_track_top()).max(1.0)
+        (self.last_viewport_height.max(1.0)
+            - self.editor_scrollbar_track_top()
+            - self.editor_scrollbar_track_bottom_margin())
+        .max(1.0)
     }
 
     fn editor_scrollbar_hit_width(&self) -> f32 {
@@ -1774,7 +1795,8 @@ impl EditorView {
         let left = f32::from(self.content_origin.x);
         let top = f32::from(self.content_origin.y);
         let right = left + self.last_viewport_width.max(1.0);
-        let bottom = top + self.last_viewport_height.max(1.0);
+        let bottom =
+            top + self.last_viewport_height.max(1.0) - self.editor_scrollbar_track_bottom_margin();
         let x = f32::from(position.x);
         let y = f32::from(position.y);
         let hit_width = self.editor_scrollbar_hit_width();
@@ -1841,7 +1863,12 @@ impl EditorView {
         self.editor_scrollbar_opacity_epoch += 1;
         let epoch = self.editor_scrollbar_opacity_epoch;
         let duration_ms = self.styles.editor.editor_scrollbar_fade_animation_ms.max(1);
-        let step = (16.0 / duration_ms as f32).clamp(0.08, 1.0);
+        let frame_ms = self
+            .styles
+            .editor
+            .editor_scrollbar_animation_frame_ms
+            .max(1);
+        let step = (frame_ms as f32 / duration_ms as f32).clamp(0.08, 1.0);
 
         self.editor_scrollbar_opacity_task = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -1871,7 +1898,7 @@ impl EditorView {
                 }
 
                 cx.background_executor()
-                    .timer(Duration::from_millis(16))
+                    .timer(Duration::from_millis(frame_ms))
                     .await;
             }
         }));
@@ -1895,7 +1922,12 @@ impl EditorView {
             .editor
             .editor_scrollbar_width_animation_ms
             .max(1);
-        let step = (16.0 / duration_ms as f32).clamp(0.08, 1.0);
+        let frame_ms = self
+            .styles
+            .editor
+            .editor_scrollbar_animation_frame_ms
+            .max(1);
+        let step = (frame_ms as f32 / duration_ms as f32).clamp(0.08, 1.0);
 
         self.editor_scrollbar_width_task = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -1924,7 +1956,7 @@ impl EditorView {
                 }
 
                 cx.background_executor()
-                    .timer(Duration::from_millis(16))
+                    .timer(Duration::from_millis(frame_ms))
                     .await;
             }
         }));

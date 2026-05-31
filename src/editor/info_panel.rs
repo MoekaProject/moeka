@@ -2501,17 +2501,39 @@ impl EditorView {
                 .into_any_element(),
         );
 
+        let scrollbar = self.render_scrollbar_for_handle(
+            PanelScrollbarKind::Info,
+            &self.info_panel_scroll_handle,
+            f32::from(self.info_panel_scroll_handle.bounds().size.height),
+            0.0,
+            self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
+            cx,
+        );
+
         div()
             .id("info-panel")
             .h_full()
             .w_full()
             .bg(ups.utility_panel_bg)
-            .overflow_y_scroll()
+            .relative()
+            .overflow_hidden()
             .border_l(px(ups.utility_panel_border_width_px))
             .border_color(ups.utility_panel_border_color)
-            .flex()
-            .flex_col()
-            .children(children)
+            .child(
+                div()
+                    .id("info-panel-scroll")
+                    .h_full()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                        this.reveal_panel_scrollbar(PanelScrollbarKind::Info, cx);
+                    }))
+                    .track_scroll(&self.info_panel_scroll_handle)
+                    .flex()
+                    .flex_col()
+                    .children(children),
+            )
+            .when_some(scrollbar, |this, scrollbar| this.child(scrollbar))
             .into_any_element()
     }
 
@@ -2601,18 +2623,39 @@ impl EditorView {
                 .into_any_element(),
         );
 
+        let scrollbar = self.render_scrollbar_for_handle(
+            PanelScrollbarKind::GitHistory,
+            &self.git_history_scroll_handle,
+            f32::from(self.git_history_scroll_handle.bounds().size.height),
+            0.0,
+            self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
+            cx,
+        );
+
         div()
             .id("git-history-panel")
             .h_full()
             .w_full()
             .bg(ups.utility_panel_bg)
-            .overflow_y_scroll()
-            .track_scroll(&self.git_history_scroll_handle)
+            .relative()
+            .overflow_hidden()
             .border_l(px(ups.utility_panel_border_width_px))
             .border_color(ups.utility_panel_border_color)
-            .flex()
-            .flex_col()
-            .children(children)
+            .child(
+                div()
+                    .id("git-history-panel-scroll")
+                    .h_full()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                        this.reveal_panel_scrollbar(PanelScrollbarKind::GitHistory, cx);
+                    }))
+                    .track_scroll(&self.git_history_scroll_handle)
+                    .flex()
+                    .flex_col()
+                    .children(children),
+            )
+            .when_some(scrollbar, |this, scrollbar| this.child(scrollbar))
             .into_any_element()
     }
 }
