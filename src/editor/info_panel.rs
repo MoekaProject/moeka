@@ -1133,11 +1133,6 @@ impl EditorView {
             return self.info_panel_cache_result.clone().flatten();
         }
 
-        let mut profile_scope = profile::ProfileScope::new("utility_panel.info_panel_refresh");
-        if let Some(tab_id) = current_tab_id.as_deref() {
-            profile_scope.set_note(format!("tab_id={tab_id}"));
-        }
-
         self.info_panel_cache_tab_id = current_tab_id;
         self.info_panel_cache_result = Some(self.collect_info_panel_data());
         self.info_panel_cache_result.clone().flatten()
@@ -1208,11 +1203,6 @@ impl EditorView {
         }
 
         if self.git_history_cache_dirty {
-            if let Some(path) = current_path.as_ref() {
-                let mut profile_scope =
-                    profile::ProfileScope::new("utility_panel.git_history_refresh");
-                profile_scope.set_note(format!("path={}", path.display()));
-            }
             self.schedule_git_history_refresh(cx);
         }
 

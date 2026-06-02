@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use gpui::{Context, Pixels, px};
 
-use super::{profile, *};
+use super::*;
 
 fn sidebar_git_repo_root_for_path(sidebar_root: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
@@ -428,17 +428,6 @@ impl EditorView {
                         this.schedule_sidebar_git_status_refresh(cx);
                     }
                     return;
-                }
-
-                if profile::enabled() {
-                    let mut profile_scope =
-                        profile::ProfileScope::new("sidebar.git_status_refresh");
-                    profile_scope.set_note(format!(
-                        "repo_root={} entries={} dirty_was={}",
-                        requested_sidebar_root.display(),
-                        statuses.len(),
-                        this.sidebar_git_statuses_dirty
-                    ));
                 }
 
                 this.sidebar_git_statuses = statuses;

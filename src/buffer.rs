@@ -36,7 +36,7 @@ impl Buffer {
     pub fn insert(&mut self, offset: usize, text: &str) {
         let offset = snap_char_start(&self.text, offset.min(self.text.len()));
         self.text.insert_str(offset, text);
-        self.rebuild_line_starts();
+        self.splice_line_starts(offset, offset, text);
     }
 
     pub fn delete(&mut self, range: std::ops::Range<usize>) {
@@ -44,7 +44,7 @@ impl Buffer {
         let end = snap_char_start(&self.text, range.end.min(self.text.len()));
         if start < end {
             self.text.drain(start..end);
-            self.rebuild_line_starts();
+            self.splice_line_starts(start, end, "");
         }
     }
 
@@ -53,7 +53,7 @@ impl Buffer {
         let end = snap_char_start(&self.text, range.end.min(self.text.len()));
         if start <= end {
             self.text.replace_range(start..end, text);
-            self.rebuild_line_starts();
+            self.splice_line_starts(start, end, text);
         }
     }
 
@@ -135,6 +135,37 @@ impl Buffer {
                 self.line_starts.push(i + 1);
             }
         }
+    }
+
+    /// Incrementally update the cached line-start offsets after the byte range
+    /// `[start, end)` of the *old* text was replaced by `inserted`.
+    ///
+    /// This avoids the O(n) full rescan of `rebuild_line_starts` on every edit,
+    /// which is the dominant per-keystroke cost on very large files. The caller
+    /// must already have applied the edit to `self.text` using the same snapped
+    /// `start`/`end` offsets.
+    fn splice_line_starts(&mut self, start: usize, end: usize, inserted: &str) {
+        let delta = inserted.len() as isize - (end - start) as isize;
+
+        // Line starts in `(start, end]` correspond to newlines inside the removed
+        // region and must be dropped; line starts strictly after `end` only shift
+        // by the byte delta. `line_starts[0]` is always 0 (<= start) so it stays.
+        let first = self.line_starts.partition_point(|&v| v <= start);
+        let last = self.line_starts.partition_point(|&v| v <= end);
+
+        let mut new_starts: Vec<usize> = Vec::new();
+        for (i, byte) in inserted.bytes().enumerate() {
+            if byte == b'\n' {
+                new_starts.push(start + i + 1);
+            }
+        }
+
+        if delta != 0 {
+            for v in &mut self.line_starts[last..] {
+                *v = (*v as isize + delta) as usize;
+            }
+        }
+        self.line_starts.splice(first..last, new_starts);
     }
 }
 
@@ -226,5 +257,60 @@ mod tests {
         assert_eq!(buffer.clamp_grapheme_offset(modifier_boundary), 0);
         assert_eq!(buffer.prev_grapheme_boundary(bang_offset), 0);
         assert_eq!(buffer.next_grapheme_boundary(0), bang_offset);
+    }
+
+    fn expected_line_starts(text: &str) -> Vec<usize> {
+        let mut starts = vec![0usize];
+        for (i, byte) in text.bytes().enumerate() {
+            if byte == b'\n' {
+                starts.push(i + 1);
+            }
+        }
+        starts
+    }
+
+    fn assert_line_starts_consistent(buffer: &Buffer) {
+        assert_eq!(
+            buffer.line_starts,
+            expected_line_starts(buffer.text()),
+            "incremental line_starts diverged from full rebuild for {:?}",
+            buffer.text()
+        );
+    }
+
+    #[test]
+    fn incremental_line_starts_match_full_rebuild() {
+        let mut buffer = Buffer::from_text("line0\nline1\nline2\n");
+        assert_line_starts_consistent(&buffer);
+
+        // Insert without a newline in the middle of a line.
+        buffer.insert(2, "XY");
+        assert_line_starts_consistent(&buffer);
+
+        // Insert a newline (splits a line).
+        buffer.insert(6, "\n");
+        assert_line_starts_consistent(&buffer);
+
+        // Insert multi-line text.
+        buffer.insert(0, "a\nb\nc");
+        assert_line_starts_consistent(&buffer);
+
+        // Delete across a newline (merges lines).
+        let text_len = buffer.len();
+        buffer.delete(3..text_len.min(9));
+        assert_line_starts_consistent(&buffer);
+
+        // Replace a range that removes and adds newlines.
+        buffer.replace(0..buffer.len().min(4), "p\nq\nr\n");
+        assert_line_starts_consistent(&buffer);
+
+        // Delete everything.
+        buffer.delete(0..buffer.len());
+        assert_line_starts_consistent(&buffer);
+        assert_eq!(buffer.line_count(), 1);
+
+        // Insert into empty buffer.
+        buffer.insert(0, "first\nsecond");
+        assert_line_starts_consistent(&buffer);
     }
 }

@@ -9,7 +9,7 @@ use gpui::{
 
 use crate::markdown::{BlockType, InlineKind};
 
-use super::{profile, *};
+use super::*;
 
 pub(super) struct TableCellDisplayInfo {
     pub(super) wrapped: WrappedLine,
@@ -2100,12 +2100,6 @@ impl EditorView {
         let pos_x: f32 = position.x.into();
         let origin_y: f32 = self.content_origin.y.into();
         if self.layout_dirty {
-            profile::log_event("cursor.offset_for_position.layout_dirty", || {
-                format!(
-                    "pos=({pos_x:.1},{pos_y:.1}) origin_y={origin_y:.1} scroll={:.1}",
-                    self.scroll_offset
-                )
-            });
             return self.cursor.offset;
         }
 
@@ -2116,15 +2110,6 @@ impl EditorView {
             return self.buffer.line_end(last_line).min(self.buffer.len());
         }
         let line = self.line_at_y(y);
-        if line == 0 && y > self.padding_top() + self.visual_height_for_line(0) {
-            profile::log_event("cursor.offset_for_position.suspect_line0", || {
-                let padding_top = origin_y + self.padding_top();
-                format!(
-                    "pos=({pos_x:.1},{pos_y:.1}) y={y:.1} content_top={padding_top:.1} scroll={:.1}",
-                    self.scroll_offset
-                )
-            });
-        }
         let line_content = self.buffer.line_content(line);
         if line_content.is_empty() {
             return self.buffer.line_start(line);

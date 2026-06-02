@@ -12,7 +12,7 @@ use gpui::{
 use crate::markdown::BlockType;
 
 use super::helpers;
-use super::{profile, *};
+use super::*;
 
 pub(crate) struct EditorElement {
     pub editor: Entity<EditorView>,
@@ -874,7 +874,6 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let _profile_scope = profile::ProfileScope::new("editor.prepaint");
         let editor = self.editor.read(cx);
         let theme = &editor.theme;
         let buffer = &editor.buffer;
@@ -1387,6 +1386,16 @@ impl Element for EditorElement {
                     let can_skip_offscreen = if editor.active_tab_is_non_markdown_text() {
                         can_reuse_non_markdown_cached_line
                             || should_defer_stale_offscreen_non_markdown_line
+                    } else if wrap_width_changed {
+                        // Markdown resize: the wrap width changed, so every cached
+                        // line's shaping is stale. Re-shaping the entire document on
+                        // each resize frame costs hundreds of milliseconds on large
+                        // files, so instead reuse the stale cached height for
+                        // offscreen lines (only the visible window re-shapes at the
+                        // new width). Offscreen lines converge to the new width as
+                        // they scroll back into view — the same transient the
+                        // non-markdown deferred-reflow path accepts.
+                        true
                     } else {
                         has_valid_cache
                     };
@@ -1395,7 +1404,14 @@ impl Element for EditorElement {
                         if should_defer_stale_offscreen_non_markdown_line {
                             deferred_offscreen_wrap_lines = true;
                         }
-                        display_info_updates.push((line_idx, Some(cached.clone())));
+                        // The cached display info for this offscreen line is already
+                        // stored in `editor.line_display_info[line_idx]` and is being
+                        // left unchanged, so there is no need to clone it into
+                        // `display_info_updates` (which would just write the identical
+                        // value back). On very large documents the window can cover
+                        // tens of thousands of skipped lines per frame, and cloning a
+                        // `LineDisplayInfo` (String + several Vecs + HashMap +
+                        // WrappedLine) for each was the dominant prepaint cost.
                         y += cached_h;
                         continue;
                     }
@@ -5069,12 +5085,16 @@ impl Element for EditorElement {
         });
 
         // Trigger loading for any image paths not yet in cache
-        let decorations_ref = self.editor.read(cx).decorations.clone();
         let mut new_image_paths: Vec<String> = Vec::new();
-        for dec in &decorations_ref {
-            if let Some(ref path) = dec.image_path {
-                let has = self.editor.read(cx).image_cache.contains_key(path);
-                if !has {
+        {
+            // Scan decorations by reference; cloning the whole decoration vector
+            // here used to allocate thousands of LineDecoration structs on every
+            // prepaint frame (i.e. every scroll frame) on large documents.
+            let editor = self.editor.read(cx);
+            for dec in &editor.decorations {
+                if let Some(ref path) = dec.image_path
+                    && !editor.image_cache.contains_key(path)
+                {
                     new_image_paths.push(path.clone());
                 }
             }

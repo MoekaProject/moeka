@@ -260,14 +260,16 @@ impl EditorView {
             && (touched_ordered_prefix.is_some() || removes_line_break)
         {
             let _ = (start_line, end_line);
-            self.normalize_all_ordered_lists();
-            self.reparse();
+            if self.normalize_all_ordered_lists() {
+                self.reparse();
+            }
         } else if should_normalize_ordered_lists && let Some(line) = touched_ordered_prefix {
             self.normalize_ordered_list_near_line(line, true);
             self.reparse();
         } else if should_normalize_ordered_lists && removes_line_break {
-            self.normalize_all_ordered_lists();
-            self.reparse();
+            if self.normalize_all_ordered_lists() {
+                self.reparse();
+            }
         }
         if !cursor_had_inline_headroom
             || (!removes_line_break
@@ -378,14 +380,16 @@ impl EditorView {
             && (touched_ordered_prefix.is_some() || removes_line_break)
         {
             let _ = (start_line, end_line);
-            self.normalize_all_ordered_lists();
-            self.reparse();
+            if self.normalize_all_ordered_lists() {
+                self.reparse();
+            }
         } else if should_normalize_ordered_lists && let Some(line) = touched_ordered_prefix {
             self.normalize_ordered_list_near_line(line, true);
             self.reparse();
         } else if should_normalize_ordered_lists && removes_line_break {
-            self.normalize_all_ordered_lists();
-            self.reparse();
+            if self.normalize_all_ordered_lists() {
+                self.reparse();
+            }
         }
         if !cursor_had_inline_headroom
             || (!removes_line_break
@@ -1453,13 +1457,15 @@ impl EditorView {
         } else {
             start
         };
+        self.queue_non_markdown_line_display_transfer(&(delete_start..delete_end), "");
         self.buffer.delete(delete_start..delete_end);
         self.cursor.offset = delete_start.min(self.buffer.len());
         self.cursor.anchor = self.cursor.offset;
         self.mark_active_tab_dirty();
         self.reparse();
-        self.normalize_all_ordered_lists();
-        self.reparse();
+        if self.normalize_all_ordered_lists() {
+            self.reparse();
+        }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -1542,7 +1548,11 @@ impl EditorView {
     }
 
     fn format_markdown_tables_for_save(&self, text: &str) -> String {
-        let decorations = crate::markdown::parse_decorations(text);
+        // `text` is the current buffer text (see `normalize_text_for_save`), so
+        // `self.decorations` is already in sync with it. Reusing the cached
+        // decorations avoids a full-document `parse_decorations` on every save,
+        // which is a multi-hundred-millisecond UI freeze on large files.
+        let decorations = &self.decorations;
         let mut lines = text
             .split('\n')
             .map(|line| line.to_string())

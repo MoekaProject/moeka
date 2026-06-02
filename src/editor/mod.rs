@@ -17,7 +17,6 @@ mod input_table;
 mod input_wrap;
 mod menus;
 mod outline;
-mod profile;
 mod quick_open;
 mod render;
 mod scaling;
@@ -779,6 +778,316 @@ fn shift_line_after_transfer(
     }
 }
 
+/// Shifts the absolute line- and byte-offset fields stored in a
+/// `LineDecoration` by the given deltas. Every other range a decoration carries
+/// (inline spans, syntax ranges, display replacements, table cell ranges, …) is
+/// stored relative to its own line, so only `block_preview` (absolute line
+/// numbers and an absolute source byte range) and `table_info` (absolute line
+/// numbers) need adjusting when decorations are spliced incrementally.
+fn offset_decoration_positions(decoration: &mut LineDecoration, line_delta: isize, byte_delta: isize) {
+    let shift_usize = |value: &mut usize, delta: isize| {
+        if delta != 0 {
+            *value = (*value as isize + delta).max(0) as usize;
+        }
+    };
+    if let Some(preview) = decoration.block_preview.as_mut() {
+        shift_usize(&mut preview.start_line, line_delta);
+        shift_usize(&mut preview.end_line, line_delta);
+        shift_usize(&mut preview.source_range.start, byte_delta);
+        shift_usize(&mut preview.source_range.end, byte_delta);
+    }
+    if let Some(table_info) = decoration.table_info.as_mut() {
+        shift_usize(&mut table_info.table_start_line, line_delta);
+        shift_usize(&mut table_info.table_end_line, line_delta);
+    }
+}
+
+/// Pure core of incremental markdown decoration parsing. Given the pre-edit
+/// decorations, the already-edited buffer, and the line/byte deltas of the edit,
+/// returns a full set of decorations equivalent to a full `parse_decorations` of
+/// the edited buffer — but built by re-parsing only the affected block window
+/// and splicing it into the moved (not cloned) prefix/suffix. Returns `None`
+/// when incremental parsing is unsafe and the caller must fall back to a full
+/// parse. See `Editor::try_incremental_markdown_decorations` for the rationale
+/// behind each guard.
+fn compute_incremental_markdown_decorations(
+    old_decorations: Vec<LineDecoration>,
+    buffer: &Buffer,
+    new_end_line_exclusive: usize,
+    old_end_line_exclusive: usize,
+    dirty_start_line: usize,
+    dirty_end_line_exclusive: usize,
+    byte_delta: isize,
+) -> Result<Vec<LineDecoration>, &'static str> {
+    let new_line_count = buffer.line_count();
+    if new_line_count == 0 {
+        return Err("empty_buffer");
+    }
+
+    let line_delta = new_end_line_exclusive as isize - old_end_line_exclusive as isize;
+    let old_line_count = new_line_count as isize - line_delta;
+    if old_line_count < 0 || old_decorations.len() != old_line_count as usize {
+        return Err("decoration_len_mismatch");
+    }
+
+    let mut win_start = dirty_start_line.min(new_line_count);
+    let mut win_end = dirty_end_line_exclusive.min(new_line_count);
+    if win_start >= win_end {
+        return Err("empty_window");
+    }
+
+    // Grow the window up/down to blank-line boundaries so a multi-line paragraph
+    // (and any inline span that spans a soft newline) is parsed whole.
+    let max_window_growth = MAX_INCREMENTAL_WINDOW_LINES;
+    while win_start > 0
+        && win_end - win_start < max_window_growth
+        && !buffer.line_content(win_start - 1).trim().is_empty()
+    {
+        win_start -= 1;
+    }
+    while win_end < new_line_count
+        && win_end - win_start < max_window_growth
+        && !buffer.line_content(win_end).trim().is_empty()
+    {
+        win_end += 1;
+    }
+    // If the surrounding block has no blank-line boundary within the growth
+    // budget, we cannot safely parse it in isolation.
+    if win_end - win_start >= max_window_growth {
+        return Err("no_block_boundary");
+    }
+
+    // Not worth incremental work (and front-matter/global concerns apply) if the
+    // window now spans essentially the whole document.
+    if win_start == 0 && win_end == new_line_count {
+        return Err("window_spans_document");
+    }
+
+    let window_len = win_end - win_start;
+
+    // The line just above the window must be a true block boundary. A blank line
+    // can still live *inside* a fenced code block, so consult the old decoration
+    // (identity-mapped because `win_start <= start_line`) and bail if we'd cut a
+    // code block.
+    if win_start > 0 {
+        if let Some(above) = old_decorations.get(win_start - 1) {
+            if matches!(
+                above.block_type,
+                BlockType::CodeBlock | BlockType::CodeBlockFence
+            ) {
+                return Err("window_starts_in_code_block");
+            }
+        }
+    }
+
+    // Map the new-coords window end back to old-coords to know which slice of the
+    // existing decorations is replaced.
+    let old_win_end = win_end as isize - line_delta;
+    if old_win_end < win_start as isize || old_win_end > old_decorations.len() as isize {
+        return Err("old_window_out_of_range");
+    }
+    let old_win_end = old_win_end as usize;
+
+    // Byte range of the window in the already-edited buffer.
+    let byte_start = buffer.line_start(win_start);
+    let byte_end = if win_end < new_line_count {
+        buffer.line_start(win_end)
+    } else {
+        buffer.len()
+    };
+    let buffer_text = buffer.text();
+    if byte_start > byte_end || byte_end > buffer_text.len() {
+        return Err("byte_range_invalid");
+    }
+    let window_text = &buffer_text[byte_start..byte_end];
+
+    // Multi-line block math (`$$ … $$`) can straddle the window edge and its
+    // delimiters pair across arbitrary distance, so re-parsing a window that
+    // contains one in isolation is unsafe. A bare `$` (inline math or currency)
+    // is *not* a hazard: inline math produces no decoration. Reference links and
+    // footnotes are handled below by prepending their definitions, so they no
+    // longer force a full parse.
+    if window_text.contains("$$") {
+        return Err("window_has_block_math");
+    }
+    // A non-leading window must not begin with a front-matter delimiter, or the
+    // sub-parse would misread it as front matter.
+    if win_start > 0 {
+        let first_line = buffer.line_content(win_start);
+        let first_trimmed = first_line.trim();
+        if first_trimmed == "---" || first_trimmed == "+++" {
+            return Err("window_starts_front_matter");
+        }
+    }
+
+    // Reference-style link/image definitions (`[label]: …`) and footnote
+    // definitions (`[^label]: …`) may live anywhere in the document, yet a
+    // *usage* inside the window needs its definition present for pulldown to
+    // resolve it as a link/footnote rather than literal text. Collect every
+    // definition outside the window and prepend it to the window text so the
+    // isolated parse resolves identically to a full-document parse. A definition
+    // merely *present* in the window is harmless (it renders as block metadata),
+    // and the edit itself never touches reference syntax here — the dirty-range
+    // pre-guard returns no transfer for edits containing `]:`, `[^`, or `][` —
+    // so no out-of-window usage's rendering can change.
+    //
+    // A reference *usage* always contains `[`, so when the window has none we
+    // can skip the whole-document definition scan and the combined re-parse.
+    // This is the dominant cost on large files (every Enter/delete in plain
+    // prose would otherwise rebuild and re-parse a prefix of all definitions),
+    // so the `[`-free fast path keeps ordinary editing cheap.
+    let definition_prefix = if window_text.contains('[') {
+        collect_reference_definition_prefix(buffer, win_start, win_end, window_text)
+    } else {
+        String::new()
+    };
+    let prefix_byte_len = definition_prefix.len();
+    let prefix_line_count = definition_prefix.bytes().filter(|byte| *byte == b'\n').count();
+
+    let mut window_decorations = if definition_prefix.is_empty() {
+        markdown::parse_decorations(window_text)
+    } else {
+        let combined = format!("{definition_prefix}{window_text}");
+        let mut combined_decorations = markdown::parse_decorations(&combined);
+        // Drop the prepended definition lines; the remainder lines up with the
+        // real window content.
+        if combined_decorations.len() < prefix_line_count {
+            return Err("prefix_parse_short");
+        }
+        combined_decorations.drain(0..prefix_line_count);
+        combined_decorations
+    };
+
+    // `parse_decorations` can emit a trailing phantom line when the slice ends in
+    // a newline; normalize to exactly `window_len` entries.
+    if window_decorations.len() > window_len {
+        window_decorations.truncate(window_len);
+    } else {
+        while window_decorations.len() < window_len {
+            window_decorations.push(LineDecoration::default());
+        }
+    }
+    // Make the (combined-relative) absolute fields global. Combined line
+    // `prefix_line_count + i` and combined byte `prefix_byte_len + b` map to the
+    // real window line `win_start + i` / byte `byte_start + b`, so the deltas
+    // subtract the prepended prefix.
+    let line_offset = win_start as isize - prefix_line_count as isize;
+    let byte_offset = byte_start as isize - prefix_byte_len as isize;
+    for decoration in &mut window_decorations {
+        offset_decoration_positions(decoration, line_offset, byte_offset);
+    }
+
+    // Splice in place; `Vec::splice` moves the unchanged prefix/suffix, never
+    // cloning the ~100k lines a full parse would rebuild.
+    let mut result = old_decorations;
+    result.splice(win_start..old_win_end, window_decorations);
+
+    // Shift absolute positions in the untouched suffix by the edit deltas.
+    if line_delta != 0 || byte_delta != 0 {
+        for decoration in result.iter_mut().skip(win_start + window_len) {
+            offset_decoration_positions(decoration, line_delta, byte_delta);
+        }
+    }
+
+    if result.len() != new_line_count {
+        return Err("result_len_mismatch");
+    }
+    Ok(result)
+}
+
+/// Upper bound on how far the incremental window may grow when searching for a
+/// blank-line block boundary. Edits inside a contiguous non-blank block larger
+/// than this fall back to a full parse rather than re-parsing an unbounded
+/// window (which would defeat the point of going incremental).
+const MAX_INCREMENTAL_WINDOW_LINES: usize = 512;
+
+/// Returns `true` if `trimmed` (a leading-whitespace-trimmed line) is a
+/// reference-style link/image definition (`[label]: …`) or a footnote
+/// definition (`[^label]: …`). Such lines must be visible to pulldown for any
+/// usage referencing the same label to resolve, even when the usage is in a
+/// re-parsed window and the definition is not.
+fn is_reference_definition_line(trimmed: &str) -> bool {
+    if !trimmed.starts_with('[') {
+        return false;
+    }
+    match trimmed.find(']') {
+        // Need a non-empty label and a `:` immediately after the closing `]`.
+        Some(close) => close > 1 && trimmed[close + 1..].starts_with(':'),
+        None => false,
+    }
+}
+
+/// Collects every reference/footnote definition line that lies *outside* the
+/// `[win_start, win_end)` line range **and whose label is actually referenced
+/// inside the window**, each terminated with a newline and the whole block
+/// followed by a blank line so it parses as standalone block metadata when
+/// prepended to the window text. Definitions inside the window are skipped
+/// because they are already part of `window_text`.
+///
+/// Filtering by referenced label is essential on large documents: a file with
+/// thousands of definitions would otherwise prepend and re-parse all of them on
+/// every keystroke (a full-document-sized parse), even though the window
+/// usually references at most a handful. Over-inclusion would only be a minor
+/// slowdown (extra definitions render as harmless metadata that is dropped),
+/// and every reference syntax (`[label]`, `[text][label]`, `[label][]`,
+/// `[^label]`) embeds the label literally in the usage, so a substring match
+/// against the window never misses a needed definition.
+fn collect_reference_definition_prefix(
+    buffer: &Buffer,
+    win_start: usize,
+    win_end: usize,
+    window_text: &str,
+) -> String {
+    let window_lower = window_text.to_lowercase();
+    let mut prefix = String::new();
+    let line_count = buffer.line_count();
+    for line in 0..line_count {
+        if line >= win_start && line < win_end {
+            continue;
+        }
+        let content = buffer.line_content(line);
+        let trimmed = content.trim_start();
+        if !is_reference_definition_line(trimmed) {
+            continue;
+        }
+        let Some(label) = reference_definition_label(trimmed) else {
+            continue;
+        };
+        // Match the label only when it appears as an actual bracketed usage in
+        // the window (`[label]`, `[text][label]`, `[label][]`, or `[^label]`),
+        // not as a bare substring. A bare-substring test over-includes on
+        // footnote-heavy documents — a window containing the digit "1" would
+        // pull in `[^1]`, `[^10]`, … turning the prepend+re-parse into a
+        // full-document-sized parse (the source of the multi-hundred-ms spikes).
+        // Over-inclusion is otherwise harmless, so a conservative empty-label
+        // definition is always kept.
+        let referenced = label.is_empty() || {
+            let bracketed = format!("[{}]", label.to_lowercase());
+            let footnote = format!("[^{}]", label.to_lowercase());
+            window_lower.contains(&bracketed) || window_lower.contains(&footnote)
+        };
+        if referenced {
+            prefix.push_str(content);
+            prefix.push('\n');
+        }
+    }
+    if !prefix.is_empty() {
+        // Trailing blank line separates the definition block from the window so
+        // pulldown does not fold the first window line into the last definition.
+        prefix.push('\n');
+    }
+    prefix
+}
+
+/// Extracts the label of a reference/footnote definition line (the text between
+/// the leading `[` and the matching `]`, with any footnote `^` prefix removed).
+/// Assumes `trimmed` already satisfies `is_reference_definition_line`.
+fn reference_definition_label(trimmed: &str) -> Option<&str> {
+    let close = trimmed.find(']')?;
+    let inner = &trimmed[1..close];
+    Some(inner.strip_prefix('^').unwrap_or(inner))
+}
+
 fn markdown_decoration_is_plain_text(decoration: &LineDecoration) -> bool {
     matches!(decoration.block_type, BlockType::Normal)
         && decoration.inline_spans.is_empty()
@@ -832,16 +1141,28 @@ struct PendingLineDisplayTransfer {
     dirty_start_line: usize,
     dirty_end_line_exclusive: usize,
     markdown_plain_decoration_transfer: bool,
+    /// Net change in buffer byte length caused by the edit
+    /// (`inserted_text.len() - replaced_range.len()`). Used to shift the
+    /// absolute byte offsets stored in suffix `block_preview` ranges when
+    /// splicing decorations incrementally.
+    byte_delta: isize,
 }
 
 impl PendingLineDisplayTransfer {
-    fn apply(self, new_line_count: usize) -> Vec<Option<LineDisplayInfo>> {
-        let mut next = vec![None; new_line_count];
+    fn apply(mut self, new_line_count: usize) -> Vec<Option<LineDisplayInfo>> {
+        let mut next: Vec<Option<LineDisplayInfo>> =
+            std::iter::repeat_with(|| None).take(new_line_count).collect();
         let prefix_end = self
             .start_line
             .min(self.cached_lines.len())
             .min(new_line_count);
-        next[..prefix_end].clone_from_slice(&self.cached_lines[..prefix_end]);
+        // Move the unchanged prefix/suffix lines instead of deep-cloning them.
+        // `LineDisplayInfo` owns a String plus several Vecs/HashMap, so on a large
+        // document cloning thousands of these on every keystroke was a major cost;
+        // `Option::take` transfers ownership at pointer cost.
+        for idx in 0..prefix_end {
+            next[idx] = self.cached_lines[idx].take();
+        }
 
         let old_suffix_start = self.old_end_line_exclusive.min(self.cached_lines.len());
         let new_suffix_start = self.new_end_line_exclusive.min(new_line_count);
@@ -852,7 +1173,7 @@ impl PendingLineDisplayTransfer {
             .min(new_line_count.saturating_sub(new_suffix_start));
 
         for idx in 0..suffix_len {
-            next[new_suffix_start + idx] = self.cached_lines[old_suffix_start + idx].clone();
+            next[new_suffix_start + idx] = self.cached_lines[old_suffix_start + idx].take();
         }
 
         let dirty_start = self.dirty_start_line.min(new_line_count);
@@ -3711,7 +4032,13 @@ impl EditorView {
             .unwrap_or(FileKind::Markdown);
         let pending_line_display_transfer = self.pending_line_display_transfer.take();
         self.invalidate_indent_guide_step_cache();
-        self.clear_line_display_info();
+        // Take (don't just clear) the current shaping cache. When a transfer is
+        // applied below it is restored from the transfer's own snapshot; when no
+        // transfer exists we restore this snapshot as-is if the line count is
+        // unchanged, so reparses triggered without a queued transfer (e.g. the
+        // second reparse after ordered-list renumbering) do not force the next
+        // prepaint to re-shape the entire document.
+        let preserved_line_display_info = self.take_line_display_info();
         self.search_matches.clear();
         self.search_current_index = None;
         self.workspace_search_highlight_path = None;
@@ -3748,19 +4075,38 @@ impl EditorView {
                 self.invalidate_line_geometry_cache();
             }
         } else {
-            self.set_decorations(parse_decorations_for_file_kind(
-                self.buffer.text(),
-                &file_kind,
-            ));
+            let incremental_succeeded = pending_line_display_transfer
+                .as_ref()
+                .filter(|_| matches!(file_kind, FileKind::Markdown))
+                .map(|transfer| self.try_incremental_markdown_decorations(transfer))
+                .is_some_and(|result| result.is_ok());
+            if !incremental_succeeded {
+                self.set_decorations(parse_decorations_for_file_kind(
+                    self.buffer.text(),
+                    &file_kind,
+                ));
+            }
         }
-        if (matches!(file_kind, FileKind::Code { .. } | FileKind::Text)
-            || matches!(file_kind, FileKind::Markdown)
-                && pending_line_display_transfer
-                    .as_ref()
-                    .is_some_and(|transfer| transfer.markdown_plain_decoration_transfer))
-            && let Some(transfer) = pending_line_display_transfer
-        {
+        // Restore the per-line shaping cache from the queued transfer whenever one
+        // exists. For markdown this now also applies on the full-parse path: the
+        // decorations are re-parsed for correctness, but unchanged lines outside
+        // the computed dirty range keep their cached shaping, so the next prepaint
+        // stays windowed instead of re-shaping the entire document on every
+        // keystroke. Edits with non-local effects (reference/footnote definitions,
+        // fence toggles) do not queue a transfer and still fall back to a full
+        // re-layout.
+        if let Some(transfer) = pending_line_display_transfer {
             self.set_line_display_info(transfer.apply(self.buffer.line_count()));
+        } else if preserved_line_display_info.len() == self.buffer.line_count()
+            && !preserved_line_display_info.is_empty()
+        {
+            // No transfer was queued, but the edit that triggered this reparse
+            // (typically in-place ordered-list renumbering) did not change the
+            // line count. Reuse the prior shaping cache so the next prepaint
+            // stays windowed; the visible lines are re-shaped each frame anyway,
+            // and any offscreen line whose decoration changed converges when it
+            // next scrolls into view.
+            self.set_line_display_info(preserved_line_display_info);
         }
         self.refresh_generated_block_previews();
         self.layout_dirty = true;
@@ -6082,8 +6428,23 @@ impl EditorView {
         None
     }
 
-    pub(crate) fn normalize_all_ordered_lists(&mut self) {
-        normalize_ordered_list_numbers_in_buffer(&mut self.buffer);
+    pub(crate) fn normalize_all_ordered_lists(&mut self) -> bool {
+        match normalize_ordered_list_numbers_in_buffer(&mut self.buffer) {
+            Some((first_line, last_line)) => {
+                // Renumbering rewrites the digits on these lines in place. Drop
+                // their shaping cache entries so the next reparse (which reuses
+                // the rest of the cache to stay windowed) re-shapes them with
+                // the corrected numbers instead of showing stale glyphs.
+                for line in first_line..=last_line {
+                    if line < self.line_display_info.len() {
+                        self.line_display_info[line] = None;
+                    }
+                }
+                self.invalidate_line_geometry_cache();
+                true
+            }
+            None => false,
+        }
     }
 
     pub(crate) fn renumber_ordered_list_block_from(
@@ -6196,16 +6557,17 @@ impl EditorView {
     }
 }
 
-fn normalize_ordered_list_numbers_in_buffer(buffer: &mut Buffer) {
+fn normalize_ordered_list_numbers_in_buffer(buffer: &mut Buffer) -> Option<(usize, usize)> {
     if buffer.line_count() == 0 {
-        return;
+        return None;
     }
 
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     let mut number_stack: Vec<(usize, u32)> = Vec::new();
+    let mut changed_line_range: Option<(usize, usize)> = None;
 
     for line in 0..buffer.line_count() {
-        let line_content = buffer.line_content(line).to_string();
+        let line_content = buffer.line_content(line);
         if line_content.trim().is_empty() {
             number_stack.clear();
             continue;
@@ -6261,11 +6623,16 @@ fn normalize_ordered_list_numbers_in_buffer(buffer: &mut Buffer) {
         let number_start = buffer.line_start(line) + leading_ws;
         let number_end = number_start + number_text.len();
         edits.push((number_start, number_end, expected_number.to_string()));
+        changed_line_range = Some(match changed_line_range {
+            Some((first, last)) => (first.min(line), last.max(line)),
+            None => (line, line),
+        });
     }
 
     for (number_start, number_end, new_number) in edits.into_iter().rev() {
         buffer.replace(number_start..number_end, &new_number);
     }
+    changed_line_range
 }
 
 // ── Free functions ──────────────────────────────────────────────────
@@ -6584,13 +6951,34 @@ impl EditorView {
             self.line_display_info.resize(line_count, None);
         }
 
+        // Only invalidate the cumulative line-geometry cache when an update
+        // actually changes a line's visual height. During steady scrolling the
+        // window keeps re-emitting identical cached heights, and a blind
+        // invalidation would force an O(n) prefix-sum rebuild every frame.
+        let info_height = |info: Option<&LineDisplayInfo>| {
+            info.map(|info| {
+                info.line_height * info.visual_line_count as f32 + info.extra_height
+            })
+        };
+        let mut geometry_changed = false;
         for (line_idx, info) in updates {
             if line_idx < line_count {
+                if !geometry_changed {
+                    let old_height = info_height(self.line_display_info[line_idx].as_ref());
+                    let new_height = info_height(info.as_ref());
+                    geometry_changed = match (old_height, new_height) {
+                        (Some(a), Some(b)) => (a - b).abs() > 0.01,
+                        (None, None) => false,
+                        _ => true,
+                    };
+                }
                 self.line_display_info[line_idx] = info;
             }
         }
 
-        self.invalidate_line_geometry_cache();
+        if geometry_changed {
+            self.invalidate_line_geometry_cache();
+        }
     }
 
     fn take_line_display_info(&mut self) -> Vec<Option<LineDisplayInfo>> {
@@ -6647,7 +7035,56 @@ impl EditorView {
             dirty_start_line: dirty_range.start,
             dirty_end_line_exclusive: dirty_range.end,
             markdown_plain_decoration_transfer,
+            byte_delta: inserted_text.len() as isize
+                - (replaced_range.end.saturating_sub(replaced_range.start)) as isize,
         });
+    }
+
+    /// Attempts to update `self.decorations` in place for a markdown edit by
+    /// re-parsing only the affected block window, instead of re-parsing the
+    /// whole document. Returns `true` on success (decorations updated); `false`
+    /// means the caller must fall back to a full `parse_decorations`.
+    ///
+    /// Correctness relies on the spliced window producing decorations identical
+    /// to a full parse. To guarantee that we (1) grow the window to blank-line
+    /// block boundaries so inline spans can't be cut mid-block, (2) bail when
+    /// the window would start inside a multi-line code block, and (3) bail on
+    /// constructs whose parse depends on out-of-window content (reference
+    /// links/footnotes, block math, front matter). Per-line ranges are stored
+    /// line-relative, so only absolute line numbers and the suffix
+    /// `block_preview` byte ranges need shifting (see
+    /// `offset_decoration_positions`).
+    fn try_incremental_markdown_decorations(
+        &mut self,
+        transfer: &PendingLineDisplayTransfer,
+    ) -> Result<(), &'static str> {
+        if transfer.markdown_plain_decoration_transfer {
+            return Err("plain_transfer");
+        }
+        // Move the old decorations out so the splice reuses their allocation
+        // instead of cloning ~100k lines. On failure the old decorations are
+        // discarded, but the caller immediately runs a full parse that rebuilds
+        // them, so nothing is lost.
+        let old_decorations = std::mem::take(&mut self.decorations);
+        match compute_incremental_markdown_decorations(
+            old_decorations,
+            &self.buffer,
+            transfer.new_end_line_exclusive,
+            transfer.old_end_line_exclusive,
+            transfer.dirty_start_line,
+            transfer.dirty_end_line_exclusive,
+            transfer.byte_delta,
+        ) {
+            Ok(new_decorations) => {
+                self.decorations = new_decorations;
+                if self.decorations.is_empty() {
+                    self.decorations.push(LineDecoration::default());
+                }
+                self.invalidate_line_geometry_cache();
+                Ok(())
+            }
+            Err(reason) => Err(reason),
+        }
     }
 
     fn can_transfer_markdown_plain_decorations(
@@ -6712,6 +7149,17 @@ impl EditorView {
             || (inserted_text.contains('~')
                 && self.markdown_context_contains(start_line, old_end_line_exclusive, "~~"));
         if changed_text_can_toggle_fence {
+            return None;
+        }
+
+        // Constructs whose effect can reach lines far outside the edited region
+        // (reference-style link/image definitions and footnote definitions) must
+        // force a full re-layout, because preserving cached shaping for distant
+        // usage lines would leave them stale.
+        let has_non_local_effect = |text: &str| {
+            text.contains("]:") || text.contains("[^") || text.contains("][")
+        };
+        if has_non_local_effect(inserted_text) || has_non_local_effect(touched_text) {
             return None;
         }
 
@@ -7014,11 +7462,168 @@ pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        heading_matches_anchor, line_display_transfer_line_bounds,
-        markdown_reference_for_import_name, normalize_ordered_list_numbers_in_buffer,
-        resolve_markdown_target_path, split_markdown_target, text_tab_is_dirty, unique_import_path,
+        compute_incremental_markdown_decorations, heading_matches_anchor,
+        line_display_transfer_line_bounds, markdown_reference_for_import_name,
+        normalize_ordered_list_numbers_in_buffer, resolve_markdown_target_path,
+        split_markdown_target, text_tab_is_dirty, unique_import_path,
     };
     use crate::buffer::Buffer;
+    use crate::markdown::parse_decorations;
+
+    /// Drives `compute_incremental_markdown_decorations` for an `old -> new`
+    /// edit derived from the byte-level diff of the two texts, then asserts the
+    /// incremental result is byte-for-byte identical (via `Debug`) to a full
+    /// `parse_decorations` of the new text. Returns `true` when the incremental
+    /// path was taken (it may legitimately bail, in which case the test only
+    /// checks that the caller would fall back to a full parse).
+    fn assert_incremental_matches_full(old_text: &str, new_text: &str) -> bool {
+        let prefix = old_text
+            .bytes()
+            .zip(new_text.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let max_suffix = old_text.len().min(new_text.len()) - prefix;
+        let suffix = old_text
+            .bytes()
+            .rev()
+            .zip(new_text.bytes().rev())
+            .take_while(|(a, b)| a == b)
+            .take(max_suffix)
+            .count();
+
+        let replaced_range = prefix..(old_text.len() - suffix);
+        let inserted_text = &new_text[prefix..(new_text.len() - suffix)];
+
+        let old_buffer = Buffer::from_text(old_text);
+        let (start_line, old_end_line_exclusive, new_end_line_exclusive) =
+            line_display_transfer_line_bounds(&old_buffer, &replaced_range, inserted_text);
+
+        let new_buffer = Buffer::from_text(new_text);
+        let old_decorations = parse_decorations(old_text);
+        let byte_delta = new_text.len() as isize - old_text.len() as isize;
+
+        let incremental = compute_incremental_markdown_decorations(
+            old_decorations,
+            &new_buffer,
+            new_end_line_exclusive,
+            old_end_line_exclusive,
+            start_line,
+            new_end_line_exclusive,
+            byte_delta,
+        );
+
+        match incremental {
+            Ok(result) => {
+                let full = parse_decorations(new_text);
+                assert_eq!(
+                    format!("{result:#?}"),
+                    format!("{full:#?}"),
+                    "incremental decorations diverged from full parse for edit\nOLD:\n{old_text}\nNEW:\n{new_text}"
+                );
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn incremental_markdown_matches_full_for_inline_edit() {
+        assert!(assert_incremental_matches_full(
+            "# Title\n\npara one\npara two\n\nmore\n",
+            "# Title\n\npara **one**\npara two\n\nmore\n",
+        ));
+    }
+
+    #[test]
+    fn incremental_markdown_matches_full_for_heading_edit() {
+        assert!(assert_incremental_matches_full(
+            "intro\n\n## Section\n\nbody text here\n\noutro\n",
+            "intro\n\n### Section\n\nbody text here\n\noutro\n",
+        ));
+    }
+
+    #[test]
+    fn incremental_markdown_matches_full_for_newline_insertion() {
+        assert!(assert_incremental_matches_full(
+            "alpha\n\nfirst line\n\nbeta\n\ngamma\n",
+            "alpha\n\nfirst\nline\n\nbeta\n\ngamma\n",
+        ));
+    }
+
+    #[test]
+    fn incremental_markdown_matches_full_for_line_deletion() {
+        assert!(assert_incremental_matches_full(
+            "alpha\n\none\ntwo\nthree\n\nbeta\n",
+            "alpha\n\none\nthree\n\nbeta\n",
+        ));
+    }
+
+    #[test]
+    fn incremental_markdown_matches_full_for_list_edit() {
+        assert!(assert_incremental_matches_full(
+            "intro\n\n- one\n- two\n- three\n\nend\n",
+            "intro\n\n- one\n- two two\n- three\n\nend\n",
+        ));
+    }
+
+    #[test]
+    fn incremental_markdown_matches_full_for_reference_link_with_external_def() {
+        // A reference-style link usage in the edited window whose definition
+        // lives far above (outside the window) must still resolve to a link.
+        // The prepend-definitions logic makes the isolated window parse match
+        // the full-document parse.
+        assert!(assert_incremental_matches_full(
+            "[site]: https://example.com\n\nintro\n\nsee [the site][site] now\n\nmore text\n\nend\n",
+            "[site]: https://example.com\n\nintro\n\nsee [the site][site] today\n\nmore text\n\nend\n",
+        ));
+    }
+
+    #[test]
+    fn incremental_markdown_matches_full_for_footnote_with_external_def() {
+        // A footnote reference in the edited window whose definition lives
+        // elsewhere must still resolve as a footnote.
+        assert!(assert_incremental_matches_full(
+            "intro[^a]\n\npara one\n\npara two\n\n[^a]: the footnote text\n",
+            "intro[^a]\n\npara ONE\n\npara two\n\n[^a]: the footnote text\n",
+        ));
+    }
+
+    #[test]
+    fn incremental_markdown_matches_full_for_code_block_edit() {
+        // Editing a line inside a fence whose blank-line block boundary lies
+        // outside the fence: the window grows to include the whole fence, so
+        // incremental parsing is valid and must match the full parse.
+        assert!(assert_incremental_matches_full(
+            "intro\n\n```rust\nlet a = 1;\nlet b = 2;\n```\n\nend\n",
+            "intro\n\n```rust\nlet a = 1;\nlet b = 22;\n```\n\nend\n",
+        ));
+    }
+
+    #[test]
+    fn incremental_markdown_falls_back_inside_code_block_with_inner_blank() {
+        // A fenced code block that contains a blank line: editing a line below
+        // that inner blank means the blank-line block-boundary walk would stop
+        // *inside* the fence. The function must bail (return None) so the caller
+        // performs a full parse.
+        let old_text = "intro\n\n```text\nline a\n\nline b\nline c\n```\n\nend\n";
+        let new_text = "intro\n\n```text\nline a\n\nline b\nline cc\n```\n\nend\n";
+        let new_buffer = Buffer::from_text(new_text);
+        let old_decorations = parse_decorations(old_text);
+        // Edited line index 6 ("line c"), single-line replacement, +1 byte.
+        let result = compute_incremental_markdown_decorations(
+            old_decorations,
+            &new_buffer,
+            7,
+            7,
+            6,
+            7,
+            1,
+        );
+        assert!(
+            result.is_err(),
+            "expected fall back to full parse for edit below an inner-blank code-block line"
+        );
+    }
 
     #[test]
     fn text_tab_is_dirty_detects_saved_file_revert() {
