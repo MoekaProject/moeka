@@ -66,7 +66,8 @@ impl EditorView {
         recreate_settings_editors: bool,
         cx: &mut Context<Self>,
     ) {
-        self.styles = crate::style::Styles::from_theme(&self.theme);
+        let ui_theme = self.app_settings.dark_theme_kind().build();
+        self.styles = crate::style::Styles::from_theme(&self.theme, &ui_theme);
         self.styles.editor.editor_font_size_px = self.app_settings.font_size;
         self.styles.editor.editor_paragraph_line_height_factor = self.app_settings.line_height;
         self.styles.editor.editor_heading_line_height_factor = self.app_settings.line_height;
@@ -1091,6 +1092,7 @@ fn format_theme_debugger_export(theme: &crate::theme::Theme) -> String {
             ThemeColorField::BorderTertiary,
             ThemeColorField::BorderDecorative,
             ThemeColorField::BorderCodeBlock,
+            ThemeColorField::WindowBorder,
         ],
         theme,
     );

@@ -784,7 +784,11 @@ fn shift_line_after_transfer(
 /// stored relative to its own line, so only `block_preview` (absolute line
 /// numbers and an absolute source byte range) and `table_info` (absolute line
 /// numbers) need adjusting when decorations are spliced incrementally.
-fn offset_decoration_positions(decoration: &mut LineDecoration, line_delta: isize, byte_delta: isize) {
+fn offset_decoration_positions(
+    decoration: &mut LineDecoration,
+    line_delta: isize,
+    byte_delta: isize,
+) {
     let shift_usize = |value: &mut usize, delta: isize| {
         if delta != 0 {
             *value = (*value as isize + delta).max(0) as usize;
@@ -942,7 +946,10 @@ fn compute_incremental_markdown_decorations(
         String::new()
     };
     let prefix_byte_len = definition_prefix.len();
-    let prefix_line_count = definition_prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let prefix_line_count = definition_prefix
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
 
     let mut window_decorations = if definition_prefix.is_empty() {
         markdown::parse_decorations(window_text)
@@ -1150,8 +1157,9 @@ struct PendingLineDisplayTransfer {
 
 impl PendingLineDisplayTransfer {
     fn apply(mut self, new_line_count: usize) -> Vec<Option<LineDisplayInfo>> {
-        let mut next: Vec<Option<LineDisplayInfo>> =
-            std::iter::repeat_with(|| None).take(new_line_count).collect();
+        let mut next: Vec<Option<LineDisplayInfo>> = std::iter::repeat_with(|| None)
+            .take(new_line_count)
+            .collect();
         let prefix_end = self
             .start_line
             .min(self.cached_lines.len())
@@ -1465,7 +1473,6 @@ pub struct EditorView {
     pub(crate) utility_panel: Option<RightUtilityPanel>,
     pub(crate) displayed_utility_panel: Option<RightUtilityPanel>,
     pub(crate) chat_panel_visible: bool,
-    pub(crate) last_non_chat_utility_panel: Option<RightUtilityPanel>,
     pub(crate) chat_panel_placement: ChatPanelPlacement,
     pub(crate) utility_panel_custom_width: Option<f32>,
     pub(crate) chat_panel_custom_size: Option<f32>,
@@ -1619,7 +1626,8 @@ impl EditorView {
             editor_theme_mode,
             theme_kind.is_dark(),
         );
-        let mut styles = crate::style::Styles::from_theme(&theme);
+        let ui_theme = app_settings.dark_theme_kind().build();
+        let mut styles = crate::style::Styles::from_theme(&theme, &ui_theme);
         // Apply saved font settings
         styles.editor.editor_font_size_px = app_settings.font_size;
         styles.editor.editor_paragraph_line_height_factor = app_settings.line_height;
@@ -1839,7 +1847,6 @@ impl EditorView {
             utility_panel: None,
             displayed_utility_panel: None,
             chat_panel_visible: false,
-            last_non_chat_utility_panel: None,
             chat_panel_placement: ChatPanelPlacement::Right,
             utility_panel_custom_width: None,
             chat_panel_custom_size: None,
@@ -6956,9 +6963,7 @@ impl EditorView {
         // window keeps re-emitting identical cached heights, and a blind
         // invalidation would force an O(n) prefix-sum rebuild every frame.
         let info_height = |info: Option<&LineDisplayInfo>| {
-            info.map(|info| {
-                info.line_height * info.visual_line_count as f32 + info.extra_height
-            })
+            info.map(|info| info.line_height * info.visual_line_count as f32 + info.extra_height)
         };
         let mut geometry_changed = false;
         for (line_idx, info) in updates {
@@ -7156,9 +7161,8 @@ impl EditorView {
         // (reference-style link/image definitions and footnote definitions) must
         // force a full re-layout, because preserving cached shaping for distant
         // usage lines would leave them stale.
-        let has_non_local_effect = |text: &str| {
-            text.contains("]:") || text.contains("[^") || text.contains("][")
-        };
+        let has_non_local_effect =
+            |text: &str| text.contains("]:") || text.contains("[^") || text.contains("][");
         if has_non_local_effect(inserted_text) || has_non_local_effect(touched_text) {
             return None;
         }
@@ -7610,15 +7614,8 @@ mod tests {
         let new_buffer = Buffer::from_text(new_text);
         let old_decorations = parse_decorations(old_text);
         // Edited line index 6 ("line c"), single-line replacement, +1 byte.
-        let result = compute_incremental_markdown_decorations(
-            old_decorations,
-            &new_buffer,
-            7,
-            7,
-            6,
-            7,
-            1,
-        );
+        let result =
+            compute_incremental_markdown_decorations(old_decorations, &new_buffer, 7, 7, 6, 7, 1);
         assert!(
             result.is_err(),
             "expected fall back to full parse for edit below an inner-blank code-block line"

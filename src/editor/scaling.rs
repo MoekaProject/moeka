@@ -44,13 +44,6 @@ impl EditorView {
 
     pub(crate) fn reveal_chat_panel(&mut self, cx: &mut Context<Self>) {
         self.chat_panel_visible = true;
-        if let Some(current_panel) = self
-            .utility_panel
-            .filter(|panel| *panel != RightUtilityPanel::Chat)
-        {
-            self.last_non_chat_utility_panel = Some(current_panel);
-        }
-
         if self.utility_panel != Some(RightUtilityPanel::Chat) {
             self.set_visible_utility_panel(Some(RightUtilityPanel::Chat), cx);
         } else {
@@ -61,7 +54,7 @@ impl EditorView {
     pub(crate) fn hide_chat_panel(&mut self, cx: &mut Context<Self>) {
         self.chat_panel_visible = false;
         if self.utility_panel == Some(RightUtilityPanel::Chat) {
-            self.set_visible_utility_panel(self.last_non_chat_utility_panel, cx);
+            self.set_visible_utility_panel(None, cx);
         } else {
             cx.notify();
         }
@@ -688,19 +681,12 @@ impl EditorView {
 
         if self.utility_panel == Some(panel) {
             self.utility_panel_resizing = false;
-            if self.last_non_chat_utility_panel == Some(panel) {
-                self.last_non_chat_utility_panel = None;
-            }
-            if self.chat_panel_visible {
-                self.set_visible_utility_panel(Some(RightUtilityPanel::Chat), cx);
-            } else {
-                self.set_visible_utility_panel(None, cx);
-            }
+            self.chat_panel_visible = false;
+            self.set_visible_utility_panel(None, cx);
             return;
         }
 
         self.chat_panel_visible = false;
-        self.last_non_chat_utility_panel = Some(panel);
         self.set_visible_utility_panel(Some(panel), cx);
     }
 }

@@ -90,6 +90,7 @@ pub enum ThemeColorField {
     BorderTertiary,
     BorderDecorative,
     BorderCodeBlock,
+    WindowBorder,
     Cursor,
     Selection,
     LineHighlight,
@@ -110,7 +111,7 @@ pub enum ThemeColorField {
 }
 
 impl ThemeColorField {
-    pub const UI_FIELDS: [Self; 18] = [
+    pub const UI_FIELDS: [Self; 19] = [
         Self::TextPrimary,
         Self::TextSecondary,
         Self::TextBright,
@@ -129,6 +130,7 @@ impl ThemeColorField {
         Self::BorderSecondary,
         Self::BorderTertiary,
         Self::BorderDecorative,
+        Self::WindowBorder,
     ];
 
     pub const EDITOR_FIELDS: [Self; 20] = [
@@ -177,6 +179,7 @@ impl ThemeColorField {
             Self::BorderTertiary => "border_tertiary",
             Self::BorderDecorative => "border_decorative",
             Self::BorderCodeBlock => "border_code_block",
+            Self::WindowBorder => "window_border",
             Self::Cursor => "cursor",
             Self::Selection => "selection",
             Self::LineHighlight => "line_highlight",
@@ -205,6 +208,13 @@ macro_rules! hex_hsla {
         VALUE
     }};
 }
+
+/// Default outer window chrome border color for light themes.
+///
+/// Kept intentionally dark so the rounded window edge stays clearly visible
+/// against bright surroundings. Used as the `window_border` field value for
+/// light theme builders; also tunable per-theme via the theme debugger.
+pub const LIGHT_WINDOW_BORDER: Hsla = hex_to_hsla("#00000033");
 
 /// Color palette organized by visual category: text, background, border, editor.
 ///
@@ -241,6 +251,9 @@ pub struct Theme {
     pub border_tertiary: Hsla,
     pub border_decorative: Hsla,
     pub border_code_block: Hsla,
+    /// Outer window chrome border. Kept dark in light themes so the rounded
+    /// window edge stays visible; tunable via the theme debugger.
+    pub window_border: Hsla,
 
     // ── Editor / Markdown semantic colors ────────────────────────
     pub cursor: Hsla,
@@ -286,6 +299,7 @@ impl Theme {
             ThemeColorField::BorderTertiary => self.border_tertiary,
             ThemeColorField::BorderDecorative => self.border_decorative,
             ThemeColorField::BorderCodeBlock => self.border_code_block,
+            ThemeColorField::WindowBorder => self.window_border,
             ThemeColorField::Cursor => self.cursor,
             ThemeColorField::Selection => self.selection,
             ThemeColorField::LineHighlight => self.line_highlight,
@@ -329,6 +343,7 @@ impl Theme {
             ThemeColorField::BorderTertiary => self.border_tertiary = color,
             ThemeColorField::BorderDecorative => self.border_decorative = color,
             ThemeColorField::BorderCodeBlock => self.border_code_block = color,
+            ThemeColorField::WindowBorder => self.window_border = color,
             ThemeColorField::Cursor => self.cursor = color,
             ThemeColorField::Selection => self.selection = color,
             ThemeColorField::LineHighlight => self.line_highlight = color,
@@ -409,6 +424,7 @@ impl Theme {
             border_tertiary: crate::hex_hsla!("#3E4452"),
             border_decorative: with_alpha(crate::hex_hsla!("#636D83"), 0.5),
             border_code_block: with_alpha(crate::hex_hsla!("#303740"), 1.0),
+            window_border: crate::hex_hsla!("#67718633"),
             // Editor/Markdown
             cursor: crate::hex_hsla!("#528BFF"),
             selection: with_alpha(crate::hex_hsla!("#5A6275"), 0.6),
@@ -456,6 +472,7 @@ impl Theme {
             border_tertiary: crate::hex_hsla!("#C7BCA9"),
             border_decorative: with_alpha(crate::hex_hsla!("#9B9A97"), 0.4),
             border_code_block: with_alpha(crate::hex_hsla!("#E7E2DB"), 0.8),
+            window_border: LIGHT_WINDOW_BORDER,
             // Editor/Markdown
             cursor: crate::hex_hsla!("#528BFF"),
             selection: with_alpha(crate::hex_hsla!("#2383E2"), 0.15),
@@ -503,6 +520,7 @@ impl Theme {
             border_tertiary: crate::hex_hsla!("#9AA4D0"),
             border_decorative: with_alpha(crate::hex_hsla!("#A0A1A7"), 0.4),
             border_code_block: with_alpha(crate::hex_hsla!("#AAB0CD"), 0.2),
+            window_border: LIGHT_WINDOW_BORDER,
             // Editor/Markdown
             cursor: crate::hex_hsla!("#657BCF"),
             selection: with_alpha(crate::hex_hsla!("#3A56C1"), 0.15),
@@ -550,6 +568,7 @@ impl Theme {
             border_tertiary: crate::hex_hsla!("#4B5067"),
             border_decorative: with_alpha(crate::hex_hsla!("#5c6773"), 0.5),
             border_code_block: with_alpha(crate::hex_hsla!("#2C3041"), 1.0),
+            window_border: crate::hex_hsla!("#363a4f"),
             // Editor/Markdown
             cursor: crate::hex_hsla!("#528bff"),
             selection: with_alpha(crate::hex_hsla!("#4F5768"), 0.6),

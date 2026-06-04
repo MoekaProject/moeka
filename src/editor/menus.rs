@@ -1879,6 +1879,7 @@ impl EditorView {
                         this.app_settings.remove_starred_file(&normalized);
                     } else {
                         this.app_settings.add_starred_file(normalized);
+                        this.sidebar_starred_collapsed = false;
                     }
                     this.app_settings.save();
                     this.context_menu = None;
