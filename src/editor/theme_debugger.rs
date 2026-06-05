@@ -83,7 +83,7 @@ impl EditorView {
             self.styles.editor.editor_body_cjk_font_family;
         self.styles.editor.editor_monospace_font_family =
             Box::leak(self.app_settings.code_font.clone().into_boxed_str());
-        self.clear_line_display_info();
+        self.clear_all_tab_layout_caches();
         self.rerender_generated_block_previews();
         self.sync_overlay_text_input_styles(cx);
 

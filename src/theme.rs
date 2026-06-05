@@ -368,7 +368,7 @@ impl Theme {
 pub fn apply_editor_theme_mode(theme: &Theme, mode: EditorThemeMode, is_dark: bool) -> Theme {
     let mut themed = theme.clone();
     if mode == EditorThemeMode::Monochrome {
-        let monochrome_link = crate::hex_hsla!("#61afef");
+        let monochrome_link = crate::hex_hsla!("#2E84CAFF");
         let emphasis = if is_dark {
             themed.text_bright
         } else {
@@ -462,7 +462,7 @@ impl Theme {
             bg_selected: crate::hex_hsla!("#E2DCD0"),
             bg_bar: crate::hex_hsla!("#F6EEE2"),
             bg_tab: crate::hex_hsla!("#F6EEE2"),
-            bg_tab_hover: crate::hex_hsla!("#FAF2E6"),
+            bg_tab_hover: crate::hex_hsla!("#FDF7EE"),
             bg_tab_active: crate::hex_hsla!("#FDF7EE"),
             bg_code: crate::hex_hsla!("#FAF5ED"),
             bg_code_inline: crate::hex_hsla!("#F0ECE8"),
@@ -530,8 +530,8 @@ impl Theme {
             italic: crate::hex_hsla!("#B043B8"),
             strikethrough: crate::hex_hsla!("#A0A1A7"),
             inline_code: crate::hex_hsla!("#4C9C3A"),
-            link: crate::hex_hsla!("#728BE4"),
-            syntax_marker: with_alpha(crate::hex_hsla!("#3F4673"), 0.7),
+            link: crate::hex_hsla!("#4463D4"),
+            syntax_marker: with_alpha(crate::hex_hsla!("#1B2462"), 0.7),
             list_marker: crate::hex_hsla!("#D3604F"),
             checkbox_checked: crate::hex_hsla!("#707DAD"),
             gutter_heading: with_alpha(crate::hex_hsla!("#383A42"), 0.2),

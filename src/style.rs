@@ -1008,8 +1008,10 @@ pub struct SettingsPanelStyles {
 impl Styles {
     /// `theme` drives editor content colors and follows the user's light/dark
     /// selection. `ui_theme` is the dark chrome palette (the user's selected
-    /// dark theme) used for the window border, menus, file tree, and sidebar
-    /// controls so that those surfaces stay dark even in light mode.
+    /// dark theme) used for the window border and menus so those surfaces stay
+    /// dark even in light mode. The sidebar surfaces (file tree, workspace
+    /// switcher, sidebar search) instead follow the active appearance: they
+    /// use `theme` in light mode and `ui_theme` in dark mode.
     pub fn from_theme(theme: &Theme, ui_theme: &Theme) -> Self {
         let ui_font_size_px = 13.0;
         let ui_font_size_sm_px = ui_font_size_px - 1.0;
@@ -1017,9 +1019,9 @@ impl Styles {
         let ui_font_size_lg_px = ui_font_size_px + 1.0;
         let ui_font_size_xl_px = ui_font_size_px + 3.0;
         let editor_body_font_size_px = 15.0;
-        let sidebar_theme = ui_theme;
 
         let is_light = theme.bg_primary.l >= 0.5;
+        let sidebar_theme = if is_light { theme } else { ui_theme };
         Self {
             ui_font_family: ".SystemUIFont",
             ui_font_size_px,
@@ -1641,14 +1643,14 @@ impl Styles {
             workspace_switcher: WorkspaceSwitcherStyles {
                 ws_bar_height_px: 32.0,
                 ws_bar_bg: gpui::transparent_black(),
-                ws_bar_border_color: ui_theme.border_secondary,
+                ws_bar_border_color: sidebar_theme.border_secondary,
                 ws_bar_padding_x_px: 14.0,
                 ws_bar_gap_px: 6.0,
                 ws_bar_icon_size_px: 18.0,
-                ws_bar_icon_color: ui_theme.text_secondary,
+                ws_bar_icon_color: sidebar_theme.text_secondary,
                 ws_bar_font_size_px: ui_font_size_px,
-                ws_bar_text_color: ui_theme.text_secondary,
-                ws_bar_hover_bg: ui_theme.bg_hover,
+                ws_bar_text_color: sidebar_theme.text_secondary,
+                ws_bar_hover_bg: sidebar_theme.bg_hover,
                 ws_menu_width_px: 220.0,
                 ws_menu_item_check_size_px: 12.0,
                 ws_menu_item_check_color: ui_theme.text_secondary,
@@ -1739,44 +1741,47 @@ impl Styles {
                 ws_search_input_left_inset_px: 28.0,
                 ws_search_input_right_inset_px: 108.0,
                 ws_search_input_icon_size_px: 13.0,
-                ws_search_input_icon_color: ui_theme.text_secondary,
+                ws_search_input_icon_color: sidebar_theme.text_secondary,
                 ws_search_input_icon_gap_px: 4.0,
                 ws_search_input_height_px: 32.0,
                 ws_search_input_radius_px: 6.0,
-                ws_search_input_bg: ui_theme.bg_elevated,
-                ws_search_input_focus_bg: ui_theme.bg_tab_active,
+                ws_search_input_bg: sidebar_theme.bg_elevated,
+                ws_search_input_focus_bg: sidebar_theme.bg_tab_active,
                 ws_search_input_border_width_px: 1.0,
-                ws_search_input_border_color: ui_theme.border_primary,
+                ws_search_input_border_color: sidebar_theme.border_primary,
                 ws_search_input_cursor_height_ratio: 0.72,
                 ws_search_input_cursor_height_adjust_px: -4.0,
                 ws_search_file_header_height_px: 28.0,
-                ws_search_file_header_bg: ui_theme.bg_primary,
+                ws_search_file_header_bg: sidebar_theme.bg_primary,
                 ws_search_file_header_font_size_px: ui_font_size_sm_px,
-                ws_search_file_header_text_color: ui_theme.text_primary,
+                ws_search_file_header_text_color: sidebar_theme.text_primary,
                 ws_search_file_header_dir_gap_px: 5.0,
-                ws_search_file_header_dir_text_color: with_alpha(ui_theme.text_secondary, 0.72),
+                ws_search_file_header_dir_text_color: with_alpha(
+                    sidebar_theme.text_secondary,
+                    0.72,
+                ),
                 ws_search_file_header_icon_size_px: 14.0,
                 ws_search_file_header_count_font_size_px: ui_font_size_xs_px,
-                ws_search_file_header_count_text_color: ui_theme.text_secondary,
+                ws_search_file_header_count_text_color: sidebar_theme.text_secondary,
                 ws_search_match_height_px: 24.0,
                 ws_search_match_padding_x_px: 14.0,
                 ws_search_match_font_size_px: ui_font_size_sm_px,
-                ws_search_match_text_color: ui_theme.text_primary,
+                ws_search_match_text_color: sidebar_theme.text_primary,
                 ws_search_match_highlight_bg: gpui::hsla(0.14, 0.9, 0.5, 0.3),
-                ws_search_match_highlight_text_color: ui_theme.text_bright,
-                ws_search_match_line_number_color: ui_theme.text_secondary,
-                ws_search_match_hover_bg: ui_theme.bg_hover,
-                ws_search_match_active_bg: ui_theme.bg_selected,
+                ws_search_match_highlight_text_color: sidebar_theme.text_bright,
+                ws_search_match_line_number_color: sidebar_theme.text_secondary,
+                ws_search_match_hover_bg: sidebar_theme.bg_hover,
+                ws_search_match_active_bg: sidebar_theme.bg_selected,
                 ws_search_progress_height_px: 2.0,
-                ws_search_progress_color: ui_theme.text_accent,
+                ws_search_progress_color: sidebar_theme.text_accent,
                 ws_search_summary_font_size_px: ui_font_size_xs_px,
-                ws_search_summary_text_color: ui_theme.text_secondary,
+                ws_search_summary_text_color: sidebar_theme.text_secondary,
                 ws_search_btn_size_px: 22.0,
                 ws_search_btn_icon_size_px: 14.0,
-                ws_search_btn_icon_color: ui_theme.text_secondary,
-                ws_search_btn_active_icon_color: ui_theme.text_accent,
-                ws_search_btn_hover_bg: ui_theme.bg_hover,
-                ws_search_btn_active_bg: ui_theme.bg_selected,
+                ws_search_btn_icon_color: sidebar_theme.text_secondary,
+                ws_search_btn_active_icon_color: sidebar_theme.text_accent,
+                ws_search_btn_hover_bg: sidebar_theme.bg_hover,
+                ws_search_btn_active_bg: sidebar_theme.bg_selected,
             },
             quick_open: QuickOpenStyles {
                 quick_open_backdrop_bg: with_alpha(Hsla::black(), 0.5),

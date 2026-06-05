@@ -5730,7 +5730,10 @@ impl EditorView {
         self.sync_overlay_text_input_styles(cx);
         // Zooming changes the scaled font sizes, so the cached per-line layout
         // (heights, wrapping, geometry) must be rebuilt to avoid geometry drift.
-        self.clear_line_display_info();
+        // This affects every tab, so invalidate the inactive tab caches too;
+        // otherwise switching back to an editor restores a stale pre-zoom layout
+        // until a line is touched.
+        self.clear_all_tab_layout_caches();
         self.clamp_scroll();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -6940,6 +6943,16 @@ impl EditorView {
     fn clear_line_display_info(&mut self) {
         self.line_display_info.clear();
         self.invalidate_line_geometry_cache();
+    }
+
+    /// Invalidate the cached per-line layout for the active editor AND every
+    /// inactive tab. Use this when a global rendering parameter (UI scale,
+    /// fonts, theme, line height, letter spacing) changes, because those affect
+    /// the layout of all tabs, not just the one currently shown. Inactive tabs
+    /// recompute lazily on activation, so this stays cheap.
+    pub(crate) fn clear_all_tab_layout_caches(&mut self) {
+        self.clear_line_display_info();
+        self.tab_layout_cache.clear();
     }
 
     fn set_line_display_info(&mut self, line_display_info: Vec<Option<LineDisplayInfo>>) {

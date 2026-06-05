@@ -1228,11 +1228,10 @@ impl Render for EditorView {
                                                                             overlay_image_bounds,
                                                                             image,
                                                                             editor.styles.editor.editor_bg,
-                                                                            if overlay.cache_key.starts_with("__generated_preview__") {
-                                                                                px(10.0)
-                                                                            } else {
-                                                                                px(0.0)
-                                                                            },
+                                                                            // Generated math/Mermaid previews are cropped tightly
+                                                                            // to glyph ink, so a rounded-corner clip cuts into real
+                                                                            // glyphs (e.g. E=mc²). Keep square corners for them.
+                                                                            px(0.0),
                                                                         ))
                                                                     })
                                                                 },

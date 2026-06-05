@@ -2086,6 +2086,40 @@ impl Element for EditorElement {
                     }
                 }
 
+                if !bracket_match_ranges.is_empty() {
+                    let mut line_spans: Vec<std::ops::Range<usize>> = Vec::new();
+                    for range in &bracket_match_ranges {
+                        if range.end > line_start_offset && range.start < line_end_offset {
+                            let start = range.start.max(line_start_offset) - line_start_offset;
+                            let end = range.end.min(line_end_offset) - line_start_offset;
+                            if start < end {
+                                line_spans.push(start..end);
+                            }
+                        }
+                    }
+                    if !line_spans.is_empty() {
+                        push_diff_inline_highlight_quads(
+                            &mut diff_inline_quads,
+                            &line_spans,
+                            &cached.display_text,
+                            line_content.len(),
+                            &cached.buffer_to_display,
+                            &runs,
+                            &cached.wrapped_line,
+                            content_x,
+                            text_line_top,
+                            line_height,
+                            font_size,
+                            cached.indent_px,
+                            gpui::transparent_black(),
+                            editor.styles.editor.editor_bracket_match_border,
+                            editor.scaled(editor.styles.editor.editor_match_border_width_px),
+                            editor_styles.editor_letter_spacing_px,
+                            window,
+                        );
+                    }
+                }
+
                 if editor.selected_handle.is_none()
                     && window.is_window_active()
                     && editor.focus_handle.is_focused(window)
@@ -3590,7 +3624,11 @@ impl Element for EditorElement {
                             point(px(img_left), px(img_top)),
                             size(px(display_w), px(display_h)),
                         );
-                        image_previews.push((img_bounds, img_data.clone(), px(10.0)));
+                        // Generated math/Mermaid previews are cropped tightly to
+                        // their glyph ink, so a rounded-corner clip would cut into
+                        // real glyphs (e.g. the descenders and the `²` superscript
+                        // in E=mc²). Keep square corners for these previews.
+                        image_previews.push((img_bounds, img_data.clone(), px(0.0)));
                         generated_preview_hit_areas.push((block_bounds, line_idx));
                         generated_preview_image_areas.push((img_bounds, line_idx));
                         if editor.hovering_generated_preview_line == Some(line_idx)

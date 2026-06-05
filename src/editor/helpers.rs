@@ -224,18 +224,11 @@ pub(crate) fn active_ranges_have_non_eol_position(
     })
 }
 
-fn active_ranges_have_selection(active_ranges: &[Range<usize>]) -> bool {
-    active_ranges
-        .iter()
-        .any(|active_range| active_range.start != active_range.end)
-}
-
-fn heading_syntax_is_active(decoration: &LineDecoration, active_ranges: &[Range<usize>]) -> bool {
-    active_ranges_have_selection(active_ranges)
-        || decoration
-            .syntax_ranges
-            .iter()
-            .any(|syntax_range| active_ranges_intersect(active_ranges, &syntax_range.trigger_range))
+fn heading_syntax_is_active(_decoration: &LineDecoration, active_ranges: &[Range<usize>]) -> bool {
+    // Headings expand their `#` markers whenever the caret is anywhere on the
+    // line (or there is a selection touching it), not only when it falls inside
+    // the marker trigger range.
+    !active_ranges.is_empty()
 }
 
 fn scaled_inline_placeholder(text: &str, scale: f32) -> String {
@@ -3097,8 +3090,8 @@ pub(crate) fn apply_code_block_highlighting(
 
 fn adjust_code_block_highlight_color_for_theme(mut color: Hsla, theme: &Theme) -> Hsla {
     if theme.bg_primary.l >= 0.65 {
-        color.l = (color.l * 0.78).clamp(0.0, 1.0);
-        color.s = (color.s * 1.04).clamp(0.0, 1.0);
+        color.l = (color.l * 0.5).clamp(0.0, 1.0);
+        color.s = (color.s * 1.5).clamp(0.0, 1.0);
     }
     color
 }
