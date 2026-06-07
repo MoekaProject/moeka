@@ -13,6 +13,7 @@ use super::*;
 
 const ADD_FILE_TO_CHAT_LABEL: &str = "添加文件到聊天";
 const ADD_SELECTION_TO_CHAT_LABEL: &str = "添加选区到聊天";
+const COPY_PLAIN_TEXT_LABEL: &str = "复制纯文本";
 const TERMINAL_SELECT_ALL_LABEL: &str = "全选";
 
 fn current_raw_wiki_link_range(
@@ -1292,15 +1293,20 @@ impl EditorView {
             wss.ws_menu_item_check_size_px,
             wss.ws_menu_item_action_icon_gap_px,
         );
+        let item_height = self.scaled(ms.menu_item_height_px);
+        let padding_x = self.scaled(ms.menu_item_padding_x_px);
+        let font_size = self.scaled(ms.menu_item_font_size_px);
+        let icon_col_w = self.scaled(icon_col_w);
+        let gap = self.scaled(gap);
         div()
             .id(item_id)
             .w_full()
-            .h(px(ms.menu_item_height_px))
-            .px(px(ms.menu_item_padding_x_px))
+            .h(px(item_height))
+            .px(px(padding_x))
             .flex()
             .items_center()
             .gap(px(gap))
-            .text_size(px(ms.menu_item_font_size_px))
+            .text_size(px(font_size))
             .text_color(text_color)
             .hover(move |s| s.bg(hover_bg))
             .cursor(CursorStyle::Arrow)
@@ -1346,16 +1352,21 @@ impl EditorView {
             wss.ws_menu_item_check_size_px,
             wss.ws_menu_item_action_icon_gap_px,
         );
-        let icon_size = ms.menu_format_icon_size_px;
+        let icon_size = self.scaled(ms.menu_format_icon_size_px);
+        let item_height = self.scaled(ms.menu_item_height_px);
+        let padding_x = self.scaled(ms.menu_item_padding_x_px);
+        let font_size = self.scaled(ms.menu_item_font_size_px);
+        let icon_col_w = self.scaled(icon_col_w);
+        let gap = self.scaled(gap);
         div()
             .id(item_id)
             .w_full()
-            .h(px(ms.menu_item_height_px))
-            .px(px(ms.menu_item_padding_x_px))
+            .h(px(item_height))
+            .px(px(padding_x))
             .flex()
             .items_center()
             .gap(px(gap))
-            .text_size(px(ms.menu_item_font_size_px))
+            .text_size(px(font_size))
             .text_color(text_color)
             .hover(move |s| s.bg(hover_bg))
             .cursor(CursorStyle::Arrow)
@@ -1643,6 +1654,7 @@ impl EditorView {
         let ms = &self.styles.context_menu;
         let is_open = matches!(self.context_submenu, Some(ContextMenuKind::FormatMore));
         let icon_size = self.scaled(ms.menu_format_icon_size_px);
+        let icon_gap = self.scaled(ms.menu_format_icon_gap_px);
         let arrow_size = (icon_size - self.scaled(2.0)).max(self.scaled(10.0));
         let hover_bg = ms.menu_item_hover_bg;
         let text_color = ms.menu_item_text_color;
@@ -1668,6 +1680,7 @@ impl EditorView {
                 div()
                     .flex()
                     .items_center()
+                    .gap(px(icon_gap))
                     .child(
                         div()
                             .w(px(icon_size))
@@ -2283,6 +2296,28 @@ impl EditorView {
                     },
                 ));
             }
+
+            // Text/code editors only expose Cut/Copy/Paste; markdown-specific
+            // actions below do not apply to plain text or source files.
+            if self.active_tab_is_non_markdown_text() {
+                return items;
+            }
+
+            // Copy the document's text with all markdown syntax markers removed.
+            // Operates on the selection when present (still excluding any syntax
+            // characters inside it), otherwise on the whole document.
+            items.push(self.render_format_context_menu_item_with_hover_behavior(
+                COPY_PLAIN_TEXT_LABEL,
+                Some(MENU_COPY_SVG_PATH),
+                None,
+                false,
+                false,
+                FormatMenuHoverBehavior::ClearSubmenu,
+                cx,
+                move |this, _, cx| {
+                    this.copy_plain_text_to_clipboard(cx);
+                },
+            ));
 
             if let Some(current_path) = self.current_file_path.clone() {
                 items.push(self.render_context_menu_separator());

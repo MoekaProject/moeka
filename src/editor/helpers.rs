@@ -2379,6 +2379,7 @@ mod tests {
             theme.link,
             FontWeight::NORMAL,
             None,
+            false,
         );
 
         assert_eq!(display_text, "title");
@@ -2485,6 +2486,7 @@ mod tests {
             theme.link,
             FontWeight::NORMAL,
             None,
+            false,
         );
 
         assert_eq!(display_text, "==hi==");
@@ -2548,6 +2550,7 @@ mod tests {
             theme.link,
             FontWeight::NORMAL,
             None,
+            false,
         );
 
         let highlight_bg = crate::theme::with_alpha(crate::hex_hsla!("#E5C07B"), 0.22);
@@ -3713,6 +3716,7 @@ pub(crate) fn build_text_runs_for_display(
     wiki_link_text_color: Hsla,
     wiki_link_text_weight: FontWeight,
     front_matter_key_text_color: Option<Hsla>,
+    force_monospace: bool,
 ) -> Vec<TextRun> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FontRole {
@@ -3734,7 +3738,8 @@ pub(crate) fn build_text_runs_for_display(
     let is_code_line = matches!(
         decoration.block_type,
         BlockType::CodeBlock | BlockType::CodeBlockFence
-    ) || is_front_matter_line;
+    ) || is_front_matter_line
+        || force_monospace;
     let default_font = if matches!(decoration.block_type, BlockType::Heading(_)) {
         heading_font
     } else {

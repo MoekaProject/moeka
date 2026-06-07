@@ -553,11 +553,14 @@ impl EditorView {
                     .items_center()
                     .justify_center()
                     .rounded(px(button_radius))
-                    .text_size(px(nav_btn_icon_size))
-                    .text_color(nav_icon_color)
                     .cursor(gpui::CursorStyle::Arrow)
                     .hover(move |style| style.bg(nav_hover_bg))
-                    .child("↑")
+                    .child(
+                        svg()
+                            .path("assets/icons/arrow-up.svg")
+                            .size(px(nav_btn_icon_size))
+                            .text_color(nav_icon_color),
+                    )
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
@@ -575,11 +578,14 @@ impl EditorView {
                     .items_center()
                     .justify_center()
                     .rounded(px(button_radius))
-                    .text_size(px(nav_btn_icon_size))
-                    .text_color(nav_icon_color)
                     .cursor(gpui::CursorStyle::Arrow)
                     .hover(move |style| style.bg(nav_hover_bg))
-                    .child("↓")
+                    .child(
+                        svg()
+                            .path("assets/icons/arrow-down.svg")
+                            .size(px(nav_btn_icon_size))
+                            .text_color(nav_icon_color),
+                    )
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {

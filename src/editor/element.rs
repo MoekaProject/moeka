@@ -37,8 +37,9 @@ pub(crate) struct EditorPrepaintState {
     gutter_labels: Vec<(ShapedLine, Point<Pixels>, Pixels)>,
     gutter_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
     gutter_fold_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
-    /// HR dashed lines: (y_position, start_x, width)
-    hr_lines: Vec<(f32, f32, f32)>,
+    /// HR lines: (y_position, start_x, width, is_dashed). `***` renders dashed,
+    /// `---`/`___` render solid.
+    hr_lines: Vec<(f32, f32, f32, bool)>,
     /// Image previews to paint: (bounds, image_data)
     image_previews: Vec<(Bounds<Pixels>, Arc<RenderImage>, Pixels)>,
     image_borders: Vec<PaintQuad>,
@@ -399,6 +400,7 @@ fn build_precise_table_layout(
                     theme.link,
                     FontWeight::BOLD,
                     None,
+                    false,
                 );
                 if layout.is_header.get(vi).copied().unwrap_or(false) && !layout.is_front_matter {
                     for run in &mut cell_runs {
@@ -874,6 +876,40 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        // Resolve a deferred scroll-to-cursor before reading layout state, when
+        // the per-line geometry cache is already valid (the common case after an
+        // edit like pasting long text). Otherwise the layout loop below positions
+        // every line at the OLD scroll offset and the deferred scroll only runs
+        // afterwards (followed by `cx.notify()`), so the first frame paints at the
+        // stale offset and the next frame jumps to the corrected one. Resolving it
+        // up front makes this frame paint at the final offset with no jump.
+        self.editor.update(cx, |editor, _| {
+            if !editor.pending_scroll_to_cursor
+                || editor.pending_center_cursor_in_view
+                || editor.pending_preview_reveal.is_some()
+            {
+                return;
+            }
+            let line_count = editor.buffer.line_count();
+            let viewport_width: f32 = bounds.size.width.into();
+            let expanded_layout = editor.editor_uses_expanded_layout();
+            let editor_width = if expanded_layout {
+                viewport_width
+            } else {
+                viewport_width.min(editor.max_editor_width())
+            };
+            let text_width = (editor_width - editor.padding_left() - editor.padding_right())
+                .max(editor.scaled(120.0));
+            let geometry_valid = editor.line_display_info.len() == line_count
+                && (editor.last_text_width - text_width).abs() < 0.5;
+            if !geometry_valid {
+                return;
+            }
+            editor.last_viewport_height = bounds.size.height.into();
+            editor.layout_dirty = false;
+            editor.scroll_to_cursor();
+        });
+
         let editor = self.editor.read(cx);
         let theme = &editor.theme;
         let buffer = &editor.buffer;
@@ -1089,7 +1125,7 @@ impl Element for EditorElement {
         let mut image_preview_zoom_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut display_info_updates: Vec<(usize, Option<LineDisplayInfo>)> =
             Vec::with_capacity(render_end_line.saturating_sub(render_start_line));
-        let mut hr_lines: Vec<(f32, f32, f32)> = Vec::new();
+        let mut hr_lines: Vec<(f32, f32, f32, bool)> = Vec::new();
         let mut image_previews: Vec<(Bounds<Pixels>, Arc<RenderImage>, Pixels)> = Vec::new();
         let mut image_borders: Vec<PaintQuad> = Vec::new();
         let mut table_borders: Vec<PaintQuad> = Vec::new();
@@ -2375,6 +2411,7 @@ impl Element for EditorElement {
                     editor.styles.wiki_link.wiki_link_text_color,
                     editor.styles.wiki_link.wiki_link_text_weight,
                     Some(editor.styles.table.front_matter_key_text_color),
+                    editor.active_tab_is_non_markdown_text(),
                 );
                 helpers::apply_search_match_text_styles(
                     &mut runs,
@@ -3075,6 +3112,7 @@ impl Element for EditorElement {
                                         editor.styles.wiki_link.wiki_link_text_color,
                                         editor.styles.wiki_link.wiki_link_text_weight,
                                         None,
+                                        false,
                                     );
 
                                     // Apply table/front-matter text styling
@@ -3538,10 +3576,16 @@ impl Element for EditorElement {
                 }
             }
 
-            // HR dashed line
+            // HR line: `***` renders dashed, `---`/`___` render solid.
             if *block_type == BlockType::HorizontalRule && !is_cursor_line {
                 let hr_y = text_line_top + text_line_height / 2.0;
-                hr_lines.push((hr_y, editor_left + editor.padding_left(), text_width));
+                let is_dashed = line_content.trim_start().starts_with('*');
+                hr_lines.push((
+                    hr_y,
+                    editor_left + editor.padding_left(),
+                    text_width,
+                    is_dashed,
+                ));
             }
 
             // Image preview
@@ -5304,20 +5348,30 @@ impl Element for EditorElement {
                 .ok();
         }
 
-        // HR dashed lines
-        for (hr_y, hr_start_x, hr_width) in &prepaint.hr_lines {
-            let dash_len = 6.0_f32;
-            let gap_len = 4.0_f32;
-            let mut x = *hr_start_x;
-            let end_x = *hr_start_x + hr_width;
+        // HR lines: solid for `---`/`___`, dashed for `***`.
+        for (hr_y, hr_start_x, hr_width, is_dashed) in &prepaint.hr_lines {
             let theme = &self.editor.read(cx).theme;
-            while x < end_x {
-                let seg_end = (x + dash_len).min(end_x);
+            if *is_dashed {
+                let dash_len = 6.0_f32;
+                let gap_len = 4.0_f32;
+                let mut x = *hr_start_x;
+                let end_x = *hr_start_x + hr_width;
+                while x < end_x {
+                    let seg_end = (x + dash_len).min(end_x);
+                    window.paint_quad(fill(
+                        Bounds::new(point(px(x), px(*hr_y)), size(px(seg_end - x), px(1.0))),
+                        theme.border_decorative,
+                    ));
+                    x = seg_end + gap_len;
+                }
+            } else {
                 window.paint_quad(fill(
-                    Bounds::new(point(px(x), px(*hr_y)), size(px(seg_end - x), px(1.0))),
+                    Bounds::new(
+                        point(px(*hr_start_x), px(*hr_y)),
+                        size(px(*hr_width), px(1.0)),
+                    ),
                     theme.border_decorative,
                 ));
-                x = seg_end + gap_len;
             }
         }
 

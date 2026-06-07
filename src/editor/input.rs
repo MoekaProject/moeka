@@ -1485,6 +1485,7 @@ impl EditorView {
             self.styles.wiki_link.wiki_link_text_color,
             self.styles.wiki_link.wiki_link_text_weight,
             None,
+            false,
         );
         if ti.is_header {
             for run in &mut cell_runs {
@@ -1874,6 +1875,7 @@ impl EditorView {
             self.styles.wiki_link.wiki_link_text_color,
             self.styles.wiki_link.wiki_link_text_weight,
             Some(self.styles.table.front_matter_key_text_color),
+            self.active_tab_is_non_markdown_text(),
         );
 
         let display_shared: SharedString = if display_text.is_empty() {

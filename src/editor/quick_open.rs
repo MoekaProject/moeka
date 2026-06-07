@@ -399,6 +399,13 @@ impl EditorView {
                             .flex_1()
                             .max_h(px(max_results_h))
                             .overflow_y_scroll()
+                            // GPUI content masks are rectangular, so a hovered
+                            // row's background cannot be clipped to the panel's
+                            // rounded corners. Inset the list from the bottom by
+                            // the corner radius so hovered rows never reach the
+                            // rounded bottom corners (mirrors the context menu's
+                            // vertical padding pattern).
+                            .pb(px(self.scaled(styles.quick_open_panel_radius_px)))
                             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
                                 this.maybe_extend_quick_open_results(cx);
                             }))

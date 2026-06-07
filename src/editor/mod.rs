@@ -5281,6 +5281,68 @@ impl EditorView {
         cx.write_to_clipboard(ClipboardItem::new_string(texts[0].clone()));
     }
 
+    /// Copy the document text with markdown syntax markers stripped out. When a
+    /// selection is present only that range is copied (still excluding any
+    /// syntax characters that fall inside it); otherwise the whole document is
+    /// copied as plain text.
+    pub(crate) fn copy_plain_text_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        let selection = self.cursor.selection_range();
+        let (start, end) = if selection.start != selection.end {
+            (selection.start, selection.end)
+        } else {
+            (0, self.buffer.len())
+        };
+        let plain = self.plain_text_in_buffer_range(start, end);
+        self.context_menu = None;
+        self.multi_cursor_clipboard = None;
+        cx.write_to_clipboard(ClipboardItem::new_string(plain));
+        cx.notify();
+    }
+
+    /// Build the plain text for the buffer byte range `[start, end)`, dropping
+    /// every per-line syntax marker span (e.g. `#`, `**`, `` ` ``, `~~`, `==`,
+    /// list markers) so only the rendered content remains.
+    fn plain_text_in_buffer_range(&self, start: usize, end: usize) -> String {
+        let mut out = String::new();
+        let mut first_line = true;
+        for line_idx in 0..self.buffer.line_count() {
+            let line_start = self.buffer.line_start(line_idx);
+            let line_content = self.buffer.line_content(line_idx);
+            let line_end = line_start + line_content.len();
+            if line_end < start || line_start > end {
+                continue;
+            }
+            if !first_line {
+                out.push('\n');
+            }
+            first_line = false;
+            let syntax_spans: Vec<std::ops::Range<usize>> = self
+                .decorations
+                .get(line_idx)
+                .map(|decoration| {
+                    decoration
+                        .syntax_ranges
+                        .iter()
+                        .map(|sr| sr.range.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (offset, ch) in line_content.char_indices() {
+                let abs = line_start + offset;
+                if abs < start || abs >= end {
+                    continue;
+                }
+                let in_syntax = syntax_spans
+                    .iter()
+                    .any(|span| offset >= span.start && offset < span.end);
+                if !in_syntax {
+                    out.push(ch);
+                }
+            }
+        }
+        out
+    }
+
     fn next_code_block_copy_feedback_epoch(&mut self) -> usize {
         self.code_block_copy_feedback_epoch += 1;
         self.code_block_copy_feedback_epoch

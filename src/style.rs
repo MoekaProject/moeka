@@ -1685,7 +1685,7 @@ impl Styles {
             search: SearchStyles {
                 search_bar_width_px: 360.0,
                 search_bar_padding_px: 8.0,
-                search_bar_bg: theme.bg_elevated,
+                search_bar_bg: theme.bg_primary,
                 search_bar_border_width_px: 1.0,
                 search_bar_border_color: theme.border_primary,
                 search_bar_radius_px: 8.0,
