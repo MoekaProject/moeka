@@ -70,6 +70,10 @@ impl EditorView {
             self.close_context_menu(cx);
             return;
         }
+        if self.clear_phantom_selection() {
+            cx.notify();
+            return;
+        }
         if self.has_extra_cursors() {
             self.clear_extra_cursors();
             cx.notify();
@@ -407,6 +411,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_left(cx);
             return;
@@ -466,6 +471,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_right(cx);
             return;
@@ -508,6 +514,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_up(cx);
             return;
@@ -551,6 +558,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_down(cx);
             return;
@@ -678,6 +686,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
+        self.clear_phantom_selection();
         self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_move_to_line_start();
@@ -689,6 +698,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        self.clear_phantom_selection();
         self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_move_to_line_end();
@@ -963,6 +973,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_phantom_selection();
         if self.has_extra_cursors() {
             self.multi_cursor_move_word_left();
         } else {
@@ -978,6 +989,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_phantom_selection();
         if self.has_extra_cursors() {
             self.multi_cursor_move_word_right();
         } else {

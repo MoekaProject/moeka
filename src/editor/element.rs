@@ -3,10 +3,11 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    App, BorderStyle, Bounds, Corners, CursorStyle, Element, ElementId, ElementInputHandler,
-    Entity, Font, FontFallbacks, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
-    IntoElement, LayoutId, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextAlign,
-    TextRun, TransformationMatrix, Window, WrappedLine, fill, point, px, quad, relative, size,
+    App, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Element, ElementId,
+    ElementInputHandler, Entity, Font, FontFallbacks, FontWeight, GlobalElementId, Hitbox,
+    HitboxBehavior, Hsla, IntoElement, LayoutId, PaintQuad, Path, Pixels, Point, ShapedLine,
+    SharedString, Style, TextAlign, TextRun, TransformationMatrix, Window, WrappedLine, fill,
+    point, px, quad, relative, size,
 };
 
 use crate::markdown::BlockType;
@@ -29,6 +30,8 @@ pub(crate) struct EditorPrepaintState {
     search_match_quads: Vec<PaintQuad>,
     diff_line_bgs: Vec<PaintQuad>,
     diff_inline_quads: Vec<PaintQuad>,
+    inline_diff_gutter_bars: Vec<(Bounds<Pixels>, Hsla)>,
+    phantom_text_lines: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
     line_highlight: Option<PaintQuad>,
     code_block_bgs: Vec<PaintQuad>,
     unordered_list_markers: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
@@ -54,6 +57,7 @@ pub(crate) struct EditorPrepaintState {
     /// Per-cell shaped texts for table block rendering.
     table_cell_texts: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
     code_block_copy_buttons: Vec<CodeBlockCopyButtonPaint>,
+    inline_diff_revert_buttons: Vec<CodeBlockCopyButtonPaint>,
     code_block_copy_hitboxes: Vec<Hitbox>,
     preview_zoom_buttons: Vec<CodeBlockCopyButtonPaint>,
     preview_zoom_hitboxes: Vec<Hitbox>,
@@ -119,12 +123,21 @@ struct PrepaintLine {
 }
 
 fn diff_line_background(editor: &EditorView, line_idx: usize) -> Option<Hsla> {
-    let row = editor.active_git_diff_state()?.rows.get(line_idx)?;
-    match row.kind {
-        GitDiffRowKind::Added => Some(editor.styles.selection.selection_diff_added_line_bg),
-        GitDiffRowKind::Removed => Some(editor.styles.selection.selection_diff_removed_line_bg),
-        GitDiffRowKind::Context => None,
+    if let Some(diff) = editor.active_git_diff_state() {
+        let row = diff.rows.get(line_idx)?;
+        return match row.kind {
+            GitDiffRowKind::Added => Some(editor.styles.selection.selection_diff_added_line_bg),
+            GitDiffRowKind::Removed => Some(editor.styles.selection.selection_diff_removed_line_bg),
+            GitDiffRowKind::Context => None,
+        };
     }
+    // In-place working-tree diff: added/modified buffer lines get the green
+    // changed-line background. Removed lines are not in the buffer, so they are
+    // surfaced separately as phantom rows when a hunk is expanded.
+    if editor.inline_diff_line_is_changed(line_idx) {
+        return Some(editor.styles.selection.selection_diff_added_line_bg);
+    }
+    None
 }
 
 fn diff_hunk_label_text_color(editor: &EditorView, line_idx: usize) -> Option<Hsla> {
@@ -1132,6 +1145,23 @@ impl Element for EditorElement {
         let mut table_bgs: Vec<PaintQuad> = Vec::new();
         let mut diff_line_bgs: Vec<PaintQuad> = Vec::new();
         let mut diff_inline_quads: Vec<PaintQuad> = Vec::new();
+        // In-place (working-tree) diff: left-edge indicator bars plus the
+        // per-visible-line geometry used to position them and their hit areas.
+        let mut inline_diff_gutter_bars: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
+        let mut inline_diff_line_geometry: Vec<(usize, f32, f32)> = Vec::new();
+        let mut inline_diff_gutter_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
+        let mut inline_diff_hunk_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
+        let mut inline_diff_revert_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
+        let mut inline_diff_revert_buttons: Vec<CodeBlockCopyButtonPaint> = Vec::new();
+        // Read-only removed rows shaped for expanded inline-diff hunks.
+        let mut phantom_text_lines: Vec<(WrappedLine, Point<Pixels>, Pixels)> = Vec::new();
+        // Measured total height of the soft-wrapped removed rows anchored above /
+        // below each line, written back so `block_padding_for_line` reserves the
+        // right amount on the next frame.
+        let mut phantom_above_heights: HashMap<usize, f32> = HashMap::new();
+        let mut phantom_below_heights: HashMap<usize, f32> = HashMap::new();
+        // Per-removed-row geometry for read-only character-level selection.
+        let mut phantom_row_hits_local: Vec<PhantomRowHit> = Vec::new();
         let mut table_cell_texts: Vec<(WrappedLine, Point<Pixels>, Pixels)> = Vec::new();
         let mut table_click_areas_local: Vec<(Bounds<Pixels>, usize, usize, usize)> = Vec::new();
         let mut table_col_handle_areas_local: Vec<(Bounds<Pixels>, usize, usize)> = Vec::new();
@@ -1396,6 +1426,7 @@ impl Element for EditorElement {
             let can_reuse_non_markdown_cached_line = editor.active_tab_is_non_markdown_text()
                 && !is_cursor_line_early
                 && !line_has_block_preview
+                && !editor.inline_diff_is_phantom_anchor(line_idx)
                 && cached_line.is_some_and(|cached| {
                     non_markdown_cached_line_can_reuse(cached, non_markdown_cached_wrap_width)
                 });
@@ -1462,6 +1493,13 @@ impl Element for EditorElement {
             }
 
             let decoration = decorations.get(line_idx).cloned().unwrap_or_default();
+            let mut decoration = decoration;
+            // Overlay in-place working-tree diff highlights onto the live buffer
+            // line. Removed spans stay empty (removed content is shown as phantom
+            // rows when a hunk is expanded), only added/changed chars highlight.
+            if let Some(added_spans) = editor.inline_diff_added_spans_for_line(line_idx) {
+                decoration.diff_added_spans = added_spans;
+            }
             let block_type = &decoration.block_type;
             let font_size = editor.font_size_for_block(block_type);
             let line_height = editor.line_height_for_block(block_type);
@@ -1766,6 +1804,7 @@ impl Element for EditorElement {
                     _last_line_height = total_line_height;
                     continue;
                 }
+                inline_diff_line_geometry.push((line_idx, line_top, total_line_height));
 
                 let mut runs = cached.base_runs.clone();
                 helpers::apply_search_match_text_styles(
@@ -2157,6 +2196,7 @@ impl Element for EditorElement {
                 }
 
                 if editor.selected_handle.is_none()
+                    && editor.phantom_selection.is_none()
                     && window.is_window_active()
                     && editor.focus_handle.is_focused(window)
                     && editor.focused_sidebar_path.is_none()
@@ -2696,6 +2736,9 @@ impl Element for EditorElement {
             let line_top = y - effective_scroll_offset;
             let line_bottom = line_top + total_line_height;
             let text_line_top = line_top + block_padding_top;
+            if line_bottom >= origin_y && line_top <= origin_y + viewport_height {
+                inline_diff_line_geometry.push((line_idx, line_top, total_line_height));
+            }
             let base_content_x =
                 if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence)
                     || is_front_matter_line
@@ -4053,6 +4096,267 @@ impl Element for EditorElement {
                 letter_spacing,
                 window,
             );
+            // Read-only phantom rows: an expanded inline-diff hunk's removed
+            // lines render in the padding band reserved by `block_padding_for_line`
+            // (above the anchor line, or below the last line for a trailing
+            // deletion). They carry the HEAD line's markdown decoration and
+            // soft-wrap like live lines, but are reference-only and never enter
+            // the buffer. The painted band is top-aligned at the reserved height
+            // so the anchor's geometry stays consistent; the measured height is
+            // recorded for the next frame.
+            {
+                let above_rows = editor.inline_diff_phantom_removed_above(line_idx);
+                let below_rows = editor.inline_diff_phantom_removed_below(line_idx);
+                if !above_rows.is_empty() || !below_rows.is_empty() {
+                    let phantom_content_x = editor_left + editor.padding_left();
+                    let phantom_border_width =
+                        editor.scaled(selection_styles.selection_diff_inline_border_width_px);
+                    let mut render_band = |rows: &[(usize, usize, InlineDiffRemovedLine)],
+                                           band_top: f32|
+                     -> f32 {
+                        let mut row_top = band_top;
+                        for (hunk_base_start, row_in_hunk, removed) in rows {
+                            let r_decoration = &removed.decoration;
+                            let r_font_size = editor.font_size_for_block(&r_decoration.block_type);
+                            let r_line_height =
+                                editor.line_height_for_block(&r_decoration.block_type);
+                            // Removed rows fold their markdown syntax like the
+                            // editor does, expanding to source only on the focused
+                            // row (the one the read-only caret/selection touches),
+                            // following cursor focus. Tables, code blocks, and
+                            // generated previews (charts/formulas) have no folded
+                            // form and always stay in source syntax.
+                            let foldable = r_decoration.table_info.is_none()
+                                && r_decoration.block_preview.is_none()
+                                && !matches!(
+                                    r_decoration.block_type,
+                                    BlockType::CodeBlock | BlockType::CodeBlockFence
+                                );
+                            let is_active = editor.phantom_selection.is_some_and(|sel| {
+                                if sel.hunk_base_start != *hunk_base_start {
+                                    return false;
+                                }
+                                let (start_row, _, end_row, _) = sel.ordered();
+                                *row_in_hunk >= start_row && *row_in_hunk <= end_row
+                            });
+                            let show_source = !foldable || is_active;
+                            let (display_text, display_to_buffer, code_syntax_active) =
+                                if show_source {
+                                    (
+                                        removed.text.clone(),
+                                        (0..=removed.text.len()).collect::<Vec<usize>>(),
+                                        true,
+                                    )
+                                } else {
+                                    let (folded, d2b, _b2d, _prefix_collapsed) =
+                                        helpers::build_display_text(
+                                            &removed.text,
+                                            r_decoration,
+                                            &[],
+                                            false,
+                                            None,
+                                            table_cell_padding_chars,
+                                            collapsed_task_prefix_display_columns,
+                                            checkbox_indent_step_display_columns,
+                                            editor.styles.checkbox.checkbox_parent_prefix_chars
+                                                as usize,
+                                            0,
+                                            editor.styles.editor.editor_superscript_scale_factor,
+                                            editor.styles.editor.editor_subscript_scale_factor,
+                                            editor.styles.editor.editor_superscript_scale_factor,
+                                        );
+                                    (folded, d2b, false)
+                                };
+                            let runs = helpers::build_text_runs_for_display(
+                                &display_text,
+                                &removed.text,
+                                &display_to_buffer,
+                                r_decoration,
+                                &[],
+                                code_syntax_active,
+                                false,
+                                &body_font,
+                                &body_cjk_font,
+                                &monospace_font,
+                                &heading_font,
+                                &heading_cjk_font,
+                                collapsed_task_prefix_display_columns,
+                                r_font_size,
+                                theme,
+                                selection_styles.selection_diff_added_inline_bg,
+                                selection_styles.selection_diff_removed_inline_bg,
+                                editor.styles.wiki_link.wiki_link_text_color,
+                                editor.styles.wiki_link.wiki_link_text_weight,
+                                None,
+                                false,
+                            );
+                            let shared: SharedString = if display_text.is_empty() {
+                                " ".into()
+                            } else {
+                                display_text.clone().into()
+                            };
+                            let Ok(shaped) = window.text_system().shape_text(
+                                shared,
+                                px(r_font_size),
+                                &runs,
+                                Some(px(wrap_width)),
+                                None,
+                            ) else {
+                                row_top += r_line_height;
+                                continue;
+                            };
+                            let Some(wrapped) = shaped.into_iter().next() else {
+                                row_top += r_line_height;
+                                continue;
+                            };
+                            let visual_lines = helpers::wrap_boundary_byte_indices(&wrapped)
+                                .len()
+                                .saturating_add(1);
+                            let row_height = visual_lines as f32 * r_line_height;
+                            let row_bounds = Bounds::new(
+                                point(px(origin_x), px(row_top)),
+                                size(px(viewport_width), px(row_height)),
+                            );
+                            diff_line_bgs.push(fill(
+                                row_bounds,
+                                selection_styles.selection_diff_removed_line_bg,
+                            ));
+                            // Record geometry so a later mouse event can hit-test
+                            // this soft-wrapped removed row down to a byte offset.
+                            phantom_row_hits_local.push(PhantomRowHit {
+                                bounds: row_bounds,
+                                hunk_base_start: *hunk_base_start,
+                                row: *row_in_hunk,
+                                content_x: phantom_content_x,
+                                row_top,
+                                line_height: r_line_height,
+                                wrapped: wrapped.clone(),
+                                text_len: removed.text.len(),
+                                display_to_buffer: display_to_buffer.clone(),
+                            });
+                            // Read-only character-level selection + caret.
+                            if let Some(sel) = editor.phantom_selection
+                                && sel.hunk_base_start == *hunk_base_start
+                            {
+                                let text_len = removed.text.len();
+                                let clamp_off = |mut off: usize| -> usize {
+                                    off = off.min(text_len);
+                                    while off > 0 && !removed.text.is_char_boundary(off) {
+                                        off -= 1;
+                                    }
+                                    off
+                                };
+                                if !sel.is_collapsed() {
+                                    let (sr, so, er, eo) = sel.ordered();
+                                    if *row_in_hunk >= sr && *row_in_hunk <= er {
+                                        let disp_start =
+                                            if *row_in_hunk == sr { clamp_off(so) } else { 0 };
+                                        let disp_end = if *row_in_hunk == er {
+                                            clamp_off(eo)
+                                        } else {
+                                            text_len
+                                        };
+                                        if disp_start < disp_end {
+                                            selection_quads.extend(helpers::build_selection_quads(
+                                                &removed.text,
+                                                &runs,
+                                                &wrapped,
+                                                disp_start,
+                                                disp_end,
+                                                phantom_content_x,
+                                                row_top,
+                                                r_line_height,
+                                                r_font_size,
+                                                0.0,
+                                                0.0,
+                                                theme.selection,
+                                                letter_spacing,
+                                                window,
+                                            ));
+                                        }
+                                    }
+                                }
+                                if sel.head_row == *row_in_hunk
+                                    && window.is_window_active()
+                                    && editor.focus_handle.is_focused(window)
+                                {
+                                    let head_off = clamp_off(sel.head_offset);
+                                    let caret_pos = wrapped
+                                        .position_for_index(head_off, px(r_line_height))
+                                        .unwrap_or_default();
+                                    let caret_height = r_line_height
+                                        * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
+                                    let caret_top = row_top
+                                        + f32::from(caret_pos.y)
+                                        + (r_line_height - caret_height) / 2.0;
+                                    let mut caret_color = theme.cursor;
+                                    caret_color.a *= if editor.phantom_selecting {
+                                        editor.styles.cursor.cursor_opacity_max
+                                    } else {
+                                        editor.cursor_opacity
+                                    };
+                                    cursor_quads.push(fill(
+                                        Bounds::new(
+                                            point(
+                                                px(phantom_content_x) + caret_pos.x,
+                                                px(caret_top),
+                                            ),
+                                            size(
+                                                px(editor.styles.cursor.cursor_width_px),
+                                                px(caret_height),
+                                            ),
+                                        ),
+                                        caret_color,
+                                    ));
+                                }
+                            }
+                            // The inline char-diff highlight maps raw-text spans
+                            // through an identity table, so only draw it on source
+                            // rows; folded rows still carry the removed-line
+                            // background for context.
+                            if show_source {
+                                push_diff_inline_highlight_quads(
+                                    &mut diff_inline_quads,
+                                    &removed.removed_spans,
+                                    &display_text,
+                                    removed.text.len(),
+                                    &display_to_buffer,
+                                    &runs,
+                                    &wrapped,
+                                    phantom_content_x,
+                                    row_top,
+                                    r_line_height,
+                                    r_font_size,
+                                    0.0,
+                                    selection_styles.selection_diff_removed_inline_bg,
+                                    selection_styles.selection_diff_removed_inline_border_color,
+                                    phantom_border_width,
+                                    letter_spacing,
+                                    window,
+                                );
+                            }
+                            phantom_text_lines.push((
+                                wrapped,
+                                point(px(phantom_content_x), px(row_top)),
+                                px(r_line_height),
+                            ));
+                            row_top += row_height;
+                        }
+                        row_top - band_top
+                    };
+                    if !above_rows.is_empty() {
+                        let reserved = editor.inline_diff_phantom_reserved_above(line_idx);
+                        let measured = render_band(&above_rows, text_line_top - reserved);
+                        phantom_above_heights.insert(line_idx, measured);
+                    }
+                    if !below_rows.is_empty() {
+                        let reserved = editor.inline_diff_phantom_reserved_below(line_idx);
+                        let measured =
+                            render_band(&below_rows, line_top + total_line_height - reserved);
+                        phantom_below_heights.insert(line_idx, measured);
+                    }
+                }
+            }
             if !decoration.highlight_spans.is_empty() {
                 push_diff_inline_highlight_quads(
                     &mut diff_inline_quads,
@@ -4317,6 +4621,7 @@ impl Element for EditorElement {
             // Cursor bars — paint for all cursors (primary + extra)
             // Skip for table lines — table cursor is rendered within the table block
             if editor.selected_handle.is_none()
+                && editor.phantom_selection.is_none()
                 && (*block_type != BlockType::Table || is_front_matter_line)
                 && window.is_window_active()
                 && editor.focus_handle.is_focused(window)
@@ -5111,6 +5416,214 @@ impl Element for EditorElement {
             }
         }
 
+        // ── In-place diff gutter indicators + hover revert button ───────
+        // Draw the left-edge bars from the active inline diff and the geometry
+        // captured for visible lines above. Added/modified hunks get a green bar
+        // over their buffer lines; pure deletions get a short red marker. A
+        // full-width hover region per hunk reveals a top-right "revert" button.
+        if let Some(inline_diff) = editor.active_inline_diff()
+            && !inline_diff.hunks.is_empty()
+            && !inline_diff_line_geometry.is_empty()
+        {
+            let geometry: HashMap<usize, (f32, f32)> = inline_diff_line_geometry
+                .iter()
+                .map(|(line, top, height)| (*line, (*top, *height)))
+                .collect();
+            let selection_styles = &editor.styles.selection;
+            let bar_width = editor.scaled(selection_styles.selection_diff_bar_width_px);
+            // Flush against the editor's far-left edge with no margin. The click
+            // target is exactly the bar width, so the gap between the bar and the
+            // text content still behaves as normal editor text (I-beam cursor).
+            let bar_x = origin_x;
+            let gutter_hit_left = bar_x;
+            let gutter_hit_width = bar_width;
+            let added_bar = selection_styles.selection_diff_added_bar_color;
+            let removed_bar = selection_styles.selection_diff_removed_bar_color;
+            let collapsed_opacity = selection_styles.selection_diff_bar_collapsed_opacity;
+            let expanded_opacity = selection_styles.selection_diff_bar_expanded_opacity;
+            let removed_marker_h = editor.scaled(10.0);
+            for (hunk_index, hunk) in inline_diff.hunks.iter().enumerate() {
+                // Dimmer while collapsed, full brightness while expanded.
+                let bar_opacity = if hunk.expanded {
+                    expanded_opacity
+                } else {
+                    collapsed_opacity
+                };
+                let mut added_bar = added_bar;
+                added_bar.a *= bar_opacity;
+                let mut removed_bar = removed_bar;
+                removed_bar.a *= bar_opacity;
+                // Region spanning the hunk's visible buffer lines plus any
+                // expanded phantom band, used for the hover hit area and to
+                // anchor the revert button.
+                let mut region_top = f32::MAX;
+                let mut region_bottom = f32::MIN;
+                if hunk.expanded
+                    && !hunk.removed_lines.is_empty()
+                    && let Some(&(top, _)) = geometry.get(&hunk.buffer_start)
+                {
+                    // `top` is the buffer_start block's top, which already sits
+                    // above the removed-row band (the band lives inside that
+                    // line's top padding). So the hunk's visual top is `top`
+                    // itself — do not subtract the reserved band height again.
+                    region_top = region_top.min(top);
+                    region_bottom = region_bottom.max(top);
+                }
+                match hunk.kind {
+                    InlineDiffHunkKind::Added | InlineDiffHunkKind::Modified => {
+                        let mut bar_top = f32::MAX;
+                        let mut bar_bottom = f32::MIN;
+                        for line in hunk.buffer_start..hunk.buffer_end {
+                            let Some(&(top, height)) = geometry.get(&line) else {
+                                continue;
+                            };
+                            bar_top = bar_top.min(top);
+                            bar_bottom = bar_bottom.max(top + height);
+                        }
+                        if bar_bottom > bar_top {
+                            inline_diff_gutter_bars.push((
+                                Bounds::new(
+                                    point(px(bar_x), px(bar_top)),
+                                    size(px(bar_width), px(bar_bottom - bar_top)),
+                                ),
+                                added_bar,
+                            ));
+                            region_top = region_top.min(bar_top);
+                            region_bottom = region_bottom.max(bar_bottom);
+                            // Toggle hit area covers only the visible bar so the
+                            // text to its right stays a normal editor click target.
+                            inline_diff_gutter_areas_local.push((
+                                Bounds::new(
+                                    point(px(gutter_hit_left), px(bar_top)),
+                                    size(px(gutter_hit_width), px(bar_bottom - bar_top)),
+                                ),
+                                hunk_index,
+                            ));
+                        }
+                    }
+                    InlineDiffHunkKind::Removed => {
+                        let anchor_y = geometry
+                            .get(&hunk.buffer_start)
+                            .map(|&(top, _)| top)
+                            .or_else(|| {
+                                if hunk.buffer_start >= line_count {
+                                    geometry
+                                        .get(&line_count.saturating_sub(1))
+                                        .map(|&(top, height)| top + height)
+                                } else {
+                                    None
+                                }
+                            });
+                        if let Some(anchor_y) = anchor_y {
+                            let marker_top = anchor_y - removed_marker_h / 2.0;
+                            inline_diff_gutter_bars.push((
+                                Bounds::new(
+                                    point(px(bar_x), px(marker_top)),
+                                    size(px(bar_width), px(removed_marker_h)),
+                                ),
+                                removed_bar,
+                            ));
+                            inline_diff_gutter_areas_local.push((
+                                Bounds::new(
+                                    point(
+                                        px(gutter_hit_left),
+                                        px(marker_top - removed_marker_h / 2.0),
+                                    ),
+                                    size(px(gutter_hit_width), px(removed_marker_h * 2.0)),
+                                ),
+                                hunk_index,
+                            ));
+                            if region_bottom <= region_top {
+                                region_top = marker_top - removed_marker_h / 2.0;
+                                region_bottom = marker_top + removed_marker_h * 1.5;
+                            }
+                        }
+                    }
+                }
+
+                if region_bottom <= region_top {
+                    continue;
+                }
+
+                // Full-width hover region that reveals the revert button.
+                inline_diff_hunk_areas_local.push((
+                    Bounds::new(
+                        point(px(editor_left), px(region_top)),
+                        size(px(editor_width), px(region_bottom - region_top)),
+                    ),
+                    hunk_index,
+                ));
+
+                // The revert button only appears once a hunk is expanded, and
+                // then only while the hunk is hovered. It sits flush against the
+                // right edge of the editor content with no extra margin, and
+                // highlights while the pointer is over the button itself.
+                if hunk.expanded && editor.hovering_inline_diff_hunk == Some(hunk_index) {
+                    let is_revert_hovered =
+                        editor.hovering_inline_diff_revert_hunk == Some(hunk_index);
+                    let (revert_bg, revert_text_color, revert_border_color) = if is_revert_hovered {
+                        (
+                            code_block_styles.code_block_copy_button_hover_bg,
+                            code_block_styles.code_block_copy_button_hover_text_color,
+                            code_block_styles.code_block_copy_button_hover_border_color,
+                        )
+                    } else {
+                        (
+                            code_block_styles.code_block_copy_button_bg,
+                            code_block_styles.code_block_copy_button_text_color,
+                            code_block_styles.code_block_copy_button_border_color,
+                        )
+                    };
+                    if let Some((revert_label, revert_button_width, revert_button_height)) =
+                        shape_preview_button(
+                            window,
+                            &button_font,
+                            button_font_size,
+                            button_padding_x,
+                            button_padding_x,
+                            button_padding_y,
+                            button_text_line_height,
+                            editor.t(crate::i18n::TextKey::InlineDiffRevert),
+                            revert_text_color,
+                        )
+                    {
+                        let revert_button_width = revert_button_width.ceil();
+                        let revert_button_height = revert_button_height.ceil();
+                        // Outside the editor content: the button's top-left corner
+                        // aligns with the content's top-right corner. Clamp to the
+                        // editor pane so it never runs off the right edge.
+                        let content_text_right = editor_left + editor.padding_left() + text_width;
+                        let pane_right = editor_left + editor_width;
+                        let revert_x = content_text_right
+                            .min(pane_right - revert_button_width)
+                            .round();
+                        let revert_y = region_top.round();
+                        let revert_bounds = Bounds::new(
+                            point(px(revert_x), px(revert_y)),
+                            size(px(revert_button_width), px(revert_button_height)),
+                        );
+                        inline_diff_revert_buttons.push(CodeBlockCopyButtonPaint {
+                            quad: quad(
+                                revert_bounds,
+                                Corners::all(button_radius),
+                                revert_bg,
+                                button_border_width,
+                                revert_border_color,
+                                BorderStyle::default(),
+                            ),
+                            label: revert_label,
+                            origin: point(
+                                px(revert_x + button_padding_x),
+                                px(revert_y + button_padding_y),
+                            ),
+                            line_height: px(button_text_line_height),
+                        });
+                        inline_diff_revert_areas_local.push((revert_bounds, hunk_index));
+                    }
+                }
+            }
+        }
+
         self.editor.update(cx, |editor, cx| {
             editor.apply_line_display_info_updates(line_count, display_info_updates);
             editor.last_viewport_height = viewport_height;
@@ -5127,12 +5640,52 @@ impl Element for EditorElement {
             editor.table_col_handle_areas = table_col_handle_areas_local.clone();
             editor.table_row_handle_areas = table_row_handle_areas_local.clone();
             editor.gutter_fold_areas = gutter_fold_hit_areas_local.clone();
+            editor.inline_diff_gutter_areas = inline_diff_gutter_areas_local.clone();
+            editor.inline_diff_hunk_areas = inline_diff_hunk_areas_local.clone();
+            editor.inline_diff_revert_areas = inline_diff_revert_areas_local.clone();
+            editor.phantom_row_hits = phantom_row_hits_local;
             editor.image_edit_areas = image_edit_hit_areas_local.clone();
             editor.preview_overlay_bounds = preview_overlay_bounds_local;
             editor.preview_overlay_image_bounds = preview_overlay_image_bounds_local;
             editor.last_editor_left = editor_left;
             editor.last_editor_width = editor_width;
             editor.last_content_left = editor_left + editor.padding_left();
+            // Reconcile measured phantom (removed-row) heights. A wrap-width
+            // change invalidates the cached heights; apply this frame's
+            // measurements and, if anything changed, invalidate the geometry
+            // cache so the reserved bands match on the next frame.
+            let phantom_width_changed = (editor.last_text_width - text_width).abs() > 0.5;
+            let mut phantom_heights_changed = false;
+            if phantom_width_changed
+                && (!editor.inline_diff_phantom_height_above.is_empty()
+                    || !editor.inline_diff_phantom_height_below.is_empty())
+            {
+                editor.inline_diff_phantom_height_above.clear();
+                editor.inline_diff_phantom_height_below.clear();
+                phantom_heights_changed = true;
+            }
+            for (line, height) in phantom_above_heights {
+                match editor.inline_diff_phantom_height_above.get(&line) {
+                    Some(&existing) if (existing - height).abs() <= 0.5 => {}
+                    _ => {
+                        editor.inline_diff_phantom_height_above.insert(line, height);
+                        phantom_heights_changed = true;
+                    }
+                }
+            }
+            for (line, height) in phantom_below_heights {
+                match editor.inline_diff_phantom_height_below.get(&line) {
+                    Some(&existing) if (existing - height).abs() <= 0.5 => {}
+                    _ => {
+                        editor.inline_diff_phantom_height_below.insert(line, height);
+                        phantom_heights_changed = true;
+                    }
+                }
+            }
+            if phantom_heights_changed {
+                editor.invalidate_line_geometry_cache();
+                cx.notify();
+            }
             editor.last_text_width = text_width;
             if scroll_anchor_delta.abs() > 0.5
                 && editor.active_tab_is_non_markdown_text()
@@ -5202,6 +5755,8 @@ impl Element for EditorElement {
             search_match_quads,
             diff_line_bgs,
             diff_inline_quads,
+            inline_diff_gutter_bars,
+            phantom_text_lines,
             line_highlight,
             code_block_bgs,
             unordered_list_markers,
@@ -5217,6 +5772,7 @@ impl Element for EditorElement {
             table_bgs,
             table_cell_texts,
             code_block_copy_buttons,
+            inline_diff_revert_buttons,
             code_block_copy_hitboxes,
             preview_zoom_buttons,
             preview_zoom_hitboxes,
@@ -5246,6 +5802,8 @@ impl Element for EditorElement {
             None if editor.hovering_image_preview_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_generated_preview_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_generated_preview_zoom_line.is_some() => CursorStyle::Arrow,
+            None if editor.hovering_inline_diff_gutter_hunk.is_some() => CursorStyle::Arrow,
+            None if editor.hovering_inline_diff_revert_hunk.is_some() => CursorStyle::Arrow,
             None if editor.editor_scrollbar_hovered => CursorStyle::Arrow,
             None => CursorStyle::IBeam,
         };
@@ -5317,6 +5875,38 @@ impl Element for EditorElement {
 
         for quad in prepaint.gutter_quads.drain(..) {
             window.paint_quad(quad);
+        }
+        // In-place diff gutter bars: a spaced diagonal hatch clipped to each
+        // bar's strip. Sweeping the intercept on a stable absolute grid keeps
+        // the pattern from crawling while scrolling.
+        if !prepaint.inline_diff_gutter_bars.is_empty() {
+            let selection_styles = &editor.styles.selection;
+            let stripe_thickness = editor
+                .scaled(selection_styles.selection_diff_bar_stripe_thickness_px)
+                .max(0.5);
+            let stripe_spacing = editor
+                .scaled(selection_styles.selection_diff_bar_stripe_spacing_px)
+                .max(0.0);
+            let stripe_period = (stripe_thickness + stripe_spacing).max(1.0);
+            for (bar_bounds, color) in prepaint.inline_diff_gutter_bars.drain(..) {
+                let x0 = f32::from(bar_bounds.origin.x);
+                let x1 = x0 + f32::from(bar_bounds.size.width);
+                let top = f32::from(bar_bounds.origin.y);
+                let bottom = top + f32::from(bar_bounds.size.height);
+                window.with_content_mask(Some(ContentMask { bounds: bar_bounds }), |window| {
+                    let c_min = x0 + top - stripe_thickness;
+                    let c_max = x1 + bottom;
+                    let mut c0 = (c_min / stripe_period).floor() * stripe_period;
+                    while c0 < c_max {
+                        let mut path = Path::new(point(px(x0), px(c0 - x0)));
+                        path.line_to(point(px(x1), px(c0 - x1)));
+                        path.line_to(point(px(x1), px(c0 + stripe_thickness - x1)));
+                        path.line_to(point(px(x0), px(c0 + stripe_thickness - x0)));
+                        window.paint_path(path, color);
+                        c0 += stripe_period;
+                    }
+                });
+            }
         }
         for (icon_bounds, icon_path, color) in &prepaint.gutter_svgs {
             window
@@ -5407,6 +5997,12 @@ impl Element for EditorElement {
             }
         }
 
+        for (wrapped, origin, line_height) in &prepaint.phantom_text_lines {
+            wrapped
+                .paint(*origin, *line_height, TextAlign::Left, None, window, cx)
+                .ok();
+        }
+
         for (marker, origin, line_height) in &prepaint.unordered_list_markers {
             marker
                 .paint(*origin, *line_height, TextAlign::Left, None, window, cx)
@@ -5414,6 +6010,21 @@ impl Element for EditorElement {
         }
 
         for button in &prepaint.code_block_copy_buttons {
+            window.paint_quad(button.quad.clone());
+            button
+                .label
+                .paint(
+                    button.origin,
+                    button.line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                )
+                .ok();
+        }
+
+        for button in &prepaint.inline_diff_revert_buttons {
             window.paint_quad(button.quad.clone());
             button
                 .label

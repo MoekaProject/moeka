@@ -10,6 +10,7 @@ mod helpers;
 mod history_store;
 mod image_view;
 mod info_panel;
+mod inline_diff;
 mod input;
 mod input_entity;
 mod input_ime;
@@ -1516,6 +1517,40 @@ pub struct EditorView {
     pub(crate) last_window_width: f32,
     pub(crate) last_window_height: f32,
 
+    // ── Inline (working-tree vs HEAD) diff overlay ──────────────────
+    /// Set when the active editor buffer changed and its inline diff needs to
+    /// be recomputed (consumed on the next render, which has a `Context`).
+    pub(crate) inline_diff_dirty: bool,
+    /// Set when the HEAD baseline must be re-read from git (file open, tab
+    /// switch, or a git working-tree change) rather than reusing the cached one.
+    pub(crate) inline_diff_base_dirty: bool,
+    /// Supersede token so only the latest debounced recompute applies.
+    pub(crate) inline_diff_epoch: u64,
+    /// Hit areas for the left-edge diff indicators: `(bounds, hunk_index)`.
+    pub(crate) inline_diff_gutter_areas: Vec<(gpui::Bounds<gpui::Pixels>, usize)>,
+    pub(crate) hovering_inline_diff_gutter_hunk: Option<usize>,
+    /// Full-width per-hunk regions used to reveal the hover "revert" button:
+    /// `(bounds, hunk_index)`.
+    pub(crate) inline_diff_hunk_areas: Vec<(gpui::Bounds<gpui::Pixels>, usize)>,
+    /// Hit areas for the hover "revert" buttons: `(bounds, hunk_index)`.
+    pub(crate) inline_diff_revert_areas: Vec<(gpui::Bounds<gpui::Pixels>, usize)>,
+    /// Hunk currently hovered (controls revert-button visibility).
+    pub(crate) hovering_inline_diff_hunk: Option<usize>,
+    /// Revert button currently hovered (controls its highlight + cursor).
+    pub(crate) hovering_inline_diff_revert_hunk: Option<usize>,
+    /// Measured total height of the expanded removed rows anchored above / below
+    /// a buffer line, keyed by that line. Filled during prepaint after the
+    /// removed lines are shaped (they soft-wrap), and read by
+    /// `block_padding_for_line` so the reserved band matches what is painted.
+    pub(crate) inline_diff_phantom_height_above: HashMap<usize, f32>,
+    pub(crate) inline_diff_phantom_height_below: HashMap<usize, f32>,
+    /// Per-removed-row geometry for hit-testing read-only phantom-row selection.
+    pub(crate) phantom_row_hits: Vec<PhantomRowHit>,
+    /// Read-only character-level selection over an expanded hunk's removed rows.
+    pub(crate) phantom_selection: Option<PhantomSelection>,
+    /// True while a phantom-row selection is being dragged.
+    pub(crate) phantom_selecting: bool,
+
     // ── Buffer search state ─────────────────────────────────────────
     pub(crate) search_visible: bool,
     pub(crate) search_query: String,
@@ -1886,6 +1921,21 @@ impl EditorView {
             tooltip_task: None,
             last_window_width: 1360.0,
             last_window_height: 820.0,
+
+            inline_diff_dirty: false,
+            inline_diff_base_dirty: false,
+            inline_diff_epoch: 0,
+            inline_diff_gutter_areas: Vec::new(),
+            hovering_inline_diff_gutter_hunk: None,
+            inline_diff_hunk_areas: Vec::new(),
+            inline_diff_revert_areas: Vec::new(),
+            hovering_inline_diff_hunk: None,
+            hovering_inline_diff_revert_hunk: None,
+            inline_diff_phantom_height_above: HashMap::new(),
+            inline_diff_phantom_height_below: HashMap::new(),
+            phantom_row_hits: Vec::new(),
+            phantom_selection: None,
+            phantom_selecting: false,
 
             search_visible: false,
             search_query: String::new(),
@@ -3251,6 +3301,13 @@ impl EditorView {
             }
         }
 
+        // A HEAD move (commit, checkout, reset) changes the inline-diff baseline
+        // for the active editable tab, so re-read it from git on the next render.
+        if git_metadata_impact.affects_working_tree_diff {
+            self.mark_inline_diff_dirty(true);
+            needs_notify = true;
+        }
+
         // Reload the active tab's buffer if it was externally modified
         if active_tab_needs_reload {
             if let Some(ref active_id) = self.active_tab_id {
@@ -4118,6 +4175,7 @@ impl EditorView {
         self.refresh_generated_block_previews();
         self.layout_dirty = true;
         self.invalidate_info_panel_cache();
+        self.mark_inline_diff_dirty(false);
     }
 
     fn refresh_generated_block_previews(&mut self) {
@@ -5262,6 +5320,14 @@ impl EditorView {
     }
 
     pub(crate) fn copy_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        // A read-only phantom-row selection takes precedence so the deleted
+        // lines under an expanded hunk can be copied.
+        if let Some(text) = self.phantom_selection_text() {
+            self.multi_cursor_clipboard = None;
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            return;
+        }
+
         let texts = self.multi_cursor_selected_texts();
         if texts.is_empty() {
             return;
@@ -7496,6 +7562,7 @@ pub(super) fn builtin_welcome_tab(ui_language: UiLanguage) -> OpenTab {
         },
         image_view: ImageViewState::default(),
         git_diff: None,
+        inline_diff: None,
         is_preview: false,
         is_dirty: false,
         is_deleted: false,

@@ -89,13 +89,13 @@ pub(crate) struct GitHistoryItem {
     is_working_tree: bool,
 }
 
-struct GitRepoContext {
-    repo_root: PathBuf,
-    file_path: PathBuf,
-    relative_path: String,
+pub(super) struct GitRepoContext {
+    pub(super) repo_root: PathBuf,
+    pub(super) file_path: PathBuf,
+    pub(super) relative_path: String,
 }
 
-fn git_repo_context_for_file(file_path: &Path) -> Option<GitRepoContext> {
+pub(super) fn git_repo_context_for_file(file_path: &Path) -> Option<GitRepoContext> {
     let file_dir = file_path.parent()?;
     let output = Command::new("git")
         .arg("-C")
@@ -775,7 +775,7 @@ fn run_git_command(repo_root: &Path, args: &[&str]) -> Option<String> {
     )
 }
 
-fn git_show_file_at_revision(repo_root: &Path, revision: &str, relative_path: &str) -> String {
+pub(super) fn git_show_file_at_revision(repo_root: &Path, revision: &str, relative_path: &str) -> String {
     let object = format!("{revision}:{relative_path}");
     let Ok(output) = Command::new("git")
         .arg("-C")
@@ -1007,7 +1007,7 @@ fn normalize_diff_block_preview_metadata(rows: &mut [GitDiffRow]) {
     }
 }
 
-fn build_inline_change_text_and_highlights(
+pub(super) fn build_inline_change_text_and_highlights(
     change: &InlineChange<'_, str>,
 ) -> (String, Vec<Range<usize>>) {
     let mut text = String::new();
@@ -1032,7 +1032,7 @@ fn build_inline_change_text_and_highlights(
     (text, merge_adjacent_inline_ranges(ranges))
 }
 
-fn merge_adjacent_inline_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+pub(super) fn merge_adjacent_inline_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
     if ranges.is_empty() {
         return ranges;
     }
@@ -1582,6 +1582,7 @@ impl EditorView {
             snapshot,
             image_view: ImageViewState::default(),
             git_diff: Some(diff),
+            inline_diff: None,
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -1597,15 +1598,20 @@ impl EditorView {
         let Some(context) = self.git_repo_context() else {
             return;
         };
-        let diff_title = Self::title_for_path(&context.file_path);
 
-        let source = if item.is_working_tree {
-            GitDiffSource::WorkingTree
-        } else {
-            GitDiffSource::Commit {
-                commit_hash: item.commit_hash.clone().unwrap_or_default(),
-                short_hash: item.short_hash.clone(),
-            }
+        // Working-tree changes are shown in place in the editor via the inline
+        // diff (gutter indicators, expandable hunks, per-hunk revert), so just
+        // focus the file instead of opening a read-only diff tab. Historical
+        // commits still open the dedicated read-only diff tab.
+        if item.is_working_tree {
+            self.open_path_in_preview_tab(context.file_path, true, cx);
+            return;
+        }
+
+        let diff_title = Self::title_for_path(&context.file_path);
+        let source = GitDiffSource::Commit {
+            commit_hash: item.commit_hash.clone().unwrap_or_default(),
+            short_hash: item.short_hash.clone(),
         };
 
         let Some(diff) = self.build_git_diff_state_for_source(&context.file_path, source) else {

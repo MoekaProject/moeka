@@ -223,6 +223,20 @@ impl EditorView {
     }
 
     pub(crate) fn block_padding_for_line(&self, line: usize) -> (f32, f32) {
+        let (base_top, base_bottom) = self.base_block_padding_for_line(line);
+        // Expanded inline-diff hunks reserve space for their read-only removed
+        // rows by growing the anchor line's top padding (or the last line's
+        // bottom padding for a trailing deletion). Routing this through
+        // `block_padding_for_line` keeps every consumer — the geometry cache,
+        // `text_y_offset_for_line`, and the per-line layout — in agreement. The
+        // removed rows soft-wrap, so the reserved height comes from the measured
+        // (or estimated) phantom heights rather than a fixed row count.
+        let above = self.inline_diff_phantom_reserved_above(line);
+        let below = self.inline_diff_phantom_reserved_below(line);
+        (base_top + above, base_bottom + below)
+    }
+
+    fn base_block_padding_for_line(&self, line: usize) -> (f32, f32) {
         if line >= self.buffer.line_count() {
             return (0.0, 0.0);
         }

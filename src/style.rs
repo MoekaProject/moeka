@@ -593,6 +593,17 @@ pub struct SelectionStyles {
     pub selection_diff_added_inline_border_color: Hsla,
     pub selection_diff_removed_inline_border_color: Hsla,
     pub selection_diff_inline_border_width_px: f32,
+    /// Left-edge indicator bars for in-place (working-tree) diffs, drawn as a
+    /// spaced diagonal-hatch pattern flush against the editor's left edge.
+    pub selection_diff_added_bar_color: Hsla,
+    pub selection_diff_removed_bar_color: Hsla,
+    pub selection_diff_bar_width_px: f32,
+    /// Thickness of each diagonal stripe and the gap between consecutive stripes.
+    pub selection_diff_bar_stripe_thickness_px: f32,
+    pub selection_diff_bar_stripe_spacing_px: f32,
+    /// Bar brightness (opacity) when the hunk is collapsed vs expanded.
+    pub selection_diff_bar_collapsed_opacity: f32,
+    pub selection_diff_bar_expanded_opacity: f32,
     pub selection_trailing_width_factor: f32,
 }
 
@@ -1481,12 +1492,38 @@ impl Styles {
                 selection_line_highlight_color: theme.line_highlight,
                 selection_diff_added_line_bg: with_alpha(theme.diff_added_bg, 0.3),
                 selection_diff_removed_line_bg: with_alpha(theme.diff_removed_bg, 0.3),
-                selection_diff_added_inline_bg: with_alpha(theme.diff_added_bg, 0.9),
-                selection_diff_removed_inline_bg: with_alpha(theme.diff_removed_bg, 0.9),
-                selection_diff_added_inline_border_color: with_alpha(theme.diff_added_bg, 1.0),
-                selection_diff_removed_inline_border_color: with_alpha(theme.diff_removed_bg, 1.0),
+                // Light mode keeps the diff red/green subtle: the inline
+                // highlight background and its border are lowered so changed
+                // text does not read as a heavy solid block. Dark mode keeps the
+                // stronger contrast it needs to stay legible.
+                selection_diff_added_inline_bg: with_alpha(
+                    theme.diff_added_bg,
+                    if is_light { 0.3 } else { 0.9 },
+                ),
+                selection_diff_removed_inline_bg: with_alpha(
+                    theme.diff_removed_bg,
+                    if is_light { 0.3 } else { 0.9 },
+                ),
+                selection_diff_added_inline_border_color: with_alpha(
+                    theme.diff_added_bg,
+                    if is_light { 0.5 } else { 1.0 },
+                ),
+                selection_diff_removed_inline_border_color: with_alpha(
+                    theme.diff_removed_bg,
+                    if is_light { 0.5 } else { 1.0 },
+                ),
                 selection_diff_inline_border_width_px: 1.0,
-                selection_trailing_width_factor: 0.4,
+                // The left-edge indicator bars stay strong in both appearances
+                // so changed lines are scannable at a glance. Their brightness
+                // is dimmer while collapsed and full while expanded.
+                selection_diff_added_bar_color: with_alpha(theme.diff_added_bg, 1.0),
+                selection_diff_removed_bar_color: with_alpha(theme.diff_removed_bg, 1.0),
+                selection_diff_bar_width_px: 8.0,
+                selection_diff_bar_stripe_thickness_px: 3.0,
+                selection_diff_bar_stripe_spacing_px: 3.0,
+                selection_diff_bar_collapsed_opacity: 0.7,
+                selection_diff_bar_expanded_opacity: 1.0,
+                selection_trailing_width_factor: 0.5,
             },
             checkbox: CheckboxStyles {
                 checkbox_size_factor: 1.2,

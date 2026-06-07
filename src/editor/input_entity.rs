@@ -97,6 +97,8 @@ impl EntityInputHandler for EditorView {
         }
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
+        // Typing into the buffer dismisses any read-only phantom-row selection.
+        self.clear_phantom_selection();
         if !self.cursor.has_selection()
             && self.marked_range.is_none()
             && range_utf16.is_none()
@@ -296,6 +298,7 @@ impl EntityInputHandler for EditorView {
         }
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
+        self.clear_phantom_selection();
         ime_debug_log(format!(
             "replace_and_mark_text_in_range start range_utf16={:?} new_text={:?} new_selected_range_utf16={:?} marked_before={:?} selection_before={:?}",
             range_utf16,

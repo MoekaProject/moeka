@@ -294,6 +294,15 @@ impl EditorView {
             return;
         }
 
+        if let Some(&(_, hunk_index)) = self
+            .inline_diff_revert_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+        {
+            self.revert_inline_diff_hunk(hunk_index, cx);
+            return;
+        }
+
         self.selected_handle = None;
         if let Some(&(_, line_idx, is_image_fold)) = self
             .gutter_fold_areas
@@ -312,6 +321,39 @@ impl EditorView {
             } else {
                 self.toggle_fold(line_idx, cx);
             }
+            return;
+        }
+
+        if let Some(&(_, hunk_index)) = self
+            .inline_diff_gutter_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+        {
+            self.toggle_inline_diff_hunk_expanded(hunk_index, cx);
+            return;
+        }
+
+        // Read-only text selection over an expanded hunk's removed rows. Clicking
+        // a phantom row places a read-only caret there (collapsing any buffer
+        // selection); dragging extends a character-level selection that can be
+        // copied.
+        if let Some((hunk_base_start, row, offset)) =
+            self.phantom_offset_at_position(event.position)
+        {
+            self.phantom_selection = Some(PhantomSelection {
+                hunk_base_start,
+                anchor_row: row,
+                anchor_offset: offset,
+                head_row: row,
+                head_offset: offset,
+            });
+            self.phantom_selecting = true;
+            self.cursor.anchor = self.cursor.offset;
+            self.clear_extra_cursors();
+            self.is_selecting = false;
+            self.marked_range = None;
+            self.pause_blinking(cx);
+            cx.notify();
             return;
         }
 
@@ -465,6 +507,7 @@ impl EditorView {
         }
 
         if event.button == MouseButton::Left && event.click_count >= 2 {
+            self.clear_phantom_selection();
             self.clear_extra_cursors();
             self.clear_wrap_boundary_affinity();
             let offset = self.offset_for_position(event.position);
@@ -475,6 +518,7 @@ impl EditorView {
             return;
         }
 
+        self.clear_phantom_selection();
         self.is_selecting = true;
         let prev_offset = self.cursor.offset;
         let offset = self.offset_for_position(event.position);
@@ -1025,6 +1069,11 @@ impl EditorView {
             return;
         }
 
+        if self.phantom_selecting {
+            self.phantom_selecting = false;
+            return;
+        }
+
         if let Some(drag) = self.image_drag_state.take() {
             if self.preview_overlay.is_some() {
                 let moved_x =
@@ -1125,6 +1174,21 @@ impl EditorView {
         self.set_editor_scrollbar_hovered(scrollbar_hovered, cx);
         if dragging_scrollbar {
             if toolbar_hover_changed {
+                cx.notify();
+            }
+            return;
+        }
+        // Extend a read-only phantom-row selection while dragging.
+        if self.phantom_selecting {
+            if event.dragging()
+                && let Some(mut sel) = self.phantom_selection
+                && let Some((hunk, row, offset)) = self.phantom_offset_at_position(event.position)
+                && hunk == sel.hunk_base_start
+                && (row != sel.head_row || offset != sel.head_offset)
+            {
+                sel.head_row = row;
+                sel.head_offset = offset;
+                self.phantom_selection = Some(sel);
                 cx.notify();
             }
             return;
@@ -1276,6 +1340,36 @@ impl EditorView {
         if hovering_fold != self.hovering_fold_line {
             self.hovering_fold_line = hovering_fold;
             self.sync_gutter_fold_reveal(cx);
+            cx.notify();
+        }
+
+        let hovering_inline_diff_gutter = self
+            .inline_diff_gutter_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(_, hunk_index)| *hunk_index);
+        if hovering_inline_diff_gutter != self.hovering_inline_diff_gutter_hunk {
+            self.hovering_inline_diff_gutter_hunk = hovering_inline_diff_gutter;
+            cx.notify();
+        }
+
+        let hovering_inline_diff_hunk = self
+            .inline_diff_hunk_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(_, hunk_index)| *hunk_index);
+        if hovering_inline_diff_hunk != self.hovering_inline_diff_hunk {
+            self.hovering_inline_diff_hunk = hovering_inline_diff_hunk;
+            cx.notify();
+        }
+
+        let hovering_inline_diff_revert = self
+            .inline_diff_revert_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(_, hunk_index)| *hunk_index);
+        if hovering_inline_diff_revert != self.hovering_inline_diff_revert_hunk {
+            self.hovering_inline_diff_revert_hunk = hovering_inline_diff_revert;
             cx.notify();
         }
 

@@ -1,6 +1,7 @@
+use std::ops::Range;
 use std::path::PathBuf;
 
-use gpui::{Pixels, Point};
+use gpui::{Bounds, Pixels, Point, WrappedLine};
 
 use crate::markdown::LineDecoration;
 
@@ -142,6 +143,7 @@ pub(crate) struct OpenTab {
     pub snapshot: EditorSnapshot,
     pub image_view: ImageViewState,
     pub git_diff: Option<GitDiffState>,
+    pub inline_diff: Option<InlineDiffState>,
     pub is_preview: bool,
     pub is_dirty: bool,
     pub is_deleted: bool,
@@ -183,6 +185,117 @@ pub(crate) enum GitDiffRowKind {
     Context,
     Added,
     Removed,
+}
+
+/// In-place (working-tree vs HEAD) diff overlay for an editable file tab.
+///
+/// Unlike [`GitDiffState`], which drives a dedicated read-only diff tab, this
+/// state is layered on top of the live, editable buffer: hunks are keyed by the
+/// current buffer's line indices so the editor can draw gutter indicators,
+/// inline highlights, and (when a hunk is expanded) read-only phantom rows for
+/// the removed lines, all while the added/modified lines stay editable.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct InlineDiffState {
+    /// The HEAD version of the file, kept so a hunk can be reverted to its
+    /// original lines.
+    pub base_text: String,
+    /// Hunks ordered by `buffer_start`.
+    pub hunks: Vec<InlineDiffHunk>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct InlineDiffHunk {
+    pub kind: InlineDiffHunkKind,
+    /// Buffer (current file) line range occupied by this hunk's added/modified
+    /// lines, 0-based and end-exclusive. For a pure deletion the range is empty
+    /// (`buffer_start == buffer_end`); the removed phantom rows attach directly
+    /// above `buffer_start`.
+    pub buffer_start: usize,
+    pub buffer_end: usize,
+    /// Base (HEAD) line range removed or replaced, 0-based and end-exclusive.
+    /// Doubles as a stable identity for preserving expansion across edits, since
+    /// base line numbers do not shift while HEAD is unchanged.
+    pub base_start: usize,
+    pub base_end: usize,
+    /// Removed base lines, rendered as read-only phantom rows when expanded.
+    pub removed_lines: Vec<InlineDiffRemovedLine>,
+    /// Inline added character spans per buffer line in `buffer_start..buffer_end`
+    /// (index 0 == `buffer_start`). An empty span list means the whole line is new.
+    pub added_inline_spans: Vec<Vec<Range<usize>>>,
+    /// Whether the hunk is currently expanded to show removed rows in place.
+    pub expanded: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InlineDiffHunkKind {
+    Added,
+    Removed,
+    Modified,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct InlineDiffRemovedLine {
+    pub text: String,
+    pub removed_spans: Vec<Range<usize>>,
+    /// Markdown decoration parsed from the HEAD line, so removed rows render
+    /// with the same syntax styling (and soft-wrap) as live editor lines.
+    pub decoration: LineDecoration,
+}
+
+/// A read-only character-level selection over an expanded hunk's removed
+/// (phantom) rows. Rows are indexed within the hunk; offsets are byte offsets
+/// within each row's text. The head is where the caret sits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PhantomSelection {
+    pub hunk_base_start: usize,
+    pub anchor_row: usize,
+    pub anchor_offset: usize,
+    pub head_row: usize,
+    pub head_offset: usize,
+}
+
+impl PhantomSelection {
+    pub fn is_collapsed(&self) -> bool {
+        self.anchor_row == self.head_row && self.anchor_offset == self.head_offset
+    }
+
+    /// `(start_row, start_offset, end_row, end_offset)` in document order.
+    pub fn ordered(&self) -> (usize, usize, usize, usize) {
+        if (self.anchor_row, self.anchor_offset) <= (self.head_row, self.head_offset) {
+            (
+                self.anchor_row,
+                self.anchor_offset,
+                self.head_row,
+                self.head_offset,
+            )
+        } else {
+            (
+                self.head_row,
+                self.head_offset,
+                self.anchor_row,
+                self.anchor_offset,
+            )
+        }
+    }
+}
+
+/// Per-rendered phantom row geometry, captured during prepaint so the next
+/// mouse event can hit-test the soft-wrapped removed line and map a screen
+/// position to a byte offset.
+#[derive(Clone)]
+pub(crate) struct PhantomRowHit {
+    pub bounds: Bounds<Pixels>,
+    pub hunk_base_start: usize,
+    pub row: usize,
+    pub content_x: f32,
+    pub row_top: f32,
+    pub line_height: f32,
+    pub wrapped: WrappedLine,
+    pub text_len: usize,
+    /// Maps a display byte index (into the possibly-folded rendered text) back to
+    /// a byte offset in the removed line's raw text, so clicks on a folded row
+    /// resolve to the correct caret offset.
+    pub display_to_buffer: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

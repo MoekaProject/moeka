@@ -118,7 +118,7 @@ fn char_display_width(ch: char) -> usize {
     }
 }
 
-fn prefers_latin_text_font(ch: char) -> bool {
+pub(crate) fn prefers_latin_text_font(ch: char) -> bool {
     matches!(
         ch,
         '\u{0000}'..='\u{024F}'

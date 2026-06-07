@@ -276,6 +276,7 @@ impl EditorView {
             snapshot: closed_tab.snapshot,
             image_view: closed_tab.image_view,
             git_diff: None,
+            inline_diff: None,
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -425,6 +426,7 @@ impl EditorView {
             snapshot,
             image_view: ImageViewState::default(),
             git_diff: None,
+            inline_diff: None,
             is_preview,
             is_dirty: false,
             is_deleted: false,
@@ -613,6 +615,7 @@ impl EditorView {
             }
         }
         self.record_active_tab_navigation_target();
+        self.mark_inline_diff_dirty(true);
         cx.notify();
     }
 
@@ -922,6 +925,7 @@ impl EditorView {
             },
             image_view: ImageViewState::default(),
             git_diff: None,
+            inline_diff: None,
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -1012,6 +1016,7 @@ impl EditorView {
             },
             image_view: ImageViewState::default(),
             git_diff: None,
+            inline_diff: None,
             is_preview: false,
             is_dirty: false,
             is_deleted: false,

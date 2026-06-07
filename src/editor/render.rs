@@ -359,6 +359,7 @@ impl EditorView {
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh_chat_terminal_metrics(window, cx);
+        self.process_pending_inline_diff(cx);
         if self.pending_editor_focus {
             window.focus(&self.focus_handle(cx));
             self.pending_editor_focus = false;
