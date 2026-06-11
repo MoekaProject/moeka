@@ -461,6 +461,15 @@ impl TextInput {
         let menu_bg = s.text_input_menu_bg;
         let text_color = s.text_input_menu_text_color;
         let menu_font_size = s.text_input_menu_font_size_px;
+        let border_color = s.text_input_menu_border_color;
+        let radius = s.text_input_menu_radius_px;
+        let padding_y = s.text_input_menu_padding_y_px;
+        let item_height = s.text_input_menu_item_height_px;
+        let item_padding_x = s.text_input_menu_item_padding_x_px;
+        let hover_bg = s.text_input_menu_hover_bg;
+        let separator_color = s.text_input_menu_separator_color;
+        let menu_width = s.text_input_menu_width_px;
+        let menu_shadow = s.text_input_menu_shadow;
         let has_sel = self.has_selection();
 
         let item =
@@ -477,20 +486,16 @@ impl TextInput {
                         ..text_color
                     }
                 };
-                let hover_bg = Hsla {
-                    a: 0.1,
-                    ..text_color
-                };
                 div()
                     .id(SharedString::from(format!("ctx-{id}")))
                     .w_full()
-                    .h(px(26.0))
-                    .px(px(8.0))
+                    .h(px(item_height))
+                    .px(px(item_padding_x))
                     .flex()
                     .items_center()
                     .text_size(px(menu_font_size))
                     .text_color(item_text_color)
-                    .rounded(px(4.0))
+                    .cursor(CursorStyle::Arrow)
                     .when(enabled, |el| {
                         el.hover(move |s| s.bg(hover_bg)).on_mouse_down(
                             MouseButton::Left,
@@ -506,21 +511,17 @@ impl TextInput {
 
         // The menu is positioned by anchored(), no need for offset calculations
         div()
-            .w(px(140.0))
+            .w(px(menu_width))
             .bg(menu_bg)
             .border_1()
-            .border_color(Hsla {
-                a: 0.2,
-                ..text_color
-            })
-            .rounded(px(6.0))
-            .shadow_lg()
-            .p(px(4.0))
+            .border_color(border_color)
+            .rounded(px(radius))
+            .when(menu_shadow, |this| this.shadow_lg())
+            .py(px(padding_y))
+            .overflow_hidden()
             .flex()
             .flex_col()
-            .gap(px(1.0))
             .text_size(px(menu_font_size))
-            .line_height(px(26.0))
             .child(item("cut", "剪切", has_sel, cx, |this, w, cx| {
                 this.on_cut(&TextInputCut, w, cx);
             }))
@@ -530,10 +531,13 @@ impl TextInput {
             .child(item("paste", "粘贴", true, cx, |this, w, cx| {
                 this.on_paste(&TextInputPaste, w, cx);
             }))
-            .child(div().w_full().h(px(1.0)).my(px(2.0)).bg(Hsla {
-                a: 0.1,
-                ..text_color
-            }))
+            .child(
+                div()
+                    .w_full()
+                    .h(px(1.0))
+                    .my(px(4.0))
+                    .bg(separator_color),
+            )
             .child(item(
                 "select-all",
                 "全选",

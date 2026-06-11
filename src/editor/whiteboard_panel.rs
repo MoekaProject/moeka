@@ -47,9 +47,9 @@ impl EditorView {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(4.0))
-            .p(px(6.0))
-            .rounded(px(12.0))
+            .gap(px(self.scaled(4.0)))
+            .p(px(self.scaled(6.0)))
+            .rounded(px(self.scaled(12.0)))
             .bg(self.theme.bg_elevated)
             .border_1()
             .border_color(self.theme.border_primary)
@@ -64,7 +64,7 @@ impl EditorView {
 
         div()
             .absolute()
-            .bottom(px(20.0))
+            .bottom(px(self.scaled(20.0)))
             .left_0()
             .right_0()
             .flex()
@@ -94,19 +94,19 @@ impl EditorView {
         let hover_bg = self.theme.bg_hover;
         div()
             .id(id)
-            .w(px(36.0))
-            .h(px(34.0))
+            .w(px(self.scaled(36.0)))
+            .h(px(self.scaled(34.0)))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(8.0))
+            .rounded(px(self.scaled(8.0)))
             .bg(bg)
             .cursor(CursorStyle::Arrow)
             .hover(move |style| style.bg(hover_bg))
             .child(
                 svg()
                     .path(format!("{TOOL_ICON}/{icon}"))
-                    .size(px(18.0))
+                    .size(px(self.scaled(18.0)))
                     .text_color(icon_color),
             )
             .on_mouse_down(
@@ -140,7 +140,7 @@ impl EditorView {
             .px(px(section_padding_x))
             .flex()
             .flex_col()
-            .gap(px(14.0))
+            .gap(px(self.scaled(14.0)))
             .children(self.wb_property_fields(&style, cx));
 
         div()
@@ -235,8 +235,8 @@ impl EditorView {
                 saturation_row = saturation_row.child(
                     div()
                         .id(("wb-saturation", index))
-                        .w(px(22.0))
-                        .h(px(22.0))
+                        .w(px(self.scaled(22.0)))
+                        .h(px(self.scaled(22.0)))
                         .rounded_full()
                         .bg(fill)
                         .border(px(if active { 2.0 } else { 1.0 }))
@@ -267,7 +267,7 @@ impl EditorView {
                 ("wb-sw", index),
                 index == 0,
                 width == option,
-                line_glyph(option.px(), StrokeStyle::Solid, StrokeRoughness::Clean, fg),
+                line_glyph(option.px(), StrokeStyle::Solid, StrokeRoughness::Clean, fg, self.ui_scale),
                 cx,
                 move |this, cx| this.whiteboard_apply_stroke_width(option, cx),
             ));
@@ -286,7 +286,7 @@ impl EditorView {
                 ("wb-ss", index),
                 index == 0,
                 line_style == option,
-                line_glyph(2.0, option, StrokeRoughness::Clean, fg),
+                line_glyph(2.0, option, StrokeRoughness::Clean, fg, self.ui_scale),
                 cx,
                 move |this, cx| this.whiteboard_apply_stroke_style(option, cx),
             ));
@@ -309,7 +309,7 @@ impl EditorView {
                 ("wb-rough", index),
                 index == 0,
                 roughness == option,
-                line_glyph(1.8, StrokeStyle::Solid, option, fg),
+                line_glyph(1.8, StrokeStyle::Solid, option, fg, self.ui_scale),
                 cx,
                 move |this, cx| this.whiteboard_apply_roughness(option, cx),
             ));
@@ -330,9 +330,9 @@ impl EditorView {
         {
             let fg = self.wb_option_fg(radius == option);
             let square = div()
-                .w(px(14.0))
-                .h(px(14.0))
-                .border(px(1.5))
+                .w(px(self.scaled(14.0)))
+                .h(px(self.scaled(14.0)))
+                .border(px(self.scaled(1.5)))
                 .border_color(fg)
                 .rounded(px(preview_radius))
                 .into_any_element();
@@ -364,7 +364,7 @@ impl EditorView {
                     ("wb-route", index),
                     index == 0,
                     route == option,
-                    route_glyph(option, fg),
+                    route_glyph(option, fg, self.ui_scale),
                     cx,
                     move |this, cx| this.whiteboard_apply_route(option, cx),
                 ));
@@ -384,7 +384,7 @@ impl EditorView {
                 ("wb-fill", index),
                 index == 0,
                 fill == option,
-                fill_glyph(option, fg, fg),
+                fill_glyph(option, fg, fg, self.ui_scale),
                 cx,
                 move |this, cx| this.whiteboard_apply_fill(option, cx),
             ));
@@ -404,7 +404,7 @@ impl EditorView {
         {
             let fg = self.wb_option_fg(size == option);
             let glyph = div()
-                .text_size(px(preview_px))
+                .text_size(px(self.scaled(preview_px)))
                 .text_color(fg)
                 .child("A")
                 .into_any_element();
@@ -473,9 +473,9 @@ impl EditorView {
         for (index, value) in levels.into_iter().enumerate() {
             let active = (current_opacity - value).abs() < 0.05;
             let glyph = div()
-                .w(px(14.0))
-                .h(px(14.0))
-                .rounded(px(4.0))
+                .w(px(self.scaled(14.0)))
+                .h(px(self.scaled(14.0)))
+                .rounded(px(self.scaled(4.0)))
                 .border_1()
                 .border_color(checker)
                 .bg(with_alpha(opacity_preview, value))
@@ -491,6 +491,25 @@ impl EditorView {
         }
         fields.push(self.wb_field("透明度", self.wb_segmented(opacity_row)));
 
+        // 导出 (selected elements, or the whole canvas when unselected).
+        let export_row = div()
+            .w_full()
+            .flex()
+            .child(self.wb_text_option("wb-export-png", true, "PNG", cx, |this, cx| {
+                this.whiteboard_export_png(cx)
+            }))
+            .child(self.wb_text_option("wb-export-svg", false, "SVG", cx, |this, cx| {
+                this.whiteboard_export_svg(cx)
+            }))
+            .child(self.wb_text_option(
+                "wb-export-json",
+                false,
+                "JSON",
+                cx,
+                |this, cx| this.whiteboard_export_json(cx),
+            ));
+        fields.push(self.wb_field("导出", self.wb_segmented(export_row)));
+
         fields
     }
 
@@ -499,7 +518,7 @@ impl EditorView {
         div()
             .flex()
             .flex_col()
-            .gap(px(6.0))
+            .gap(px(self.scaled(6.0)))
             .child(self.wb_label(label))
             .child(row)
             .into_any_element()
@@ -519,7 +538,7 @@ impl EditorView {
 
     fn wb_label(&self, text: &'static str) -> AnyElement {
         div()
-            .text_size(px(11.0))
+            .text_size(px(self.scaled(11.0)))
             .text_color(self.theme.text_secondary)
             .child(text)
             .into_any_element()
@@ -544,8 +563,8 @@ impl EditorView {
         let fill = resolved.unwrap_or(self.theme.bg_primary);
         div()
             .id(id)
-            .w(px(22.0))
-            .h(px(22.0))
+            .w(px(self.scaled(22.0)))
+            .h(px(self.scaled(22.0)))
             .rounded_full()
             .bg(fill)
             .border(px(border_width))
@@ -573,7 +592,7 @@ impl EditorView {
         cx: &mut Context<Self>,
         apply: fn(&mut Self, PaletteColor, &mut Context<Self>),
     ) -> AnyElement {
-        let mut column = div().w_full().flex().flex_col().gap(px(6.0));
+        let mut column = div().w_full().flex().flex_col().gap(px(self.scaled(6.0)));
         for (row_index, chunk) in colors.chunks(5).enumerate() {
             let mut row = div().w_full().flex().flex_row().justify_between();
             for (col_index, color) in chunk.iter().enumerate() {
@@ -588,7 +607,7 @@ impl EditorView {
                 ));
             }
             for _ in chunk.len()..5 {
-                row = row.child(div().w(px(22.0)).h(px(22.0)));
+                row = row.child(div().w(px(self.scaled(22.0))).h(px(self.scaled(22.0))));
             }
             column = column.child(row);
         }
@@ -624,14 +643,14 @@ impl EditorView {
                 div()
                     .id("wb-font-family")
                     .w_full()
-                    .h(px(28.0))
-                    .px(px(8.0))
+                    .h(px(self.scaled(28.0)))
+                    .px(px(self.scaled(8.0)))
                     .flex()
                     .items_center()
-                    .rounded(px(6.0))
+                    .rounded(px(self.scaled(6.0)))
                     .border_1()
                     .border_color(border_color)
-                    .text_size(px(12.0))
+                    .text_size(px(self.scaled(12.0)))
                     .text_color(self.theme.text_primary)
                     .cursor(CursorStyle::Arrow)
                     .hover(move |style| style.bg(hover_bg))
@@ -663,7 +682,7 @@ impl EditorView {
     fn wb_segmented(&self, row: gpui::Div) -> AnyElement {
         row.w_full()
             .flex()
-            .rounded(px(6.0))
+            .rounded(px(self.scaled(6.0)))
             .border_1()
             .border_color(self.theme.border_primary)
             .overflow_hidden()
@@ -691,8 +710,8 @@ impl EditorView {
         let hover_bg = self.theme.bg_hover;
         div()
             .id(id)
-            .px(px(8.0))
-            .h(px(26.0))
+            .px(px(self.scaled(8.0)))
+            .h(px(self.scaled(26.0)))
             .flex_1()
             .flex()
             .items_center()
@@ -704,6 +723,41 @@ impl EditorView {
             })
             .when(!active, |this| this.hover(move |style| style.bg(hover_bg)))
             .child(child)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    on_click(this, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// A plain-text action button in a segmented row (used for export).
+    fn wb_text_option(
+        &self,
+        id: impl Into<ElementId>,
+        first: bool,
+        label: &'static str,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let hover_bg = self.theme.bg_hover;
+        div()
+            .id(id)
+            .flex_1()
+            .h(px(self.scaled(26.0)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(self.scaled(11.0)))
+            .text_color(self.theme.text_secondary)
+            .cursor(CursorStyle::Arrow)
+            .when(!first, |this| {
+                this.border_l_1().border_color(self.theme.border_primary)
+            })
+            .hover(move |style| style.bg(hover_bg))
+            .child(label)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
@@ -732,7 +786,7 @@ impl EditorView {
         div()
             .id(id)
             .flex_1()
-            .h(px(26.0))
+            .h(px(self.scaled(26.0)))
             .flex()
             .items_center()
             .justify_center()
@@ -745,7 +799,7 @@ impl EditorView {
             .child(
                 svg()
                     .path(format!("{TOOL_ICON}/{icon}"))
-                    .size(px(16.0))
+                    .size(px(self.scaled(16.0)))
                     .text_color(fg),
             )
             .on_mouse_down(
@@ -1108,6 +1162,7 @@ fn line_glyph(
     style: StrokeStyle,
     roughness: StrokeRoughness,
     color: Hsla,
+    scale: f32,
 ) -> AnyElement {
     canvas(
         |_, _, _| (),
@@ -1145,13 +1200,13 @@ fn line_glyph(
             }
         },
     )
-    .w(px(26.0))
-    .h(px(14.0))
+    .w(px(26.0 * scale))
+    .h(px(14.0 * scale))
     .into_any_element()
 }
 
 /// A connector-route preview: straight diagonal, orthogonal elbow, or curve.
-fn route_glyph(route: RouteStyle, color: Hsla) -> AnyElement {
+fn route_glyph(route: RouteStyle, color: Hsla, scale: f32) -> AnyElement {
     canvas(
         |_, _, _| (),
         move |bounds: Bounds<Pixels>, _, window: &mut Window, _| {
@@ -1185,13 +1240,13 @@ fn route_glyph(route: RouteStyle, color: Hsla) -> AnyElement {
             }
         },
     )
-    .w(px(22.0))
-    .h(px(14.0))
+    .w(px(22.0 * scale))
+    .h(px(14.0 * scale))
     .into_any_element()
 }
 
 /// A fill-style preview swatch: solid, cross-hatched, or hatched square.
-fn fill_glyph(fill: FillStyle, color: Hsla, border: Hsla) -> AnyElement {
+fn fill_glyph(fill: FillStyle, color: Hsla, border: Hsla, scale: f32) -> AnyElement {
     canvas(
         |_, _, _| (),
         move |bounds: Bounds<Pixels>, _, window: &mut Window, _| {
@@ -1226,7 +1281,7 @@ fn fill_glyph(fill: FillStyle, color: Hsla, border: Hsla) -> AnyElement {
             }
         },
     )
-    .w(px(16.0))
-    .h(px(14.0))
+    .w(px(16.0 * scale))
+    .h(px(14.0 * scale))
     .into_any_element()
 }

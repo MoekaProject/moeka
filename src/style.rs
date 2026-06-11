@@ -841,9 +841,19 @@ pub struct TextInputStyles {
     pub text_input_right: bool,
     /// Context-menu chrome (independent of the input's own bg/font so styled
     /// inputs like the whiteboard's transparent overlay keep a normal menu).
+    /// Values mirror the editor's context-menu styles for visual consistency.
     pub text_input_menu_bg: Hsla,
     pub text_input_menu_text_color: Hsla,
     pub text_input_menu_font_size_px: f32,
+    pub text_input_menu_border_color: Hsla,
+    pub text_input_menu_radius_px: f32,
+    pub text_input_menu_padding_y_px: f32,
+    pub text_input_menu_item_height_px: f32,
+    pub text_input_menu_item_padding_x_px: f32,
+    pub text_input_menu_hover_bg: Hsla,
+    pub text_input_menu_separator_color: Hsla,
+    pub text_input_menu_width_px: f32,
+    pub text_input_menu_shadow: bool,
 }
 
 // ── Search (in-editor buffer search) ────────────────────────────────
@@ -1728,7 +1738,16 @@ impl Styles {
                 text_input_right: false,
                 text_input_menu_bg: theme.bg_elevated,
                 text_input_menu_text_color: theme.text_primary,
-                text_input_menu_font_size_px: 12.0,
+                text_input_menu_font_size_px: ui_font_size_px,
+                text_input_menu_border_color: theme.border_primary,
+                text_input_menu_radius_px: 10.0,
+                text_input_menu_padding_y_px: 10.0,
+                text_input_menu_item_height_px: 28.0,
+                text_input_menu_item_padding_x_px: 12.0,
+                text_input_menu_hover_bg: theme.bg_hover,
+                text_input_menu_separator_color: theme.border_primary,
+                text_input_menu_width_px: 160.0,
+                text_input_menu_shadow: theme.bg_primary.l < 0.5,
             },
             search: SearchStyles {
                 search_bar_width_px: 360.0,

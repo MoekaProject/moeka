@@ -1564,8 +1564,11 @@ impl EditorView {
         // Multi-selection: handles on the combined bounding box.
         if state.selected_ids.len() > 1 {
             let (min, max) = selection_bbox(state.selected_elements())?;
+            let pad = super::whiteboard_geometry::BBOX_OUTLINE_PAD;
             let smin = view.to_screen(min);
             let smax = view.to_screen(max);
+            let smin = (smin.0 - pad, smin.1 - pad);
+            let smax = (smax.0 + pad, smax.1 + pad);
             let points = bbox_handle_points(smin, smax);
             let originals: Vec<(String, f32, f32, f32, f32)> = state
                 .selected_elements()
@@ -1710,8 +1713,11 @@ impl EditorView {
             && state.selected_ids.len() > 1
             && let Some((min, max)) = selection_bbox(state.selected_elements())
         {
+            let pad = super::whiteboard_geometry::BBOX_OUTLINE_PAD;
             let smin = view.to_screen(min);
             let smax = view.to_screen(max);
+            let smin = (smin.0 - pad, smin.1 - pad);
+            let smax = (smax.0 + pad, smax.1 + pad);
             let points = bbox_handle_points(smin, smax);
             for (i, handle) in ResizeHandle::ALL.iter().enumerate() {
                 if dist(screen, points[i]) <= HANDLE_HIT_RADIUS {
@@ -1750,8 +1756,11 @@ impl EditorView {
         // Multi-selection: ring outside the combined bbox corners.
         if state.selected_ids.len() > 1 {
             let (min, max) = selection_bbox(state.selected_elements())?;
+            let pad = super::whiteboard_geometry::BBOX_OUTLINE_PAD;
             let smin = view.to_screen(min);
             let smax = view.to_screen(max);
+            let smin = (smin.0 - pad, smin.1 - pad);
+            let smax = (smax.0 + pad, smax.1 + pad);
             let points = bbox_handle_points(smin, smax);
             for point in &points {
                 if dist(pointer, *point) <= HANDLE_HIT_RADIUS {

@@ -40,6 +40,7 @@ mod tooltip;
 mod types;
 mod whiteboard;
 mod whiteboard_element;
+mod whiteboard_export;
 mod whiteboard_geometry;
 mod whiteboard_input;
 mod whiteboard_panel;

@@ -15,6 +15,10 @@ pub(crate) type Pt = (f32, f32);
 /// snapping, and keyboard nudges.
 pub(crate) const GRID: f32 = 20.0;
 
+/// Screen-pixel padding applied to multi-selection / group bounding boxes so
+/// the outline and its handles sit outside the painted shapes.
+pub(crate) const BBOX_OUTLINE_PAD: f32 = 6.0;
+
 /// Snap a canvas-space coordinate to the grid.
 pub(crate) fn snap_to_grid(value: f32) -> f32 {
     (value / GRID).round() * GRID
@@ -72,6 +76,29 @@ pub(crate) fn element_corners(element: &WhiteboardElement) -> [Pt; 4] {
     let y0 = element.y;
     let x1 = element.x + element.width;
     let y1 = element.y + element.height;
+    [
+        rotate_around((x0, y0), center, sin, cos),
+        rotate_around((x1, y0), center, sin, cos),
+        rotate_around((x1, y1), center, sin, cos),
+        rotate_around((x0, y1), center, sin, cos),
+    ]
+}
+
+/// Canvas-units padding for an element's selection/hover outline so it sits
+/// outside the painted stroke, however thick.
+pub(crate) fn selection_outline_pad(element: &WhiteboardElement) -> f32 {
+    element.stroke.width.px() * 0.5 + 4.0
+}
+
+/// The element's rotated corners inflated outward by `pad` canvas units on
+/// every side (for selection outlines drawn outside the shape).
+pub(crate) fn outline_corners(element: &WhiteboardElement, pad: f32) -> [Pt; 4] {
+    let center = element.center();
+    let (sin, cos) = element.rotation.sin_cos();
+    let x0 = element.x.min(element.x + element.width) - pad;
+    let y0 = element.y.min(element.y + element.height) - pad;
+    let x1 = element.x.max(element.x + element.width) + pad;
+    let y1 = element.y.max(element.y + element.height) + pad;
     [
         rotate_around((x0, y0), center, sin, cos),
         rotate_around((x1, y0), center, sin, cos),
@@ -366,8 +393,8 @@ pub(crate) fn fill_polygon(points: &[Pt]) -> Option<Path<Pixels>> {
     Some(path)
 }
 
-/// A single thick segment between two screen points, as a filled quad path.
-fn segment_quad(a: Pt, b: Pt, half_width: f32) -> Option<Path<Pixels>> {
+/// Vertex quad for a single thick segment between two screen points.
+pub(crate) fn segment_quad_points(a: Pt, b: Pt, half_width: f32) -> Option<[Pt; 4]> {
     let dx = b.0 - a.0;
     let dy = b.1 - a.1;
     let len = (dx * dx + dy * dy).sqrt();
@@ -376,7 +403,7 @@ fn segment_quad(a: Pt, b: Pt, half_width: f32) -> Option<Path<Pixels>> {
     }
     let nx = -dy / len * half_width;
     let ny = dx / len * half_width;
-    fill_polygon(&[
+    Some([
         (a.0 + nx, a.1 + ny),
         (b.0 + nx, b.1 + ny),
         (b.0 - nx, b.1 - ny),
@@ -384,11 +411,17 @@ fn segment_quad(a: Pt, b: Pt, half_width: f32) -> Option<Path<Pixels>> {
     ])
 }
 
+/// A single thick segment between two screen points, as a filled quad path.
+#[allow(dead_code)]
+fn segment_quad(a: Pt, b: Pt, half_width: f32) -> Option<Path<Pixels>> {
+    fill_polygon(&segment_quad_points(a, b, half_width)?)
+}
+
 /// Emit dashed/dotted quads along a whole polyline with a continuous dash
 /// phase, so densely sampled curves (ellipses, rounded corners) keep the same
 /// dash/gap rhythm as straight segments.
-fn push_dashed_polyline(
-    out: &mut Vec<Path<Pixels>>,
+fn push_dashed_quads(
+    out: &mut Vec<[Pt; 4]>,
     points: &[Pt],
     closed: bool,
     half_width: f32,
@@ -432,8 +465,8 @@ fn push_dashed_polyline(
                 let t1 = s1 - seg_start;
                 let p0 = (a.0 + ux * t0, a.1 + uy * t0);
                 let p1 = (a.0 + ux * t1, a.1 + uy * t1);
-                if let Some(path) = segment_quad(p0, p1, half_width) {
-                    out.push(path);
+                if let Some(quad) = segment_quad_points(p0, p1, half_width) {
+                    out.push(quad);
                 }
             }
             k += 1.0;
@@ -442,14 +475,14 @@ fn push_dashed_polyline(
     }
 }
 
-/// Build the stroke for a polyline (or closed polygon) as a list of filled
-/// quad paths, honoring the dash/dot style. `width` is in screen pixels.
-pub(crate) fn stroke_polyline(
+/// Stroke a polyline (or closed polygon) into filled vertex quads, honoring
+/// the dash/dot style. `width` is in screen pixels.
+pub(crate) fn stroke_polyline_quads(
     points: &[Pt],
     width: f32,
     style: StrokeStyle,
     closed: bool,
-) -> Vec<Path<Pixels>> {
+) -> Vec<[Pt; 4]> {
     let mut out = Vec::new();
     let n = points.len();
     if n < 2 {
@@ -460,24 +493,38 @@ pub(crate) fn stroke_polyline(
         StrokeStyle::Solid => {
             let count = if closed { n } else { n - 1 };
             for i in 0..count {
-                if let Some(path) = segment_quad(points[i], points[(i + 1) % n], half) {
-                    out.push(path);
+                if let Some(quad) = segment_quad_points(points[i], points[(i + 1) % n], half) {
+                    out.push(quad);
                 }
             }
         }
         StrokeStyle::Dashed => {
-            push_dashed_polyline(&mut out, points, closed, half, width * 2.6, width * 2.0);
+            push_dashed_quads(&mut out, points, closed, half, width * 2.6, width * 2.0);
         }
         StrokeStyle::Dotted => {
-            push_dashed_polyline(&mut out, points, closed, half, width.max(1.0), width * 1.6);
+            push_dashed_quads(&mut out, points, closed, half, width.max(1.0), width * 1.6);
         }
     }
     out
 }
 
-/// A filled triangular arrowhead pointing from `start` toward `end` (screen
-/// space). `size` is the barb length in pixels.
-pub(crate) fn arrowhead(start: Pt, end: Pt, size: f32) -> Option<Path<Pixels>> {
+/// Build the stroke for a polyline (or closed polygon) as a list of filled
+/// quad paths, honoring the dash/dot style. `width` is in screen pixels.
+pub(crate) fn stroke_polyline(
+    points: &[Pt],
+    width: f32,
+    style: StrokeStyle,
+    closed: bool,
+) -> Vec<Path<Pixels>> {
+    stroke_polyline_quads(points, width, style, closed)
+        .into_iter()
+        .filter_map(|quad| fill_polygon(&quad))
+        .collect()
+}
+
+/// Triangle vertices for an arrowhead pointing from `start` toward `end`
+/// (screen space). `size` is the barb length in pixels.
+pub(crate) fn arrowhead_points(start: Pt, end: Pt, size: f32) -> Option<[Pt; 3]> {
     let dx = end.0 - start.0;
     let dy = end.1 - start.1;
     let len = (dx * dx + dy * dy).sqrt();
@@ -492,7 +539,13 @@ pub(crate) fn arrowhead(start: Pt, end: Pt, size: f32) -> Option<Path<Pixels>> {
     let barb2 = (-ux * cos - uy * sin, -uy * cos + ux * sin);
     let p1 = (end.0 + barb1.0 * size, end.1 + barb1.1 * size);
     let p2 = (end.0 + barb2.0 * size, end.1 + barb2.1 * size);
-    fill_polygon(&[end, p1, p2])
+    Some([end, p1, p2])
+}
+
+/// A filled triangular arrowhead pointing from `start` toward `end` (screen
+/// space). `size` is the barb length in pixels.
+pub(crate) fn arrowhead(start: Pt, end: Pt, size: f32) -> Option<Path<Pixels>> {
+    fill_polygon(&arrowhead_points(start, end, size)?)
 }
 
 /// Sample the perimeter of a (possibly rounded) rectangle in canvas space, with
@@ -629,14 +682,14 @@ pub(crate) fn roughen_polyline(points: &[Pt], closed: bool, amplitude: f32, seed
 }
 
 /// Stroke a (jittered) open polyline with smoothly varying width as filled
-/// trapezoid segments — the pen-pressure feel of the hand-drawn styles.
+/// trapezoid vertex quads — the pen-pressure feel of the hand-drawn styles.
 /// `variation` is the relative width wobble (0..1). Deterministic per `seed`.
-pub(crate) fn sketch_stroke_polyline(
+pub(crate) fn sketch_stroke_polyline_quads(
     points: &[Pt],
     width: f32,
     variation: f32,
     seed: u64,
-) -> Vec<Path<Pixels>> {
+) -> Vec<[Pt; 4]> {
     let n = points.len();
     let mut out = Vec::new();
     if n < 2 {
@@ -672,16 +725,27 @@ pub(crate) fn sketch_stroke_polyline(
         let ny = dx / len;
         let ha = (half * factors[i]).max(0.3);
         let hb = (half * factors[i + 1]).max(0.3);
-        if let Some(path) = fill_polygon(&[
+        out.push([
             (a.0 + nx * ha, a.1 + ny * ha),
             (b.0 + nx * hb, b.1 + ny * hb),
             (b.0 - nx * hb, b.1 - ny * hb),
             (a.0 - nx * ha, a.1 - ny * ha),
-        ]) {
-            out.push(path);
-        }
+        ]);
     }
     out
+}
+
+/// Path wrapper over [`sketch_stroke_polyline_quads`].
+pub(crate) fn sketch_stroke_polyline(
+    points: &[Pt],
+    width: f32,
+    variation: f32,
+    seed: u64,
+) -> Vec<Path<Pixels>> {
+    sketch_stroke_polyline_quads(points, width, variation, seed)
+        .into_iter()
+        .filter_map(|quad| fill_polygon(&quad))
+        .collect()
 }
 
 /// Build a circular "rotate" glyph (an arc with an arrowhead) centered at
@@ -1055,7 +1119,8 @@ pub(crate) fn intersects_rect(element: &WhiteboardElement, min: Pt, max: Pt) -> 
 /// Screen positions of the 8 resize handles for a non-linear element, ordered
 /// to match `ResizeHandle`'s corner-then-edge layout.
 pub(crate) fn resize_handle_points(element: &WhiteboardElement, view: &CanvasView) -> [Pt; 8] {
-    let c = element_corners(element).map(|corner| view.to_screen(corner));
+    let pad = selection_outline_pad(element);
+    let c = outline_corners(element, pad).map(|corner| view.to_screen(corner));
     let mid = |a: Pt, b: Pt| ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
     [
         c[0],

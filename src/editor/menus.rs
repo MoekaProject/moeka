@@ -3337,6 +3337,26 @@ impl EditorView {
                         this.whiteboard_delete_selected(cx);
                     },
                 ));
+                // Copy-as exports (selection, or the whole canvas when empty).
+                items.push(self.render_context_menu_separator());
+                items.push(self.render_context_menu_item(
+                    self.t(crate::i18n::TextKey::WhiteboardCopyAsPng),
+                    false,
+                    cx,
+                    |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.whiteboard_copy_as_png(cx);
+                    },
+                ));
+                items.push(self.render_context_menu_item(
+                    self.t(crate::i18n::TextKey::WhiteboardCopyAsSvg),
+                    false,
+                    cx,
+                    |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.whiteboard_copy_as_svg(cx);
+                    },
+                ));
                 if self.whiteboard_has_selection() {
                     // Grouping
                     if self.whiteboard_can_group() || self.whiteboard_can_ungroup() {

@@ -19,9 +19,9 @@ use super::whiteboard::{
 use super::whiteboard_geometry::{
     CanvasView, GRID, Pt, arrowhead, bbox_handle_points, element_corners, element_seed,
     ellipse_perimeter, ellipse_segment_count, fill_polygon, hatch_segments, label_center,
-    linear_endpoints, resize_handle_points, rotate_glyph, roughen_polyline, rounded_rect_polyline,
-    route_handles, route_points, selection_bbox, sketch_stroke_polyline,
-    split_polyline_outside_rect, stroke_polyline,
+    linear_endpoints, outline_corners, resize_handle_points, rotate_glyph, roughen_polyline,
+    rounded_rect_polyline, route_handles, route_points, selection_bbox, selection_outline_pad,
+    sketch_stroke_polyline, split_polyline_outside_rect, stroke_polyline,
 };
 use super::*;
 use crate::theme::{Theme, with_alpha};
@@ -700,6 +700,8 @@ fn build_selection(
 ) {
     let accent = theme.text_accent;
     let handle_fill = theme.bg_primary;
+    // Outlines and combined boxes sit slightly outside the painted strokes.
+    let bbox_pad = super::whiteboard_geometry::BBOX_OUTLINE_PAD;
 
     // Hover highlight: a blue outline without handles (single element, or the
     // combined box of a hovered group).
@@ -714,6 +716,8 @@ fn build_selection(
             ) {
                 let smin = view.to_screen(min);
                 let smax = view.to_screen(max);
+                let smin = (smin.0 - bbox_pad, smin.1 - bbox_pad);
+                let smax = (smax.0 + bbox_pad, smax.1 + bbox_pad);
                 let outline = vec![
                     (smin.0, smin.1),
                     (smax.0, smin.1),
@@ -734,7 +738,8 @@ fn build_selection(
                     selection.push((path, accent));
                 }
             } else {
-                let corners: Vec<Pt> = element_corners(element)
+                let pad = selection_outline_pad(element);
+                let corners: Vec<Pt> = outline_corners(element, pad)
                     .iter()
                     .map(|corner| view.to_screen(*corner))
                     .collect();
@@ -780,7 +785,8 @@ fn build_selection(
                 push_handle(handles, view.to_screen(a), handle_fill, accent);
                 push_handle(handles, view.to_screen(b), handle_fill, accent);
             } else {
-                let corners: Vec<Pt> = element_corners(shape)
+                let pad = selection_outline_pad(shape);
+                let corners: Vec<Pt> = outline_corners(shape, pad)
                     .iter()
                     .map(|corner| view.to_screen(*corner))
                     .collect();
@@ -808,6 +814,8 @@ fn build_selection(
     {
         let smin = view.to_screen(min);
         let smax = view.to_screen(max);
+        let smin = (smin.0 - bbox_pad, smin.1 - bbox_pad);
+        let smax = (smax.0 + bbox_pad, smax.1 + bbox_pad);
         let outline = vec![
             (smin.0, smin.1),
             (smax.0, smin.1),
