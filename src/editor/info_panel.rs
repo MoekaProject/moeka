@@ -775,7 +775,11 @@ fn run_git_command(repo_root: &Path, args: &[&str]) -> Option<String> {
     )
 }
 
-pub(super) fn git_show_file_at_revision(repo_root: &Path, revision: &str, relative_path: &str) -> String {
+pub(super) fn git_show_file_at_revision(
+    repo_root: &Path,
+    revision: &str,
+    relative_path: &str,
+) -> String {
     let object = format!("{revision}:{relative_path}");
     let Ok(output) = Command::new("git")
         .arg("-C")
@@ -1581,6 +1585,7 @@ impl EditorView {
             editor_left_aligned: false,
             snapshot,
             image_view: ImageViewState::default(),
+            whiteboard: None,
             git_diff: Some(diff),
             inline_diff: None,
             is_preview: false,
@@ -2341,6 +2346,10 @@ impl EditorView {
     }
 
     pub(crate) fn render_info_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        // On whiteboard tabs the file-info panel hosts the canvas properties.
+        if self.active_tab_is_whiteboard() {
+            return self.render_whiteboard_properties_panel(cx);
+        }
         let data = self.cached_info_panel_data();
         let ups = &self.styles.utility_panel;
         let top_spacer = self.scaled(ups.utility_panel_top_spacer_height_px);

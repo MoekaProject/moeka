@@ -5,6 +5,7 @@ use gpui::{Bounds, Pixels, Point, WrappedLine};
 
 use crate::markdown::LineDecoration;
 
+use super::whiteboard::WhiteboardTabState;
 use super::{config_store, history_store};
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -73,6 +74,7 @@ pub(crate) enum FileKind {
     Text,
     Image,
     Binary,
+    Whiteboard,
 }
 
 impl FileKind {
@@ -85,7 +87,7 @@ impl FileKind {
     }
 
     pub(crate) fn supports_persistent_save(&self) -> bool {
-        self.supports_text_buffer()
+        self.supports_text_buffer() || self.is_whiteboard()
     }
 
     pub(crate) fn is_markdown(&self) -> bool {
@@ -98,6 +100,10 @@ impl FileKind {
 
     pub(crate) fn is_binary(&self) -> bool {
         matches!(self, Self::Binary)
+    }
+
+    pub(crate) fn is_whiteboard(&self) -> bool {
+        matches!(self, Self::Whiteboard)
     }
 }
 
@@ -142,6 +148,7 @@ pub(crate) struct OpenTab {
     pub editor_left_aligned: bool,
     pub snapshot: EditorSnapshot,
     pub image_view: ImageViewState,
+    pub whiteboard: Option<WhiteboardTabState>,
     pub git_diff: Option<GitDiffState>,
     pub inline_diff: Option<InlineDiffState>,
     pub is_preview: bool,

@@ -38,12 +38,18 @@ mod temp_store;
 mod theme_debugger;
 mod tooltip;
 mod types;
+mod whiteboard;
+mod whiteboard_element;
+mod whiteboard_geometry;
+mod whiteboard_input;
+mod whiteboard_panel;
 mod workspace_search;
 
 pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
 pub(crate) use assets::*;
 pub(crate) use scrollbar::{PanelScrollbarKind, PanelScrollbarState};
 pub(crate) use types::*;
+pub(crate) use whiteboard::*;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -430,6 +436,7 @@ pub(crate) enum ContextMenuKind {
         tab_id: String,
     },
     Workspace,
+    Whiteboard,
     Table {
         table_start_line: usize,
         row: usize,
@@ -1288,6 +1295,21 @@ pub struct EditorView {
     pub(crate) pending_preview_reveal: Option<PendingPreviewReveal>,
     pub(crate) last_viewport_height: f32,
     pub(crate) last_viewport_width: f32,
+    /// Screen bounds of the whiteboard canvas element from the last paint, used
+    /// to map pointer positions into canvas coordinates.
+    pub(crate) whiteboard_canvas_bounds: Option<Bounds<Pixels>>,
+    /// Active pointer interaction on the whiteboard canvas, if any.
+    pub(crate) whiteboard_drag: Option<WhiteboardDrag>,
+    /// Last known pointer position over the whiteboard canvas (screen space),
+    /// used to compute the hover cursor during paint.
+    pub(crate) whiteboard_pointer: Option<Point<Pixels>>,
+    /// Whether Space is held (enables drag-to-pan on the whiteboard).
+    pub(crate) whiteboard_space_down: bool,
+    /// Elements currently highlighted as magnetic bind targets while dragging
+    /// linear endpoints over them.
+    pub(crate) whiteboard_bind_targets: Vec<String>,
+    /// Active inline text editor for a whiteboard element, if any.
+    pub(crate) whiteboard_text_editor: Option<whiteboard_input::WhiteboardTextEditor>,
     // Cursor blink state
     pub(crate) cursor_opacity: f32,
     pub(crate) cursor_opacity_direction: f32,
@@ -1710,6 +1732,12 @@ impl EditorView {
             pending_preview_reveal: None,
             last_viewport_height: 600.0,
             last_viewport_width: init_max_width,
+            whiteboard_canvas_bounds: None,
+            whiteboard_drag: None,
+            whiteboard_pointer: None,
+            whiteboard_space_down: false,
+            whiteboard_bind_targets: Vec::new(),
+            whiteboard_text_editor: None,
             cursor_opacity: init_cursor_opacity,
             cursor_opacity_direction: -1.0,
             blink_epoch: 0,
@@ -4400,6 +4428,10 @@ impl EditorView {
             tab.is_dirty = false;
             return;
         }
+        if tab.file_kind.as_ref().is_some_and(FileKind::is_whiteboard) {
+            // Whiteboard dirty state is driven by canvas mutations, not text diff.
+            return;
+        }
         if !tab
             .file_kind
             .as_ref()
@@ -4428,6 +4460,21 @@ impl EditorView {
 
     pub(crate) fn active_tab_is_binary(&self) -> bool {
         self.active_file_kind().is_some_and(FileKind::is_binary)
+    }
+
+    pub(crate) fn active_tab_is_whiteboard(&self) -> bool {
+        self.active_file_kind().is_some_and(FileKind::is_whiteboard)
+    }
+
+    pub(crate) fn active_whiteboard(&self) -> Option<&WhiteboardTabState> {
+        self.active_tab_index()
+            .and_then(|index| self.tabs.get(index))
+            .and_then(|tab| tab.whiteboard.as_ref())
+    }
+
+    pub(crate) fn active_whiteboard_mut(&mut self) -> Option<&mut WhiteboardTabState> {
+        let index = self.active_tab_index()?;
+        self.tabs.get_mut(index)?.whiteboard.as_mut()
     }
 
     pub(crate) fn active_tab_is_diff(&self) -> bool {
@@ -6847,6 +6894,10 @@ pub(crate) fn classify_file_kind_for_bytes(path: &Path, bytes: &[u8]) -> FileKin
         return FileKind::Image;
     }
 
+    if is_whiteboard_file(path) {
+        return FileKind::Whiteboard;
+    }
+
     if let Some(syntax) = helpers::find_syntax_for_path(path)
         && syntax.name != "Plain Text"
         && syntax.name != "Markdown"
@@ -7026,7 +7077,9 @@ pub(crate) fn parse_decorations_for_file_kind(
     match file_kind {
         FileKind::Markdown => markdown::parse_decorations(text),
         FileKind::Code { language } => plain_text_decorations(text, Some(language.clone())),
-        FileKind::Text | FileKind::Image | FileKind::Binary => plain_text_decorations(text, None),
+        FileKind::Text | FileKind::Image | FileKind::Binary | FileKind::Whiteboard => {
+            plain_text_decorations(text, None)
+        }
     }
 }
 
@@ -7561,6 +7614,7 @@ pub(super) fn builtin_welcome_tab(ui_language: UiLanguage) -> OpenTab {
             extra_cursors: Vec::new(),
         },
         image_view: ImageViewState::default(),
+        whiteboard: None,
         git_diff: None,
         inline_diff: None,
         is_preview: false,

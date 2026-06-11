@@ -221,6 +221,7 @@ fn main() {
             KeyBinding::new("alt-down", MoveLineDown, Some("MarkdownEditor")),
             KeyBinding::new("cmd-s", Save, Some("MarkdownEditor")),
             KeyBinding::new("cmd-n", NewTab, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-alt-n", NewWhiteboard, Some("MarkdownEditor")),
             KeyBinding::new("cmd-q", Quit, Some("MarkdownEditor")),
             KeyBinding::new("escape", Escape, Some("MarkdownEditor")),
             KeyBinding::new("cmd-shift-\\", ToggleOutline, Some("MarkdownEditor")),

@@ -837,6 +837,13 @@ pub struct TextInputStyles {
     pub text_input_cursor_height_adjust_px: f32,
     pub text_input_selection_color: Hsla,
     pub text_input_center: bool,
+    /// Right-align text within the input (overridden by `text_input_center`).
+    pub text_input_right: bool,
+    /// Context-menu chrome (independent of the input's own bg/font so styled
+    /// inputs like the whiteboard's transparent overlay keep a normal menu).
+    pub text_input_menu_bg: Hsla,
+    pub text_input_menu_text_color: Hsla,
+    pub text_input_menu_font_size_px: f32,
 }
 
 // ── Search (in-editor buffer search) ────────────────────────────────
@@ -1718,6 +1725,10 @@ impl Styles {
                 text_input_cursor_height_adjust_px: 0.0,
                 text_input_selection_color: theme.selection,
                 text_input_center: false,
+                text_input_right: false,
+                text_input_menu_bg: theme.bg_elevated,
+                text_input_menu_text_color: theme.text_primary,
+                text_input_menu_font_size_px: 12.0,
             },
             search: SearchStyles {
                 search_bar_width_px: 360.0,

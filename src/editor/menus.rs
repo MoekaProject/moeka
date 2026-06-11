@@ -3264,6 +3264,19 @@ impl EditorView {
                 {
                     let parent = self.sidebar_root.clone();
                     items.push(self.render_context_menu_item_with_icon(
+                        self.t(crate::i18n::TextKey::NewWhiteboard),
+                        "assets/icons/whiteboard/whiteboard.svg",
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.create_new_whiteboard(parent.clone(), cx);
+                        },
+                    ));
+                }
+                {
+                    let parent = self.sidebar_root.clone();
+                    items.push(self.render_context_menu_item_with_icon(
                         self.t(crate::i18n::TextKey::MenuNewFolder),
                         MENU_NEW_FOLDER_SVG_PATH,
                         false,
@@ -3282,6 +3295,139 @@ impl EditorView {
                 self.render_format_context_menu(cx),
                 self.scaled(self.styles.context_menu.menu_format_width_px),
             ),
+            ContextMenuKind::Whiteboard => {
+                let mut items = Vec::new();
+                items.push(self.render_context_menu_item_with_icon(
+                    self.t(crate::i18n::TextKey::Cut),
+                    MENU_CLIP_SVG_PATH,
+                    false,
+                    cx,
+                    |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.whiteboard_cut(cx);
+                    },
+                ));
+                items.push(self.render_context_menu_item_with_icon(
+                    self.t(crate::i18n::TextKey::Copy),
+                    MENU_COPY_SVG_PATH,
+                    false,
+                    cx,
+                    |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.whiteboard_copy(cx);
+                    },
+                ));
+                items.push(self.render_context_menu_item_with_icon(
+                    self.t(crate::i18n::TextKey::Paste),
+                    MENU_PASTE_SVG_PATH,
+                    false,
+                    cx,
+                    |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.whiteboard_paste(cx);
+                    },
+                ));
+                items.push(self.render_context_menu_item_with_icon(
+                    self.t(crate::i18n::TextKey::Delete),
+                    MENU_DELETE_SVG_PATH,
+                    true,
+                    cx,
+                    |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.whiteboard_delete_selected(cx);
+                    },
+                ));
+                if self.whiteboard_has_selection() {
+                    // Grouping
+                    if self.whiteboard_can_group() || self.whiteboard_can_ungroup() {
+                        items.push(self.render_context_menu_separator());
+                        if self.whiteboard_can_group() {
+                            items.push(self.render_context_menu_item(
+                                self.t(crate::i18n::TextKey::WhiteboardGroup),
+                                false,
+                                cx,
+                                |this, _, cx| {
+                                    this.close_context_menu(cx);
+                                    this.whiteboard_group_selection(cx);
+                                },
+                            ));
+                        }
+                        if self.whiteboard_can_ungroup() {
+                            items.push(self.render_context_menu_item(
+                                self.t(crate::i18n::TextKey::WhiteboardUngroup),
+                                false,
+                                cx,
+                                |this, _, cx| {
+                                    this.close_context_menu(cx);
+                                    this.whiteboard_ungroup_selection(cx);
+                                },
+                            ));
+                        }
+                    }
+                    // Z-ordering
+                    items.push(self.render_context_menu_separator());
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::WhiteboardBringForward),
+                        false,
+                        cx,
+                        |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.whiteboard_bring_forward(cx);
+                        },
+                    ));
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::WhiteboardSendBackward),
+                        false,
+                        cx,
+                        |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.whiteboard_send_backward(cx);
+                        },
+                    ));
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::WhiteboardBringToFront),
+                        false,
+                        cx,
+                        |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.whiteboard_bring_to_front(cx);
+                        },
+                    ));
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::WhiteboardSendToBack),
+                        false,
+                        cx,
+                        |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.whiteboard_send_to_back(cx);
+                        },
+                    ));
+                    // Mirroring
+                    items.push(self.render_context_menu_separator());
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::WhiteboardFlipHorizontal),
+                        false,
+                        cx,
+                        |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.whiteboard_flip_horizontal(cx);
+                        },
+                    ));
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::WhiteboardFlipVertical),
+                        false,
+                        cx,
+                        |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.whiteboard_flip_vertical(cx);
+                        },
+                    ));
+                }
+                (
+                    items,
+                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                )
+            }
             ContextMenuKind::FormatMore => (
                 self.render_format_more_context_menu(cx),
                 self.scaled(self.styles.context_menu.menu_format_width_px),

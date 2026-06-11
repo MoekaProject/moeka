@@ -469,6 +469,22 @@ impl Render for EditorView {
             .id("editor-root")
             .key_context("MarkdownEditor")
             .track_focus(&self.focus_handle(cx))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if this.active_tab_is_whiteboard()
+                    && event.keystroke.key == "space"
+                    && this.whiteboard_text_editor.is_none()
+                    && !this.whiteboard_space_down
+                {
+                    this.whiteboard_space_down = true;
+                    cx.notify();
+                }
+            }))
+            .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, _, cx| {
+                if event.keystroke.key == "space" && this.whiteboard_space_down {
+                    this.whiteboard_space_down = false;
+                    cx.notify();
+                }
+            }))
             .relative()
             .size_full()
             .flex()
@@ -548,6 +564,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_move_line_down))
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_new_tab))
+            .on_action(cx.listener(Self::on_new_whiteboard))
             .on_action(cx.listener(Self::on_close_active_tab))
             .on_action(cx.listener(Self::on_reopen_closed_tab))
             .on_action(cx.listener(Self::on_activate_previous_tab))
@@ -831,7 +848,12 @@ impl Render for EditorView {
                                                                     this.open_external_paths_in_tabs(paths.paths(), cx);
                                                                 },
                                                             ))
-                                                            .child(if self.active_tab_is_image() {
+                                                            .child(if self.active_tab_is_whiteboard() {
+                                                                whiteboard_element::WhiteboardElement {
+                                                                    editor: cx.entity().clone(),
+                                                                }
+                                                                .into_any_element()
+                                                            } else if self.active_tab_is_image() {
                                                                 image_view::ImageViewElement {
                                                                     editor: cx.entity().clone(),
                                                                 }
@@ -843,6 +865,44 @@ impl Render for EditorView {
                                                                     editor: cx.entity().clone(),
                                                                 }
                                                                 .into_any_element()
+                                                            })
+                                                            .when(self.active_tab_is_whiteboard(), |this| {
+                                                                this.child(
+                                                                    self.render_whiteboard_toolbar(cx),
+                                                                )
+                                                                .when_some(
+                                                                    self.whiteboard_text_overlay_rect(),
+                                                                    |this, rect| {
+                                                                        let input = self
+                                                                            .whiteboard_text_editor
+                                                                            .as_ref()
+                                                                            .map(|editor| {
+                                                                                editor.input.clone()
+                                                                            });
+                                                                        this.when_some(
+                                                                            input,
+                                                                            |this, input| {
+                                                                                this.child(
+                                                                                    div()
+                                                                                        .id("wb-text-overlay")
+                                                                                        .occlude()
+                                                                                        .absolute()
+                                                                                        .left(px(rect.0))
+                                                                                        .top(px(rect.1))
+                                                                                        .w(px(rect.2))
+                                                                                        .h(px(rect.3))
+                                                                                        .on_mouse_down(
+                                                                                            MouseButton::Left,
+                                                                                            cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                                                                                                cx.stop_propagation();
+                                                                                            }),
+                                                                                        )
+                                                                                        .child(input),
+                                                                                )
+                                                                            },
+                                                                        )
+                                                                    },
+                                                                )
                                                             })
                                                             .when_some(
                                                                 self.editor_scrollbar_thumb_geometry(),

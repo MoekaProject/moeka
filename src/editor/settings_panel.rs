@@ -22,6 +22,8 @@ pub(crate) enum FontRole {
     BodyFont,
     CodeFont,
     InterfaceLanguage,
+    /// Font family for selected whiteboard elements (whiteboard panel).
+    WhiteboardFont,
 }
 
 #[derive(Clone)]
@@ -1298,7 +1300,13 @@ impl EditorView {
             None => (button_left, 200.0, button_w, self.scaled(30.0)),
         };
 
-        let dropdown_w = button_w_val.min(self.scaled(400.0)).max(self.scaled(260.0));
+        // The whiteboard panel's picker matches its trigger button exactly;
+        // the settings pickers keep a comfortable min/max width.
+        let dropdown_w = if picker.role == FontRole::WhiteboardFont {
+            button_w_val
+        } else {
+            button_w_val.min(self.scaled(400.0)).max(self.scaled(260.0))
+        };
         let gap = self.scaled(4.0);
         let desired_visible = picker.filtered.len().min(200).min(max_visible).max(1);
         let desired_h = desired_visible as f32 * item_h + self.scaled(42.0);
@@ -1438,6 +1446,10 @@ impl EditorView {
                         self.apply_ui_language(language, cx);
                         return;
                     }
+                }
+                (FontRole::WhiteboardFont, _) => {
+                    self.whiteboard_apply_font_family(font_name, cx);
+                    return;
                 }
                 _ => {}
             }

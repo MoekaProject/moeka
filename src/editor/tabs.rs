@@ -275,6 +275,7 @@ impl EditorView {
             editor_left_aligned: closed_tab.editor_left_aligned,
             snapshot: closed_tab.snapshot,
             image_view: closed_tab.image_view,
+            whiteboard: closed_tab.whiteboard,
             git_diff: None,
             inline_diff: None,
             is_preview: false,
@@ -414,6 +415,11 @@ impl EditorView {
 
     fn build_file_tab(&mut self, path: &Path, is_preview: bool) -> Option<OpenTab> {
         let (snapshot, file_kind) = Self::load_editor_tab_state_for_path(path)?;
+        let whiteboard = if matches!(file_kind, FileKind::Whiteboard) {
+            Some(WhiteboardTabState::load_from_path(path))
+        } else {
+            None
+        };
         let id = self.next_tab_identity();
         let history = history_store::load_tab_history(&id, Some(path), &snapshot);
         Some(OpenTab {
@@ -425,6 +431,7 @@ impl EditorView {
             editor_left_aligned: false,
             snapshot,
             image_view: ImageViewState::default(),
+            whiteboard,
             git_diff: None,
             inline_diff: None,
             is_preview,
@@ -924,6 +931,7 @@ impl EditorView {
                 extra_cursors: Vec::new(),
             },
             image_view: ImageViewState::default(),
+            whiteboard: None,
             git_diff: None,
             inline_diff: None,
             is_preview: false,
@@ -1015,6 +1023,7 @@ impl EditorView {
                 extra_cursors: Vec::new(),
             },
             image_view: ImageViewState::default(),
+            whiteboard: None,
             git_diff: None,
             inline_diff: None,
             is_preview: false,

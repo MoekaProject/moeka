@@ -63,6 +63,7 @@ actions!(
         MoveLineDown,
         Save,
         NewTab,
+        NewWhiteboard,
         Quit,
         Escape,
         ToggleOutline,

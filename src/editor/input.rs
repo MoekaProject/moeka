@@ -188,6 +188,10 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_on_mouse_down(event, window, cx);
+            return;
+        }
         self.last_mouse_down_target = None;
 
         if self.active_tab_supports_text_buffer() {
@@ -932,6 +936,19 @@ impl EditorView {
         cx.stop_propagation();
         self.is_selecting = false;
 
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_select_at(event.position);
+            self.context_submenu = None;
+            self.context_submenu_aim = None;
+            self.context_submenu_hovered = false;
+            self.context_menu = Some(ContextMenu {
+                position: event.position,
+                kind: ContextMenuKind::Whiteboard,
+            });
+            cx.notify();
+            return;
+        }
+
         if let Some(&(bounds, table_start, visual_row, col)) = self
             .table_click_areas
             .iter()
@@ -1065,6 +1082,10 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_on_mouse_up(event, cx);
+            return;
+        }
         if self.stop_editor_scrollbar_drag(event.position, cx) {
             return;
         }
@@ -1166,6 +1187,10 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_on_mouse_move(event, window, cx);
+            return;
+        }
         let toolbar_hover_changed = self.update_toolbar_corner_hover(event.position, cx);
         self.hovered_editor_position = Some(event.position);
         let dragging_scrollbar = self.update_editor_scrollbar_drag(event.position, cx);
@@ -2133,6 +2158,10 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_on_scroll(event, cx);
+            return;
+        }
         if self.preview_overlay.is_some() {
             let delta_y: f32 = event.delta.pixel_delta(px(40.0)).y.into();
             if delta_y != 0.0 {

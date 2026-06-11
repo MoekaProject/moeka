@@ -134,6 +134,11 @@ fn restore_tab_from_record(record: &TabSessionRecord) -> Option<OpenTab> {
 
     let file_kind = record.file_kind.as_deref().and_then(deserialize_file_kind);
     let (path, snapshot, is_dirty) = resolve_snapshot(record, file_kind.as_ref())?;
+    let whiteboard = if matches!(file_kind, Some(FileKind::Whiteboard)) {
+        path.as_deref().map(WhiteboardTabState::load_from_path)
+    } else {
+        None
+    };
     let mut history = history_store::load_tab_history_from_path(
         &record.id,
         path.as_deref(),
@@ -153,6 +158,7 @@ fn restore_tab_from_record(record: &TabSessionRecord) -> Option<OpenTab> {
         editor_left_aligned: record.view.editor_left_aligned,
         snapshot,
         image_view: ImageViewState::default(),
+        whiteboard,
         git_diff: None,
         inline_diff: None,
         is_preview: record.is_preview,
@@ -316,6 +322,7 @@ fn serialize_file_kind(kind: &FileKind) -> String {
         FileKind::Text => "text".to_string(),
         FileKind::Image => "image".to_string(),
         FileKind::Binary => "binary".to_string(),
+        FileKind::Whiteboard => "whiteboard".to_string(),
         FileKind::Code { language } => format!("code:{language}"),
     }
 }
@@ -326,6 +333,7 @@ fn deserialize_file_kind(value: &str) -> Option<FileKind> {
         "text" => Some(FileKind::Text),
         "image" => Some(FileKind::Image),
         "binary" => Some(FileKind::Binary),
+        "whiteboard" => Some(FileKind::Whiteboard),
         _ => value.strip_prefix("code:").map(|language| FileKind::Code {
             language: language.to_string(),
         }),
@@ -352,6 +360,7 @@ fn settings_tab(id: String) -> OpenTab {
             extra_cursors: Vec::new(),
         },
         image_view: ImageViewState::default(),
+        whiteboard: None,
         git_diff: None,
         inline_diff: None,
         is_preview: false,
@@ -417,6 +426,7 @@ mod tests {
                     extra_cursors: Vec::new(),
                 },
                 image_view: ImageViewState::default(),
+                whiteboard: None,
                 git_diff: None,
                 inline_diff: None,
                 is_preview: false,

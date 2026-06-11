@@ -152,6 +152,30 @@ impl EditorView {
         self.begin_sidebar_rename(path, true, window, cx);
     }
 
+    /// Create a new empty `.moeka` whiteboard in `parent`, then open it. Falls
+    /// back to the current directory when no workspace folder is set.
+    pub(crate) fn create_new_whiteboard(&mut self, parent: PathBuf, cx: &mut Context<Self>) {
+        let parent = if parent.as_os_str().is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        } else {
+            parent
+        };
+        let json = WhiteboardDocument::default().to_json_string();
+        let mut name = "Whiteboard.moeka".to_string();
+        let mut index = 1;
+        while parent.join(&name).exists() {
+            index += 1;
+            name = format!("Whiteboard {index}.moeka");
+        }
+        let path = parent.join(&name);
+        if std::fs::write(&path, json).is_ok() {
+            self.expanded_dirs.insert(parent);
+            self.invalidate_sidebar_items_cache();
+            self.open_path_in_permanent_tab(path, true, cx);
+            cx.notify();
+        }
+    }
+
     pub(crate) fn start_create_file(
         &mut self,
         parent: PathBuf,

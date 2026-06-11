@@ -33,10 +33,18 @@ impl EditorView {
     }
 
     pub(crate) fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_undo(cx);
+            return;
+        }
         self.apply_history_snapshot(cx, |history, current| history.take_undo(current));
     }
 
     pub(crate) fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_whiteboard() && self.whiteboard_escape() {
+            cx.notify();
+            return;
+        }
         if self.preview_overlay.is_some() {
             self.close_preview_overlay();
             cx.notify();
@@ -104,6 +112,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_redo(cx);
+            return;
+        }
         self.apply_history_snapshot(cx, |history, current| history.take_redo(current));
     }
 
@@ -113,6 +125,10 @@ impl EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_delete_selected(cx);
+            return;
+        }
         if self.active_tab_is_read_only() {
             return;
         }
@@ -301,6 +317,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_delete_selected(cx);
+            return;
+        }
         if self.focused_sidebar_path.is_some() {
             self.sidebar_delete_focused(cx);
             return;
@@ -411,6 +431,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_nudge(-whiteboard_geometry::GRID, 0.0, cx);
+            return;
+        }
         self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_left(cx);
@@ -471,6 +495,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_nudge(whiteboard_geometry::GRID, 0.0, cx);
+            return;
+        }
         self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_right(cx);
@@ -514,6 +542,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_nudge(0.0, -whiteboard_geometry::GRID, cx);
+            return;
+        }
         self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_up(cx);
@@ -558,6 +590,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_nudge(0.0, whiteboard_geometry::GRID, cx);
+            return;
+        }
         self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_down(cx);
@@ -681,6 +717,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_select_all(cx);
+            return;
+        }
         self.cursor.select_all(&self.buffer);
         self.pause_blinking(cx);
     }
@@ -947,14 +987,26 @@ impl EditorView {
     }
 
     pub(crate) fn on_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_copy(cx);
+            return;
+        }
         self.copy_selection_to_clipboard(cx);
     }
 
     pub(crate) fn on_cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_cut(cx);
+            return;
+        }
         self.cut_selection_to_clipboard(cx);
     }
 
     pub(crate) fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_whiteboard() {
+            self.whiteboard_paste(cx);
+            return;
+        }
         self.paste_from_clipboard(cx);
     }
 
@@ -1631,6 +1683,14 @@ impl EditorView {
         let Some(index) = self.active_tab_index() else {
             return;
         };
+        if self.tabs[index]
+            .file_kind
+            .as_ref()
+            .is_some_and(FileKind::is_whiteboard)
+        {
+            self.save_active_whiteboard(cx);
+            return;
+        }
         let text = self.normalize_text_for_save();
         if let Some(ref path) = self.tabs[index].path.clone() {
             if std::fs::write(path, &text).is_ok() {
@@ -1689,8 +1749,63 @@ impl EditorView {
         }
     }
 
+    fn save_active_whiteboard(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.active_tab_index() else {
+            return;
+        };
+        let Some(json) = self.tabs[index]
+            .whiteboard
+            .as_ref()
+            .map(|state| state.document.to_json_string())
+        else {
+            return;
+        };
+        if let Some(path) = self.tabs[index].path.clone() {
+            if std::fs::write(&path, &json).is_ok() {
+                self.tabs[index].is_dirty = false;
+                session_store::persist_session(self);
+                cx.notify();
+            }
+        } else {
+            let default_name = format!("{}.{}", self.tabs[index].title, WHITEBOARD_EXTENSION);
+            let title = self.t(crate::i18n::TextKey::SaveFileDialog).to_string();
+            cx.spawn(async move |this, cx| {
+                let maybe_path = cx
+                    .background_executor()
+                    .spawn(async move { helpers::save_file_blocking(&default_name, &title) })
+                    .await;
+                if let Some(path) = maybe_path
+                    && std::fs::write(&path, &json).is_ok()
+                {
+                    this.update(cx, |editor, cx| {
+                        if let Some(idx) = editor.active_tab_index() {
+                            editor.tabs[idx].path = Some(path.clone());
+                            editor.tabs[idx].title = EditorView::title_for_path(&path);
+                            editor.tabs[idx].is_dirty = false;
+                            editor.current_file_path = Some(path);
+                            session_store::persist_session(editor);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+        }
+    }
+
     pub(crate) fn on_new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) {
         self.create_scratch_tab(cx);
+    }
+
+    pub(crate) fn on_new_whiteboard(
+        &mut self,
+        _: &NewWhiteboard,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let parent = self.sidebar_root.clone();
+        self.create_new_whiteboard(parent, cx);
     }
 
     pub(crate) fn on_close_active_tab(
