@@ -24,6 +24,7 @@ pub struct Styles {
     pub utility_panel: UtilityPanelStyles,
     pub tab_bar: TabBarStyles,
     pub toolbar: ToolbarStyles,
+    pub whiteboard: WhiteboardStyles,
     pub tooltip: TooltipStyles,
     pub cursor: CursorStyles,
     pub code_block: CodeBlockStyles,
@@ -487,6 +488,36 @@ pub struct ToolbarStyles {
     pub toolbar_btn_shadow: bool,
     pub toolbar_btn_bg: Hsla,
     pub toolbar_btn_radius_px: f32,
+    pub toolbar_whiteboard_bottom_px: f32,
+    pub toolbar_whiteboard_gap_px: f32,
+    pub toolbar_whiteboard_padding_px: f32,
+    pub toolbar_whiteboard_btn_size_px: f32,
+    pub toolbar_whiteboard_icon_size_px: f32,
+    pub toolbar_whiteboard_border_width_px: f32,
+    pub toolbar_whiteboard_shadow: bool,
+    pub toolbar_whiteboard_bg: Hsla,
+    pub toolbar_whiteboard_border_color: Hsla,
+    pub toolbar_whiteboard_btn_bg: Hsla,
+    pub toolbar_whiteboard_btn_active_bg: Hsla,
+    pub toolbar_whiteboard_btn_hover_bg: Hsla,
+    pub toolbar_whiteboard_icon_color: Hsla,
+    pub toolbar_whiteboard_icon_active_color: Hsla,
+}
+
+// ── Whiteboard ─────────────────────────────────────────────────────
+
+pub struct WhiteboardStyles {
+    pub whiteboard_swatch_size_px: f32,
+    pub whiteboard_swatch_ring_width_px: f32,
+    pub whiteboard_swatch_ring_gap_px: f32,
+    pub whiteboard_swatch_checker_cell_px: f32,
+    pub whiteboard_swatch_grid_gap_y_px: f32,
+    pub whiteboard_swatch_ring_color: Hsla,
+    pub whiteboard_swatch_ring_idle_color: Hsla,
+    pub whiteboard_swatch_checker_light_color: Hsla,
+    pub whiteboard_swatch_checker_dark_color: Hsla,
+    pub whiteboard_render_cull_margin_px: f32,
+    pub whiteboard_fill_opacity_levels: [f32; 5],
 }
 
 // ── Tooltip ─────────────────────────────────────────────────────────
@@ -1438,6 +1469,37 @@ impl Styles {
                 toolbar_btn_shadow: false,
                 toolbar_btn_bg: with_alpha(theme.bg_elevated, 0.85),
                 toolbar_btn_radius_px: 8.0,
+                toolbar_whiteboard_bottom_px: 18.0,
+                toolbar_whiteboard_gap_px: 3.0,
+                toolbar_whiteboard_padding_px: 5.0,
+                toolbar_whiteboard_btn_size_px: 30.0,
+                toolbar_whiteboard_icon_size_px: 16.0,
+                toolbar_whiteboard_border_width_px: 1.0,
+                toolbar_whiteboard_shadow: true,
+                toolbar_whiteboard_bg: theme.bg_elevated,
+                toolbar_whiteboard_border_color: theme.border_primary,
+                toolbar_whiteboard_btn_bg: with_alpha(theme.bg_elevated, 0.0),
+                toolbar_whiteboard_btn_active_bg: theme.bg_selected,
+                toolbar_whiteboard_btn_hover_bg: theme.bg_hover,
+                toolbar_whiteboard_icon_color: theme.text_secondary,
+                toolbar_whiteboard_icon_active_color: theme.text_bright,
+            },
+            whiteboard: WhiteboardStyles {
+                whiteboard_swatch_size_px: 28.0,
+                whiteboard_swatch_ring_width_px: 3.0,
+                whiteboard_swatch_ring_gap_px: 1.0,
+                whiteboard_swatch_checker_cell_px: 4.0,
+                whiteboard_swatch_grid_gap_y_px: 6.0,
+                whiteboard_swatch_ring_color: if theme.bg_primary.l < 0.5 {
+                    crate::hex_hsla!("#f8f9fa")
+                } else {
+                    Hsla::black()
+                },
+                whiteboard_swatch_ring_idle_color: gpui::transparent_black(),
+                whiteboard_swatch_checker_light_color: crate::hex_hsla!("#ffffff"),
+                whiteboard_swatch_checker_dark_color: crate::hex_hsla!("#d9dee3"),
+                whiteboard_render_cull_margin_px: 240.0,
+                whiteboard_fill_opacity_levels: [0.2, 0.4, 0.6, 0.8, 1.0],
             },
             tooltip: TooltipStyles {
                 tooltip_delay_ms: 1000,

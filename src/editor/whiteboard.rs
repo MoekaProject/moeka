@@ -334,17 +334,10 @@ pub(crate) struct BackgroundSpec {
     pub opacity: f32,
     #[serde(default)]
     pub fill: FillStyle,
-    /// Fill color saturation factor (0..=1); 1 is the palette color itself.
+    /// Legacy fill-tone field kept on disk for compatibility with earlier
+    /// `.moeka` files. New UI uses `opacity` for fill transparency instead.
     #[serde(default = "default_opacity")]
     pub saturation: f32,
-}
-
-/// Scale a color's saturation channel (used for the fill-saturation levels).
-pub(crate) fn with_saturation(color: gpui::Hsla, factor: f32) -> gpui::Hsla {
-    gpui::Hsla {
-        s: color.s * factor.clamp(0.0, 1.0),
-        ..color
-    }
 }
 
 /// How a shape's background is painted.

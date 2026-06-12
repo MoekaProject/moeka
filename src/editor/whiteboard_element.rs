@@ -14,14 +14,13 @@ use gpui::{
 
 use super::whiteboard::{
     ElementKind, FillStyle, StrokeStyle, WhiteboardElement as Shape, WhiteboardTabState,
-    with_saturation,
 };
 use super::whiteboard_geometry::{
-    CanvasView, GRID, Pt, arrowhead, bbox_handle_points, element_corners, element_seed,
-    ellipse_perimeter, ellipse_segment_count, fill_polygon, hatch_segments, label_center,
-    linear_endpoints, outline_corners, resize_handle_points, rotate_glyph, roughen_polyline,
-    rounded_rect_polyline, route_handles, route_points, selection_bbox, selection_outline_pad,
-    sketch_stroke_polyline, split_polyline_outside_rect, stroke_polyline,
+    CanvasView, GRID, Pt, arrowhead, bbox_handle_points, element_corners, element_intersects_rect,
+    element_seed, ellipse_perimeter, ellipse_segment_count, fill_polygon, hatch_segments,
+    label_center, linear_endpoints, outline_corners, resize_handle_points, rotate_glyph,
+    roughen_polyline, rounded_rect_polyline, route_handles, route_points, selection_bbox,
+    selection_outline_pad, sketch_stroke_polyline, split_polyline_outside_rect, stroke_polyline,
 };
 use super::*;
 use crate::theme::{Theme, with_alpha};
@@ -135,8 +134,19 @@ impl Element for WhiteboardElement {
 
                 let font = build_canvas_font(window, editor);
                 let editing_id = editor.whiteboard_editing_element_id();
+                let cull_margin = editor.styles.whiteboard.whiteboard_render_cull_margin_px;
+                let c0 = view.to_canvas((origin_x - cull_margin, origin_y - cull_margin));
+                let c1 = view.to_canvas((
+                    origin_x + viewport_width + cull_margin,
+                    origin_y + viewport_height + cull_margin,
+                ));
+                let view_min = (c0.0.min(c1.0), c0.1.min(c1.1));
+                let view_max = (c0.0.max(c1.0), c0.1.max(c1.1));
                 for shape in &state.document.elements {
                     let editing = editing_id.as_deref() == Some(shape.id.as_str());
+                    if !editing && !element_intersects_rect(shape, view_min, view_max, 0.0) {
+                        continue;
+                    }
                     // Build each element into local buffers, then flatten in
                     // fill -> stroke -> label order so elements layer by their
                     // document (z) order.
@@ -337,17 +347,14 @@ fn build_shape(
     strokes: &mut Vec<(Path<Pixels>, Hsla)>,
     texts: &mut Vec<(WrappedLine, Point<Pixels>, Pixels)>,
 ) {
-    // The opacity setting applies to the whole element: stroke, fill, and
-    // any label text. A transparent stroke color draws no stroke at all.
-    let opacity = shape.background.opacity.clamp(0.0, 1.0);
     let stroke_visible = shape.stroke.color.resolve(theme).is_some();
-    let stroke_color = with_alpha(shape.stroke.color.resolve_stroke(theme), opacity);
+    let stroke_color = shape.stroke.color.resolve_stroke(theme);
     let stroke_width = (shape.stroke.width.px() * view.zoom).max(0.75);
     let fill_color = shape
         .background
         .color
         .resolve(theme)
-        .map(|color| with_alpha(with_saturation(color, shape.background.saturation), opacity));
+        .map(|color| with_alpha(color, shape.background.opacity.clamp(0.0, 1.0)));
 
     let roughness = shape.stroke.roughness;
     let amplitude = roughness.amplitude() * view.zoom;
@@ -549,7 +556,7 @@ fn build_text(
             .font
             .effective_color(shape.stroke.color)
             .resolve_stroke(theme),
-        shape.background.opacity.clamp(0.0, 1.0),
+        1.0,
     );
     let font = canvas_font_for(shape, font);
     let run = TextRun {
@@ -626,7 +633,7 @@ fn layout_label(
             .font
             .effective_color(shape.stroke.color)
             .resolve_stroke(theme),
-        shape.background.opacity.clamp(0.0, 1.0),
+        1.0,
     );
     let font = canvas_font_for(shape, font);
     let run = TextRun {

@@ -3,7 +3,7 @@
 //! marquee selection, and pan/zoom. These methods are invoked from the editor's
 //! shared mouse/scroll handlers when the active tab is a whiteboard.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui::{
     AppContext, ClipboardItem, Context, CursorStyle, Entity, Hsla, MouseButton, MouseDownEvent,
@@ -11,10 +11,11 @@ use gpui::{
 };
 
 use super::whiteboard_geometry::{
-    CanvasView, Pt, bbox_handle_anchor, bbox_handle_points, bounds_of, element_corners,
-    element_edge_point, hit_test, intersects_rect, label_center, label_hit_test, linear_endpoints,
-    resize_handle_points, route_cross_for_pointer, route_curve_offsets_for_pointer, route_handles,
-    route_mid_for_pointer, selection_bbox, snap_to_grid,
+    CanvasView, Pt, bbox_handle_anchor, bbox_handle_points, bounds_of, element_bounds,
+    element_corners, element_edge_point, hit_test, intersects_rect, label_center, label_hit_test,
+    linear_endpoints, point_near_element_bounds, resize_handle_points, route_cross_for_pointer,
+    route_curve_offsets_for_pointer, route_handles, route_mid_for_pointer, selection_bbox,
+    snap_to_grid,
 };
 use super::*;
 use crate::text_input::{TextInput, TextInputEvent};
@@ -1442,7 +1443,34 @@ impl EditorView {
             .elements
             .iter()
             .rev()
-            .find(|element| hit_test(element, canvas, tolerance) || label_hit_test(element, canvas))
+            .find(|element| {
+                let label_pad = if element.kind.is_linear() && !element.text.is_empty() {
+                    let font_size = element.font.size.px();
+                    let label_width = element
+                        .text
+                        .split('\n')
+                        .map(|line| {
+                            line.chars()
+                                .map(|ch| {
+                                    if ch.is_ascii() {
+                                        font_size * 0.55
+                                    } else {
+                                        font_size
+                                    }
+                                })
+                                .sum::<f32>()
+                        })
+                        .fold(0.0, f32::max);
+                    label_width * 0.5 + font_size
+                } else {
+                    0.0
+                };
+                point_near_element_bounds(
+                    element,
+                    canvas,
+                    tolerance + element.stroke.width.px() * 0.5 + 6.0 + label_pad,
+                ) && (hit_test(element, canvas, tolerance) || label_hit_test(element, canvas))
+            })
             .map(|element| element.id.clone())
     }
 
@@ -1450,35 +1478,50 @@ impl EditorView {
     /// `canvas` (clicking anywhere inside a group's rectangle selects it).
     fn whiteboard_pick_group_at(&self, canvas: Pt) -> Option<Vec<String>> {
         let state = self.active_whiteboard()?;
-        let mut seen: Vec<&str> = Vec::new();
+        let mut bounds_by_group: HashMap<&str, (Pt, Pt)> = HashMap::new();
+        let mut members_by_group: HashMap<&str, Vec<String>> = HashMap::new();
+        for element in &state.document.elements {
+            let Some(group) = element.outermost_group() else {
+                continue;
+            };
+            members_by_group
+                .entry(group)
+                .or_default()
+                .push(element.id.clone());
+            let Some((min, max)) = element_bounds(element) else {
+                continue;
+            };
+            bounds_by_group
+                .entry(group)
+                .and_modify(|(group_min, group_max)| {
+                    group_min.0 = group_min.0.min(min.0);
+                    group_min.1 = group_min.1.min(min.1);
+                    group_max.0 = group_max.0.max(max.0);
+                    group_max.1 = group_max.1.max(max.1);
+                })
+                .or_insert((min, max));
+        }
+
+        let mut topmost_groups = Vec::new();
+        let mut seen = HashSet::new();
         for element in state.document.elements.iter().rev() {
             let Some(group) = element.outermost_group() else {
                 continue;
             };
-            if seen.contains(&group) {
+            if !seen.insert(group) {
                 continue;
             }
-            seen.push(group);
-            let members = state
-                .document
-                .elements
-                .iter()
-                .filter(|other| other.outermost_group() == Some(group));
-            if let Some((min, max)) = selection_bbox(members)
+            topmost_groups.push(group);
+        }
+
+        for group in topmost_groups {
+            if let Some((min, max)) = bounds_by_group.get(group)
                 && canvas.0 >= min.0
                 && canvas.0 <= max.0
                 && canvas.1 >= min.1
                 && canvas.1 <= max.1
             {
-                return Some(
-                    state
-                        .document
-                        .elements
-                        .iter()
-                        .filter(|other| other.outermost_group() == Some(group))
-                        .map(|other| other.id.clone())
-                        .collect(),
-                );
+                return members_by_group.remove(group);
             }
         }
         None
@@ -1496,6 +1539,11 @@ impl EditorView {
             .find(|element| {
                 !element.kind.is_linear()
                     && exclude != Some(element.id.as_str())
+                    && point_near_element_bounds(
+                        element,
+                        canvas,
+                        element.stroke.width.px() * 0.5 + 4.0,
+                    )
                     && hit_test(element, canvas, 0.0)
             })
             .map(|element| element.id.clone())
@@ -1677,6 +1725,10 @@ impl EditorView {
 
     /// The cursor to show given the current drag/hover state over the canvas.
     pub(crate) fn whiteboard_cursor_at(&self, view: &CanvasView) -> CursorStyle {
+        if self.whiteboard_space_down {
+            return CursorStyle::ClosedHand;
+        }
+
         // An in-progress resize dictates the cursor; everything else uses the
         // default arrow (rotation shows the custom glyph instead).
         if let Some(drag) = self.whiteboard_drag.as_ref() {

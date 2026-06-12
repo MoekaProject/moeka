@@ -886,6 +886,39 @@ pub(crate) fn bounds_of(points: &[Pt]) -> Option<(Pt, Pt)> {
     Some((min, max))
 }
 
+pub(crate) fn bounds_intersect(a_min: Pt, a_max: Pt, b_min: Pt, b_max: Pt) -> bool {
+    a_min.0 <= b_max.0 && a_max.0 >= b_min.0 && a_min.1 <= b_max.1 && a_max.1 >= b_min.1
+}
+
+pub(crate) fn element_bounds(element: &WhiteboardElement) -> Option<(Pt, Pt)> {
+    if element.kind.is_linear() {
+        bounds_of(&route_points(element))
+    } else {
+        bounds_of(&element_corners(element))
+    }
+}
+
+pub(crate) fn element_intersects_rect(
+    element: &WhiteboardElement,
+    min: Pt,
+    max: Pt,
+    pad: f32,
+) -> bool {
+    let Some((emin, emax)) = element_bounds(element) else {
+        return false;
+    };
+    let emin = (emin.0 - pad, emin.1 - pad);
+    let emax = (emax.0 + pad, emax.1 + pad);
+    bounds_intersect(emin, emax, min, max)
+}
+
+pub(crate) fn point_near_element_bounds(element: &WhiteboardElement, p: Pt, pad: f32) -> bool {
+    let Some((min, max)) = element_bounds(element) else {
+        return false;
+    };
+    p.0 >= min.0 - pad && p.0 <= max.0 + pad && p.1 >= min.1 - pad && p.1 <= max.1 + pad
+}
+
 // ── Hit testing (canvas space) ───────────────────────────────────────────────
 
 /// Even-odd ray-cast point-in-polygon test.
@@ -924,6 +957,10 @@ pub(crate) fn dist_to_segment(p: Pt, a: Pt, b: Pt) -> f32 {
 /// Whether a canvas-space point hits the element (with `tol` canvas-unit
 /// tolerance for thin shapes / stroke width).
 pub(crate) fn hit_test(element: &WhiteboardElement, p: Pt, tol: f32) -> bool {
+    if !point_near_element_bounds(element, p, tol + element.stroke.width.px() * 0.5 + 4.0) {
+        return false;
+    }
+
     match element.kind {
         ElementKind::Rectangle | ElementKind::Text => {
             point_in_polygon(p, &element_corners(element))
@@ -1109,11 +1146,7 @@ pub(crate) fn split_polyline_outside_rect(points: &[Pt], min: Pt, max: Pt) -> Ve
 /// Whether the element's bounding box intersects the given canvas-space rect
 /// (used for marquee selection). Uses the element's axis-aligned bounds.
 pub(crate) fn intersects_rect(element: &WhiteboardElement, min: Pt, max: Pt) -> bool {
-    let corners = element_corners(element);
-    let Some((emin, emax)) = bounds_of(&corners) else {
-        return false;
-    };
-    emin.0 <= max.0 && emax.0 >= min.0 && emin.1 <= max.1 && emax.1 >= min.1
+    element_intersects_rect(element, min, max, 0.0)
 }
 
 /// Screen positions of the 8 resize handles for a non-linear element, ordered

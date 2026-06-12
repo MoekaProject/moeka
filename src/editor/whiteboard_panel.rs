@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, Bounds, Context, CursorStyle, ElementId, Hsla, MouseButton, Pixels, Window, canvas,
-    div, prelude::*, px, svg, transparent_black,
+    div, fill, point, prelude::*, px, size, svg, transparent_black,
 };
 
 use super::settings_panel::FontRole;
@@ -41,19 +41,20 @@ impl EditorView {
             .active_whiteboard()
             .map(|state| state.tool)
             .unwrap_or(WhiteboardTool::Select);
+        let toolbar = &self.styles.toolbar;
 
         let mut pill = div()
             .id("wb-toolbar-pill")
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(self.scaled(4.0)))
-            .p(px(self.scaled(6.0)))
-            .rounded(px(self.scaled(12.0)))
-            .bg(self.theme.bg_elevated)
-            .border_1()
-            .border_color(self.theme.border_primary)
-            .shadow_sm()
+            .gap(px(self.scaled(toolbar.toolbar_whiteboard_gap_px)))
+            .p(px(self.scaled(toolbar.toolbar_whiteboard_padding_px)))
+            .rounded_full()
+            .bg(toolbar.toolbar_whiteboard_bg)
+            .border(px(self.scaled(toolbar.toolbar_whiteboard_border_width_px)))
+            .border_color(toolbar.toolbar_whiteboard_border_color)
+            .when(toolbar.toolbar_whiteboard_shadow, |this| this.shadow_xs())
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _: &gpui::MouseDownEvent, _, cx| cx.stop_propagation()),
@@ -64,7 +65,7 @@ impl EditorView {
 
         div()
             .absolute()
-            .bottom(px(self.scaled(20.0)))
+            .bottom(px(self.scaled(toolbar.toolbar_whiteboard_bottom_px)))
             .left_0()
             .right_0()
             .flex()
@@ -81,32 +82,33 @@ impl EditorView {
         active: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let toolbar = &self.styles.toolbar;
         let icon_color = if active {
-            self.theme.text_bright
+            toolbar.toolbar_whiteboard_icon_active_color
         } else {
-            self.theme.text_secondary
+            toolbar.toolbar_whiteboard_icon_color
         };
         let bg = if active {
-            self.theme.bg_selected
+            toolbar.toolbar_whiteboard_btn_active_bg
         } else {
-            transparent_black()
+            toolbar.toolbar_whiteboard_btn_bg
         };
-        let hover_bg = self.theme.bg_hover;
+        let hover_bg = toolbar.toolbar_whiteboard_btn_hover_bg;
         div()
             .id(id)
-            .w(px(self.scaled(36.0)))
-            .h(px(self.scaled(34.0)))
+            .w(px(self.scaled(toolbar.toolbar_whiteboard_btn_size_px)))
+            .h(px(self.scaled(toolbar.toolbar_whiteboard_btn_size_px)))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(self.scaled(8.0)))
+            .rounded_full()
             .bg(bg)
             .cursor(CursorStyle::Arrow)
             .hover(move |style| style.bg(hover_bg))
             .child(
                 svg()
                     .path(format!("{TOOL_ICON}/{icon}"))
-                    .size(px(self.scaled(18.0)))
+                    .size(px(self.scaled(toolbar.toolbar_whiteboard_icon_size_px)))
                     .text_color(icon_color),
             )
             .on_mouse_down(
@@ -217,42 +219,27 @@ impl EditorView {
             bg_swatches,
         ));
 
-        // 填充颜色饱和度: 5 saturation levels shown as a neutral white→black
-        // ramp (independent of the chosen fill color).
-        if !canvas_mode && style.background.color.resolve(&self.theme).is_some() {
-            let current_saturation = style.background.saturation;
-            let accent = self.theme.text_accent;
-            let inactive_border = self.theme.border_secondary;
-            let mut saturation_row = div().w_full().flex().justify_between();
-            for (index, level) in [0.2_f32, 0.4, 0.6, 0.8, 1.0].into_iter().enumerate() {
-                let active = (current_saturation - level).abs() < 0.05;
-                let fill = gpui::Hsla {
-                    h: 0.0,
-                    s: 0.0,
-                    l: 1.0 - level,
-                    a: 1.0,
-                };
-                saturation_row = saturation_row.child(
-                    div()
-                        .id(("wb-saturation", index))
-                        .w(px(self.scaled(22.0)))
-                        .h(px(self.scaled(22.0)))
-                        .rounded_full()
-                        .bg(fill)
-                        .border(px(if active { 2.0 } else { 1.0 }))
-                        .border_color(if active { accent } else { inactive_border })
-                        .cursor(CursorStyle::Arrow)
-                        .hover(move |s| s.border_color(accent))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.whiteboard_apply_fill_saturation(level, cx);
-                            }),
-                        ),
-                );
+        // 填充颜色透明度: preview the current fill from 20% to 100% opacity.
+        if !canvas_mode
+            && let Some(base_fill) = style.background.color.resolve(&self.theme)
+        {
+            let whiteboard_styles = &self.styles.whiteboard;
+            let mut fill_opacity_row = div().w_full().flex().justify_between();
+            for (index, opacity) in whiteboard_styles
+                .whiteboard_fill_opacity_levels
+                .into_iter()
+                .enumerate()
+            {
+                let active = (style.background.opacity - opacity).abs() < 0.05;
+                fill_opacity_row = fill_opacity_row.child(self.wb_color_swatch(
+                    ("wb-fill-opacity", index),
+                    with_alpha(base_fill, opacity),
+                    active,
+                    cx,
+                    move |this, cx| this.whiteboard_apply_background_opacity(opacity, cx),
+                ));
             }
-            fields.push(self.wb_field("填充颜色饱和度", saturation_row.into_any_element()));
+            fields.push(self.wb_field("填充颜色透明度", fill_opacity_row.into_any_element()));
         }
 
         // 描边宽度 (fixed clean solid previews).
@@ -267,7 +254,13 @@ impl EditorView {
                 ("wb-sw", index),
                 index == 0,
                 width == option,
-                line_glyph(option.px(), StrokeStyle::Solid, StrokeRoughness::Clean, fg, self.ui_scale),
+                line_glyph(
+                    option.px(),
+                    StrokeStyle::Solid,
+                    StrokeRoughness::Clean,
+                    fg,
+                    self.ui_scale,
+                ),
                 cx,
                 move |this, cx| this.whiteboard_apply_stroke_width(option, cx),
             ));
@@ -465,49 +458,53 @@ impl EditorView {
             ));
         fields.push(self.wb_field("文本对齐", self.wb_segmented(align_row)));
 
-        // 透明度 (whole-element opacity; canvas background when unselected).
-        let opacity_preview = self.theme.text_secondary;
-        let checker = self.theme.border_secondary;
-        let levels = [0.2_f32, 0.4, 0.6, 0.8, 1.0];
-        let mut opacity_row = div().w_full().flex();
-        for (index, value) in levels.into_iter().enumerate() {
-            let active = (current_opacity - value).abs() < 0.05;
-            let glyph = div()
-                .w(px(self.scaled(14.0)))
-                .h(px(self.scaled(14.0)))
-                .rounded(px(self.scaled(4.0)))
-                .border_1()
-                .border_color(checker)
-                .bg(with_alpha(opacity_preview, value))
-                .into_any_element();
-            opacity_row = opacity_row.child(self.wb_custom_pill(
-                ("wb-bg-opacity", index),
-                index == 0,
-                active,
-                glyph,
-                cx,
-                move |this, cx| this.whiteboard_apply_background_opacity(value, cx),
-            ));
+        // 画布颜色透明度 (only when nothing is selected).
+        if canvas_mode {
+            let opacity_preview = self.theme.text_secondary;
+            let checker = self.theme.border_secondary;
+            let levels = self.styles.whiteboard.whiteboard_fill_opacity_levels;
+            let mut opacity_row = div().w_full().flex();
+            for (index, value) in levels.into_iter().enumerate() {
+                let active = (current_opacity - value).abs() < 0.05;
+                let glyph = div()
+                    .w(px(self.scaled(14.0)))
+                    .h(px(self.scaled(14.0)))
+                    .rounded(px(self.scaled(4.0)))
+                    .border_1()
+                    .border_color(checker)
+                    .bg(with_alpha(opacity_preview, value))
+                    .into_any_element();
+                opacity_row = opacity_row.child(self.wb_custom_pill(
+                    ("wb-bg-opacity", index),
+                    index == 0,
+                    active,
+                    glyph,
+                    cx,
+                    move |this, cx| this.whiteboard_apply_background_opacity(value, cx),
+                ));
+            }
+            fields.push(self.wb_field("画布颜色透明度", self.wb_segmented(opacity_row)));
         }
-        fields.push(self.wb_field("透明度", self.wb_segmented(opacity_row)));
 
         // 导出 (selected elements, or the whole canvas when unselected).
         let export_row = div()
             .w_full()
             .flex()
-            .child(self.wb_text_option("wb-export-png", true, "PNG", cx, |this, cx| {
-                this.whiteboard_export_png(cx)
-            }))
-            .child(self.wb_text_option("wb-export-svg", false, "SVG", cx, |this, cx| {
-                this.whiteboard_export_svg(cx)
-            }))
-            .child(self.wb_text_option(
-                "wb-export-json",
-                false,
-                "JSON",
-                cx,
-                |this, cx| this.whiteboard_export_json(cx),
-            ));
+            .child(
+                self.wb_text_option("wb-export-png", true, "PNG", cx, |this, cx| {
+                    this.whiteboard_export_png(cx)
+                }),
+            )
+            .child(
+                self.wb_text_option("wb-export-svg", false, "SVG", cx, |this, cx| {
+                    this.whiteboard_export_svg(cx)
+                }),
+            )
+            .child(
+                self.wb_text_option("wb-export-json", false, "JSON", cx, |this, cx| {
+                    this.whiteboard_export_json(cx)
+                }),
+            );
         fields.push(self.wb_field("导出", self.wb_segmented(export_row)));
 
         fields
@@ -552,25 +549,41 @@ impl EditorView {
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
+        if color == PaletteColor::Transparent {
+            return self.wb_transparent_swatch(id, active, cx, on_click);
+        }
         let resolved = color.resolve(&self.theme);
-        let accent = self.theme.text_accent;
-        let border_color = if active {
-            accent
-        } else {
-            self.theme.border_secondary
-        };
-        let border_width = if active { 2.0 } else { 1.0 };
         let fill = resolved.unwrap_or(self.theme.bg_primary);
+        self.wb_color_swatch(id, fill, active, cx, on_click)
+    }
+
+    fn wb_swatch_frame(
+        &self,
+        id: impl Into<ElementId>,
+        active: bool,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        child: AnyElement,
+    ) -> AnyElement {
+        let style = &self.styles.whiteboard;
+        let ring_color = if active {
+            style.whiteboard_swatch_ring_color
+        } else {
+            style.whiteboard_swatch_ring_idle_color
+        };
+        let hover_ring_color = style.whiteboard_swatch_ring_color;
+
         div()
             .id(id)
-            .w(px(self.scaled(22.0)))
-            .h(px(self.scaled(22.0)))
+            .w(px(self.scaled(style.whiteboard_swatch_size_px)))
+            .h(px(self.scaled(style.whiteboard_swatch_size_px)))
             .rounded_full()
-            .bg(fill)
-            .border(px(border_width))
-            .border_color(border_color)
+            .border(px(self.scaled(style.whiteboard_swatch_ring_width_px)))
+            .border_color(ring_color)
+            .p(px(self.scaled(style.whiteboard_swatch_ring_gap_px)))
             .cursor(CursorStyle::Arrow)
-            .hover(move |s| s.border_color(accent))
+            .hover(move |s| s.border_color(hover_ring_color))
+            .child(child)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
@@ -579,6 +592,81 @@ impl EditorView {
                 }),
             )
             .into_any_element()
+    }
+
+    fn wb_transparent_swatch(
+        &self,
+        id: impl Into<ElementId>,
+        active: bool,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let style = &self.styles.whiteboard;
+        let light = style.whiteboard_swatch_checker_light_color;
+        let dark = style.whiteboard_swatch_checker_dark_color;
+        let cell = self
+            .scaled(style.whiteboard_swatch_checker_cell_px)
+            .max(1.0);
+        let checker = div().w_full().h_full().rounded_full().child(
+            canvas(
+                |_, _, _| (),
+                move |bounds: Bounds<Pixels>, _, window: &mut Window, _| {
+                    let origin_x = f32::from(bounds.origin.x);
+                    let origin_y = f32::from(bounds.origin.y);
+                    let width = f32::from(bounds.size.width);
+                    let height = f32::from(bounds.size.height);
+                    let diameter = width.min(height);
+                    let radius = diameter * 0.5;
+                    let center_x = origin_x + width * 0.5;
+                    let center_y = origin_y + height * 0.5;
+                    let top = center_y - radius;
+                    let bottom = center_y + radius;
+                    let strip_h = 1.0_f32;
+                    let mut y = top;
+                    while y < bottom {
+                        let h = (bottom - y).min(strip_h);
+                        let mid_y = y + h * 0.5;
+                        let dy = mid_y - center_y;
+                        let half_width = (radius * radius - dy * dy).max(0.0).sqrt();
+                        let mut x = center_x - half_width;
+                        let right = center_x + half_width;
+                        let row = ((mid_y - origin_y) / cell).floor() as i32;
+                        while x < right {
+                            let col = ((x - origin_x) / cell).floor() as i32;
+                            let cell_right = origin_x + (col + 1) as f32 * cell;
+                            let next_x = right.min(cell_right).max(x + 0.1);
+                            let color = if (row + col) % 2 == 0 { light } else { dark };
+                            window.paint_quad(fill(
+                                Bounds::new(point(px(x), px(y)), size(px(next_x - x), px(h))),
+                                color,
+                            ));
+                            x = next_x;
+                        }
+                        y += h;
+                    }
+                },
+            )
+            .w_full()
+            .h_full(),
+        );
+        self.wb_swatch_frame(id, active, cx, on_click, checker.into_any_element())
+    }
+
+    fn wb_color_swatch(
+        &self,
+        id: impl Into<ElementId>,
+        fill: Hsla,
+        active: bool,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let inner = div()
+            .w_full()
+            .h_full()
+            .rounded_full()
+            .bg(fill)
+            .into_any_element();
+        self.wb_swatch_frame(id, active, cx, on_click, inner)
     }
 
     /// A grid of circular color swatches, 5 per row, spread edge-to-edge with
@@ -592,7 +680,12 @@ impl EditorView {
         cx: &mut Context<Self>,
         apply: fn(&mut Self, PaletteColor, &mut Context<Self>),
     ) -> AnyElement {
-        let mut column = div().w_full().flex().flex_col().gap(px(self.scaled(6.0)));
+        let style = &self.styles.whiteboard;
+        let mut column = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(self.scaled(style.whiteboard_swatch_grid_gap_y_px)));
         for (row_index, chunk) in colors.chunks(5).enumerate() {
             let mut row = div().w_full().flex().flex_row().justify_between();
             for (col_index, color) in chunk.iter().enumerate() {
@@ -607,7 +700,11 @@ impl EditorView {
                 ));
             }
             for _ in chunk.len()..5 {
-                row = row.child(div().w(px(self.scaled(22.0))).h(px(self.scaled(22.0))));
+                row = row.child(
+                    div()
+                        .w(px(self.scaled(style.whiteboard_swatch_size_px)))
+                        .h(px(self.scaled(style.whiteboard_swatch_size_px))),
+                );
             }
             column = column.child(row);
         }
@@ -1034,27 +1131,6 @@ impl EditorView {
             for element in state.document.elements.iter_mut() {
                 if ids.iter().any(|id| id == &element.id) {
                     element.background.opacity = opacity;
-                    changed = true;
-                }
-            }
-        }
-        if changed {
-            self.mark_whiteboard_dirty();
-        }
-        cx.notify();
-    }
-
-    fn whiteboard_apply_fill_saturation(&mut self, saturation: f32, cx: &mut Context<Self>) {
-        if self.whiteboard_has_selection() {
-            self.whiteboard_push_undo();
-        }
-        let mut changed = false;
-        if let Some(state) = self.active_whiteboard_mut() {
-            state.default_style.background.saturation = saturation;
-            let ids = state.selected_ids.clone();
-            for element in state.document.elements.iter_mut() {
-                if ids.iter().any(|id| id == &element.id) {
-                    element.background.saturation = saturation;
                     changed = true;
                 }
             }

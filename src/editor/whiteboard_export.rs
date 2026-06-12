@@ -8,7 +8,6 @@ use gpui::{ClipboardItem, Hsla, Image, ImageFormat};
 use super::EditorView;
 use super::whiteboard::{
     CanvasTextAlign, ElementKind, FillStyle, StrokeStyle, WhiteboardDocument, WhiteboardElement,
-    with_saturation,
 };
 use super::whiteboard_geometry::{
     CanvasView, Pt, arrowhead_points, bounds_of, element_corners, element_seed,
@@ -272,19 +271,20 @@ pub(crate) fn whiteboard_svg(
     }
 
     for element in elements {
-        let opacity = element.background.opacity.clamp(0.0, 1.0);
         let stroke_visible = element.stroke.color.resolve(theme).is_some();
-        let stroke_color = with_alpha(element.stroke.color.resolve_stroke(theme), opacity);
+        let stroke_color = element.stroke.color.resolve_stroke(theme);
         let stroke_width = element.stroke.width.px().max(0.75);
-        let fill_color = element.background.color.resolve(theme).map(|color| {
-            with_alpha(with_saturation(color, element.background.saturation), opacity)
-        });
+        let fill_color = element
+            .background
+            .color
+            .resolve(theme)
+            .map(|color| with_alpha(color, element.background.opacity.clamp(0.0, 1.0)));
         let text_color = with_alpha(
             element
                 .font
                 .effective_color(element.stroke.color)
                 .resolve_stroke(theme),
-            opacity,
+            1.0,
         );
         let family = element.font.family.as_deref().unwrap_or(font_family);
 
