@@ -2158,6 +2158,15 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.outline_rail_clicked_active_line.is_some() {
+            self.outline_rail_clicked_active_line = None;
+            self.outline_rail_hovered_label_line = None;
+            self.outline_rail_hovered_label_opacity = 0.0;
+            self.outline_rail_hovered_label_opacity_target = 0.0;
+            self.outline_rail_hovered_label_opacity_epoch += 1;
+            self.outline_rail_hovered_label_opacity_task = None;
+        }
+
         if self.active_tab_is_whiteboard() {
             self.whiteboard_on_scroll(event, cx);
             return;

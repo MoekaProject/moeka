@@ -2456,7 +2456,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match self.displayed_utility_panel {
-            Some(RightUtilityPanel::Outline) => self.render_outline(cx),
             Some(RightUtilityPanel::Chat) => self.render_chat_panel(is_chat_focused, cx),
             Some(RightUtilityPanel::Info) => self.render_info_panel(cx),
             Some(RightUtilityPanel::GitHistory) => self.render_git_history_panel(cx),

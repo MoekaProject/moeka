@@ -1330,7 +1330,7 @@ impl EditorView {
             .collect();
 
         // Determine position: left-align with the trigger button's left edge.
-        // Layout: sidebar? | [workspace-pane: settings_panel(max_w=560, mx_auto, px=40, font_row: label=120 + gap=12 + button)] | outline?
+        // Layout: sidebar? | [workspace-pane: settings_panel(max_w=560, mx_auto, px=40, font_row: label=120 + gap=12 + button)] | utility panel?
         let border_w = self.styles.window.window_border_width_px;
         let sidebar_w = self.sidebar_width();
         let right_panel_w = self.right_panel_width();

@@ -154,7 +154,8 @@ impl TextInput {
 
     /// Insert a newline at the cursor (multiline mode).
     fn insert_newline(&mut self, cx: &mut Context<Self>) {
-        self.undo_stack.push((self.text.clone(), self.cursor_offset));
+        self.undo_stack
+            .push((self.text.clone(), self.cursor_offset));
         self.delete_selection();
         self.text.insert(self.cursor_offset, '\n');
         self.cursor_offset += 1;
@@ -531,13 +532,7 @@ impl TextInput {
             .child(item("paste", "粘贴", true, cx, |this, w, cx| {
                 this.on_paste(&TextInputPaste, w, cx);
             }))
-            .child(
-                div()
-                    .w_full()
-                    .h(px(1.0))
-                    .my(px(4.0))
-                    .bg(separator_color),
-            )
+            .child(div().w_full().h(px(1.0)).my(px(4.0)).bg(separator_color))
             .child(item(
                 "select-all",
                 "全选",
@@ -1298,8 +1293,7 @@ impl Element for TextElement {
                     None,
                 );
                 let center_offset = if centered {
-                    ((bounds.size.width - shaped.x_for_index(part.len())) / 2.0)
-                        .max(Pixels::ZERO)
+                    ((bounds.size.width - shaped.x_for_index(part.len())) / 2.0).max(Pixels::ZERO)
                 } else if right_aligned {
                     (bounds.size.width - shaped.x_for_index(part.len())).max(Pixels::ZERO)
                 } else {
@@ -1326,10 +1320,7 @@ impl Element for TextElement {
                         ));
                     }
                 }
-                if cursor_quad.is_none()
-                    && cursor_offset >= seg_start
-                    && cursor_offset <= seg_end
-                {
+                if cursor_quad.is_none() && cursor_offset >= seg_start && cursor_offset <= seg_end {
                     let x = shaped.x_for_index(cursor_offset - seg_start);
                     cursor_quad = Some(fill(
                         Bounds::new(

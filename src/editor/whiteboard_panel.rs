@@ -220,9 +220,7 @@ impl EditorView {
         ));
 
         // 填充颜色透明度: preview the current fill from 20% to 100% opacity.
-        if !canvas_mode
-            && let Some(base_fill) = style.background.color.resolve(&self.theme)
-        {
+        if !canvas_mode && let Some(base_fill) = style.background.color.resolve(&self.theme) {
             let whiteboard_styles = &self.styles.whiteboard;
             let mut fill_opacity_row = div().w_full().flex().justify_between();
             for (index, opacity) in whiteboard_styles

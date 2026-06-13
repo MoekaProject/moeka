@@ -39,7 +39,6 @@ pub(crate) enum TabKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RightUtilityPanel {
-    Outline,
     Chat,
     Info,
     GitHistory,

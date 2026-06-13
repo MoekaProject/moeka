@@ -8,16 +8,14 @@ use super::EditorView;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum PanelScrollbarKind {
     Sidebar,
-    Outline,
     Info,
     GitHistory,
     ChatTerminal,
 }
 
 impl PanelScrollbarKind {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 4] = [
         Self::Sidebar,
-        Self::Outline,
         Self::Info,
         Self::GitHistory,
         Self::ChatTerminal,
@@ -26,7 +24,6 @@ impl PanelScrollbarKind {
     fn id(self) -> &'static str {
         match self {
             Self::Sidebar => "sidebar-scrollbar",
-            Self::Outline => "outline-scrollbar",
             Self::Info => "info-scrollbar",
             Self::GitHistory => "git-history-scrollbar",
             Self::ChatTerminal => "chat-terminal-scrollbar",
@@ -219,12 +216,6 @@ impl EditorView {
                 )?;
                 (metrics, self.sidebar_scrollbar_track_height(), 0.0)
             }
-            PanelScrollbarKind::Outline => {
-                let metrics =
-                    VerticalScrollbarMetrics::from_scroll_handle(&self.outline_scroll_handle)?;
-                let track_height_px = f32::from(self.outline_scroll_handle.bounds().size.height);
-                (metrics, track_height_px, 0.0)
-            }
             PanelScrollbarKind::Info => {
                 let metrics =
                     VerticalScrollbarMetrics::from_scroll_handle(&self.info_panel_scroll_handle)?;
@@ -304,7 +295,6 @@ impl EditorView {
     fn panel_scrollbar_handle(&self, kind: PanelScrollbarKind) -> Option<&ScrollHandle> {
         match kind {
             PanelScrollbarKind::Sidebar => Some(self.active_sidebar_scrollbar_handle()),
-            PanelScrollbarKind::Outline => Some(&self.outline_scroll_handle),
             PanelScrollbarKind::Info => Some(&self.info_panel_scroll_handle),
             PanelScrollbarKind::GitHistory => Some(&self.git_history_scroll_handle),
             PanelScrollbarKind::ChatTerminal => None,
@@ -640,7 +630,6 @@ impl EditorView {
                 self.set_active_chat_terminal_scrollbar_top(scroll_top, cx);
             }
             PanelScrollbarKind::Sidebar
-            | PanelScrollbarKind::Outline
             | PanelScrollbarKind::Info
             | PanelScrollbarKind::GitHistory => {
                 if let Some(handle) = self.panel_scrollbar_handle(kind) {

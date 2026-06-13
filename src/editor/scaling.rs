@@ -393,32 +393,6 @@ impl EditorView {
             self.scroll_offset =
                 cursor_y + cursor_line_height - self.last_viewport_height + self.padding_top();
         }
-
-        if self.utility_panel == Some(RightUtilityPanel::Outline)
-            && let Some(active_line) = self.active_outline_heading_line()
-        {
-            let headings = self.collect_outline_headings();
-            if let Some(index) = headings
-                .iter()
-                .position(|heading| heading.line == active_line)
-            {
-                self.outline_scroll_handle.scroll_to_item(index + 2);
-            }
-        }
-    }
-
-    fn sync_outline_scroll_position(&self) {
-        if self.utility_panel == Some(RightUtilityPanel::Outline)
-            && let Some(active_line) = self.active_outline_heading_line()
-        {
-            let headings = self.collect_outline_headings();
-            if let Some(index) = headings
-                .iter()
-                .position(|heading| heading.line == active_line)
-            {
-                self.outline_scroll_handle.scroll_to_item(index + 2);
-            }
-        }
     }
 
     fn animate_scroll_to(&mut self, target_scroll: f32, cx: &mut Context<Self>) {
@@ -429,7 +403,6 @@ impl EditorView {
 
         if (final_scroll - start_scroll).abs() < 1.0 {
             self.scroll_offset = final_scroll;
-            self.sync_outline_scroll_position();
             cx.notify();
             return;
         }
@@ -456,7 +429,6 @@ impl EditorView {
                         let ease = 1.0 - (1.0 - t).powi(3);
                         this.scroll_offset = start_scroll + (final_scroll - start_scroll) * ease;
                         this.clamp_scroll();
-                        this.sync_outline_scroll_position();
                         cx.notify();
                         step == total_steps
                     })
@@ -647,7 +619,20 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_outline_visibility(&mut self, cx: &mut Context<Self>) {
-        self.toggle_utility_panel(RightUtilityPanel::Outline, cx);
+        self.outline_rail_visible = !self.outline_rail_visible;
+        self.outline_rail_hovered = false;
+        self.outline_rail_hovered_label_line = None;
+        self.outline_rail_hovered_label_opacity = 0.0;
+        self.outline_rail_hovered_label_opacity_target = 0.0;
+        self.outline_rail_hovered_label_opacity_epoch += 1;
+        self.outline_rail_hovered_label_opacity_task = None;
+        self.outline_rail_label_opacity = 0.0;
+        self.outline_rail_label_opacity_target = 0.0;
+        self.outline_rail_label_opacity_epoch += 1;
+        self.outline_rail_label_opacity_task = None;
+        self.app_settings.outline_rail_visible = self.outline_rail_visible;
+        self.app_settings.save();
+        cx.notify();
     }
 
     pub(crate) fn toggle_chat_panel(&mut self, cx: &mut Context<Self>) {

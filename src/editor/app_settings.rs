@@ -43,6 +43,8 @@ pub(crate) struct AppSettings {
     pub date_time_format: String,
     #[serde(default = "default_starred_files")]
     pub starred_files: Vec<PathBuf>,
+    #[serde(default = "default_outline_rail_visible")]
+    pub outline_rail_visible: bool,
 }
 
 fn default_theme() -> String {
@@ -117,6 +119,10 @@ fn default_starred_files() -> Vec<PathBuf> {
     Vec::new()
 }
 
+fn default_outline_rail_visible() -> bool {
+    true
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -138,6 +144,7 @@ impl Default for AppSettings {
             sidebar_sort_mode: default_sidebar_sort_mode(),
             date_time_format: default_date_time_format(),
             starred_files: default_starred_files(),
+            outline_rail_visible: default_outline_rail_visible(),
         }
     }
 }

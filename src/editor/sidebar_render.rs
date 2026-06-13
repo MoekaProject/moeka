@@ -437,7 +437,7 @@ impl EditorView {
             } else {
                 gpui::transparent_black()
             })
-            .when(!self.sidebar_resizing && !self.outline_resizing, |this| {
+            .when(!self.sidebar_resizing, |this| {
                 this.hover(move |style| style.bg(item_hover_bg))
             })
             .child(
@@ -802,7 +802,7 @@ impl EditorView {
             } else {
                 gpui::transparent_black()
             })
-            .when(!self.sidebar_resizing && !self.outline_resizing, |this| {
+            .when(!self.sidebar_resizing, |this| {
                 this.hover(move |style| style.bg(item_hover_bg))
             })
             .children(guides)
@@ -879,7 +879,7 @@ impl EditorView {
                     cx.notify();
                 })
             })
-            .when(!self.sidebar_resizing && !self.outline_resizing, |el| {
+            .when(!self.sidebar_resizing, |el| {
                 el.on_drag(DraggedSidebarItems { paths: drag_paths }, {
                     let label = drag_label;
                     let count = drag_count;

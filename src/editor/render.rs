@@ -905,6 +905,10 @@ impl Render for EditorView {
                                                                 )
                                                             })
                                                             .when_some(
+                                                                self.render_outline_rail(cx),
+                                                                |this, rail| this.child(rail),
+                                                            )
+                                                            .when_some(
                                                                 self.editor_scrollbar_thumb_geometry(),
                                                                 |this, (thumb_top, thumb_height)| {
                                                                     let thumb_width = self.scaled(self.editor_scrollbar_width);
@@ -1088,10 +1092,7 @@ impl Render for EditorView {
                                                         let secondary_btn_width = secondary_btn_size;
                                                         let toolbar_right = toolbar_min_right.round();
                                                         let toolbar_top = toolbar_min_top.round();
-                                                        let outline_active = self
-                                                            .is_utility_panel_active(
-                                                                RightUtilityPanel::Outline,
-                                                            );
+                                                        let outline_active = self.outline_rail_visible;
                                                         let outline_x = editor_pane_width
                                                             - toolbar_right
                                                             - secondary_btn_width * 2.0
