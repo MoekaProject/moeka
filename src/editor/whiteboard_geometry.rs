@@ -135,41 +135,26 @@ pub(crate) fn route_points(element: &WhiteboardElement) -> Vec<Pt> {
             let dx = end.0 - start.0;
             let dy = end.1 - start.1;
             let t1 = element.route_mid.clamp(0.0, 1.0);
-            let t2 = element.route_mid2.unwrap_or(element.route_mid).clamp(0.0, 1.0);
+            let t2 = element
+                .route_mid2
+                .unwrap_or(element.route_mid)
+                .clamp(0.0, 1.0);
             let cross = element.route_cross;
             if dx.abs() >= dy.abs() {
                 let x1 = start.0 + dx * t1;
                 let x2 = start.0 + dx * t2;
                 let ym = start.1 + dy * cross;
-                vec![
-                    start,
-                    (x1, start.1),
-                    (x1, ym),
-                    (x2, ym),
-                    (x2, end.1),
-                    end,
-                ]
+                vec![start, (x1, start.1), (x1, ym), (x2, ym), (x2, end.1), end]
             } else {
                 let y1 = start.1 + dy * t1;
                 let y2 = start.1 + dy * t2;
                 let xm = start.0 + dx * cross;
-                vec![
-                    start,
-                    (start.0, y1),
-                    (xm, y1),
-                    (xm, y2),
-                    (end.0, y2),
-                    end,
-                ]
+                vec![start, (start.0, y1), (xm, y1), (xm, y2), (end.0, y2), end]
             }
         }
         RouteStyle::Curved => {
-            let control = curve_control_point(
-                start,
-                end,
-                element.route_curve,
-                element.route_curve_t,
-            );
+            let control =
+                curve_control_point(start, end, element.route_curve, element.route_curve_t);
             let segs = 28;
             (0..=segs)
                 .map(|i| {
@@ -658,10 +643,7 @@ pub(crate) fn roughen_polyline(points: &[Pt], closed: bool, amplitude: f32, seed
             // Dense sampling (curves): one gentle bow per edge.
             out.push(a);
             let offset = rng.next_f32() * amplitude * 0.5;
-            out.push((
-                a.0 + dx * 0.5 + nx * offset,
-                a.1 + dy * 0.5 + ny * offset,
-            ));
+            out.push((a.0 + dx * 0.5 + nx * offset, a.1 + dy * 0.5 + ny * offset));
             continue;
         }
         // Random control offsets at 1/3 and 2/3; zero at the vertices.

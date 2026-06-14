@@ -10,10 +10,9 @@ use super::whiteboard::{
     CanvasTextAlign, ElementKind, FillStyle, StrokeStyle, WhiteboardDocument, WhiteboardElement,
 };
 use super::whiteboard_geometry::{
-    CanvasView, Pt, arrowhead_points, bounds_of, element_corners, element_seed,
-    ellipse_perimeter, ellipse_segment_count, hatch_segments, label_center, roughen_polyline,
-    rounded_rect_polyline, route_points, sketch_stroke_polyline_quads,
-    split_polyline_outside_rect, stroke_polyline_quads,
+    CanvasView, Pt, arrowhead_points, bounds_of, element_corners, element_seed, ellipse_perimeter,
+    ellipse_segment_count, hatch_segments, label_center, roughen_polyline, rounded_rect_polyline,
+    route_points, sketch_stroke_polyline_quads, split_polyline_outside_rect, stroke_polyline_quads,
 };
 use crate::theme::{Theme, with_alpha};
 
@@ -180,7 +179,11 @@ fn push_stroke(
     }
     for pass in 0..roughness.passes() {
         let pass_seed = seed.wrapping_add(pass as u64 * 0x9e37);
-        let pass_amplitude = if pass == 0 { amplitude } else { amplitude * 1.4 };
+        let pass_amplitude = if pass == 0 {
+            amplitude
+        } else {
+            amplitude * 1.4
+        };
         let color = if pass == 0 {
             stroke_color
         } else {
@@ -191,9 +194,12 @@ fn push_stroke(
             if closed && let Some(first) = pts.first().copied() {
                 pts.push(first);
             }
-            for quad in
-                sketch_stroke_polyline_quads(&pts, stroke_width, roughness.width_variation(), pass_seed)
-            {
+            for quad in sketch_stroke_polyline_quads(
+                &pts,
+                stroke_width,
+                roughness.width_variation(),
+                pass_seed,
+            ) {
                 push_polygon(out, &quad, color);
             }
         } else {
@@ -291,8 +297,7 @@ pub(crate) fn whiteboard_svg(
         match element.kind {
             ElementKind::Rectangle => {
                 let canvas_pts = rounded_rect_polyline(element, element.corner_radius.px(), 6);
-                let screen: Vec<Pt> =
-                    canvas_pts.iter().map(|p| view.to_screen(*p)).collect();
+                let screen: Vec<Pt> = canvas_pts.iter().map(|p| view.to_screen(*p)).collect();
                 if let Some(color) = fill_color {
                     push_fill(&mut out, &screen, element.background.fill, color);
                 }
@@ -339,7 +344,14 @@ pub(crate) fn whiteboard_svg(
                             );
                         }
                     } else {
-                        push_stroke(&mut out, element, &screen, false, stroke_color, stroke_width);
+                        push_stroke(
+                            &mut out,
+                            element,
+                            &screen,
+                            false,
+                            stroke_color,
+                            stroke_width,
+                        );
                     }
                     if element.kind == ElementKind::Arrow && screen.len() >= 2 {
                         let head = (stroke_width * 3.2 + 6.0).min(46.0);
@@ -450,7 +462,9 @@ impl EditorView {
     }
 
     pub(crate) fn whiteboard_export_png(&mut self, cx: &mut gpui::Context<Self>) {
-        let Some(png) = self.whiteboard_export_svg_string().and_then(|svg| svg_to_png(&svg))
+        let Some(png) = self
+            .whiteboard_export_svg_string()
+            .and_then(|svg| svg_to_png(&svg))
         else {
             return;
         };
@@ -492,7 +506,10 @@ impl EditorView {
     }
 
     pub(crate) fn whiteboard_copy_as_png(&mut self, cx: &mut gpui::Context<Self>) {
-        if let Some(png) = self.whiteboard_export_svg_string().and_then(|svg| svg_to_png(&svg)) {
+        if let Some(png) = self
+            .whiteboard_export_svg_string()
+            .and_then(|svg| svg_to_png(&svg))
+        {
             cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
                 ImageFormat::Png,
                 png,
