@@ -2288,6 +2288,64 @@ mod tests {
     }
 
     #[test]
+    fn generated_mermaid_block_preview_handles_complex_utf8_flowchart() {
+        let theme = Theme::one_dark();
+        let source = r#"flowchart TD
+  A["商品页加载<br/>content script document_start 注入"] --> B["登录态检查<br/>chrome.storage.local.pluginAuth"]
+  B -->|未登录| B0["不进入商品分析<br/>只等登录态变化"]
+  B -->|已登录| C["白名单门控<br/>focus + host 白名单 + Shopify 自动发现"]
+  C -->|未命中| C0["静默退出<br/>页面完全不显示插件"]
+  C -->|命中| D["挂载 Shadow DOM React Root<br/>但 pluginActive 仍可为 false"]
+  D --> E["商品主管线准备<br/>XPath / Shopify JSON / URL PDP / 截图 OCR"]
+  E -->|非 PDP| E0["不显示插件"]
+  E -->|确认 PDP + 拿到商品| F["暂存 preparedAnalysis<br/>小女孩进入正常态，等待点击"]
+  F --> G["用户点击小女孩"]
+  G --> H["POST /api/plugin-ai/analyze<br/>带 pageData + extractedProduct + engine"]
+  H --> I{"engine?"}
+  I -->|server| J["服务端研究 + Tavily + 平台模型最终成稿"]
+  J --> K["SSE: analysis_report_start/component/done"]
+  I -->|user_ai| L["服务端只做品类 + 模板 + web prompt 备料"]
+  L --> M["SSE: bridge_prompt + bridgeHandoff done"]
+  M --> N["插件 Bridge Client 接管"]
+  N --> O["Bridge Tab 驱动 ChatGPT/Gemini iframe"]
+  O --> P["用户 AI 输出 JSONL 原文"]
+  P --> Q["POST /analyze/bridge-complete"]
+  Q --> R{"服务端验收通过?"}
+  R -->|通过| S["返回同构 events 数组"]
+  R -->|未 done 且有额度| O2["BRIDGE_CONTINUE 续写"]
+  O2 --> P
+  R -->|失败/额度尽| T["POST /analyze/bridge-fallback<br/>服务端兜底成稿"]
+  T --> K
+  S --> U["逐条喂 mapAnalyzeSseEvent"]
+  K --> U
+  U --> V["analysis-store streamingReport"]
+  V --> W["SidePanel 渲染最终组件报告"]"#;
+        let svg = build_generated_block_preview_svg(
+            markdown::BlockPreviewKind::Mermaid,
+            source,
+            &theme,
+            generated_preview_fonts(),
+        );
+
+        assert!(svg.contains("<svg"));
+        assert!(!svg.contains("Mermaid preview failed"));
+        assert!(svg.contains(" H ") || svg.contains(" V "));
+        assert!(!svg.contains(" C "));
+        for bare_label in ["C", "D", "F", "S", "T"] {
+            assert!(!svg.contains(&format!(">{bare_label}</text>")));
+        }
+        for expected in [
+            "白名单门控",
+            "挂载 Shadow DOM React Root",
+            "暂存 preparedAnalysis",
+            "返回同构 events 数组",
+            "POST /analyze/bridge-fallback",
+        ] {
+            assert!(svg.contains(expected));
+        }
+    }
+
+    #[test]
     fn generated_mermaid_block_preview_uses_configured_code_font_with_cjk_fallback() {
         let theme = Theme::one_dark();
         let svg = build_generated_block_preview_svg(
@@ -2300,7 +2358,8 @@ mod tests {
             },
         );
 
-        assert!(svg.contains("font-family=\"Fira Code, PingFang SC"));
+        assert!(svg.contains("Fira Code"));
+        assert!(svg.contains("PingFang SC"));
         assert!(svg.contains("ui-monospace"));
     }
 
@@ -3368,6 +3427,71 @@ fn render_mermaid_block_preview_svg(
     theme: &Theme,
     font_families: GeneratedPreviewFontFamilies<'_>,
 ) -> anyhow::Result<String> {
+    if mermaid_source_prefers_orthogonal_svg(source_text) {
+        return render_mermaid_text_block_preview_svg(source_text, theme, font_families);
+    }
+
+    let mermaid_svg_source = normalize_mermaid_svg_source(source_text);
+    match mermaid_svg::render(&mermaid_svg_source) {
+        Ok(svg) => Ok(apply_mermaid_svg_theme(&svg, theme, font_families)),
+        Err(_) => render_mermaid_text_block_preview_svg(source_text, theme, font_families),
+    }
+}
+
+fn mermaid_source_prefers_orthogonal_svg(source_text: &str) -> bool {
+    source_text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("%%"))
+        .and_then(|line| line.split_whitespace().next())
+        .is_some_and(|keyword| {
+            keyword.eq_ignore_ascii_case("flowchart")
+                || keyword.eq_ignore_ascii_case("graph")
+                || keyword.eq_ignore_ascii_case("statediagram")
+                || keyword.eq_ignore_ascii_case("statediagram-v2")
+        })
+}
+
+fn normalize_mermaid_svg_source(source_text: &str) -> String {
+    source_text
+        .replace("<br/>", r"\n")
+        .replace("<br>", r"\n")
+        .replace("<br />", r"\n")
+        .replace("<BR/>", r"\n")
+        .replace("<BR>", r"\n")
+        .replace("<BR />", r"\n")
+}
+
+fn render_mermaid_text_block_preview_svg(
+    source_text: &str,
+    theme: &Theme,
+    font_families: GeneratedPreviewFontFamilies<'_>,
+) -> anyhow::Result<String> {
+    let font_family = build_generated_preview_font_family(font_families);
+    let foreground = svg_color(generated_preview_foreground_color(theme));
+    let secondary = svg_color(theme.text_secondary);
+    let node_fill = svg_color(theme.bg_secondary);
+    let node_stroke = svg_color(theme.border_primary);
+    let subgraph_fill = svg_color(theme.bg_secondary);
+    let subgraph_stroke = svg_color(theme.border_secondary);
+    let svg_options = mermaid_text::SvgRenderOptions {
+        font_family: &font_family,
+        text_color: &foreground,
+        muted_text_color: &secondary,
+        edge_label_color: &foreground,
+        node_fill: &node_fill,
+        node_stroke: &node_stroke,
+        edge_stroke: &foreground,
+        subgraph_fill: &subgraph_fill,
+        subgraph_stroke: &subgraph_stroke,
+    };
+
+    match mermaid_text::render_svg_with_options(source_text, &svg_options) {
+        Ok(svg) => return Ok(svg),
+        Err(mermaid_text::Error::UnsupportedDiagram(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+
     let rendered = mermaid_text::render_with_width(
         source_text,
         Some(GENERATED_PREVIEW_MERMAID_TEXT_COLUMN_BUDGET),
@@ -3377,6 +3501,61 @@ fn render_mermaid_block_preview_svg(
         theme,
         font_families,
     ))
+}
+
+fn apply_mermaid_svg_theme(
+    svg: &str,
+    theme: &Theme,
+    font_families: GeneratedPreviewFontFamilies<'_>,
+) -> String {
+    let font_family = escape_svg_text(&build_generated_preview_font_family(font_families));
+    let foreground = svg_color(generated_preview_foreground_color(theme));
+    let secondary = svg_color(theme.text_secondary);
+    let node_fill = svg_color(theme.bg_secondary);
+    let node_stroke = svg_color(theme.border_primary);
+    let subgraph_fill = svg_color(theme.bg_secondary);
+    let subgraph_stroke = svg_color(theme.border_secondary);
+
+    let mut themed = append_svg_root_style(
+        svg,
+        &format!(
+            "font-family:{font_family};text-rendering:geometricPrecision;shape-rendering:geometricPrecision;font-variant-ligatures:none;"
+        ),
+    );
+
+    for (from, to) in [
+        (
+            "font-family=\"sans-serif\"",
+            format!("font-family=\"{font_family}\""),
+        ),
+        ("fill=\"#333\"", format!("fill=\"{foreground}\"")),
+        ("fill=\"#222\"", format!("fill=\"{foreground}\"")),
+        ("fill=\"#666\"", format!("fill=\"{secondary}\"")),
+        ("fill=\"#777\"", format!("fill=\"{secondary}\"")),
+        ("stroke=\"#333\"", format!("stroke=\"{foreground}\"")),
+        ("stroke=\"#222\"", format!("stroke=\"{foreground}\"")),
+        ("stroke=\"#666\"", format!("stroke=\"{foreground}\"")),
+        ("stroke=\"#777\"", format!("stroke=\"{foreground}\"")),
+        ("fill=\"#ECECFF\"", format!("fill=\"{node_fill}\"")),
+        ("fill=\"#EEE\"", format!("fill=\"{node_fill}\"")),
+        ("stroke=\"#9370DB\"", format!("stroke=\"{node_stroke}\"")),
+        (
+            "stroke=\"#D0D0D0\"",
+            format!("stroke=\"{subgraph_stroke}\""),
+        ),
+        ("fill=\"#F9F9F9\"", format!("fill=\"{subgraph_fill}\"")),
+        (
+            "fill=\"#fff\"",
+            format!(
+                "fill=\"{theme_bg}\"",
+                theme_bg = svg_color(theme.bg_primary)
+            ),
+        ),
+    ] {
+        themed = themed.replace(from, &to);
+    }
+
+    themed
 }
 
 fn build_generated_block_preview_error_svg(

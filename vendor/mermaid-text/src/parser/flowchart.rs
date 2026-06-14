@@ -585,7 +585,8 @@ fn try_consume_inline_compact_arrow(s: &str) -> Option<(String, usize)> {
     {
         let label = rest[..end].trim();
         if !label.is_empty() {
-            return Some((format!("-.->|{label}|"), 2 + end + 3));
+            let consumed = s[..2 + end + 3].chars().count();
+            return Some((format!("-.->|{label}|"), consumed));
         }
     }
     if let Some(rest) = s.strip_prefix("==")
@@ -594,7 +595,8 @@ fn try_consume_inline_compact_arrow(s: &str) -> Option<(String, usize)> {
     {
         let label = rest[..end].trim();
         if !label.is_empty() {
-            return Some((format!("==>|{label}|"), 2 + end + 3));
+            let consumed = s[..2 + end + 3].chars().count();
+            return Some((format!("==>|{label}|"), consumed));
         }
     }
     None
@@ -693,7 +695,7 @@ fn try_consume_inline_quoted_arrow(s: &str) -> Option<(String, usize)> {
         let tail_start = after_open[close_q + 1..].trim_start_matches(' ');
         if let Some(tail) = tail_start.strip_prefix(".->") {
             let pipe_tok = format!("-.->|\"{label}\"|");
-            let consumed = s.len() - tail.len();
+            let consumed = s[..s.len() - tail.len()].chars().count();
             return Some((pipe_tok, consumed));
         }
     }
@@ -706,7 +708,7 @@ fn try_consume_inline_quoted_arrow(s: &str) -> Option<(String, usize)> {
         let tail_start = after_open[close_q + 1..].trim_start_matches(' ');
         if let Some(tail) = tail_start.strip_prefix("==>") {
             let pipe_tok = format!("==>|\"{label}\"|");
-            let consumed = s.len() - tail.len();
+            let consumed = s[..s.len() - tail.len()].chars().count();
             return Some((pipe_tok, consumed));
         }
     }
@@ -734,7 +736,7 @@ fn try_consume_pipe_label(s: &str) -> (String, usize) {
         && let Some(end) = inner.find('|')
     {
         let portion = &s[..end + 2]; // includes both pipes
-        return (portion.to_string(), end + 2);
+        return (portion.to_string(), portion.chars().count());
     }
     (String::new(), 0)
 }
@@ -920,6 +922,12 @@ const LABEL_WRAP_THRESHOLD: usize = 40;
 /// own row inside the node box, widening the box vertically instead of
 /// horizontally.
 fn normalize_label(s: &str) -> String {
+    let s = s.trim();
+    let s = s
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(s);
+
     // Step 1: replace HTML <br> variants with `\n`. Lower-case first; the
     // upper-case variants are the only other common spellings on the wild.
     let with_breaks = s
@@ -1553,6 +1561,20 @@ classDef overlay stroke:#999,color:#fff";
         let thick = g.edges.iter().find(|e| e.to == "C").unwrap();
         assert_eq!(thick.style, EdgeStyle::Thick);
         assert_eq!(thick.label.as_deref(), Some("pipe thick"));
+    }
+
+    #[test]
+    fn utf8_pipe_label_does_not_skip_following_node_definition() {
+        let g = parse("flowchart TD\nB -->|已登录| C[\"白名单门控<br/>focus + host\"]").unwrap();
+
+        assert_eq!(g.edges.len(), 1);
+        assert_eq!(g.edges[0].from, "B");
+        assert_eq!(g.edges[0].to, "C");
+        assert_eq!(g.edges[0].label.as_deref(), Some("已登录"));
+        assert_eq!(
+            g.node("C").map(|node| node.label.as_str()),
+            Some("白名单门控\nfocus + host")
+        );
     }
 
     /// Inline-quoted labels with spaces in the label text.

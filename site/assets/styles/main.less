@@ -4,6 +4,8 @@
 @paper: #fff3e3;
 @paper-soft: #fff7ed;
 @muted: #8b8580;
+@button-shadow: 0 5px 14px rgba(0, 0, 0, 0.28);
+@topbar-shadow: 0 4px 10px rgba(0, 0, 0, 0.18);
 @serif: "Noto Serif SC", "Songti SC", STSong, serif;
 @sans: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
 
@@ -20,7 +22,7 @@ body {
   margin: 0;
   color: @ink;
   font-family: @sans;
-  background: linear-gradient(180deg, @paper 0%, @paper-soft 100%);
+  background: @paper;
 }
 
 a {
@@ -36,7 +38,7 @@ button {
 .site-shell {
   min-height: 100vh;
   overflow: hidden;
-  background: linear-gradient(180deg, @paper 0 545px, @paper-soft 545px 100%);
+  background: @paper;
 }
 
 .sr-only {
@@ -56,7 +58,10 @@ button {
   min-height: 545px;
   padding-top: 42px;
   isolation: isolate;
-  background: url("../index-bg.png") center top / 1363px 545px no-repeat;
+  background-image: url("../index-bg.svg");
+  background-position: center 200px;
+  background-repeat: no-repeat;
+  background-size: 800px auto;
 }
 
 .topbar {
@@ -75,9 +80,7 @@ button {
   padding: 0 5px;
   border-radius: 999px;
   background: @ink;
-  box-shadow:
-    0 4px 0 rgba(0, 0, 0, 0.38),
-    0 8px 13px rgba(0, 0, 0, 0.16);
+  box-shadow: @topbar-shadow;
 }
 
 .nav-link {
@@ -108,9 +111,7 @@ button {
   font-family: @serif;
   font-size: 14px;
   font-weight: 900;
-  box-shadow:
-    0 4px 0 rgba(0, 0, 0, 0.95),
-    0 8px 12px rgba(0, 0, 0, 0.11);
+  box-shadow: @topbar-shadow;
 }
 
 .language-pill img {
@@ -150,17 +151,25 @@ button {
 .flower-right {
   width: 82px;
   height: 88px;
-  right: 15px;
+  right: 58px;
   top: 4px;
 }
 
 .tagline {
-  margin-top: -3px;
+  display: flex;
+  justify-content: space-between;
+  width: 274px;
+  margin-top: -10px;
   color: @ink;
   font-family: @serif;
   font-size: 20px;
   font-weight: 900;
   line-height: 1.45;
+}
+
+.tagline span {
+  letter-spacing: 0.6em;
+  margin-right: -0.4em;
 }
 
 .hero-actions {
@@ -184,7 +193,7 @@ button {
   font-size: 14px;
   font-weight: 900;
   line-height: 1;
-  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.28);
+  box-shadow: @button-shadow;
 }
 
 .button img {
@@ -214,8 +223,8 @@ button {
   position: relative;
   z-index: 1;
   width: min(calc(100% - 120px), 1120px);
-  margin: -142px auto 0;
-  padding-bottom: 64px;
+  margin: -110px auto 0;
+  padding-bottom: 40px;
 }
 
 .feature-heading {
@@ -223,8 +232,8 @@ button {
   align-items: center;
   justify-content: center;
   gap: 20px;
-  min-height: 110px;
-  margin-bottom: 10px;
+  // min-height: 50px;
+  // margin-bottom: 10px;
   text-align: left;
 }
 
@@ -258,7 +267,7 @@ p {
 
 .product-screenshot {
   width: 100%;
-  max-width: 922px;
+  max-width: 1024px;
   height: auto;
   display: block;
   margin: 0 auto;
@@ -268,19 +277,16 @@ p {
 
 @media (min-width: 1364px) {
   .hero {
-    background-size: 100% 545px;
+    background-size: 800px auto;
   }
 }
 
 @media (max-width: 900px) {
-  .site-shell {
-    background: linear-gradient(180deg, @paper 0 500px, @paper-soft 500px 100%);
-  }
-
   .hero {
     min-height: 500px;
     padding: 28px 20px 0;
-    background-size: auto 500px;
+    background-position: center 118px;
+    background-size: 800px auto;
   }
 
   .topbar {
@@ -297,7 +303,7 @@ p {
   }
 
   .flower-right {
-    right: 32px;
+    right: 8px;
   }
 
   .feature-one {
@@ -307,13 +313,10 @@ p {
 }
 
 @media (max-width: 620px) {
-  .site-shell {
-    background: linear-gradient(180deg, @paper 0 470px, @paper-soft 470px 100%);
-  }
-
   .hero {
     min-height: 470px;
-    background-size: auto 470px;
+    background-position: center 120px;
+    background-size: 800px auto;
   }
 
   .topbar {
@@ -347,11 +350,12 @@ p {
   .flower-right {
     width: 62px;
     height: auto;
-    right: 3vw;
+    right: -2vw;
     top: 3px;
   }
 
   .tagline {
+    width: min(274px, 76vw);
     font-size: 17px;
   }
 

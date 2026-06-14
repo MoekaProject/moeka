@@ -3546,6 +3546,7 @@ dependencies = [
  "gpui",
  "image",
  "mathjax-svg-rs",
+ "mermaid-svg",
  "mermaid-text",
  "notify",
  "objc",
@@ -3631,6 +3632,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "mermaid-svg"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d401974d59b2d2ff913b700a730f544721d8b6a9f3f829be3e03befc7d85349e"
+dependencies = [
+ "petgraph",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4314,6 +4325,18 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "petgraph"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
+dependencies = [
+ "fixedbitset",
+ "hashbrown 0.15.5",
+ "indexmap",
+ "serde",
+]
 
 [[package]]
 name = "phf"

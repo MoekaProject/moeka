@@ -30,7 +30,10 @@ const navItems = ['简介', '特性', '需求', '下载']
 
         <h1 id="hero-title" class="sr-only">小语文稿</h1>
 
-        <p id="hero-tagline" class="tagline">言渡四海&nbsp;&nbsp;&nbsp;&nbsp;意会千山</p>
+        <p id="hero-tagline" class="tagline">
+          <span>言渡四海</span>
+          <span>意会千山</span>
+        </p>
 
         <div class="hero-actions" aria-label="主要操作">
           <a class="button button-dark" href="#下载">

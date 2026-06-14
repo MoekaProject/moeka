@@ -104,8 +104,36 @@ $$
 用一个最简单的流程图来观察图表预览效果。
 
 ```mermaid
-flowchart LR
-  A[开始] --> B[结束]
+flowchart TD
+  A["商品页加载<br/>content script document_start 注入"] --> B["登录态检查<br/>chrome.storage.local.pluginAuth"]
+  B -->|未登录| B0["不进入商品分析<br/>只等登录态变化"]
+  B -->|已登录| C["白名单门控<br/>focus + host 白名单 + Shopify 自动发现"]
+  C -->|未命中| C0["静默退出<br/>页面完全不显示插件"]
+  C -->|命中| D["挂载 Shadow DOM React Root<br/>但 pluginActive 仍可为 false"]
+  D --> E["商品主管线准备<br/>XPath / Shopify JSON / URL PDP / 截图 OCR"]
+  E -->|非 PDP| E0["不显示插件"]
+  E -->|确认 PDP + 拿到商品| F["暂存 preparedAnalysis<br/>小女孩进入正常态，等待点击"]
+  F --> G["用户点击小女孩"]
+  G --> H["POST /api/plugin-ai/analyze<br/>带 pageData + extractedProduct + engine"]
+  H --> I{"engine?"}
+  I -->|server| J["服务端研究 + Tavily + 平台模型最终成稿"]
+  J --> K["SSE: analysis_report_start/component/done"]
+  I -->|user_ai| L["服务端只做品类 + 模板 + web prompt 备料"]
+  L --> M["SSE: bridge_prompt + bridgeHandoff done"]
+  M --> N["插件 Bridge Client 接管"]
+  N --> O["Bridge Tab 驱动 ChatGPT/Gemini iframe"]
+  O --> P["用户 AI 输出 JSONL 原文"]
+  P --> Q["POST /analyze/bridge-complete"]
+  Q --> R{"服务端验收通过?"}
+  R -->|通过| S["返回同构 events 数组"]
+  R -->|未 done 且有额度| O2["BRIDGE_CONTINUE 续写"]
+  O2 --> P
+  R -->|失败/额度尽| T["POST /analyze/bridge-fallback<br/>服务端兜底成稿"]
+  T --> K
+  S --> U["逐条喂 mapAnalyzeSseEvent"]
+  K --> U
+  U --> V["analysis-store streamingReport"]
+  V --> W["SidePanel 渲染最终组件报告"]
 ```
 
 ## 行内语法

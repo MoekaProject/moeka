@@ -127,6 +127,7 @@ pub mod render;
 pub mod requirement_diagram;
 pub mod sankey;
 pub mod sequence;
+pub mod svg;
 pub mod timeline;
 pub mod types;
 pub mod xy_chart;
@@ -151,6 +152,7 @@ pub use requirement_diagram::{
 };
 pub use sankey::{Sankey, SankeyFlow};
 pub use sequence::{Message, MessageStyle, Participant, SequenceDiagram};
+pub use svg::{SvgRenderOptions, render_svg, render_svg_with_options};
 pub use timeline::{Timeline, TimelineEntry, TimelineSection};
 pub use types::{Direction, Edge, EdgeEndpoint, EdgeStyle, Graph, Node, NodeShape};
 pub use xy_chart::{XAxis, XyChart, XyOrientation, YAxis};
