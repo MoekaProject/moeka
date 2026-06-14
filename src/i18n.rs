@@ -22,6 +22,7 @@ pub(crate) enum TextKey {
     ThemeSection,
     FontsSection,
     ThemeLight,
+    FormatSection,
     ThemeDark,
     ThemeModeColorful,
     ThemeModeMonochrome,
@@ -31,10 +32,12 @@ pub(crate) enum TextKey {
     EditorFont,
     EditorFontCjk,
     CodeFont,
+    DateTimeFormat,
     LineHeight,
     LetterSpacing,
     SearchFonts,
     SearchLanguages,
+    SearchDateTimeFormats,
     RenameNamePlaceholder,
     FileNamePlaceholder,
     FolderNamePlaceholder,
@@ -170,6 +173,7 @@ pub(crate) enum TextKey {
     WikiLink,
     Image,
     Table,
+    InsertDateTime,
     NoMatchingReferenceFiles,
     NoReferenceFiles,
     SortCreatedDesc,
@@ -505,19 +509,23 @@ pub(crate) fn untitled_title(language: UiLanguage, index: usize) -> String {
 
 pub(crate) fn delete_items_label(language: UiLanguage, count: usize) -> String {
     let delete = translate(language, TextKey::Delete);
+    action_items_label(language, delete, count)
+}
+
+pub(crate) fn action_items_label(language: UiLanguage, action: &str, count: usize) -> String {
     match language {
-        UiLanguage::English => format!("{delete} ({count} items)"),
-        UiLanguage::ChineseSimplified => format!("{delete} ({count} 项)"),
-        UiLanguage::ChineseTraditional => format!("{delete} ({count} 項)"),
-        UiLanguage::Japanese => format!("{delete} ({count} 件)"),
-        UiLanguage::Korean => format!("{delete} ({count}개)"),
-        UiLanguage::French => format!("{delete} ({count} éléments)"),
-        UiLanguage::German => format!("{delete} ({count} Elemente)"),
-        UiLanguage::Spanish => format!("{delete} ({count} elementos)"),
-        UiLanguage::Portuguese => format!("{delete} ({count} itens)"),
-        UiLanguage::Russian => format!("{delete} ({count} элементов)"),
-        UiLanguage::Arabic => format!("{delete} ({count} عناصر)"),
-        UiLanguage::Hindi => format!("{delete} ({count} आइटम)"),
+        UiLanguage::English => format!("{action} ({count} items)"),
+        UiLanguage::ChineseSimplified => format!("{action} ({count} 项)"),
+        UiLanguage::ChineseTraditional => format!("{action} ({count} 項)"),
+        UiLanguage::Japanese => format!("{action} ({count} 件)"),
+        UiLanguage::Korean => format!("{action} ({count}개)"),
+        UiLanguage::French => format!("{action} ({count} éléments)"),
+        UiLanguage::German => format!("{action} ({count} Elemente)"),
+        UiLanguage::Spanish => format!("{action} ({count} elementos)"),
+        UiLanguage::Portuguese => format!("{action} ({count} itens)"),
+        UiLanguage::Russian => format!("{action} ({count} элементов)"),
+        UiLanguage::Arabic => format!("{action} ({count} عناصر)"),
+        UiLanguage::Hindi => format!("{action} ({count} आइटम)"),
     }
 }
 
@@ -685,6 +693,7 @@ fn translate_english(key: TextKey) -> &'static str {
         TextKey::SettingsTitle | TextKey::SettingsPanelTitle => "Settings",
         TextKey::ThemeSection => "Interface Theme",
         TextKey::FontsSection => "Fonts",
+        TextKey::FormatSection => "Formats",
         TextKey::ThemeLight => "Light",
         TextKey::ThemeDark => "Dark",
         TextKey::ThemeModeColorful => "Colorful Highlights",
@@ -695,10 +704,12 @@ fn translate_english(key: TextKey) -> &'static str {
         TextKey::EditorFont => "Editor Font",
         TextKey::EditorFontCjk => "Editor Font (CJK)",
         TextKey::CodeFont => "Code Font",
+        TextKey::DateTimeFormat => "Date & Time Format",
         TextKey::LineHeight => "Editor Line Height",
         TextKey::LetterSpacing => "Editor Letter Spacing",
         TextKey::SearchFonts => "Search fonts...",
         TextKey::SearchLanguages => "Search languages...",
+        TextKey::SearchDateTimeFormats => "Search date and time formats...",
         TextKey::RenameNamePlaceholder => "Name...",
         TextKey::FileNamePlaceholder => "File name...",
         TextKey::FolderNamePlaceholder => "Folder name...",
@@ -836,6 +847,7 @@ fn translate_english(key: TextKey) -> &'static str {
         TextKey::WikiLink => "Wiki Link",
         TextKey::Image => "Image",
         TextKey::Table => "Table",
+        TextKey::InsertDateTime => "Insert Date/Time",
         TextKey::NoMatchingReferenceFiles => "No matching reference files",
         TextKey::NoReferenceFiles => "No referenceable files yet",
         TextKey::SortCreatedDesc => "Created Time (Newest First)",
@@ -854,6 +866,7 @@ fn translate_zh_cn(key: TextKey) -> &'static str {
         TextKey::SettingsTitle | TextKey::SettingsPanelTitle => "设置",
         TextKey::ThemeSection => "界面主题",
         TextKey::FontsSection => "字体",
+        TextKey::FormatSection => "格式",
         TextKey::ThemeLight => "浅色",
         TextKey::ThemeDark => "深色",
         TextKey::ThemeModeColorful => "彩色渲染",
@@ -864,10 +877,12 @@ fn translate_zh_cn(key: TextKey) -> &'static str {
         TextKey::EditorFont => "编辑器字体",
         TextKey::EditorFontCjk => "编辑器字体(CJK)",
         TextKey::CodeFont => "编辑器代码字体",
+        TextKey::DateTimeFormat => "日期时间格式",
         TextKey::LineHeight => "编辑器行间距",
         TextKey::LetterSpacing => "编辑器字符间距",
         TextKey::SearchFonts => "搜索字体...",
         TextKey::SearchLanguages => "搜索语言...",
+        TextKey::SearchDateTimeFormats => "搜索日期时间格式...",
         TextKey::RenameNamePlaceholder => "名称...",
         TextKey::FileNamePlaceholder => "文件名...",
         TextKey::FolderNamePlaceholder => "目录名...",
@@ -944,6 +959,7 @@ fn translate_zh_cn(key: TextKey) -> &'static str {
         TextKey::Attachments => "附件",
         TextKey::Images => "图片",
         TextKey::Links => "链接",
+        TextKey::InsertDateTime => "插入日期/时间",
         TextKey::Backlinks => "双向链接",
         TextKey::NoLocalAttachments => "无本地附件。",
         TextKey::NoImageLinks => "无图片链接。",
@@ -1179,6 +1195,7 @@ fn translate_zh_tw(key: TextKey) -> &'static str {
         TextKey::SortType => "類型",
         TextKey::WorkingTree => "工作樹",
         TextKey::EmptyFile => "空檔案",
+        _ => translate_english(key),
     }
 }
 
@@ -1348,6 +1365,7 @@ fn translate_japanese(key: TextKey) -> &'static str {
         TextKey::SortType => "種類",
         TextKey::WorkingTree => "作業ツリー",
         TextKey::EmptyFile => "空のファイル",
+        _ => translate_english(key),
     }
 }
 
@@ -1517,6 +1535,7 @@ fn translate_korean(key: TextKey) -> &'static str {
         TextKey::SortType => "유형",
         TextKey::WorkingTree => "작업 트리",
         TextKey::EmptyFile => "빈 파일",
+        _ => translate_english(key),
     }
 }
 
@@ -1688,6 +1707,7 @@ fn translate_french(key: TextKey) -> &'static str {
         TextKey::SortType => "Type",
         TextKey::WorkingTree => "Arbre de travail",
         TextKey::EmptyFile => "Fichier vide",
+        _ => translate_english(key),
     }
 }
 
@@ -1857,6 +1877,7 @@ fn translate_german(key: TextKey) -> &'static str {
         TextKey::SortType => "Typ",
         TextKey::WorkingTree => "Arbeitsbereich",
         TextKey::EmptyFile => "Leere Datei",
+        _ => translate_english(key),
     }
 }
 
@@ -2026,6 +2047,7 @@ fn translate_spanish(key: TextKey) -> &'static str {
         TextKey::SortType => "Tipo",
         TextKey::WorkingTree => "Árbol de trabajo",
         TextKey::EmptyFile => "Archivo vacío",
+        _ => translate_english(key),
     }
 }
 
@@ -2195,6 +2217,7 @@ fn translate_portuguese(key: TextKey) -> &'static str {
         TextKey::SortType => "Tipo",
         TextKey::WorkingTree => "Árvore de trabalho",
         TextKey::EmptyFile => "Arquivo vazio",
+        _ => translate_english(key),
     }
 }
 
@@ -2364,6 +2387,7 @@ fn translate_russian(key: TextKey) -> &'static str {
         TextKey::SortType => "Тип",
         TextKey::WorkingTree => "Рабочее дерево",
         TextKey::EmptyFile => "Пустой файл",
+        _ => translate_english(key),
     }
 }
 
@@ -2531,6 +2555,7 @@ fn translate_arabic(key: TextKey) -> &'static str {
         TextKey::SortType => "النوع",
         TextKey::WorkingTree => "شجرة العمل",
         TextKey::EmptyFile => "ملف فارغ",
+        _ => translate_english(key),
     }
 }
 
@@ -2698,5 +2723,6 @@ fn translate_hindi(key: TextKey) -> &'static str {
         TextKey::SortType => "प्रकार",
         TextKey::WorkingTree => "वर्किंग ट्री",
         TextKey::EmptyFile => "खाली फ़ाइल",
+        _ => translate_english(key),
     }
 }

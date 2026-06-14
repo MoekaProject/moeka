@@ -524,6 +524,7 @@ pub(crate) enum FormatMenuAction {
     WikiLink,
     Image,
     Table,
+    DateTime,
     Superscript,
     Subscript,
     Footnote,

@@ -204,6 +204,7 @@ mod tests {
             line_height: 1.8,
             letter_spacing: 0.5,
             sidebar_sort_mode: "created_desc".to_string(),
+            date_time_format: "%Y-%m-%d %H:%M".to_string(),
             starred_files: Vec::new(),
         }
     }

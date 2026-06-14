@@ -2006,6 +2006,22 @@ impl EditorView {
         }
     }
 
+    pub(crate) fn add_paths_to_chat(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let references = paths
+            .iter()
+            .filter_map(|path| self.relative_path_for_path(path))
+            .map(|relative_path| format!("@{} ", relative_path))
+            .collect::<String>();
+        if references.is_empty() {
+            return;
+        }
+
+        self.ensure_chat_terminal_visible(cx);
+        if let Some(session) = self.active_chat_terminal_mut() {
+            let _ = session.write_bytes(references.as_bytes());
+        }
+    }
+
     fn chat_reference_position(&self, offset: usize) -> (usize, usize) {
         Self::chat_reference_position_in_buffer(&self.buffer, offset)
     }

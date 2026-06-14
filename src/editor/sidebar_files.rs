@@ -396,10 +396,12 @@ impl EditorView {
     }
 
     pub(crate) fn paste_into_dir(&mut self, target_dir: PathBuf, cx: &mut Context<Self>) {
-        let Some(clipboard) = self.file_clipboard.take() else {
+        let Some(clipboard) = self.file_clipboard.clone() else {
             return;
         };
         let target_dir = Self::normalize_sidebar_path(&target_dir);
+        let mut pasted_paths = Vec::new();
+        let mut starred_changed = false;
         for src in &clipboard.paths {
             let src = Self::normalize_sidebar_path(src);
             let Some(dst) = Self::next_available_paste_destination(&src, &target_dir) else {
@@ -409,18 +411,83 @@ impl EditorView {
                 if let Err(error) = std::fs::rename(&src, &dst) {
                     eprintln!("Move {:?} -> {:?} failed: {error}", src, dst);
                 } else {
+                    pasted_paths.push(dst.clone());
+                    starred_changed |= self.app_settings.rename_starred_prefix(&src, &dst);
                     for tab in &mut self.tabs {
-                        if tab.path.as_deref() == Some(src.as_path()) {
-                            tab.path = Some(dst.clone());
-                            tab.title = Self::title_for_path(&dst);
+                        if let Some(ref tab_path) = tab.path {
+                            let normalized_tab_path = Self::normalize_sidebar_path(tab_path);
+                            if normalized_tab_path.starts_with(&src) {
+                                let relative = normalized_tab_path
+                                    .strip_prefix(&src)
+                                    .unwrap_or(normalized_tab_path.as_path());
+                                let new_tab_path = dst.join(relative);
+                                tab.title = Self::title_for_path(&new_tab_path);
+                                tab.path = Some(new_tab_path);
+                            }
                         }
+                    }
+
+                    let old_selected: Vec<PathBuf> = self
+                        .selected_sidebar_paths
+                        .iter()
+                        .filter(|path| Self::normalize_sidebar_path(path).starts_with(&src))
+                        .cloned()
+                        .collect();
+                    for old in old_selected {
+                        self.selected_sidebar_paths.remove(&old);
+                        let normalized_old = Self::normalize_sidebar_path(&old);
+                        let relative = normalized_old
+                            .strip_prefix(&src)
+                            .unwrap_or(normalized_old.as_path());
+                        self.selected_sidebar_paths.insert(dst.join(relative));
+                    }
+
+                    if self
+                        .current_file_path
+                        .as_ref()
+                        .is_some_and(|path| Self::normalize_sidebar_path(path).starts_with(&src))
+                        && let Some(ref path) = self.current_file_path
+                    {
+                        let normalized_path = Self::normalize_sidebar_path(path);
+                        let relative = normalized_path
+                            .strip_prefix(&src)
+                            .unwrap_or(normalized_path.as_path());
+                        self.current_file_path = Some(dst.join(relative));
+                    }
+
+                    if self
+                        .sidebar_selection_anchor
+                        .as_ref()
+                        .is_some_and(|path| Self::normalize_sidebar_path(path).starts_with(&src))
+                        && let Some(anchor) = self.sidebar_selection_anchor.as_ref()
+                    {
+                        let normalized_anchor = Self::normalize_sidebar_path(anchor);
+                        let relative = normalized_anchor
+                            .strip_prefix(&src)
+                            .unwrap_or(normalized_anchor.as_path());
+                        self.sidebar_selection_anchor = Some(dst.join(relative));
                     }
                 }
             } else if let Err(error) = Self::copy_path_recursively(&src, &dst) {
                 eprintln!("Copy {:?} -> {:?} failed: {error}", src, dst);
+            } else {
+                pasted_paths.push(dst);
             }
         }
+        if clipboard.is_cut {
+            self.file_clipboard = None;
+        }
+        if starred_changed {
+            self.app_settings.save();
+        }
+        self.invalidate_sidebar_items_cache();
         self.context_menu = None;
+        if let Some(reveal_path) = pasted_paths.first().cloned() {
+            self.reveal_path_in_sidebar(reveal_path.clone(), cx);
+            self.selected_sidebar_paths = pasted_paths.into_iter().collect();
+            self.focused_sidebar_path = Some(reveal_path.clone());
+            self.sidebar_selection_anchor = Some(reveal_path);
+        }
         cx.notify();
     }
 
@@ -431,6 +498,12 @@ impl EditorView {
             .spawn()
         {
             eprintln!("failed to reveal in Finder: {error}");
+        }
+    }
+
+    pub(crate) fn reveal_paths_in_finder(&self, paths: &[PathBuf]) {
+        for path in paths {
+            self.reveal_in_finder(path);
         }
     }
 

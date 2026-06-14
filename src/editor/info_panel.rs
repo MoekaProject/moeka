@@ -10,7 +10,9 @@ use gpui::{
 };
 #[cfg(not(target_os = "macos"))]
 use printpdf::{Mm, PdfDocument};
-use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd, html::push_html};
+use pulldown_cmark::{
+    CodeBlockKind, CowStr, Event, LinkType, Options, Parser, Tag, TagEnd, html::push_html,
+};
 use similar::{Algorithm, ChangeTag, InlineChange, TextDiff};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -267,15 +269,138 @@ fn html_base_href(source_file_path: Option<&Path>) -> Option<String> {
     ))
 }
 
-fn build_html_document(title: &str, markdown: &str, source_file_path: Option<&Path>) -> String {
+fn export_preview_font_families() -> helpers::GeneratedPreviewFontFamilies<'static> {
+    helpers::GeneratedPreviewFontFamilies {
+        monospace: "SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace",
+        body_cjk: "PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, sans-serif",
+    }
+}
+
+fn render_export_preview_svg(kind: crate::markdown::BlockPreviewKind, source: &str) -> String {
+    let theme = crate::theme::ThemeKind::OneLight.build();
+    helpers::build_generated_block_preview_svg(kind, source, &theme, export_preview_font_families())
+}
+
+fn export_code_block_preview_html(kind: &CodeBlockKind<'_>, source: &str) -> Option<String> {
+    let language = match kind {
+        CodeBlockKind::Fenced(info) => info
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase(),
+        CodeBlockKind::Indented => String::new(),
+    };
+
+    let preview_kind = match language.as_str() {
+        "mermaid" | "mmd" => crate::markdown::BlockPreviewKind::Mermaid,
+        "math" | "latex" | "tex" => crate::markdown::BlockPreviewKind::Math,
+        _ => return None,
+    };
+
+    let svg = render_export_preview_svg(preview_kind, source);
+    Some(format!(
+        "<figure class=\"export-preview export-preview-{}\">{}</figure>",
+        match preview_kind {
+            crate::markdown::BlockPreviewKind::Math => "math",
+            crate::markdown::BlockPreviewKind::Mermaid => "mermaid",
+        },
+        svg
+    ))
+}
+
+fn render_markdown_for_export(markdown: &str) -> String {
     let mut html = String::new();
     let parser = Parser::new_ext(markdown, Options::all());
-    push_html(&mut html, parser);
+    let mut events = Vec::new();
+    let mut pending_code_block: Option<(CodeBlockKind<'_>, Vec<Event<'_>>, String)> = None;
+
+    for event in parser {
+        if let Some((kind, mut buffered, mut source)) = pending_code_block.take() {
+            if let Event::Text(content) = &event {
+                source.push_str(content);
+            }
+            let is_end = matches!(event, Event::End(TagEnd::CodeBlock));
+            buffered.push(event);
+            if is_end {
+                if let Some(preview_html) = export_code_block_preview_html(&kind, &source) {
+                    events.push(Event::Html(CowStr::Boxed(preview_html.into_boxed_str())));
+                } else {
+                    events.extend(buffered);
+                }
+            } else {
+                pending_code_block = Some((kind, buffered, source));
+            }
+            continue;
+        }
+
+        match event {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                pending_code_block = Some((
+                    kind.clone(),
+                    vec![Event::Start(Tag::CodeBlock(kind))],
+                    String::new(),
+                ));
+            }
+            Event::DisplayMath(content) => {
+                let svg =
+                    render_export_preview_svg(crate::markdown::BlockPreviewKind::Math, &content);
+                events.push(Event::Html(CowStr::Boxed(
+                    format!("<figure class=\"export-preview export-preview-math\">{svg}</figure>")
+                        .into_boxed_str(),
+                )));
+            }
+            Event::InlineMath(content) => {
+                let svg =
+                    render_export_preview_svg(crate::markdown::BlockPreviewKind::Math, &content);
+                events.push(Event::Html(CowStr::Boxed(
+                    format!("<span class=\"export-math-inline\">{svg}</span>").into_boxed_str(),
+                )));
+            }
+            _ => events.push(event),
+        }
+    }
+
+    if let Some((_kind, buffered, _source)) = pending_code_block.take() {
+        events.extend(buffered);
+    }
+
+    push_html(&mut html, events.into_iter());
+    html
+}
+
+fn build_html_document(title: &str, markdown: &str, source_file_path: Option<&Path>) -> String {
+    let html = render_markdown_for_export(markdown);
 
     let escaped_title = html_escape(title);
     let base_href = html_base_href(source_file_path)
         .map(|href| format!("<base href=\"{}\">", html_escape(&href)))
         .unwrap_or_default();
+
+    let github_markdown_css = concat!(
+        ".markdown-body{box-sizing:border-box;min-width:200px;max-width:980px;margin:0 auto;padding:45px;color:#1f2328;background:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif,'Apple Color Emoji','Segoe UI Emoji';font-size:16px;line-height:1.5;word-wrap:break-word;}",
+        ".markdown-body h1,.markdown-body h2{padding-bottom:.3em;border-bottom:1px solid #d8dee4;}",
+        ".markdown-body h1{margin:.67em 0 16px;font-size:2em;}",
+        ".markdown-body h2{margin:24px 0 16px;font-size:1.5em;}",
+        ".markdown-body h3{margin:24px 0 16px;font-size:1.25em;}",
+        ".markdown-body h4{margin:24px 0 16px;font-size:1em;}",
+        ".markdown-body h5{margin:24px 0 16px;font-size:.875em;}",
+        ".markdown-body h6{margin:24px 0 16px;color:#57606a;font-size:.85em;}",
+        ".markdown-body p,.markdown-body blockquote,.markdown-body ul,.markdown-body ol,.markdown-body dl,.markdown-body table,.markdown-body pre,.markdown-body details{margin-top:0;margin-bottom:16px;}",
+        ".markdown-body a{color:#0969da;text-decoration:none;}.markdown-body a:hover{text-decoration:underline;}",
+        ".markdown-body blockquote{padding:0 1em;color:#57606a;border-left:.25em solid #d0d7de;}",
+        ".markdown-body code,.markdown-body tt{padding:.2em .4em;margin:0;font-size:85%;white-space:break-spaces;background-color:rgba(175,184,193,.2);border-radius:6px;}",
+        ".markdown-body pre{padding:16px;overflow:auto;font-size:85%;line-height:1.45;background-color:#f6f8fa;border-radius:6px;}",
+        ".markdown-body pre code{padding:0;margin:0;font-size:100%;white-space:pre;background:transparent;border:0;}",
+        ".markdown-body table{display:block;width:max-content;max-width:100%;overflow:auto;border-spacing:0;border-collapse:collapse;}",
+        ".markdown-body table th{font-weight:600;}.markdown-body table th,.markdown-body table td{padding:6px 13px;border:1px solid #d0d7de;}",
+        ".markdown-body table tr{background-color:#fff;border-top:1px solid #d8dee4;}.markdown-body table tr:nth-child(2n){background-color:#f6f8fa;}",
+        ".markdown-body img{box-sizing:content-box;max-width:100%;height:auto;background-color:#fff;}",
+        ".markdown-body hr{height:.25em;padding:0;margin:24px 0;background-color:#d0d7de;border:0;}",
+        ".markdown-body kbd{display:inline-block;padding:3px 5px;font:11px ui-monospace,SFMono-Regular,SF Mono,Menlo,Consolas,Liberation Mono,monospace;line-height:10px;color:#24292f;vertical-align:middle;background-color:#f6f8fa;border:solid 1px rgba(175,184,193,.2);border-bottom-color:rgba(175,184,193,.2);border-radius:6px;box-shadow:inset 0 -1px 0 rgba(175,184,193,.2);}",
+        ".export-preview{margin:16px 0;padding:12px;overflow:auto;text-align:center;background:#fff;border:1px solid #d0d7de;border-radius:6px;}",
+        ".export-preview svg{max-width:100%;height:auto;}.export-math-inline{display:inline-flex;max-width:100%;vertical-align:-.25em;}.export-math-inline svg{height:1.35em;width:auto;max-width:100%;}"
+    );
 
     format!(
         concat!(
@@ -284,19 +409,13 @@ fn build_html_document(title: &str, markdown: &str, source_file_path: Option<&Pa
             "<title>{}</title>",
             "{}",
             "<style>",
-            ":root{{color-scheme:light dark;}}",
+            "{}",
+            "@media(max-width:767px){{.markdown-body{{padding:15px;}}}}",
             "@page{{size:A4;margin:18mm;}}",
-            "body{{margin:40px auto;max-width:840px;padding:0 24px;font:16px/1.7 -apple-system,BlinkMacSystemFont,'PingFang SC','Segoe UI',sans-serif;word-break:break-word;overflow-wrap:anywhere;}}",
-            "img{{max-width:100%;height:auto;}}",
-            "pre{{overflow:auto;padding:12px;border-radius:8px;background:rgba(127,127,127,.08);}}",
-            "code{{font-family:Menlo,Consolas,monospace;}}",
-            "table{{border-collapse:collapse;width:100%;}}",
-            "th,td{{border:1px solid rgba(127,127,127,.25);padding:8px 10px;text-align:left;}}",
-            "blockquote{{margin:0;padding-left:16px;border-left:3px solid rgba(127,127,127,.35);color:rgba(127,127,127,.9);}}",
-            "@media print{{body{{margin:0;max-width:none;padding:0;font-size:12pt;line-height:1.65;}}a{{color:inherit;text-decoration:none;}}pre{{white-space:pre-wrap;word-break:break-word;}}}}",
-            "</style></head><body>{}</body></html>"
+            "@media print{{html,body{{background:#fff;}}body{{margin:0;}}.markdown-body{{max-width:none;padding:0;font-size:12pt;line-height:1.55;}}.markdown-body a{{color:inherit;text-decoration:none;}}.markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4,.markdown-body h5,.markdown-body h6{{break-after:avoid-page;page-break-after:avoid;}}.markdown-body pre,.markdown-body blockquote,.markdown-body table,.markdown-body img,.markdown-body svg,.export-preview{{break-inside:avoid;page-break-inside:avoid;}}.markdown-body pre{{white-space:pre-wrap;word-break:break-word;}}.markdown-body tr{{break-inside:avoid;page-break-inside:avoid;}}.markdown-body p{{orphans:3;widows:3;}}}}",
+            "</style></head><body><article class=\"markdown-body\">{}</article></body></html>"
         ),
-        escaped_title, base_href, html
+        escaped_title, base_href, github_markdown_css, html
     )
 }
 

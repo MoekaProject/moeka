@@ -669,7 +669,7 @@ impl EditorView {
         };
         let is_cut_item = self.file_clipboard.as_ref().is_some_and(|clipboard| {
             clipboard.is_cut
-                && clipboard.paths.first().is_some_and(|cut_path| {
+                && clipboard.paths.iter().any(|cut_path| {
                     let cut_path = Self::normalize_sidebar_path(cut_path);
                     let current_path = Self::normalize_sidebar_path(&path);
                     current_path == cut_path || current_path.starts_with(&cut_path)

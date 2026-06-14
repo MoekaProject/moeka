@@ -39,6 +39,8 @@ pub(crate) struct AppSettings {
     pub letter_spacing: f32,
     #[serde(default = "default_sidebar_sort_mode")]
     pub sidebar_sort_mode: String,
+    #[serde(default = "default_date_time_format")]
+    pub date_time_format: String,
     #[serde(default = "default_starred_files")]
     pub starred_files: Vec<PathBuf>,
 }
@@ -107,6 +109,10 @@ fn default_sidebar_sort_mode() -> String {
     "created_desc".to_string()
 }
 
+fn default_date_time_format() -> String {
+    "%Y-%m-%d %H:%M".to_string()
+}
+
 fn default_starred_files() -> Vec<PathBuf> {
     Vec::new()
 }
@@ -130,6 +136,7 @@ impl Default for AppSettings {
             line_height: default_line_height(),
             letter_spacing: default_letter_spacing(),
             sidebar_sort_mode: default_sidebar_sort_mode(),
+            date_time_format: default_date_time_format(),
             starred_files: default_starred_files(),
         }
     }
@@ -248,6 +255,18 @@ impl AppSettings {
             SidebarSortMode::Type => "type",
         }
         .to_string();
+    }
+
+    pub(crate) fn date_time_format(&self) -> &str {
+        if self.date_time_format.trim().is_empty() {
+            "%Y-%m-%d %H:%M"
+        } else {
+            &self.date_time_format
+        }
+    }
+
+    pub(crate) fn set_date_time_format(&mut self, format: String) {
+        self.date_time_format = format;
     }
 
     pub(crate) fn is_starred_file(&self, path: &Path) -> bool {

@@ -22,6 +22,7 @@ pub(crate) enum FontRole {
     BodyFont,
     CodeFont,
     InterfaceLanguage,
+    DateTimeFormat,
     /// Font family for selected whiteboard elements (whiteboard panel).
     WhiteboardFont,
 }
@@ -90,7 +91,8 @@ impl EditorView {
                             .child(self.render_settings_help_button(cx)),
                     )
                     .child(self.render_theme_section(cx))
-                    .child(self.render_font_section(window, cx)),
+                    .child(self.render_font_section(window, cx))
+                    .child(self.render_format_section(cx)),
             )
             .into_any_element()
     }
@@ -131,6 +133,59 @@ impl EditorView {
                 }),
             )
             .into_any_element()
+    }
+
+    fn render_format_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.date_time_format_preview_label(self.app_settings.date_time_format());
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(self.scaled(12.0)))
+            .child(self.render_section_heading(self.t(TextKey::FormatSection)))
+            .child(self.render_picker_row(
+                self.t(TextKey::DateTimeFormat),
+                &current,
+                FontRole::DateTimeFormat,
+                0,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn date_time_format_options(&self) -> Vec<PickerOption> {
+        let now = chrono::Local::now();
+        let formats = [
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+            "%H:%M",
+            "%Y/%m/%d %H:%M",
+            "%m/%d/%Y %I:%M %p",
+            "%d/%m/%Y %H:%M",
+            "%d.%m.%Y %H:%M",
+            "%d %b %Y %H:%M",
+            "%B %d, %Y %I:%M %p",
+            "%a, %d %b %Y %H:%M:%S %z",
+            "%Y-%m-%dT%H:%M:%S%:z",
+        ];
+
+        formats
+            .iter()
+            .map(|format| {
+                let preview = now.format(format).to_string();
+                PickerOption {
+                    value: (*format).to_string(),
+                    label: format!("{preview}  ({format})"),
+                    search_text: format!("{preview} {format}").to_lowercase(),
+                    preview_font: None,
+                }
+            })
+            .collect()
+    }
+
+    fn date_time_format_preview_label(&self, format: &str) -> String {
+        let preview = chrono::Local::now().format(format).to_string();
+        format!("{preview}  ({format})")
     }
 
     // ── Section heading ─────────────────────────────────────────
@@ -1097,6 +1152,10 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let (all_options, placeholder) = match role {
+            FontRole::DateTimeFormat => (
+                self.date_time_format_options(),
+                self.t(TextKey::SearchDateTimeFormats).to_string(),
+            ),
             FontRole::InterfaceLanguage => (
                 language_picker_options()
                     .into_iter()
@@ -1446,6 +1505,9 @@ impl EditorView {
                         self.apply_ui_language(language, cx);
                         return;
                     }
+                }
+                (FontRole::DateTimeFormat, _) => {
+                    self.app_settings.set_date_time_format(font_name);
                 }
                 (FontRole::WhiteboardFont, _) => {
                     self.whiteboard_apply_font_family(font_name, cx);

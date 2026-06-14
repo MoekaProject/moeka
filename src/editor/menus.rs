@@ -194,6 +194,10 @@ impl EditorView {
 
     fn context_menu_icon_path(&self, label: &str) -> Option<&'static str> {
         let delete_prefix = format!("{} (", self.t(crate::i18n::TextKey::Delete));
+        let counted = |key: crate::i18n::TextKey| {
+            let base = self.t(key);
+            label == base || label.starts_with(&format!("{base} ("))
+        };
         match label {
             current if current == self.t(crate::i18n::TextKey::NewFile) => {
                 Some(MENU_NEW_FILE_SVG_PATH)
@@ -204,9 +208,9 @@ impl EditorView {
             current if current == self.t(crate::i18n::TextKey::Rename) => {
                 Some(MENU_RENAME_SVG_PATH)
             }
-            current if current == self.t(crate::i18n::TextKey::Cut) => Some(MENU_CLIP_SVG_PATH),
-            current if current == self.t(crate::i18n::TextKey::Copy) => Some(MENU_COPY_SVG_PATH),
-            current if current == self.t(crate::i18n::TextKey::Paste) => Some(MENU_PASTE_SVG_PATH),
+            current if counted(crate::i18n::TextKey::Cut) => Some(MENU_CLIP_SVG_PATH),
+            current if counted(crate::i18n::TextKey::Copy) => Some(MENU_COPY_SVG_PATH),
+            current if counted(crate::i18n::TextKey::Paste) => Some(MENU_PASTE_SVG_PATH),
             current if current == self.t(crate::i18n::TextKey::CollapseAllDirectories) => {
                 Some(MENU_FOLD_SVG_PATH)
             }
@@ -216,10 +220,8 @@ impl EditorView {
             current if current == self.t(crate::i18n::TextKey::RevealInFinder) => {
                 Some(MENU_LOCATE_SVG_PATH)
             }
-            current if current == self.t(crate::i18n::TextKey::Star) => Some(MENU_STAR_SVG_PATH),
-            current if current == self.t(crate::i18n::TextKey::Unstar) => {
-                Some(MENU_UNSTAR_SVG_PATH)
-            }
+            current if counted(crate::i18n::TextKey::Star) => Some(MENU_STAR_SVG_PATH),
+            current if counted(crate::i18n::TextKey::Unstar) => Some(MENU_UNSTAR_SVG_PATH),
             current if current == self.t(crate::i18n::TextKey::PinTab) => Some(MENU_PIN_SVG_PATH),
             current if current == self.t(crate::i18n::TextKey::UnpinTab) => {
                 Some(MENU_UNPIN_SVG_PATH)
@@ -271,6 +273,7 @@ impl EditorView {
             FormatMenuAction::WikiLink => self.t(crate::i18n::TextKey::WikiLink).to_string(),
             FormatMenuAction::Image => self.t(crate::i18n::TextKey::Image).to_string(),
             FormatMenuAction::Table => self.t(crate::i18n::TextKey::Table).to_string(),
+            FormatMenuAction::DateTime => self.t(crate::i18n::TextKey::InsertDateTime).to_string(),
             FormatMenuAction::Superscript
             | FormatMenuAction::Subscript
             | FormatMenuAction::Footnote => self.extra_format_action_label(action).to_string(),
@@ -342,6 +345,14 @@ impl EditorView {
             lines.push(self.path_copy_text(&item_path, relative)?);
         }
         Some(lines.join("\n"))
+    }
+
+    fn sidebar_counted_label(&self, label: &str, count: usize) -> String {
+        if count > 1 {
+            crate::i18n::action_items_label(self.ui_language, label, count)
+        } else {
+            label.to_string()
+        }
     }
 
     fn replace_image_url_on_line_with_text(
@@ -1140,6 +1151,19 @@ impl EditorView {
                 self.scroll_to_cursor();
                 self.pause_blinking(cx);
             }
+            FormatMenuAction::DateTime => {
+                self.checkpoint();
+                let range = self.cursor.selection_range();
+                let formatted = chrono::Local::now()
+                    .format(self.app_settings.date_time_format())
+                    .to_string();
+                self.buffer.replace(range.clone(), &formatted);
+                self.cursor
+                    .move_to(range.start + formatted.len(), &self.buffer);
+                self.reparse();
+                self.scroll_to_cursor();
+                self.pause_blinking(cx);
+            }
             FormatMenuAction::Superscript => {
                 self.checkpoint();
                 self.apply_wrap("^", "^");
@@ -1240,6 +1264,11 @@ impl EditorView {
                 self.format_action_label(FormatMenuAction::Image),
                 "image photo",
                 FormatMenuAction::Image,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::DateTime),
+                "date time now today timestamp calendar",
+                FormatMenuAction::DateTime,
             ),
         ];
         for (label, ft, action) in all_items {
@@ -1774,7 +1803,40 @@ impl EditorView {
                     },
                 ));
             }
+            {
+                let pd = parent_dir.clone();
+                items.push(self.render_context_menu_item(
+                    self.t(crate::i18n::TextKey::NewWhiteboard),
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.create_new_whiteboard(pd.clone(), cx);
+                    },
+                ));
+            }
             items.push(self.render_context_menu_separator());
+            if has_clipboard {
+                let pd = parent_dir.clone();
+                let paste_count = self
+                    .file_clipboard
+                    .as_ref()
+                    .map(|clipboard| {
+                        Self::filter_nested_paths(&clipboard.paths.iter().cloned().collect()).len()
+                    })
+                    .unwrap_or(0);
+                let paste_label =
+                    self.sidebar_counted_label(self.t(crate::i18n::TextKey::Paste), paste_count);
+                items.push(self.render_context_menu_item(
+                    &paste_label,
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.paste_into_dir(pd.clone(), cx);
+                    },
+                ));
+                items.push(self.render_context_menu_separator());
+            }
             if !self.expanded_dirs.is_empty() {
                 items.push(self.render_context_menu_item(
                     self.t(crate::i18n::TextKey::CollapseAllDirectories),
@@ -1828,14 +1890,14 @@ impl EditorView {
             }
             items.push(self.render_context_menu_separator());
             {
-                let chat_path = path.clone();
+                let chat_paths = self.sidebar_context_paths(&path);
                 items.push(self.render_context_menu_item(
                     ADD_FILE_TO_CHAT_LABEL,
                     false,
                     cx,
                     move |this, _, cx| {
                         this.close_context_menu(cx);
-                        this.add_path_to_chat(&chat_path, cx);
+                        this.add_paths_to_chat(&chat_paths, cx);
                     },
                 ));
             }
@@ -1876,40 +1938,69 @@ impl EditorView {
                 },
             ));
         }
+        {
+            let pd = parent_dir.clone();
+            items.push(self.render_context_menu_item(
+                self.t(crate::i18n::TextKey::NewWhiteboard),
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.close_context_menu(cx);
+                    this.create_new_whiteboard(pd.clone(), cx);
+                },
+            ));
+        }
         items.push(self.render_context_menu_separator());
+
+        let context_paths = self.sidebar_context_paths(&path);
+        let context_paths = Self::filter_nested_paths(&context_paths.into_iter().collect());
+        let context_count = context_paths.len();
+
         if !is_dir {
-            let starred_path = path.clone();
-            let is_starred = self.app_settings.is_starred_file(&starred_path);
+            let starred_paths: Vec<PathBuf> = context_paths
+                .iter()
+                .filter(|path| path.is_file())
+                .cloned()
+                .collect();
+            let is_starred = starred_paths
+                .iter()
+                .all(|path| self.app_settings.is_starred_file(path));
             let label = if is_starred {
                 self.t(crate::i18n::TextKey::Unstar)
             } else {
                 self.t(crate::i18n::TextKey::Star)
             };
-            items.push(
-                self.render_context_menu_item(label, false, cx, move |this, _, cx| {
-                    let normalized = Self::normalize_sidebar_path(&starred_path);
-                    if is_starred {
-                        this.app_settings.remove_starred_file(&normalized);
-                    } else {
-                        this.app_settings.add_starred_file(normalized);
-                        this.sidebar_starred_collapsed = false;
+            let star_label = self.sidebar_counted_label(label, starred_paths.len());
+            items.push(self.render_context_menu_item(
+                &star_label,
+                false,
+                cx,
+                move |this, _, cx| {
+                    for starred_path in &starred_paths {
+                        let normalized = Self::normalize_sidebar_path(starred_path);
+                        if is_starred {
+                            this.app_settings.remove_starred_file(&normalized);
+                        } else {
+                            this.app_settings.add_starred_file(normalized);
+                            this.sidebar_starred_collapsed = false;
+                        }
                     }
                     this.app_settings.save();
                     this.context_menu = None;
                     cx.notify();
-                }),
-            );
+                },
+            ));
             items.push(self.render_context_menu_separator());
         }
         {
-            let chat_path = path.clone();
+            let chat_paths = context_paths.clone();
             items.push(self.render_context_menu_item(
                 ADD_FILE_TO_CHAT_LABEL,
                 false,
                 cx,
                 move |this, _, cx| {
                     this.close_context_menu(cx);
-                    this.add_path_to_chat(&chat_path, cx);
+                    this.add_paths_to_chat(&chat_paths, cx);
                 },
             ));
         }
@@ -1927,53 +2018,49 @@ impl EditorView {
             ));
         }
         {
-            let selected: Vec<std::path::PathBuf> =
-                self.selected_sidebar_paths.iter().cloned().collect();
-            let count = selected.len();
-            let delete_label = if count > 1 {
-                crate::i18n::delete_items_label(self.ui_language, count)
+            let delete_label = if context_count > 1 {
+                crate::i18n::delete_items_label(self.ui_language, context_count)
             } else {
                 self.t(crate::i18n::TextKey::Delete).to_string()
             };
+            let delete_paths = context_paths.clone();
             items.push(self.render_context_menu_item(
                 &delete_label,
                 true,
                 cx,
                 move |this, _, cx| {
-                    this.show_sidebar_delete_dialog(selected.clone(), cx);
+                    this.show_sidebar_delete_dialog(delete_paths.clone(), cx);
                 },
             ));
         }
         items.push(self.render_context_menu_separator());
         {
-            let selected: Vec<std::path::PathBuf> =
-                self.selected_sidebar_paths.iter().cloned().collect();
-            let paths = if selected.is_empty() {
-                vec![path.clone()]
-            } else {
-                selected
-            };
-            let cut_path = path.clone();
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::Cut),
-                false,
-                cx,
-                move |this, _, cx| {
+            let cut_paths = context_paths
+                .iter()
+                .map(|path| Self::normalize_sidebar_path(path))
+                .collect::<Vec<_>>();
+            let copy_paths = cut_paths.clone();
+            let cut_label =
+                self.sidebar_counted_label(self.t(crate::i18n::TextKey::Cut), context_count);
+            let copy_label =
+                self.sidebar_counted_label(self.t(crate::i18n::TextKey::Copy), context_count);
+            items.push(
+                self.render_context_menu_item(&cut_label, false, cx, move |this, _, cx| {
                     this.file_clipboard = Some(FileClipboard {
-                        paths: vec![Self::normalize_sidebar_path(&cut_path)],
+                        paths: cut_paths.clone(),
                         is_cut: true,
                     });
                     this.context_menu = None;
                     cx.notify();
-                },
-            ));
+                }),
+            );
             items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::Copy),
+                &copy_label,
                 false,
                 cx,
                 move |this, _, cx| {
                     this.file_clipboard = Some(FileClipboard {
-                        paths: paths.clone(),
+                        paths: copy_paths.clone(),
                         is_cut: false,
                     });
                     this.context_menu = None;
@@ -1983,8 +2070,17 @@ impl EditorView {
         }
         if has_clipboard {
             let pd = parent_dir.clone();
+            let paste_count = self
+                .file_clipboard
+                .as_ref()
+                .map(|clipboard| {
+                    Self::filter_nested_paths(&clipboard.paths.iter().cloned().collect()).len()
+                })
+                .unwrap_or(0);
+            let paste_label =
+                self.sidebar_counted_label(self.t(crate::i18n::TextKey::Paste), paste_count);
             items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::Paste),
+                &paste_label,
                 false,
                 cx,
                 move |this, _, cx| {
@@ -2059,14 +2155,21 @@ impl EditorView {
         let mut items: Vec<AnyElement> = Vec::new();
 
         {
-            let starred_path = path.clone();
+            let context_paths = self.sidebar_context_paths(&path);
+            let context_count = context_paths.len();
+            let unstar_label =
+                self.sidebar_counted_label(self.t(crate::i18n::TextKey::Unstar), context_count);
             items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::Unstar),
+                &unstar_label,
                 false,
                 cx,
                 move |this, _, cx| {
-                    let normalized = Self::normalize_sidebar_path(&starred_path);
-                    if this.app_settings.remove_starred_file(&normalized) {
+                    let mut changed = false;
+                    for starred_path in &context_paths {
+                        let normalized = Self::normalize_sidebar_path(starred_path);
+                        changed |= this.app_settings.remove_starred_file(&normalized);
+                    }
+                    if changed {
                         this.app_settings.save();
                     }
                     this.context_menu = None;
@@ -2076,7 +2179,7 @@ impl EditorView {
         }
         items.push(self.render_context_menu_separator());
 
-        {
+        if self.selected_sidebar_paths.len() <= 1 {
             let rename_path = path.clone();
             items.push(self.render_context_menu_item(
                 self.t(crate::i18n::TextKey::Rename),
@@ -2088,19 +2191,86 @@ impl EditorView {
             ));
         }
         {
-            let delete_path = path.clone();
+            let context_paths = self.sidebar_context_paths(&path);
+            let context_count = context_paths.len();
+            let delete_label = if context_count > 1 {
+                crate::i18n::delete_items_label(self.ui_language, context_count)
+            } else {
+                self.t(crate::i18n::TextKey::Delete).to_string()
+            };
             items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::Delete),
+                &delete_label,
                 true,
                 cx,
                 move |this, _, cx| {
-                    this.show_sidebar_delete_dialog(vec![delete_path.clone()], cx);
+                    this.show_sidebar_delete_dialog(context_paths.clone(), cx);
                 },
             ));
         }
         items.push(self.render_context_menu_separator());
 
-        if let Some(copy_path_text) = self.path_copy_text(&path, false) {
+        {
+            let context_paths = self.sidebar_context_paths(&path);
+            let context_count = context_paths.len();
+            let cut_paths = context_paths
+                .iter()
+                .map(|path| Self::normalize_sidebar_path(path))
+                .collect::<Vec<_>>();
+            let copy_paths = cut_paths.clone();
+            let cut_label =
+                self.sidebar_counted_label(self.t(crate::i18n::TextKey::Cut), context_count);
+            let copy_label =
+                self.sidebar_counted_label(self.t(crate::i18n::TextKey::Copy), context_count);
+            items.push(
+                self.render_context_menu_item(&cut_label, false, cx, move |this, _, cx| {
+                    this.file_clipboard = Some(FileClipboard {
+                        paths: cut_paths.clone(),
+                        is_cut: true,
+                    });
+                    this.context_menu = None;
+                    cx.notify();
+                }),
+            );
+            items.push(self.render_context_menu_item(
+                &copy_label,
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.file_clipboard = Some(FileClipboard {
+                        paths: copy_paths.clone(),
+                        is_cut: false,
+                    });
+                    this.context_menu = None;
+                    cx.notify();
+                },
+            ));
+        }
+        if self.file_clipboard.is_some() {
+            let parent_dir = path
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.sidebar_root.clone());
+            let paste_count = self
+                .file_clipboard
+                .as_ref()
+                .map(|clipboard| {
+                    Self::filter_nested_paths(&clipboard.paths.iter().cloned().collect()).len()
+                })
+                .unwrap_or(0);
+            let paste_label =
+                self.sidebar_counted_label(self.t(crate::i18n::TextKey::Paste), paste_count);
+            items.push(self.render_context_menu_item(
+                &paste_label,
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.paste_into_dir(parent_dir.clone(), cx);
+                },
+            ));
+        }
+        items.push(self.render_context_menu_separator());
+
+        if let Some(copy_path_text) = self.sidebar_paths_copy_text(&path, false) {
             items.push(self.render_context_menu_item(
                 self.t(crate::i18n::TextKey::CopyPath),
                 false,
@@ -2110,7 +2280,7 @@ impl EditorView {
                 },
             ));
         }
-        if let Some(copy_relative_path_text) = self.path_copy_text(&path, true) {
+        if let Some(copy_relative_path_text) = self.sidebar_paths_copy_text(&path, true) {
             items.push(self.render_context_menu_item(
                 self.t(crate::i18n::TextKey::CopyRelativePath),
                 false,
@@ -2123,13 +2293,13 @@ impl EditorView {
         items.push(self.render_context_menu_separator());
 
         {
-            let reveal_path = path.clone();
+            let reveal_paths = self.sidebar_context_paths(&path);
             items.push(self.render_context_menu_item(
                 self.t(crate::i18n::TextKey::RevealInFinder),
                 false,
                 cx,
                 move |this, _, _cx| {
-                    this.reveal_in_finder(&reveal_path);
+                    this.reveal_paths_in_finder(&reveal_paths);
                 },
             ));
         }
@@ -2474,6 +2644,13 @@ impl EditorView {
                 Some(FMT_LINK_SVG),
                 Some("⌘K"),
                 FormatMenuAction::Link,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::DateTime),
+                "date time now today timestamp calendar",
+                None,
+                None,
+                FormatMenuAction::DateTime,
             ),
             (
                 self.format_action_label(FormatMenuAction::WikiLink),
@@ -3264,6 +3441,18 @@ impl EditorView {
                 {
                     let parent = self.sidebar_root.clone();
                     items.push(self.render_context_menu_item_with_icon(
+                        self.t(crate::i18n::TextKey::MenuNewFolder),
+                        MENU_NEW_FOLDER_SVG_PATH,
+                        false,
+                        cx,
+                        move |this, window, cx| {
+                            this.start_create_dir(parent.clone(), window, cx);
+                        },
+                    ));
+                }
+                {
+                    let parent = self.sidebar_root.clone();
+                    items.push(self.render_context_menu_item_with_icon(
                         self.t(crate::i18n::TextKey::NewWhiteboard),
                         "assets/icons/whiteboard/whiteboard.svg",
                         false,
@@ -3271,18 +3460,6 @@ impl EditorView {
                         move |this, _, cx| {
                             this.close_context_menu(cx);
                             this.create_new_whiteboard(parent.clone(), cx);
-                        },
-                    ));
-                }
-                {
-                    let parent = self.sidebar_root.clone();
-                    items.push(self.render_context_menu_item_with_icon(
-                        self.t(crate::i18n::TextKey::MenuNewFolder),
-                        MENU_NEW_FOLDER_SVG_PATH,
-                        false,
-                        cx,
-                        move |this, window, cx| {
-                            this.start_create_dir(parent.clone(), window, cx);
                         },
                     ));
                 }
