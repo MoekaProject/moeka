@@ -76,21 +76,111 @@ pub(super) struct ImageMenuTarget {
 }
 
 impl EditorView {
+    pub(crate) fn open_context_menu(
+        &mut self,
+        menu: ContextMenu,
+        clear_sidebar_edit: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = Some(menu);
+        self.context_submenu = None;
+        self.context_submenu_aim = None;
+        self.context_submenu_hovered = false;
+        if clear_sidebar_edit {
+            self.sidebar_edit = None;
+        }
+        self.context_menu_opacity = 0.0;
+        self.animate_context_menu_opacity(1.0, false, cx);
+        cx.notify();
+    }
+
+    fn animate_context_menu_opacity(
+        &mut self,
+        target: f32,
+        close_when_done: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu_opacity_target = target.clamp(0.0, 1.0);
+        self.context_menu_opacity_epoch += 1;
+        let epoch = self.context_menu_opacity_epoch;
+        let start = self.context_menu_opacity.clamp(0.0, 1.0);
+        let target = self.context_menu_opacity_target;
+        let duration_ms = self.styles.context_menu.menu_opacity_animation_ms.max(1);
+
+        self.context_menu_opacity_task = Some(cx.spawn(async move |this, cx| {
+            let start_time = std::time::Instant::now();
+            loop {
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.context_menu_opacity_epoch != epoch {
+                            return true;
+                        }
+
+                        let progress = (start_time.elapsed().as_secs_f32()
+                            / (duration_ms as f32 / 1000.0))
+                            .clamp(0.0, 1.0);
+                        let eased = super::ease_in_out_cubic(progress);
+                        this.context_menu_opacity = start + (target - start) * eased;
+                        if progress >= 1.0 {
+                            this.context_menu_opacity = target;
+                            this.context_menu_opacity_task = None;
+                            if close_when_done {
+                                this.finish_close_context_menu(cx);
+                            }
+                            cx.notify();
+                            return true;
+                        }
+
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+
+                if done {
+                    return;
+                }
+
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+            }
+        }));
+    }
+
+    fn finish_close_context_menu(&mut self, cx: &mut Context<Self>) {
+        let had_menu = self.context_menu.take().is_some();
+        let had_submenu = self.context_submenu.take().is_some();
+        let had_submenu_aim = self.context_submenu_aim.take().is_some();
+        let had_submenu_hovered = std::mem::replace(&mut self.context_submenu_hovered, false);
+        if had_menu || had_submenu || had_submenu_aim || had_submenu_hovered {
+            if let Some(start) = self.slash_menu_start.take() {
+                let end = self.cursor.offset;
+                if end > start {
+                    self.buffer.replace(start..end, "");
+                    self.cursor.move_to(start, &self.buffer);
+                    self.reparse();
+                }
+                self.slash_filter.clear();
+            }
+            self.clear_wiki_link_menu_state();
+            cx.notify();
+        }
+    }
+
     pub(crate) fn open_starred_sidebar_context_menu(
         &mut self,
         path: PathBuf,
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.context_menu = Some(ContextMenu {
-            position,
-            kind: ContextMenuKind::SidebarStarred { path },
-        });
-        self.context_submenu = None;
-        self.context_submenu_aim = None;
-        self.context_submenu_hovered = false;
-        self.sidebar_edit = None;
-        cx.notify();
+        self.open_context_menu(
+            ContextMenu {
+                position,
+                kind: ContextMenuKind::SidebarStarred { path },
+            },
+            true,
+            cx,
+        );
     }
 
     fn current_wiki_link_target(&self) -> Option<Range<usize>> {
@@ -585,15 +675,14 @@ impl EditorView {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.context_menu = Some(ContextMenu {
-            position,
-            kind: ContextMenuKind::Sidebar { path, is_dir },
-        });
-        self.context_submenu = None;
-        self.context_submenu_aim = None;
-        self.context_submenu_hovered = false;
-        self.sidebar_edit = None;
-        cx.notify();
+        self.open_context_menu(
+            ContextMenu {
+                position,
+                kind: ContextMenuKind::Sidebar { path, is_dir },
+            },
+            true,
+            cx,
+        );
     }
 
     pub(crate) fn open_format_context_menu(
@@ -601,15 +690,14 @@ impl EditorView {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.context_menu = Some(ContextMenu {
-            position,
-            kind: ContextMenuKind::Format,
-        });
-        self.context_submenu = None;
-        self.context_submenu_aim = None;
-        self.context_submenu_hovered = false;
-        self.sidebar_edit = None;
-        cx.notify();
+        self.open_context_menu(
+            ContextMenu {
+                position,
+                kind: ContextMenuKind::Format,
+            },
+            true,
+            cx,
+        );
     }
 
     fn screen_position_for_offset(&self, offset: usize) -> Point<Pixels> {
@@ -676,19 +764,19 @@ impl EditorView {
         self.wiki_link_search_results.clear();
         self.menu_selected_index = 0;
         let pos = self.wiki_link_menu_position(start);
-        self.context_menu = Some(ContextMenu {
-            position: pos,
-            kind: ContextMenuKind::WikiLink,
-        });
-        self.context_submenu = None;
-        self.context_submenu_aim = None;
-        self.context_submenu_hovered = false;
+        self.open_context_menu(
+            ContextMenu {
+                position: pos,
+                kind: ContextMenuKind::WikiLink,
+            },
+            true,
+            cx,
+        );
         if self.wiki_link_query.trim().is_empty() {
             self.run_wiki_link_recent_search(cx);
         } else {
             self.run_wiki_link_search(cx);
         }
-        cx.notify();
     }
 
     pub(crate) fn ensure_wiki_link_menu_for_cursor(&mut self, cx: &mut Context<Self>) -> bool {
@@ -851,15 +939,14 @@ impl EditorView {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.context_menu = Some(ContextMenu {
-            position,
-            kind: ContextMenuKind::Tab { tab_id },
-        });
-        self.context_submenu = None;
-        self.context_submenu_aim = None;
-        self.context_submenu_hovered = false;
-        self.sidebar_edit = None;
-        cx.notify();
+        self.open_context_menu(
+            ContextMenu {
+                position,
+                kind: ContextMenuKind::Tab { tab_id },
+            },
+            true,
+            cx,
+        );
     }
 
     pub(crate) fn open_terminal_context_menu(
@@ -867,15 +954,14 @@ impl EditorView {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.context_menu = Some(ContextMenu {
-            position,
-            kind: ContextMenuKind::Terminal,
-        });
-        self.context_submenu = None;
-        self.context_submenu_aim = None;
-        self.context_submenu_hovered = false;
-        self.sidebar_edit = None;
-        cx.notify();
+        self.open_context_menu(
+            ContextMenu {
+                position,
+                kind: ContextMenuKind::Terminal,
+            },
+            true,
+            cx,
+        );
     }
 
     pub(crate) fn open_chat_tab_context_menu(
@@ -884,15 +970,14 @@ impl EditorView {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.context_menu = Some(ContextMenu {
-            position,
-            kind: ContextMenuKind::ChatTab { tab_id },
-        });
-        self.context_submenu = None;
-        self.context_submenu_aim = None;
-        self.context_submenu_hovered = false;
-        self.sidebar_edit = None;
-        cx.notify();
+        self.open_context_menu(
+            ContextMenu {
+                position,
+                kind: ContextMenuKind::ChatTab { tab_id },
+            },
+            true,
+            cx,
+        );
     }
 
     pub(crate) fn open_chat_tab_create_context_menu(
@@ -900,35 +985,24 @@ impl EditorView {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.context_menu = Some(ContextMenu {
-            position,
-            kind: ContextMenuKind::ChatTabCreate,
-        });
-        self.context_submenu = None;
-        self.context_submenu_aim = None;
-        self.context_submenu_hovered = false;
-        self.sidebar_edit = None;
-        cx.notify();
+        self.open_context_menu(
+            ContextMenu {
+                position,
+                kind: ContextMenuKind::ChatTabCreate,
+            },
+            true,
+            cx,
+        );
     }
 
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
-        let had_menu = self.context_menu.take().is_some();
-        let had_submenu = self.context_submenu.take().is_some();
-        let had_submenu_aim = self.context_submenu_aim.take().is_some();
-        let had_submenu_hovered = std::mem::replace(&mut self.context_submenu_hovered, false);
-        if had_menu || had_submenu || had_submenu_aim || had_submenu_hovered {
-            if let Some(start) = self.slash_menu_start.take() {
-                let end = self.cursor.offset;
-                if end > start {
-                    self.buffer.replace(start..end, "");
-                    self.cursor.move_to(start, &self.buffer);
-                    self.reparse();
-                }
-                self.slash_filter.clear();
-            }
-            self.clear_wiki_link_menu_state();
-            cx.notify();
+        if self.context_menu.is_none() {
+            self.finish_close_context_menu(cx);
+            self.context_menu_opacity = 0.0;
+            self.context_menu_opacity_target = 0.0;
+            return;
         }
+        self.animate_context_menu_opacity(0.0, true, cx);
     }
 
     pub(crate) fn sync_wiki_link_menu(&mut self, cx: &mut Context<Self>) {
@@ -986,9 +1060,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         if self.active_tab_is_read_only() {
-            self.context_menu = None;
-            self.context_submenu = None;
-            self.context_submenu_aim = None;
             if action == FormatMenuAction::Copy {
                 self.copy_selection_to_clipboard(cx);
             }
@@ -1004,9 +1075,7 @@ impl EditorView {
             }
             self.slash_filter.clear();
         }
-        self.context_menu = None;
-        self.context_submenu = None;
-        self.context_submenu_aim = None;
+        self.close_context_menu(cx);
         match action {
             FormatMenuAction::Cut => self.cut_selection_to_clipboard(cx),
             FormatMenuAction::Copy => self.copy_selection_to_clipboard(cx),
@@ -3243,6 +3312,7 @@ impl EditorView {
             .left(px(layout.left))
             .w(px(width))
             .max_h(px(layout.max_height))
+            .opacity(self.context_menu_opacity.clamp(0.0, 1.0))
             .overflow_y_scroll()
             .py(px(self.scaled(ms.menu_padding_y_px)))
             .bg(ms.menu_bg)

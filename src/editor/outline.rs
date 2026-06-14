@@ -9,7 +9,14 @@ use super::*;
 
 pub(crate) struct OutlineHeading {
     pub line: usize,
+    pub level: u8,
     pub text: SharedString,
+}
+
+#[derive(Clone, Copy)]
+struct OutlineRailRow {
+    line: usize,
+    level: u8,
 }
 
 fn centered_overflow_offset(
@@ -41,6 +48,18 @@ fn mix_hsla(from: gpui::Hsla, to: gpui::Hsla, factor: f32) -> gpui::Hsla {
         l: from.l * inverse + to.l * factor,
         a: from.a * inverse + to.a * factor,
     }
+}
+
+fn multiply_alpha(color: gpui::Hsla, factor: f32) -> gpui::Hsla {
+    gpui::Hsla {
+        a: color.a * factor.clamp(0.0, 1.0),
+        ..color
+    }
+}
+
+fn heading_level_opacity(level: u8, level_opacities: [f32; 6]) -> f32 {
+    let index = level.saturating_sub(1).min(5) as usize;
+    level_opacities[index].clamp(0.0, 1.0)
 }
 
 impl EditorView {
@@ -130,11 +149,12 @@ impl EditorView {
     pub(crate) fn collect_outline_headings(&self) -> Vec<OutlineHeading> {
         let mut headings = Vec::new();
         for (line_idx, dec) in self.decorations.iter().enumerate() {
-            if let BlockType::Heading(_) = dec.block_type {
+            if let BlockType::Heading(level) = dec.block_type {
                 let raw = self.buffer.line_content(line_idx);
                 let text = raw.trim_start_matches('#').trim_start();
                 headings.push(OutlineHeading {
                     line: line_idx,
+                    level,
                     text: SharedString::from(text.to_string()),
                 });
             }
@@ -161,8 +181,14 @@ impl EditorView {
         fallback.or_else(|| headings.first().map(|heading| heading.line))
     }
 
-    fn outline_rail_rows(&self, headings: &[OutlineHeading]) -> Vec<usize> {
-        headings.iter().map(|heading| heading.line).collect()
+    fn outline_rail_rows(&self, headings: &[OutlineHeading]) -> Vec<OutlineRailRow> {
+        headings
+            .iter()
+            .map(|heading| OutlineRailRow {
+                line: heading.line,
+                level: heading.level,
+            })
+            .collect()
     }
 
     fn outline_rail_active_line(&self, headings: &[OutlineHeading]) -> Option<usize> {
@@ -171,8 +197,14 @@ impl EditorView {
             .or_else(|| self.first_visible_outline_heading_line(headings))
     }
 
-    fn sync_outline_rail_label_opacity(&mut self, cx: &mut Context<Self>) {
-        let target = if self.outline_rail_hovered { 1.0 } else { 0.0 };
+    pub(crate) fn sync_outline_rail_label_opacity(&mut self, cx: &mut Context<Self>) {
+        let target = if self.outline_rail_hovered
+            || (self.editor_scrollbar_hovered && self.outline_rail_label_opacity > 0.01)
+        {
+            1.0
+        } else {
+            0.0
+        };
         if (self.outline_rail_label_opacity_target - target).abs() <= 0.001 {
             return;
         }
@@ -371,6 +403,17 @@ impl EditorView {
 
         let os = &self.styles.outline;
         let right_margin = self.scaled(os.outline_rail_right_margin_px);
+        let scrollbar_hit_left_from_right = self.scaled(
+            self.styles.editor.editor_scrollbar_right_margin_px
+                + self
+                    .styles
+                    .editor
+                    .editor_scrollbar_hit_width_px
+                    .max(self.styles.editor.editor_scrollbar_width_px)
+                    .max(self.styles.editor.editor_scrollbar_hover_width_px),
+        );
+        let track_right = scrollbar_hit_left_from_right.min(right_margin);
+        let track_extra_right_padding = (right_margin - track_right).max(0.0);
         let vertical_padding = self.scaled(os.outline_rail_vertical_padding_px);
         let label_font_size = self.scaled(os.outline_rail_label_font_size_px);
         let label_max_width = self.scaled(os.outline_rail_label_max_width_px);
@@ -389,6 +432,8 @@ impl EditorView {
         let label_color = os.outline_rail_label_color;
         let label_hover_color = os.outline_rail_label_hover_color;
         let label_active_color = os.outline_rail_label_active_color;
+        let tick_level_opacities = os.outline_rail_tick_level_opacities;
+        let label_level_opacities = os.outline_rail_label_level_opacities;
         let hovered_label_line = self.outline_rail_hovered_label_line;
         let hovered_label_opacity = self.outline_rail_hovered_label_opacity.clamp(0.0, 1.0);
         let label_opacity = self.outline_rail_label_opacity.clamp(0.0, 1.0);
@@ -428,8 +473,8 @@ impl EditorView {
         let viewport_height = self.last_viewport_height.max(0.0);
         let mut total_height = 0.0;
         let mut active_row_center = None;
-        for line in &rows {
-            if Some(*line) == active_line {
+        for row in &rows {
+            if Some(row.line) == active_line {
                 active_row_center = Some(total_height + row_height / 2.0);
             }
             total_height += row_height;
@@ -447,7 +492,9 @@ impl EditorView {
         };
 
         let mut row_elements: Vec<AnyElement> = Vec::with_capacity(rows.len());
-        for line in rows {
+        for row in rows {
+            let line = row.line;
+            let level_opacity = heading_level_opacity(row.level, tick_level_opacities);
             let is_active = Some(line) == active_line;
             let animated_tick_width = if is_active {
                 let progress = self
@@ -465,7 +512,7 @@ impl EditorView {
             let row_tick_color = if is_active {
                 tick_active_color
             } else {
-                tick_color
+                multiply_alpha(tick_color, level_opacity)
             };
             row_elements.push(
                 div()
@@ -511,6 +558,7 @@ impl EditorView {
             rail_collapsed_width
         };
         let rail_outer_width = rail_width + right_margin;
+        let track_width = rail_width + track_extra_right_padding;
 
         let label_overlay = if labels_visible {
             let mut label_items: Vec<AnyElement> = Vec::with_capacity(headings.len());
@@ -518,12 +566,13 @@ impl EditorView {
             let mut label_total_height = 0.0;
             for heading in &headings {
                 let target_line = heading.line;
+                let level_opacity = heading_level_opacity(heading.level, label_level_opacities);
                 let is_active = Some(target_line) == active_line;
                 let is_hovered = hovered_label_line == Some(target_line);
                 let base_label_color = if is_active {
                     label_active_color
                 } else {
-                    label_color
+                    multiply_alpha(label_color, level_opacity)
                 };
                 let row_label_color = if is_hovered {
                     mix_hsla(base_label_color, label_hover_color, hovered_label_opacity)
@@ -655,7 +704,6 @@ impl EditorView {
             .h_full()
             .w_full()
             .overflow_hidden()
-            .cursor(CursorStyle::Arrow)
             .when(labels_visible, |this| {
                 let gradient_start_color = gpui::Hsla {
                     a: os.outline_rail_label_gradient_start_color.a * label_opacity,
@@ -673,10 +721,7 @@ impl EditorView {
                     ),
                     linear_color_stop(gradient_end_color, os.outline_rail_label_gradient_end_stop),
                 ))
-            })
-            .on_hover(cx.listener(|this, hovering: &bool, _, cx| {
-                this.set_outline_rail_hovered(*hovering, cx);
-            }));
+            });
 
         let track_inner = div()
             .id("outline-rail-track-inner")
@@ -706,9 +751,23 @@ impl EditorView {
             .absolute()
             .top_0()
             .bottom_0()
-            .right(px(right_margin))
-            .w(px(rail_width))
-            .child(track_inner);
+            .right(px(track_right))
+            .w(px(track_width))
+            .occlude()
+            .cursor(CursorStyle::Arrow)
+            .on_scroll_wheel(cx.listener(Self::on_scroll))
+            .on_hover(cx.listener(|this, hovering: &bool, _, cx| {
+                this.set_outline_rail_hovered(*hovering, cx);
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(px(track_extra_right_padding))
+                    .w(px(rail_width))
+                    .child(track_inner),
+            );
         let content = content.child(track);
 
         Some(
@@ -719,8 +778,6 @@ impl EditorView {
                 .right(px(0.0))
                 .h_full()
                 .w(px(rail_outer_width))
-                .occlude()
-                .on_scroll_wheel(cx.listener(Self::on_scroll))
                 .child(content)
                 .into_any_element(),
         )

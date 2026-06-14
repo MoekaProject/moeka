@@ -305,6 +305,8 @@ pub struct OutlineStyles {
     pub outline_rail_label_gradient_end_stop: f32,
     pub outline_rail_label_opacity_animation_ms: u64,
     pub outline_rail_label_hover_animation_ms: u64,
+    pub outline_rail_tick_level_opacities: [f32; 6],
+    pub outline_rail_label_level_opacities: [f32; 6],
     // Row metrics
     pub outline_rail_row_height_px: f32,
     // Tick indicator
@@ -783,6 +785,7 @@ pub struct ContextMenuStyles {
     pub menu_padding_y_px: f32,
     pub menu_submenu_gap_px: f32,
     pub menu_max_height_margin_px: f32,
+    pub menu_opacity_animation_ms: u64,
     // Item
     pub menu_item_height_px: f32,
     pub menu_item_padding_x_px: f32,
@@ -1307,6 +1310,8 @@ impl Styles {
                 outline_rail_label_gradient_end_stop: 0.30,
                 outline_rail_label_opacity_animation_ms: 140,
                 outline_rail_label_hover_animation_ms: 110,
+                outline_rail_tick_level_opacities: [1.0, 0.66, 0.42, 0.26, 0.16, 0.10],
+                outline_rail_label_level_opacities: [1.0, 0.90, 0.78, 0.66, 0.56, 0.48],
                 outline_rail_row_height_px: 4.0,
                 outline_rail_tick_width_px: 8.0,
                 outline_rail_tick_thickness_px: 0.66,
@@ -1687,10 +1692,11 @@ impl Styles {
                 menu_padding_y_px: 10.0,
                 menu_submenu_gap_px: 3.0,
                 menu_max_height_margin_px: 0.0,
+                menu_opacity_animation_ms: 120,
                 menu_item_height_px: 28.0,
                 menu_item_padding_x_px: 12.0,
                 menu_item_font_size_px: ui_font_size_px,
-                menu_item_text_color: ui_theme.text_primary,
+                menu_item_text_color: with_alpha(ui_theme.text_primary, 0.9),
                 menu_item_danger_text_color: ui_theme.text_danger,
                 menu_item_hover_bg: ui_theme.bg_hover,
                 menu_item_selected_bg: ui_theme.bg_hover,

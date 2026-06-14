@@ -938,14 +938,14 @@ impl EditorView {
 
         if self.active_tab_is_whiteboard() {
             self.whiteboard_select_at(event.position);
-            self.context_submenu = None;
-            self.context_submenu_aim = None;
-            self.context_submenu_hovered = false;
-            self.context_menu = Some(ContextMenu {
-                position: event.position,
-                kind: ContextMenuKind::Whiteboard,
-            });
-            cx.notify();
+            self.open_context_menu(
+                ContextMenu {
+                    position: event.position,
+                    kind: ContextMenuKind::Whiteboard,
+                },
+                true,
+                cx,
+            );
             return;
         }
 
@@ -969,17 +969,18 @@ impl EditorView {
                 .get(table_start)
                 .and_then(|dec| dec.table_info.as_ref())
                 .is_some_and(|ti| ti.is_front_matter);
-            self.context_submenu = None;
-            self.context_submenu_aim = None;
-            self.context_submenu_hovered = false;
-            self.context_menu = Some(ContextMenu {
-                position: event.position,
-                kind: ContextMenuKind::Table {
-                    table_start_line: table_start,
-                    row: visual_row,
-                    col,
+            self.open_context_menu(
+                ContextMenu {
+                    position: event.position,
+                    kind: ContextMenuKind::Table {
+                        table_start_line: table_start,
+                        row: visual_row,
+                        col,
+                    },
                 },
-            });
+                true,
+                cx,
+            );
             if is_front_matter {
                 self.selected_handle = Some((table_start, false, visual_row));
             }

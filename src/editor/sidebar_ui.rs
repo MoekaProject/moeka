@@ -38,13 +38,10 @@ impl EditorView {
         clear_sidebar_edit: bool,
         cx: &mut Context<Self>,
     ) {
-        self.context_menu = Some(ContextMenu { position, kind });
-        self.context_submenu = None;
-        self.context_submenu_aim = None;
+        self.open_context_menu(ContextMenu { position, kind }, clear_sidebar_edit, cx);
         if clear_sidebar_edit {
             self.sidebar_edit = None;
         }
-        cx.notify();
     }
 
     pub(crate) fn open_workspace_menu(

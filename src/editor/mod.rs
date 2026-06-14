@@ -1379,6 +1379,10 @@ pub struct EditorView {
     pub(crate) context_submenu: Option<ContextMenuKind>,
     pub(crate) context_submenu_aim: Option<ContextSubmenuAim>,
     pub(crate) context_submenu_hovered: bool,
+    pub(crate) context_menu_opacity: f32,
+    pub(crate) context_menu_opacity_target: f32,
+    pub(crate) context_menu_opacity_epoch: usize,
+    pub(crate) context_menu_opacity_task: Option<Task<()>>,
     pub(crate) sidebar_edit: Option<SidebarEditMode>,
     pub(crate) sidebar_edit_blur_sub: Option<gpui::Subscription>,
     pub(crate) file_clipboard: Option<FileClipboard>,
@@ -1808,6 +1812,10 @@ impl EditorView {
             context_submenu: None,
             context_submenu_aim: None,
             context_submenu_hovered: false,
+            context_menu_opacity: 0.0,
+            context_menu_opacity_target: 0.0,
+            context_menu_opacity_epoch: 0,
+            context_menu_opacity_task: None,
             sidebar_edit: None,
             sidebar_edit_blur_sub: None,
             file_clipboard: None,
@@ -2454,6 +2462,7 @@ impl EditorView {
         }
         self.sync_editor_scrollbar_opacity(cx);
         self.sync_editor_scrollbar_width(cx);
+        self.sync_outline_rail_label_opacity(cx);
     }
 
     pub(crate) fn start_editor_scrollbar_drag(
