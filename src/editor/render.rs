@@ -1212,9 +1212,14 @@ impl Render for EditorView {
                                                                         let overlay_bounds = bounds;
                                                                         let overlay_width = f32::from(bounds.size.width).max(1.0);
                                                                         let overlay_height = f32::from(bounds.size.height).max(1.0);
-                                                                        let fit_scale = (overlay_width / intrinsic_width.max(1.0))
-                                                                            .min(overlay_height / intrinsic_height.max(1.0))
-                                                                            .min(1.0);
+                                                                        let generated_preview_overlay = preview_kind.is_some();
+                                                                        let fit_scale = if generated_preview_overlay {
+                                                                            overlay_width / intrinsic_width.max(1.0)
+                                                                        } else {
+                                                                            (overlay_width / intrinsic_width.max(1.0))
+                                                                                .min(overlay_height / intrinsic_height.max(1.0))
+                                                                                .min(1.0)
+                                                                        };
                                                                         let base_display_width = intrinsic_width * fit_scale;
                                                                         let base_display_height = intrinsic_height * fit_scale;
                                                                         let display_width =
@@ -1224,9 +1229,13 @@ impl Render for EditorView {
                                                                         let image_left = f32::from(bounds.origin.x)
                                                                             + (overlay_width - display_width) * 0.5
                                                                             + overlay.view.pan_x;
-                                                                        let image_top = f32::from(bounds.origin.y)
-                                                                            + (overlay_height - display_height) * 0.5
-                                                                            + overlay.view.pan_y;
+                                                                        let image_top = if generated_preview_overlay {
+                                                                            f32::from(bounds.origin.y) + overlay.view.pan_y
+                                                                        } else {
+                                                                            f32::from(bounds.origin.y)
+                                                                                + (overlay_height - display_height) * 0.5
+                                                                                + overlay.view.pan_y
+                                                                        };
                                                                         let overlay_image_bounds = Bounds::new(
                                                                             gpui::point(px(image_left), px(image_top)),
                                                                             gpui::size(px(display_width), px(display_height)),

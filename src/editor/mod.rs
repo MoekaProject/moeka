@@ -4550,15 +4550,13 @@ impl EditorView {
         if let Some(image_view) = self.active_image_view_state_mut() {
             image_view.zoom_factor = image_view.zoom_factor.clamp(0.2, 8.0);
             if let Some((image_width, image_height)) = image_size {
-                let fit_scale = (viewport_width / image_width)
-                    .min(viewport_height / image_height)
-                    .min(1.0);
+                let fit_scale = viewport_width / image_width;
                 let display_width = image_width * fit_scale * image_view.zoom_factor;
                 let display_height = image_height * fit_scale * image_view.zoom_factor;
                 let limit_x = ((display_width - viewport_width) / 2.0).max(0.0);
-                let limit_y = ((display_height - viewport_height) / 2.0).max(0.0);
+                let limit_y = (display_height - viewport_height).max(0.0);
                 image_view.pan_x = image_view.pan_x.clamp(-limit_x, limit_x);
-                image_view.pan_y = image_view.pan_y.clamp(-limit_y, limit_y);
+                image_view.pan_y = image_view.pan_y.clamp(-limit_y, 0.0);
             } else {
                 image_view.pan_x = 0.0;
                 image_view.pan_y = 0.0;
@@ -4604,16 +4602,42 @@ impl EditorView {
 
         let viewport_width = f32::from(bounds.size.width).max(1.0);
         let viewport_height = f32::from(bounds.size.height).max(1.0);
-        let fit_scale = (viewport_width / image_width)
-            .min(viewport_height / image_height)
-            .min(1.0);
-        let display_width = image_width * fit_scale * view.zoom_factor;
-        let display_height = image_height * fit_scale * view.zoom_factor;
+        let preview_kind = self
+            .decorations
+            .get(overlay.line_idx)
+            .and_then(|decoration| decoration.block_preview.as_ref())
+            .map(|preview| preview.kind);
+        let (intrinsic_width, intrinsic_height) = if let Some(preview_kind) = preview_kind {
+            helpers::intrinsic_generated_preview_size_for_kind(
+                image_width,
+                image_height,
+                preview_kind,
+            )
+        } else {
+            (image_width, image_height)
+        };
+        let fit_scale = if preview_kind.is_some() {
+            viewport_width / intrinsic_width.max(1.0)
+        } else {
+            (viewport_width / intrinsic_width.max(1.0))
+                .min(viewport_height / intrinsic_height.max(1.0))
+                .min(1.0)
+        };
+        let display_width = intrinsic_width * fit_scale * view.zoom_factor;
+        let display_height = intrinsic_height * fit_scale * view.zoom_factor;
         let limit_x = ((display_width - viewport_width) / 2.0).max(0.0);
-        let limit_y = ((display_height - viewport_height) / 2.0).max(0.0);
+        let limit_y = if preview_kind.is_some() {
+            (display_height - viewport_height).max(0.0)
+        } else {
+            ((display_height - viewport_height) / 2.0).max(0.0)
+        };
 
         view.pan_x = view.pan_x.clamp(-limit_x, limit_x);
-        view.pan_y = view.pan_y.clamp(-limit_y, limit_y);
+        view.pan_y = if preview_kind.is_some() {
+            view.pan_y.clamp(-limit_y, 0.0)
+        } else {
+            view.pan_y.clamp(-limit_y, limit_y)
+        };
     }
 
     pub(crate) fn active_image_dimensions(&self) -> Option<(f32, f32)> {

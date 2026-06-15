@@ -14,6 +14,7 @@ pub(crate) struct ImageViewElement {
 pub(crate) struct ImageViewPrepaintState {
     hitbox: Hitbox,
     image: Option<(Bounds<Pixels>, Arc<RenderImage>)>,
+    dragging: bool,
 }
 
 impl gpui::IntoElement for ImageViewElement {
@@ -71,12 +72,14 @@ impl Element for ImageViewElement {
                 return ImageViewPrepaintState {
                     hitbox,
                     image: None,
+                    dragging: false,
                 };
             };
             let Some(path) = tab.path.as_ref() else {
                 return ImageViewPrepaintState {
                     hitbox,
                     image: None,
+                    dragging: false,
                 };
             };
             let key = path.to_string_lossy();
@@ -84,6 +87,7 @@ impl Element for ImageViewElement {
                 return ImageViewPrepaintState {
                     hitbox,
                     image: None,
+                    dragging: false,
                 };
             };
 
@@ -95,18 +99,16 @@ impl Element for ImageViewElement {
                 return ImageViewPrepaintState {
                     hitbox,
                     image: None,
+                    dragging: false,
                 };
             }
 
-            let fit_scale = (viewport_width / image_width)
-                .min(viewport_height / image_height)
-                .min(1.0);
+            let fit_scale = viewport_width / image_width;
             let display_width = image_width * fit_scale * state.zoom_factor;
             let display_height = image_height * fit_scale * state.zoom_factor;
             let origin_x =
                 f32::from(bounds.origin.x) + (viewport_width - display_width) * 0.5 + state.pan_x;
-            let origin_y =
-                f32::from(bounds.origin.y) + (viewport_height - display_height) * 0.5 + state.pan_y;
+            let origin_y = f32::from(bounds.origin.y) + state.pan_y;
 
             Some((
                 Bounds::new(
@@ -117,12 +119,18 @@ impl Element for ImageViewElement {
             ))
         };
 
+        let dragging = self.editor.read(cx).image_drag_state.is_some();
+
         let _ = self.editor.update(cx, |editor, _| {
             editor.last_viewport_width = viewport_width;
             editor.last_viewport_height = viewport_height;
         });
 
-        ImageViewPrepaintState { hitbox, image }
+        ImageViewPrepaintState {
+            hitbox,
+            image,
+            dragging,
+        }
     }
 
     fn paint(
@@ -135,7 +143,14 @@ impl Element for ImageViewElement {
         window: &mut Window,
         _cx: &mut App,
     ) {
-        window.set_cursor_style(CursorStyle::Arrow, &prepaint.hitbox);
+        window.set_cursor_style(
+            if prepaint.dragging {
+                CursorStyle::ClosedHand
+            } else {
+                CursorStyle::OpenHand
+            },
+            &prepaint.hitbox,
+        );
         if let Some((bounds, image)) = &prepaint.image {
             let _ = window.paint_image(*bounds, Corners::all(px(0.0)), image.clone(), 0, false);
         }
