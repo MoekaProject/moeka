@@ -75,7 +75,6 @@ pub(crate) const GENERATED_PREVIEW_MATH_RASTER_SCALE: f32 = 3.0;
 pub(crate) const GENERATED_PREVIEW_EDITOR_MAX_HEIGHT: f32 = 400.0;
 pub(crate) const GENERATED_PREVIEW_EDITOR_MERMAID_SCALE: f32 = 0.6;
 const GENERATED_PREVIEW_MATH_DISPLAY_SCALE: f32 = 1.5;
-const GENERATED_PREVIEW_MERMAID_TEXT_COLUMN_BUDGET: usize = 84;
 const GENERATED_PREVIEW_DEFAULT_MONOSPACE_FONT_FAMILY: &str =
     "ui-monospace, Menlo, Monaco, Consolas, monospace";
 const GENERATED_PREVIEW_DEFAULT_CJK_FONT_FAMILY: &str =
@@ -2331,7 +2330,6 @@ mod tests {
 
         assert!(svg.contains("<svg"));
         assert!(!svg.contains("Mermaid preview failed"));
-        assert!(svg.contains(" H ") || svg.contains(" V "));
         assert!(!svg.contains(" C "));
         for bare_label in ["C", "D", "F", "S", "T"] {
             assert!(!svg.contains(&format!(">{bare_label}</text>")));
@@ -3429,29 +3427,10 @@ fn render_mermaid_block_preview_svg(
     theme: &Theme,
     font_families: GeneratedPreviewFontFamilies<'_>,
 ) -> anyhow::Result<String> {
-    if mermaid_source_prefers_orthogonal_svg(source_text) {
-        return render_mermaid_text_block_preview_svg(source_text, theme, font_families);
-    }
-
     let mermaid_svg_source = normalize_mermaid_svg_source(source_text);
-    match mermaid_svg::render(&mermaid_svg_source) {
-        Ok(svg) => Ok(apply_mermaid_svg_theme(&svg, theme, font_families)),
-        Err(_) => render_mermaid_text_block_preview_svg(source_text, theme, font_families),
-    }
-}
-
-fn mermaid_source_prefers_orthogonal_svg(source_text: &str) -> bool {
-    source_text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with("%%"))
-        .and_then(|line| line.split_whitespace().next())
-        .is_some_and(|keyword| {
-            keyword.eq_ignore_ascii_case("flowchart")
-                || keyword.eq_ignore_ascii_case("graph")
-                || keyword.eq_ignore_ascii_case("statediagram")
-                || keyword.eq_ignore_ascii_case("statediagram-v2")
-        })
+    mermaid_svg::render(&mermaid_svg_source)
+        .map(|svg| apply_mermaid_svg_theme(&svg, theme, font_families))
+        .map_err(Into::into)
 }
 
 fn normalize_mermaid_svg_source(source_text: &str) -> String {
@@ -3462,47 +3441,6 @@ fn normalize_mermaid_svg_source(source_text: &str) -> String {
         .replace("<BR/>", r"\n")
         .replace("<BR>", r"\n")
         .replace("<BR />", r"\n")
-}
-
-fn render_mermaid_text_block_preview_svg(
-    source_text: &str,
-    theme: &Theme,
-    font_families: GeneratedPreviewFontFamilies<'_>,
-) -> anyhow::Result<String> {
-    let font_family = build_generated_preview_font_family(font_families);
-    let foreground = svg_color(generated_preview_foreground_color(theme));
-    let secondary = svg_color(theme.text_secondary);
-    let node_fill = svg_color(theme.bg_secondary);
-    let node_stroke = svg_color(theme.border_primary);
-    let subgraph_fill = svg_color(theme.bg_secondary);
-    let subgraph_stroke = svg_color(theme.border_secondary);
-    let svg_options = mermaid_text::SvgRenderOptions {
-        font_family: &font_family,
-        text_color: &foreground,
-        muted_text_color: &secondary,
-        edge_label_color: &foreground,
-        node_fill: &node_fill,
-        node_stroke: &node_stroke,
-        edge_stroke: &foreground,
-        subgraph_fill: &subgraph_fill,
-        subgraph_stroke: &subgraph_stroke,
-    };
-
-    match mermaid_text::render_svg_with_options(source_text, &svg_options) {
-        Ok(svg) => return Ok(svg),
-        Err(mermaid_text::Error::UnsupportedDiagram(_)) => {}
-        Err(error) => return Err(error.into()),
-    }
-
-    let rendered = mermaid_text::render_with_width(
-        source_text,
-        Some(GENERATED_PREVIEW_MERMAID_TEXT_COLUMN_BUDGET),
-    )?;
-    Ok(build_mermaid_text_preview_svg(
-        &rendered,
-        theme,
-        font_families,
-    ))
 }
 
 fn apply_mermaid_svg_theme(
@@ -3557,6 +3495,28 @@ fn apply_mermaid_svg_theme(
         themed = themed.replace(from, &to);
     }
 
+    themed = append_svg_style_block(
+        &themed,
+        concat!(
+            ".label foreignObject,",
+            ".nodeLabel foreignObject,",
+            ".edgeLabel foreignObject,",
+            ".cluster-label foreignObject{overflow:hidden !important;}\n",
+            ".label foreignObject div,",
+            ".label foreignObject span,",
+            ".nodeLabel foreignObject div,",
+            ".nodeLabel foreignObject span,",
+            ".edgeLabel foreignObject div,",
+            ".edgeLabel foreignObject span,",
+            ".cluster-label foreignObject div,",
+            ".cluster-label foreignObject span{",
+            "max-width:100%;box-sizing:border-box;",
+            "white-space:normal !important;",
+            "overflow-wrap:anywhere;word-break:break-word;",
+            "line-break:anywhere;}",
+        ),
+    );
+
     themed
 }
 
@@ -3594,57 +3554,6 @@ fn build_generated_block_preview_error_svg(
         font_family = font_family,
         title = escape_svg_text(title),
         title_color = title_color,
-    )
-}
-
-fn build_mermaid_text_preview_svg(
-    rendered_text: &str,
-    theme: &Theme,
-    font_families: GeneratedPreviewFontFamilies<'_>,
-) -> String {
-    let rendered_text = rendered_text.trim_end_matches('\n');
-    let lines: Vec<&str> = if rendered_text.is_empty() {
-        vec![""]
-    } else {
-        rendered_text.lines().collect()
-    };
-    let max_columns = lines
-        .iter()
-        .map(|line| display_width(line))
-        .max()
-        .unwrap_or(1)
-        .max(1);
-
-    let font_family = escape_svg_text(&build_generated_preview_font_family(font_families));
-    let font_size = 18.0;
-    let char_width = 11.0;
-    let line_height = 24.0;
-    let padding_x = 24.0;
-    let padding_y = 22.0;
-    let width = (padding_x * 2.0 + max_columns as f32 * char_width).ceil() as i32;
-    let height = (padding_y * 2.0 + lines.len().max(1) as f32 * line_height).ceil() as i32;
-    let text_color = svg_color(generated_preview_foreground_color(theme));
-    let mut text_nodes = String::new();
-
-    for (index, line) in lines.iter().enumerate() {
-        let y = padding_y + font_size + index as f32 * line_height;
-        let mut column = 0usize;
-        for ch in line.chars() {
-            let width = char_display_width(ch);
-            if ch != ' ' {
-                let x = padding_x + column as f32 * char_width;
-                text_nodes.push_str(&format!(
-                    "<text x=\"{x}\" y=\"{y}\" font-family=\"{font_family}\" font-size=\"{font_size}\" fill=\"{text_color}\">{}</text>",
-                    escape_svg_text(&ch.to_string())
-                ));
-            }
-            column += width;
-        }
-    }
-
-    format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"><g style=\"text-rendering:geometricPrecision;shape-rendering:geometricPrecision;font-variant-ligatures:none;\">{text_nodes}</g></svg>",
-        text_nodes = text_nodes,
     )
 }
 
@@ -3767,6 +3676,24 @@ fn append_svg_root_style(svg: &str, style_fragment: &str) -> String {
     let mut merged = String::with_capacity(svg.len() + style_fragment.len() + 9);
     merged.push_str(&svg[..tag_end]);
     merged.push_str(&format!(" style=\"{style_fragment}\""));
+    merged.push_str(&svg[tag_end..]);
+    merged
+}
+
+fn append_svg_style_block(svg: &str, style_css: &str) -> String {
+    let Some(svg_start) = svg.find("<svg") else {
+        return svg.to_string();
+    };
+    let Some(tag_end_rel) = svg[svg_start..].find('>') else {
+        return svg.to_string();
+    };
+    let tag_end = svg_start + tag_end_rel + 1;
+
+    let mut merged = String::with_capacity(svg.len() + style_css.len() + 32);
+    merged.push_str(&svg[..tag_end]);
+    merged.push_str("<style>");
+    merged.push_str(style_css);
+    merged.push_str("</style>");
     merged.push_str(&svg[tag_end..]);
     merged
 }

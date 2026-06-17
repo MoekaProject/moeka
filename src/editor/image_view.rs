@@ -106,9 +106,10 @@ impl Element for ImageViewElement {
             let fit_scale = viewport_width / image_width;
             let display_width = image_width * fit_scale * state.zoom_factor;
             let display_height = image_height * fit_scale * state.zoom_factor;
+            let centered_offset_y = (viewport_height - display_height).max(0.0) * 0.5;
             let origin_x =
                 f32::from(bounds.origin.x) + (viewport_width - display_width) * 0.5 + state.pan_x;
-            let origin_y = f32::from(bounds.origin.y) + state.pan_y;
+            let origin_y = f32::from(bounds.origin.y) + centered_offset_y + state.pan_y;
 
             Some((
                 Bounds::new(
@@ -147,7 +148,7 @@ impl Element for ImageViewElement {
             if prepaint.dragging {
                 CursorStyle::ClosedHand
             } else {
-                CursorStyle::OpenHand
+                CursorStyle::Arrow
             },
             &prepaint.hitbox,
         );

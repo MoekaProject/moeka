@@ -40,7 +40,6 @@ emojis = "0.6"
 portable-pty = "0.9.0"
 mathjax-svg-rs = "0.4"
 mermaid-svg = "0.3.1"
-mermaid-text = { path = "vendor/mermaid-text" }
 resvg = { version = "0.45", default-features = false, features = [
   "text",
   "system-fonts",

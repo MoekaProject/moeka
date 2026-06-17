@@ -2665,11 +2665,12 @@ impl Element for EditorElement {
                     if img_w > 0.0 && img_h > 0.0 {
                         let (_, full_display_h) =
                             if preview.kind == crate::markdown::BlockPreviewKind::Mermaid {
-                                let (_, intrinsic_h) = helpers::intrinsic_generated_preview_size_for_kind(
-                                    img_w,
-                                    img_h,
-                                    preview.kind,
-                                );
+                                let (_, intrinsic_h) =
+                                    helpers::intrinsic_generated_preview_size_for_kind(
+                                        img_w,
+                                        img_h,
+                                        preview.kind,
+                                    );
                                 (
                                     0.0,
                                     intrinsic_h * helpers::GENERATED_PREVIEW_EDITOR_MERMAID_SCALE,
@@ -3722,11 +3723,12 @@ impl Element for EditorElement {
                             .is_some_and(|overlay| overlay.line_idx == line_idx);
                         let (display_w, full_display_h) =
                             if preview.kind == crate::markdown::BlockPreviewKind::Mermaid {
-                                let (intrinsic_w, intrinsic_h) = helpers::intrinsic_generated_preview_size_for_kind(
-                                    img_w,
-                                    img_h,
-                                    preview.kind,
-                                );
+                                let (intrinsic_w, intrinsic_h) =
+                                    helpers::intrinsic_generated_preview_size_for_kind(
+                                        img_w,
+                                        img_h,
+                                        preview.kind,
+                                    );
                                 (
                                     intrinsic_w * helpers::GENERATED_PREVIEW_EDITOR_MERMAID_SCALE,
                                     intrinsic_h * helpers::GENERATED_PREVIEW_EDITOR_MERMAID_SCALE,
@@ -3768,18 +3770,18 @@ impl Element for EditorElement {
                             point(px(img_left), px(img_top)),
                             size(px(display_w), px(full_display_h)),
                         );
-                        let visible_left = if preview.kind == crate::markdown::BlockPreviewKind::Mermaid
-                        {
-                            img_left.max(block_left)
-                        } else {
-                            img_left
-                        };
-                        let visible_right = if preview.kind == crate::markdown::BlockPreviewKind::Mermaid
-                        {
-                            (img_left + display_w).min(block_left + text_width)
-                        } else {
-                            img_left + display_w
-                        };
+                        let visible_left =
+                            if preview.kind == crate::markdown::BlockPreviewKind::Mermaid {
+                                img_left.max(block_left)
+                            } else {
+                                img_left
+                            };
+                        let visible_right =
+                            if preview.kind == crate::markdown::BlockPreviewKind::Mermaid {
+                                (img_left + display_w).min(block_left + text_width)
+                            } else {
+                                img_left + display_w
+                            };
                         let visible_w = (visible_right - visible_left).max(1.0);
                         let visible_img_bounds = Bounds::new(
                             point(px(visible_left), px(img_top)),
@@ -5882,7 +5884,7 @@ impl Element for EditorElement {
             {
                 CursorStyle::ClosedHand
             }
-            None if editor.hovering_generated_preview_line.is_some() => CursorStyle::OpenHand,
+            None if editor.hovering_generated_preview_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_generated_preview_zoom_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_inline_diff_gutter_hunk.is_some() => CursorStyle::Arrow,
             None if editor.hovering_inline_diff_revert_hunk.is_some() => CursorStyle::Arrow,

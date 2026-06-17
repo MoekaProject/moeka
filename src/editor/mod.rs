@@ -1499,6 +1499,7 @@ pub struct EditorView {
     pub(crate) outline_rail_label_opacity_target: f32,
     pub(crate) outline_rail_label_opacity_epoch: usize,
     pub(crate) outline_rail_label_opacity_task: Option<Task<()>>,
+    pub(crate) outline_rail_scroll_offset: Option<f32>,
     pub(crate) outline_rail_last_active_line: Cell<Option<usize>>,
     pub(crate) outline_rail_active_since: Cell<Option<Instant>>,
     pub(crate) info_panel_scroll_handle: ScrollHandle,
@@ -1928,6 +1929,7 @@ impl EditorView {
             outline_rail_label_opacity_target: 0.0,
             outline_rail_label_opacity_epoch: 0,
             outline_rail_label_opacity_task: None,
+            outline_rail_scroll_offset: None,
             outline_rail_last_active_line: Cell::new(None),
             outline_rail_active_since: Cell::new(None),
             info_panel_scroll_handle: ScrollHandle::new(),
@@ -4333,6 +4335,10 @@ impl EditorView {
         if sel.end > text.len() {
             return Vec::new();
         }
+        let sel = self.buffer.clamp_offset(sel.start)..self.buffer.clamp_offset(sel.end);
+        if sel.start >= sel.end {
+            return Vec::new();
+        }
         let needle = &text[sel.start..sel.end];
         if needle.is_empty()
             || needle.len() > 200
@@ -4354,6 +4360,12 @@ impl EditorView {
                 }
             }
             search_from = end;
+            if search_from >= text.len() {
+                break;
+            }
+            while !text.is_char_boundary(search_from) {
+                search_from += 1;
+            }
         }
         ranges
     }

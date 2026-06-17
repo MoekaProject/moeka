@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, SharedString, div,
-    linear_color_stop, linear_gradient, prelude::*, px,
+    AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, ScrollWheelEvent, SharedString,
+    Window, div, linear_color_stop, linear_gradient, prelude::*, px,
 };
 
 use crate::markdown::BlockType;
@@ -27,9 +27,49 @@ fn centered_overflow_offset(
 ) -> f32 {
     let padding = padding.min(viewport_height.max(0.0) / 2.0);
     let viewport_inner_height = (viewport_height - padding * 2.0).max(0.0);
+    if total_height <= viewport_inner_height {
+        return padding + (viewport_inner_height - total_height).max(0.0) / 2.0;
+    }
+
     let desired =
         padding + viewport_inner_height / 2.0 - active_center.unwrap_or(total_height / 2.0);
     desired.clamp(padding + viewport_inner_height - total_height, padding)
+}
+
+fn overflow_max_scroll(viewport_height: f32, total_height: f32, padding: f32) -> f32 {
+    let padding = padding.min(viewport_height.max(0.0) / 2.0);
+    let viewport_inner_height = (viewport_height - padding * 2.0).max(0.0);
+    (total_height - viewport_inner_height).max(0.0)
+}
+
+fn overflow_offset_from_scroll(scroll_offset: f32, viewport_height: f32, padding: f32) -> f32 {
+    let padding = padding.min(viewport_height.max(0.0) / 2.0);
+    padding - scroll_offset.max(0.0)
+}
+
+fn overflow_offset_from_shared_scroll(
+    shared_scroll: Option<f32>,
+    shared_max_scroll: f32,
+    content_max_scroll: f32,
+    viewport_height: f32,
+    padding: f32,
+) -> Option<f32> {
+    if shared_max_scroll <= 0.0 || content_max_scroll <= 0.0 {
+        return None;
+    }
+
+    let shared_scroll = shared_scroll?.clamp(0.0, shared_max_scroll);
+    let content_scroll = shared_scroll * (content_max_scroll / shared_max_scroll);
+    Some(overflow_offset_from_scroll(
+        content_scroll,
+        viewport_height,
+        padding,
+    ))
+}
+
+fn overflow_scroll_from_offset(top_offset: f32, viewport_height: f32, padding: f32) -> f32 {
+    let padding = padding.min(viewport_height.max(0.0) / 2.0);
+    (padding - top_offset).max(0.0)
 }
 
 fn outline_label_line_count(text: &str, chars_per_line: usize, max_lines: usize) -> usize {
@@ -37,6 +77,37 @@ fn outline_label_line_count(text: &str, chars_per_line: usize, max_lines: usize)
     let max_lines = max_lines.max(1);
     let char_count = text.chars().count().max(1);
     char_count.div_ceil(chars_per_line).clamp(1, max_lines)
+}
+
+fn outline_label_chars_per_line(max_width: f32, font_size: f32) -> usize {
+    ((max_width / (font_size.max(1.0) * 0.82)).floor() as usize).max(1)
+}
+
+fn outline_label_metrics(
+    headings: &[OutlineHeading],
+    active_line: Option<usize>,
+    item_height: f32,
+    item_gap: f32,
+    item_padding_y: f32,
+    line_height: f32,
+    chars_per_line: usize,
+    max_lines: usize,
+) -> (f32, Option<f32>) {
+    let mut total_height = 0.0;
+    let mut active_center = None;
+    for (index, heading) in headings.iter().enumerate() {
+        if index > 0 {
+            total_height += item_gap;
+        }
+        let line_count = outline_label_line_count(&heading.text, chars_per_line, max_lines);
+        let current_height =
+            item_height.max(line_count as f32 * line_height + item_padding_y * 2.0);
+        if Some(heading.line) == active_line {
+            active_center = Some(total_height + current_height / 2.0);
+        }
+        total_height += current_height;
+    }
+    (total_height, active_center)
 }
 
 fn mix_hsla(from: gpui::Hsla, to: gpui::Hsla, factor: f32) -> gpui::Hsla {
@@ -337,6 +408,99 @@ impl EditorView {
         cx.notify();
     }
 
+    fn on_outline_rail_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let headings = self.collect_outline_headings();
+        if headings.is_empty() {
+            return;
+        }
+
+        let os = &self.styles.outline;
+        let active_line = self.outline_rail_active_line(&headings);
+        let viewport_height = self.last_viewport_height.max(0.0);
+        let vertical_padding = self.scaled(os.outline_rail_vertical_padding_px);
+        let row_height = self.scaled(os.outline_rail_row_height_px);
+        let tick_total_height = headings.len() as f32 * row_height;
+        let tick_max_scroll =
+            overflow_max_scroll(viewport_height, tick_total_height, vertical_padding);
+        let mut max_scroll = tick_max_scroll;
+        let mut label_max_scroll = 0.0;
+        let mut label_initial_scroll = None;
+
+        if self.outline_rail_hovered || self.outline_rail_label_opacity > 0.01 {
+            let label_wrap_chars_per_line = outline_label_chars_per_line(
+                self.scaled(os.outline_rail_label_max_width_px),
+                self.scaled(os.outline_rail_label_font_size_px),
+            )
+            .min(os.outline_rail_label_wrap_chars_per_line.max(1));
+            let (label_total_height, active_label_center) = outline_label_metrics(
+                &headings,
+                active_line,
+                self.scaled(os.outline_rail_label_item_height_px),
+                self.scaled(os.outline_rail_label_item_gap_px),
+                self.scaled(os.outline_rail_label_item_padding_y_px),
+                self.scaled(os.outline_rail_label_line_height_px),
+                label_wrap_chars_per_line,
+                os.outline_rail_label_max_lines,
+            );
+            label_max_scroll =
+                overflow_max_scroll(viewport_height, label_total_height, vertical_padding);
+            if label_max_scroll > 0.0 {
+                let label_top_offset = centered_overflow_offset(
+                    viewport_height,
+                    label_total_height,
+                    active_label_center,
+                    vertical_padding,
+                );
+                label_initial_scroll = Some(overflow_scroll_from_offset(
+                    label_top_offset,
+                    viewport_height,
+                    vertical_padding,
+                ));
+            }
+            max_scroll = max_scroll.max(label_max_scroll);
+        }
+
+        if max_scroll <= 0.0 {
+            return;
+        }
+
+        let current_scroll = self.outline_rail_scroll_offset.unwrap_or_else(|| {
+            if let Some(label_initial_scroll) = label_initial_scroll {
+                return if label_max_scroll > 0.0 {
+                    label_initial_scroll / label_max_scroll * max_scroll
+                } else {
+                    label_initial_scroll
+                };
+            }
+            let active_index = active_line
+                .and_then(|line| headings.iter().position(|heading| heading.line == line));
+            let active_center =
+                active_index.map(|index| index as f32 * row_height + row_height / 2.0);
+            let top_offset = centered_overflow_offset(
+                viewport_height,
+                tick_total_height,
+                active_center,
+                vertical_padding,
+            );
+            let tick_initial_scroll =
+                overflow_scroll_from_offset(top_offset, viewport_height, vertical_padding);
+            if tick_max_scroll > 0.0 {
+                tick_initial_scroll / tick_max_scroll * max_scroll
+            } else {
+                tick_initial_scroll
+            }
+        });
+        let delta_y: f32 = event.delta.pixel_delta(px(row_height * 6.0)).y.into();
+        self.outline_rail_scroll_offset = Some((current_scroll - delta_y).clamp(0.0, max_scroll));
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     pub(crate) fn scroll_to_line(&mut self, target_line: usize, cx: &mut Context<Self>) {
         let target_y = self.line_y_offset(target_line);
         let target_scroll = (target_y - self.padding_top()).max(0.0);
@@ -420,7 +584,11 @@ impl EditorView {
         let label_gap = self.scaled(os.outline_rail_label_gap_px);
         let label_item_height = self.scaled(os.outline_rail_label_item_height_px);
         let label_item_gap = self.scaled(os.outline_rail_label_item_gap_px);
+        let label_item_padding_y = self.scaled(os.outline_rail_label_item_padding_y_px);
         let label_line_height = self.scaled(os.outline_rail_label_line_height_px);
+        let label_wrap_chars_per_line =
+            outline_label_chars_per_line(label_max_width, label_font_size)
+                .min(os.outline_rail_label_wrap_chars_per_line.max(1));
         let row_height = self.scaled(os.outline_rail_row_height_px);
         let tick_width = self.scaled(os.outline_rail_tick_width_px);
         let tick_thickness = self
@@ -481,12 +649,39 @@ impl EditorView {
         }
         let overflow = viewport_height > 0.0 && total_height > viewport_height;
         let top_offset = if overflow {
-            centered_overflow_offset(
+            let max_scroll = overflow_max_scroll(viewport_height, total_height, vertical_padding);
+            let label_max_scroll = if labels_visible {
+                let (label_total_height, _) = outline_label_metrics(
+                    &headings,
+                    active_line,
+                    label_item_height,
+                    label_item_gap,
+                    label_item_padding_y,
+                    label_line_height,
+                    label_wrap_chars_per_line,
+                    os.outline_rail_label_max_lines,
+                );
+                overflow_max_scroll(viewport_height, label_total_height, vertical_padding)
+            } else {
+                0.0
+            };
+            let shared_max_scroll = max_scroll.max(label_max_scroll);
+            if let Some(top_offset) = overflow_offset_from_shared_scroll(
+                self.outline_rail_scroll_offset,
+                shared_max_scroll,
+                max_scroll,
                 viewport_height,
-                total_height,
-                active_row_center,
                 vertical_padding,
-            )
+            ) {
+                top_offset
+            } else {
+                centered_overflow_offset(
+                    viewport_height,
+                    total_height,
+                    active_row_center,
+                    vertical_padding,
+                )
+            }
         } else {
             0.0
         };
@@ -562,8 +757,16 @@ impl EditorView {
 
         let label_overlay = if labels_visible {
             let mut label_items: Vec<AnyElement> = Vec::with_capacity(headings.len());
-            let mut active_label_center = None;
-            let mut label_total_height = 0.0;
+            let (label_total_height, active_label_center) = outline_label_metrics(
+                &headings,
+                active_line,
+                label_item_height,
+                label_item_gap,
+                label_item_padding_y,
+                label_line_height,
+                label_wrap_chars_per_line,
+                os.outline_rail_label_max_lines,
+            );
             for heading in &headings {
                 let target_line = heading.line;
                 let level_opacity = heading_level_opacity(heading.level, label_level_opacities);
@@ -581,19 +784,12 @@ impl EditorView {
                 };
                 let label_line_count = outline_label_line_count(
                     heading.text.as_ref(),
-                    os.outline_rail_label_wrap_chars_per_line,
+                    label_wrap_chars_per_line,
                     os.outline_rail_label_max_lines,
                 );
+                let label_text_max_height = label_line_count as f32 * label_line_height;
                 let current_label_item_height =
-                    label_item_height.max(label_line_count as f32 * label_line_height);
-                if is_active {
-                    active_label_center =
-                        Some(label_total_height + current_label_item_height / 2.0);
-                }
-                if !label_items.is_empty() {
-                    label_total_height += label_item_gap;
-                }
-                label_total_height += current_label_item_height;
+                    label_item_height.max(label_text_max_height + label_item_padding_y * 2.0);
                 label_items.push(
                     div()
                         .id(SharedString::from(format!(
@@ -607,6 +803,7 @@ impl EditorView {
                         .items_center()
                         .justify_end()
                         .overflow_hidden()
+                        .py(px(label_item_padding_y))
                         .text_size(px(label_font_size))
                         .text_right()
                         .text_color(row_label_color)
@@ -620,8 +817,8 @@ impl EditorView {
                         }))
                         .child(
                             div()
-                                .w_full()
                                 .max_w(px(label_max_width))
+                                .max_h(px(label_text_max_height))
                                 .overflow_hidden()
                                 .line_height(px(label_line_height))
                                 .whitespace_normal()
@@ -643,18 +840,33 @@ impl EditorView {
 
             let label_overflow = viewport_height > 0.0 && label_total_height > viewport_height;
             let label_top_offset = if label_overflow {
-                centered_overflow_offset(
+                let max_scroll =
+                    overflow_max_scroll(viewport_height, label_total_height, vertical_padding);
+                let tick_max_scroll =
+                    overflow_max_scroll(viewport_height, total_height, vertical_padding);
+                let shared_max_scroll = max_scroll.max(tick_max_scroll);
+                if let Some(top_offset) = overflow_offset_from_shared_scroll(
+                    self.outline_rail_scroll_offset,
+                    shared_max_scroll,
+                    max_scroll,
                     viewport_height,
-                    label_total_height,
-                    active_label_center,
                     vertical_padding,
-                )
+                ) {
+                    top_offset
+                } else {
+                    centered_overflow_offset(
+                        viewport_height,
+                        label_total_height,
+                        active_label_center,
+                        vertical_padding,
+                    )
+                }
             } else {
                 0.0
             };
 
             let label_column = div()
-                .w(px(label_max_width))
+                .max_w(px(label_max_width))
                 .flex()
                 .flex_col()
                 .items_end()
@@ -755,7 +967,7 @@ impl EditorView {
             .w(px(track_width))
             .occlude()
             .cursor(CursorStyle::Arrow)
-            .on_scroll_wheel(cx.listener(Self::on_scroll))
+            .on_scroll_wheel(cx.listener(Self::on_outline_rail_scroll))
             .on_hover(cx.listener(|this, hovering: &bool, _, cx| {
                 this.set_outline_rail_hovered(*hovering, cx);
             }))

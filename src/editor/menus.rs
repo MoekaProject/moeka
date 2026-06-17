@@ -298,9 +298,9 @@ impl EditorView {
             current if current == self.t(crate::i18n::TextKey::Rename) => {
                 Some(MENU_RENAME_SVG_PATH)
             }
-            current if counted(crate::i18n::TextKey::Cut) => Some(MENU_CLIP_SVG_PATH),
-            current if counted(crate::i18n::TextKey::Copy) => Some(MENU_COPY_SVG_PATH),
-            current if counted(crate::i18n::TextKey::Paste) => Some(MENU_PASTE_SVG_PATH),
+            _ if counted(crate::i18n::TextKey::Cut) => Some(MENU_CLIP_SVG_PATH),
+            _ if counted(crate::i18n::TextKey::Copy) => Some(MENU_COPY_SVG_PATH),
+            _ if counted(crate::i18n::TextKey::Paste) => Some(MENU_PASTE_SVG_PATH),
             current if current == self.t(crate::i18n::TextKey::CollapseAllDirectories) => {
                 Some(MENU_FOLD_SVG_PATH)
             }
@@ -310,8 +310,8 @@ impl EditorView {
             current if current == self.t(crate::i18n::TextKey::RevealInFinder) => {
                 Some(MENU_LOCATE_SVG_PATH)
             }
-            current if counted(crate::i18n::TextKey::Star) => Some(MENU_STAR_SVG_PATH),
-            current if counted(crate::i18n::TextKey::Unstar) => Some(MENU_UNSTAR_SVG_PATH),
+            _ if counted(crate::i18n::TextKey::Star) => Some(MENU_STAR_SVG_PATH),
+            _ if counted(crate::i18n::TextKey::Unstar) => Some(MENU_UNSTAR_SVG_PATH),
             current if current == self.t(crate::i18n::TextKey::PinTab) => Some(MENU_PIN_SVG_PATH),
             current if current == self.t(crate::i18n::TextKey::UnpinTab) => {
                 Some(MENU_UNPIN_SVG_PATH)

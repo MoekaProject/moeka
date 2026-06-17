@@ -1,0 +1,54 @@
+<svg width="1600" height="1200" viewBox="0 0 1600 1200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="leaf-soft" x="-28%" y="-28%" width="156%" height="156%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="11" />
+    </filter>
+    <path id="bamboo-leaf"
+      d="M0 -24 C 88 -46 252 -34 356 0 C 250 30 86 38 0 24 C 16 10 16 -10 0 -24 Z" />
+    <path id="bamboo-leaf-slim"
+      d="M0 -18 C 76 -34 210 -26 310 0 C 206 24 74 28 0 18 C 12 8 12 -8 0 -18 Z" />
+
+    <g id="spray-a">
+      <path d="M0 0 C 210 24 438 72 684 146 C 890 208 1080 280 1284 378"
+        stroke="#271205" stroke-width="5.5" stroke-linecap="round" fill="none" />
+      <path d="M150 30 C 344 74 514 126 714 206" stroke="#271205" stroke-width="2.8" stroke-linecap="round" fill="none" />
+      <path d="M430 104 C 610 140 766 196 956 282" stroke="#271205" stroke-width="2.6" stroke-linecap="round" fill="none" />
+
+      <use href="#bamboo-leaf" transform="translate(48 6) rotate(-35) scale(0.72)" opacity="0.7" />
+      <use href="#bamboo-leaf-slim" transform="translate(94 18) rotate(16) scale(0.88)" opacity="0.92" />
+      <use href="#bamboo-leaf" transform="translate(168 32) rotate(-22) scale(0.82)" opacity="0.84" />
+      <use href="#bamboo-leaf-slim" transform="translate(228 47) rotate(24) scale(0.76)" opacity="0.62" />
+      <use href="#bamboo-leaf" transform="translate(294 60) rotate(-38) scale(0.88)" opacity="0.86" />
+      <use href="#bamboo-leaf-slim" transform="translate(376 86) rotate(10) scale(0.98)" opacity="0.76" />
+      <use href="#bamboo-leaf" transform="translate(468 106) rotate(-26) scale(0.92)" opacity="0.88" />
+      <use href="#bamboo-leaf-slim" transform="translate(540 132) rotate(30) scale(0.84)" opacity="0.66" />
+      <use href="#bamboo-leaf" transform="translate(612 150) rotate(-16) scale(0.98)" opacity="0.78" />
+      <use href="#bamboo-leaf-slim" transform="translate(708 184) rotate(38) scale(0.9)" opacity="0.72" />
+      <use href="#bamboo-leaf" transform="translate(790 206) rotate(-28) scale(0.86)" opacity="0.84" />
+      <use href="#bamboo-leaf-slim" transform="translate(888 246) rotate(20) scale(1)" opacity="0.64" />
+      <use href="#bamboo-leaf" transform="translate(990 282) rotate(-8) scale(0.94)" opacity="0.7" />
+    </g>
+
+    <g id="spray-b">
+      <path d="M0 0 C 146 72 310 124 496 156 C 642 182 780 214 930 270"
+        stroke="#271205" stroke-width="4.4" stroke-linecap="round" fill="none" />
+      <path d="M106 48 C 262 84 420 128 582 194" stroke="#271205" stroke-width="2.4" stroke-linecap="round" fill="none" />
+
+      <use href="#bamboo-leaf-slim" transform="translate(24 10) rotate(22) scale(0.76)" opacity="0.6" />
+      <use href="#bamboo-leaf" transform="translate(90 48) rotate(-18) scale(0.74)" opacity="0.8" />
+      <use href="#bamboo-leaf-slim" transform="translate(154 68) rotate(34) scale(0.82)" opacity="0.7" />
+      <use href="#bamboo-leaf" transform="translate(230 92) rotate(-30) scale(0.78)" opacity="0.86" />
+      <use href="#bamboo-leaf-slim" transform="translate(318 116) rotate(12) scale(0.88)" opacity="0.74" />
+      <use href="#bamboo-leaf" transform="translate(406 134) rotate(-20) scale(0.82)" opacity="0.68" />
+      <use href="#bamboo-leaf-slim" transform="translate(516 164) rotate(30) scale(0.92)" opacity="0.72" />
+      <use href="#bamboo-leaf" transform="translate(614 188) rotate(-8) scale(0.78)" opacity="0.62" />
+    </g>
+  </defs>
+
+  <g filter="url(#leaf-soft)" fill="#271205">
+    <use href="#spray-a" transform="translate(1584 34) rotate(151) scale(1.08)" opacity="0.82" />
+    <use href="#spray-a" transform="translate(1398 -70) rotate(165) scale(0.76)" opacity="0.48" />
+    <use href="#spray-b" transform="translate(1560 310) rotate(196) scale(0.9)" opacity="0.58" />
+    <use href="#spray-b" transform="translate(1270 70) rotate(137) scale(0.72)" opacity="0.42" />
+  </g>
+</svg>

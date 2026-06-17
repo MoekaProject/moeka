@@ -169,7 +169,9 @@ impl EditorView {
             None
         };
         let removes_line_break = if self.cursor.has_selection() {
-            self.buffer.text()[selection.clone()].contains('\n')
+            let selection =
+                self.buffer.clamp_offset(selection.start)..self.buffer.clamp_offset(selection.end);
+            self.buffer.text()[selection].contains('\n')
         } else {
             self.cursor.offset > 0
                 && self.buffer.text().as_bytes().get(self.cursor.offset - 1) == Some(&b'\n')
@@ -375,7 +377,9 @@ impl EditorView {
             None
         };
         let removes_line_break = if self.cursor.has_selection() {
-            self.buffer.text()[selection.clone()].contains('\n')
+            let selection =
+                self.buffer.clamp_offset(selection.start)..self.buffer.clamp_offset(selection.end);
+            self.buffer.text()[selection].contains('\n')
         } else {
             self.buffer.text().as_bytes().get(self.cursor.offset) == Some(&b'\n')
         };
