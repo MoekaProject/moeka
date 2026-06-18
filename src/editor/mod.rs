@@ -2134,7 +2134,9 @@ impl EditorView {
     }
 
     fn desired_toolbar_opacity(&self) -> f32 {
-        if self.should_show_editor_toolbar(self.toolbar_base_visible()) {
+        if self.outline_rail_hovered || self.outline_rail_label_opacity_target > 0.01 {
+            self.styles.toolbar.toolbar_hidden_opacity
+        } else if self.should_show_editor_toolbar(self.toolbar_base_visible()) {
             1.0
         } else {
             self.styles.toolbar.toolbar_hidden_opacity

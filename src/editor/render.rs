@@ -381,8 +381,11 @@ impl Render for EditorView {
         let resizing = self.sidebar_resizing || self.utility_panel_resizing;
         let toolbar_base_visible =
             self.tabs.len() > 0 && !self.active_tab_is_settings() && !self.active_tab_is_binary();
+        let outline_rail_active =
+            self.outline_rail_hovered || self.outline_rail_label_opacity > 0.01;
         let show_editor_toolbar = self.should_show_editor_toolbar(toolbar_base_visible);
         let render_editor_toolbar = toolbar_base_visible
+            && !outline_rail_active
             && (show_editor_toolbar
                 || self.toolbar_opacity_task.is_some()
                 || self.toolbar_opacity > self.styles.toolbar.toolbar_hidden_opacity + 0.01);

@@ -20,7 +20,7 @@ const translations = {
     languageAria: '切换语言',
     nav: {
       intro: '简介',
-      features: '特性',
+      features: '更新',
       requirements: '需求',
       download: '下载',
     },
@@ -458,24 +458,6 @@ function cycleLanguage() {
 
       <div class="product-screenshot-frame">
         <img class="product-screenshot" src="../assets/screenshot-feature-1.png" :alt="activeCopy.screenshotAlt">
-        <svg
-          class="version-badge"
-          viewBox="0 0 120 120"
-          role="img"
-          aria-label="Ver 0.1 Beta"
-        >
-          <path
-            class="version-badge-shadow"
-            d="M65 5 C77 2 83 14 94 16 C108 19 106 35 116 43 C126 52 113 63 117 76 C121 91 104 94 99 107 C92 121 78 112 65 117 C51 123 44 110 31 108 C17 106 18 90 9 80 C0 69 10 58 6 46 C2 32 17 27 23 15 C31 1 49 12 65 5 Z"
-          />
-          <path
-            class="version-badge-shape"
-            d="M60 4 C72 -1 78 12 90 14 C104 16 103 32 113 40 C124 50 111 61 115 74 C120 89 103 93 98 105 C91 119 76 110 64 116 C50 123 43 110 30 107 C16 104 18 88 10 78 C1 67 9 56 5 44 C1 31 15 25 22 14 C31 0 47 12 60 4 Z"
-          />
-          <text class="version-badge-text" x="60" y="63">
-            Ver 0.1 Beta
-          </text>
-        </svg>
       </div>
     </section>
   </main>

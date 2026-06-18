@@ -1964,7 +1964,7 @@ mod tests {
     use super::{
         GeneratedPreviewFontFamilies, build_display_text, build_generated_block_preview_svg,
         build_text_runs_for_display, compute_display_prefix_bytes, compute_generated_preview_size,
-        prefix_is_folded, task_prefix_is_folded,
+        normalize_mermaid_svg_source, prefix_is_folded, task_prefix_is_folded,
     };
 
     fn generated_preview_fonts() -> GeneratedPreviewFontFamilies<'static> {
@@ -2336,13 +2336,51 @@ mod tests {
         }
         for expected in [
             "白名单门控",
-            "挂载 Shadow DOM React Root",
-            "暂存 preparedAnalysis",
-            "返回同构 events 数组",
-            "POST /analyze/bridge-fallback",
+            "挂载 Shadow DOM",
+            "React Root",
+            "暂存",
+            "preparedAnalysis",
+            "返回同构",
+            "events",
+            "数组",
+            "POST /analyze/",
+            "bridge-fallback",
         ] {
-            assert!(svg.contains(expected));
+            assert!(
+                svg.contains(expected),
+                "missing Mermaid fragment: {expected}"
+            );
         }
+    }
+
+    #[test]
+    fn normalize_mermaid_svg_source_wraps_long_node_labels() {
+        let source = r#"flowchart LR
+  A[一个非常非常长的中文节点标题会超出边框] --> B[Short]
+  B -->|this edge label is long enough to wrap| C[Done]"#;
+        let normalized = normalize_mermaid_svg_source(source);
+
+        assert!(normalized.contains("一个非常"));
+        assert!(normalized.contains("中文节点"));
+        assert!(normalized.contains("标题"));
+        assert!(normalized.contains("超"));
+        assert!(normalized.contains("出"));
+        assert!(normalized.contains("边"));
+        assert!(normalized.contains("框"));
+        assert!(normalized.contains(r"\n"));
+        assert!(normalized.contains("this edge"));
+        assert!(normalized.contains("label"));
+        assert!(normalized.contains("this edge label is long enough to wrap"));
+    }
+
+    #[test]
+    fn normalize_mermaid_svg_source_preserves_explicit_label_breaks() {
+        let source = r#"flowchart LR
+  A[第一行<br/>第二行] --> B[Done]"#;
+        let normalized = normalize_mermaid_svg_source(source);
+
+        assert!(normalized.contains(r"第一行\n第二行"));
+        assert!(!normalized.contains(r"第一行\n\n第二行"));
     }
 
     #[test]
@@ -3428,19 +3466,137 @@ fn render_mermaid_block_preview_svg(
     font_families: GeneratedPreviewFontFamilies<'_>,
 ) -> anyhow::Result<String> {
     let mermaid_svg_source = normalize_mermaid_svg_source(source_text);
-    mermaid_svg::render(&mermaid_svg_source)
+    let mermaid_theme = mermaid_svg::Theme::default().with_font_size(10.5);
+    mermaid_svg::render_with(&mermaid_svg_source, &mermaid_theme)
         .map(|svg| apply_mermaid_svg_theme(&svg, theme, font_families))
         .map_err(Into::into)
 }
 
 fn normalize_mermaid_svg_source(source_text: &str) -> String {
-    source_text
+    let normalized = source_text
         .replace("<br/>", r"\n")
         .replace("<br>", r"\n")
         .replace("<br />", r"\n")
         .replace("<BR/>", r"\n")
         .replace("<BR>", r"\n")
-        .replace("<BR />", r"\n")
+        .replace("<BR />", r"\n");
+    wrap_mermaid_svg_source_labels(&normalized, 9)
+}
+
+fn wrap_mermaid_svg_source_labels(source_text: &str, max_columns: usize) -> String {
+    let mut wrapped = String::with_capacity(source_text.len());
+    let mut index = 0;
+
+    while index < source_text.len() {
+        let Some(ch) = source_text[index..].chars().next() else {
+            break;
+        };
+        let next_index = index + ch.len_utf8();
+        let closing = match ch {
+            '[' => Some(']'),
+            '{' => Some('}'),
+            '(' => Some(')'),
+            _ => None,
+        };
+
+        let Some(closing) = closing else {
+            wrapped.push(ch);
+            index = next_index;
+            continue;
+        };
+        let Some(close_rel) = source_text[next_index..].find(closing) else {
+            wrapped.push(ch);
+            index = next_index;
+            continue;
+        };
+        let close_index = next_index + close_rel;
+        let segment = &source_text[next_index..close_index];
+        if segment.contains(r"\n") {
+            wrapped.push(ch);
+            wrapped.push_str(segment);
+            wrapped.push(closing);
+        } else {
+            wrapped.push(ch);
+            wrapped.push_str(&wrap_mermaid_label_segment(segment, max_columns));
+            wrapped.push(closing);
+        }
+        index = close_index + closing.len_utf8();
+    }
+
+    wrapped
+}
+
+fn wrap_mermaid_label_segment(segment: &str, max_columns: usize) -> String {
+    let (quote, content) = match segment.chars().next() {
+        Some(quote @ ('\'' | '"')) if segment.ends_with(quote) && segment.len() >= 2 => {
+            let start = quote.len_utf8();
+            let end = segment.len() - quote.len_utf8();
+            (Some(quote), &segment[start..end])
+        }
+        _ => (None, segment),
+    };
+    if content.contains(r"\n") {
+        return segment.to_string();
+    }
+    let max_columns = max_columns.max(4);
+    let wrapped_content = wrap_mermaid_label_content(content, max_columns);
+
+    if let Some(quote) = quote {
+        format!("{quote}{wrapped_content}{quote}")
+    } else {
+        wrapped_content
+    }
+}
+
+fn wrap_mermaid_label_content(content: &str, max_columns: usize) -> String {
+    let mut result = String::with_capacity(content.len() + content.len() / max_columns.max(1) * 2);
+    let mut line_start = 0;
+    let mut current_columns = 0;
+    let mut last_break: Option<usize> = None;
+
+    for (offset, ch) in content.char_indices() {
+        if ch == '\\' && content[offset..].starts_with(r"\n") {
+            current_columns = 0;
+            last_break = None;
+            continue;
+        }
+
+        if ch.is_whitespace() || matches!(ch, '/' | '-' | '_' | ':' | '，' | '、') {
+            last_break = Some(offset + ch.len_utf8());
+        }
+
+        let ch_columns = if ch.is_ascii() { 1 } else { 2 };
+        if current_columns + ch_columns > max_columns && offset > line_start {
+            let break_at = last_break
+                .filter(|break_at| *break_at > line_start)
+                .unwrap_or(offset);
+            result.push_str(content[line_start..break_at].trim_end());
+            result.push_str(r"\n");
+            line_start = break_at;
+            while line_start < content.len() {
+                let Some(next_ch) = content[line_start..].chars().next() else {
+                    break;
+                };
+                if !next_ch.is_whitespace() {
+                    break;
+                }
+                line_start += next_ch.len_utf8();
+            }
+            current_columns = if line_start <= offset {
+                content[line_start..offset]
+                    .chars()
+                    .map(|ch| if ch.is_ascii() { 1 } else { 2 })
+                    .sum::<usize>()
+            } else {
+                0
+            };
+            last_break = None;
+        }
+        current_columns += ch_columns;
+    }
+
+    result.push_str(content[line_start..].trim_start());
+    result
 }
 
 fn apply_mermaid_svg_theme(
@@ -3498,6 +3654,18 @@ fn apply_mermaid_svg_theme(
     themed = append_svg_style_block(
         &themed,
         concat!(
+            ".label,",
+            ".nodeLabel,",
+            ".edgeLabel,",
+            ".cluster-label{overflow:hidden !important;}\n",
+            ".label p,",
+            ".nodeLabel p,",
+            ".edgeLabel p,",
+            ".cluster-label p{",
+            "margin:0 !important;max-width:100% !important;",
+            "white-space:normal !important;",
+            "overflow-wrap:anywhere !important;word-break:break-word !important;",
+            "line-break:anywhere !important;}\n",
             ".label foreignObject,",
             ".nodeLabel foreignObject,",
             ".edgeLabel foreignObject,",
@@ -3510,10 +3678,22 @@ fn apply_mermaid_svg_theme(
             ".edgeLabel foreignObject span,",
             ".cluster-label foreignObject div,",
             ".cluster-label foreignObject span{",
-            "max-width:100%;box-sizing:border-box;",
+            "max-width:100% !important;box-sizing:border-box !important;",
             "white-space:normal !important;",
-            "overflow-wrap:anywhere;word-break:break-word;",
-            "line-break:anywhere;}",
+            "overflow-wrap:anywhere !important;word-break:break-word !important;",
+            "line-break:anywhere !important;}\n",
+            ".label text,",
+            ".nodeLabel text,",
+            ".edgeLabel text,",
+            ".cluster-label text,",
+            ".label tspan,",
+            ".nodeLabel tspan,",
+            ".edgeLabel tspan,",
+            ".cluster-label tspan{",
+            "text-overflow:ellipsis;",
+            "overflow:hidden !important;",
+            "paint-order:stroke fill;",
+            "font-size:0.92em !important;}",
         ),
     );
 
