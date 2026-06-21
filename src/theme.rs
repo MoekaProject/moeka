@@ -394,7 +394,7 @@ pub fn apply_editor_theme_mode(theme: &Theme, mode: EditorThemeMode, is_dark: bo
         themed.syntax_marker = subtle;
         themed.list_marker = subtle;
         themed.checkbox_checked = subtle;
-        themed.gutter_heading = with_alpha(themed.text_primary, if is_dark { 0.24 } else { 0.18 });
+        themed.gutter_heading = with_alpha(themed.text_primary, if is_dark { 1.0 } else { 1.0 });
     }
     themed
 }
