@@ -234,6 +234,52 @@ impl EditorView {
             .map(Self::tab_navigation_target_for_tab)
     }
 
+    fn open_tab_index_for_navigation_target(&self, target: &TabNavigationTarget) -> Option<usize> {
+        match target {
+            TabNavigationTarget::Settings => self
+                .tabs
+                .iter()
+                .position(|tab| tab.kind == TabKind::Settings),
+            TabNavigationTarget::File(path) => self.editor_tab_index_for_path(path),
+            TabNavigationTarget::LiveTab(tab_id) => {
+                self.tabs.iter().position(|tab| &tab.id == tab_id)
+            }
+        }
+    }
+
+    fn remove_tab_navigation_target(&mut self, target: &TabNavigationTarget) {
+        self.tab_navigation_history.retain(|entry| entry != target);
+        self.tab_navigation_index = self
+            .tab_navigation_index
+            .min(self.tab_navigation_history.len().saturating_sub(1));
+    }
+
+    fn activate_previous_open_tab_after_close(
+        &mut self,
+        removed: &OpenTab,
+        removed_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let removed_target = Self::tab_navigation_target_for_tab(removed);
+        self.remove_tab_navigation_target(&removed_target);
+
+        for history_index in (0..self.tab_navigation_history.len()).rev() {
+            let target = self.tab_navigation_history[history_index].clone();
+            if let Some(index) = self.open_tab_index_for_navigation_target(&target) {
+                self.tab_navigation_suspended = true;
+                self.activate_tab_by_index(index, cx);
+                self.tab_navigation_suspended = false;
+                self.tab_navigation_index = history_index;
+                return;
+            }
+        }
+
+        let fallback_index = removed_index
+            .saturating_sub(1)
+            .min(self.tabs.len().saturating_sub(1));
+        self.activate_tab_by_index(fallback_index, cx);
+    }
+
     fn record_active_tab_navigation_target(&mut self) {
         if self.tab_navigation_suspended {
             return;
@@ -474,12 +520,9 @@ impl EditorView {
             self.tabs[index] = tab;
             self.activate_tab_by_index_without_persist(index, cx);
         } else {
-            let insert_index = self
-                .active_tab_index()
-                .map(|index| index + 1)
-                .unwrap_or(self.tabs.len());
-            self.tabs.insert(insert_index, tab);
-            self.activate_tab_by_index_without_persist(insert_index, cx);
+            self.tabs.push(tab);
+            let index = self.tabs.len().saturating_sub(1);
+            self.activate_tab_by_index_without_persist(index, cx);
         }
 
         if focus_editor {
@@ -509,12 +552,9 @@ impl EditorView {
         };
 
         self.persist_active_tab_state();
-        let insert_index = self
-            .active_tab_index()
-            .map(|index| index + 1)
-            .unwrap_or(self.tabs.len());
-        self.tabs.insert(insert_index, tab);
-        self.activate_tab_by_index_without_persist(insert_index, cx);
+        self.tabs.push(tab);
+        let index = self.tabs.len().saturating_sub(1);
+        self.activate_tab_by_index_without_persist(index, cx);
         if focus_editor {
             self.request_editor_focus(cx);
         }
@@ -644,7 +684,7 @@ impl EditorView {
         // Save to recently closed (keep up to 20)
         let removed = self.tabs.remove(index);
         if Self::should_track_in_recently_closed(&removed) {
-            self.recently_closed_tabs.push(removed);
+            self.recently_closed_tabs.push(removed.clone());
             if self.recently_closed_tabs.len() > 20 {
                 self.recently_closed_tabs.remove(0);
             }
@@ -657,8 +697,7 @@ impl EditorView {
             return;
         }
         if was_active {
-            let next_index = index.min(self.tabs.len().saturating_sub(1));
-            self.activate_tab_by_index(next_index, cx);
+            self.activate_previous_open_tab_after_close(&removed, index, cx);
         } else {
             cx.notify();
         }

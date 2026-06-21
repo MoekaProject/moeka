@@ -45,6 +45,10 @@ pub(crate) struct AppSettings {
     pub starred_files: Vec<PathBuf>,
     #[serde(default = "default_outline_rail_visible")]
     pub outline_rail_visible: bool,
+    #[serde(default = "default_show_whitespace")]
+    pub show_whitespace: bool,
+    #[serde(default = "default_highlight_line_background")]
+    pub highlight_line_background: bool,
 }
 
 fn default_theme() -> String {
@@ -123,6 +127,14 @@ fn default_outline_rail_visible() -> bool {
     true
 }
 
+fn default_show_whitespace() -> bool {
+    false
+}
+
+fn default_highlight_line_background() -> bool {
+    false
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -145,6 +157,8 @@ impl Default for AppSettings {
             date_time_format: default_date_time_format(),
             starred_files: default_starred_files(),
             outline_rail_visible: default_outline_rail_visible(),
+            show_whitespace: default_show_whitespace(),
+            highlight_line_background: default_highlight_line_background(),
         }
     }
 }

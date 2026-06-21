@@ -761,6 +761,18 @@ impl ChatAgentCli {
         }
     }
 
+    fn install_url(self) -> Option<&'static str> {
+        match self {
+            Self::GithubCopilot => {
+                Some("https://docs.github.com/en/copilot/github-copilot-in-the-cli")
+            }
+            Self::OpenAICodex => Some("https://github.com/openai/codex"),
+            Self::ClaudeCode => Some("https://docs.anthropic.com/en/docs/claude-code"),
+            Self::GeminiCli => Some("https://github.com/google-gemini/gemini-cli"),
+            Self::Terminal => None,
+        }
+    }
+
     pub(crate) fn build_command(self) -> CommandBuilder {
         match self {
             Self::Terminal => CommandBuilder::new(chat_terminal_default_shell_program()),
@@ -1041,6 +1053,20 @@ impl ChatTerminalSession {
         self.receiver = None;
         self.poll_task = None;
     }
+}
+
+fn agent_cli_command_exists(agent_cli: ChatAgentCli) -> bool {
+    if agent_cli == ChatAgentCli::Terminal {
+        return true;
+    }
+
+    let command_name = agent_cli.command_name();
+    let Some(paths) = env::var_os("PATH") else {
+        return false;
+    };
+    env::split_paths(&paths)
+        .map(|path| path.join(command_name))
+        .any(|path| path.is_file())
 }
 
 fn convert_terminal_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -1631,6 +1657,14 @@ impl EditorView {
             );
         };
 
+        if !agent_cli_command_exists(agent_cli) {
+            return ChatTerminalSession::unavailable(format!(
+                "{} command not found: {}",
+                agent_cli.label(),
+                agent_cli.command_name()
+            ));
+        }
+
         match ChatTerminalSession::launch(cwd, agent_cli) {
             Ok(mut session) => {
                 session.status = ChatTerminalStatus::Running;
@@ -1638,6 +1672,25 @@ impl EditorView {
             }
             Err(error) => ChatTerminalSession::unavailable(error.to_string()),
         }
+    }
+
+    fn active_missing_agent_cli_install_target(&self) -> Option<(ChatAgentCli, &'static str)> {
+        let tab = self.active_chat_tab()?;
+        let session = tab.session.as_ref()?;
+        if !matches!(session.status, ChatTerminalStatus::Unavailable(_)) {
+            return None;
+        }
+        if agent_cli_command_exists(tab.agent_cli) {
+            return None;
+        }
+        Some((tab.agent_cli, tab.agent_cli.install_url()?))
+    }
+
+    fn open_agent_cli_install_page(&mut self, agent_cli: ChatAgentCli, _cx: &mut Context<Self>) {
+        let Some(url) = agent_cli.install_url() else {
+            return;
+        };
+        let _ = std::process::Command::new("open").arg(url).spawn();
     }
 
     fn next_chat_tab_agent_cli(&self) -> ChatAgentCli {
@@ -1667,15 +1720,10 @@ impl EditorView {
     ) {
         let id = self.next_tab_identity();
         let instance_index = self.next_chat_tab_instance_index(agent_cli);
-        let insert_index = self
-            .active_chat_tab_index()
-            .map(|index| index + 1)
-            .unwrap_or(self.chat_tabs.len());
-        self.chat_tabs.insert(
-            insert_index.min(self.chat_tabs.len()),
-            ChatTab::new(id.clone(), agent_cli, instance_index),
-        );
-        self.active_chat_tab_id = Some(id);
+        self.chat_tabs
+            .push(ChatTab::new(id.clone(), agent_cli, instance_index));
+        self.active_chat_tab_id = Some(id.clone());
+        self.record_active_chat_tab();
         self.chat_terminal_scroll_px = Pixels::ZERO;
         self.chat_terminal_input_bounds = None;
         self.clear_chat_terminal_interaction_state();
@@ -1711,6 +1759,7 @@ impl EditorView {
         }
 
         self.active_chat_tab_id = Some(tab_id.to_string());
+        self.record_active_chat_tab();
         self.chat_terminal_scroll_px = Pixels::ZERO;
         self.chat_terminal_input_bounds = None;
         self.clear_chat_terminal_interaction_state();
@@ -1730,10 +1779,13 @@ impl EditorView {
             .active_chat_tab_id
             .as_ref()
             .is_some_and(|active_id| tab_ids.iter().any(|id| id == active_id));
+        let removed_active_index = self.active_chat_tab_index();
 
         for tab_id in tab_ids {
             if let Some(index) = self.chat_tabs.iter().position(|tab| &tab.id == tab_id) {
                 let mut removed = self.chat_tabs.remove(index);
+                self.chat_tab_activation_history
+                    .retain(|history_id| history_id != tab_id);
                 if let Some(mut session) = removed.session.take() {
                     session.stop();
                 }
@@ -1751,7 +1803,20 @@ impl EditorView {
         }
 
         if active_removed {
-            self.active_chat_tab_id = self.chat_tabs.first().map(|tab| tab.id.clone());
+            self.active_chat_tab_id = self
+                .chat_tab_activation_history
+                .iter()
+                .rev()
+                .find(|history_id| self.chat_tabs.iter().any(|tab| &tab.id == *history_id))
+                .cloned()
+                .or_else(|| {
+                    let fallback_index = removed_active_index
+                        .unwrap_or(0)
+                        .saturating_sub(1)
+                        .min(self.chat_tabs.len().saturating_sub(1));
+                    self.chat_tabs.get(fallback_index).map(|tab| tab.id.clone())
+                });
+            self.record_active_chat_tab();
             if self.utility_panel == Some(RightUtilityPanel::Chat) {
                 self.open_chat_terminal(cx);
             } else {
@@ -1764,6 +1829,15 @@ impl EditorView {
 
     pub(crate) fn close_chat_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
         self.close_chat_tabs_by_ids(&[tab_id.to_string()], cx);
+    }
+
+    fn record_active_chat_tab(&mut self) {
+        let Some(active_id) = self.active_chat_tab_id.clone() else {
+            return;
+        };
+        self.chat_tab_activation_history
+            .retain(|history_id| history_id != &active_id);
+        self.chat_tab_activation_history.push(active_id);
     }
 
     pub(crate) fn close_chat_left_tabs(&mut self, from_tab_id: &str, cx: &mut Context<Self>) {
@@ -3429,6 +3503,7 @@ impl EditorView {
             .filter(|selection| !selection.is_empty())
             .map(ChatTerminalSelection::normalized);
         let marked_text = self.chat_terminal_marked_text.clone();
+        let missing_agent_cli_install_target = self.active_missing_agent_cli_install_target();
         let terminal_scrollbar = {
             let viewport_height = self
                 .chat_terminal_input_bounds
@@ -3658,6 +3733,57 @@ impl EditorView {
                             .child(ChatTerminalInputElement {
                                 editor: cx.entity().clone(),
                             })
+                            .when_some(
+                                missing_agent_cli_install_target,
+                                |this, (agent_cli, _url)| {
+                                    let button_height =
+                                        self.scaled(ups.utility_panel_button_height_px);
+                                    let button_padding_x = self
+                                        .scaled(ups.utility_panel_button_padding_x_px)
+                                        + self.scaled(6.0);
+                                    let button_border_width =
+                                        self.scaled(ups.utility_panel_button_border_width_px);
+                                    let label = format!("安装 {}...", agent_cli.label());
+                                    this.child(
+                                        div()
+                                            .absolute()
+                                            .inset_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                div()
+                                                    .h(px(button_height))
+                                                    .px(px(button_padding_x))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .rounded_full()
+                                                    .border(px(button_border_width))
+                                                    .border_color(
+                                                        ups.utility_panel_button_border_color,
+                                                    )
+                                                    .bg(default_bg)
+                                                    .text_color(ups.utility_panel_button_text_color)
+                                                    .text_size(px(body_font_size))
+                                                    .line_height(px(button_height))
+                                                    .cursor(CursorStyle::Arrow)
+                                                    .hover(|style| {
+                                                        style.bg(ups.utility_panel_button_hover_bg)
+                                                    })
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(move |this, _, _, cx| {
+                                                            this.open_agent_cli_install_page(
+                                                                agent_cli, cx,
+                                                            );
+                                                        }),
+                                                    )
+                                                    .child(label),
+                                            ),
+                                    )
+                                },
+                            )
                             .when_some(
                                 cursor_row.zip(marked_text.filter(|text| !text.is_empty())),
                                 |this, (cursor_row, text)| {

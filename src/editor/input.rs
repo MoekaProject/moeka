@@ -1583,6 +1583,15 @@ impl EditorView {
             configured_font_family(editor_styles.editor_heading_cjk_font_family);
         heading_cjk_font.fallbacks = None;
 
+        let mut italic_font = text_style.font();
+        italic_font.family = configured_font_family(editor_styles.editor_italic_latin_font_family);
+        italic_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_italic_latin_font_family);
+
+        let mut italic_cjk_font = text_style.font();
+        italic_cjk_font.family =
+            configured_font_family(editor_styles.editor_italic_cjk_font_family);
+        italic_cjk_font.fallbacks = None;
+
         let font_size = self.base_font_size();
         let mut cell_runs = helpers::build_text_runs_for_display(
             &display_text,
@@ -1597,6 +1606,8 @@ impl EditorView {
             &monospace_font,
             &heading_font,
             &heading_cjk_font,
+            &italic_font,
+            &italic_cjk_font,
             0,
             font_size,
             &self.theme,
@@ -1604,6 +1615,9 @@ impl EditorView {
             self.styles.selection.selection_diff_removed_inline_bg,
             self.styles.wiki_link.wiki_link_text_color,
             self.styles.wiki_link.wiki_link_text_weight,
+            self.styles.editor.editor_list_marker_text_color,
+            self.styles.editor.editor_list_marker_font_weight,
+            self.styles.editor.editor_heading_marker_text_color,
             None,
             false,
         );
@@ -1710,6 +1724,15 @@ impl EditorView {
         heading_cjk_font.family =
             configured_font_family(editor_styles.editor_heading_cjk_font_family);
         heading_cjk_font.fallbacks = None;
+
+        let mut italic_font = text_style.font();
+        italic_font.family = configured_font_family(editor_styles.editor_italic_latin_font_family);
+        italic_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_italic_latin_font_family);
+
+        let mut italic_cjk_font = text_style.font();
+        italic_cjk_font.family =
+            configured_font_family(editor_styles.editor_italic_cjk_font_family);
+        italic_cjk_font.fallbacks = None;
 
         let base_char_width = {
             let test_run = TextRun {
@@ -1987,6 +2010,8 @@ impl EditorView {
             &monospace_font,
             &heading_font,
             &heading_cjk_font,
+            &italic_font,
+            &italic_cjk_font,
             collapsed_task_prefix_display_columns,
             font_size,
             &self.theme,
@@ -1994,6 +2019,9 @@ impl EditorView {
             self.styles.selection.selection_diff_removed_inline_bg,
             self.styles.wiki_link.wiki_link_text_color,
             self.styles.wiki_link.wiki_link_text_weight,
+            self.styles.editor.editor_list_marker_text_color,
+            self.styles.editor.editor_list_marker_font_weight,
+            self.styles.editor.editor_heading_marker_text_color,
             Some(self.styles.table.front_matter_key_text_color),
             self.active_tab_is_non_markdown_text(),
         );

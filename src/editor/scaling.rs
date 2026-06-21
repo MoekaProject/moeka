@@ -251,20 +251,10 @@ impl EditorView {
         };
 
         match block_type {
-            BlockType::Heading(_) if self.is_heading_line(line) => {
-                let top = if line == 0 || self.is_non_empty_line(line - 1) {
-                    self.scaled(self.styles.editor.editor_heading_padding_top_px)
-                } else {
-                    0.0
-                };
-                let bottom =
-                    if line + 1 >= self.buffer.line_count() || self.is_non_empty_line(line + 1) {
-                        self.scaled(self.styles.editor.editor_heading_padding_bottom_px)
-                    } else {
-                        0.0
-                    };
-                (top, bottom)
-            }
+            BlockType::Heading(_) if self.is_heading_line(line) => (
+                self.scaled(self.styles.editor.editor_heading_padding_top_px),
+                self.scaled(self.styles.editor.editor_heading_padding_bottom_px),
+            ),
             _ if self.is_paragraph_style_line(line) => {
                 let top = if line == 0 || self.is_heading_line(line - 1) {
                     self.scaled(self.styles.editor.editor_paragraph_padding_top_px)

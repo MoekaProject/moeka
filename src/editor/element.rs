@@ -248,6 +248,35 @@ fn apply_display_text_color_ranges(
     *runs = styled_runs;
 }
 
+fn inset_bounds_vertically(bounds: Bounds<Pixels>, inset: Pixels) -> Bounds<Pixels> {
+    let inset = f32::from(inset).max(0.0);
+    if inset <= 0.0 {
+        return bounds;
+    }
+
+    let height = f32::from(bounds.size.height);
+    let inset = inset.min(height / 2.0);
+    Bounds::new(
+        point(bounds.origin.x, px(f32::from(bounds.origin.y) + inset)),
+        size(bounds.size.width, px((height - inset * 2.0).max(0.0))),
+    )
+}
+
+fn pad_bounds_horizontally(bounds: Bounds<Pixels>, padding: Pixels) -> Bounds<Pixels> {
+    let padding = f32::from(padding).max(0.0);
+    if padding <= 0.0 {
+        return bounds;
+    }
+
+    Bounds::new(
+        point(px(f32::from(bounds.origin.x) - padding), bounds.origin.y),
+        size(
+            px(f32::from(bounds.size.width) + padding * 2.0),
+            bounds.size.height,
+        ),
+    )
+}
+
 fn push_diff_inline_highlight_quads(
     quads: &mut Vec<PaintQuad>,
     spans: &[Range<usize>],
@@ -264,6 +293,9 @@ fn push_diff_inline_highlight_quads(
     fill_color: Hsla,
     border_color: Hsla,
     border_width_px: f32,
+    horizontal_padding: Pixels,
+    radius: Pixels,
+    vertical_inset: Pixels,
     letter_spacing: f32,
     window: &mut Window,
 ) {
@@ -295,13 +327,84 @@ fn push_diff_inline_highlight_quads(
             letter_spacing,
             window,
         ) {
-            quads.push(fill(bounds, fill_color));
+            let bounds = pad_bounds_horizontally(bounds, horizontal_padding);
+            let bounds = inset_bounds_vertically(bounds, vertical_inset);
             quads.push(quad(
                 bounds,
-                Corners::all(px(0.0)),
+                Corners::all(radius),
+                fill_color,
+                px(0.0),
+                gpui::transparent_black(),
+                BorderStyle::default(),
+            ));
+            quads.push(quad(
+                bounds,
+                Corners::all(radius),
                 gpui::transparent_black(),
                 px(border_width_px),
                 border_color,
+                BorderStyle::default(),
+            ));
+        }
+    }
+}
+
+fn push_inline_code_background_quads(
+    quads: &mut Vec<PaintQuad>,
+    decoration: &crate::markdown::LineDecoration,
+    display_text: &str,
+    line_content_len: usize,
+    buffer_to_display: &[usize],
+    runs: &[TextRun],
+    wrapped: &WrappedLine,
+    content_x: f32,
+    text_line_top: f32,
+    line_height: f32,
+    font_size: f32,
+    indent_px: f32,
+    fill_color: Hsla,
+    horizontal_padding: Pixels,
+    radius: Pixels,
+    vertical_inset: Pixels,
+    letter_spacing: f32,
+    window: &mut Window,
+) {
+    for span in decoration
+        .inline_spans
+        .iter()
+        .filter(|span| span.kind == crate::markdown::InlineKind::InlineCode)
+    {
+        let start = span.range.start.min(line_content_len);
+        let end = span.range.end.min(line_content_len);
+        if start >= end {
+            continue;
+        }
+
+        let disp_start = helpers::buffer_to_display_offset(buffer_to_display, start);
+        let disp_end = helpers::buffer_to_display_offset(buffer_to_display, end);
+        for bounds in helpers::build_highlight_bounds(
+            display_text,
+            runs,
+            wrapped,
+            disp_start,
+            disp_end,
+            content_x,
+            text_line_top,
+            line_height,
+            font_size,
+            indent_px,
+            0.0,
+            letter_spacing,
+            window,
+        ) {
+            let bounds = pad_bounds_horizontally(bounds, horizontal_padding);
+            let bounds = inset_bounds_vertically(bounds, vertical_inset);
+            quads.push(quad(
+                bounds,
+                Corners::all(radius),
+                fill_color,
+                px(0.0),
+                gpui::transparent_black(),
                 BorderStyle::default(),
             ));
         }
@@ -325,8 +428,13 @@ fn build_precise_table_layout(
     monospace_font: &Font,
     heading_font: &Font,
     heading_cjk_font: &Font,
+    italic_font: &Font,
+    italic_cjk_font: &Font,
     font_size: f32,
     theme: &Theme,
+    list_marker_text_color: Hsla,
+    list_marker_font_weight: FontWeight,
+    heading_marker_text_color: Hsla,
     cursor_offsets: &[usize],
     marked_range: Option<&Range<usize>>,
 ) -> helpers::TableLayout {
@@ -410,6 +518,8 @@ fn build_precise_table_layout(
                     monospace_font,
                     heading_font,
                     heading_cjk_font,
+                    italic_font,
+                    italic_cjk_font,
                     0,
                     font_size,
                     theme,
@@ -417,6 +527,9 @@ fn build_precise_table_layout(
                     crate::theme::with_alpha(theme.text_danger, 0.28),
                     theme.link,
                     FontWeight::BOLD,
+                    list_marker_text_color,
+                    list_marker_font_weight,
+                    heading_marker_text_color,
                     None,
                     false,
                 );
@@ -1243,6 +1356,15 @@ impl Element for EditorElement {
             configured_font_family(editor_styles.editor_heading_cjk_font_family);
         heading_cjk_font.fallbacks = None;
 
+        let mut italic_font = text_style.font();
+        italic_font.family = configured_font_family(editor_styles.editor_italic_latin_font_family);
+        italic_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_italic_latin_font_family);
+
+        let mut italic_cjk_font = text_style.font();
+        italic_cjk_font.family =
+            configured_font_family(editor_styles.editor_italic_cjk_font_family);
+        italic_cjk_font.fallbacks = None;
+
         let base_char_width = {
             let test_run = TextRun {
                 len: 1,
@@ -1872,16 +1994,18 @@ impl Element for EditorElement {
                     .table_info
                     .as_ref()
                     .is_some_and(|ti| !ti.is_front_matter && line_idx == ti.table_start_line);
-                push_whitespace_dot_quads(
-                    &mut whitespace_dots,
-                    &cached.display_text,
-                    &cached.wrapped_line,
-                    origin,
-                    line_height,
-                    editor.scaled(editor.styles.editor.editor_whitespace_dot_size_px),
-                    editor.styles.editor.editor_whitespace_dot_color,
-                    0,
-                );
+                if editor.app_settings.show_whitespace {
+                    push_whitespace_dot_quads(
+                        &mut whitespace_dots,
+                        &cached.display_text,
+                        &cached.wrapped_line,
+                        origin,
+                        line_height,
+                        editor.scaled(editor.styles.editor.editor_whitespace_dot_size_px),
+                        editor.styles.editor.editor_whitespace_dot_color,
+                        0,
+                    );
+                }
 
                 let gutter_styles = &editor.styles.gutter;
                 push_gutter_line_number_label(
@@ -1962,6 +2086,26 @@ impl Element for EditorElement {
                 }
 
                 let selection_styles = &editor.styles.selection;
+                push_inline_code_background_quads(
+                    &mut diff_inline_quads,
+                    &decoration,
+                    &cached.display_text,
+                    line_content.len(),
+                    &cached.buffer_to_display,
+                    &runs,
+                    &cached.wrapped_line,
+                    content_x,
+                    text_line_top,
+                    line_height,
+                    font_size,
+                    cached.indent_px,
+                    editor.styles.editor.editor_inline_code_bg,
+                    px(editor.scaled(editor.styles.editor.editor_inline_code_bg_x_padding_px)),
+                    px(editor.scaled(editor.styles.editor.editor_inline_code_bg_radius_px)),
+                    px(editor.scaled(editor.styles.editor.editor_inline_code_bg_y_inset_px)),
+                    editor_styles.editor_letter_spacing_px,
+                    window,
+                );
                 push_diff_inline_highlight_quads(
                     &mut diff_inline_quads,
                     &decoration.diff_removed_spans,
@@ -1978,6 +2122,9 @@ impl Element for EditorElement {
                     selection_styles.selection_diff_removed_inline_bg,
                     selection_styles.selection_diff_removed_inline_border_color,
                     editor.scaled(selection_styles.selection_diff_inline_border_width_px),
+                    px(0.0),
+                    px(0.0),
+                    px(0.0),
                     editor_styles.editor_letter_spacing_px,
                     window,
                 );
@@ -1997,6 +2144,9 @@ impl Element for EditorElement {
                     selection_styles.selection_diff_added_inline_bg,
                     selection_styles.selection_diff_added_inline_border_color,
                     editor.scaled(selection_styles.selection_diff_inline_border_width_px),
+                    px(0.0),
+                    px(0.0),
+                    px(0.0),
                     editor_styles.editor_letter_spacing_px,
                     window,
                 );
@@ -2006,6 +2156,7 @@ impl Element for EditorElement {
                     && !any_selection
                     && editor.extra_cursors.is_empty()
                     && !skip_block_line_highlight
+                    && editor.app_settings.highlight_line_background
                 {
                     line_highlight = Some(fill(
                         Bounds::new(
@@ -2034,22 +2185,50 @@ impl Element for EditorElement {
                             &cached.buffer_to_display,
                             buf_end_col,
                         );
-                        selection_quads.extend(helpers::build_selection_quads(
-                            &cached.display_text,
-                            &runs,
-                            &cached.wrapped_line,
-                            disp_start,
-                            disp_end,
-                            content_x,
-                            text_line_top,
-                            line_height,
-                            font_size,
-                            cached.indent_px,
-                            cached.selection_padding_left_px,
-                            theme.selection,
-                            editor_styles.editor_letter_spacing_px,
-                            window,
-                        ));
+                        let selection_spans_line =
+                            sr.start < line_start_offset || sr.end > line_end_offset;
+                        if matches!(block_type, BlockType::Heading(_)) && selection_spans_line {
+                            for bounds in helpers::build_highlight_bounds(
+                                &cached.display_text,
+                                &runs,
+                                &cached.wrapped_line,
+                                disp_start,
+                                disp_end,
+                                content_x,
+                                text_line_top,
+                                line_height,
+                                font_size,
+                                cached.indent_px,
+                                cached.selection_padding_left_px,
+                                editor_styles.editor_letter_spacing_px,
+                                window,
+                            ) {
+                                selection_quads.push(fill(
+                                    Bounds::new(
+                                        point(bounds.origin.x, px(line_top)),
+                                        size(bounds.size.width, px(total_line_height)),
+                                    ),
+                                    theme.selection,
+                                ));
+                            }
+                        } else {
+                            selection_quads.extend(helpers::build_selection_quads(
+                                &cached.display_text,
+                                &runs,
+                                &cached.wrapped_line,
+                                disp_start,
+                                disp_end,
+                                content_x,
+                                text_line_top,
+                                line_height,
+                                font_size,
+                                cached.indent_px,
+                                cached.selection_padding_left_px,
+                                theme.selection,
+                                editor_styles.editor_letter_spacing_px,
+                                window,
+                            ));
+                        }
                     }
                 }
 
@@ -2199,6 +2378,9 @@ impl Element for EditorElement {
                             gpui::transparent_black(),
                             editor.styles.editor.editor_bracket_match_border,
                             editor.scaled(editor.styles.editor.editor_match_border_width_px),
+                            px(0.0),
+                            px(0.0),
+                            px(0.0),
                             editor_styles.editor_letter_spacing_px,
                             window,
                         );
@@ -2341,6 +2523,12 @@ impl Element for EditorElement {
                 .as_ref()
                 .filter(|preview| !editor.folded_sections.contains(&preview.start_line))
                 .filter(|_| !block_preview_active);
+            let active_block_preview = decoration
+                .block_preview
+                .as_ref()
+                .filter(|preview| !editor.folded_sections.contains(&preview.start_line))
+                .filter(|_| block_preview_active)
+                .filter(|preview| line_idx == preview.end_line);
             if let Some(preview) = collapsed_block_preview
                 && !preview.is_anchor
             {
@@ -2453,6 +2641,8 @@ impl Element for EditorElement {
                     &monospace_font,
                     &heading_font,
                     &heading_cjk_font,
+                    &italic_font,
+                    &italic_cjk_font,
                     collapsed_task_prefix_display_columns,
                     font_size,
                     theme,
@@ -2460,6 +2650,9 @@ impl Element for EditorElement {
                     editor.styles.selection.selection_diff_removed_inline_bg,
                     editor.styles.wiki_link.wiki_link_text_color,
                     editor.styles.wiki_link.wiki_link_text_weight,
+                    editor.styles.editor.editor_list_marker_text_color,
+                    editor.styles.editor.editor_list_marker_font_weight,
+                    editor.styles.editor.editor_heading_marker_text_color,
                     Some(editor.styles.table.front_matter_key_text_color),
                     editor.active_tab_is_non_markdown_text(),
                 );
@@ -2657,7 +2850,8 @@ impl Element for EditorElement {
             } else {
                 0.0
             };
-            let generated_preview_extra_height = if let Some(preview) = collapsed_block_preview {
+            let rendered_block_preview = collapsed_block_preview.or(active_block_preview);
+            let generated_preview_extra_height = if let Some(preview) = rendered_block_preview {
                 if let Some(Some(img_data)) = image_cache.get(&preview.cache_key) {
                     let img_size = img_data.size(0);
                     let img_w = img_size.width.0 as f32;
@@ -2727,8 +2921,13 @@ impl Element for EditorElement {
                                     &monospace_font,
                                     &heading_font,
                                     &heading_cjk_font,
+                                    &italic_font,
+                                    &italic_cjk_font,
                                     font_size,
                                     theme,
+                                    editor.styles.editor.editor_list_marker_text_color,
+                                    editor.styles.editor.editor_list_marker_font_weight,
+                                    editor.styles.editor.editor_heading_marker_text_color,
                                     &all_cursor_offsets,
                                     editor.marked_range.as_ref(),
                                 )
@@ -2919,7 +3118,7 @@ impl Element for EditorElement {
                     .table_info
                     .as_ref()
                     .is_some_and(|ti| !ti.is_front_matter && !ti.is_separator);
-            if !is_table_source_row {
+            if !is_table_source_row && editor.app_settings.show_whitespace {
                 let whitespace_skip_prefix_bytes = if matches!(block_type, BlockType::TaskList(_)) {
                     prefix_bytes
                 } else {
@@ -3028,8 +3227,13 @@ impl Element for EditorElement {
                                     &monospace_font,
                                     &heading_font,
                                     &heading_cjk_font,
+                                    &italic_font,
+                                    &italic_cjk_font,
                                     font_size,
                                     theme,
+                                    editor.styles.editor.editor_list_marker_text_color,
+                                    editor.styles.editor.editor_list_marker_font_weight,
+                                    editor.styles.editor.editor_heading_marker_text_color,
                                     &all_cursor_offsets,
                                     editor.marked_range.as_ref(),
                                 )
@@ -3179,6 +3383,8 @@ impl Element for EditorElement {
                                         &monospace_font,
                                         &heading_font,
                                         &heading_cjk_font,
+                                        &italic_font,
+                                        &italic_cjk_font,
                                         0,
                                         font_size,
                                         theme,
@@ -3186,6 +3392,9 @@ impl Element for EditorElement {
                                         editor.styles.selection.selection_diff_removed_inline_bg,
                                         editor.styles.wiki_link.wiki_link_text_color,
                                         editor.styles.wiki_link.wiki_link_text_weight,
+                                        editor.styles.editor.editor_list_marker_text_color,
+                                        editor.styles.editor.editor_list_marker_font_weight,
+                                        editor.styles.editor.editor_heading_marker_text_color,
                                         None,
                                         false,
                                     );
@@ -3362,21 +3571,26 @@ impl Element for EditorElement {
                                                 }
                                             }
 
-                                            push_whitespace_dot_quads(
-                                                &mut whitespace_dots,
-                                                &cell_layout.display_text,
-                                                &shaped,
-                                                point(px(cell_x), px(cell_text_y)),
-                                                line_height,
-                                                editor.scaled(
+                                            if editor.app_settings.show_whitespace {
+                                                push_whitespace_dot_quads(
+                                                    &mut whitespace_dots,
+                                                    &cell_layout.display_text,
+                                                    &shaped,
+                                                    point(px(cell_x), px(cell_text_y)),
+                                                    line_height,
+                                                    editor.scaled(
+                                                        editor
+                                                            .styles
+                                                            .editor
+                                                            .editor_whitespace_dot_size_px,
+                                                    ),
                                                     editor
                                                         .styles
                                                         .editor
-                                                        .editor_whitespace_dot_size_px,
-                                                ),
-                                                editor.styles.editor.editor_whitespace_dot_color,
-                                                0,
-                                            );
+                                                        .editor_whitespace_dot_color,
+                                                    0,
+                                                );
+                                            }
 
                                             table_cell_texts.push((
                                                 shaped,
@@ -3712,7 +3926,7 @@ impl Element for EditorElement {
                 }
             }
 
-            if let Some(preview) = collapsed_block_preview {
+            if let Some(preview) = rendered_block_preview {
                 if let Some(Some(img_data)) = image_cache.get(&preview.cache_key) {
                     let img_size = img_data.size(0);
                     let img_w = img_size.width.0 as f32;
@@ -3795,21 +4009,10 @@ impl Element for EditorElement {
                             || visible_w < display_w - 0.5)
                             .then_some(visible_img_bounds);
                         image_previews.push((img_bounds, img_data.clone(), px(0.0), clip_bounds));
-                        generated_preview_hit_areas.push((block_bounds, line_idx));
-                        generated_preview_image_areas.push((visible_img_bounds, line_idx));
-                        if editor.hovering_generated_preview_line == Some(line_idx)
-                            || editor.hovering_generated_preview_zoom_line == Some(line_idx)
-                            || overlay_open
-                        {
-                            image_borders.push(quad(
-                                block_bounds,
-                                Corners::all(px(0.0)),
-                                gpui::transparent_black(),
-                                px(2.0),
-                                theme.cursor,
-                                BorderStyle::default(),
-                            ));
-                        }
+                        generated_preview_hit_areas.push((block_bounds, preview.start_line));
+                        generated_preview_image_areas
+                            .push((visible_img_bounds, preview.start_line));
+                        let _ = (block_bounds, overlay_open);
                     }
                 }
             }
@@ -3880,7 +4083,13 @@ impl Element for EditorElement {
                         gutter_styles.gutter_heading_color,
                     ));
                 }
-                BlockType::Blockquote => {
+                BlockType::Blockquote
+                    if line_idx == 0
+                        || !matches!(
+                            decorations[line_idx - 1].block_type,
+                            BlockType::Blockquote
+                        ) =>
+                {
                     let gutter_styles = &editor.styles.gutter;
                     let icon_size = editor.scaled(gutter_styles.gutter_blockquote_icon_size_px);
                     let icon_x = if editor.active_tab_is_non_markdown_text() {
@@ -4153,6 +4362,9 @@ impl Element for EditorElement {
                 selection_styles.selection_diff_removed_inline_bg,
                 selection_styles.selection_diff_removed_inline_border_color,
                 editor.scaled(selection_styles.selection_diff_inline_border_width_px),
+                px(0.0),
+                px(0.0),
+                px(0.0),
                 letter_spacing,
                 window,
             );
@@ -4172,6 +4384,9 @@ impl Element for EditorElement {
                 selection_styles.selection_diff_added_inline_bg,
                 selection_styles.selection_diff_added_inline_border_color,
                 editor.scaled(selection_styles.selection_diff_inline_border_width_px),
+                px(0.0),
+                px(0.0),
+                px(0.0),
                 letter_spacing,
                 window,
             );
@@ -4259,6 +4474,8 @@ impl Element for EditorElement {
                                 &monospace_font,
                                 &heading_font,
                                 &heading_cjk_font,
+                                &italic_font,
+                                &italic_cjk_font,
                                 collapsed_task_prefix_display_columns,
                                 r_font_size,
                                 theme,
@@ -4266,6 +4483,9 @@ impl Element for EditorElement {
                                 selection_styles.selection_diff_removed_inline_bg,
                                 editor.styles.wiki_link.wiki_link_text_color,
                                 editor.styles.wiki_link.wiki_link_text_weight,
+                                editor.styles.editor.editor_list_marker_text_color,
+                                editor.styles.editor.editor_list_marker_font_weight,
+                                editor.styles.editor.editor_heading_marker_text_color,
                                 None,
                                 false,
                             );
@@ -4410,6 +4630,9 @@ impl Element for EditorElement {
                                     selection_styles.selection_diff_removed_inline_bg,
                                     selection_styles.selection_diff_removed_inline_border_color,
                                     phantom_border_width,
+                                    px(0.0),
+                                    px(0.0),
+                                    px(0.0),
                                     letter_spacing,
                                     window,
                                 );
@@ -4436,6 +4659,26 @@ impl Element for EditorElement {
                     }
                 }
             }
+            push_inline_code_background_quads(
+                &mut diff_inline_quads,
+                &decoration,
+                &display_text,
+                line_content.len(),
+                &buffer_to_display,
+                &runs,
+                wrapped,
+                content_x,
+                text_line_top,
+                line_height,
+                font_size,
+                indent_px,
+                editor.styles.editor.editor_inline_code_bg,
+                px(editor.scaled(editor.styles.editor.editor_inline_code_bg_x_padding_px)),
+                px(editor.scaled(editor.styles.editor.editor_inline_code_bg_radius_px)),
+                px(editor.scaled(editor.styles.editor.editor_inline_code_bg_y_inset_px)),
+                letter_spacing,
+                window,
+            );
             if !decoration.highlight_spans.is_empty() {
                 push_diff_inline_highlight_quads(
                     &mut diff_inline_quads,
@@ -4453,6 +4696,9 @@ impl Element for EditorElement {
                     editor.styles.editor.editor_inline_highlight_bg,
                     gpui::transparent_black(),
                     0.0,
+                    px(editor.scaled(editor.styles.editor.editor_inline_code_bg_x_padding_px)),
+                    px(editor.scaled(editor.styles.editor.editor_inline_code_bg_radius_px)),
+                    px(editor.scaled(editor.styles.editor.editor_inline_code_bg_y_inset_px)),
                     letter_spacing,
                     window,
                 );
@@ -4485,6 +4731,9 @@ impl Element for EditorElement {
                         gpui::transparent_black(),
                         editor.styles.editor.editor_selection_match_border,
                         editor.scaled(editor.styles.editor.editor_match_border_width_px),
+                        px(0.0),
+                        px(0.0),
+                        px(0.0),
                         letter_spacing,
                         window,
                     );
@@ -4518,6 +4767,9 @@ impl Element for EditorElement {
                         gpui::transparent_black(),
                         editor.styles.editor.editor_bracket_match_border,
                         editor.scaled(editor.styles.editor.editor_match_border_width_px),
+                        px(0.0),
+                        px(0.0),
+                        px(0.0),
                         letter_spacing,
                         window,
                     );
@@ -4528,6 +4780,7 @@ impl Element for EditorElement {
                 && !any_selection
                 && editor.extra_cursors.is_empty()
                 && !skip_block_line_highlight
+                && editor.app_settings.highlight_line_background
             {
                 line_highlight = Some(fill(
                     Bounds::new(
@@ -4553,22 +4806,50 @@ impl Element for EditorElement {
                         helpers::buffer_to_display_offset(&buffer_to_display, buf_start_col);
                     let disp_end =
                         helpers::buffer_to_display_offset(&buffer_to_display, buf_end_col);
-                    selection_quads.extend(helpers::build_selection_quads(
-                        &display_text,
-                        &runs,
-                        wrapped,
-                        disp_start,
-                        disp_end,
-                        content_x,
-                        text_line_top,
-                        line_height,
-                        font_size,
-                        indent_px,
-                        selection_padding_left_px,
-                        theme.selection,
-                        letter_spacing,
-                        window,
-                    ));
+                    let selection_spans_line =
+                        sr.start < line_start_offset || sr.end > line_end_offset;
+                    if matches!(block_type, BlockType::Heading(_)) && selection_spans_line {
+                        for bounds in helpers::build_highlight_bounds(
+                            &display_text,
+                            &runs,
+                            wrapped,
+                            disp_start,
+                            disp_end,
+                            content_x,
+                            text_line_top,
+                            line_height,
+                            font_size,
+                            indent_px,
+                            selection_padding_left_px,
+                            letter_spacing,
+                            window,
+                        ) {
+                            selection_quads.push(fill(
+                                Bounds::new(
+                                    point(bounds.origin.x, px(line_top)),
+                                    size(bounds.size.width, px(total_line_height)),
+                                ),
+                                theme.selection,
+                            ));
+                        }
+                    } else {
+                        selection_quads.extend(helpers::build_selection_quads(
+                            &display_text,
+                            &runs,
+                            wrapped,
+                            disp_start,
+                            disp_end,
+                            content_x,
+                            text_line_top,
+                            line_height,
+                            font_size,
+                            indent_px,
+                            selection_padding_left_px,
+                            theme.selection,
+                            letter_spacing,
+                            window,
+                        ));
+                    }
                 }
                 if sr.end > line_end_offset && sr.start <= line_end_offset {
                     let disp_len = display_text.len();
@@ -5085,11 +5366,13 @@ impl Element for EditorElement {
                     let marker_run = TextRun {
                         len: marker_text.len(),
                         font: monospace_font.clone(),
-                        color: theme.list_marker,
+                        color: editor.styles.editor.editor_list_marker_text_color,
                         background_color: None,
                         underline: None,
                         strikethrough: None,
                     };
+                    let mut marker_run = marker_run;
+                    marker_run.font.weight = editor.styles.editor.editor_list_marker_font_weight;
                     if let Ok(mut marker_wrapped_lines) = window.text_system().shape_text(
                         marker_text.clone().into(),
                         px(marker_font_size),
@@ -5640,43 +5923,55 @@ impl Element for EditorElement {
                 if hunk.expanded && editor.hovering_inline_diff_hunk == Some(hunk_index) {
                     let is_revert_hovered =
                         editor.hovering_inline_diff_revert_hunk == Some(hunk_index);
+                    let revert_button_font_size =
+                        editor.scaled(selection_styles.selection_diff_revert_button_font_size_px);
+                    let revert_button_padding_x =
+                        editor.scaled(selection_styles.selection_diff_revert_button_padding_x_px);
+                    let revert_button_padding_y =
+                        editor.scaled(selection_styles.selection_diff_revert_button_padding_y_px);
+                    let revert_button_text_line_height = revert_button_font_size * 1.2;
+                    let revert_button_radius =
+                        px(editor.scaled(selection_styles.selection_diff_revert_button_radius_px));
+                    let revert_button_border_width = px(editor
+                        .scaled(selection_styles.selection_diff_revert_button_border_width_px));
+                    let revert_button_gap_y =
+                        editor.scaled(selection_styles.selection_diff_revert_button_gap_y_px);
                     let (revert_bg, revert_text_color, revert_border_color) = if is_revert_hovered {
                         (
-                            code_block_styles.code_block_copy_button_hover_bg,
-                            code_block_styles.code_block_copy_button_hover_text_color,
-                            code_block_styles.code_block_copy_button_hover_border_color,
+                            selection_styles.selection_diff_revert_button_hover_bg,
+                            selection_styles.selection_diff_revert_button_hover_text_color,
+                            selection_styles.selection_diff_revert_button_hover_border_color,
                         )
                     } else {
                         (
-                            code_block_styles.code_block_copy_button_bg,
-                            code_block_styles.code_block_copy_button_text_color,
-                            code_block_styles.code_block_copy_button_border_color,
+                            selection_styles.selection_diff_revert_button_bg,
+                            selection_styles.selection_diff_revert_button_text_color,
+                            selection_styles.selection_diff_revert_button_border_color,
                         )
                     };
                     if let Some((revert_label, revert_button_width, revert_button_height)) =
                         shape_preview_button(
                             window,
                             &button_font,
-                            button_font_size,
-                            button_padding_x,
-                            button_padding_x,
-                            button_padding_y,
-                            button_text_line_height,
+                            revert_button_font_size,
+                            revert_button_padding_x,
+                            revert_button_padding_x,
+                            revert_button_padding_y,
+                            revert_button_text_line_height,
                             editor.t(crate::i18n::TextKey::InlineDiffRevert),
                             revert_text_color,
                         )
                     {
                         let revert_button_width = revert_button_width.ceil();
                         let revert_button_height = revert_button_height.ceil();
-                        // Outside the editor content: the button's top-left corner
-                        // aligns with the content's top-right corner. Clamp to the
-                        // editor pane so it never runs off the right edge.
-                        let content_text_right = editor_left + editor.padding_left() + text_width;
-                        let pane_right = editor_left + editor_width;
-                        let revert_x = content_text_right
-                            .min(pane_right - revert_button_width)
+                        let content_left = editor_left + editor.padding_left();
+                        let content_text_right = content_left + text_width;
+                        let revert_x = (content_text_right - revert_button_width)
+                            .max(content_left)
                             .round();
-                        let revert_y = region_top.round();
+                        let revert_y = (region_top - revert_button_height - revert_button_gap_y)
+                            .max(origin_y)
+                            .round();
                         let revert_bounds = Bounds::new(
                             point(px(revert_x), px(revert_y)),
                             size(px(revert_button_width), px(revert_button_height)),
@@ -5684,18 +5979,18 @@ impl Element for EditorElement {
                         inline_diff_revert_buttons.push(CodeBlockCopyButtonPaint {
                             quad: quad(
                                 revert_bounds,
-                                Corners::all(button_radius),
+                                Corners::all(revert_button_radius),
                                 revert_bg,
-                                button_border_width,
+                                revert_button_border_width,
                                 revert_border_color,
                                 BorderStyle::default(),
                             ),
                             label: revert_label,
                             origin: point(
-                                px(revert_x + button_padding_x),
-                                px(revert_y + button_padding_y),
+                                px(revert_x + revert_button_padding_x),
+                                px(revert_y + revert_button_padding_y),
                             ),
-                            line_height: px(button_text_line_height),
+                            line_height: px(revert_button_text_line_height),
                         });
                         inline_diff_revert_areas_local.push((revert_bounds, hunk_index));
                     }

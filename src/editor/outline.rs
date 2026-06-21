@@ -1,12 +1,13 @@
 use gpui::{
     AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, ScrollWheelEvent, SharedString,
-    Window, div, linear_color_stop, linear_gradient, prelude::*, px,
+    Window, div, linear_color_stop, linear_gradient, prelude::*, px, svg,
 };
 
 use crate::markdown::BlockType;
 
 use super::*;
 
+#[derive(Clone)]
 pub(crate) struct OutlineHeading {
     pub line: usize,
     pub level: u8,
@@ -75,8 +76,8 @@ fn overflow_scroll_from_offset(top_offset: f32, viewport_height: f32, padding: f
 fn outline_label_line_count(text: &str, chars_per_line: usize, max_lines: usize) -> usize {
     let chars_per_line = chars_per_line.max(1);
     let max_lines = max_lines.max(1);
-    let char_count = text.chars().count().max(1);
-    char_count.div_ceil(chars_per_line).clamp(1, max_lines)
+    let column_count = outline_label_weighted_columns(text).max(1);
+    column_count.div_ceil(chars_per_line).clamp(1, max_lines)
 }
 
 fn outline_label_chars_per_line(max_width: f32, font_size: f32) -> usize {
@@ -84,34 +85,19 @@ fn outline_label_chars_per_line(max_width: f32, font_size: f32) -> usize {
 }
 
 fn outline_label_estimated_text_width(text: &str, font_size: f32, chars_per_line: usize) -> f32 {
-    let visible_chars = text.chars().count().max(1).min(chars_per_line.max(1));
-    visible_chars as f32 * font_size.max(1.0) * 0.82
+    let visible_columns = outline_label_weighted_columns(text)
+        .max(1)
+        .min(chars_per_line.max(1));
+    visible_columns as f32 * font_size.max(1.0) * 0.56 + font_size.max(1.0) * 0.35
 }
 
-fn outline_label_indent(level: u8, indent_step: f32) -> f32 {
-    level.saturating_sub(1) as f32 * indent_step.max(0.0)
+fn outline_label_weighted_columns(text: &str) -> usize {
+    text.chars()
+        .map(|ch| if ch.is_ascii() { 1 } else { 2 })
+        .sum()
 }
 
-fn outline_label_level_has_following_sibling(
-    headings: &[OutlineHeading],
-    heading_index: usize,
-    level: u8,
-) -> bool {
-    for heading in headings.iter().skip(heading_index + 1) {
-        if heading.level < level {
-            return false;
-        }
-        if heading.level == level {
-            return true;
-        }
-    }
-    false
-}
-
-fn outline_label_level_starts_child_branch(
-    headings: &[OutlineHeading],
-    heading_index: usize,
-) -> bool {
+fn outline_heading_has_children(headings: &[OutlineHeading], heading_index: usize) -> bool {
     let Some(current) = headings.get(heading_index) else {
         return false;
     };
@@ -120,66 +106,24 @@ fn outline_label_level_starts_child_branch(
         .is_some_and(|next| next.level > current.level)
 }
 
-fn outline_label_should_show_guide(
+fn outline_heading_hidden_by_collapsed_ancestor(
     headings: &[OutlineHeading],
     heading_index: usize,
-    level: u8,
+    collapsed_lines: &std::collections::HashSet<usize>,
 ) -> bool {
     let Some(current) = headings.get(heading_index) else {
         return false;
     };
-    if level == current.level {
-        return outline_label_level_starts_child_branch(headings, heading_index);
+    let mut level = current.level;
+    for heading in headings[..heading_index].iter().rev() {
+        if heading.level < level {
+            if collapsed_lines.contains(&heading.line) {
+                return true;
+            }
+            level = heading.level;
+        }
     }
-    level < current.level
-        && outline_label_level_has_following_sibling(headings, heading_index, level)
-}
-
-fn outline_label_indent_guides(
-    headings: &[OutlineHeading],
-    heading_index: usize,
-    indent_step: f32,
-    guide_width: f32,
-    dash_length: f32,
-    gap_length: f32,
-    color: gpui::Hsla,
-    current_level_top: f32,
-) -> Vec<AnyElement> {
-    let Some(heading) = headings.get(heading_index) else {
-        return Vec::new();
-    };
-    (2..=heading.level)
-        .filter(|level| outline_label_should_show_guide(headings, heading_index, *level))
-        .map(|level| {
-            let right = (level.saturating_sub(1) as f32 * indent_step.max(0.0))
-                - guide_width.max(1.0) / 2.0;
-            let top = if level == heading.level {
-                current_level_top.max(0.0)
-            } else {
-                0.0
-            };
-            let dashes = (0..16).map(|_| {
-                div()
-                    .w_full()
-                    .h(px(dash_length.max(1.0)))
-                    .flex_shrink_0()
-                    .bg(color)
-                    .into_any_element()
-            });
-            div()
-                .absolute()
-                .top(px(top))
-                .bottom_0()
-                .right(px(right.max(0.0)))
-                .w(px(guide_width.max(1.0)))
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                .gap(px(gap_length.max(0.0)))
-                .children(dashes)
-                .into_any_element()
-        })
-        .collect()
+    false
 }
 
 fn outline_label_metrics(
@@ -193,7 +137,7 @@ fn outline_label_metrics(
     font_size: f32,
     wrap_chars_per_line_cap: usize,
     max_lines: usize,
-    indent_step: f32,
+    _indent_step: f32,
 ) -> (f32, Option<f32>) {
     let mut total_height = 0.0;
     let mut active_center = None;
@@ -201,9 +145,7 @@ fn outline_label_metrics(
         if index > 0 {
             total_height += item_gap;
         }
-        let label_indent = outline_label_indent(heading.level, indent_step)
-            .min((max_width - font_size.max(1.0)).max(0.0));
-        let available_width = (max_width - label_indent).max(font_size.max(1.0));
+        let available_width = max_width.max(font_size.max(1.0));
         let chars_per_line = outline_label_chars_per_line(available_width, font_size)
             .min(wrap_chars_per_line_cap.max(1));
         let line_count = outline_label_line_count(&heading.text, chars_per_line, max_lines);
@@ -443,6 +385,13 @@ impl EditorView {
         }
         self.sync_outline_rail_label_opacity(cx);
         self.sync_toolbar_opacity(cx);
+        cx.notify();
+    }
+
+    fn toggle_outline_rail_heading_collapsed(&mut self, line: usize, cx: &mut Context<Self>) {
+        if !self.outline_rail_collapsed_heading_lines.remove(&line) {
+            self.outline_rail_collapsed_heading_lines.insert(line);
+        }
         cx.notify();
     }
 
@@ -692,25 +641,47 @@ impl EditorView {
         let label_font_size = self.scaled(os.outline_rail_label_font_size_px);
         let label_max_width = self.scaled(os.outline_rail_label_max_width_px);
         let label_indent_step = self.scaled(os.outline_rail_label_indent_step_px);
-        let label_indent_guide_width = self.scaled(os.outline_rail_label_indent_guide_width_px);
-        let label_indent_guide_dash_length =
-            self.scaled(os.outline_rail_label_indent_guide_dash_length_px);
-        let label_indent_guide_gap_length =
-            self.scaled(os.outline_rail_label_indent_guide_gap_length_px);
-        let label_indent_guide_color = os.outline_rail_label_indent_guide_color;
         let label_gap = self.scaled(os.outline_rail_label_gap_px);
         let label_item_height = self.scaled(os.outline_rail_label_item_height_px);
         let label_item_gap = self.scaled(os.outline_rail_label_item_gap_px);
         let label_item_padding_y = self.scaled(os.outline_rail_label_item_padding_y_px);
         let label_line_height = self.scaled(os.outline_rail_label_line_height_px);
         let label_wrap_chars_per_line_cap = os.outline_rail_label_wrap_chars_per_line.max(1);
-        let label_column_width = headings
+        let label_fold_icon_size = self.scaled(os.outline_rail_label_fold_icon_size_px);
+        let label_fold_icon_gap = self.scaled(os.outline_rail_label_fold_icon_gap_px);
+        let label_fold_slot_width = label_fold_icon_size + label_fold_icon_gap;
+        let visible_heading_indices: Vec<usize> = headings
             .iter()
-            .map(|heading| {
-                let label_indent = outline_label_indent(heading.level, label_indent_step)
-                    .min((label_max_width - label_font_size.max(1.0)).max(0.0));
-                let available_width =
-                    (label_max_width - label_indent).max(label_font_size.max(1.0));
+            .enumerate()
+            .filter_map(|(index, _)| {
+                (!outline_heading_hidden_by_collapsed_ancestor(
+                    &headings,
+                    index,
+                    &self.outline_rail_collapsed_heading_lines,
+                ))
+                .then_some(index)
+            })
+            .collect();
+        let visible_headings: Vec<OutlineHeading> = visible_heading_indices
+            .iter()
+            .filter_map(|index| headings.get(*index).cloned())
+            .collect();
+        let label_column_max_width = label_max_width.max(0.0);
+        let label_column_min_width = label_font_size.max(1.0).min(label_column_max_width);
+        let label_column_width = visible_heading_indices
+            .iter()
+            .filter_map(|heading_index| {
+                headings
+                    .get(*heading_index)
+                    .map(|heading| (*heading_index, heading))
+            })
+            .map(|(heading_index, heading)| {
+                let icon_slot = if outline_heading_has_children(&headings, heading_index) {
+                    label_fold_slot_width
+                } else {
+                    0.0
+                };
+                let available_width = (label_max_width - icon_slot).max(label_font_size.max(1.0));
                 let label_wrap_chars_per_line =
                     outline_label_chars_per_line(available_width, label_font_size)
                         .min(label_wrap_chars_per_line_cap);
@@ -720,10 +691,11 @@ impl EditorView {
                     label_wrap_chars_per_line,
                 )
                 .min(available_width);
-                label_indent + estimated_text_width
+                icon_slot + estimated_text_width
             })
             .fold(0.0_f32, f32::max)
-            .clamp(label_font_size.max(1.0), label_max_width);
+            .min(label_column_max_width)
+            .max(label_column_min_width);
         let row_height = self.scaled(os.outline_rail_row_height_px);
         let tick_width = self.scaled(os.outline_rail_tick_width_px);
         let tick_thickness = self
@@ -904,8 +876,9 @@ impl EditorView {
         let track_width = rail_width + track_extra_right_padding;
 
         let label_overlay = if labels_visible {
-            let mut label_items: Vec<AnyElement> = Vec::with_capacity(headings.len());
-            let (label_total_height, active_label_center) = outline_label_metrics(
+            let mut label_items: Vec<AnyElement> =
+                Vec::with_capacity(visible_heading_indices.len());
+            let (full_label_total_height, full_active_label_center) = outline_label_metrics(
                 &headings,
                 active_line,
                 label_item_height,
@@ -918,8 +891,28 @@ impl EditorView {
                 os.outline_rail_label_max_lines,
                 label_indent_step,
             );
-            for (heading_index, heading) in headings.iter().enumerate() {
+            let (label_total_height, active_label_center) = outline_label_metrics(
+                &visible_headings,
+                active_line,
+                label_item_height,
+                label_item_gap,
+                label_item_padding_y,
+                label_line_height,
+                label_max_width,
+                label_font_size,
+                label_wrap_chars_per_line_cap,
+                os.outline_rail_label_max_lines,
+                label_indent_step,
+            );
+            for heading_index in &visible_heading_indices {
+                let Some(heading) = headings.get(*heading_index) else {
+                    continue;
+                };
                 let target_line = heading.line;
+                let has_children = outline_heading_has_children(&headings, *heading_index);
+                let is_collapsed = self
+                    .outline_rail_collapsed_heading_lines
+                    .contains(&target_line);
                 let level_opacity = heading_level_opacity(heading.level, label_level_opacities);
                 let is_active = Some(target_line) == active_line;
                 let is_hovered = hovered_label_line == Some(target_line);
@@ -939,10 +932,12 @@ impl EditorView {
                 } else {
                     base_label_color
                 };
-                let label_indent = outline_label_indent(heading.level, label_indent_step)
-                    .min((label_max_width - label_font_size.max(1.0)).max(0.0));
-                let available_width =
-                    (label_max_width - label_indent).max(label_font_size.max(1.0));
+                let icon_slot = if has_children {
+                    label_fold_slot_width
+                } else {
+                    0.0
+                };
+                let available_width = (label_max_width - icon_slot).max(label_font_size.max(1.0));
                 let label_wrap_chars_per_line =
                     outline_label_chars_per_line(available_width, label_font_size)
                         .min(label_wrap_chars_per_line_cap);
@@ -951,10 +946,15 @@ impl EditorView {
                     label_wrap_chars_per_line,
                     os.outline_rail_label_max_lines,
                 );
+                let label_text_width = outline_label_estimated_text_width(
+                    heading.text.as_ref(),
+                    label_font_size,
+                    label_wrap_chars_per_line,
+                )
+                .min(available_width);
                 let label_text_max_height = label_line_count as f32 * label_line_height;
                 let current_label_item_height =
                     label_item_height.max(label_text_max_height + label_item_padding_y * 2.0);
-                let guide_top = (current_label_item_height + label_text_max_height) / 2.0;
                 label_items.push(
                     div()
                         .id(SharedString::from(format!(
@@ -968,22 +968,17 @@ impl EditorView {
                         .flex()
                         .items_center()
                         .justify_end()
+                        .gap(px(if has_children {
+                            label_fold_icon_gap
+                        } else {
+                            0.0
+                        }))
                         .overflow_hidden()
                         .py(px(label_item_padding_y))
                         .text_size(px(label_font_size))
                         .text_right()
                         .text_color(row_label_color)
                         .cursor(CursorStyle::Arrow)
-                        .children(outline_label_indent_guides(
-                            &headings,
-                            heading_index,
-                            label_indent_step,
-                            label_indent_guide_width,
-                            label_indent_guide_dash_length,
-                            label_indent_guide_gap_length,
-                            label_indent_guide_color,
-                            guide_top,
-                        ))
                         .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                             if *hovering {
                                 this.set_outline_rail_hovered_label_line(Some(target_line), cx);
@@ -991,16 +986,47 @@ impl EditorView {
                                 this.set_outline_rail_hovered_label_line(None, cx);
                             }
                         }))
+                        .when(has_children, |this| {
+                            let icon_path = if is_collapsed {
+                                FOLD_SVG_PATH
+                            } else {
+                                FOLD_EXPANDED_SVG_PATH
+                            };
+                            this.child(
+                                div()
+                                    .w(px(label_fold_icon_size))
+                                    .h(px(label_fold_icon_size))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor(CursorStyle::Arrow)
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.toggle_outline_rail_heading_collapsed(
+                                                target_line,
+                                                cx,
+                                            );
+                                        }),
+                                    )
+                                    .child(
+                                        svg()
+                                            .path(icon_path)
+                                            .size(px(label_fold_icon_size))
+                                            .text_color(row_label_color),
+                                    ),
+                            )
+                        })
                         .child(
                             div()
-                                .w_full()
-                                .pr(px(label_indent))
+                                .w(px(label_text_width))
                                 .max_h(px(label_text_max_height))
                                 .overflow_hidden()
                                 .line_height(px(label_line_height))
                                 .whitespace_normal()
                                 .text_right()
-                                .max_w(px(available_width))
                                 .child(heading.text.clone()),
                         )
                         .on_mouse_down(
@@ -1040,7 +1066,12 @@ impl EditorView {
                     )
                 }
             } else {
-                0.0
+                centered_overflow_offset(
+                    viewport_height,
+                    full_label_total_height,
+                    full_active_label_center,
+                    vertical_padding,
+                )
             };
 
             let label_column = div()
@@ -1071,11 +1102,12 @@ impl EditorView {
                     .into_any_element()
             } else {
                 overlay
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .items_end()
-                    .child(label_column)
+                    .child(
+                        label_column
+                            .absolute()
+                            .top(px(label_top_offset))
+                            .right(px(0.0)),
+                    )
                     .into_any_element()
             })
         } else {

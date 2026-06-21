@@ -8,6 +8,8 @@ import iconFeature4 from '../assets/icon-feature-4.svg'
 import iconFeature5 from '../assets/icon-feature-5.svg'
 import iconFeature6 from '../assets/icon-feature-6.svg'
 import iconFeature7 from '../assets/icon-feature-7.svg'
+import logo from '../assets/logo.svg'
+import logoEn from '../assets/logo-en.svg'
 
 const navItemKeys = ['intro', 'features', 'requirements', 'download'] as const
 const languageKeys = ['zhHans', 'zhHant', 'ja', 'ko', 'en'] as const
@@ -226,7 +228,7 @@ const translations = {
     },
     topbarAria: 'Primary navigation',
     heroName: 'Moeka Notes',
-    tagline: ['Words cross seas', 'Meaning meets mountains'],
+    tagline: ['WRITE LOCAL', 'THINK CLEAR'],
     actions: {
       download: 'Download',
       help: 'Guide',
@@ -268,6 +270,7 @@ const translations = {
 }
 
 const activeCopy = computed(() => translations[activeLanguageKey.value])
+const activeLogo = computed(() => activeLanguageKey.value === 'en' ? logoEn : logo)
 const navItems = computed(() => navItemKeys.map((key) => ({
   key,
   href: key === 'intro' ? '#简介' : key === 'features' ? '#特性' : `#${key}`,
@@ -410,7 +413,7 @@ function cycleLanguage() {
 
       <div id="简介" class="hero-content">
         <img class="flower flower-left" src="../assets/flower-left.svg" alt="" aria-hidden="true">
-        <img class="brand-logo" src="../assets/logo.svg" :alt="activeCopy.heroName" aria-describedby="hero-tagline">
+        <img class="brand-logo" :src="activeLogo" :alt="activeCopy.heroName" aria-describedby="hero-tagline">
         <img class="flower flower-right" src="../assets/flower-right.svg" alt="" aria-hidden="true">
 
         <h1 id="hero-title" class="sr-only">{{ activeCopy.heroName }}</h1>

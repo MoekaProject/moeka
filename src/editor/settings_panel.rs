@@ -143,6 +143,7 @@ impl EditorView {
             .flex_col()
             .gap(px(self.scaled(12.0)))
             .child(self.render_section_heading(self.t(TextKey::FormatSection)))
+            .child(self.render_editor_display_options(cx))
             .child(self.render_picker_row(
                 self.t(TextKey::DateTimeFormat),
                 &current,
@@ -150,6 +151,106 @@ impl EditorView {
                 0,
                 cx,
             ))
+            .into_any_element()
+    }
+
+    fn render_editor_display_options(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(self.scaled(12.0)))
+            .child(
+                div()
+                    .w(px(self.scaled(120.0)))
+                    .text_size(px(self.scaled(13.0)))
+                    .text_color(self.theme.text_secondary)
+                    .child("编辑器显示"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(self.scaled(
+                        self.styles.settings_panel.settings_option_button_gap_px,
+                    )))
+                    .child(self.render_settings_option_button(
+                        "settings-show-whitespace",
+                        "显示空白符",
+                        self.app_settings.show_whitespace,
+                        cx,
+                        |this, cx| {
+                            this.app_settings.show_whitespace = !this.app_settings.show_whitespace;
+                            this.finalize_settings_change(cx);
+                        },
+                    ))
+                    .child(self.render_settings_option_button(
+                        "settings-highlight-line-background",
+                        "高亮行背景",
+                        self.app_settings.highlight_line_background,
+                        cx,
+                        |this, cx| {
+                            this.app_settings.highlight_line_background =
+                                !this.app_settings.highlight_line_background;
+                            this.finalize_settings_change(cx);
+                        },
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn render_settings_option_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        active: bool,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let styles = &self.styles.settings_panel;
+        let bg = if active {
+            styles.settings_option_button_active_bg
+        } else {
+            styles.settings_option_button_bg
+        };
+        let text_color = if active {
+            styles.settings_option_button_active_text_color
+        } else {
+            styles.settings_option_button_text_color
+        };
+        let border_color = if active {
+            styles.settings_option_button_active_border_color
+        } else {
+            styles.settings_option_button_border_color
+        };
+        let hover_bg = styles.settings_option_button_hover_bg;
+
+        div()
+            .id(id)
+            .h(px(self.scaled(styles.settings_option_button_height_px)))
+            .px(px(self.scaled(styles.settings_option_button_padding_x_px)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(self.scaled(styles.settings_option_button_radius_px)))
+            .border(px(
+                self.scaled(styles.settings_option_button_border_width_px)
+            ))
+            .border_color(border_color)
+            .bg(bg)
+            .text_color(text_color)
+            .text_size(px(self.scaled(styles.settings_option_button_font_size_px)))
+            .cursor(CursorStyle::Arrow)
+            .when(!active, move |this| {
+                this.hover(move |style| style.bg(hover_bg))
+            })
+            .child(label)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    on_click(this, cx);
+                }),
+            )
             .into_any_element()
     }
 

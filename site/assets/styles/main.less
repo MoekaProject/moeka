@@ -80,8 +80,9 @@ button {
 .site-shell {
   --serif-font:
     "Noto Serif Site SC", "Noto Serif SC", "Noto Serif Site Latin", serif;
-  --nav-pill-width: 222px;
-  --nav-pill-padding-x: 5px;
+  --nav-pill-width: 200px;
+  --nav-pill-padding-x: 0px;
+  --nav-pill-gap: 14px;
   --language-pill-width: 109px;
   --tagline-width: 274px;
   --tagline-gap: 0px;
@@ -108,7 +109,7 @@ button {
 .site-shell[data-language="ja"] {
   --serif-font:
     "Noto Serif Site JP", "Noto Serif JP", "Noto Serif Site Latin", serif;
-  --nav-pill-width: 252px;
+  --nav-pill-width: 200px;
   --language-pill-width: 116px;
   --tagline-width: min(430px, calc(100vw - 56px));
   --tagline-gap: 28px;
@@ -123,7 +124,7 @@ button {
 .site-shell[data-language="ko"] {
   --serif-font:
     "Noto Serif Site KR", "Noto Serif KR", "Noto Serif Site Latin", serif;
-  --nav-pill-width: 252px;
+  --nav-pill-width: 200px;
   --language-pill-width: 112px;
   --tagline-width: min(430px, calc(100vw - 56px));
   --tagline-gap: 28px;
@@ -137,14 +138,15 @@ button {
 
 .site-shell[data-language="en"] {
   --serif-font: "Noto Serif Site Latin", "Noto Serif", serif;
-  --nav-pill-width: 336px;
-  --nav-pill-padding-x: 10px;
+  --nav-pill-width: 305px;
+  --nav-pill-padding-x: 22px;
+  --nav-pill-gap: 14px;
   --language-pill-width: 118px;
-  --tagline-width: min(440px, calc(100vw - 56px));
-  --tagline-gap: 20px;
-  --tagline-mobile-gap: 12px;
+  --tagline-width: min(344px, calc(100vw - 56px));
+  --tagline-gap: 12px;
+  --tagline-mobile-gap: 8px;
   --tagline-justify: center;
-  --tagline-letter-spacing: 0.01em;
+  --tagline-letter-spacing: 0;
   --tagline-letter-offset: 0;
   --tagline-font-size: 17px;
   --tagline-mobile-font-size: 13px;
@@ -259,6 +261,8 @@ button {
 .nav-pill {
   display: flex;
   align-items: center;
+  justify-content: center;
+  gap: var(--nav-pill-gap);
   width: min(var(--nav-pill-width), calc(100vw - 44px));
   height: 32px;
   padding: 0 var(--nav-pill-padding-x);
@@ -268,7 +272,7 @@ button {
 }
 
 .nav-link {
-  flex: 1;
+  flex: none;
   color: #fff;
   cursor: default;
   font-family: @serif;

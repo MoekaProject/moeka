@@ -264,6 +264,8 @@ pub struct Theme {
     pub italic: Hsla,
     pub strikethrough: Hsla,
     pub inline_code: Hsla,
+    pub inline_code_bg: Hsla,
+    pub highlight_bg: Hsla,
     pub link: Hsla,
     pub syntax_marker: Hsla,
     pub list_marker: Hsla,
@@ -368,7 +370,7 @@ impl Theme {
 pub fn apply_editor_theme_mode(theme: &Theme, mode: EditorThemeMode, is_dark: bool) -> Theme {
     let mut themed = theme.clone();
     if mode == EditorThemeMode::Monochrome {
-        let monochrome_link = crate::hex_hsla!("#2E84CAFF");
+        let monochrome_link = crate::hex_hsla!("#0057CDFF");
         let emphasis = if is_dark {
             themed.text_bright
         } else {
@@ -434,6 +436,8 @@ impl Theme {
             italic: crate::hex_hsla!("#C678DD"),
             strikethrough: crate::hex_hsla!("#636D83"),
             inline_code: crate::hex_hsla!("#98C379"),
+            inline_code_bg: with_alpha(crate::hex_hsla!("#D8DCE8"), 0.14),
+            highlight_bg: with_alpha(crate::hex_hsla!("#E5C07B"), 0.22),
             link: crate::hex_hsla!("#61AFEF"),
             syntax_marker: with_alpha(crate::hex_hsla!("#636D83"), 1.0),
             list_marker: crate::hex_hsla!("#E06C75"),
@@ -482,6 +486,8 @@ impl Theme {
             italic: crate::hex_hsla!("#8E44AD"),
             strikethrough: crate::hex_hsla!("#9B9A97"),
             inline_code: crate::hex_hsla!("#518A3C"),
+            inline_code_bg: with_alpha(crate::hex_hsla!("#E2E2E2"), 0.65),
+            highlight_bg: with_alpha(crate::hex_hsla!("#DCEB88"), 0.55),
             link: crate::hex_hsla!("#2383E2"),
             syntax_marker: with_alpha(crate::hex_hsla!("#946666"), 1.0),
             list_marker: crate::hex_hsla!("#C74440"),
@@ -497,8 +503,8 @@ impl Theme {
     pub fn one_light() -> Self {
         Self {
             // Text
-            text_primary: crate::hex_hsla!("#30323B"),
-            text_secondary: crate::hex_hsla!("#5E6177"),
+            text_primary: crate::hex_hsla!("#323232"),
+            text_secondary: crate::hex_hsla!("#676767FF"),
             text_bright: crate::hex_hsla!("#34363E"),
             text_accent: crate::hex_hsla!("#5C78E2"),
             text_danger: crate::hex_hsla!("#D3604F"),
@@ -530,6 +536,8 @@ impl Theme {
             italic: crate::hex_hsla!("#B043B8"),
             strikethrough: crate::hex_hsla!("#A0A1A7"),
             inline_code: crate::hex_hsla!("#4C9C3A"),
+            inline_code_bg: with_alpha(crate::hex_hsla!("#E5E5E5"), 0.78),
+            highlight_bg: with_alpha(crate::hex_hsla!("#DDEB7A"), 0.5),
             link: crate::hex_hsla!("#4463D4"),
             syntax_marker: with_alpha(crate::hex_hsla!("#1B2462"), 0.7),
             list_marker: crate::hex_hsla!("#D3604F"),
@@ -578,6 +586,8 @@ impl Theme {
             italic: crate::hex_hsla!("#c678dd"),
             strikethrough: crate::hex_hsla!("#636d83"),
             inline_code: crate::hex_hsla!("#98c379"),
+            inline_code_bg: with_alpha(crate::hex_hsla!("#D8DCE8"), 0.12),
+            highlight_bg: with_alpha(crate::hex_hsla!("#E5C07B"), 0.22),
             link: crate::hex_hsla!("#61afef"),
             syntax_marker: with_alpha(crate::hex_hsla!("#6A748D"), 1.0),
             list_marker: crate::hex_hsla!("#e06c75"),

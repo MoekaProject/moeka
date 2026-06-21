@@ -225,11 +225,11 @@ pub(crate) fn active_ranges_have_non_eol_position(
     })
 }
 
-fn heading_syntax_is_active(_decoration: &LineDecoration, active_ranges: &[Range<usize>]) -> bool {
-    // Headings expand their `#` markers whenever the caret is anywhere on the
-    // line (or there is a selection touching it), not only when it falls inside
-    // the marker trigger range.
-    !active_ranges.is_empty()
+fn heading_syntax_is_active(decoration: &LineDecoration, active_ranges: &[Range<usize>]) -> bool {
+    decoration
+        .syntax_ranges
+        .iter()
+        .any(|range| active_ranges_intersect(active_ranges, &range.range))
 }
 
 fn scaled_inline_placeholder(text: &str, scale: f32) -> String {
@@ -1956,7 +1956,7 @@ fn apply_mermaid_block_highlighting(
 mod tests {
     use std::ops::Range;
 
-    use gpui::{FontWeight, font};
+    use gpui::{FontStyle, FontWeight, font};
 
     use crate::markdown;
     use crate::theme::Theme;
@@ -2147,7 +2147,7 @@ mod tests {
     }
 
     #[test]
-    fn heading_prefix_expands_when_selection_exists() {
+    fn heading_prefix_stays_collapsed_when_selection_is_in_body_text() {
         let line = "# title";
         let decoration = markdown::parse_decorations(line)
             .into_iter()
@@ -2169,7 +2169,153 @@ mod tests {
             1.0,
         );
 
+        assert_eq!(display_text, "title");
+    }
+
+    #[test]
+    fn heading_prefix_stays_collapsed_after_marker_space() {
+        let line = "# ";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let (display_text, _, _, _) = build_display_text(
+            line,
+            &decoration,
+            &[Range { start: 2, end: 2 }],
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+
+        assert_eq!(display_text, "");
+    }
+
+    #[test]
+    fn active_heading_marker_uses_marker_text_color() {
+        let line = "# title";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let active_ranges = [Range { start: 1, end: 1 }];
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &active_ranges,
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let heading_marker_color = crate::hex_hsla!("#A0A7B6");
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &active_ranges,
+            false,
+            prefix_collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font("Kaiti SC"),
+            0,
+            16.0,
+            &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            heading_marker_color,
+            None,
+            false,
+        );
+
         assert_eq!(display_text, line);
+        assert_eq!(
+            runs.first().map(|run| run.color),
+            Some(heading_marker_color)
+        );
+    }
+
+    #[test]
+    fn folded_ordered_list_marker_uses_list_marker_text_color() {
+        let line = "1. item";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let active_ranges: [Range<usize>; 0] = [];
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &active_ranges,
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let list_marker_color = crate::hex_hsla!("#E06C75");
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &active_ranges,
+            false,
+            prefix_collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font("Kaiti SC"),
+            0,
+            16.0,
+            &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::NORMAL,
+            list_marker_color,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            None,
+            false,
+        );
+
+        assert!(prefix_collapsed);
+        assert!(display_text.starts_with("1. "));
+        assert_eq!(runs.first().map(|run| run.color), Some(list_marker_color));
     }
 
     #[test]
@@ -2468,6 +2614,8 @@ mod tests {
             &font(".SystemUIFont"),
             &font(".SystemUIFont"),
             &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font("Kaiti SC"),
             0,
             16.0,
             &theme,
@@ -2475,12 +2623,136 @@ mod tests {
             crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
             None,
             false,
         );
 
         assert_eq!(display_text, "title");
         assert!(runs.iter().all(|run| run.color != theme.syntax_marker));
+    }
+
+    #[test]
+    fn folded_italic_uses_italic_font_style_and_italic_font_role() {
+        let line = "plain *italic* text";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let active_ranges: [Range<usize>; 0] = [];
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &active_ranges,
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &active_ranges,
+            false,
+            prefix_collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font("Kaiti SC"),
+            0,
+            16.0,
+            &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            None,
+            false,
+        );
+
+        assert_eq!(display_text, "plain italic text");
+        assert!(runs.iter().any(|run| {
+            run.font.family.as_ref() == "Menlo"
+                && run.font.style == FontStyle::Italic
+                && run.color == theme.text_primary
+        }));
+    }
+
+    #[test]
+    fn folded_inline_code_uses_inline_code_background() {
+        let line = "use `code` here";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let active_ranges: [Range<usize>; 0] = [];
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &active_ranges,
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &active_ranges,
+            false,
+            prefix_collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font("Kaiti SC"),
+            0,
+            16.0,
+            &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            None,
+            false,
+        );
+
+        assert_eq!(display_text, "use code here");
+        assert!(
+            runs.iter()
+                .any(|run| run.background_color == Some(theme.inline_code_bg))
+        );
     }
 
     #[test]
@@ -2575,6 +2847,8 @@ mod tests {
             &font(".SystemUIFont"),
             &font(".SystemUIFont"),
             &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font("Kaiti SC"),
             0,
             16.0,
             &theme,
@@ -2582,6 +2856,9 @@ mod tests {
             crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
             None,
             false,
         );
@@ -2639,6 +2916,8 @@ mod tests {
             &font(".SystemUIFont"),
             &font(".SystemUIFont"),
             &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font("Kaiti SC"),
             0,
             16.0,
             &theme,
@@ -2646,6 +2925,9 @@ mod tests {
             crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
             None,
             false,
         );
@@ -3996,6 +4278,8 @@ pub(crate) fn build_text_runs_for_display(
     monospace_font: &Font,
     heading_font: &Font,
     heading_cjk_font: &Font,
+    italic_font: &Font,
+    italic_cjk_font: &Font,
     collapsed_task_prefix_chars: usize,
     _font_size: f32,
     theme: &Theme,
@@ -4003,6 +4287,9 @@ pub(crate) fn build_text_runs_for_display(
     diff_inline_removed_bg: Hsla,
     wiki_link_text_color: Hsla,
     wiki_link_text_weight: FontWeight,
+    list_marker_text_color: Hsla,
+    list_marker_font_weight: FontWeight,
+    heading_marker_text_color: Hsla,
     front_matter_key_text_color: Option<Hsla>,
     force_monospace: bool,
 ) -> Vec<TextRun> {
@@ -4012,6 +4299,8 @@ pub(crate) fn build_text_runs_for_display(
         BodyCjk,
         HeadingLatin,
         HeadingCjk,
+        ItalicLatin,
+        ItalicCjk,
         Monospace,
     }
 
@@ -4097,10 +4386,11 @@ pub(crate) fn build_text_runs_for_display(
         buf_colors.fill(fence_color);
     }
 
+    let is_heading = matches!(decoration.block_type, BlockType::Heading(_));
+
     if is_code_line {
         assign_font_roles(0..buf_len, FontRole::Monospace, FontRole::BodyCjk);
     } else {
-        let is_heading = matches!(decoration.block_type, BlockType::Heading(_));
         let has_latin_text = line_content
             .chars()
             .any(|ch| !ch.is_whitespace() && prefers_latin_text_font(ch));
@@ -4233,10 +4523,10 @@ pub(crate) fn build_text_runs_for_display(
             match span.kind {
                 InlineKind::Bold => {
                     buf_colors[i] = theme.bold;
-                    buf_weights[i] = FontWeight::BOLD;
+                    buf_weights[i] = FontWeight::EXTRA_BOLD;
                 }
                 InlineKind::Italic => {
-                    buf_colors[i] = theme.italic;
+                    buf_colors[i] = theme.text_primary;
                     buf_font_styles[i] = FontStyle::Italic;
                 }
                 InlineKind::Strikethrough => {
@@ -4245,7 +4535,7 @@ pub(crate) fn build_text_runs_for_display(
                 }
                 InlineKind::InlineCode => {
                     buf_colors[i] = theme.inline_code;
-                    buf_bg_colors[i] = Some(theme.bg_code_inline);
+                    buf_bg_colors[i] = Some(theme.inline_code_bg);
                 }
                 InlineKind::Link => {
                     buf_colors[i] = theme.link;
@@ -4258,18 +4548,18 @@ pub(crate) fn build_text_runs_for_display(
 
         if matches!(span.kind, InlineKind::InlineCode) {
             assign_font_roles(start..end, FontRole::Monospace, FontRole::BodyCjk);
+        } else if matches!(span.kind, InlineKind::Italic) && !is_code_line {
+            assign_font_roles(start..end, FontRole::ItalicLatin, FontRole::ItalicCjk);
         }
     }
-
-    let inline_highlight_bg = crate::theme::with_alpha(crate::hex_hsla!("#E5C07B"), 0.22);
 
     for highlight_range in &decoration.highlight_spans {
         let start = highlight_range.start.min(buf_len);
         let end = highlight_range.end.min(buf_len);
         for index in start..end {
-            buf_bg_colors[index] = Some(inline_highlight_bg);
+            buf_bg_colors[index] = Some(theme.highlight_bg);
             buf_colors[index] = theme.bold;
-            buf_weights[index] = FontWeight::BOLD;
+            buf_weights[index] = FontWeight::EXTRA_BOLD;
         }
     }
 
@@ -4329,13 +4619,22 @@ pub(crate) fn build_text_runs_for_display(
                     let start = sr.range.start.min(buf_len);
                     let end = sr.range.end.min(buf_len);
                     let syntax_color = match decoration.block_type {
+                        BlockType::Heading(_) => heading_marker_text_color,
                         BlockType::UnorderedList
                         | BlockType::OrderedList
-                        | BlockType::TaskList(_) => theme.list_marker,
+                        | BlockType::TaskList(_) => list_marker_text_color,
                         _ => theme.syntax_marker,
                     };
                     for i in start..end {
                         buf_colors[i] = syntax_color;
+                        if matches!(
+                            decoration.block_type,
+                            BlockType::UnorderedList
+                                | BlockType::OrderedList
+                                | BlockType::TaskList(_)
+                        ) {
+                            buf_weights[i] = list_marker_font_weight;
+                        }
                     }
                     assign_font_roles(start..end, FontRole::Monospace, FontRole::BodyCjk);
                 }
@@ -4429,7 +4728,8 @@ pub(crate) fn build_text_runs_for_display(
             BlockType::UnorderedList => {
                 let bullet_end = (leading_ws + "• ".len()).min(prefix_len);
                 for i in leading_ws..bullet_end {
-                    colors[i] = theme.list_marker;
+                    colors[i] = list_marker_text_color;
+                    weights[i] = list_marker_font_weight;
                     font_roles[i] = FontRole::Monospace;
                 }
             }
@@ -4443,7 +4743,8 @@ pub(crate) fn build_text_runs_for_display(
             }
             BlockType::OrderedList => {
                 for i in leading_ws..prefix_len {
-                    colors[i] = theme.list_marker;
+                    colors[i] = list_marker_text_color;
+                    weights[i] = list_marker_font_weight;
                     font_roles[i] = FontRole::Monospace;
                 }
             }
@@ -4486,6 +4787,8 @@ pub(crate) fn build_text_runs_for_display(
             FontRole::BodyCjk => body_cjk_font.clone(),
             FontRole::HeadingLatin => heading_font.clone(),
             FontRole::HeadingCjk => heading_cjk_font.clone(),
+            FontRole::ItalicLatin => italic_font.clone(),
+            FontRole::ItalicCjk => italic_cjk_font.clone(),
             FontRole::Monospace => monospace_font.clone(),
         };
         font.weight = weight;

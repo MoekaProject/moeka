@@ -127,6 +127,7 @@ impl EditorView {
         self.tabs[index].recovery.temp_path = Some(temp_path.clone());
         self.tabs[index].recovery.source_path = self.tabs[index].path.clone();
         self.tabs[index].recovery.recovered_from_temp = true;
+        session_store::persist_session(self);
         Ok(Some(temp_path))
     }
 

@@ -9,6 +9,12 @@ use gpui::{
 use super::tooltip::{TooltipState, toolbar_anchor_bounds};
 use super::*;
 
+fn clamp_resize_dimension(value: f32, minimum: f32, maximum: f32) -> f32 {
+    let lower_bound = minimum.min(maximum);
+    let upper_bound = minimum.max(maximum);
+    value.clamp(lower_bound, upper_bound)
+}
+
 impl EditorView {
     fn render_chat_panel_drop_targets(
         &self,
@@ -229,7 +235,8 @@ impl EditorView {
                                             );
                                             let new_width =
                                                 window_width - f32::from(event.position.x);
-                                            let new_width = new_width.clamp(min_w, max_w);
+                                            let new_width =
+                                                clamp_resize_dimension(new_width, min_w, max_w);
                                             if let Some(panel) =
                                                 this.active_resizable_utility_panel()
                                             {
@@ -636,7 +643,8 @@ impl Render for EditorView {
                                         .scaled(this.styles.sidebar.sidebar_resize_min_width_px);
                                     let max_w = this
                                         .scaled(this.styles.sidebar.sidebar_resize_max_width_px);
-                                    let new_width = new_width.clamp(min_w, max_w);
+                                    let new_width =
+                                        clamp_resize_dimension(new_width, min_w, max_w);
                                     this.set_active_sidebar_custom_width(new_width);
                                     this.set_sidebar_width_immediately(new_width);
                                     cx.notify();
@@ -1424,7 +1432,7 @@ impl Render for EditorView {
                                                                     let new_height =
                                                                         window_height - f32::from(event.position.y);
                                                                     let new_height =
-                                                                        new_height.clamp(min_h, max_h);
+                                                                        clamp_resize_dimension(new_height, min_h, max_h);
                                                                     if let Some(panel) =
                                                                         this.active_resizable_utility_panel()
                                                                     {
@@ -1569,7 +1577,7 @@ impl Render for EditorView {
                                     this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
                                 let max_w =
                                     this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
-                                let new_width = new_width.clamp(min_w, max_w);
+                                let new_width = clamp_resize_dimension(new_width, min_w, max_w);
                                 this.set_active_sidebar_custom_width(new_width);
                                 this.set_sidebar_width_immediately(new_width);
                                 cx.notify();
@@ -1583,9 +1591,17 @@ impl Render for EditorView {
                                 );
                                 let new_size = if this.should_render_bottom_chat_panel() {
                                     let window_height = f32::from(window.bounds().size.height);
-                                    (window_height - f32::from(event.position.y)).clamp(min_w, max_w)
+                                    clamp_resize_dimension(
+                                        window_height - f32::from(event.position.y),
+                                        min_w,
+                                        max_w,
+                                    )
                                 } else {
-                                    (window_width - f32::from(event.position.x)).clamp(min_w, max_w)
+                                    clamp_resize_dimension(
+                                        window_width - f32::from(event.position.x),
+                                        min_w,
+                                        max_w,
+                                    )
                                 };
                                 if let Some(panel) = this.active_resizable_utility_panel() {
                                     this.set_utility_panel_custom_width_for(panel, Some(new_size));

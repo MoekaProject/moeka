@@ -205,6 +205,8 @@ mod tests {
             letter_spacing: 0.5,
             sidebar_sort_mode: "created_desc".to_string(),
             outline_rail_visible: true,
+            show_whitespace: false,
+            highlight_line_background: false,
             date_time_format: "%Y-%m-%d %H:%M".to_string(),
             starred_files: Vec::new(),
         }
