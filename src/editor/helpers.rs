@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use gpui::{
     Bounds, Font, FontStyle, FontWeight, Hsla, LineLayout, PaintQuad, Pixels, ShapedGlyph,
-    ShapedRun, SharedString, StrikethroughStyle, TextRun, Window, WrappedLine, WrappedLineLayout,
-    fill, point, px,
+    ShapedRun, SharedString, StrikethroughStyle, TextRun, UnderlineStyle, Window, WrappedLine,
+    WrappedLineLayout, fill, point, px,
 };
 
 use syntect::easy::HighlightLines;
@@ -2756,6 +2756,195 @@ mod tests {
     }
 
     #[test]
+    fn folded_underline_uses_text_run_underline() {
+        let line = "use ++line++ here";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let active_ranges: [Range<usize>; 0] = [];
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &active_ranges,
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &active_ranges,
+            false,
+            prefix_collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font("Kaiti SC"),
+            0,
+            16.0,
+            &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            None,
+            false,
+        );
+
+        assert_eq!(display_text, "use line here");
+        assert!(runs.iter().any(|run| run.underline.is_some()));
+    }
+
+    #[test]
+    fn folded_callout_marker_uses_emoji_replacement() {
+        let line = "> [!TIP] Use it";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let (display_text, _, _, _) = build_display_text(
+            line,
+            &decoration,
+            &[],
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+
+        assert_eq!(display_text, "💡 Use it");
+
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &[],
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &[],
+            false,
+            prefix_collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font("Kaiti SC"),
+            0,
+            16.0,
+            &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            None,
+            false,
+        );
+        assert!(
+            runs.iter()
+                .any(|run| run.font.weight == FontWeight::EXTRA_BOLD)
+        );
+    }
+
+    #[test]
+    fn folded_quote_text_uses_normal_text_color() {
+        let line = "> plain quote";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &[],
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &[],
+            false,
+            prefix_collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font("Kaiti SC"),
+            0,
+            16.0,
+            &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            None,
+            false,
+        );
+
+        assert_eq!(display_text, "plain quote");
+        assert!(runs.iter().any(|run| run.color == theme.text_primary));
+        assert!(runs.iter().all(|run| run.color != theme.syntax_marker));
+    }
+
+    #[test]
     fn emoji_shortcode_folds_into_unicode_display_text() {
         let line = "launch :rocket: now";
         let decoration = markdown::parse_decorations(line)
@@ -4345,6 +4534,7 @@ pub(crate) fn build_text_runs_for_display(
     let mut buf_font_styles: Vec<FontStyle> = vec![FontStyle::Normal; buf_len];
     let mut buf_bg_colors: Vec<Option<Hsla>> = vec![None; buf_len];
     let mut buf_strikethroughs: Vec<bool> = vec![false; buf_len];
+    let mut buf_underlines: Vec<bool> = vec![false; buf_len];
     let mut buf_font_roles: Vec<FontRole> = vec![FontRole::BodyLatin; buf_len];
     let mut assign_font_roles =
         |range: Range<usize>, latin_role: FontRole, non_latin_role: FontRole| {
@@ -4458,11 +4648,6 @@ pub(crate) fn build_text_runs_for_display(
                 *w = FontWeight::BOLD;
             }
         }
-        BlockType::Blockquote => {
-            for c in buf_colors.iter_mut() {
-                *c = theme.syntax_marker;
-            }
-        }
         BlockType::Table => {
             if decoration
                 .table_info
@@ -4532,6 +4717,9 @@ pub(crate) fn build_text_runs_for_display(
                 InlineKind::Strikethrough => {
                     buf_colors[i] = theme.strikethrough;
                     buf_strikethroughs[i] = true;
+                }
+                InlineKind::Underline => {
+                    buf_underlines[i] = true;
                 }
                 InlineKind::InlineCode => {
                     buf_colors[i] = theme.inline_code;
@@ -4674,6 +4862,7 @@ pub(crate) fn build_text_runs_for_display(
     let mut font_styles: Vec<FontStyle> = Vec::with_capacity(disp_len);
     let mut bg_colors: Vec<Option<Hsla>> = Vec::with_capacity(disp_len);
     let mut strikethroughs: Vec<bool> = Vec::with_capacity(disp_len);
+    let mut underlines: Vec<bool> = Vec::with_capacity(disp_len);
     let mut font_roles: Vec<FontRole> = Vec::with_capacity(disp_len);
 
     for i in 0..disp_len {
@@ -4688,6 +4877,7 @@ pub(crate) fn build_text_runs_for_display(
         font_styles.push(buf_font_styles[buf_idx]);
         bg_colors.push(buf_bg_colors[buf_idx]);
         strikethroughs.push(buf_strikethroughs[buf_idx]);
+        underlines.push(buf_underlines[buf_idx]);
         font_roles.push(buf_font_roles[buf_idx]);
     }
 
@@ -4766,6 +4956,7 @@ pub(crate) fn build_text_runs_for_display(
         let style = font_styles[run_start];
         let bg = bg_colors[run_start];
         let strike = strikethroughs[run_start];
+        let underline = underlines[run_start];
 
         let mut run_end = run_start + 1;
         while run_end < disp_len
@@ -4773,6 +4964,8 @@ pub(crate) fn build_text_runs_for_display(
             && weights[run_end] == weight
             && font_styles[run_end] == style
             && bg_colors[run_end] == bg
+            && strikethroughs[run_end] == strike
+            && underlines[run_end] == underline
             && font_roles[run_end] == font_roles[run_start]
         {
             run_end += 1;
@@ -4799,7 +4992,15 @@ pub(crate) fn build_text_runs_for_display(
             font,
             color,
             background_color: bg,
-            underline: None,
+            underline: if underline {
+                Some(UnderlineStyle {
+                    thickness: px(1.0),
+                    color: Some(color),
+                    wavy: false,
+                })
+            } else {
+                None
+            },
             strikethrough: if strike {
                 Some(StrikethroughStyle {
                     thickness: px(1.0),

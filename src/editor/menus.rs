@@ -347,6 +347,7 @@ impl EditorView {
             FormatMenuAction::Strikethrough => {
                 self.t(crate::i18n::TextKey::Strikethrough).to_string()
             }
+            FormatMenuAction::Underline => self.extra_format_action_label(action).to_string(),
             FormatMenuAction::InlineCode => self.t(crate::i18n::TextKey::InlineCode).to_string(),
             FormatMenuAction::Highlight => self.extra_format_action_label(action).to_string(),
             FormatMenuAction::CodeBlock => self.t(crate::i18n::TextKey::CodeBlock).to_string(),
@@ -366,7 +367,8 @@ impl EditorView {
             FormatMenuAction::DateTime => self.t(crate::i18n::TextKey::InsertDateTime).to_string(),
             FormatMenuAction::Superscript
             | FormatMenuAction::Subscript
-            | FormatMenuAction::Footnote => self.extra_format_action_label(action).to_string(),
+            | FormatMenuAction::Footnote
+            | FormatMenuAction::CalloutTip => self.extra_format_action_label(action).to_string(),
             FormatMenuAction::EditImageDescription => {
                 self.t(crate::i18n::TextKey::EditDescription).to_string()
             }
@@ -382,23 +384,29 @@ impl EditorView {
         match self.ui_language {
             UiLanguage::ChineseSimplified => match action {
                 FormatMenuAction::Highlight => "高亮",
+                FormatMenuAction::Underline => "下划线",
                 FormatMenuAction::Superscript => "上标",
                 FormatMenuAction::Subscript => "下标",
                 FormatMenuAction::Footnote => "脚注",
+                FormatMenuAction::CalloutTip => "提示块",
                 _ => "",
             },
             UiLanguage::ChineseTraditional => match action {
                 FormatMenuAction::Highlight => "高亮",
+                FormatMenuAction::Underline => "底線",
                 FormatMenuAction::Superscript => "上標",
                 FormatMenuAction::Subscript => "下標",
                 FormatMenuAction::Footnote => "腳註",
+                FormatMenuAction::CalloutTip => "提示區塊",
                 _ => "",
             },
             _ => match action {
                 FormatMenuAction::Highlight => "Highlight",
+                FormatMenuAction::Underline => "Underline",
                 FormatMenuAction::Superscript => "Superscript",
                 FormatMenuAction::Subscript => "Subscript",
                 FormatMenuAction::Footnote => "Footnote",
+                FormatMenuAction::CalloutTip => "Tip Callout",
                 _ => "",
             },
         }
@@ -594,6 +602,7 @@ impl EditorView {
                 InlineKind::Bold => 2,
                 InlineKind::Italic => 1,
                 InlineKind::Strikethrough => 2,
+                InlineKind::Underline => 2,
                 InlineKind::InlineCode => 1,
                 InlineKind::Link => 0,
                 InlineKind::Image => 0,
@@ -604,6 +613,7 @@ impl EditorView {
                 InlineKind::Bold => Some(FormatMenuAction::Bold),
                 InlineKind::Italic => Some(FormatMenuAction::Italic),
                 InlineKind::Strikethrough => Some(FormatMenuAction::Strikethrough),
+                InlineKind::Underline => Some(FormatMenuAction::Underline),
                 InlineKind::InlineCode => Some(FormatMenuAction::InlineCode),
                 InlineKind::Link => Some(FormatMenuAction::Link),
                 InlineKind::Image => Some(FormatMenuAction::Image),
@@ -1140,6 +1150,11 @@ impl EditorView {
                 self.apply_wrap("~~", "~~");
                 self.pause_blinking(cx);
             }
+            FormatMenuAction::Underline => {
+                self.checkpoint();
+                self.apply_wrap("++", "++");
+                self.pause_blinking(cx);
+            }
             FormatMenuAction::InlineCode => {
                 self.checkpoint();
                 self.apply_wrap("`", "`");
@@ -1262,6 +1277,11 @@ impl EditorView {
                 }
                 self.reparse();
                 self.scroll_to_cursor();
+                self.pause_blinking(cx);
+            }
+            FormatMenuAction::CalloutTip => {
+                self.checkpoint();
+                self.toggle_current_line_prefix("> [!TIP] ");
                 self.pause_blinking(cx);
             }
             FormatMenuAction::EditImageDescription => {
@@ -2606,7 +2626,7 @@ impl EditorView {
                 (
                     self.t(crate::i18n::TextKey::Heading).to_string(),
                     Some(HEADING_1_SVG_PATH),
-                    None,
+                    Some("#"),
                     FormatMenuAction::Heading1,
                 ),
                 (
@@ -2626,6 +2646,12 @@ impl EditorView {
                     Some(FMT_STRIKETHROUGH_SVG),
                     Some("⌘⇧S"),
                     FormatMenuAction::Strikethrough,
+                ),
+                (
+                    self.format_action_label(FormatMenuAction::Underline),
+                    Some(FMT_UNDERLINE_SVG),
+                    Some("++"),
+                    FormatMenuAction::Underline,
                 ),
                 (
                     self.format_action_label(FormatMenuAction::InlineCode),
@@ -2717,9 +2743,16 @@ impl EditorView {
             (
                 self.format_action_label(FormatMenuAction::DateTime),
                 "date time now today timestamp calendar",
-                None,
-                None,
+                Some(FMT_DATE_TIME_SVG),
+                Some("now"),
                 FormatMenuAction::DateTime,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::CalloutTip),
+                "tip callout alert admonition quote",
+                Some(FMT_CALLOUT_TIP_SVG),
+                Some("> [!TIP]"),
+                FormatMenuAction::CalloutTip,
             ),
             (
                 self.format_action_label(FormatMenuAction::WikiLink),
@@ -2849,24 +2882,40 @@ impl EditorView {
 
         items.push(self.render_context_menu_separator());
 
-        for (label, shortcut, action) in [
+        for (label, icon, shortcut, action) in [
             (
                 self.format_action_label(FormatMenuAction::Superscript),
+                Some(FMT_SUPERSCRIPT_SVG),
                 Some("^text^"),
                 FormatMenuAction::Superscript,
             ),
             (
                 self.format_action_label(FormatMenuAction::Subscript),
+                Some(FMT_SUBSCRIPT_SVG),
                 Some("~text~"),
                 FormatMenuAction::Subscript,
             ),
             (
                 self.format_action_label(FormatMenuAction::Footnote),
+                Some(FMT_FOOTNOTE_SVG),
                 Some("[^note]"),
                 FormatMenuAction::Footnote,
             ),
             (
+                self.format_action_label(FormatMenuAction::Underline),
+                Some(FMT_UNDERLINE_SVG),
+                Some("++text++"),
+                FormatMenuAction::Underline,
+            ),
+            (
+                self.format_action_label(FormatMenuAction::CalloutTip),
+                Some(FMT_CALLOUT_TIP_SVG),
+                Some("> [!TIP]"),
+                FormatMenuAction::CalloutTip,
+            ),
+            (
                 self.format_action_label(FormatMenuAction::Highlight),
+                Some(FMT_HIGHLIGHT_SVG),
                 Some("==text=="),
                 FormatMenuAction::Highlight,
             ),
@@ -2874,7 +2923,7 @@ impl EditorView {
             let is_active = active_actions.contains(&action);
             items.push(self.render_format_context_menu_item(
                 &label,
-                None,
+                icon,
                 shortcut,
                 false,
                 is_active,

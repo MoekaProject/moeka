@@ -512,6 +512,7 @@ pub(crate) enum FormatMenuAction {
     Bold,
     Italic,
     Strikethrough,
+    Underline,
     InlineCode,
     Highlight,
     CodeBlock,
@@ -528,6 +529,7 @@ pub(crate) enum FormatMenuAction {
     Superscript,
     Subscript,
     Footnote,
+    CalloutTip,
 }
 
 #[derive(Clone)]
@@ -1107,6 +1109,8 @@ fn reference_definition_label(trimmed: &str) -> Option<&str> {
 
 fn markdown_decoration_is_plain_text(decoration: &LineDecoration) -> bool {
     matches!(decoration.block_type, BlockType::Normal)
+        && decoration.block_contexts.is_empty()
+        && decoration.callout_kind.is_none()
         && decoration.inline_spans.is_empty()
         && decoration.diff_added_spans.is_empty()
         && decoration.diff_removed_spans.is_empty()
@@ -6292,6 +6296,7 @@ impl EditorView {
                         crate::markdown::InlineKind::Bold => 2,
                         crate::markdown::InlineKind::Italic => 1,
                         crate::markdown::InlineKind::Strikethrough => 2,
+                        crate::markdown::InlineKind::Underline => 2,
                         crate::markdown::InlineKind::InlineCode => 1,
                         _ => return None,
                     };
@@ -6317,6 +6322,7 @@ impl EditorView {
                     crate::markdown::InlineKind::Bold => ("**", "**"),
                     crate::markdown::InlineKind::Italic => ("*", "*"),
                     crate::markdown::InlineKind::Strikethrough => ("~~", "~~"),
+                    crate::markdown::InlineKind::Underline => ("++", "++"),
                     crate::markdown::InlineKind::InlineCode => ("`", "`"),
                     _ => unreachable!(),
                 };

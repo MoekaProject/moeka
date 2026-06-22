@@ -10,7 +10,7 @@ use gpui::{
     point, px, quad, relative, size,
 };
 
-use crate::markdown::BlockType;
+use crate::markdown::{BlockType, CalloutKind};
 
 use super::helpers;
 use super::*;
@@ -33,6 +33,7 @@ pub(crate) struct EditorPrepaintState {
     inline_diff_gutter_bars: Vec<(Bounds<Pixels>, Hsla)>,
     phantom_text_lines: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
     line_highlight: Option<PaintQuad>,
+    quote_block_bgs: Vec<PaintQuad>,
     code_block_bgs: Vec<PaintQuad>,
     unordered_list_markers: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
     marked_underlines: Vec<PaintQuad>,
@@ -346,6 +347,33 @@ fn push_diff_inline_highlight_quads(
                 BorderStyle::default(),
             ));
         }
+    }
+}
+
+fn quote_block_colors(editor: &EditorView, kind: Option<CalloutKind>) -> (Hsla, Hsla) {
+    let styles = &editor.styles.quote_block;
+    match kind {
+        Some(CalloutKind::Note) => (
+            styles.quote_block_note_bg,
+            styles.quote_block_note_border_color,
+        ),
+        Some(CalloutKind::Tip) => (
+            styles.quote_block_tip_bg,
+            styles.quote_block_tip_border_color,
+        ),
+        Some(CalloutKind::Important) => (
+            styles.quote_block_important_bg,
+            styles.quote_block_important_border_color,
+        ),
+        Some(CalloutKind::Warning) => (
+            styles.quote_block_warning_bg,
+            styles.quote_block_warning_border_color,
+        ),
+        Some(CalloutKind::Caution) => (
+            styles.quote_block_caution_bg,
+            styles.quote_block_caution_border_color,
+        ),
+        None => (styles.quote_block_bg, styles.quote_block_border_color),
     }
 }
 
@@ -1079,6 +1107,7 @@ impl Element for EditorElement {
         let mut selection_quads = Vec::new();
         let mut search_match_quads: Vec<PaintQuad> = Vec::new();
         let mut line_highlight = None;
+        let mut quote_block_bgs = Vec::new();
         let mut code_block_bgs = Vec::new();
         let mut whitespace_dots: Vec<PaintQuad> = Vec::new();
         let mut cursor_quads: Vec<PaintQuad> = Vec::new();
@@ -1738,6 +1767,7 @@ impl Element for EditorElement {
                             crate::markdown::InlineKind::Bold => 2,
                             crate::markdown::InlineKind::Italic => 1,
                             crate::markdown::InlineKind::Strikethrough => 2,
+                            crate::markdown::InlineKind::Underline => 2,
                             crate::markdown::InlineKind::InlineCode => 1,
                             crate::markdown::InlineKind::Link
                             | crate::markdown::InlineKind::Image => {
@@ -2748,13 +2778,39 @@ impl Element for EditorElement {
                 };
             let letter_spacing = editor_styles.editor_letter_spacing_px;
 
+            let is_quote_line = editor.is_quote_line(line_idx);
+            let quote_styles = &editor.styles.quote_block;
+            let quote_border_width = if is_quote_line {
+                editor.scaled(quote_styles.quote_block_border_width_px)
+            } else {
+                0.0
+            };
+            let quote_padding_left = if is_quote_line {
+                editor.scaled(quote_styles.quote_block_padding_left_px)
+            } else {
+                0.0
+            };
+            let quote_padding_right = if is_quote_line {
+                editor.scaled(quote_styles.quote_block_padding_right_px)
+            } else {
+                0.0
+            };
+            let quote_inner_left_padding = quote_border_width + quote_padding_left;
+            let quote_horizontal_padding = quote_inner_left_padding + quote_padding_right;
+
             let base_wrap_width =
                 if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence)
                     || is_front_matter_line
                 {
                     (text_width
+                        - quote_horizontal_padding
                         - editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
                         - editor.scaled(editor.styles.code_block.code_block_wrap_right_padding_px))
+                    .max(editor.scaled(80.0))
+                } else if is_quote_line {
+                    (text_width
+                        - quote_horizontal_padding
+                        - editor.scaled(editor.styles.editor.editor_wrap_right_padding_px))
                     .max(editor.scaled(80.0))
                 } else {
                     wrap_width
@@ -2976,7 +3032,10 @@ impl Element for EditorElement {
                 {
                     editor_left
                         + editor.padding_left()
+                        + quote_inner_left_padding
                         + editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
+                } else if is_quote_line {
+                    editor_left + editor.padding_left() + quote_inner_left_padding
                 } else {
                     editor_left + editor.padding_left()
                 };
@@ -3134,6 +3193,37 @@ impl Element for EditorElement {
                     editor.styles.editor.editor_whitespace_dot_color,
                     whitespace_skip_prefix_bytes,
                 );
+            }
+
+            if is_quote_line {
+                let group_start = editor.quote_group_start(line_idx);
+                let callout_kind = editor
+                    .decorations
+                    .get(group_start)
+                    .and_then(|decoration| decoration.callout_kind);
+                let (quote_bg, quote_border_color) = quote_block_colors(editor, callout_kind);
+                let background_left = editor_left + editor.padding_left();
+                let background_width = text_width.max(0.0);
+                if background_width > 0.0 {
+                    quote_block_bgs.push(quad(
+                        Bounds::new(
+                            point(px(background_left), px(line_top)),
+                            size(px(background_width), px(total_line_height)),
+                        ),
+                        Corners::all(px(editor.scaled(quote_styles.quote_block_radius_px))),
+                        quote_bg,
+                        px(0.0),
+                        gpui::transparent_black(),
+                        BorderStyle::default(),
+                    ));
+                    quote_block_bgs.push(fill(
+                        Bounds::new(
+                            point(px(background_left), px(line_top)),
+                            size(px(quote_border_width), px(total_line_height)),
+                        ),
+                        quote_border_color,
+                    ));
+                }
             }
 
             // Code block-like background
@@ -4081,32 +4171,6 @@ impl Element for EditorElement {
                         ),
                         icon_path,
                         gutter_styles.gutter_heading_color,
-                    ));
-                }
-                BlockType::Blockquote
-                    if line_idx == 0
-                        || !matches!(
-                            decorations[line_idx - 1].block_type,
-                            BlockType::Blockquote
-                        ) =>
-                {
-                    let gutter_styles = &editor.styles.gutter;
-                    let icon_size = editor.scaled(gutter_styles.gutter_blockquote_icon_size_px);
-                    let icon_x = if editor.active_tab_is_non_markdown_text() {
-                        editor.gutter_icon_x(editor_left, icon_size)
-                    } else {
-                        editor_left + editor.padding_left()
-                            - icon_size
-                            - editor.scaled(gutter_styles.gutter_blockquote_icon_offset_px)
-                    };
-                    let icon_y = gutter_center_y - 1.0 - icon_size / 2.0;
-                    gutter_svgs.push((
-                        Bounds::new(
-                            point(px(icon_x), px(icon_y)),
-                            size(px(icon_size), px(icon_size)),
-                        ),
-                        COMMENT_SVG_PATH,
-                        gutter_styles.gutter_blockquote_icon_color,
                     ));
                 }
                 _ => {}
@@ -6132,6 +6196,7 @@ impl Element for EditorElement {
             inline_diff_gutter_bars,
             phantom_text_lines,
             line_highlight,
+            quote_block_bgs,
             code_block_bgs,
             unordered_list_markers,
             marked_underlines,
@@ -6213,6 +6278,10 @@ impl Element for EditorElement {
                     }
                 });
             });
+        }
+
+        for quad in prepaint.quote_block_bgs.drain(..) {
+            window.paint_quad(quad);
         }
 
         for quad in prepaint.code_block_bgs.drain(..) {

@@ -1866,6 +1866,7 @@ impl EditorView {
                         crate::markdown::InlineKind::Bold => 2,
                         crate::markdown::InlineKind::Italic => 1,
                         crate::markdown::InlineKind::Strikethrough => 2,
+                        crate::markdown::InlineKind::Underline => 2,
                         crate::markdown::InlineKind::InlineCode => 1,
                         crate::markdown::InlineKind::Link | crate::markdown::InlineKind::Image => {
                             if span.kind == crate::markdown::InlineKind::Image {

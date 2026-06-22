@@ -107,10 +107,6 @@ impl EditorView {
             .max(gutter_styles.gutter_heading_h4_icon_size_px);
         self.scaled(
             (gutter_styles.gutter_fold_icon_size_px + gutter_styles.gutter_fold_icon_offset_px)
-                .max(
-                    gutter_styles.gutter_blockquote_icon_size_px
-                        + gutter_styles.gutter_blockquote_icon_offset_px,
-                )
                 .max(max_heading_icon_size + gutter_styles.gutter_heading_icon_offset_px),
         )
     }
@@ -250,6 +246,18 @@ impl EditorView {
             return (0.0, 0.0);
         };
 
+        if self.is_quote_line(line) {
+            let top = self
+                .is_quote_group_start(line)
+                .then(|| self.scaled(self.styles.quote_block.quote_block_padding_top_px))
+                .unwrap_or(0.0);
+            let bottom = self
+                .is_quote_group_end(line)
+                .then(|| self.scaled(self.styles.quote_block.quote_block_padding_bottom_px))
+                .unwrap_or(0.0);
+            return (top, bottom);
+        }
+
         match block_type {
             BlockType::Heading(_) if self.is_heading_line(line) => (
                 self.scaled(self.styles.editor.editor_heading_padding_top_px),
@@ -271,6 +279,32 @@ impl EditorView {
             }
             _ => (0.0, 0.0),
         }
+    }
+
+    pub(crate) fn is_quote_line(&self, line: usize) -> bool {
+        self.decorations.get(line).is_some_and(|decoration| {
+            decoration.block_type == BlockType::Blockquote
+                || decoration
+                    .block_contexts
+                    .contains(&crate::markdown::BlockContext::Blockquote)
+        })
+    }
+
+    pub(crate) fn is_quote_group_start(&self, line: usize) -> bool {
+        self.is_quote_line(line) && (line == 0 || !self.is_quote_line(line - 1))
+    }
+
+    pub(crate) fn is_quote_group_end(&self, line: usize) -> bool {
+        self.is_quote_line(line)
+            && (line + 1 >= self.buffer.line_count() || !self.is_quote_line(line + 1))
+    }
+
+    pub(crate) fn quote_group_start(&self, line: usize) -> usize {
+        let mut start = line;
+        while start > 0 && self.is_quote_line(start - 1) {
+            start -= 1;
+        }
+        start
     }
 
     fn current_visual_height_for_line(&self, line: usize) -> f32 {

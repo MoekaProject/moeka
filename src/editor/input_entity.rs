@@ -169,6 +169,7 @@ impl EntityInputHandler for EditorView {
             let wrap = match new_text {
                 "*" => Some(("**", "**")),
                 "~" => Some(("~~", "~~")),
+                "+" => Some(("++", "++")),
                 "`" => Some(("`", "`")),
                 _ => None,
             };
@@ -217,7 +218,8 @@ impl EntityInputHandler for EditorView {
             }
 
             if new_text != "["
-                && let Some((open, close)) = input_ime::paired_delimiter(new_text)
+                && let Some((open, close)) =
+                    input_ime::paired_delimiter_at(self.buffer.text(), range.start, new_text)
             {
                 let mut paired_text = String::with_capacity(open.len() + close.len());
                 paired_text.push_str(open);

@@ -35,6 +35,82 @@ pub(crate) fn paired_delimiter(input: &str) -> Option<(&'static str, &'static st
     }
 }
 
+pub(crate) fn paired_delimiter_at(
+    text: &str,
+    cursor_offset: usize,
+    input: &str,
+) -> Option<(&'static str, &'static str)> {
+    let previous = text[..cursor_offset].chars().next_back();
+    let next = text[cursor_offset..].chars().next();
+    let at_line_start = text[..cursor_offset]
+        .rsplit_once('\n')
+        .map(|(_, line)| line.trim().is_empty())
+        .unwrap_or_else(|| text[..cursor_offset].trim().is_empty());
+    let previous_is_escape = previous == Some('\\');
+    let next_is_word = next.is_some_and(|ch| ch.is_alphanumeric() || ch == '_');
+    let previous_is_word = previous.is_some_and(|ch| ch.is_alphanumeric() || ch == '_');
+
+    match input {
+        "`" => {
+            if previous_is_escape {
+                None
+            } else {
+                Some(("`", "`"))
+            }
+        }
+        "*" => {
+            if previous_is_escape || next == Some('*') {
+                None
+            } else {
+                Some(("*", "*"))
+            }
+        }
+        "_" => {
+            if previous_is_escape || previous_is_word || next_is_word || next == Some('_') {
+                None
+            } else {
+                Some(("_", "_"))
+            }
+        }
+        "~" => {
+            if previous_is_escape || (previous == Some('~') && next == Some('~')) {
+                None
+            } else {
+                Some(("~", "~"))
+            }
+        }
+        "+" => {
+            if previous_is_escape || (previous == Some('+') && next == Some('+')) {
+                None
+            } else {
+                Some(("+", "+"))
+            }
+        }
+        "=" => {
+            if previous_is_escape || (previous == Some('=') && next == Some('=')) {
+                None
+            } else {
+                Some(("=", "="))
+            }
+        }
+        "<" => {
+            if previous_is_escape || at_line_start || next_is_word {
+                None
+            } else {
+                Some(("<", ">"))
+            }
+        }
+        "'" | "\"" => {
+            if previous_is_escape || previous_is_word || next_is_word {
+                None
+            } else {
+                paired_delimiter(input)
+            }
+        }
+        _ => paired_delimiter(input),
+    }
+}
+
 pub(crate) fn code_block_autocomplete_range(
     text: &str,
     cursor_offset: usize,
@@ -284,7 +360,7 @@ impl EditorView {
 mod tests {
     use crate::buffer::Buffer;
 
-    use super::{clamp_ime_offset, code_block_autocomplete_range};
+    use super::{clamp_ime_offset, code_block_autocomplete_range, paired_delimiter_at};
 
     #[test]
     fn third_backtick_triggers_code_block_autocomplete() {
@@ -294,6 +370,39 @@ mod tests {
     #[test]
     fn fourth_backtick_does_not_retrigger_code_block_autocomplete() {
         assert_eq!(code_block_autocomplete_range("```", 3, "`"), None);
+    }
+
+    #[test]
+    fn paired_delimiter_at_handles_markdown_backticks_and_emphasis() {
+        assert_eq!(paired_delimiter_at("", 0, "`"), Some(("`", "`")));
+        assert_eq!(paired_delimiter_at("\\", 1, "`"), None);
+        assert_eq!(paired_delimiter_at("foo", 3, "_"), None);
+        assert_eq!(paired_delimiter_at("foo ", 4, "_"), Some(("_", "_")));
+        assert_eq!(paired_delimiter_at("*", 1, "*"), Some(("*", "*")));
+    }
+
+    #[test]
+    fn paired_delimiter_at_avoids_commonmark_autolink_and_html_conflicts() {
+        assert_eq!(paired_delimiter_at("", 0, "<"), None);
+        assert_eq!(paired_delimiter_at("see ", 4, "<"), Some(("<", ">")));
+        assert_eq!(paired_delimiter_at("see ", 4, "'"), Some(("'", "'")));
+        assert_eq!(paired_delimiter_at("word", 4, "'"), None);
+    }
+
+    #[test]
+    fn paired_delimiter_at_covers_markdown_extension_delimiters() {
+        assert_eq!(paired_delimiter_at("", 0, "("), Some(("(", ")")));
+        assert_eq!(paired_delimiter_at("", 0, "{"), Some(("{", "}")));
+        assert_eq!(paired_delimiter_at("", 0, "~"), Some(("~", "~")));
+        assert_eq!(paired_delimiter_at("~", 1, "~"), Some(("~", "~")));
+        assert_eq!(paired_delimiter_at("~~", 1, "~"), None);
+        assert_eq!(paired_delimiter_at("", 0, "+"), Some(("+", "+")));
+        assert_eq!(paired_delimiter_at("+", 1, "+"), Some(("+", "+")));
+        assert_eq!(paired_delimiter_at("++", 1, "+"), None);
+        assert_eq!(paired_delimiter_at("", 0, "="), Some(("=", "=")));
+        assert_eq!(paired_delimiter_at("=", 1, "="), Some(("=", "=")));
+        assert_eq!(paired_delimiter_at("==", 1, "="), None);
+        assert_eq!(paired_delimiter_at("", 0, "【"), Some(("【", "】")));
     }
 
     #[test]

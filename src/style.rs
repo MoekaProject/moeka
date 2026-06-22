@@ -28,6 +28,7 @@ pub struct Styles {
     pub tooltip: TooltipStyles,
     pub cursor: CursorStyles,
     pub code_block: CodeBlockStyles,
+    pub quote_block: QuoteBlockStyles,
     pub wiki_link: WikiLinkStyles,
     pub checkbox: CheckboxStyles,
     pub table: TableStyles,
@@ -621,6 +622,29 @@ pub struct CodeBlockStyles {
     pub code_block_copy_button_copied_border_color: Hsla,
 }
 
+// ── Quote Block ─────────────────────────────────────────────────────
+
+pub struct QuoteBlockStyles {
+    pub quote_block_border_width_px: f32,
+    pub quote_block_radius_px: f32,
+    pub quote_block_padding_top_px: f32,
+    pub quote_block_padding_bottom_px: f32,
+    pub quote_block_padding_left_px: f32,
+    pub quote_block_padding_right_px: f32,
+    pub quote_block_bg: Hsla,
+    pub quote_block_border_color: Hsla,
+    pub quote_block_note_bg: Hsla,
+    pub quote_block_note_border_color: Hsla,
+    pub quote_block_tip_bg: Hsla,
+    pub quote_block_tip_border_color: Hsla,
+    pub quote_block_important_bg: Hsla,
+    pub quote_block_important_border_color: Hsla,
+    pub quote_block_warning_bg: Hsla,
+    pub quote_block_warning_border_color: Hsla,
+    pub quote_block_caution_bg: Hsla,
+    pub quote_block_caution_border_color: Hsla,
+}
+
 // ── Wiki Link ───────────────────────────────────────────────────────
 
 pub struct WikiLinkStyles {
@@ -733,10 +757,6 @@ pub struct GutterStyles {
     pub gutter_heading_icon_gap_px: f32,
     pub gutter_heading_icon_offset_px: f32,
     pub gutter_heading_max_total_width_px: f32,
-    // Blockquote icon
-    pub gutter_blockquote_icon_size_px: f32,
-    pub gutter_blockquote_icon_color: Hsla,
-    pub gutter_blockquote_icon_offset_px: f32,
 }
 
 // ── Image Preview ───────────────────────────────────────────────────
@@ -1623,6 +1643,67 @@ impl Styles {
                 code_block_copy_button_copied_text_color: theme.text_bright,
                 code_block_copy_button_copied_border_color: with_alpha(theme.text_accent, 0.45),
             },
+            quote_block: QuoteBlockStyles {
+                quote_block_border_width_px: 4.0,
+                quote_block_radius_px: 0.0,
+                quote_block_padding_top_px: 20.0,
+                quote_block_padding_bottom_px: 20.0,
+                quote_block_padding_left_px: 20.0,
+                quote_block_padding_right_px: 20.0,
+                quote_block_bg: with_alpha(
+                    theme.text_secondary,
+                    if is_light { 0.05 } else { 0.055 },
+                ),
+                quote_block_border_color: with_alpha(
+                    theme.text_secondary,
+                    if is_light { 0.72 } else { 0.48 },
+                ),
+                quote_block_note_bg: with_alpha(
+                    crate::hex_hsla!("#0969DA"),
+                    if is_light { 0.10 } else { 0.08 },
+                ),
+                quote_block_note_border_color: if is_light {
+                    crate::hex_hsla!("#0969DA")
+                } else {
+                    with_alpha(crate::hex_hsla!("#58A6FF"), 0.58)
+                },
+                quote_block_tip_bg: with_alpha(
+                    crate::hex_hsla!("#2DA44E"),
+                    if is_light { 0.12 } else { 0.08 },
+                ),
+                quote_block_tip_border_color: if is_light {
+                    crate::hex_hsla!("#116329")
+                } else {
+                    with_alpha(crate::hex_hsla!("#3FB950"), 0.54)
+                },
+                quote_block_important_bg: with_alpha(
+                    crate::hex_hsla!("#8250DF"),
+                    if is_light { 0.12 } else { 0.08 },
+                ),
+                quote_block_important_border_color: if is_light {
+                    crate::hex_hsla!("#8250DF")
+                } else {
+                    with_alpha(crate::hex_hsla!("#A371F7"), 0.52)
+                },
+                quote_block_warning_bg: with_alpha(
+                    crate::hex_hsla!("#D29922"),
+                    if is_light { 0.14 } else { 0.09 },
+                ),
+                quote_block_warning_border_color: if is_light {
+                    crate::hex_hsla!("#9A6700")
+                } else {
+                    with_alpha(crate::hex_hsla!("#D29922"), 0.52)
+                },
+                quote_block_caution_bg: with_alpha(
+                    crate::hex_hsla!("#CF222E"),
+                    if is_light { 0.10 } else { 0.08 },
+                ),
+                quote_block_caution_border_color: if is_light {
+                    crate::hex_hsla!("#CF222E")
+                } else {
+                    with_alpha(crate::hex_hsla!("#F85149"), 0.52)
+                },
+            },
             wiki_link: WikiLinkStyles {
                 wiki_link_text_color: theme.inline_code,
                 wiki_link_text_weight: FontWeight::BOLD,
@@ -1736,9 +1817,6 @@ impl Styles {
                 gutter_heading_icon_gap_px: 0.0,
                 gutter_heading_icon_offset_px: 10.0,
                 gutter_heading_max_total_width_px: 56.0,
-                gutter_blockquote_icon_size_px: 16.0,
-                gutter_blockquote_icon_color: theme.border_decorative,
-                gutter_blockquote_icon_offset_px: 10.0,
             },
             image_preview: ImagePreviewStyles {
                 image_border_radius_px: 0.0,
@@ -2052,5 +2130,35 @@ impl Styles {
                 settings_theme_option_border_color: theme.border_primary,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Styles;
+    use crate::theme::Theme;
+
+    #[test]
+    fn quote_block_padding_matches_code_block_left_padding() {
+        let theme = Theme::one_dark();
+        let styles = Styles::from_theme(&theme, &theme);
+
+        assert_eq!(styles.quote_block.quote_block_border_width_px, 4.0);
+        assert_eq!(
+            styles.quote_block.quote_block_padding_top_px,
+            styles.code_block.code_block_text_padding_left_px
+        );
+        assert_eq!(
+            styles.quote_block.quote_block_padding_bottom_px,
+            styles.code_block.code_block_text_padding_left_px
+        );
+        assert_eq!(
+            styles.quote_block.quote_block_padding_left_px,
+            styles.code_block.code_block_text_padding_left_px
+        );
+        assert_eq!(
+            styles.quote_block.quote_block_padding_right_px,
+            styles.code_block.code_block_text_padding_left_px
+        );
     }
 }
