@@ -251,7 +251,7 @@ pub(crate) fn build_display_text(
     front_matter_key_padding_chars: usize,
     superscript_scale_factor: f32,
     subscript_scale_factor: f32,
-    footnote_scale_factor: f32,
+    _footnote_scale_factor: f32,
 ) -> (String, Vec<usize>, Vec<usize>, bool) {
     fn append_mapped_replacement(
         display_text: &mut String,
@@ -398,9 +398,14 @@ pub(crate) fn build_display_text(
         let Some(text) = line_content.get(footnote_reference.collapsed_range.clone()) else {
             continue;
         };
+        let display_text = if decoration.footnote_definition_label.is_some() {
+            text.to_string()
+        } else {
+            scaled_inline_placeholder(text, _footnote_scale_factor)
+        };
         display_replacements.push(DisplayReplacement {
             source_range: footnote_reference.collapsed_range.clone(),
-            display_text: scaled_inline_placeholder(text, footnote_scale_factor),
+            display_text,
             trigger_range: footnote_reference.full_range.clone(),
         });
     }
@@ -1956,7 +1961,7 @@ fn apply_mermaid_block_highlighting(
 mod tests {
     use std::ops::Range;
 
-    use gpui::{FontStyle, FontWeight, font};
+    use gpui::{FontStyle, FontWeight, TextRun, font};
 
     use crate::markdown;
     use crate::theme::Theme;
@@ -1972,6 +1977,58 @@ mod tests {
             monospace: "Menlo",
             body_cjk: "Menlo",
         }
+    }
+
+    fn folded_display_and_runs(line: &str, theme: &Theme) -> (String, Vec<TextRun>) {
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let active_ranges: [Range<usize>; 0] = [];
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &active_ranges,
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &active_ranges,
+            false,
+            prefix_collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font("Kaiti SC"),
+            0,
+            16.0,
+            theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            None,
+            false,
+        );
+        (display_text, runs)
     }
 
     #[test]
@@ -2319,6 +2376,57 @@ mod tests {
     }
 
     #[test]
+    fn folded_link_description_uses_bold_link_text() {
+        let theme = Theme::one_dark();
+        let (display_text, runs) = folded_display_and_runs("[title](https://example.com)", &theme);
+
+        assert_eq!(display_text, "title");
+        assert_eq!(runs.first().map(|run| run.color), Some(theme.link));
+        assert_eq!(
+            runs.first().map(|run| run.font.weight),
+            Some(FontWeight::BOLD)
+        );
+    }
+
+    #[test]
+    fn folded_image_text_uses_plain_text_color() {
+        let theme = Theme::one_dark();
+        let (display_text, runs) = folded_display_and_runs("![alt](image.png)", &theme);
+
+        assert_eq!(display_text, "alt");
+        assert_eq!(runs.first().map(|run| run.color), Some(theme.text_primary));
+        assert_eq!(
+            runs.first().map(|run| run.font.weight),
+            Some(FontWeight::NORMAL)
+        );
+    }
+
+    #[test]
+    fn folded_footnote_source_keeps_superscript_placeholder() {
+        let theme = Theme::one_dark();
+        let (display_text, runs) = folded_display_and_runs("See [^note].", &theme);
+
+        assert!(!display_text.contains("note"));
+        assert!(
+            runs.iter()
+                .any(|run| run.color == gpui::transparent_black())
+        );
+    }
+
+    #[test]
+    fn folded_footnote_target_keeps_label_on_baseline() {
+        let theme = Theme::one_dark();
+        let (display_text, runs) = folded_display_and_runs("[^note]: body", &theme);
+
+        assert_eq!(display_text, "note: body");
+        assert!(runs.iter().any(|run| run.color == theme.text_primary));
+        assert!(
+            runs.iter()
+                .all(|run| run.color != gpui::transparent_black())
+        );
+    }
+
+    #[test]
     fn generated_math_block_preview_renders_svg() {
         let theme = Theme::one_dark();
         let svg = build_generated_block_preview_svg(
@@ -2601,6 +2709,7 @@ mod tests {
             1.0,
         );
         let theme = Theme::one_dark();
+        assert!(!prefix_collapsed);
         let runs = build_text_runs_for_display(
             &display_text,
             line,
@@ -2813,8 +2922,8 @@ mod tests {
     }
 
     #[test]
-    fn folded_callout_marker_uses_emoji_replacement() {
-        let line = "> [!TIP] Use it";
+    fn folded_callout_marker_uses_icon_placeholder() {
+        let line = "> [!WARNING] Use it";
         let decoration = markdown::parse_decorations(line)
             .into_iter()
             .next()
@@ -2835,7 +2944,7 @@ mod tests {
             1.0,
         );
 
-        assert_eq!(display_text, "💡 Use it");
+        assert_eq!(display_text, "     Use it");
 
         let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
             line,
@@ -2881,10 +2990,7 @@ mod tests {
             None,
             false,
         );
-        assert!(
-            runs.iter()
-                .any(|run| run.font.weight == FontWeight::EXTRA_BOLD)
-        );
+        assert!(runs.iter().any(|run| run.font.weight == FontWeight::BOLD));
     }
 
     #[test]
@@ -4708,7 +4814,7 @@ pub(crate) fn build_text_runs_for_display(
             match span.kind {
                 InlineKind::Bold => {
                     buf_colors[i] = theme.bold;
-                    buf_weights[i] = FontWeight::EXTRA_BOLD;
+                    buf_weights[i] = FontWeight::BOLD;
                 }
                 InlineKind::Italic => {
                     buf_colors[i] = theme.text_primary;
@@ -4727,9 +4833,10 @@ pub(crate) fn build_text_runs_for_display(
                 }
                 InlineKind::Link => {
                     buf_colors[i] = theme.link;
+                    buf_weights[i] = FontWeight::BOLD;
                 }
                 InlineKind::Image => {
-                    buf_colors[i] = theme.link;
+                    buf_colors[i] = theme.text_primary;
                 }
             }
         }
@@ -4747,7 +4854,7 @@ pub(crate) fn build_text_runs_for_display(
         for index in start..end {
             buf_bg_colors[index] = Some(theme.highlight_bg);
             buf_colors[index] = theme.bold;
-            buf_weights[index] = FontWeight::EXTRA_BOLD;
+            buf_weights[index] = FontWeight::BOLD;
         }
     }
 
@@ -4772,7 +4879,9 @@ pub(crate) fn build_text_runs_for_display(
     }
 
     for footnote_reference in &decoration.footnote_references {
-        if !active_ranges_intersect(active_ranges, &footnote_reference.full_range) {
+        if decoration.footnote_definition_label.is_none()
+            && !active_ranges_intersect(active_ranges, &footnote_reference.full_range)
+        {
             let start = footnote_reference.collapsed_range.start.min(buf_len);
             let end = footnote_reference.collapsed_range.end.min(buf_len);
             for index in start..end {

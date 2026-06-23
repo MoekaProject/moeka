@@ -769,7 +769,9 @@ impl Render for EditorView {
                                                     .overflow_hidden()
                                                     .flex()
                                                     .flex_col()
-                                                    .child(self.render_active_tab_path_bar(cx))
+                                                    .when(self.active_tab_is_diff(), |this| {
+                                                        this.child(self.render_active_tab_path_bar(cx))
+                                                    })
                                                     .child(
                                                         div()
                                                             .id("editor-pane-content")

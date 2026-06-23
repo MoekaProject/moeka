@@ -1741,7 +1741,7 @@ impl EditorView {
                         move |this, event: &MouseMoveEvent, _window, cx| match hover_behavior {
                             FormatMenuHoverBehavior::None => {}
                             FormatMenuHoverBehavior::ClearSubmenu => {
-                                if this.should_preserve_format_more_submenu(event.position) {
+                                if this.should_preserve_format_submenu(event.position) {
                                     return;
                                 }
                                 if this.context_submenu.take().is_some() {
@@ -1767,10 +1767,12 @@ impl EditorView {
     fn render_format_submenu_trigger_item(
         &self,
         label: &str,
+        icon_path: Option<&'static str>,
+        submenu_kind: ContextMenuKind,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ms = &self.styles.context_menu;
-        let is_open = matches!(self.context_submenu, Some(ContextMenuKind::FormatMore));
+        let is_open = self.context_submenu.as_ref() == Some(&submenu_kind);
         let icon_size = self.scaled(ms.menu_format_icon_size_px);
         let icon_gap = self.scaled(ms.menu_format_icon_gap_px);
         let arrow_size = (icon_size - self.scaled(2.0)).max(self.scaled(10.0));
@@ -1781,6 +1783,7 @@ impl EditorView {
         } else {
             gpui::transparent_black()
         };
+        let icon_shared = icon_path.map(SharedString::from);
 
         div()
             .w_full()
@@ -1806,7 +1809,15 @@ impl EditorView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .flex_none(),
+                            .flex_none()
+                            .when_some(icon_shared, |this, path| {
+                                this.child(
+                                    svg()
+                                        .path(path)
+                                        .size(px(icon_size))
+                                        .text_color(ms.menu_format_icon_color),
+                                )
+                            }),
                     )
                     .child(label.to_string()),
             )
@@ -1816,28 +1827,31 @@ impl EditorView {
                     .size(px(arrow_size))
                     .text_color(ms.menu_shortcut_text_color),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                this.context_submenu_aim = Some(ContextSubmenuAim {
-                    origin: event.position,
-                });
-                this.context_submenu_hovered = false;
-                if !matches!(this.context_submenu, Some(ContextMenuKind::FormatMore)) {
-                    this.context_submenu = Some(ContextMenuKind::FormatMore);
-                    cx.notify();
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+            .on_mouse_move({
+                let submenu_kind = submenu_kind.clone();
+                cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                    this.context_submenu_aim = Some(ContextSubmenuAim {
+                        origin: event.position,
+                    });
+                    this.context_submenu_hovered = false;
+                    if this.context_submenu.as_ref() != Some(&submenu_kind) {
+                        this.context_submenu = Some(submenu_kind.clone());
+                        cx.notify();
+                    }
+                })
+            })
+            .on_mouse_down(MouseButton::Left, {
+                let submenu_kind = submenu_kind.clone();
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     cx.stop_propagation();
                     this.context_submenu_aim = Some(ContextSubmenuAim {
                         origin: event.position,
                     });
                     this.context_submenu_hovered = false;
-                    this.context_submenu = Some(ContextMenuKind::FormatMore);
+                    this.context_submenu = Some(submenu_kind.clone());
                     cx.notify();
-                }),
-            )
+                })
+            })
             .into_any_element()
     }
 
@@ -2506,10 +2520,6 @@ impl EditorView {
             return self.render_image_context_menu(cx);
         }
 
-        if self.current_heading_action().is_some() {
-            return self.render_heading_context_menu(cx);
-        }
-
         let mut items: Vec<AnyElement> = Vec::new();
         let is_slash_menu = self.slash_menu_start.is_some();
         let filter = self.slash_filter.to_lowercase();
@@ -2621,14 +2631,14 @@ impl EditorView {
             }
 
             items.push(self.render_context_menu_separator());
+            items.push(self.render_format_submenu_trigger_item(
+                &self.t(crate::i18n::TextKey::Heading).to_string(),
+                Some(HEADING_1_SVG_PATH),
+                ContextMenuKind::FormatHeading,
+                cx,
+            ));
 
             for (label, icon, shortcut, action) in [
-                (
-                    self.t(crate::i18n::TextKey::Heading).to_string(),
-                    Some(HEADING_1_SVG_PATH),
-                    Some("#"),
-                    FormatMenuAction::Heading1,
-                ),
                 (
                     self.format_action_label(FormatMenuAction::Bold),
                     Some(FMT_BOLD_SVG),
@@ -2707,7 +2717,12 @@ impl EditorView {
             }
 
             items.push(self.render_context_menu_separator());
-            items.push(self.render_format_submenu_trigger_item(self.more_formats_menu_label(), cx));
+            items.push(self.render_format_submenu_trigger_item(
+                self.more_formats_menu_label(),
+                None,
+                ContextMenuKind::FormatMore,
+                cx,
+            ));
             return items;
         }
 
@@ -3261,8 +3276,12 @@ impl EditorView {
         !(has_neg && has_pos)
     }
 
-    fn format_more_submenu_layout(&self, menu: &ContextMenu) -> Option<ContextMenuPanelLayout> {
-        if !matches!(menu.kind, ContextMenuKind::Format) || !self.can_render_format_more_submenu() {
+    fn format_submenu_layout(
+        &self,
+        menu: &ContextMenu,
+        submenu_kind: &ContextMenuKind,
+    ) -> Option<ContextMenuPanelLayout> {
+        if !matches!(menu.kind, ContextMenuKind::Format) || !self.can_render_format_submenu() {
             return None;
         }
 
@@ -3270,11 +3289,12 @@ impl EditorView {
         let main_menu_width = self.scaled(ms.menu_format_width_px);
         let main_menu_height = self.format_main_menu_height();
         let submenu_width = self.scaled(ms.menu_format_width_px);
-        let submenu_height = self.format_more_menu_height();
+        let submenu_height = self.format_submenu_height(submenu_kind);
         let submenu_gap = self.scaled(ms.menu_submenu_gap_px);
         let main_layout =
             self.context_menu_panel_layout(menu.position, main_menu_width, main_menu_height);
         let main_menu_top = self.context_menu_layout_top(main_layout, main_menu_height);
+        let main_menu_bottom = main_menu_top + main_menu_height;
         let right_space = main_layout.overlay_width
             - (main_layout.left + main_menu_width)
             - submenu_gap
@@ -3284,43 +3304,41 @@ impl EditorView {
         } else {
             (main_layout.left - submenu_width - submenu_gap).max(main_layout.margin)
         };
-        let max_top = (main_layout.overlay_height - main_layout.margin - submenu_height)
-            .max(main_layout.margin);
-        let submenu_top = (self.format_more_submenu_trigger_center_y(main_menu_top)
-            - submenu_height / 2.0)
-            .clamp(main_layout.margin, max_top);
+        let submenu_bottom_anchor = (main_layout.overlay_height - main_menu_bottom).max(0.0);
+        let submenu_top = (main_menu_bottom - submenu_height).max(main_layout.margin);
 
         Some(ContextMenuPanelLayout {
             left: submenu_left,
             estimated_top: submenu_top,
             max_height: (main_layout.overlay_height - 2.0 * main_layout.margin)
                 .max(self.scaled(100.0)),
-            bottom_anchor: None,
+            bottom_anchor: Some(submenu_bottom_anchor),
             overlay_width: main_layout.overlay_width,
             overlay_height: main_layout.overlay_height,
             margin: main_layout.margin,
         })
     }
 
-    fn should_preserve_format_more_submenu(&self, cursor_position: Point<Pixels>) -> bool {
+    fn should_preserve_format_submenu(&self, cursor_position: Point<Pixels>) -> bool {
         let Some(menu) = &self.context_menu else {
             return false;
         };
-        if !matches!(menu.kind, ContextMenuKind::Format)
-            || !matches!(self.context_submenu, Some(ContextMenuKind::FormatMore))
-        {
+        if !matches!(menu.kind, ContextMenuKind::Format) || self.context_submenu.is_none() {
             return false;
         }
 
         let Some(aim) = self.context_submenu_aim else {
             return false;
         };
-        let Some(submenu_layout) = self.format_more_submenu_layout(menu) else {
+        let Some(submenu_kind) = self.context_submenu.as_ref() else {
+            return false;
+        };
+        let Some(submenu_layout) = self.format_submenu_layout(menu, submenu_kind) else {
             return false;
         };
 
         let submenu_width = self.scaled(self.styles.context_menu.menu_format_width_px);
-        let submenu_height = self.format_more_menu_height();
+        let submenu_height = self.format_submenu_height(submenu_kind);
         let submenu_top = self.context_menu_layout_top(submenu_layout, submenu_height);
         let (origin_x, origin_y) = self.context_menu_overlay_coordinates(aim.origin);
         let (cursor_x, cursor_y) = self.context_menu_overlay_coordinates(cursor_position);
@@ -3418,9 +3436,7 @@ impl EditorView {
                     return;
                 }
 
-                if this.context_submenu_hovered
-                    && matches!(this.context_submenu, Some(ContextMenuKind::FormatMore))
-                {
+                if this.context_submenu_hovered && this.context_submenu.is_some() {
                     this.context_submenu = None;
                     this.context_submenu_aim = None;
                     this.context_submenu_hovered = false;
@@ -3434,10 +3450,8 @@ impl EditorView {
         menu_div.into_any_element()
     }
 
-    fn can_render_format_more_submenu(&self) -> bool {
-        self.slash_menu_start.is_none()
-            && self.current_image_menu_target().is_none()
-            && self.current_heading_action().is_none()
+    fn can_render_format_submenu(&self) -> bool {
+        self.slash_menu_start.is_none() && self.current_image_menu_target().is_none()
     }
 
     fn context_menu_separator_block_height(&self) -> f32 {
@@ -3477,28 +3491,19 @@ impl EditorView {
         padding + item_height * 12.0 + separator_height * 2.0
     }
 
-    fn format_more_submenu_trigger_center_y(&self, main_menu_top: f32) -> f32 {
+    fn format_heading_menu_height(&self) -> f32 {
         let ms = &self.styles.context_menu;
         let item_height = self.scaled(ms.menu_item_height_px);
-        let separator_height = self.context_menu_separator_block_height();
-        let mut y = main_menu_top + self.scaled(ms.menu_padding_y_px);
+        let padding = self.scaled(ms.menu_padding_y_px) * 2.0;
+        padding + item_height * 7.0
+    }
 
-        y += item_height * 3.0;
-        if self.current_file_path.is_some() {
-            y += separator_height;
-            y += if self.cursor.selection_range().is_empty() {
-                item_height
-            } else {
-                item_height * 2.0
-            };
+    fn format_submenu_height(&self, submenu_kind: &ContextMenuKind) -> f32 {
+        match submenu_kind {
+            ContextMenuKind::FormatHeading => self.format_heading_menu_height(),
+            ContextMenuKind::FormatMore => self.format_more_menu_height(),
+            _ => self.format_more_menu_height(),
         }
-
-        y += separator_height;
-        y += item_height * 5.0;
-        y += separator_height;
-        y += item_height * 2.0;
-        y += separator_height;
-        y + item_height / 2.0
     }
 
     pub(crate) fn render_context_menu(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -3746,6 +3751,10 @@ impl EditorView {
             }
             ContextMenuKind::FormatMore => (
                 self.render_format_more_context_menu(cx),
+                self.scaled(self.styles.context_menu.menu_format_width_px),
+            ),
+            ContextMenuKind::FormatHeading => (
+                self.render_heading_context_menu(cx),
                 self.scaled(self.styles.context_menu.menu_format_width_px),
             ),
             ContextMenuKind::WikiLink => (
@@ -4317,22 +4326,28 @@ impl EditorView {
         let main_menu = self.render_context_menu_panel("context-menu", layout, width, items, cx);
 
         let submenu = if matches!(menu.kind, ContextMenuKind::Format)
-            && matches!(self.context_submenu, Some(ContextMenuKind::FormatMore))
-            && self.can_render_format_more_submenu()
+            && self.context_submenu.is_some()
+            && self.can_render_format_submenu()
         {
-            let submenu_items = self.render_format_more_context_menu(cx);
+            let submenu_kind = self.context_submenu.as_ref().cloned();
+            let submenu_items = match submenu_kind.as_ref() {
+                Some(ContextMenuKind::FormatHeading) => self.render_heading_context_menu(cx),
+                Some(ContextMenuKind::FormatMore) => self.render_format_more_context_menu(cx),
+                _ => Vec::new(),
+            };
             let submenu_width = self.scaled(self.styles.context_menu.menu_format_width_px);
-            let submenu_layout =
-                self.format_more_submenu_layout(menu)
-                    .unwrap_or(ContextMenuPanelLayout {
-                        left: layout.left + width,
-                        estimated_top: layout.estimated_top,
-                        max_height: layout.max_height,
-                        bottom_anchor: None,
-                        overlay_width: layout.overlay_width,
-                        overlay_height: layout.overlay_height,
-                        margin: layout.margin,
-                    });
+            let submenu_layout = submenu_kind
+                .as_ref()
+                .and_then(|submenu_kind| self.format_submenu_layout(menu, submenu_kind))
+                .unwrap_or(ContextMenuPanelLayout {
+                    left: layout.left + width,
+                    estimated_top: layout.estimated_top,
+                    max_height: layout.max_height,
+                    bottom_anchor: None,
+                    overlay_width: layout.overlay_width,
+                    overlay_height: layout.overlay_height,
+                    margin: layout.margin,
+                });
             Some(self.render_context_menu_panel(
                 "context-submenu",
                 submenu_layout,

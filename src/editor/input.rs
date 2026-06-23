@@ -1177,9 +1177,13 @@ impl EditorView {
             cx.notify();
             return;
         }
+        let was_selecting = self.is_selecting;
         self.is_selecting = false;
         self.selection_drag_position = None;
         self.selection_drag_scroll_task = None;
+        if was_selecting {
+            cx.notify();
+        }
     }
 
     pub(crate) fn on_mouse_move(

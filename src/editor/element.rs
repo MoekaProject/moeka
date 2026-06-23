@@ -11,9 +11,60 @@ use gpui::{
 };
 
 use crate::markdown::{BlockType, CalloutKind};
+use crate::style::Styles;
 
 use super::helpers;
 use super::*;
+
+fn callout_icon_path(kind: CalloutKind) -> &'static str {
+    match kind {
+        CalloutKind::Note => FMT_CALLOUT_NOTE_SVG,
+        CalloutKind::Tip => FMT_CALLOUT_TIP_SVG,
+        CalloutKind::Important => FMT_CALLOUT_IMPORTANT_SVG,
+        CalloutKind::Warning => FMT_CALLOUT_WARNING_SVG,
+        CalloutKind::Caution => FMT_CALLOUT_CAUTION_SVG,
+    }
+}
+
+fn callout_icon_color(styles: &Styles, kind: CalloutKind) -> Hsla {
+    match kind {
+        CalloutKind::Note => styles.quote_block.quote_block_note_border_color,
+        CalloutKind::Tip => styles.quote_block.quote_block_tip_border_color,
+        CalloutKind::Important => styles.quote_block.quote_block_important_border_color,
+        CalloutKind::Warning => styles.quote_block.quote_block_warning_border_color,
+        CalloutKind::Caution => styles.quote_block.quote_block_caution_border_color,
+    }
+}
+
+fn snap_to_device_pixel(value: f32, window: &Window) -> f32 {
+    let scale_factor = window.scale_factor().max(1.0);
+    (value * scale_factor).round() / scale_factor
+}
+
+fn snap_pixel_width(value: f32, window: &Window) -> f32 {
+    if value <= 0.0 {
+        0.0
+    } else {
+        snap_to_device_pixel(value, window).max(1.0)
+    }
+}
+
+fn snap_bounds_to_device_pixels(
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    window: &Window,
+) -> Bounds<Pixels> {
+    let right = snap_to_device_pixel(left + width, window);
+    let bottom = snap_to_device_pixel(top + height, window);
+    let left = snap_to_device_pixel(left, window);
+    let top = snap_to_device_pixel(top, window);
+    Bounds::new(
+        point(px(left), px(top)),
+        size(px((right - left).max(0.0)), px((bottom - top).max(0.0))),
+    )
+}
 
 pub(crate) struct EditorElement {
     pub editor: Entity<EditorView>,
@@ -40,6 +91,7 @@ pub(crate) struct EditorPrepaintState {
     gutter_quads: Vec<PaintQuad>,
     gutter_labels: Vec<(ShapedLine, Point<Pixels>, Pixels)>,
     gutter_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
+    inline_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
     gutter_fold_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
     /// HR lines: (y_position, start_x, width, is_dashed). `***` renders dashed,
     /// `---`/`___` render solid.
@@ -1276,6 +1328,7 @@ impl Element for EditorElement {
         let mut gutter_quads = Vec::new();
         let mut gutter_labels: Vec<(ShapedLine, Point<Pixels>, Pixels)> = Vec::new();
         let mut gutter_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
+        let mut inline_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
         let mut gutter_fold_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
         let mut checkbox_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut image_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
@@ -1818,24 +1871,28 @@ impl Element for EditorElement {
             } else {
                 None
             };
-            let mut active_ranges: Vec<std::ops::Range<usize>> = all_sel_ranges
-                .iter()
-                .filter(|range| range.start != range.end)
-                .filter_map(|range| {
-                    if range.end <= line_start_offset || range.start >= line_end_offset {
-                        return None;
-                    }
-                    let start = range
-                        .start
-                        .saturating_sub(line_start_offset)
-                        .min(line_content.len());
-                    let end = range
-                        .end
-                        .saturating_sub(line_start_offset)
-                        .min(line_content.len());
-                    Some(start..end)
-                })
-                .collect();
+            let mut active_ranges: Vec<std::ops::Range<usize>> = if editor.is_selecting {
+                Vec::new()
+            } else {
+                all_sel_ranges
+                    .iter()
+                    .filter(|range| range.start != range.end)
+                    .filter_map(|range| {
+                        if range.end <= line_start_offset || range.start >= line_end_offset {
+                            return None;
+                        }
+                        let start = range
+                            .start
+                            .saturating_sub(line_start_offset)
+                            .min(line_content.len());
+                        let end = range
+                            .end
+                            .saturating_sub(line_start_offset)
+                            .min(line_content.len());
+                        Some(start..end)
+                    })
+                    .collect()
+            };
             for marked in editor.marked_ranges() {
                 if heading_content_start.is_some() && ime_active_on_line {
                     continue;
@@ -1859,7 +1916,8 @@ impl Element for EditorElement {
                 }
                 active_ranges.push(start..end);
             }
-            if active_ranges.is_empty()
+            if !editor.is_selecting
+                && active_ranges.is_empty()
                 && let Some(col) = cursor_col
             {
                 let clamped = col.min(line_content.len());
@@ -3230,13 +3288,13 @@ impl Element for EditorElement {
             if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence)
                 || is_front_matter_line
                 || diff_table_syntax_line
+                || rendered_block_preview.is_some()
             {
                 let corner_r = px(editor.scaled(editor.styles.code_block.code_block_radius_px));
-                let side_inset = if editor.theme_kind.is_dark() {
-                    0.0
-                } else {
-                    editor.scaled(editor.styles.code_block.code_block_border_width_px)
-                };
+                let side_inset = snap_pixel_width(
+                    editor.scaled(editor.styles.code_block.code_block_fill_inset_px),
+                    window,
+                );
                 let (group_start, group_end) = if is_front_matter_line || diff_table_syntax_line {
                     let table_info = decoration.table_info.as_ref();
                     let start = table_info.map(|ti| ti.table_start_line).unwrap_or(line_idx);
@@ -3269,9 +3327,12 @@ impl Element for EditorElement {
                     });
                 if fill_width > 0.0 {
                     code_block_bgs.push(quad(
-                        Bounds::new(
-                            point(px(fill_left), px(line_top)),
-                            size(px(fill_width), px(total_line_height)),
+                        snap_bounds_to_device_pixels(
+                            fill_left,
+                            line_top,
+                            fill_width,
+                            total_line_height,
+                            window,
                         ),
                         Corners {
                             top_left: if has_top_corner { corner_r } else { px(0.0) },
@@ -4164,7 +4225,7 @@ impl Element for EditorElement {
                         editor_left + editor.padding_left() - icon_size - heading_offset
                     };
                     let icon_y = gutter_center_y + 0.0 - icon_size / 2.0;
-                    gutter_svgs.push((
+                    inline_svgs.push((
                         Bounds::new(
                             point(px(icon_x), px(icon_y)),
                             size(px(icon_size), px(icon_size)),
@@ -4174,6 +4235,49 @@ impl Element for EditorElement {
                     ));
                 }
                 _ => {}
+            }
+
+            if let Some(callout_kind) = render_decoration.callout_kind
+                && let Some(replacement) =
+                    render_decoration
+                        .display_replacements
+                        .iter()
+                        .find(|replacement| {
+                            line_content
+                                .get(replacement.source_range.clone())
+                                .is_some_and(|source| source.trim_start().starts_with("[!"))
+                        })
+                && !helpers::active_ranges_intersect(&active_ranges, &replacement.trigger_range)
+            {
+                let disp_start = helpers::buffer_to_display_offset(
+                    &buffer_to_display,
+                    replacement.source_range.start,
+                );
+                let disp_end =
+                    (disp_start + replacement.display_text.len()).min(display_text.len());
+                if let (Some(pos_start), Some(pos_end)) = (
+                    wrapped.position_for_index(disp_start, px(line_height)),
+                    wrapped.position_for_index(disp_end, px(line_height)),
+                ) && pos_start.y == pos_end.y
+                {
+                    let indent_start = helpers::indent_for_y(indent_px, pos_start.y, line_height);
+                    let reserved_width = f32::from(pos_end.x - pos_start.x).max(font_size);
+                    let icon_size = font_size.min(line_height * 0.82).max(10.0);
+                    let icon_x = content_x
+                        + indent_start
+                        + f32::from(pos_start.x)
+                        + (reserved_width - icon_size).max(0.0) / 2.0;
+                    let icon_y =
+                        text_line_top + f32::from(pos_start.y) + (line_height - icon_size) / 2.0;
+                    inline_svgs.push((
+                        Bounds::new(
+                            point(px(icon_x), px(icon_y)),
+                            size(px(icon_size), px(icon_size)),
+                        ),
+                        callout_icon_path(callout_kind),
+                        callout_icon_color(&editor.styles, callout_kind),
+                    ));
+                }
             }
 
             // Checkbox painting
@@ -4203,7 +4307,7 @@ impl Element for EditorElement {
                         checkbox_styles.checkbox_default_opacity
                     };
                     if *checked {
-                        let mut checkbox_bg = theme.checkbox_checked;
+                        let mut checkbox_bg = checkbox_styles.checkbox_checked_bg;
                         checkbox_bg.a *= checkbox_opacity;
                         gutter_quads.push(quad(
                             cb_bounds,
@@ -4215,7 +4319,7 @@ impl Element for EditorElement {
                         ));
                         let icon_size = cb_size * editor.styles.checkbox.checkbox_check_icon_scale;
                         let icon_offset = (cb_size - icon_size) / 2.0;
-                        let mut icon_color = gpui::white();
+                        let mut icon_color = checkbox_styles.checkbox_check_icon_color;
                         icon_color.a *= checkbox_opacity;
                         gutter_svgs.push((
                             Bounds::new(
@@ -4226,13 +4330,13 @@ impl Element for EditorElement {
                             icon_color,
                         ));
                     } else {
-                        let mut border_color = theme.border_tertiary;
+                        let mut border_color = checkbox_styles.checkbox_border_color;
                         border_color.a *= checkbox_opacity;
                         gutter_quads.push(quad(
                             cb_bounds,
                             Corners::all(corner_r),
                             gpui::transparent_black(),
-                            px(1.5),
+                            px(editor.scaled(checkbox_styles.checkbox_border_width_px)),
                             border_color,
                             BorderStyle::default(),
                         ));
@@ -5360,42 +5464,44 @@ impl Element for EditorElement {
                 );
             }
 
-            for footnote_reference in &decoration.footnote_references {
-                if !helpers::inline_range_is_collapsed(
-                    &decoration,
-                    &footnote_reference.collapsed_range,
-                    &active_ranges,
-                ) {
-                    continue;
+            if decoration.footnote_definition_label.is_none() {
+                for footnote_reference in &decoration.footnote_references {
+                    if !helpers::inline_range_is_collapsed(
+                        &decoration,
+                        &footnote_reference.collapsed_range,
+                        &active_ranges,
+                    ) {
+                        continue;
+                    }
+                    let disp_start = helpers::buffer_to_display_offset(
+                        &buffer_to_display,
+                        footnote_reference.collapsed_range.start,
+                    );
+                    let disp_end = helpers::buffer_to_display_offset(
+                        &buffer_to_display,
+                        footnote_reference.collapsed_range.end,
+                    );
+                    push_inline_text_overlay(
+                        &mut inline_overlays,
+                        window,
+                        wrapped,
+                        line_content
+                            .get(footnote_reference.collapsed_range.clone())
+                            .unwrap_or_default(),
+                        disp_start..disp_end,
+                        &body_font,
+                        &body_cjk_font,
+                        theme.link,
+                        font_size,
+                        editor.styles.editor.editor_superscript_scale_factor,
+                        InlineOverlayVerticalAlign::Offset(-line_height * 0.14),
+                        false,
+                        content_x,
+                        text_line_top,
+                        indent_px,
+                        line_height,
+                    );
                 }
-                let disp_start = helpers::buffer_to_display_offset(
-                    &buffer_to_display,
-                    footnote_reference.collapsed_range.start,
-                );
-                let disp_end = helpers::buffer_to_display_offset(
-                    &buffer_to_display,
-                    footnote_reference.collapsed_range.end,
-                );
-                push_inline_text_overlay(
-                    &mut inline_overlays,
-                    window,
-                    wrapped,
-                    line_content
-                        .get(footnote_reference.collapsed_range.clone())
-                        .unwrap_or_default(),
-                    disp_start..disp_end,
-                    &body_font,
-                    &body_cjk_font,
-                    theme.link,
-                    font_size,
-                    editor.styles.editor.editor_superscript_scale_factor,
-                    InlineOverlayVerticalAlign::Offset(-line_height * 0.14),
-                    false,
-                    content_x,
-                    text_line_top,
-                    indent_px,
-                    line_height,
-                );
             }
 
             // Determine if this is a table row with per-cell rendering
@@ -5500,24 +5606,59 @@ impl Element for EditorElement {
         let button_min_left = editor.scaled(code_block_styles.code_block_text_padding_left_px);
         let mut button_font = text_style.font();
         button_font.family = configured_font_family(editor.styles.ui_font_family);
-        let code_block_border_width =
-            px(editor.scaled(code_block_styles.code_block_border_width_px));
-        let code_block_radius = px(editor.scaled(code_block_styles.code_block_radius_px));
+        let code_block_border_width_px = snap_pixel_width(
+            editor.scaled(code_block_styles.code_block_border_width_px),
+            window,
+        );
         let overlay_active = editor.preview_overlay_state().is_some();
         let preview_outer_button_padding_x = button_padding_x;
         let preview_inner_button_padding_x = editor.scaled(3.0);
         for (start_line, group) in &code_block_group_bounds {
-            code_block_bgs.push(quad(
-                Bounds::new(
-                    point(px(group.left), px(group.top)),
-                    size(px(group.width), px(group.bottom - group.top)),
-                ),
-                Corners::all(code_block_radius),
-                gpui::transparent_black(),
-                code_block_border_width,
-                code_block_styles.code_block_border_color,
-                BorderStyle::default(),
-            ));
+            let group_height = group.bottom - group.top;
+            if code_block_border_width_px > 0.0 && group.width > 0.0 && group_height > 0.0 {
+                let border_color = code_block_styles.code_block_border_color;
+                let border_width = code_block_border_width_px.min(group.width * 0.5);
+                code_block_bgs.push(fill(
+                    snap_bounds_to_device_pixels(
+                        group.left,
+                        group.top,
+                        border_width,
+                        group_height,
+                        window,
+                    ),
+                    border_color,
+                ));
+                code_block_bgs.push(fill(
+                    snap_bounds_to_device_pixels(
+                        group.left + group.width - border_width,
+                        group.top,
+                        border_width,
+                        group_height,
+                        window,
+                    ),
+                    border_color,
+                ));
+                code_block_bgs.push(fill(
+                    snap_bounds_to_device_pixels(
+                        group.left,
+                        group.top,
+                        group.width,
+                        border_width.min(group_height),
+                        window,
+                    ),
+                    border_color,
+                ));
+                code_block_bgs.push(fill(
+                    snap_bounds_to_device_pixels(
+                        group.left,
+                        group.bottom - border_width.min(group_height),
+                        group.width,
+                        border_width.min(group_height),
+                        window,
+                    ),
+                    border_color,
+                ));
+            }
 
             let group_bounds = Bounds::new(
                 point(px(group.left), px(group.top)),
@@ -6203,6 +6344,7 @@ impl Element for EditorElement {
             gutter_quads,
             gutter_labels,
             gutter_svgs,
+            inline_svgs,
             gutter_fold_icons,
             hr_lines,
             image_previews,
@@ -6357,6 +6499,17 @@ impl Element for EditorElement {
             }
         }
         for (icon_bounds, icon_path, color) in &prepaint.gutter_svgs {
+            window
+                .paint_svg(
+                    *icon_bounds,
+                    (*icon_path).into(),
+                    TransformationMatrix::default(),
+                    *color,
+                    cx,
+                )
+                .ok();
+        }
+        for (icon_bounds, icon_path, color) in &prepaint.inline_svgs {
             window
                 .paint_svg(
                     *icon_bounds,

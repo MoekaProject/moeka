@@ -601,6 +601,7 @@ pub struct CodeBlockStyles {
     pub code_block_border_width_px: f32,
     pub code_block_border_color: Hsla,
     pub code_block_radius_px: f32,
+    pub code_block_fill_inset_px: f32,
     pub code_block_text_padding_left_px: f32,
     pub code_block_wrap_right_padding_px: f32,
     pub code_block_fence_clip_px: f32,
@@ -1126,6 +1127,11 @@ pub struct SettingsPanelStyles {
 // Construction
 // ═════════════════════════════════════════════════════════════════════
 
+fn deepen_block_background(mut color: Hsla, is_light: bool) -> Hsla {
+    color.l = (color.l * if is_light { 0.98 } else { 0.9 }).clamp(0.0, 1.0);
+    color
+}
+
 impl Styles {
     /// `theme` drives editor content colors and follows the user's light/dark
     /// selection. `ui_theme` is the dark chrome palette (the user's selected
@@ -1143,6 +1149,23 @@ impl Styles {
 
         let is_light = theme.bg_primary.l >= 0.5;
         let sidebar_theme = if is_light { theme } else { ui_theme };
+        let is_light_monochrome = is_light && theme.heading == theme.text_primary;
+        let light_monochrome_heading_color = if is_light_monochrome {
+            theme.heading
+        } else {
+            theme.list_marker
+        };
+        let checkbox_border_color = if is_light_monochrome {
+            theme.heading
+        } else {
+            theme.border_tertiary
+        };
+        let checkbox_checked_bg = if is_light_monochrome {
+            theme.heading
+        } else {
+            theme.checkbox_checked
+        };
+        let code_block_bg = deepen_block_background(theme.bg_code, is_light);
         Self {
             ui_font_family: ".SystemUIFont",
             ui_font_size_px,
@@ -1227,16 +1250,20 @@ impl Styles {
                 editor_indent_guide_gap_length_px: 0.0,
                 editor_whitespace_dot_size_px: 2.0,
                 editor_whitespace_dot_color: with_alpha(theme.text_secondary, 0.35),
-                editor_inline_code_bg: theme.inline_code_bg,
-                editor_inline_code_bg_x_padding_px: 2.0,
+                editor_inline_code_bg: if is_light {
+                    with_alpha(theme.inline_code_bg, 0.42)
+                } else {
+                    theme.inline_code_bg
+                },
+                editor_inline_code_bg_x_padding_px: 4.0,
                 editor_inline_code_bg_radius_px: 4.0,
-                editor_inline_code_bg_y_inset_px: 1.0,
+                editor_inline_code_bg_y_inset_px: 2.0,
                 editor_inline_highlight_bg: theme.highlight_bg,
-                editor_list_marker_text_color: theme.list_marker,
+                editor_list_marker_text_color: light_monochrome_heading_color,
                 editor_list_marker_font_weight: FontWeight::BOLD,
                 editor_heading_marker_text_color: with_alpha(
                     theme.text_secondary,
-                    if is_light { 0.66 } else { 0.82 },
+                    if is_light { 0.42 } else { 0.82 },
                 ),
                 editor_selection_match_border: with_alpha(theme.text_secondary, 0.55),
                 editor_bracket_match_border: with_alpha(theme.text_primary, 0.5),
@@ -1619,10 +1646,11 @@ impl Styles {
                 cursor_opacity_step: 0.03,
             },
             code_block: CodeBlockStyles {
-                code_block_bg: theme.bg_code,
-                code_block_border_width_px: 0.0,
-                code_block_border_color: theme.border_code_block,
+                code_block_bg,
+                code_block_border_width_px: 1.0,
+                code_block_border_color: code_block_bg,
                 code_block_radius_px: 0.0,
+                code_block_fill_inset_px: 1.0,
                 code_block_text_padding_left_px: 20.0,
                 code_block_wrap_right_padding_px: 30.0,
                 code_block_fence_clip_px: 15.0,
@@ -1646,10 +1674,10 @@ impl Styles {
             quote_block: QuoteBlockStyles {
                 quote_block_border_width_px: 4.0,
                 quote_block_radius_px: 0.0,
-                quote_block_padding_top_px: 20.0,
-                quote_block_padding_bottom_px: 20.0,
-                quote_block_padding_left_px: 20.0,
-                quote_block_padding_right_px: 20.0,
+                quote_block_padding_top_px: 5.0,
+                quote_block_padding_bottom_px: 5.0,
+                quote_block_padding_left_px: 10.0,
+                quote_block_padding_right_px: 10.0,
                 quote_block_bg: with_alpha(
                     theme.text_secondary,
                     if is_light { 0.05 } else { 0.055 },
@@ -1767,8 +1795,8 @@ impl Styles {
                 checkbox_parent_prefix_chars: 2.0,
                 checkbox_radius_px: 5.0,
                 checkbox_border_width_px: 1.5,
-                checkbox_border_color: theme.border_tertiary,
-                checkbox_checked_bg: theme.checkbox_checked,
+                checkbox_border_color,
+                checkbox_checked_bg,
                 checkbox_check_icon_scale: 0.52,
                 checkbox_check_icon_color: gpui::white(),
                 checkbox_default_opacity: 0.9,

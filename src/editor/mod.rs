@@ -419,7 +419,7 @@ pub(crate) struct ContextSubmenuAim {
     pub origin: Point<Pixels>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ContextMenuKind {
     Sidebar {
         path: PathBuf,
@@ -431,6 +431,7 @@ pub(crate) enum ContextMenuKind {
     SidebarSort,
     SidebarCreate,
     Format,
+    FormatHeading,
     FormatMore,
     WikiLink,
     Tab {
