@@ -2459,6 +2459,7 @@ impl EditorView {
             Some(RightUtilityPanel::Chat) => self.render_chat_panel(is_chat_focused, cx),
             Some(RightUtilityPanel::Info) => self.render_info_panel(cx),
             Some(RightUtilityPanel::GitHistory) => self.render_git_history_panel(cx),
+            Some(RightUtilityPanel::Outline) => self.render_outline_panel(cx),
             None => div().into_any_element(),
         }
     }

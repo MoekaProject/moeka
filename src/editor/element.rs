@@ -11,7 +11,6 @@ use gpui::{
 };
 
 use crate::markdown::{BlockType, CalloutKind};
-use crate::style::Styles;
 
 use super::helpers;
 use super::*;
@@ -23,16 +22,6 @@ fn callout_icon_path(kind: CalloutKind) -> &'static str {
         CalloutKind::Important => FMT_CALLOUT_IMPORTANT_SVG,
         CalloutKind::Warning => FMT_CALLOUT_WARNING_SVG,
         CalloutKind::Caution => FMT_CALLOUT_CAUTION_SVG,
-    }
-}
-
-fn callout_icon_color(styles: &Styles, kind: CalloutKind) -> Hsla {
-    match kind {
-        CalloutKind::Note => styles.quote_block.quote_block_note_border_color,
-        CalloutKind::Tip => styles.quote_block.quote_block_tip_border_color,
-        CalloutKind::Important => styles.quote_block.quote_block_important_border_color,
-        CalloutKind::Warning => styles.quote_block.quote_block_warning_border_color,
-        CalloutKind::Caution => styles.quote_block.quote_block_caution_border_color,
     }
 }
 
@@ -1871,28 +1860,48 @@ impl Element for EditorElement {
             } else {
                 None
             };
-            let mut active_ranges: Vec<std::ops::Range<usize>> = if editor.is_selecting {
-                Vec::new()
-            } else {
-                all_sel_ranges
-                    .iter()
-                    .filter(|range| range.start != range.end)
-                    .filter_map(|range| {
-                        if range.end <= line_start_offset || range.start >= line_end_offset {
-                            return None;
+            let mut active_ranges: Vec<std::ops::Range<usize>> =
+                if editor.is_selecting && editor.selection_drag_has_moved {
+                    Vec::new()
+                } else {
+                    all_sel_ranges
+                        .iter()
+                        .filter(|range| range.start != range.end)
+                        .filter_map(|range| {
+                            if range.end <= line_start_offset || range.start >= line_end_offset {
+                                return None;
+                            }
+                            let start = range
+                                .start
+                                .saturating_sub(line_start_offset)
+                                .min(line_content.len());
+                            let end = range
+                                .end
+                                .saturating_sub(line_start_offset)
+                                .min(line_content.len());
+                            Some(start..end)
+                        })
+                        .collect()
+                };
+            if editor.is_selecting
+                && editor.selection_drag_has_moved
+                && editor.cursor.has_selection()
+            {
+                let (anchor_line, anchor_col) = buffer.offset_to_line_col(editor.cursor.anchor);
+                let (head_line, head_col) = buffer.offset_to_line_col(editor.cursor.offset);
+                if anchor_line == line_idx && head_line == line_idx {
+                    for syntax_range in &decoration.syntax_ranges {
+                        let anchor_inside = anchor_col >= syntax_range.trigger_range.start
+                            && anchor_col <= syntax_range.trigger_range.end;
+                        let head_inside = head_col >= syntax_range.trigger_range.start
+                            && head_col <= syntax_range.trigger_range.end;
+                        if anchor_inside && head_inside {
+                            active_ranges.push(syntax_range.trigger_range.clone());
+                            break;
                         }
-                        let start = range
-                            .start
-                            .saturating_sub(line_start_offset)
-                            .min(line_content.len());
-                        let end = range
-                            .end
-                            .saturating_sub(line_start_offset)
-                            .min(line_content.len());
-                        Some(start..end)
-                    })
-                    .collect()
-            };
+                    }
+                }
+            }
             for marked in editor.marked_ranges() {
                 if heading_content_start.is_some() && ime_active_on_line {
                     continue;
@@ -1916,8 +1925,9 @@ impl Element for EditorElement {
                 }
                 active_ranges.push(start..end);
             }
-            if !editor.is_selecting
+            if (!editor.is_selecting || !editor.selection_drag_has_moved)
                 && active_ranges.is_empty()
+                && !editor.suppress_fold_for_empty_selection_drag
                 && let Some(col) = cursor_col
             {
                 let clamped = col.min(line_content.len());
@@ -4262,7 +4272,13 @@ impl Element for EditorElement {
                 {
                     let indent_start = helpers::indent_for_y(indent_px, pos_start.y, line_height);
                     let reserved_width = f32::from(pos_end.x - pos_start.x).max(font_size);
-                    let icon_size = font_size.min(line_height * 0.82).max(10.0);
+                    let icon_size = (font_size
+                        * editor
+                            .styles
+                            .quote_block
+                            .quote_block_callout_icon_size_factor)
+                        .min(line_height * 0.95)
+                        .max(10.0);
                     let icon_x = content_x
                         + indent_start
                         + f32::from(pos_start.x)
@@ -4275,7 +4291,7 @@ impl Element for EditorElement {
                             size(px(icon_size), px(icon_size)),
                         ),
                         callout_icon_path(callout_kind),
-                        callout_icon_color(&editor.styles, callout_kind),
+                        editor.styles.quote_block.quote_block_callout_icon_color,
                     ));
                 }
             }

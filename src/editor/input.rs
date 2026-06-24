@@ -199,6 +199,9 @@ impl EditorView {
         }
 
         if event.button == MouseButton::Left {
+            self.suppress_fold_for_empty_selection_drag = false;
+            self.selection_drag_has_moved = false;
+
             if let Some(line_idx) = self
                 .image_preview_zoom_areas
                 .iter()
@@ -1178,9 +1181,13 @@ impl EditorView {
             return;
         }
         let was_selecting = self.is_selecting;
+        let had_selection = self.cursor.has_selection();
         self.is_selecting = false;
         self.selection_drag_position = None;
         self.selection_drag_scroll_task = None;
+        self.suppress_fold_for_empty_selection_drag =
+            was_selecting && self.selection_drag_has_moved && !had_selection;
+        self.selection_drag_has_moved = false;
         if was_selecting {
             cx.notify();
         }
@@ -1454,6 +1461,16 @@ impl EditorView {
         }
 
         if self.is_selecting {
+            if self
+                .last_mouse_down_target
+                .is_some_and(|(start_position, _)| {
+                    let moved_x = (f32::from(event.position.x) - f32::from(start_position.x)).abs();
+                    let moved_y = (f32::from(event.position.y) - f32::from(start_position.y)).abs();
+                    moved_x >= 3.0 || moved_y >= 3.0
+                })
+            {
+                self.selection_drag_has_moved = true;
+            }
             self.selection_drag_position = Some(event.position);
             self.sync_selection_drag_scroll_task(cx);
             let pos_y: f32 = event.position.y.into();
@@ -1493,6 +1510,9 @@ impl EditorView {
             };
             self.update_wrap_boundary_affinity_for_position(offset, event.position);
             self.cursor.select_to(offset, &self.buffer);
+            if self.cursor.has_selection() {
+                self.suppress_fold_for_empty_selection_drag = false;
+            }
             cx.notify();
         } else if toolbar_hover_changed {
             cx.notify();
@@ -2194,11 +2214,6 @@ impl EditorView {
     ) {
         if self.outline_rail_clicked_active_line.is_some() {
             self.outline_rail_clicked_active_line = None;
-            self.outline_rail_hovered_label_line = None;
-            self.outline_rail_hovered_label_opacity = 0.0;
-            self.outline_rail_hovered_label_opacity_target = 0.0;
-            self.outline_rail_hovered_label_opacity_epoch += 1;
-            self.outline_rail_hovered_label_opacity_task = None;
         }
 
         if self.active_tab_is_whiteboard() {

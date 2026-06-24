@@ -42,6 +42,7 @@ pub(crate) enum RightUtilityPanel {
     Chat,
     Info,
     GitHistory,
+    Outline,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

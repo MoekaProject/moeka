@@ -388,11 +388,8 @@ impl Render for EditorView {
         let resizing = self.sidebar_resizing || self.utility_panel_resizing;
         let toolbar_base_visible =
             self.tabs.len() > 0 && !self.active_tab_is_settings() && !self.active_tab_is_binary();
-        let outline_rail_active =
-            self.outline_rail_hovered || self.outline_rail_label_opacity > 0.01;
         let show_editor_toolbar = self.should_show_editor_toolbar(toolbar_base_visible);
         let render_editor_toolbar = toolbar_base_visible
-            && !outline_rail_active
             && (show_editor_toolbar
                 || self.toolbar_opacity_task.is_some()
                 || self.toolbar_opacity > self.styles.toolbar.toolbar_hidden_opacity + 0.01);
@@ -918,10 +915,6 @@ impl Render for EditorView {
                                                                 )
                                                             })
                                                             .when_some(
-                                                                self.render_outline_rail(cx),
-                                                                |this, rail| this.child(rail),
-                                                            )
-                                                            .when_some(
                                                                 self.editor_scrollbar_thumb_geometry(),
                                                                 |this, (thumb_top, thumb_height)| {
                                                                     let thumb_width = self.scaled(self.editor_scrollbar_width);
@@ -1105,7 +1098,7 @@ impl Render for EditorView {
                                                         let secondary_btn_width = secondary_btn_size;
                                                         let toolbar_right = toolbar_min_right.round();
                                                         let toolbar_top = toolbar_min_top.round();
-                                                        let outline_active = self.outline_rail_visible;
+                                                        let outline_active = self.utility_panel == Some(RightUtilityPanel::Outline);
                                                         let outline_x = editor_pane_width
                                                             - toolbar_right
                                                             - secondary_btn_width * 2.0
@@ -1176,6 +1169,10 @@ impl Render for EditorView {
                                                                 },
                                                             ))
                                                     }))
+                                                    .when_some(
+                                                        self.render_outline_rail(cx),
+                                                        |this, rail| this.child(rail),
+                                                    )
                                                     .when(self.preview_overlay_state().is_some(), |this| {
                                                         let editor_handle = cx.entity().clone();
                                                         this.child(deferred(
@@ -1585,12 +1582,15 @@ impl Render for EditorView {
                                 cx.notify();
                             } else if this.utility_panel_resizing {
                                 let window_width = f32::from(window.bounds().size.width);
-                                let min_w = this.scaled(
-                                    this.styles.utility_panel.utility_panel_resize_min_width_px,
-                                );
-                                let max_w = this.scaled(
-                                    this.styles.utility_panel.utility_panel_resize_max_width_px,
-                                );
+                                let active_panel = this.active_resizable_utility_panel();
+                                let (min_w, max_w) = active_panel
+                                    .map(|panel| this.utility_panel_resize_bounds_for(panel))
+                                    .unwrap_or_else(|| {
+                                        (
+                                            this.scaled(this.styles.utility_panel.utility_panel_resize_min_width_px),
+                                            this.scaled(this.styles.utility_panel.utility_panel_resize_max_width_px),
+                                        )
+                                    });
                                 let new_size = if this.should_render_bottom_chat_panel() {
                                     let window_height = f32::from(window.bounds().size.height);
                                     clamp_resize_dimension(
@@ -1605,7 +1605,7 @@ impl Render for EditorView {
                                         max_w,
                                     )
                                 };
-                                if let Some(panel) = this.active_resizable_utility_panel() {
+                                if let Some(panel) = active_panel {
                                     this.set_utility_panel_custom_width_for(panel, Some(new_size));
                                 }
                                 this.set_utility_panel_width_immediately(new_size);

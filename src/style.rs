@@ -316,13 +316,6 @@ pub struct OutlineStyles {
     pub outline_rail_label_color: Hsla,
     pub outline_rail_label_hover_color: Hsla,
     pub outline_rail_label_active_color: Hsla,
-    pub outline_rail_label_gradient_angle_deg: f32,
-    pub outline_rail_label_gradient_start_color: Hsla,
-    pub outline_rail_label_gradient_start_stop: f32,
-    pub outline_rail_label_gradient_end_color: Hsla,
-    pub outline_rail_label_gradient_end_stop: f32,
-    pub outline_rail_label_opacity_animation_ms: u64,
-    pub outline_rail_label_hover_animation_ms: u64,
     pub outline_rail_tick_level_opacities: [f32; 6],
     pub outline_rail_label_level_opacities: [f32; 6],
     pub outline_rail_label_level_brightness_mix: [f32; 6],
@@ -632,6 +625,8 @@ pub struct QuoteBlockStyles {
     pub quote_block_padding_bottom_px: f32,
     pub quote_block_padding_left_px: f32,
     pub quote_block_padding_right_px: f32,
+    pub quote_block_callout_icon_color: Hsla,
+    pub quote_block_callout_icon_size_factor: f32,
     pub quote_block_bg: Hsla,
     pub quote_block_border_color: Hsla,
     pub quote_block_note_bg: Hsla,
@@ -1413,13 +1408,6 @@ impl Styles {
                 outline_rail_label_color: theme.text_secondary,
                 outline_rail_label_hover_color: theme.text_bright,
                 outline_rail_label_active_color: theme.text_bright,
-                outline_rail_label_gradient_angle_deg: 90.0,
-                outline_rail_label_gradient_start_color: with_alpha(theme.bg_primary, 0.0),
-                outline_rail_label_gradient_start_stop: 0.10,
-                outline_rail_label_gradient_end_color: with_alpha(theme.bg_primary, 0.80),
-                outline_rail_label_gradient_end_stop: 0.30,
-                outline_rail_label_opacity_animation_ms: 140,
-                outline_rail_label_hover_animation_ms: 110,
                 outline_rail_tick_level_opacities: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
                 outline_rail_label_level_opacities: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
                 outline_rail_label_level_brightness_mix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -1648,7 +1636,11 @@ impl Styles {
             code_block: CodeBlockStyles {
                 code_block_bg,
                 code_block_border_width_px: 1.0,
-                code_block_border_color: code_block_bg,
+                code_block_border_color: if is_light {
+                    with_alpha(theme.border_primary, 0.58)
+                } else {
+                    with_alpha(theme.text_secondary, 0.10)
+                },
                 code_block_radius_px: 0.0,
                 code_block_fill_inset_px: 1.0,
                 code_block_text_padding_left_px: 20.0,
@@ -1678,13 +1670,15 @@ impl Styles {
                 quote_block_padding_bottom_px: 5.0,
                 quote_block_padding_left_px: 10.0,
                 quote_block_padding_right_px: 10.0,
+                quote_block_callout_icon_color: theme.bold,
+                quote_block_callout_icon_size_factor: 1.04,
                 quote_block_bg: with_alpha(
                     theme.text_secondary,
                     if is_light { 0.05 } else { 0.055 },
                 ),
                 quote_block_border_color: with_alpha(
                     theme.text_secondary,
-                    if is_light { 0.72 } else { 0.48 },
+                    if is_light { 0.72 } else { 0.3 },
                 ),
                 quote_block_note_bg: with_alpha(
                     crate::hex_hsla!("#0969DA"),
@@ -1693,7 +1687,7 @@ impl Styles {
                 quote_block_note_border_color: if is_light {
                     crate::hex_hsla!("#0969DA")
                 } else {
-                    with_alpha(crate::hex_hsla!("#58A6FF"), 0.58)
+                    with_alpha(crate::hex_hsla!("#58A6FF"), 0.6)
                 },
                 quote_block_tip_bg: with_alpha(
                     crate::hex_hsla!("#2DA44E"),
@@ -1702,7 +1696,7 @@ impl Styles {
                 quote_block_tip_border_color: if is_light {
                     crate::hex_hsla!("#116329")
                 } else {
-                    with_alpha(crate::hex_hsla!("#3FB950"), 0.54)
+                    with_alpha(crate::hex_hsla!("#3FB950"), 0.58)
                 },
                 quote_block_important_bg: with_alpha(
                     crate::hex_hsla!("#8250DF"),
@@ -1711,7 +1705,7 @@ impl Styles {
                 quote_block_important_border_color: if is_light {
                     crate::hex_hsla!("#8250DF")
                 } else {
-                    with_alpha(crate::hex_hsla!("#A371F7"), 0.52)
+                    with_alpha(crate::hex_hsla!("#A371F7"), 0.58)
                 },
                 quote_block_warning_bg: with_alpha(
                     crate::hex_hsla!("#D29922"),
@@ -1720,7 +1714,7 @@ impl Styles {
                 quote_block_warning_border_color: if is_light {
                     crate::hex_hsla!("#9A6700")
                 } else {
-                    with_alpha(crate::hex_hsla!("#D29922"), 0.52)
+                    with_alpha(crate::hex_hsla!("#D29922"), 0.58)
                 },
                 quote_block_caution_bg: with_alpha(
                     crate::hex_hsla!("#CF222E"),
@@ -1729,7 +1723,7 @@ impl Styles {
                 quote_block_caution_border_color: if is_light {
                     crate::hex_hsla!("#CF222E")
                 } else {
-                    with_alpha(crate::hex_hsla!("#F85149"), 0.52)
+                    with_alpha(crate::hex_hsla!("#F85149"), 0.58)
                 },
             },
             wiki_link: WikiLinkStyles {

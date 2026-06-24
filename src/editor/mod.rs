@@ -1380,6 +1380,7 @@ pub struct EditorView {
     pub(crate) preview_overlay_bounds: Option<Bounds<Pixels>>,
     pub(crate) preview_overlay_image_bounds: Option<Bounds<Pixels>>,
     pub(crate) last_mouse_down_target: Option<(Point<Pixels>, usize)>,
+    pub(crate) selection_drag_has_moved: bool,
     pub(crate) context_menu: Option<ContextMenu>,
     pub(crate) context_submenu: Option<ContextMenuKind>,
     pub(crate) context_submenu_aim: Option<ContextSubmenuAim>,
@@ -1474,6 +1475,7 @@ pub struct EditorView {
     pub(crate) sidebar_drag_scroll_task: Option<Task<()>>,
     pub(crate) selection_drag_scroll_task: Option<Task<()>>,
     pub(crate) selection_drag_position: Option<Point<Pixels>>,
+    pub(crate) suppress_fold_for_empty_selection_drag: bool,
     /// 拖拽悬停自动展开的延迟 task
     pub(crate) sidebar_drag_expand_task: Option<Task<()>>,
     /// 拖拽悬停时自动展开、离开后可回折的目录集合
@@ -1494,16 +1496,7 @@ pub struct EditorView {
     pub(crate) temp_save_epochs: HashMap<String, usize>,
     pub(crate) outline_rail_visible: bool,
     pub(crate) outline_rail_hovered: bool,
-    pub(crate) outline_rail_hovered_label_line: Option<usize>,
-    pub(crate) outline_rail_hovered_label_opacity: f32,
-    pub(crate) outline_rail_hovered_label_opacity_target: f32,
-    pub(crate) outline_rail_hovered_label_opacity_epoch: usize,
-    pub(crate) outline_rail_hovered_label_opacity_task: Option<Task<()>>,
     pub(crate) outline_rail_clicked_active_line: Option<usize>,
-    pub(crate) outline_rail_label_opacity: f32,
-    pub(crate) outline_rail_label_opacity_target: f32,
-    pub(crate) outline_rail_label_opacity_epoch: usize,
-    pub(crate) outline_rail_label_opacity_task: Option<Task<()>>,
     pub(crate) outline_rail_scroll_offset: Option<f32>,
     pub(crate) outline_rail_collapsed_heading_lines: HashSet<usize>,
     pub(crate) outline_rail_last_active_line: Cell<Option<usize>>,
@@ -1525,6 +1518,7 @@ pub struct EditorView {
     pub(crate) chat_panel_custom_size: Option<f32>,
     pub(crate) info_panel_custom_width: Option<f32>,
     pub(crate) git_history_panel_custom_width: Option<f32>,
+    pub(crate) outline_panel_custom_width: Option<f32>,
     pub(crate) utility_panel_resizing: bool,
     pub(crate) utility_panel_display_width: f32,
     pub(crate) utility_panel_layout_width: f32,
@@ -1816,6 +1810,7 @@ impl EditorView {
             preview_overlay_bounds: None,
             preview_overlay_image_bounds: None,
             last_mouse_down_target: None,
+            selection_drag_has_moved: false,
             context_menu: None,
             context_submenu: None,
             context_submenu_aim: None,
@@ -1908,6 +1903,7 @@ impl EditorView {
             sidebar_drag_scroll_task: None,
             selection_drag_scroll_task: None,
             selection_drag_position: None,
+            suppress_fold_for_empty_selection_drag: false,
             sidebar_drag_expand_task: None,
             sidebar_drag_auto_expanded_dirs: HashSet::new(),
             sidebar_items_cache: Vec::new(),
@@ -1926,16 +1922,7 @@ impl EditorView {
             temp_save_epochs: HashMap::new(),
             outline_rail_visible: app_settings.outline_rail_visible,
             outline_rail_hovered: false,
-            outline_rail_hovered_label_line: None,
-            outline_rail_hovered_label_opacity: 0.0,
-            outline_rail_hovered_label_opacity_target: 0.0,
-            outline_rail_hovered_label_opacity_epoch: 0,
-            outline_rail_hovered_label_opacity_task: None,
             outline_rail_clicked_active_line: None,
-            outline_rail_label_opacity: 0.0,
-            outline_rail_label_opacity_target: 0.0,
-            outline_rail_label_opacity_epoch: 0,
-            outline_rail_label_opacity_task: None,
             outline_rail_scroll_offset: None,
             outline_rail_collapsed_heading_lines: HashSet::new(),
             outline_rail_last_active_line: Cell::new(None),
@@ -1957,6 +1944,7 @@ impl EditorView {
             chat_panel_custom_size: None,
             info_panel_custom_width: None,
             git_history_panel_custom_width: None,
+            outline_panel_custom_width: None,
             utility_panel_resizing: false,
             utility_panel_display_width: 0.0,
             utility_panel_layout_width: 0.0,
@@ -2143,9 +2131,7 @@ impl EditorView {
     }
 
     fn desired_toolbar_opacity(&self) -> f32 {
-        if self.outline_rail_hovered || self.outline_rail_label_opacity_target > 0.01 {
-            self.styles.toolbar.toolbar_hidden_opacity
-        } else if self.should_show_editor_toolbar(self.toolbar_base_visible()) {
+        if self.should_show_editor_toolbar(self.toolbar_base_visible()) {
             1.0
         } else {
             self.styles.toolbar.toolbar_hidden_opacity
@@ -2475,7 +2461,6 @@ impl EditorView {
         }
         self.sync_editor_scrollbar_opacity(cx);
         self.sync_editor_scrollbar_width(cx);
-        self.sync_outline_rail_label_opacity(cx);
     }
 
     pub(crate) fn start_editor_scrollbar_drag(
@@ -2598,7 +2583,24 @@ impl EditorView {
     pub(crate) fn utility_panel_target_width(&self) -> f32 {
         self.utility_panel
             .and_then(|panel| self.utility_panel_custom_width_for(panel))
-            .unwrap_or_else(|| self.scaled(self.styles.utility_panel.utility_panel_width_px))
+            .unwrap_or_else(|| {
+                if self.utility_panel == Some(RightUtilityPanel::Outline) {
+                    self.outline_panel_preferred_width()
+                } else {
+                    self.scaled(self.styles.utility_panel.utility_panel_width_px)
+                }
+            })
+    }
+
+    pub(crate) fn utility_panel_resize_bounds_for(&self, panel: RightUtilityPanel) -> (f32, f32) {
+        if panel == RightUtilityPanel::Outline {
+            self.outline_panel_resize_bounds()
+        } else {
+            (
+                self.scaled(self.styles.utility_panel.utility_panel_resize_min_width_px),
+                self.scaled(self.styles.utility_panel.utility_panel_resize_max_width_px),
+            )
+        }
     }
 
     pub(crate) fn utility_panel_custom_width_for(&self, panel: RightUtilityPanel) -> Option<f32> {
@@ -2606,6 +2608,7 @@ impl EditorView {
             RightUtilityPanel::Chat => self.chat_panel_custom_size,
             RightUtilityPanel::Info => self.info_panel_custom_width,
             RightUtilityPanel::GitHistory => self.git_history_panel_custom_width,
+            RightUtilityPanel::Outline => self.outline_panel_custom_width,
         }
     }
 
@@ -2618,6 +2621,7 @@ impl EditorView {
             RightUtilityPanel::Chat => self.chat_panel_custom_size = width,
             RightUtilityPanel::Info => self.info_panel_custom_width = width,
             RightUtilityPanel::GitHistory => self.git_history_panel_custom_width = width,
+            RightUtilityPanel::Outline => self.outline_panel_custom_width = width,
         }
     }
 

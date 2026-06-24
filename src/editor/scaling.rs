@@ -643,20 +643,7 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_outline_visibility(&mut self, cx: &mut Context<Self>) {
-        self.outline_rail_visible = !self.outline_rail_visible;
-        self.outline_rail_hovered = false;
-        self.outline_rail_hovered_label_line = None;
-        self.outline_rail_hovered_label_opacity = 0.0;
-        self.outline_rail_hovered_label_opacity_target = 0.0;
-        self.outline_rail_hovered_label_opacity_epoch += 1;
-        self.outline_rail_hovered_label_opacity_task = None;
-        self.outline_rail_label_opacity = 0.0;
-        self.outline_rail_label_opacity_target = 0.0;
-        self.outline_rail_label_opacity_epoch += 1;
-        self.outline_rail_label_opacity_task = None;
-        self.app_settings.outline_rail_visible = self.outline_rail_visible;
-        self.app_settings.save();
-        cx.notify();
+        self.toggle_outline_panel(cx);
     }
 
     pub(crate) fn toggle_chat_panel(&mut self, cx: &mut Context<Self>) {
@@ -690,6 +677,10 @@ impl EditorView {
 
     pub(crate) fn toggle_git_history_panel(&mut self, cx: &mut Context<Self>) {
         self.toggle_utility_panel(RightUtilityPanel::GitHistory, cx);
+    }
+
+    pub(crate) fn toggle_outline_panel(&mut self, cx: &mut Context<Self>) {
+        self.toggle_utility_panel(RightUtilityPanel::Outline, cx);
     }
 
     pub(crate) fn toggle_utility_panel(

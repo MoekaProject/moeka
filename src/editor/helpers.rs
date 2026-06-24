@@ -2865,6 +2865,132 @@ mod tests {
     }
 
     #[test]
+    fn expanded_inline_code_marks_backticks_with_background() {
+        let line = "use `code` here";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let active_ranges = [4..10];
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &active_ranges,
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &active_ranges,
+            false,
+            prefix_collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font("Kaiti SC"),
+            0,
+            16.0,
+            &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            None,
+            false,
+        );
+
+        assert_eq!(display_text, line);
+        let mut backgrounds = vec![None; display_text.len()];
+        let mut offset = 0;
+        for run in runs {
+            for background in backgrounds.iter_mut().skip(offset).take(run.len) {
+                *background = run.background_color;
+            }
+            offset += run.len;
+        }
+
+        assert_eq!(backgrounds[4], Some(theme.inline_code_bg));
+        assert_eq!(backgrounds[9], Some(theme.inline_code_bg));
+    }
+
+    #[test]
+    fn folded_strikethrough_uses_primary_text_color() {
+        let line = "use ~~gone~~ here";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let active_ranges: [Range<usize>; 0] = [];
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &active_ranges,
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &active_ranges,
+            false,
+            prefix_collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font("Kaiti SC"),
+            0,
+            16.0,
+            &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            None,
+            false,
+        );
+
+        assert_eq!(display_text, "use gone here");
+        assert!(runs.iter().any(|run| {
+            run.strikethrough.is_some() && run.color == theme.text_primary
+        }));
+    }
+
+    #[test]
     fn folded_underline_uses_text_run_underline() {
         let line = "use ++line++ here";
         let decoration = markdown::parse_decorations(line)
@@ -4821,7 +4947,7 @@ pub(crate) fn build_text_runs_for_display(
                     buf_font_styles[i] = FontStyle::Italic;
                 }
                 InlineKind::Strikethrough => {
-                    buf_colors[i] = theme.strikethrough;
+                    buf_colors[i] = theme.text_primary;
                     buf_strikethroughs[i] = true;
                 }
                 InlineKind::Underline => {
@@ -4843,6 +4969,21 @@ pub(crate) fn build_text_runs_for_display(
 
         if matches!(span.kind, InlineKind::InlineCode) {
             assign_font_roles(start..end, FontRole::Monospace, FontRole::BodyCjk);
+            for syntax_range in decoration.syntax_ranges.iter().filter(|syntax_range| {
+                syntax_range.trigger_range.start <= span.range.start
+                    && syntax_range.trigger_range.end >= span.range.end
+            }) {
+                let syntax_start = syntax_range.range.start.min(buf_len);
+                let syntax_end = syntax_range.range.end.min(buf_len);
+                for index in syntax_start..syntax_end {
+                    buf_bg_colors[index] = Some(theme.inline_code_bg);
+                }
+                assign_font_roles(
+                    syntax_start..syntax_end,
+                    FontRole::Monospace,
+                    FontRole::BodyCjk,
+                );
+            }
         } else if matches!(span.kind, InlineKind::Italic) && !is_code_line {
             assign_font_roles(start..end, FontRole::ItalicLatin, FontRole::ItalicCjk);
         }

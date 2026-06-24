@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, ScrollWheelEvent, SharedString,
-    Window, div, linear_color_stop, linear_gradient, prelude::*, px, svg,
+    Window, div, prelude::*, px, svg,
 };
 
 use crate::markdown::BlockType;
@@ -73,28 +73,69 @@ fn overflow_scroll_from_offset(top_offset: f32, viewport_height: f32, padding: f
     (padding - top_offset).max(0.0)
 }
 
-fn outline_label_line_count(text: &str, chars_per_line: usize, max_lines: usize) -> usize {
-    let chars_per_line = chars_per_line.max(1);
-    let max_lines = max_lines.max(1);
-    let column_count = outline_label_weighted_columns(text).max(1);
-    column_count.div_ceil(chars_per_line).clamp(1, max_lines)
-}
-
-fn outline_label_chars_per_line(max_width: f32, font_size: f32) -> usize {
-    ((max_width / (font_size.max(1.0) * 0.82)).floor() as usize).max(1)
-}
-
-fn outline_label_estimated_text_width(text: &str, font_size: f32, chars_per_line: usize) -> f32 {
-    let visible_columns = outline_label_weighted_columns(text)
-        .max(1)
-        .min(chars_per_line.max(1));
-    visible_columns as f32 * font_size.max(1.0) * 0.56 + font_size.max(1.0) * 0.35
-}
-
-fn outline_label_weighted_columns(text: &str) -> usize {
-    text.chars()
+fn outline_heading_text_width(text: &str, font_size: f32) -> f32 {
+    let columns: usize = text
+        .chars()
         .map(|ch| if ch.is_ascii() { 1 } else { 2 })
-        .sum()
+        .sum();
+    columns.max(1) as f32 * font_size.max(1.0) * 0.56 + font_size.max(1.0) * 0.35
+}
+
+fn normalized_outline_width_bounds(min_width: f32, max_width: f32) -> (f32, f32) {
+    let min_width = if min_width.is_finite() {
+        min_width.max(0.0)
+    } else {
+        0.0
+    };
+    let max_width = if max_width.is_finite() {
+        max_width.max(0.0)
+    } else {
+        min_width
+    };
+    (min_width.min(max_width), min_width.max(max_width))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalized_outline_width_bounds;
+
+    #[test]
+    fn outline_width_bounds_are_normalized_before_clamp() {
+        assert_eq!(
+            normalized_outline_width_bounds(324.0, 316.0),
+            (316.0, 324.0)
+        );
+        assert_eq!(
+            normalized_outline_width_bounds(f32::NAN, 316.0),
+            (0.0, 316.0)
+        );
+        assert_eq!(
+            normalized_outline_width_bounds(324.0, f32::NAN),
+            (324.0, 324.0)
+        );
+    }
+}
+
+fn visible_outline_heading_indices_with_depths(
+    headings: &[OutlineHeading],
+    collapsed_lines: &std::collections::HashSet<usize>,
+) -> Vec<(usize, usize)> {
+    let mut visible = Vec::new();
+    let mut level_stack: Vec<u8> = Vec::new();
+    for (index, heading) in headings.iter().enumerate() {
+        if outline_heading_hidden_by_collapsed_ancestor(headings, index, collapsed_lines) {
+            continue;
+        }
+        while level_stack
+            .last()
+            .is_some_and(|level| *level >= heading.level)
+        {
+            level_stack.pop();
+        }
+        visible.push((index, level_stack.len()));
+        level_stack.push(heading.level);
+    }
+    visible
 }
 
 fn outline_heading_has_children(headings: &[OutlineHeading], heading_index: usize) -> bool {
@@ -124,50 +165,6 @@ fn outline_heading_hidden_by_collapsed_ancestor(
         }
     }
     false
-}
-
-fn outline_label_metrics(
-    headings: &[OutlineHeading],
-    active_line: Option<usize>,
-    item_height: f32,
-    item_gap: f32,
-    item_padding_y: f32,
-    line_height: f32,
-    max_width: f32,
-    font_size: f32,
-    wrap_chars_per_line_cap: usize,
-    max_lines: usize,
-    _indent_step: f32,
-) -> (f32, Option<f32>) {
-    let mut total_height = 0.0;
-    let mut active_center = None;
-    for (index, heading) in headings.iter().enumerate() {
-        if index > 0 {
-            total_height += item_gap;
-        }
-        let available_width = max_width.max(font_size.max(1.0));
-        let chars_per_line = outline_label_chars_per_line(available_width, font_size)
-            .min(wrap_chars_per_line_cap.max(1));
-        let line_count = outline_label_line_count(&heading.text, chars_per_line, max_lines);
-        let current_height =
-            item_height.max(line_count as f32 * line_height + item_padding_y * 2.0);
-        if Some(heading.line) == active_line {
-            active_center = Some(total_height + current_height / 2.0);
-        }
-        total_height += current_height;
-    }
-    (total_height, active_center)
-}
-
-fn mix_hsla(from: gpui::Hsla, to: gpui::Hsla, factor: f32) -> gpui::Hsla {
-    let factor = factor.clamp(0.0, 1.0);
-    let inverse = 1.0 - factor;
-    gpui::Hsla {
-        h: from.h * inverse + to.h * factor,
-        s: from.s * inverse + to.s * factor,
-        l: from.l * inverse + to.l * factor,
-        a: from.a * inverse + to.a * factor,
-    }
 }
 
 fn multiply_alpha(color: gpui::Hsla, factor: f32) -> gpui::Hsla {
@@ -317,74 +314,12 @@ impl EditorView {
             .or_else(|| self.first_visible_outline_heading_line(headings))
     }
 
-    pub(crate) fn sync_outline_rail_label_opacity(&mut self, cx: &mut Context<Self>) {
-        let target = if self.outline_rail_hovered
-            || (self.editor_scrollbar_hovered && self.outline_rail_label_opacity > 0.01)
-        {
-            1.0
-        } else {
-            0.0
-        };
-        if (self.outline_rail_label_opacity_target - target).abs() <= 0.001 {
-            return;
-        }
-
-        self.outline_rail_label_opacity_target = target;
-        self.outline_rail_label_opacity_epoch += 1;
-        let epoch = self.outline_rail_label_opacity_epoch;
-        let duration_ms = self
-            .styles
-            .outline
-            .outline_rail_label_opacity_animation_ms
-            .max(1);
-        let step = (16.0 / duration_ms as f32).clamp(0.08, 1.0);
-
-        self.outline_rail_label_opacity_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let done = this
-                    .update(cx, |this, cx| {
-                        if this.outline_rail_label_opacity_epoch != epoch {
-                            return true;
-                        }
-
-                        let diff = this.outline_rail_label_opacity_target
-                            - this.outline_rail_label_opacity;
-                        if diff.abs() <= 0.01 {
-                            this.outline_rail_label_opacity =
-                                this.outline_rail_label_opacity_target;
-                            this.outline_rail_label_opacity_task = None;
-                            cx.notify();
-                            return true;
-                        }
-
-                        this.outline_rail_label_opacity += diff * step;
-                        cx.notify();
-                        false
-                    })
-                    .unwrap_or(true);
-
-                if done {
-                    return;
-                }
-
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(16))
-                    .await;
-            }
-        }));
-    }
-
     fn set_outline_rail_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
         if self.outline_rail_hovered == hovered {
             return;
         }
 
         self.outline_rail_hovered = hovered;
-        if !hovered {
-            self.set_outline_rail_hovered_label_line(None, cx);
-        }
-        self.sync_outline_rail_label_opacity(cx);
-        self.sync_toolbar_opacity(cx);
         cx.notify();
     }
 
@@ -392,76 +327,6 @@ impl EditorView {
         if !self.outline_rail_collapsed_heading_lines.remove(&line) {
             self.outline_rail_collapsed_heading_lines.insert(line);
         }
-        cx.notify();
-    }
-
-    fn sync_outline_rail_label_hover_opacity(&mut self, cx: &mut Context<Self>) {
-        if (self.outline_rail_hovered_label_opacity_target
-            - self.outline_rail_hovered_label_opacity)
-            .abs()
-            <= 0.001
-        {
-            return;
-        }
-
-        self.outline_rail_hovered_label_opacity_epoch += 1;
-        let epoch = self.outline_rail_hovered_label_opacity_epoch;
-        let duration_ms = self
-            .styles
-            .outline
-            .outline_rail_label_hover_animation_ms
-            .max(1);
-        let step = (16.0 / duration_ms as f32).clamp(0.08, 1.0);
-
-        self.outline_rail_hovered_label_opacity_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let done = this
-                    .update(cx, |this, cx| {
-                        if this.outline_rail_hovered_label_opacity_epoch != epoch {
-                            return true;
-                        }
-
-                        let diff = this.outline_rail_hovered_label_opacity_target
-                            - this.outline_rail_hovered_label_opacity;
-                        if diff.abs() <= 0.01 {
-                            this.outline_rail_hovered_label_opacity =
-                                this.outline_rail_hovered_label_opacity_target;
-                            if this.outline_rail_hovered_label_opacity <= 0.01 {
-                                this.outline_rail_hovered_label_line = None;
-                            }
-                            this.outline_rail_hovered_label_opacity_task = None;
-                            cx.notify();
-                            return true;
-                        }
-
-                        this.outline_rail_hovered_label_opacity += diff * step;
-                        cx.notify();
-                        false
-                    })
-                    .unwrap_or(true);
-
-                if done {
-                    return;
-                }
-
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(16))
-                    .await;
-            }
-        }));
-    }
-
-    fn set_outline_rail_hovered_label_line(&mut self, line: Option<usize>, cx: &mut Context<Self>) {
-        if let Some(line) = line {
-            if self.outline_rail_hovered_label_line != Some(line) {
-                self.outline_rail_hovered_label_line = Some(line);
-                self.outline_rail_hovered_label_opacity = 0.0;
-            }
-            self.outline_rail_hovered_label_opacity_target = 1.0;
-        } else {
-            self.outline_rail_hovered_label_opacity_target = 0.0;
-        }
-        self.sync_outline_rail_label_hover_opacity(cx);
         cx.notify();
     }
 
@@ -484,58 +349,13 @@ impl EditorView {
         let tick_total_height = headings.len() as f32 * row_height;
         let tick_max_scroll =
             overflow_max_scroll(viewport_height, tick_total_height, vertical_padding);
-        let mut max_scroll = tick_max_scroll;
-        let mut label_max_scroll = 0.0;
-        let mut label_initial_scroll = None;
-
-        if self.outline_rail_hovered || self.outline_rail_label_opacity > 0.01 {
-            let label_max_width = self.scaled(os.outline_rail_label_max_width_px);
-            let label_font_size = self.scaled(os.outline_rail_label_font_size_px);
-            let label_indent_step = self.scaled(os.outline_rail_label_indent_step_px);
-            let label_wrap_chars_per_line_cap = os.outline_rail_label_wrap_chars_per_line.max(1);
-            let (label_total_height, active_label_center) = outline_label_metrics(
-                &headings,
-                active_line,
-                self.scaled(os.outline_rail_label_item_height_px),
-                self.scaled(os.outline_rail_label_item_gap_px),
-                self.scaled(os.outline_rail_label_item_padding_y_px),
-                self.scaled(os.outline_rail_label_line_height_px),
-                label_max_width,
-                label_font_size,
-                label_wrap_chars_per_line_cap,
-                os.outline_rail_label_max_lines,
-                label_indent_step,
-            );
-            label_max_scroll =
-                overflow_max_scroll(viewport_height, label_total_height, vertical_padding);
-            if label_max_scroll > 0.0 {
-                let label_top_offset = centered_overflow_offset(
-                    viewport_height,
-                    label_total_height,
-                    active_label_center,
-                    vertical_padding,
-                );
-                label_initial_scroll = Some(overflow_scroll_from_offset(
-                    label_top_offset,
-                    viewport_height,
-                    vertical_padding,
-                ));
-            }
-            max_scroll = max_scroll.max(label_max_scroll);
-        }
+        let max_scroll = tick_max_scroll;
 
         if max_scroll <= 0.0 {
             return;
         }
 
         let current_scroll = self.outline_rail_scroll_offset.unwrap_or_else(|| {
-            if let Some(label_initial_scroll) = label_initial_scroll {
-                return if label_max_scroll > 0.0 {
-                    label_initial_scroll / label_max_scroll * max_scroll
-                } else {
-                    label_initial_scroll
-                };
-            }
             let active_index = active_line
                 .and_then(|line| headings.iter().position(|heading| heading.line == line));
             let active_center =
@@ -638,64 +458,6 @@ impl EditorView {
         let track_right = scrollbar_hit_left_from_right.min(right_margin);
         let track_extra_right_padding = (right_margin - track_right).max(0.0);
         let vertical_padding = self.scaled(os.outline_rail_vertical_padding_px);
-        let label_font_size = self.scaled(os.outline_rail_label_font_size_px);
-        let label_max_width = self.scaled(os.outline_rail_label_max_width_px);
-        let label_indent_step = self.scaled(os.outline_rail_label_indent_step_px);
-        let label_gap = self.scaled(os.outline_rail_label_gap_px);
-        let label_item_height = self.scaled(os.outline_rail_label_item_height_px);
-        let label_item_gap = self.scaled(os.outline_rail_label_item_gap_px);
-        let label_item_padding_y = self.scaled(os.outline_rail_label_item_padding_y_px);
-        let label_line_height = self.scaled(os.outline_rail_label_line_height_px);
-        let label_wrap_chars_per_line_cap = os.outline_rail_label_wrap_chars_per_line.max(1);
-        let label_fold_icon_size = self.scaled(os.outline_rail_label_fold_icon_size_px);
-        let label_fold_icon_gap = self.scaled(os.outline_rail_label_fold_icon_gap_px);
-        let label_fold_slot_width = label_fold_icon_size + label_fold_icon_gap;
-        let visible_heading_indices: Vec<usize> = headings
-            .iter()
-            .enumerate()
-            .filter_map(|(index, _)| {
-                (!outline_heading_hidden_by_collapsed_ancestor(
-                    &headings,
-                    index,
-                    &self.outline_rail_collapsed_heading_lines,
-                ))
-                .then_some(index)
-            })
-            .collect();
-        let visible_headings: Vec<OutlineHeading> = visible_heading_indices
-            .iter()
-            .filter_map(|index| headings.get(*index).cloned())
-            .collect();
-        let label_column_max_width = label_max_width.max(0.0);
-        let label_column_min_width = label_font_size.max(1.0).min(label_column_max_width);
-        let label_column_width = visible_heading_indices
-            .iter()
-            .filter_map(|heading_index| {
-                headings
-                    .get(*heading_index)
-                    .map(|heading| (*heading_index, heading))
-            })
-            .map(|(heading_index, heading)| {
-                let icon_slot = if outline_heading_has_children(&headings, heading_index) {
-                    label_fold_slot_width
-                } else {
-                    0.0
-                };
-                let available_width = (label_max_width - icon_slot).max(label_font_size.max(1.0));
-                let label_wrap_chars_per_line =
-                    outline_label_chars_per_line(available_width, label_font_size)
-                        .min(label_wrap_chars_per_line_cap);
-                let estimated_text_width = outline_label_estimated_text_width(
-                    heading.text.as_ref(),
-                    label_font_size,
-                    label_wrap_chars_per_line,
-                )
-                .min(available_width);
-                icon_slot + estimated_text_width
-            })
-            .fold(0.0_f32, f32::max)
-            .min(label_column_max_width)
-            .max(label_column_min_width);
         let row_height = self.scaled(os.outline_rail_row_height_px);
         let tick_width = self.scaled(os.outline_rail_tick_width_px);
         let tick_thickness = self
@@ -704,16 +466,7 @@ impl EditorView {
             .max(1.0);
         let tick_color = os.outline_rail_tick_color;
         let tick_active_color = os.outline_rail_tick_active_color;
-        let label_color = os.outline_rail_label_color;
-        let label_hover_color = os.outline_rail_label_hover_color;
-        let label_active_color = os.outline_rail_label_active_color;
         let tick_level_opacities = os.outline_rail_tick_level_opacities;
-        let label_level_opacities = os.outline_rail_label_level_opacities;
-        let label_level_brightness_mix = os.outline_rail_label_level_brightness_mix;
-        let hovered_label_line = self.outline_rail_hovered_label_line;
-        let hovered_label_opacity = self.outline_rail_hovered_label_opacity.clamp(0.0, 1.0);
-        let label_opacity = self.outline_rail_label_opacity.clamp(0.0, 1.0);
-        let labels_visible = self.outline_rail_hovered || label_opacity > 0.01;
         let active_extra_width = self.scaled(os.outline_rail_tick_active_extra_width_px);
         let active_anim_seconds = os.outline_rail_tick_active_animation_seconds.max(0.001);
 
@@ -758,25 +511,7 @@ impl EditorView {
         let overflow = viewport_height > 0.0 && total_height > viewport_height;
         let top_offset = if overflow {
             let max_scroll = overflow_max_scroll(viewport_height, total_height, vertical_padding);
-            let label_max_scroll = if labels_visible {
-                let (label_total_height, _) = outline_label_metrics(
-                    &headings,
-                    active_line,
-                    label_item_height,
-                    label_item_gap,
-                    label_item_padding_y,
-                    label_line_height,
-                    label_max_width,
-                    label_font_size,
-                    label_wrap_chars_per_line_cap,
-                    os.outline_rail_label_max_lines,
-                    label_indent_step,
-                );
-                overflow_max_scroll(viewport_height, label_total_height, vertical_padding)
-            } else {
-                0.0
-            };
-            let shared_max_scroll = max_scroll.max(label_max_scroll);
+            let shared_max_scroll = max_scroll;
             if let Some(top_offset) = overflow_offset_from_shared_scroll(
                 self.outline_rail_scroll_offset,
                 shared_max_scroll,
@@ -856,9 +591,7 @@ impl EditorView {
                         MouseButton::Left,
                         cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
-                            this.outline_rail_clicked_active_line = Some(line);
-                            this.scroll_to_line(line, cx);
-                            this.flash_outline_heading_line(line, cx);
+                            this.toggle_outline_panel(cx);
                         }),
                     )
                     .into_any_element(),
@@ -866,253 +599,9 @@ impl EditorView {
         }
 
         let rail_collapsed_width = tick_width + active_extra_width;
-        let rail_expanded_width = rail_collapsed_width + label_gap + label_column_width;
-        let rail_width = if labels_visible {
-            rail_expanded_width
-        } else {
-            rail_collapsed_width
-        };
+        let rail_width = rail_collapsed_width;
         let rail_outer_width = rail_width + right_margin;
         let track_width = rail_width + track_extra_right_padding;
-
-        let label_overlay = if labels_visible {
-            let mut label_items: Vec<AnyElement> =
-                Vec::with_capacity(visible_heading_indices.len());
-            let (full_label_total_height, full_active_label_center) = outline_label_metrics(
-                &headings,
-                active_line,
-                label_item_height,
-                label_item_gap,
-                label_item_padding_y,
-                label_line_height,
-                label_max_width,
-                label_font_size,
-                label_wrap_chars_per_line_cap,
-                os.outline_rail_label_max_lines,
-                label_indent_step,
-            );
-            let (label_total_height, active_label_center) = outline_label_metrics(
-                &visible_headings,
-                active_line,
-                label_item_height,
-                label_item_gap,
-                label_item_padding_y,
-                label_line_height,
-                label_max_width,
-                label_font_size,
-                label_wrap_chars_per_line_cap,
-                os.outline_rail_label_max_lines,
-                label_indent_step,
-            );
-            for heading_index in &visible_heading_indices {
-                let Some(heading) = headings.get(*heading_index) else {
-                    continue;
-                };
-                let target_line = heading.line;
-                let has_children = outline_heading_has_children(&headings, *heading_index);
-                let is_collapsed = self
-                    .outline_rail_collapsed_heading_lines
-                    .contains(&target_line);
-                let level_opacity = heading_level_opacity(heading.level, label_level_opacities);
-                let is_active = Some(target_line) == active_line;
-                let is_hovered = hovered_label_line == Some(target_line);
-                let level_brightness_mix =
-                    heading_level_opacity(heading.level, label_level_brightness_mix);
-                let base_label_color = if is_active {
-                    label_active_color
-                } else {
-                    mix_hsla(
-                        multiply_alpha(label_color, level_opacity),
-                        label_hover_color,
-                        level_brightness_mix,
-                    )
-                };
-                let row_label_color = if is_hovered {
-                    mix_hsla(base_label_color, label_hover_color, hovered_label_opacity)
-                } else {
-                    base_label_color
-                };
-                let icon_slot = if has_children {
-                    label_fold_slot_width
-                } else {
-                    0.0
-                };
-                let available_width = (label_max_width - icon_slot).max(label_font_size.max(1.0));
-                let label_wrap_chars_per_line =
-                    outline_label_chars_per_line(available_width, label_font_size)
-                        .min(label_wrap_chars_per_line_cap);
-                let label_line_count = outline_label_line_count(
-                    heading.text.as_ref(),
-                    label_wrap_chars_per_line,
-                    os.outline_rail_label_max_lines,
-                );
-                let label_text_width = outline_label_estimated_text_width(
-                    heading.text.as_ref(),
-                    label_font_size,
-                    label_wrap_chars_per_line,
-                )
-                .min(available_width);
-                let label_text_max_height = label_line_count as f32 * label_line_height;
-                let current_label_item_height =
-                    label_item_height.max(label_text_max_height + label_item_padding_y * 2.0);
-                label_items.push(
-                    div()
-                        .id(SharedString::from(format!(
-                            "outline-rail-label-{}",
-                            target_line
-                        )))
-                        .relative()
-                        .h(px(current_label_item_height))
-                        .w(px(label_column_width))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .gap(px(if has_children {
-                            label_fold_icon_gap
-                        } else {
-                            0.0
-                        }))
-                        .overflow_hidden()
-                        .py(px(label_item_padding_y))
-                        .text_size(px(label_font_size))
-                        .text_right()
-                        .text_color(row_label_color)
-                        .cursor(CursorStyle::Arrow)
-                        .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
-                            if *hovering {
-                                this.set_outline_rail_hovered_label_line(Some(target_line), cx);
-                            } else if this.outline_rail_hovered_label_line == Some(target_line) {
-                                this.set_outline_rail_hovered_label_line(None, cx);
-                            }
-                        }))
-                        .when(has_children, |this| {
-                            let icon_path = if is_collapsed {
-                                FOLD_SVG_PATH
-                            } else {
-                                FOLD_EXPANDED_SVG_PATH
-                            };
-                            this.child(
-                                div()
-                                    .w(px(label_fold_icon_size))
-                                    .h(px(label_fold_icon_size))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor(CursorStyle::Arrow)
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                            cx.stop_propagation();
-                                            this.toggle_outline_rail_heading_collapsed(
-                                                target_line,
-                                                cx,
-                                            );
-                                        }),
-                                    )
-                                    .child(
-                                        svg()
-                                            .path(icon_path)
-                                            .size(px(label_fold_icon_size))
-                                            .text_color(row_label_color),
-                                    ),
-                            )
-                        })
-                        .child(
-                            div()
-                                .w(px(label_text_width))
-                                .max_h(px(label_text_max_height))
-                                .overflow_hidden()
-                                .line_height(px(label_line_height))
-                                .whitespace_normal()
-                                .text_right()
-                                .child(heading.text.clone()),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.outline_rail_clicked_active_line = Some(target_line);
-                                this.scroll_to_line(target_line, cx);
-                                this.flash_outline_heading_line(target_line, cx);
-                            }),
-                        )
-                        .into_any_element(),
-                );
-            }
-
-            let label_overflow = viewport_height > 0.0 && label_total_height > viewport_height;
-            let label_top_offset = if label_overflow {
-                let max_scroll =
-                    overflow_max_scroll(viewport_height, label_total_height, vertical_padding);
-                let tick_max_scroll =
-                    overflow_max_scroll(viewport_height, total_height, vertical_padding);
-                let shared_max_scroll = max_scroll.max(tick_max_scroll);
-                if let Some(top_offset) = overflow_offset_from_shared_scroll(
-                    self.outline_rail_scroll_offset,
-                    shared_max_scroll,
-                    max_scroll,
-                    viewport_height,
-                    vertical_padding,
-                ) {
-                    top_offset
-                } else {
-                    centered_overflow_offset(
-                        viewport_height,
-                        label_total_height,
-                        active_label_center,
-                        vertical_padding,
-                    )
-                }
-            } else {
-                centered_overflow_offset(
-                    viewport_height,
-                    full_label_total_height,
-                    full_active_label_center,
-                    vertical_padding,
-                )
-            };
-
-            let label_column = div()
-                .w(px(label_column_width))
-                .flex()
-                .flex_col()
-                .items_end()
-                .gap(px(label_item_gap))
-                .children(label_items);
-            let label_right = rail_collapsed_width + label_gap;
-            let overlay = div()
-                .id("outline-rail-label-overlay")
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .right(px(label_right))
-                .w(px(label_column_width))
-                .overflow_hidden()
-                .opacity(label_opacity);
-            Some(if label_overflow {
-                overlay
-                    .child(
-                        label_column
-                            .absolute()
-                            .top(px(label_top_offset))
-                            .right(px(0.0)),
-                    )
-                    .into_any_element()
-            } else {
-                overlay
-                    .child(
-                        label_column
-                            .absolute()
-                            .top(px(label_top_offset))
-                            .right(px(0.0)),
-                    )
-                    .into_any_element()
-            })
-        } else {
-            None
-        };
 
         let column = div()
             .id("outline-rail-tick-column")
@@ -1127,25 +616,7 @@ impl EditorView {
             .relative()
             .h_full()
             .w_full()
-            .overflow_hidden()
-            .when(labels_visible, |this| {
-                let gradient_start_color = gpui::Hsla {
-                    a: os.outline_rail_label_gradient_start_color.a * label_opacity,
-                    ..os.outline_rail_label_gradient_start_color
-                };
-                let gradient_end_color = gpui::Hsla {
-                    a: os.outline_rail_label_gradient_end_color.a * label_opacity,
-                    ..os.outline_rail_label_gradient_end_color
-                };
-                this.bg(linear_gradient(
-                    os.outline_rail_label_gradient_angle_deg,
-                    linear_color_stop(
-                        gradient_start_color,
-                        os.outline_rail_label_gradient_start_stop,
-                    ),
-                    linear_color_stop(gradient_end_color, os.outline_rail_label_gradient_end_stop),
-                ))
-            });
+            .overflow_hidden();
 
         let track_inner = div()
             .id("outline-rail-track-inner")
@@ -1164,11 +635,7 @@ impl EditorView {
                 .items_end()
                 .child(column)
         };
-        let track_inner = if let Some(label_overlay) = label_overlay {
-            track_inner.child(label_overlay)
-        } else {
-            track_inner
-        };
+        let track_inner = track_inner;
 
         let track_hover_width = if self.outline_rail_hovered {
             track_width
@@ -1217,5 +684,229 @@ impl EditorView {
                 .child(content)
                 .into_any_element(),
         )
+    }
+
+    pub(crate) fn render_outline_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let headings = self.collect_outline_headings();
+        let active_line = self.outline_rail_active_line(&headings);
+        let visible_heading_indices = visible_outline_heading_indices_with_depths(
+            &headings,
+            &self.outline_rail_collapsed_heading_lines,
+        );
+        let ups = &self.styles.utility_panel;
+        let os = &self.styles.outline;
+        let top_spacer = self.scaled(ups.utility_panel_top_spacer_height_px);
+        let bottom_spacer = self.scaled(ups.utility_panel_bottom_spacer_height_px);
+        let header_height = self.scaled(ups.utility_panel_header_height_px);
+        let header_padding_x = self.scaled(ups.utility_panel_header_padding_x_px);
+        let header_font_size = self.scaled(ups.utility_panel_header_font_size_px);
+        let section_gap = self.scaled(ups.utility_panel_section_gap_px);
+        let section_padding_x = self.scaled(ups.utility_panel_section_padding_x_px);
+        let empty_font_size = self.scaled(ups.utility_panel_empty_font_size_px);
+        let item_height = self.scaled(os.outline_rail_label_item_height_px).max(22.0);
+        let item_gap = self.scaled(os.outline_rail_label_item_gap_px);
+        let item_padding_y = self.scaled(os.outline_rail_label_item_padding_y_px);
+        let line_height = self.scaled(os.outline_rail_label_line_height_px);
+        let font_size = self.scaled(os.outline_rail_label_font_size_px);
+        let indent_step = self.scaled(os.outline_rail_label_indent_step_px);
+        let fold_icon_size = self.scaled(os.outline_rail_label_fold_icon_size_px);
+        let fold_icon_gap = self.scaled(os.outline_rail_label_fold_icon_gap_px);
+
+        let mut children: Vec<AnyElement> = vec![
+            div().h(px(top_spacer)).flex_shrink_0().into_any_element(),
+            div()
+                .h(px(header_height))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .px(px(header_padding_x))
+                .text_size(px(header_font_size))
+                .text_color(ups.utility_panel_header_text_color)
+                .child("大纲")
+                .into_any_element(),
+        ];
+
+        if headings.is_empty() {
+            children.push(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(empty_font_size))
+                    .text_color(ups.utility_panel_empty_text_color)
+                    .child("当前文档没有标题")
+                    .into_any_element(),
+            );
+        } else {
+            children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
+            let active_bg = self.theme.bg_selected;
+            for (heading_index, depth) in visible_heading_indices {
+                let heading = &headings[heading_index];
+
+                let target_line = heading.line;
+                let has_children = outline_heading_has_children(&headings, heading_index);
+                let is_collapsed = self
+                    .outline_rail_collapsed_heading_lines
+                    .contains(&target_line);
+                let is_active = Some(target_line) == active_line;
+                let color = if is_active {
+                    os.outline_rail_label_active_color
+                } else {
+                    os.outline_rail_label_color
+                };
+                let indent = depth as f32 * indent_step.max(0.0);
+                let inner_padding_left = section_padding_x + indent;
+                let icon_path = if is_collapsed {
+                    FOLD_SVG_PATH
+                } else {
+                    FOLD_EXPANDED_SVG_PATH
+                };
+
+                children.push(
+                    div()
+                        .min_h(px(item_height))
+                        .flex_shrink_0()
+                        .pl(px(inner_padding_left))
+                        .pr(px(section_padding_x))
+                        .py(px(item_padding_y))
+                        .flex()
+                        .items_center()
+                        .gap(px(if has_children { fold_icon_gap } else { 0.0 }))
+                        .text_size(px(font_size))
+                        .text_color(color)
+                        .line_height(px(line_height))
+                        .cursor(CursorStyle::Arrow)
+                        .when(is_active, |this| this.bg(active_bg))
+                        .hover(move |style| style.bg(active_bg))
+                        .when(has_children, |this| {
+                            this.child(
+                                div()
+                                    .w(px(fold_icon_size))
+                                    .h(px(fold_icon_size))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.toggle_outline_rail_heading_collapsed(
+                                                target_line,
+                                                cx,
+                                            );
+                                        }),
+                                    )
+                                    .child(
+                                        svg()
+                                            .path(icon_path)
+                                            .size(px(fold_icon_size))
+                                            .text_color(color),
+                                    ),
+                            )
+                        })
+                        .when(!has_children, |this| {
+                            this.child(div().w(px(fold_icon_size)).flex_none())
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .whitespace_normal()
+                                .child(heading.text.clone()),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.outline_rail_clicked_active_line = Some(target_line);
+                                this.scroll_to_line(target_line, cx);
+                                this.flash_outline_heading_line(target_line, cx);
+                            }),
+                        )
+                        .into_any_element(),
+                );
+                children.push(div().h(px(item_gap)).flex_shrink_0().into_any_element());
+            }
+            children.push(
+                div()
+                    .h(px(bottom_spacer))
+                    .flex_shrink_0()
+                    .into_any_element(),
+            );
+        }
+
+        div()
+            .id("outline-panel")
+            .h_full()
+            .w_full()
+            .bg(ups.utility_panel_bg)
+            .relative()
+            .overflow_hidden()
+            .border_l(px(ups.utility_panel_border_width_px))
+            .border_color(ups.utility_panel_border_color)
+            .child(
+                div()
+                    .id("outline-panel-scroll")
+                    .h_full()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .children(children),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn outline_panel_preferred_width(&self) -> f32 {
+        let headings = self.collect_outline_headings();
+        let ups = &self.styles.utility_panel;
+        let os = &self.styles.outline;
+        let section_padding_x = self.scaled(ups.utility_panel_section_padding_x_px);
+        let header_padding_x = self.scaled(ups.utility_panel_header_padding_x_px);
+        let header_font_size = self.scaled(ups.utility_panel_header_font_size_px);
+        let font_size = self.scaled(os.outline_rail_label_font_size_px);
+        let indent_step = self.scaled(os.outline_rail_label_indent_step_px);
+        let fold_icon_size = self.scaled(os.outline_rail_label_fold_icon_size_px);
+        let fold_icon_gap = self.scaled(os.outline_rail_label_fold_icon_gap_px);
+        let text_cap = self.scaled(os.outline_rail_label_max_width_px);
+        let visible_heading_indices = visible_outline_heading_indices_with_depths(
+            &headings,
+            &self.outline_rail_collapsed_heading_lines,
+        );
+        let header_width = header_padding_x * 2.0
+            + outline_heading_text_width("大纲", header_font_size)
+            + self.scaled(20.0);
+        let content_width = visible_heading_indices
+            .iter()
+            .map(|(heading_index, depth)| {
+                let heading = &headings[*heading_index];
+                let text_width = outline_heading_text_width(heading.text.as_ref(), font_size)
+                    .min(text_cap.max(font_size));
+                section_padding_x * 2.0
+                    + *depth as f32 * indent_step.max(0.0)
+                    + fold_icon_size
+                    + fold_icon_gap
+                    + text_width
+                    + self.scaled(20.0)
+            })
+            .fold(header_width, f32::max);
+        let min_width = self.scaled(150.0);
+        let max_width = self.scaled(self.styles.utility_panel.utility_panel_resize_max_width_px);
+        let (min_width, max_width) = normalized_outline_width_bounds(min_width, max_width);
+        let content_width = if content_width.is_finite() {
+            content_width.max(0.0)
+        } else {
+            min_width
+        };
+        content_width.clamp(min_width, max_width)
+    }
+
+    pub(crate) fn outline_panel_resize_bounds(&self) -> (f32, f32) {
+        let preferred = self.outline_panel_preferred_width();
+        let min_width = (preferred * 0.85).max(self.scaled(140.0));
+        let global_max = self.scaled(self.styles.utility_panel.utility_panel_resize_max_width_px);
+        let max_width = (preferred * 1.25).max(min_width).min(global_max);
+        normalized_outline_width_bounds(min_width, max_width)
     }
 }
