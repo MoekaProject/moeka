@@ -438,6 +438,7 @@ pub(crate) enum ContextMenuKind {
         tab_id: String,
     },
     Workspace,
+    Image,
     Whiteboard,
     Table {
         table_start_line: usize,
@@ -6918,7 +6919,17 @@ pub(crate) fn is_image_file(path: &Path) -> bool {
         .is_some_and(|ext| {
             matches!(
                 ext.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff" | "avif"
+                "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "gif"
+                    | "webp"
+                    | "bmp"
+                    | "ico"
+                    | "tif"
+                    | "tiff"
+                    | "avif"
+                    | "svg"
             )
         })
 }

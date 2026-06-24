@@ -2,8 +2,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Pixels, Point, SharedString, div, prelude::*, px, svg,
+    AnyElement, ClipboardItem, Context, CursorStyle, FontWeight, Image, ImageFormat, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, div, prelude::*, px, svg,
 };
 
 use crate::markdown::{BlockType, InlineKind, LineDecoration, raw_wiki_link_ranges};
@@ -280,6 +280,40 @@ impl EditorView {
         self.context_menu = None;
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         cx.notify();
+    }
+
+    fn copy_active_image_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.current_file_path.clone() else {
+            self.context_menu = None;
+            cx.notify();
+            return;
+        };
+        let ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase());
+        let format = match ext.as_deref() {
+            Some("png") => Some(ImageFormat::Png),
+            Some("jpg" | "jpeg") => Some(ImageFormat::Jpeg),
+            Some("webp") => Some(ImageFormat::Webp),
+            Some("gif") => Some(ImageFormat::Gif),
+            _ => None,
+        };
+        if let Some(format) = format
+            && let Ok(bytes) = std::fs::read(&path)
+        {
+            self.context_menu = None;
+            cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(format, bytes)));
+            cx.notify();
+            return;
+        }
+        if ext.as_deref() == Some("svg")
+            && let Ok(svg) = std::fs::read_to_string(&path)
+        {
+            self.copy_text_to_clipboard(svg, cx);
+            return;
+        }
+        self.copy_text_to_clipboard(path.to_string_lossy().into_owned(), cx);
     }
 
     fn context_menu_icon_path(&self, label: &str) -> Option<&'static str> {
@@ -1402,7 +1436,7 @@ impl EditorView {
         let text_color = if is_destructive {
             ms.menu_item_danger_text_color
         } else {
-            ms.menu_item_text_color
+            ms.menu_item_primary_text_color
         };
         let hover_bg = ms.menu_item_hover_bg;
         let item_id = SharedString::from(format!("menu-item-{}", label));
@@ -1461,7 +1495,7 @@ impl EditorView {
         let text_color = if is_destructive {
             ms.menu_item_danger_text_color
         } else {
-            ms.menu_item_text_color
+            ms.menu_item_primary_text_color
         };
         let hover_bg = ms.menu_item_hover_bg;
         let item_id = SharedString::from(format!("menu-item-{}", label));
@@ -1525,7 +1559,7 @@ impl EditorView {
         let ms = &self.styles.context_menu;
         let wss = &self.styles.workspace_switcher;
         let hover_bg = ms.menu_item_hover_bg;
-        let text_color = ms.menu_item_text_color;
+        let text_color = ms.menu_item_primary_text_color;
         let check_size = self.scaled(wss.ws_menu_item_check_size_px);
         let icon_size = self.scaled(ms.menu_format_icon_size_px);
         let gap = self.scaled(wss.ws_menu_item_action_icon_gap_px);
@@ -1606,7 +1640,7 @@ impl EditorView {
             .items_center()
             .gap(px(gap))
             .text_size(px(self.scaled(ms.menu_item_font_size_px)))
-            .text_color(ms.menu_item_text_color)
+            .text_color(ms.menu_item_primary_text_color)
             .hover(move |s| s.bg(hover_bg))
             .cursor(CursorStyle::Arrow)
             .child(
@@ -1681,7 +1715,7 @@ impl EditorView {
         let text_color = if is_active {
             ms.menu_format_active_text_color
         } else {
-            ms.menu_item_text_color
+            ms.menu_item_primary_text_color
         };
         let icon_color = if is_active {
             ms.menu_format_active_text_color
@@ -1777,7 +1811,7 @@ impl EditorView {
         let icon_gap = self.scaled(ms.menu_format_icon_gap_px);
         let arrow_size = (icon_size - self.scaled(2.0)).max(self.scaled(10.0));
         let hover_bg = ms.menu_item_hover_bg;
-        let text_color = ms.menu_item_text_color;
+        let text_color = ms.menu_item_primary_text_color;
         let bg = if is_open {
             ms.menu_item_selected_bg
         } else {
@@ -3027,7 +3061,7 @@ impl EditorView {
                     .items_center()
                     .gap(px(self.scaled(self.styles.sidebar.sidebar_item_gap_px)))
                     .text_size(px(self.scaled(ms.menu_item_font_size_px)))
-                    .text_color(ms.menu_item_text_color)
+                    .text_color(ms.menu_item_primary_text_color)
                     .bg(if is_selected {
                         ms.menu_item_selected_bg
                     } else {
@@ -3039,7 +3073,7 @@ impl EditorView {
                     .child(self.render_wiki_link_menu_label(
                         &item,
                         &highlight_indices,
-                        ms.menu_item_text_color,
+                        ms.menu_item_primary_text_color,
                         self.styles.quick_open.quick_open_result_match_text_color,
                     ))
                     .when_some(directory_path, |this, directory_path| {
@@ -3596,6 +3630,34 @@ impl EditorView {
                 self.render_format_context_menu(cx),
                 self.scaled(self.styles.context_menu.menu_format_width_px),
             ),
+            ContextMenuKind::Image => {
+                let mut items = Vec::new();
+                items.push(self.render_context_menu_item_with_icon(
+                    self.t(crate::i18n::TextKey::Copy),
+                    MENU_COPY_SVG_PATH,
+                    false,
+                    cx,
+                    |this, _, cx| {
+                        this.copy_active_image_to_clipboard(cx);
+                    },
+                ));
+                items.push(self.render_context_menu_item_with_icon(
+                    self.t(crate::i18n::TextKey::RevealInFinder),
+                    MENU_LOCATE_SVG_PATH,
+                    false,
+                    cx,
+                    |this, _, cx| {
+                        if let Some(path) = this.current_file_path.clone() {
+                            this.reveal_in_finder(&path);
+                        }
+                        this.close_context_menu(cx);
+                    },
+                ));
+                (
+                    items,
+                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                )
+            }
             ContextMenuKind::Whiteboard => {
                 let mut items = Vec::new();
                 items.push(self.render_context_menu_item_with_icon(
@@ -4081,7 +4143,7 @@ impl EditorView {
                 let close_size = self.scaled(wss.ws_menu_item_close_size_px);
                 let ms = &self.styles.context_menu;
                 let row_hover_bg = ms.menu_item_hover_bg;
-                let text_color = ms.menu_item_text_color;
+                let text_color = ms.menu_item_primary_text_color;
 
                 for workspace in self.workspaces.clone() {
                     let ws_name = workspace

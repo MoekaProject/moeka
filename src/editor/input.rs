@@ -952,6 +952,18 @@ impl EditorView {
             return;
         }
 
+        if self.active_tab_is_image() {
+            self.open_context_menu(
+                ContextMenu {
+                    position: event.position,
+                    kind: ContextMenuKind::Image,
+                },
+                true,
+                cx,
+            );
+            return;
+        }
+
         if let Some(&(bounds, table_start, visual_row, col)) = self
             .table_click_areas
             .iter()

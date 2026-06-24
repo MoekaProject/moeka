@@ -99,6 +99,8 @@ pub enum ThemeColorField {
     Italic,
     Strikethrough,
     InlineCode,
+    InlineCodeBg,
+    HighlightBg,
     Link,
     SyntaxMarker,
     ListMarker,
@@ -133,7 +135,7 @@ impl ThemeColorField {
         Self::WindowBorder,
     ];
 
-    pub const EDITOR_FIELDS: [Self; 20] = [
+    pub const EDITOR_FIELDS: [Self; 22] = [
         Self::BgCode,
         Self::BgCodeInline,
         Self::BorderCodeBlock,
@@ -145,6 +147,8 @@ impl ThemeColorField {
         Self::Italic,
         Self::Strikethrough,
         Self::InlineCode,
+        Self::InlineCodeBg,
+        Self::HighlightBg,
         Self::Link,
         Self::SyntaxMarker,
         Self::ListMarker,
@@ -188,6 +192,8 @@ impl ThemeColorField {
             Self::Italic => "italic",
             Self::Strikethrough => "strikethrough",
             Self::InlineCode => "inline_code",
+            Self::InlineCodeBg => "inline_code_bg",
+            Self::HighlightBg => "highlight_bg",
             Self::Link => "link",
             Self::SyntaxMarker => "syntax_marker",
             Self::ListMarker => "list_marker",
@@ -310,6 +316,8 @@ impl Theme {
             ThemeColorField::Italic => self.italic,
             ThemeColorField::Strikethrough => self.strikethrough,
             ThemeColorField::InlineCode => self.inline_code,
+            ThemeColorField::InlineCodeBg => self.inline_code_bg,
+            ThemeColorField::HighlightBg => self.highlight_bg,
             ThemeColorField::Link => self.link,
             ThemeColorField::SyntaxMarker => self.syntax_marker,
             ThemeColorField::ListMarker => self.list_marker,
@@ -354,6 +362,8 @@ impl Theme {
             ThemeColorField::Italic => self.italic = color,
             ThemeColorField::Strikethrough => self.strikethrough = color,
             ThemeColorField::InlineCode => self.inline_code = color,
+            ThemeColorField::InlineCodeBg => self.inline_code_bg = color,
+            ThemeColorField::HighlightBg => self.highlight_bg = color,
             ThemeColorField::Link => self.link = color,
             ThemeColorField::SyntaxMarker => self.syntax_marker = color,
             ThemeColorField::ListMarker => self.list_marker = color,
@@ -510,7 +520,7 @@ impl Theme {
             text_danger: crate::hex_hsla!("#D3604F"),
             // Background
             bg_primary: crate::hex_hsla!("#FFFFFF"),
-            bg_secondary: crate::hex_hsla!("#FBFBFB"),
+            bg_secondary: crate::hex_hsla!("#F6F6F6"),
             bg_elevated: crate::hex_hsla!("#F3F3F3"),
             bg_hover: crate::hex_hsla!("#F1F1F1"),
             bg_selected: crate::hex_hsla!("#F1F0F0"),

@@ -1016,15 +1016,6 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
         let line_len = content.strip_suffix('\n').unwrap_or(content);
         let leading_ws = line_len.len() - line_len.trim_start_matches([' ', '\t']).len();
         let trimmed = &line_len[leading_ws..];
-        let is_list_item = decoration.block_contexts.contains(&BlockContext::ListItem)
-            || matches!(
-                decoration.block_type,
-                BlockType::OrderedList | BlockType::UnorderedList | BlockType::TaskList(_)
-            );
-        if !is_list_item {
-            continue;
-        }
-
         let prefix_len = ordered_list_prefix_len(trimmed);
         if prefix_len > 0
             && (leading_ws <= 3
@@ -1041,6 +1032,15 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                 range: leading_ws..leading_ws + prefix_len,
                 trigger_range: leading_ws..leading_ws + prefix_len,
             });
+            continue;
+        }
+
+        let is_list_item = decoration.block_contexts.contains(&BlockContext::ListItem)
+            || matches!(
+                decoration.block_type,
+                BlockType::OrderedList | BlockType::UnorderedList | BlockType::TaskList(_)
+            );
+        if !is_list_item {
             continue;
         }
 
@@ -3011,6 +3011,10 @@ mod tests {
         assert_eq!(decorations[0].block_type, BlockType::OrderedList);
         assert_eq!(decorations[1].block_type, BlockType::OrderedList);
         assert_eq!(decorations[2].block_type, BlockType::OrderedList);
+
+        let decorations = parse_decorations("1. ");
+        assert_eq!(decorations[0].block_type, BlockType::OrderedList);
+        assert_eq!(decorations[0].syntax_ranges[0].range, 0..3);
 
         let changed_ordered_delimiter = commonmark_example(302);
         assert_eq!(changed_ordered_delimiter.section, "Lists");

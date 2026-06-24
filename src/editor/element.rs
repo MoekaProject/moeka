@@ -2333,6 +2333,9 @@ impl Element for EditorElement {
                 if !editor.search_matches.is_empty() {
                     let match_bg = editor.styles.search.search_match_bg;
                     let active_bg = editor.styles.search.search_match_active_bg;
+                    let border_color = editor.styles.search.search_match_border_color;
+                    let border_width =
+                        editor.scaled(editor.styles.search.search_match_border_width_px);
                     for (match_idx, sr) in editor.search_matches.iter().enumerate() {
                         let is_active = editor.search_current_index == Some(match_idx);
                         let sel_start_on_line = sr.start.max(line_start_offset);
@@ -2364,6 +2367,28 @@ impl Element for EditorElement {
                                 editor_styles.editor_letter_spacing_px,
                                 window,
                             ));
+                            push_diff_inline_highlight_quads(
+                                &mut search_match_quads,
+                                &[buf_start_col..buf_end_col],
+                                &cached.display_text,
+                                line_content.len(),
+                                &cached.buffer_to_display,
+                                &runs,
+                                &cached.wrapped_line,
+                                content_x,
+                                line_top,
+                                line_height,
+                                font_size,
+                                cached.indent_px,
+                                gpui::transparent_black(),
+                                border_color,
+                                border_width,
+                                px(0.0),
+                                px(0.0),
+                                px(0.0),
+                                editor_styles.editor_letter_spacing_px,
+                                window,
+                            );
                         }
                     }
                 }
@@ -5063,6 +5088,8 @@ impl Element for EditorElement {
             if !editor.search_matches.is_empty() {
                 let match_bg = editor.styles.search.search_match_bg;
                 let active_bg = editor.styles.search.search_match_active_bg;
+                let border_color = editor.styles.search.search_match_border_color;
+                let border_width = editor.scaled(editor.styles.search.search_match_border_width_px);
                 for (match_idx, sr) in editor.search_matches.iter().enumerate() {
                     let is_active = editor.search_current_index == Some(match_idx);
                     let sel_start_on_line = sr.start.max(line_start_offset);
@@ -5090,6 +5117,28 @@ impl Element for EditorElement {
                             letter_spacing,
                             window,
                         ));
+                        push_diff_inline_highlight_quads(
+                            &mut search_match_quads,
+                            &[buf_start_col..buf_end_col],
+                            &display_text,
+                            line_content.len(),
+                            &buffer_to_display,
+                            &runs,
+                            wrapped,
+                            content_x,
+                            line_top,
+                            line_height,
+                            font_size,
+                            indent_px,
+                            gpui::transparent_black(),
+                            border_color,
+                            border_width,
+                            px(0.0),
+                            px(0.0),
+                            px(0.0),
+                            letter_spacing,
+                            window,
+                        );
                     }
                 }
             }

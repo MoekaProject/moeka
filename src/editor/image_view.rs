@@ -148,7 +148,7 @@ impl Element for ImageViewElement {
             if prepaint.dragging {
                 CursorStyle::ClosedHand
             } else {
-                CursorStyle::Arrow
+                CursorStyle::OpenHand
             },
             &prepaint.hitbox,
         );

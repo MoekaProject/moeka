@@ -1108,11 +1108,17 @@ fn format_theme_debugger_export(theme: &crate::theme::Theme) -> String {
             ThemeColorField::Italic,
             ThemeColorField::Strikethrough,
             ThemeColorField::InlineCode,
+            ThemeColorField::InlineCodeBg,
+            ThemeColorField::HighlightBg,
             ThemeColorField::Link,
             ThemeColorField::SyntaxMarker,
             ThemeColorField::ListMarker,
             ThemeColorField::CheckboxChecked,
             ThemeColorField::GutterHeading,
+            ThemeColorField::GitStatusAdded,
+            ThemeColorField::GitStatusModified,
+            ThemeColorField::DiffAddedBg,
+            ThemeColorField::DiffRemovedBg,
         ],
         theme,
     );
@@ -1165,8 +1171,12 @@ fn theme_debugger_export_uses_with_alpha(field: ThemeColorField) -> bool {
             | ThemeColorField::BorderCodeBlock
             | ThemeColorField::Selection
             | ThemeColorField::LineHighlight
+            | ThemeColorField::InlineCodeBg
+            | ThemeColorField::HighlightBg
             | ThemeColorField::SyntaxMarker
             | ThemeColorField::GutterHeading
+            | ThemeColorField::DiffAddedBg
+            | ThemeColorField::DiffRemovedBg
     )
 }
 
