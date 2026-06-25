@@ -73,7 +73,7 @@ fn apply_code_highlight_segments(
 pub(crate) const GENERATED_PREVIEW_RASTER_SCALE: f32 = 2.0;
 pub(crate) const GENERATED_PREVIEW_MATH_RASTER_SCALE: f32 = 3.0;
 pub(crate) const GENERATED_PREVIEW_EDITOR_MAX_HEIGHT: f32 = 400.0;
-pub(crate) const GENERATED_PREVIEW_EDITOR_MERMAID_SCALE: f32 = 0.6;
+pub(crate) const GENERATED_PREVIEW_EDITOR_MERMAID_SCALE: f32 = 0.75;
 const GENERATED_PREVIEW_MATH_DISPLAY_SCALE: f32 = 1.5;
 const GENERATED_PREVIEW_DEFAULT_MONOSPACE_FONT_FAMILY: &str =
     "ui-monospace, Menlo, Monaco, Consolas, monospace";
@@ -2614,9 +2614,11 @@ mod tests {
   B -->|this edge label is long enough to wrap| C[Done]"#;
         let normalized = normalize_mermaid_svg_source(source);
 
-        assert!(normalized.contains("一个非常"));
-        assert!(normalized.contains("中文节点"));
-        assert!(normalized.contains("标题"));
+        assert!(normalized.contains("一个非"));
+        assert!(normalized.contains("常非常"));
+        assert!(normalized.contains("长的中"));
+        assert!(normalized.contains("文节点"));
+        assert!(normalized.contains("标题会"));
         assert!(normalized.contains("超"));
         assert!(normalized.contains("出"));
         assert!(normalized.contains("边"));
@@ -2985,9 +2987,10 @@ mod tests {
         );
 
         assert_eq!(display_text, "use gone here");
-        assert!(runs.iter().any(|run| {
-            run.strikethrough.is_some() && run.color == theme.text_primary
-        }));
+        assert!(
+            runs.iter()
+                .any(|run| { run.strikethrough.is_some() && run.color == theme.text_primary })
+        );
     }
 
     #[test]
@@ -4183,7 +4186,7 @@ fn normalize_mermaid_svg_source(source_text: &str) -> String {
         .replace("<BR/>", r"\n")
         .replace("<BR>", r"\n")
         .replace("<BR />", r"\n");
-    wrap_mermaid_svg_source_labels(&normalized, 9)
+    wrap_mermaid_svg_source_labels(&normalized, 7)
 }
 
 fn wrap_mermaid_svg_source_labels(source_text: &str, max_columns: usize) -> String {
@@ -4630,6 +4633,15 @@ fn escape_svg_text(text: &str) -> String {
 }
 
 pub(crate) fn load_render_image_from_path(path: &PathBuf) -> anyhow::Result<RenderImage> {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+    {
+        let svg = std::fs::read_to_string(path)?;
+        return load_render_image_from_svg_with_scale(&svg, 1.0);
+    }
+
     let bytes = std::fs::read(path)?;
     load_render_image_from_bytes(&bytes)
 }

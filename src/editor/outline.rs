@@ -315,11 +315,27 @@ impl EditorView {
     }
 
     fn set_outline_rail_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
-        if self.outline_rail_hovered == hovered {
+        let rail_changed = self.outline_rail_hovered != hovered;
+        self.outline_rail_hovered = hovered;
+        if !hovered {
+            self.outline_rail_hovered_line = None;
+        }
+        let toolbar_changed = self.toolbar_corner_hovered != hovered;
+        if self.toolbar_corner_hovered != hovered {
+            self.toolbar_corner_hovered = hovered;
+            self.sync_toolbar_opacity(cx);
+        }
+        if rail_changed || toolbar_changed {
+            cx.notify();
+        }
+    }
+
+    fn set_outline_rail_hovered_line(&mut self, line: Option<usize>, cx: &mut Context<Self>) {
+        if self.outline_rail_hovered_line == line {
             return;
         }
 
-        self.outline_rail_hovered = hovered;
+        self.outline_rail_hovered_line = line;
         cx.notify();
     }
 
@@ -537,6 +553,7 @@ impl EditorView {
             let line = row.line;
             let level_opacity = heading_level_opacity(row.level, tick_level_opacities);
             let is_active = Some(line) == active_line;
+            let is_hovered = self.outline_rail_hovered_line == Some(line);
             let animated_tick_width = if is_active {
                 let progress = self
                     .outline_rail_active_since
@@ -547,10 +564,12 @@ impl EditorView {
                     .unwrap_or(1.0);
                 let ease = super::ease_in_out_cubic(progress);
                 tick_width + active_extra_width * ease
+            } else if is_hovered {
+                tick_width + active_extra_width
             } else {
                 tick_width
             };
-            let row_tick_color = if is_active {
+            let row_tick_color = if is_active || is_hovered {
                 tick_active_color
             } else {
                 multiply_alpha(tick_color, level_opacity)
@@ -564,6 +583,14 @@ impl EditorView {
                     .items_center()
                     .justify_end()
                     .cursor(CursorStyle::Arrow)
+                    .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+                        if *hovering {
+                            this.set_outline_rail_hovered(true, cx);
+                            this.set_outline_rail_hovered_line(Some(line), cx);
+                        } else {
+                            this.set_outline_rail_hovered_line(None, cx);
+                        }
+                    }))
                     .child(
                         div()
                             .w(px(tick_width + active_extra_width))
@@ -579,12 +606,7 @@ impl EditorView {
                                     .w(px(animated_tick_width))
                                     .h(px(tick_thickness))
                                     .rounded_full()
-                                    .bg(row_tick_color)
-                                    .on_hover(cx.listener(|this, hovering: &bool, _, cx| {
-                                        if *hovering {
-                                            this.set_outline_rail_hovered(true, cx);
-                                        }
-                                    })),
+                                    .bg(row_tick_color),
                             ),
                     )
                     .on_mouse_down(
@@ -704,12 +726,12 @@ impl EditorView {
         let section_padding_x = self.scaled(ups.utility_panel_section_padding_x_px);
         let empty_font_size = self.scaled(ups.utility_panel_empty_font_size_px);
         let item_height = self.scaled(os.outline_rail_label_item_height_px).max(22.0);
-        let item_gap = self.scaled(os.outline_rail_label_item_gap_px);
         let item_padding_y = self.scaled(os.outline_rail_label_item_padding_y_px);
         let line_height = self.scaled(os.outline_rail_label_line_height_px);
         let font_size = self.scaled(os.outline_rail_label_font_size_px);
         let indent_step = self.scaled(os.outline_rail_label_indent_step_px);
         let fold_icon_size = self.scaled(os.outline_rail_label_fold_icon_size_px);
+        let fold_icon_hit_size = (fold_icon_size + self.scaled(8.0)).round();
         let fold_icon_gap = self.scaled(os.outline_rail_label_fold_icon_gap_px);
 
         let mut children: Vec<AnyElement> = vec![
@@ -741,6 +763,7 @@ impl EditorView {
         } else {
             children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
             let active_bg = self.theme.bg_selected;
+            let fold_icon_hover_color = os.outline_rail_label_hover_color;
             for (heading_index, depth) in visible_heading_indices {
                 let heading = &headings[heading_index];
 
@@ -782,12 +805,13 @@ impl EditorView {
                         .when(has_children, |this| {
                             this.child(
                                 div()
-                                    .w(px(fold_icon_size))
-                                    .h(px(fold_icon_size))
+                                    .w(px(fold_icon_hit_size))
+                                    .h(px(fold_icon_hit_size))
                                     .flex_none()
                                     .flex()
                                     .items_center()
                                     .justify_center()
+                                    .text_color(color)
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -802,12 +826,15 @@ impl EditorView {
                                         svg()
                                             .path(icon_path)
                                             .size(px(fold_icon_size))
-                                            .text_color(color),
+                                            .text_color(color)
+                                            .hover(move |style| {
+                                                style.text_color(fold_icon_hover_color)
+                                            }),
                                     ),
                             )
                         })
                         .when(!has_children, |this| {
-                            this.child(div().w(px(fold_icon_size)).flex_none())
+                            this.child(div().w(px(fold_icon_hit_size)).flex_none())
                         })
                         .child(
                             div()
@@ -826,7 +853,6 @@ impl EditorView {
                         )
                         .into_any_element(),
                 );
-                children.push(div().h(px(item_gap)).flex_shrink_0().into_any_element());
             }
             children.push(
                 div()

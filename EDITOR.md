@@ -57,12 +57,14 @@ fn greet(name: &str) {
   println!("hello, {name}");
 }
 ```
+
 ### LaTeX 数学公式
 输入一个简单的行级公式，即可在文稿中看到块级预览效果。
 
 $$
 E = mc^2
 $$
+
 ### Mermaid 图表示例
 用一个最简单的流程图来观察图表预览效果。
 
@@ -98,6 +100,35 @@ flowchart TD
   U --> V["analysis-store streamingReport"]
   V --> W["SidePanel 渲染最终组件报告"]
 ```
+
+### Mermaid 图表示例
+```mermaid
+flowchart LR 
+  PDP["商品页 PDP<br/>Content Script + Shadow DOM"] --> ENTRY["白名单与商品页门控"]
+  ENTRY --> EXTRACT["商品提取<br/>XPath / Shopify JSON / 截图 OCR"]
+  EXTRACT --> CLICK["用户点击小女孩"]
+  CLICK --> API["POST /api/plugin-ai/analyze<br/>SSE"]
+
+  API --> CACHE{"分析缓存命中？"}
+  CACHE -->|是| PLAYBACK["服务端回放缓存事件"]
+  CACHE -->|否| ENGINE{"engine"}
+
+  ENGINE -->|server| SERVER["服务端研究链<br/>品类 → Planner → Tavily → 最终模型"]
+  ENGINE -->|user_ai| HANDOFF["服务端准备 Web Prompt<br/>创建 analysis_bridge_session"]
+
+  HANDOFF --> SW["插件 Service Worker"]
+  SW --> PROVIDER{"provider"}
+  PROVIDER --> GEMINI["Gemini 网页私有接口"]
+  PROVIDER --> GPT["ChatGPT 网页私有接口"]
+  GEMINI --> COMPLETE["回答落库 + /complete 校验"]
+  GPT --> COMPLETE
+
+  SERVER --> FINALIZE["统一报告校验与事件化"]
+  COMPLETE --> FINALIZE
+  PLAYBACK --> RENDER["插件报告渲染器"]
+  FINALIZE --> RENDER
+```
+
 ## 行内语法
 - 可以使用**加粗**或者带有 *italic* 斜体语法来表示强调。
 - 也可以使用++下划线++来标记需要补充注意的短语；`~U~` 会作为下标，而不是下划线。

@@ -1222,9 +1222,22 @@ impl Render for EditorView {
                                                                         let overlay_bounds = bounds;
                                                                         let overlay_width = f32::from(bounds.size.width).max(1.0);
                                                                         let overlay_height = f32::from(bounds.size.height).max(1.0);
-                                                                        let generated_preview_overlay = preview_kind.is_some();
-                                                                        let fit_scale = if generated_preview_overlay {
+                                                                        let math_overlay = matches!(
+                                                                            preview_kind,
+                                                                            Some(crate::markdown::BlockPreviewKind::Math)
+                                                                        );
+                                                                        let mermaid_overlay = matches!(
+                                                                            preview_kind,
+                                                                            Some(crate::markdown::BlockPreviewKind::Mermaid)
+                                                                        );
+                                                                        let mermaid_is_vertical =
+                                                                            intrinsic_height > intrinsic_width;
+                                                                        let fit_scale = if math_overlay {
+                                                                            1.0
+                                                                        } else if mermaid_overlay && mermaid_is_vertical {
                                                                             overlay_width / intrinsic_width.max(1.0)
+                                                                        } else if mermaid_overlay {
+                                                                            (overlay_height / intrinsic_height.max(1.0)).min(1.0)
                                                                         } else {
                                                                             (overlay_width / intrinsic_width.max(1.0))
                                                                                 .min(overlay_height / intrinsic_height.max(1.0))
@@ -1236,10 +1249,14 @@ impl Render for EditorView {
                                                                             base_display_width * overlay.view.zoom_factor;
                                                                         let display_height =
                                                                             base_display_height * overlay.view.zoom_factor;
-                                                                        let image_left = f32::from(bounds.origin.x)
-                                                                            + (overlay_width - display_width) * 0.5
-                                                                            + overlay.view.pan_x;
-                                                                        let image_top = if generated_preview_overlay {
+                                                                        let image_left = if mermaid_overlay && !mermaid_is_vertical {
+                                                                            f32::from(bounds.origin.x) + overlay.view.pan_x
+                                                                        } else {
+                                                                            f32::from(bounds.origin.x)
+                                                                                + (overlay_width - display_width) * 0.5
+                                                                                + overlay.view.pan_x
+                                                                        };
+                                                                        let image_top = if mermaid_overlay && mermaid_is_vertical {
                                                                             f32::from(bounds.origin.y) + overlay.view.pan_y
                                                                         } else {
                                                                             f32::from(bounds.origin.y)

@@ -103,7 +103,7 @@ impl EditorView {
             return;
         }
 
-        if matches!(event.keystroke.key.as_ref(), "escape" | "space" | " ") {
+        if matches!(event.keystroke.key.as_ref(), "escape") {
             window.prevent_default();
             cx.stop_propagation();
             self.close_preview_overlay();

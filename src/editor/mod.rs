@@ -1497,6 +1497,7 @@ pub struct EditorView {
     pub(crate) temp_save_epochs: HashMap<String, usize>,
     pub(crate) outline_rail_visible: bool,
     pub(crate) outline_rail_hovered: bool,
+    pub(crate) outline_rail_hovered_line: Option<usize>,
     pub(crate) outline_rail_clicked_active_line: Option<usize>,
     pub(crate) outline_rail_scroll_offset: Option<f32>,
     pub(crate) outline_rail_collapsed_heading_lines: HashSet<usize>,
@@ -1923,6 +1924,7 @@ impl EditorView {
             temp_save_epochs: HashMap::new(),
             outline_rail_visible: app_settings.outline_rail_visible,
             outline_rail_hovered: false,
+            outline_rail_hovered_line: None,
             outline_rail_clicked_active_line: None,
             outline_rail_scroll_offset: None,
             outline_rail_collapsed_heading_lines: HashSet::new(),
@@ -7414,6 +7416,18 @@ impl EditorView {
                     | '$'
             )
         }) {
+            return false;
+        }
+
+        // An ordered-list marker (`N. ` / `N) `) is built only from digits, a
+        // `.`/`)` and spaces, none of which appear in the blocklist above (unlike
+        // unordered markers, which trip the `-`/`*`/`+` entries). Without this
+        // check, typing an ordered marker on a plain line would be treated as a
+        // plain-text edit and never re-detected as a list. Force a full reparse
+        // when the edited line now starts with an ordered-list prefix.
+        let new_line = self.buffer.line_content(start_line);
+        let trimmed = new_line.trim_start_matches([' ', '\t']);
+        if crate::markdown::ordered_list_prefix_len(trimmed) > 0 {
             return false;
         }
 
