@@ -131,6 +131,24 @@ pub(crate) struct ImageDragState {
     pub start_pan_y: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GeneratedPreviewAction {
+    Fullscreen,
+    Restore,
+    ZoomIn,
+    ZoomOut,
+    Copy,
+    Code,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct GeneratedPreviewDragState {
+    pub cache_key: String,
+    pub start_position: Point<Pixels>,
+    pub start_pan_x: f32,
+    pub start_pan_y: f32,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct PreviewOverlayState {
     pub cache_key: String,

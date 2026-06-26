@@ -147,10 +147,18 @@ fn compute_inline_diff_hunks(
             let (text, spans) = build_inline_change_text_and_highlights(&change);
             match change.tag() {
                 similar::ChangeTag::Delete => {
-                    let decoration = change
+                    let mut decoration = change
                         .old_index()
                         .and_then(|index| base_decorations.get(index).cloned())
                         .unwrap_or_default();
+                    if decoration
+                        .table_info
+                        .as_ref()
+                        .is_some_and(|table_info| !table_info.is_front_matter)
+                    {
+                        decoration.block_type = crate::markdown::BlockType::CodeBlock;
+                        decoration.code_language = Some("table".to_string());
+                    }
                     entry.removed_lines.push(InlineDiffRemovedLine {
                         text,
                         removed_spans: spans,
@@ -670,6 +678,7 @@ impl EditorView {
                 // reusing it avoids a one-frame estimate flash (vertical jitter)
                 // while editing the added/modified lines. Stale entries for lines
                 // that no longer anchor phantoms are ignored by the getters.
+                this.refresh_generated_block_previews();
                 this.phantom_selection = None;
                 this.phantom_selecting = false;
                 this.invalidate_line_geometry_cache();
@@ -678,5 +687,54 @@ impl EditorView {
             });
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::markdown::BlockPreviewKind;
+
+    #[test]
+    fn removed_rows_keep_generated_preview_decorations() {
+        let base = "```mermaid\ngraph TD\nA-->B\n```\n";
+        let state = compute_inline_diff_state(base, "", &FileKind::Markdown);
+        let removed_lines = state
+            .hunks
+            .first()
+            .map(|hunk| hunk.removed_lines.as_slice())
+            .unwrap_or(&[]);
+
+        assert_eq!(removed_lines.len(), 4);
+        let preview = removed_lines[0]
+            .decoration
+            .block_preview
+            .as_ref()
+            .expect("removed Mermaid preview decoration");
+        assert_eq!(preview.kind, BlockPreviewKind::Mermaid);
+        assert!(preview.is_anchor);
+        assert!(
+            removed_lines[1]
+                .decoration
+                .block_preview
+                .as_ref()
+                .is_some_and(|preview| !preview.is_anchor)
+        );
+    }
+
+    #[test]
+    fn removed_table_rows_match_diff_editor_source_rendering() {
+        let base = "| A | B |\n| - | - |\n| 1 | 2 |\n";
+        let state = compute_inline_diff_state(base, "", &FileKind::Markdown);
+        let removed_lines = state
+            .hunks
+            .first()
+            .map(|hunk| hunk.removed_lines.as_slice())
+            .unwrap_or(&[]);
+
+        assert!(removed_lines.iter().all(|line| {
+            line.decoration.block_type == crate::markdown::BlockType::CodeBlock
+                && line.decoration.code_language.as_deref() == Some("table")
+        }));
     }
 }

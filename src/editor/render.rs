@@ -3,7 +3,7 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Corners, CursorStyle, ExternalPaths, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Window, canvas, deferred,
-    div, fill, img, prelude::*, px,
+    div, fill, img, prelude::*, px, quad,
 };
 
 use super::tooltip::{TooltipState, toolbar_anchor_bounds};
@@ -360,6 +360,108 @@ impl EditorView {
                 }),
             )
             .into_any_element()
+    }
+
+    fn render_preview_overlay_actions(&self, cx: &mut Context<Self>) -> AnyElement {
+        let editor_handle = cx.entity().clone();
+        let action_size = self.scaled(30.0);
+        let icon_size = self.scaled(15.0);
+        let gap = self.scaled(6.0);
+        let top = self.scaled(18.0);
+        let right = self.scaled(18.0);
+        let button_bg = self.styles.code_block.code_block_copy_button_bg;
+        let button_hover_bg = self.styles.code_block.code_block_copy_button_hover_bg;
+        let button_border = self.styles.code_block.generated_preview_action_border_color;
+        let button_radius = px(self.scaled(8.0));
+        let button_border_width = px(self.scaled(
+            self.styles
+                .code_block
+                .generated_preview_action_border_width_px,
+        ));
+        let icon_color = self.styles.code_block.code_block_copy_button_text_color;
+        let icon_opacity = 0.78;
+        let actions = [
+            (
+                PREVIEW_FULLSCREEN_EXIT_SVG_PATH,
+                GeneratedPreviewAction::Fullscreen,
+            ),
+            (PREVIEW_RESTORE_SVG_PATH, GeneratedPreviewAction::Restore),
+            (PREVIEW_ZOOM_IN_SVG_PATH, GeneratedPreviewAction::ZoomIn),
+            (PREVIEW_ZOOM_OUT_SVG_PATH, GeneratedPreviewAction::ZoomOut),
+        ];
+        deferred(
+            canvas(
+                move |bounds, _window, cx| {
+                    editor_handle.update(cx, |editor, _| {
+                        if editor.preview_overlay_state().is_none() {
+                            editor.preview_overlay_action_areas.clear();
+                            return Vec::new();
+                        }
+                        let total_width = actions.len() as f32 * action_size
+                            + actions.len().saturating_sub(1) as f32 * gap;
+                        let start_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width)
+                            - right
+                            - total_width;
+                        let y = f32::from(bounds.origin.y) + top;
+                        let mut paints = Vec::with_capacity(actions.len());
+                        let mut areas = Vec::with_capacity(actions.len());
+                        for (index, (icon_path, action)) in actions.iter().copied().enumerate() {
+                            let x = start_x + index as f32 * (action_size + gap);
+                            let button_bounds = Bounds::new(
+                                gpui::point(px(x), px(y)),
+                                gpui::size(px(action_size), px(action_size)),
+                            );
+                            areas.push((button_bounds, action));
+                            paints.push((button_bounds, icon_path, action));
+                        }
+                        editor.preview_overlay_action_areas = areas;
+                        paints
+                    })
+                },
+                move |_bounds, paints, window, cx| {
+                    for (button_bounds, icon_path, action) in paints {
+                        let bg = if action == GeneratedPreviewAction::Restore {
+                            button_bg
+                        } else {
+                            button_bg
+                        };
+                        window.paint_quad(quad(
+                            button_bounds,
+                            Corners::all(button_radius),
+                            bg,
+                            button_border_width,
+                            button_border,
+                            gpui::BorderStyle::default(),
+                        ));
+                        let icon_left = f32::from(button_bounds.origin.x)
+                            + (f32::from(button_bounds.size.width) - icon_size) * 0.5;
+                        let icon_top = f32::from(button_bounds.origin.y)
+                            + (f32::from(button_bounds.size.height) - icon_size) * 0.5;
+                        let mut color = icon_color;
+                        color.a *= icon_opacity;
+                        window
+                            .paint_svg(
+                                Bounds::new(
+                                    gpui::point(px(icon_left), px(icon_top)),
+                                    gpui::size(px(icon_size), px(icon_size)),
+                                ),
+                                icon_path.into(),
+                                gpui::TransformationMatrix::default(),
+                                color,
+                                cx,
+                            )
+                            .ok();
+                    }
+                    let _ = button_hover_bg;
+                },
+            )
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .right(px(0.0))
+            .bottom(px(0.0)),
+        )
+        .into_any_element()
     }
 }
 
@@ -1222,22 +1324,14 @@ impl Render for EditorView {
                                                                         let overlay_bounds = bounds;
                                                                         let overlay_width = f32::from(bounds.size.width).max(1.0);
                                                                         let overlay_height = f32::from(bounds.size.height).max(1.0);
-                                                                        let math_overlay = matches!(
-                                                                            preview_kind,
-                                                                            Some(crate::markdown::BlockPreviewKind::Math)
-                                                                        );
                                                                         let mermaid_overlay = matches!(
                                                                             preview_kind,
                                                                             Some(crate::markdown::BlockPreviewKind::Mermaid)
                                                                         );
                                                                         let mermaid_is_vertical =
                                                                             intrinsic_height > intrinsic_width;
-                                                                        let fit_scale = if math_overlay {
+                                                                        let fit_scale = if preview_kind.is_some() {
                                                                             1.0
-                                                                        } else if mermaid_overlay && mermaid_is_vertical {
-                                                                            overlay_width / intrinsic_width.max(1.0)
-                                                                        } else if mermaid_overlay {
-                                                                            (overlay_height / intrinsic_height.max(1.0)).min(1.0)
                                                                         } else {
                                                                             (overlay_width / intrinsic_width.max(1.0))
                                                                                 .min(overlay_height / intrinsic_height.max(1.0))
@@ -1361,6 +1455,7 @@ impl Render for EditorView {
                                                             .right(px(0.0))
                                                             .bottom(px(0.0)),
                                                         ))
+                                                        .child(self.render_preview_overlay_actions(cx))
                                                     })
                                                     .when_some(
                                                         self.render_tooltip_overlay(editor_pane_width),

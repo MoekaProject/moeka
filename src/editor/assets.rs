@@ -36,6 +36,13 @@ pub(crate) const MENU_PASTE_SVG_PATH: &str = "assets/icons/menu/paste.svg";
 pub(crate) const MENU_FOLD_SVG_PATH: &str = "assets/icons/menu/fold.svg";
 pub(crate) const MENU_EXPAND_SVG_PATH: &str = "assets/icons/menu/expand.svg";
 pub(crate) const SEARCH2_SVG_PATH: &str = "assets/icons/search2.svg";
+pub(crate) const PREVIEW_FULLSCREEN_SVG_PATH: &str = "assets/icons/preview/fullscreen.svg";
+pub(crate) const PREVIEW_FULLSCREEN_EXIT_SVG_PATH: &str =
+    "assets/icons/preview/fullscreen-exit.svg";
+pub(crate) const PREVIEW_COPY_SVG_PATH: &str = "assets/icons/preview/restore.svg";
+pub(crate) const PREVIEW_RESTORE_SVG_PATH: &str = "assets/icons/preview/reset.svg";
+pub(crate) const PREVIEW_ZOOM_IN_SVG_PATH: &str = "assets/icons/preview/zoom-in.svg";
+pub(crate) const PREVIEW_ZOOM_OUT_SVG_PATH: &str = "assets/icons/preview/zoom-out.svg";
 pub(crate) const MENU_LOCATE_SVG_PATH: &str = "assets/icons/menu/locate.svg";
 pub(crate) const MENU_STAR_SVG_PATH: &str = "assets/icons/menu/star.svg";
 pub(crate) const MENU_UNSTAR_SVG_PATH: &str = "assets/icons/menu/unstar.svg";

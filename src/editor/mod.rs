@@ -1334,9 +1334,13 @@ pub struct EditorView {
     pub(crate) generated_preview_click_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) generated_preview_image_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) generated_preview_zoom_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
+    pub(crate) generated_preview_action_areas:
+        Vec<(gpui::Bounds<Pixels>, usize, GeneratedPreviewAction)>,
+    pub(crate) preview_overlay_action_areas: Vec<(gpui::Bounds<Pixels>, GeneratedPreviewAction)>,
     pub(crate) hovering_image_preview_line: Option<usize>,
     pub(crate) hovering_generated_preview_line: Option<usize>,
     pub(crate) hovering_generated_preview_zoom_line: Option<usize>,
+    pub(crate) hovering_generated_preview_action: Option<(usize, GeneratedPreviewAction)>,
     pub(crate) code_block_hover_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) code_block_copy_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_code_block_start: Option<usize>,
@@ -1360,6 +1364,9 @@ pub struct EditorView {
     pub(crate) image_cache: HashMap<String, Option<Arc<RenderImage>>>,
     pub(crate) generated_preview_svg_cache: HashMap<String, Arc<str>>,
     pub(crate) generated_preview_overlay_cache: HashMap<String, (u16, Arc<RenderImage>)>,
+    pub(crate) generated_preview_views: HashMap<String, ImageViewState>,
+    pub(crate) generated_preview_code_views: HashSet<String>,
+    pub(crate) generated_preview_drag_state: Option<GeneratedPreviewDragState>,
     pub(crate) sidebar_root: PathBuf,
     pub(crate) expanded_dirs: HashSet<PathBuf>,
     /// 多选：所有选中的 sidebar 路径
@@ -1773,9 +1780,12 @@ impl EditorView {
             generated_preview_click_areas: Vec::new(),
             generated_preview_image_areas: Vec::new(),
             generated_preview_zoom_areas: Vec::new(),
+            generated_preview_action_areas: Vec::new(),
+            preview_overlay_action_areas: Vec::new(),
             hovering_image_preview_line: None,
             hovering_generated_preview_line: None,
             hovering_generated_preview_zoom_line: None,
+            hovering_generated_preview_action: None,
             code_block_hover_areas: Vec::new(),
             code_block_copy_areas: Vec::new(),
             hovering_code_block_start: None,
@@ -1792,6 +1802,9 @@ impl EditorView {
             image_cache: HashMap::new(),
             generated_preview_svg_cache: HashMap::new(),
             generated_preview_overlay_cache: HashMap::new(),
+            generated_preview_views: HashMap::new(),
+            generated_preview_code_views: HashSet::new(),
+            generated_preview_drag_state: None,
             sidebar_root: sidebar_root.clone(),
             expanded_dirs,
             selected_sidebar_paths: HashSet::new(),
@@ -4271,8 +4284,7 @@ impl EditorView {
             return;
         }
 
-        let mut next_generated_keys = HashSet::new();
-
+        let mut preview_entries = Vec::new();
         for decoration in &self.decorations {
             let Some(preview) = decoration.block_preview.as_ref() else {
                 continue;
@@ -4280,6 +4292,24 @@ impl EditorView {
             if !preview.is_anchor || preview.source_text.is_empty() {
                 continue;
             }
+            preview_entries.push(preview.clone());
+        }
+        if let Some(inline_diff) = self.active_inline_diff() {
+            for hunk in &inline_diff.hunks {
+                for removed in &hunk.removed_lines {
+                    let Some(preview) = removed.decoration.block_preview.as_ref() else {
+                        continue;
+                    };
+                    if preview.is_anchor && !preview.source_text.is_empty() {
+                        preview_entries.push(preview.clone());
+                    }
+                }
+            }
+        }
+
+        let mut next_generated_keys = HashSet::new();
+
+        for preview in preview_entries {
             next_generated_keys.insert(preview.cache_key.clone());
             let has_cached_image = self.image_cache.contains_key(&preview.cache_key);
             if !force
@@ -4323,6 +4353,8 @@ impl EditorView {
         }
 
         self.generated_preview_keys = next_generated_keys;
+        self.generated_preview_views
+            .retain(|cache_key, _| self.generated_preview_keys.contains(cache_key));
     }
 
     pub(crate) fn active_file_kind(&self) -> Option<&FileKind> {
@@ -4606,7 +4638,46 @@ impl EditorView {
         self.preview_overlay = None;
         self.preview_overlay_bounds = None;
         self.preview_overlay_image_bounds = None;
+        self.preview_overlay_action_areas.clear();
         self.image_drag_state = None;
+    }
+
+    pub(crate) fn generated_preview_view(&self, cache_key: &str) -> ImageViewState {
+        self.generated_preview_views
+            .get(cache_key)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn generated_preview_view_mut(&mut self, cache_key: &str) -> &mut ImageViewState {
+        self.generated_preview_views
+            .entry(cache_key.to_string())
+            .or_default()
+    }
+
+    pub(crate) fn reset_generated_preview_view(&mut self, cache_key: &str) {
+        self.generated_preview_views
+            .insert(cache_key.to_string(), ImageViewState::default());
+    }
+
+    pub(crate) fn zoom_generated_preview_view(&mut self, cache_key: &str, factor: f32) {
+        let view = self.generated_preview_view_mut(cache_key);
+        view.zoom_factor = (view.zoom_factor * factor).clamp(0.25, 6.0);
+        view.pan_x = view.pan_x.clamp(-5000.0, 5000.0);
+        view.pan_y = view.pan_y.clamp(-5000.0, 5000.0);
+    }
+
+    pub(crate) fn reset_preview_overlay_view(&mut self) {
+        if let Some(overlay) = self.preview_overlay_state_mut() {
+            overlay.view = ImageViewState::default();
+        }
+    }
+
+    pub(crate) fn zoom_preview_overlay_view(&mut self, factor: f32) {
+        if let Some(overlay) = self.preview_overlay_state_mut() {
+            overlay.view.zoom_factor = (overlay.view.zoom_factor * factor).clamp(0.25, 6.0);
+        }
+        self.clamp_preview_overlay_view();
     }
 
     pub(crate) fn preview_overlay_dimensions(&self) -> Option<(f32, f32)> {

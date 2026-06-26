@@ -347,6 +347,197 @@ fn pad_bounds_horizontally(bounds: Bounds<Pixels>, padding: Pixels) -> Bounds<Pi
     )
 }
 
+fn raw_offset_to_display_offset(buffer_to_display: &[usize], raw_offset: usize) -> usize {
+    buffer_to_display
+        .get(raw_offset)
+        .copied()
+        .or_else(|| buffer_to_display.last().copied())
+        .unwrap_or(0)
+}
+
+fn push_task_checkbox_paint(
+    editor: &EditorView,
+    block_type: &BlockType,
+    prefix_collapsed: bool,
+    display_text: &str,
+    wrapped: &WrappedLine,
+    font_size: f32,
+    line_height: f32,
+    content_x: f32,
+    text_line_top: f32,
+    line_top: f32,
+    total_line_height: f32,
+    collapsed_task_prefix_display_columns: usize,
+    checkbox_text_gap_px: f32,
+    hit_line_idx: Option<usize>,
+    gutter_quads: &mut Vec<PaintQuad>,
+    gutter_svgs: &mut Vec<(Bounds<Pixels>, &'static str, Hsla)>,
+    checkbox_hit_areas: &mut Vec<(Bounds<Pixels>, usize)>,
+) {
+    if !prefix_collapsed {
+        return;
+    }
+    let BlockType::TaskList(checked) = block_type else {
+        return;
+    };
+
+    let checkbox_styles = &editor.styles.checkbox;
+    let checkbox_size = font_size * checkbox_styles.checkbox_size_factor;
+    let prefix_bytes = helpers::compute_display_prefix_bytes(
+        display_text,
+        block_type,
+        prefix_collapsed,
+        collapsed_task_prefix_display_columns,
+    )
+    .min(display_text.len());
+    let text_start_x = wrapped
+        .position_for_index(prefix_bytes, px(line_height))
+        .map(|pos| f32::from(pos.x))
+        .unwrap_or(0.0);
+    let checkbox_x = content_x + text_start_x - checkbox_text_gap_px - checkbox_size;
+    let checkbox_y = text_line_top + (line_height - checkbox_size) / 2.0;
+    let checkbox_bounds = Bounds::new(
+        point(px(checkbox_x), px(checkbox_y)),
+        size(px(checkbox_size), px(checkbox_size)),
+    );
+    let corner_radius = px(editor.scaled(checkbox_styles.checkbox_radius_px));
+    let checkbox_opacity =
+        if hit_line_idx.is_some_and(|line_idx| editor.hovering_checkbox_line == Some(line_idx)) {
+            checkbox_styles.checkbox_hover_opacity
+        } else {
+            checkbox_styles.checkbox_default_opacity
+        };
+
+    if *checked {
+        let mut checkbox_bg = checkbox_styles.checkbox_checked_bg;
+        checkbox_bg.a *= checkbox_opacity;
+        gutter_quads.push(quad(
+            checkbox_bounds,
+            Corners::all(corner_radius),
+            checkbox_bg,
+            px(0.0),
+            gpui::transparent_black(),
+            BorderStyle::default(),
+        ));
+        let icon_size = checkbox_size * checkbox_styles.checkbox_check_icon_scale;
+        let icon_offset = (checkbox_size - icon_size) / 2.0;
+        let mut icon_color = checkbox_styles.checkbox_check_icon_color;
+        icon_color.a *= checkbox_opacity;
+        gutter_svgs.push((
+            Bounds::new(
+                point(px(checkbox_x + icon_offset), px(checkbox_y + icon_offset)),
+                size(px(icon_size), px(icon_size)),
+            ),
+            CHECK_SVG_PATH,
+            icon_color,
+        ));
+    } else {
+        let mut border_color = checkbox_styles.checkbox_border_color;
+        border_color.a *= checkbox_opacity;
+        gutter_quads.push(quad(
+            checkbox_bounds,
+            Corners::all(corner_radius),
+            gpui::transparent_black(),
+            px(editor.scaled(checkbox_styles.checkbox_border_width_px)),
+            border_color,
+            BorderStyle::default(),
+        ));
+    }
+
+    if let Some(line_idx) = hit_line_idx {
+        let hit_padding = editor.scaled(2.0);
+        let hit_bounds = Bounds::new(
+            point(px(checkbox_x - hit_padding), px(line_top)),
+            size(px(checkbox_size + hit_padding * 2.0), px(total_line_height)),
+        );
+        checkbox_hit_areas.push((hit_bounds, line_idx));
+    }
+}
+
+fn push_unordered_list_marker_paint(
+    editor: &EditorView,
+    line_content: &str,
+    block_type: &BlockType,
+    prefix_collapsed: bool,
+    wrapped: &WrappedLine,
+    font_size: f32,
+    line_height: f32,
+    content_x: f32,
+    base_content_x: f32,
+    text_line_top: f32,
+    monospace_font: &Font,
+    window: &mut Window,
+    unordered_list_markers: &mut Vec<(WrappedLine, Point<Pixels>, Pixels)>,
+) {
+    if *block_type != BlockType::UnorderedList || !prefix_collapsed {
+        return;
+    }
+
+    let marker_text = editor
+        .unordered_list_display_marker_for_line(line_content)
+        .trim_end()
+        .to_string();
+    if marker_text.is_empty() {
+        return;
+    }
+
+    let marker_font_size = font_size
+        + editor.scaled(
+            editor
+                .styles
+                .editor
+                .editor_unordered_list_marker_font_size_offset_px,
+        );
+    let mut marker_run = TextRun {
+        len: marker_text.len(),
+        font: monospace_font.clone(),
+        color: editor.styles.editor.editor_list_marker_text_color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    marker_run.font.weight = editor.styles.editor.editor_list_marker_font_weight;
+    if let Ok(mut marker_wrapped_lines) = window.text_system().shape_text(
+        marker_text.into(),
+        px(marker_font_size),
+        &[marker_run],
+        None,
+        None,
+    ) && let Some(marker_wrapped) = marker_wrapped_lines.pop()
+    {
+        let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+        let marker_x = if leading_ws == 0 {
+            base_content_x
+        } else {
+            content_x
+                + f32::from(
+                    wrapped
+                        .position_for_index(leading_ws, px(line_height))
+                        .unwrap_or_default()
+                        .x,
+                )
+        };
+        let marker_offset = editor.scaled(
+            editor
+                .styles
+                .editor
+                .editor_unordered_list_marker_font_size_offset_px,
+        );
+        let marker_line_height = line_height
+            + editor.scaled(
+                editor
+                    .styles
+                    .editor
+                    .editor_unordered_list_marker_line_height_offset_px,
+            );
+        unordered_list_markers.push((
+            marker_wrapped,
+            point(px(marker_x), px(text_line_top - marker_offset * 0.35)),
+            px(marker_line_height),
+        ));
+    }
+}
+
 fn push_diff_inline_highlight_quads(
     quads: &mut Vec<PaintQuad>,
     spans: &[Range<usize>],
@@ -1053,6 +1244,170 @@ fn push_inline_text_overlay(
     overlays.push((shaped, overlay_origin, overlay_line_height));
 }
 
+fn push_rendered_inline_overlays(
+    editor: &EditorView,
+    window: &mut Window,
+    decoration: &crate::markdown::LineDecoration,
+    line_content: &str,
+    display_text: &str,
+    buffer_to_display: &[usize],
+    active_ranges: &[Range<usize>],
+    wrapped: &WrappedLine,
+    body_font: &Font,
+    body_cjk_font: &Font,
+    theme: &Theme,
+    font_size: f32,
+    content_x: f32,
+    text_line_top: f32,
+    indent_px: f32,
+    line_height: f32,
+    inline_svgs: &mut Vec<(Bounds<Pixels>, &'static str, Hsla)>,
+    inline_overlays: &mut Vec<(ShapedLine, Point<Pixels>, Pixels)>,
+) {
+    if let Some(callout_kind) = decoration.callout_kind
+        && let Some(replacement) = decoration.display_replacements.iter().find(|replacement| {
+            line_content
+                .get(replacement.source_range.clone())
+                .is_some_and(|source| source.trim_start().starts_with("[!"))
+        })
+        && !helpers::active_ranges_intersect(active_ranges, &replacement.trigger_range)
+    {
+        let disp_start =
+            helpers::buffer_to_display_offset(buffer_to_display, replacement.source_range.start);
+        let disp_end = (disp_start + replacement.display_text.len()).min(display_text.len());
+        if let (Some(pos_start), Some(pos_end)) = (
+            wrapped.position_for_index(disp_start, px(line_height)),
+            wrapped.position_for_index(disp_end, px(line_height)),
+        ) && pos_start.y == pos_end.y
+        {
+            let indent_start = helpers::indent_for_y(indent_px, pos_start.y, line_height);
+            let reserved_width = f32::from(pos_end.x - pos_start.x).max(font_size);
+            let icon_size = (font_size
+                * editor
+                    .styles
+                    .quote_block
+                    .quote_block_callout_icon_size_factor)
+                .min(line_height * 0.95)
+                .max(10.0);
+            let icon_x = content_x
+                + indent_start
+                + f32::from(pos_start.x)
+                + (reserved_width - icon_size).max(0.0) / 2.0;
+            let icon_y = text_line_top + f32::from(pos_start.y) + (line_height - icon_size) / 2.0;
+            inline_svgs.push((
+                Bounds::new(
+                    point(px(icon_x), px(icon_y)),
+                    size(px(icon_size), px(icon_size)),
+                ),
+                callout_icon_path(callout_kind),
+                editor.styles.quote_block.quote_block_callout_icon_color,
+            ));
+        }
+    }
+
+    for superscript_range in &decoration.superscript_spans {
+        if !helpers::inline_range_is_collapsed(decoration, superscript_range, active_ranges) {
+            continue;
+        }
+        let disp_start =
+            helpers::buffer_to_display_offset(buffer_to_display, superscript_range.start);
+        let disp_end = helpers::buffer_to_display_offset(buffer_to_display, superscript_range.end);
+        push_inline_text_overlay(
+            inline_overlays,
+            window,
+            wrapped,
+            line_content
+                .get(superscript_range.clone())
+                .unwrap_or_default(),
+            disp_start..disp_end,
+            body_font,
+            body_cjk_font,
+            theme.syntax_marker,
+            font_size,
+            editor.styles.editor.editor_superscript_scale_factor,
+            InlineOverlayVerticalAlign::Top(
+                editor.scaled(editor.styles.editor.editor_superscript_offset_px),
+            ),
+            false,
+            content_x,
+            text_line_top,
+            indent_px,
+            line_height,
+        );
+    }
+
+    for subscript_range in &decoration.subscript_spans {
+        if !helpers::inline_range_is_collapsed(decoration, subscript_range, active_ranges) {
+            continue;
+        }
+        let disp_start =
+            helpers::buffer_to_display_offset(buffer_to_display, subscript_range.start);
+        let disp_end = helpers::buffer_to_display_offset(buffer_to_display, subscript_range.end);
+        push_inline_text_overlay(
+            inline_overlays,
+            window,
+            wrapped,
+            line_content
+                .get(subscript_range.clone())
+                .unwrap_or_default(),
+            disp_start..disp_end,
+            body_font,
+            body_cjk_font,
+            theme.syntax_marker,
+            font_size,
+            editor.styles.editor.editor_subscript_scale_factor,
+            InlineOverlayVerticalAlign::Bottom(
+                editor.scaled(editor.styles.editor.editor_subscript_offset_px),
+            ),
+            false,
+            content_x,
+            text_line_top,
+            indent_px,
+            line_height,
+        );
+    }
+
+    if decoration.footnote_definition_label.is_none() {
+        for footnote_reference in &decoration.footnote_references {
+            if !helpers::inline_range_is_collapsed(
+                decoration,
+                &footnote_reference.collapsed_range,
+                active_ranges,
+            ) {
+                continue;
+            }
+            let disp_start = helpers::buffer_to_display_offset(
+                buffer_to_display,
+                footnote_reference.collapsed_range.start,
+            );
+            let disp_end = helpers::buffer_to_display_offset(
+                buffer_to_display,
+                footnote_reference.collapsed_range.end,
+            );
+            push_inline_text_overlay(
+                inline_overlays,
+                window,
+                wrapped,
+                line_content
+                    .get(footnote_reference.collapsed_range.clone())
+                    .unwrap_or_default(),
+                disp_start..disp_end,
+                body_font,
+                body_cjk_font,
+                theme.link,
+                font_size,
+                editor.styles.editor.editor_superscript_scale_factor,
+                InlineOverlayVerticalAlign::Offset(-line_height * 0.14),
+                false,
+                content_x,
+                text_line_top,
+                indent_px,
+                line_height,
+            );
+        }
+    }
+}
+
 fn non_markdown_cached_line_can_reuse(
     cached: &LineDisplayInfo,
     current_wrap_width: Option<f32>,
@@ -1352,6 +1707,11 @@ impl Element for EditorElement {
         let mut generated_preview_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut generated_preview_image_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut generated_preview_zoom_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
+        let mut generated_preview_action_areas_local: Vec<(
+            Bounds<Pixels>,
+            usize,
+            GeneratedPreviewAction,
+        )> = Vec::new();
         let mut image_preview_zoom_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut display_info_updates: Vec<(usize, Option<LineDisplayInfo>)> =
             Vec::with_capacity(render_end_line.saturating_sub(render_start_line));
@@ -2312,6 +2672,20 @@ impl Element for EditorElement {
                         );
                         let selection_spans_line =
                             sr.start < line_start_offset || sr.end > line_end_offset;
+                        let selection_leading_padding_left_px =
+                            if matches!(
+                                block_type,
+                                BlockType::CodeBlock | BlockType::CodeBlockFence
+                            ) || decoration.block_preview.is_some()
+                                || decoration
+                                    .table_info
+                                    .as_ref()
+                                    .is_some_and(|table_info| table_info.is_front_matter)
+                            {
+                                0.0
+                            } else {
+                                cached.selection_padding_left_px
+                            };
                         if matches!(block_type, BlockType::Heading(_)) && selection_spans_line {
                             for bounds in helpers::build_highlight_bounds(
                                 &cached.display_text,
@@ -2324,7 +2698,7 @@ impl Element for EditorElement {
                                 line_height,
                                 font_size,
                                 cached.indent_px,
-                                cached.selection_padding_left_px,
+                                selection_leading_padding_left_px,
                                 editor_styles.editor_letter_spacing_px,
                                 window,
                             ) {
@@ -2348,7 +2722,7 @@ impl Element for EditorElement {
                                 line_height,
                                 font_size,
                                 cached.indent_px,
-                                cached.selection_padding_left_px,
+                                selection_leading_padding_left_px,
                                 theme.selection,
                                 editor_styles.editor_letter_spacing_px,
                                 window,
@@ -2642,9 +3016,18 @@ impl Element for EditorElement {
                 decoration.block_preview.is_some()
             } else {
                 decoration.block_preview.as_ref().is_some_and(|preview| {
-                    helpers::block_preview_is_active(preview, cursor_line, &all_sel_ranges)
+                    editor
+                        .generated_preview_code_views
+                        .contains(&preview.cache_key)
+                        || helpers::block_preview_is_active(preview, cursor_line, &all_sel_ranges)
                 })
             };
+            let block_preview_code_mode =
+                decoration.block_preview.as_ref().is_some_and(|preview| {
+                    editor
+                        .generated_preview_code_views
+                        .contains(&preview.cache_key)
+                });
             let collapsed_block_preview = decoration
                 .block_preview
                 .as_ref()
@@ -2655,7 +3038,16 @@ impl Element for EditorElement {
                 .as_ref()
                 .filter(|preview| !editor.folded_sections.contains(&preview.start_line))
                 .filter(|_| block_preview_active)
-                .filter(|preview| line_idx == preview.end_line);
+                .filter(|preview| {
+                    if editor
+                        .generated_preview_code_views
+                        .contains(&preview.cache_key)
+                    {
+                        line_idx == preview.start_line
+                    } else {
+                        line_idx == preview.end_line
+                    }
+                });
             if let Some(preview) = collapsed_block_preview
                 && !preview.is_anchor
             {
@@ -2895,23 +3287,30 @@ impl Element for EditorElement {
             let quote_inner_left_padding = quote_border_width + quote_padding_left;
             let quote_horizontal_padding = quote_inner_left_padding + quote_padding_right;
 
-            let base_wrap_width =
-                if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence)
-                    || is_front_matter_line
-                {
-                    (text_width
-                        - quote_horizontal_padding
-                        - editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
-                        - editor.scaled(editor.styles.code_block.code_block_wrap_right_padding_px))
-                    .max(editor.scaled(80.0))
-                } else if is_quote_line {
-                    (text_width
-                        - quote_horizontal_padding
-                        - editor.scaled(editor.styles.editor.editor_wrap_right_padding_px))
-                    .max(editor.scaled(80.0))
-                } else {
-                    wrap_width
-                };
+            let code_mode_split_gap = editor.scaled(14.0);
+            let code_mode_text_width = ((text_width - code_mode_split_gap) * 0.5).max(80.0);
+            let base_wrap_width = if block_preview_code_mode {
+                (code_mode_text_width
+                    - quote_horizontal_padding
+                    - editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
+                    - editor.scaled(editor.styles.code_block.code_block_wrap_right_padding_px))
+                .max(editor.scaled(80.0))
+            } else if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence)
+                || is_front_matter_line
+            {
+                (text_width
+                    - quote_horizontal_padding
+                    - editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
+                    - editor.scaled(editor.styles.code_block.code_block_wrap_right_padding_px))
+                .max(editor.scaled(80.0))
+            } else if is_quote_line {
+                (text_width
+                    - quote_horizontal_padding
+                    - editor.scaled(editor.styles.editor.editor_wrap_right_padding_px))
+                .max(editor.scaled(80.0))
+            } else {
+                wrap_width
+            };
 
             let effective_wrap_width = if wrap_indent_px > 0.0 {
                 (base_wrap_width - wrap_indent_px).max(base_wrap_width * 0.3)
@@ -3034,6 +3433,9 @@ impl Element for EditorElement {
                                     preview.kind,
                                 )
                             };
+                        let code_mode = editor
+                            .generated_preview_code_views
+                            .contains(&preview.cache_key);
                         let display_h = if preview.kind
                             == crate::markdown::BlockPreviewKind::Mermaid
                         {
@@ -3042,7 +3444,11 @@ impl Element for EditorElement {
                         } else {
                             full_display_h
                         };
-                        display_h + image_gap_top + generated_preview_gap_bottom
+                        if code_mode {
+                            display_h.max(text_line_height) - text_line_height
+                        } else {
+                            display_h + image_gap_top + generated_preview_gap_bottom
+                        }
                     } else {
                         0.0
                     }
@@ -3140,8 +3546,6 @@ impl Element for EditorElement {
                 } else {
                     editor_left + editor.padding_left()
                 };
-            let leading_ws =
-                line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
             let content_x = if matches!(block_type, BlockType::TaskList(_)) && prefix_collapsed {
                 let target_prefix_width = helpers::task_prefix_target_width_px(
                     line_content,
@@ -4129,28 +4533,13 @@ impl Element for EditorElement {
                         let overlay_open = editor
                             .preview_overlay_state()
                             .is_some_and(|overlay| overlay.line_idx == line_idx);
-                        let mut mermaid_is_vertical = true;
                         let (display_w, full_display_h) =
-                            if preview.kind == crate::markdown::BlockPreviewKind::Mermaid {
-                                let (intrinsic_w, intrinsic_h) =
-                                    helpers::intrinsic_generated_preview_size_for_kind(
-                                        img_w,
-                                        img_h,
-                                        preview.kind,
-                                    );
-                                mermaid_is_vertical = intrinsic_h > intrinsic_w;
-                                (
-                                    intrinsic_w * helpers::GENERATED_PREVIEW_EDITOR_MERMAID_SCALE,
-                                    intrinsic_h * helpers::GENERATED_PREVIEW_EDITOR_MERMAID_SCALE,
-                                )
-                            } else {
-                                helpers::compute_generated_preview_size_for_kind(
-                                    img_w,
-                                    img_h,
-                                    text_width,
-                                    preview.kind,
-                                )
-                            };
+                            helpers::intrinsic_generated_preview_size_for_kind(
+                                img_w,
+                                img_h,
+                                preview.kind,
+                            );
+                        let mermaid_is_vertical = full_display_h > display_w;
                         let display_h = if preview.kind
                             == crate::markdown::BlockPreviewKind::Mermaid
                         {
@@ -4159,22 +4548,47 @@ impl Element for EditorElement {
                         } else {
                             full_display_h
                         };
+                        let code_mode = editor
+                            .generated_preview_code_views
+                            .contains(&preview.cache_key);
                         let block_left = editor_left + editor.padding_left();
                         let block_top = line_top;
-                        let block_height = text_line_height
-                            + display_h
-                            + image_gap_top
-                            + generated_preview_gap_bottom;
+                        let block_height = if code_mode {
+                            display_h.max(text_line_height)
+                        } else {
+                            text_line_height
+                                + display_h
+                                + image_gap_top
+                                + generated_preview_gap_bottom
+                        };
                         let block_bounds = Bounds::new(
                             point(px(block_left), px(block_top)),
                             size(px(text_width.max(1.0)), px(block_height)),
                         );
-                        let preview_top = line_top + text_line_height + image_gap_top;
+                        let preview_top = if code_mode {
+                            line_top
+                        } else {
+                            line_top + text_line_height + image_gap_top
+                        };
+                        let preview_left = if code_mode {
+                            block_left + ((text_width + editor.scaled(14.0)) * 0.5)
+                        } else {
+                            block_left
+                        };
+                        let preview_width = if code_mode {
+                            ((text_width - editor.scaled(14.0)) * 0.5).max(1.0)
+                        } else {
+                            text_width
+                        };
+                        let view = editor.generated_preview_view(&preview.cache_key);
+                        let zoom = view.zoom_factor.clamp(0.25, 6.0);
+                        let display_w = display_w * zoom;
+                        let full_display_h = full_display_h * zoom;
                         let img_left = if preview.kind == crate::markdown::BlockPreviewKind::Mermaid
                         {
-                            block_left + (text_width - display_w) * 0.5
+                            preview_left + (preview_width - display_w) * 0.5
                         } else {
-                            block_left + ((text_width - display_w) / 2.0).max(0.0)
+                            preview_left + ((preview_width - display_w) / 2.0).max(0.0)
                         };
                         let img_top = if preview.kind == crate::markdown::BlockPreviewKind::Mermaid
                             && !mermaid_is_vertical
@@ -4187,38 +4601,34 @@ impl Element for EditorElement {
                         let img_left = if preview.kind == crate::markdown::BlockPreviewKind::Mermaid
                             && !mermaid_is_vertical
                         {
-                            block_left
+                            preview_left
                         } else {
                             img_left
                         };
+                        let img_left = img_left + view.pan_x;
+                        let img_top = img_top + view.pan_y;
                         let img_bounds = Bounds::new(
                             point(px(img_left), px(img_top)),
                             size(px(display_w), px(full_display_h)),
                         );
-                        let visible_left =
-                            if preview.kind == crate::markdown::BlockPreviewKind::Mermaid {
-                                img_left.max(block_left)
-                            } else {
-                                img_left
-                            };
-                        let visible_right =
-                            if preview.kind == crate::markdown::BlockPreviewKind::Mermaid {
-                                (img_left + display_w).min(block_left + text_width)
-                            } else {
-                                img_left + display_w
-                            };
-                        let visible_w = (visible_right - visible_left).max(1.0);
                         let visible_img_bounds = Bounds::new(
-                            point(px(visible_left), px(preview_top)),
-                            size(px(visible_w), px(display_h)),
+                            point(px(preview_left), px(preview_top)),
+                            size(px(preview_width.max(1.0)), px(display_h.max(1.0))),
                         );
+                        if code_mode {
+                            code_block_bgs.push(fill(
+                                Bounds::new(
+                                    point(px(block_left + code_mode_text_width), px(line_top)),
+                                    size(px(1.0), px((display_h.max(text_line_height)).max(1.0))),
+                                ),
+                                editor.styles.code_block.code_block_border_color,
+                            ));
+                        }
                         // Generated math/Mermaid previews are cropped tightly to
                         // their glyph ink, so a rounded-corner clip would cut into
                         // real glyphs (e.g. the descenders and the `²` superscript
                         // in E=mc²). Keep square corners for these previews.
-                        let clip_bounds = (display_h < full_display_h - 0.5
-                            || visible_w < display_w - 0.5)
-                            .then_some(visible_img_bounds);
+                        let clip_bounds = Some(visible_img_bounds);
                         image_previews.push((img_bounds, img_data.clone(), px(0.0), clip_bounds));
                         generated_preview_hit_areas.push((block_bounds, preview.start_line));
                         generated_preview_image_areas
@@ -4347,74 +4757,25 @@ impl Element for EditorElement {
             }
 
             // Checkbox painting
-            if prefix_collapsed {
-                if let BlockType::TaskList(checked) = block_type {
-                    let checkbox_styles = &editor.styles.checkbox;
-                    let cb_size = font_size * editor.styles.checkbox.checkbox_size_factor;
-                    let prefix_bytes = helpers::compute_display_prefix_bytes(
-                        &display_text,
-                        block_type,
-                        prefix_collapsed,
-                        collapsed_task_prefix_display_columns,
-                    )
-                    .min(display_text.len());
-                    let text_start_x = wrapped
-                        .position_for_index(prefix_bytes, px(line_height))
-                        .map(|pos| f32::from(pos.x))
-                        .unwrap_or(0.0);
-                    let cb_x = content_x + text_start_x - checkbox_text_gap_px - cb_size;
-                    let cb_y = text_line_top + (line_height - cb_size) / 2.0;
-                    let cb_bounds =
-                        Bounds::new(point(px(cb_x), px(cb_y)), size(px(cb_size), px(cb_size)));
-                    let corner_r = px(editor.scaled(editor.styles.checkbox.checkbox_radius_px));
-                    let checkbox_opacity = if editor.hovering_checkbox_line == Some(line_idx) {
-                        checkbox_styles.checkbox_hover_opacity
-                    } else {
-                        checkbox_styles.checkbox_default_opacity
-                    };
-                    if *checked {
-                        let mut checkbox_bg = checkbox_styles.checkbox_checked_bg;
-                        checkbox_bg.a *= checkbox_opacity;
-                        gutter_quads.push(quad(
-                            cb_bounds,
-                            Corners::all(corner_r),
-                            checkbox_bg,
-                            px(0.0),
-                            gpui::transparent_black(),
-                            BorderStyle::default(),
-                        ));
-                        let icon_size = cb_size * editor.styles.checkbox.checkbox_check_icon_scale;
-                        let icon_offset = (cb_size - icon_size) / 2.0;
-                        let mut icon_color = checkbox_styles.checkbox_check_icon_color;
-                        icon_color.a *= checkbox_opacity;
-                        gutter_svgs.push((
-                            Bounds::new(
-                                point(px(cb_x + icon_offset), px(cb_y + icon_offset)),
-                                size(px(icon_size), px(icon_size)),
-                            ),
-                            CHECK_SVG_PATH,
-                            icon_color,
-                        ));
-                    } else {
-                        let mut border_color = checkbox_styles.checkbox_border_color;
-                        border_color.a *= checkbox_opacity;
-                        gutter_quads.push(quad(
-                            cb_bounds,
-                            Corners::all(corner_r),
-                            gpui::transparent_black(),
-                            px(editor.scaled(checkbox_styles.checkbox_border_width_px)),
-                            border_color,
-                            BorderStyle::default(),
-                        ));
-                    }
-                    let hit_padding = editor.scaled(2.0);
-                    let hit_bounds = Bounds::new(
-                        point(px(cb_x - hit_padding), px(line_top)),
-                        size(px(cb_size + hit_padding * 2.0), px(total_line_height)),
-                    );
-                    checkbox_hit_areas.push((hit_bounds, line_idx));
-                }
-            }
+            push_task_checkbox_paint(
+                editor,
+                block_type,
+                prefix_collapsed,
+                &display_text,
+                wrapped,
+                font_size,
+                line_height,
+                content_x,
+                text_line_top,
+                line_top,
+                total_line_height,
+                collapsed_task_prefix_display_columns,
+                checkbox_text_gap_px,
+                Some(line_idx),
+                &mut gutter_quads,
+                &mut gutter_svgs,
+                &mut checkbox_hit_areas,
+            );
 
             // Gutter fold icon
             if !hidden_lines.contains(&line_idx) {
@@ -4648,81 +5009,121 @@ impl Element for EditorElement {
                             let r_font_size = editor.font_size_for_block(&r_decoration.block_type);
                             let r_line_height =
                                 editor.line_height_for_block(&r_decoration.block_type);
-                            // Removed rows fold their markdown syntax like the
-                            // editor does, expanding to source only on the focused
-                            // row (the one the read-only caret/selection touches),
-                            // following cursor focus. Tables, code blocks, and
-                            // generated previews (charts/formulas) have no folded
-                            // form and always stay in source syntax.
-                            let foldable = r_decoration.table_info.is_none()
-                                && r_decoration.block_preview.is_none()
-                                && !matches!(
-                                    r_decoration.block_type,
-                                    BlockType::CodeBlock | BlockType::CodeBlockFence
-                                );
-                            let is_active = editor.phantom_selection.is_some_and(|sel| {
-                                if sel.hunk_base_start != *hunk_base_start {
-                                    return false;
-                                }
-                                let (start_row, _, end_row, _) = sel.ordered();
-                                *row_in_hunk >= start_row && *row_in_hunk <= end_row
-                            });
-                            let show_source = !foldable || is_active;
-                            let (display_text, display_to_buffer, code_syntax_active) =
-                                if show_source {
-                                    (
-                                        removed.text.clone(),
-                                        (0..=removed.text.len()).collect::<Vec<usize>>(),
-                                        true,
+                            let row_is_front_matter = r_decoration
+                                .table_info
+                                .as_ref()
+                                .is_some_and(|table_info| table_info.is_front_matter);
+                            let row_is_block_syntax = matches!(
+                                r_decoration.block_type,
+                                BlockType::CodeBlock | BlockType::CodeBlockFence
+                            ) || row_is_front_matter;
+                            let mut row_content_x = if row_is_block_syntax {
+                                phantom_content_x
+                                    + editor.scaled(
+                                        editor.styles.code_block.code_block_text_padding_left_px,
                                     )
-                                } else {
-                                    let (folded, d2b, _b2d, _prefix_collapsed) =
-                                        helpers::build_display_text(
-                                            &removed.text,
-                                            r_decoration,
-                                            &[],
-                                            false,
-                                            None,
-                                            table_cell_padding_chars,
-                                            collapsed_task_prefix_display_columns,
-                                            checkbox_indent_step_display_columns,
-                                            editor.styles.checkbox.checkbox_parent_prefix_chars
-                                                as usize,
-                                            0,
-                                            editor.styles.editor.editor_superscript_scale_factor,
-                                            editor.styles.editor.editor_subscript_scale_factor,
-                                            editor.styles.editor.editor_superscript_scale_factor,
-                                        );
-                                    (folded, d2b, false)
-                                };
-                            let runs = helpers::build_text_runs_for_display(
-                                &display_text,
+                            } else {
+                                phantom_content_x
+                            };
+                            let row_wrap_width = if row_is_block_syntax {
+                                (wrap_width
+                                    - editor.scaled(
+                                        editor.styles.code_block.code_block_text_padding_left_px,
+                                    )
+                                    - editor.scaled(
+                                        editor.styles.code_block.code_block_wrap_right_padding_px,
+                                    ))
+                                .max(editor.scaled(80.0))
+                            } else {
+                                wrap_width
+                            };
+                            let preview = r_decoration.block_preview.as_ref();
+                            if preview.is_some_and(|preview| !preview.is_anchor) {
+                                continue;
+                            }
+                            let preview_image = preview
+                                .filter(|preview| preview.is_anchor)
+                                .and_then(|preview| {
+                                    image_cache
+                                        .get(&preview.cache_key)
+                                        .and_then(|image| image.as_ref())
+                                        .map(|image| (preview, image.clone()))
+                                });
+                            let (
+                                mut display_text,
+                                display_to_buffer,
+                                buffer_to_display,
+                                prefix_collapsed,
+                            ) = if preview_image.is_some() {
+                                (
+                                    String::new(),
+                                    Vec::new(),
+                                    vec![0; removed.text.len().saturating_add(1)],
+                                    false,
+                                )
+                            } else {
+                                helpers::build_display_text(
+                                    &removed.text,
+                                    r_decoration,
+                                    &[],
+                                    false,
+                                    None,
+                                    table_cell_padding_chars,
+                                    collapsed_task_prefix_display_columns,
+                                    checkbox_indent_step_display_columns,
+                                    editor.styles.checkbox.checkbox_parent_prefix_chars as usize,
+                                    0,
+                                    editor.styles.editor.editor_superscript_scale_factor,
+                                    editor.styles.editor.editor_subscript_scale_factor,
+                                    editor.styles.editor.editor_superscript_scale_factor,
+                                )
+                            };
+                            editor.apply_list_display_styles(
                                 &removed.text,
-                                &display_to_buffer,
                                 r_decoration,
-                                &[],
-                                code_syntax_active,
-                                false,
-                                &body_font,
-                                &body_cjk_font,
-                                &monospace_font,
-                                &heading_font,
-                                &heading_cjk_font,
-                                &italic_font,
-                                &italic_cjk_font,
-                                collapsed_task_prefix_display_columns,
-                                r_font_size,
-                                theme,
-                                selection_styles.selection_diff_added_inline_bg,
-                                selection_styles.selection_diff_removed_inline_bg,
-                                editor.styles.wiki_link.wiki_link_text_color,
-                                editor.styles.wiki_link.wiki_link_text_weight,
-                                editor.styles.editor.editor_list_marker_text_color,
-                                editor.styles.editor.editor_list_marker_font_weight,
-                                editor.styles.editor.editor_heading_marker_text_color,
-                                None,
-                                false,
+                                &mut display_text,
+                                prefix_collapsed,
                             );
+                            let runs = if display_text.is_empty() {
+                                vec![TextRun {
+                                    len: 1,
+                                    font: body_font.clone(),
+                                    color: gpui::transparent_black(),
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                }]
+                            } else {
+                                helpers::build_text_runs_for_display(
+                                    &display_text,
+                                    &removed.text,
+                                    &display_to_buffer,
+                                    r_decoration,
+                                    &[],
+                                    false,
+                                    prefix_collapsed,
+                                    &body_font,
+                                    &body_cjk_font,
+                                    &monospace_font,
+                                    &heading_font,
+                                    &heading_cjk_font,
+                                    &italic_font,
+                                    &italic_cjk_font,
+                                    collapsed_task_prefix_display_columns,
+                                    r_font_size,
+                                    theme,
+                                    selection_styles.selection_diff_added_inline_bg,
+                                    selection_styles.selection_diff_removed_inline_bg,
+                                    editor.styles.wiki_link.wiki_link_text_color,
+                                    editor.styles.wiki_link.wiki_link_text_weight,
+                                    editor.styles.editor.editor_list_marker_text_color,
+                                    editor.styles.editor.editor_list_marker_font_weight,
+                                    editor.styles.editor.editor_heading_marker_text_color,
+                                    row_is_front_matter
+                                        .then_some(editor.styles.table.front_matter_key_text_color),
+                                    false,
+                                )
+                            };
                             let shared: SharedString = if display_text.is_empty() {
                                 " ".into()
                             } else {
@@ -4732,7 +5133,7 @@ impl Element for EditorElement {
                                 shared,
                                 px(r_font_size),
                                 &runs,
-                                Some(px(wrap_width)),
+                                Some(px(row_wrap_width)),
                                 None,
                             ) else {
                                 row_top += r_line_height;
@@ -4745,7 +5146,193 @@ impl Element for EditorElement {
                             let visual_lines = helpers::wrap_boundary_byte_indices(&wrapped)
                                 .len()
                                 .saturating_add(1);
-                            let row_height = visual_lines as f32 * r_line_height;
+                            if matches!(r_decoration.block_type, BlockType::TaskList(_))
+                                && prefix_collapsed
+                            {
+                                let prefix_bytes = helpers::compute_display_prefix_bytes(
+                                    &display_text,
+                                    &r_decoration.block_type,
+                                    prefix_collapsed,
+                                    collapsed_task_prefix_display_columns,
+                                )
+                                .min(display_text.len());
+                                let indent_px = wrapped
+                                    .position_for_index(prefix_bytes, px(r_line_height))
+                                    .map(|pos| f32::from(pos.x))
+                                    .unwrap_or(0.0);
+                                let target_prefix_width = helpers::task_prefix_target_width_px(
+                                    &removed.text,
+                                    r_font_size * editor.styles.checkbox.checkbox_size_factor,
+                                    checkbox_text_gap_px,
+                                    task_source_indent_step_chars,
+                                )
+                                .unwrap_or(indent_px);
+                                row_content_x += target_prefix_width - indent_px;
+                            }
+                            let text_height = visual_lines as f32 * r_line_height;
+                            let row_height = if let Some((preview, img_data)) = preview_image {
+                                let img_size = img_data.size(0);
+                                let img_w = img_size.width.0 as f32;
+                                let img_h = img_size.height.0 as f32;
+                                if img_w > 0.0 && img_h > 0.0 {
+                                    let mut mermaid_is_vertical = true;
+                                    let (display_w, full_display_h) = if preview.kind
+                                        == crate::markdown::BlockPreviewKind::Mermaid
+                                    {
+                                        let (intrinsic_w, intrinsic_h) =
+                                            helpers::intrinsic_generated_preview_size_for_kind(
+                                                img_w,
+                                                img_h,
+                                                preview.kind,
+                                            );
+                                        mermaid_is_vertical = intrinsic_h > intrinsic_w;
+                                        (
+                                            intrinsic_w
+                                                * helpers::GENERATED_PREVIEW_EDITOR_MERMAID_SCALE,
+                                            intrinsic_h
+                                                * helpers::GENERATED_PREVIEW_EDITOR_MERMAID_SCALE,
+                                        )
+                                    } else {
+                                        helpers::compute_generated_preview_size_for_kind(
+                                            img_w,
+                                            img_h,
+                                            text_width,
+                                            preview.kind,
+                                        )
+                                    };
+                                    let display_h =
+                                        if preview.kind
+                                            == crate::markdown::BlockPreviewKind::Mermaid
+                                        {
+                                            full_display_h.min(editor.scaled(
+                                                helpers::GENERATED_PREVIEW_EDITOR_MAX_HEIGHT,
+                                            ))
+                                        } else {
+                                            full_display_h
+                                        };
+                                    let preview_top = row_top + text_height + image_gap_top;
+                                    let img_left = if preview.kind
+                                        == crate::markdown::BlockPreviewKind::Mermaid
+                                    {
+                                        phantom_content_x + (text_width - display_w) * 0.5
+                                    } else {
+                                        phantom_content_x
+                                            + ((text_width - display_w) / 2.0).max(0.0)
+                                    };
+                                    let img_top = if preview.kind
+                                        == crate::markdown::BlockPreviewKind::Mermaid
+                                        && !mermaid_is_vertical
+                                        && full_display_h > display_h
+                                    {
+                                        preview_top + (display_h - full_display_h) * 0.5
+                                    } else {
+                                        preview_top
+                                    };
+                                    let img_left = if preview.kind
+                                        == crate::markdown::BlockPreviewKind::Mermaid
+                                        && !mermaid_is_vertical
+                                    {
+                                        phantom_content_x
+                                    } else {
+                                        img_left
+                                    };
+                                    let img_bounds = Bounds::new(
+                                        point(px(img_left), px(img_top)),
+                                        size(px(display_w), px(full_display_h)),
+                                    );
+                                    let visible_left = if preview.kind
+                                        == crate::markdown::BlockPreviewKind::Mermaid
+                                    {
+                                        img_left.max(phantom_content_x)
+                                    } else {
+                                        img_left
+                                    };
+                                    let visible_right = if preview.kind
+                                        == crate::markdown::BlockPreviewKind::Mermaid
+                                    {
+                                        (img_left + display_w).min(phantom_content_x + text_width)
+                                    } else {
+                                        img_left + display_w
+                                    };
+                                    let visible_w = (visible_right - visible_left).max(1.0);
+                                    let visible_img_bounds = Bounds::new(
+                                        point(px(visible_left), px(preview_top)),
+                                        size(px(visible_w), px(display_h)),
+                                    );
+                                    let clip_bounds = (display_h < full_display_h - 0.5
+                                        || visible_w < display_w - 0.5)
+                                        .then_some(visible_img_bounds);
+                                    image_previews.push((
+                                        img_bounds,
+                                        img_data.clone(),
+                                        px(0.0),
+                                        clip_bounds,
+                                    ));
+                                    text_height
+                                        + display_h
+                                        + image_gap_top
+                                        + r_line_height
+                                        + image_gap_top
+                                } else {
+                                    text_height
+                                }
+                            } else {
+                                text_height
+                            };
+                            push_task_checkbox_paint(
+                                editor,
+                                &r_decoration.block_type,
+                                prefix_collapsed,
+                                &display_text,
+                                &wrapped,
+                                r_font_size,
+                                r_line_height,
+                                row_content_x,
+                                row_top,
+                                row_top,
+                                row_height,
+                                collapsed_task_prefix_display_columns,
+                                checkbox_text_gap_px,
+                                None,
+                                &mut gutter_quads,
+                                &mut gutter_svgs,
+                                &mut checkbox_hit_areas,
+                            );
+                            push_unordered_list_marker_paint(
+                                editor,
+                                &removed.text,
+                                &r_decoration.block_type,
+                                prefix_collapsed,
+                                &wrapped,
+                                r_font_size,
+                                r_line_height,
+                                row_content_x,
+                                phantom_content_x,
+                                row_top,
+                                &monospace_font,
+                                window,
+                                &mut unordered_list_markers,
+                            );
+                            push_rendered_inline_overlays(
+                                editor,
+                                window,
+                                r_decoration,
+                                &removed.text,
+                                &display_text,
+                                &buffer_to_display,
+                                &[],
+                                &wrapped,
+                                &body_font,
+                                &body_cjk_font,
+                                theme,
+                                r_font_size,
+                                row_content_x,
+                                row_top,
+                                0.0,
+                                r_line_height,
+                                &mut inline_svgs,
+                                &mut inline_overlays,
+                            );
                             let row_bounds = Bounds::new(
                                 point(px(origin_x), px(row_top)),
                                 size(px(viewport_width), px(row_height)),
@@ -4760,7 +5347,7 @@ impl Element for EditorElement {
                                 bounds: row_bounds,
                                 hunk_base_start: *hunk_base_start,
                                 row: *row_in_hunk,
-                                content_x: phantom_content_x,
+                                content_x: row_content_x,
                                 row_top,
                                 line_height: r_line_height,
                                 wrapped: wrapped.clone(),
@@ -4782,21 +5369,31 @@ impl Element for EditorElement {
                                 if !sel.is_collapsed() {
                                     let (sr, so, er, eo) = sel.ordered();
                                     if *row_in_hunk >= sr && *row_in_hunk <= er {
-                                        let disp_start =
+                                        let raw_start =
                                             if *row_in_hunk == sr { clamp_off(so) } else { 0 };
-                                        let disp_end = if *row_in_hunk == er {
+                                        let raw_end = if *row_in_hunk == er {
                                             clamp_off(eo)
                                         } else {
                                             text_len
                                         };
+                                        let disp_start = raw_offset_to_display_offset(
+                                            &buffer_to_display,
+                                            raw_start,
+                                        )
+                                        .min(display_text.len());
+                                        let disp_end = raw_offset_to_display_offset(
+                                            &buffer_to_display,
+                                            raw_end,
+                                        )
+                                        .min(display_text.len());
                                         if disp_start < disp_end {
                                             selection_quads.extend(helpers::build_selection_quads(
-                                                &removed.text,
+                                                &display_text,
                                                 &runs,
                                                 &wrapped,
                                                 disp_start,
                                                 disp_end,
-                                                phantom_content_x,
+                                                row_content_x,
                                                 row_top,
                                                 r_line_height,
                                                 r_font_size,
@@ -4814,8 +5411,11 @@ impl Element for EditorElement {
                                     && editor.focus_handle.is_focused(window)
                                 {
                                     let head_off = clamp_off(sel.head_offset);
+                                    let display_head =
+                                        raw_offset_to_display_offset(&buffer_to_display, head_off)
+                                            .min(display_text.len());
                                     let caret_pos = wrapped
-                                        .position_for_index(head_off, px(r_line_height))
+                                        .position_for_index(display_head, px(r_line_height))
                                         .unwrap_or_default();
                                     let caret_height = r_line_height
                                         * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
@@ -4830,10 +5430,7 @@ impl Element for EditorElement {
                                     };
                                     cursor_quads.push(fill(
                                         Bounds::new(
-                                            point(
-                                                px(phantom_content_x) + caret_pos.x,
-                                                px(caret_top),
-                                            ),
+                                            point(px(row_content_x) + caret_pos.x, px(caret_top)),
                                             size(
                                                 px(editor.styles.cursor.cursor_width_px),
                                                 px(caret_height),
@@ -4843,20 +5440,16 @@ impl Element for EditorElement {
                                     ));
                                 }
                             }
-                            // The inline char-diff highlight maps raw-text spans
-                            // through an identity table, so only draw it on source
-                            // rows; folded rows still carry the removed-line
-                            // background for context.
-                            if show_source {
+                            if !removed.removed_spans.is_empty() {
                                 push_diff_inline_highlight_quads(
                                     &mut diff_inline_quads,
                                     &removed.removed_spans,
                                     &display_text,
                                     removed.text.len(),
-                                    &display_to_buffer,
+                                    &buffer_to_display,
                                     &runs,
                                     &wrapped,
-                                    phantom_content_x,
+                                    row_content_x,
                                     row_top,
                                     r_line_height,
                                     r_font_size,
@@ -4873,7 +5466,7 @@ impl Element for EditorElement {
                             }
                             phantom_text_lines.push((
                                 wrapped,
-                                point(px(phantom_content_x), px(row_top)),
+                                point(px(row_content_x), px(row_top)),
                                 px(r_line_height),
                             ));
                             row_top += row_height;
@@ -5042,6 +5635,15 @@ impl Element for EditorElement {
                         helpers::buffer_to_display_offset(&buffer_to_display, buf_end_col);
                     let selection_spans_line =
                         sr.start < line_start_offset || sr.end > line_end_offset;
+                    let selection_leading_padding_left_px =
+                        if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence)
+                            || decoration.block_preview.is_some()
+                            || is_front_matter_line
+                        {
+                            0.0
+                        } else {
+                            selection_padding_left_px
+                        };
                     if matches!(block_type, BlockType::Heading(_)) && selection_spans_line {
                         for bounds in helpers::build_highlight_bounds(
                             &display_text,
@@ -5054,7 +5656,7 @@ impl Element for EditorElement {
                             line_height,
                             font_size,
                             indent_px,
-                            selection_padding_left_px,
+                            selection_leading_padding_left_px,
                             letter_spacing,
                             window,
                         ) {
@@ -5078,7 +5680,7 @@ impl Element for EditorElement {
                             line_height,
                             font_size,
                             indent_px,
-                            selection_padding_left_px,
+                            selection_leading_padding_left_px,
                             theme.selection,
                             letter_spacing,
                             window,
@@ -5591,69 +6193,21 @@ impl Element for EditorElement {
                 is_table_block: is_table_block_line,
             });
 
-            if *block_type == BlockType::UnorderedList && prefix_collapsed {
-                let marker_text = editor
-                    .unordered_list_display_marker_for_line(line_content)
-                    .trim_end()
-                    .to_string();
-                if !marker_text.is_empty() {
-                    let marker_font_size = font_size
-                        + editor.scaled(
-                            editor
-                                .styles
-                                .editor
-                                .editor_unordered_list_marker_font_size_offset_px,
-                        );
-                    let marker_run = TextRun {
-                        len: marker_text.len(),
-                        font: monospace_font.clone(),
-                        color: editor.styles.editor.editor_list_marker_text_color,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    };
-                    let mut marker_run = marker_run;
-                    marker_run.font.weight = editor.styles.editor.editor_list_marker_font_weight;
-                    if let Ok(mut marker_wrapped_lines) = window.text_system().shape_text(
-                        marker_text.clone().into(),
-                        px(marker_font_size),
-                        &[marker_run],
-                        None,
-                        None,
-                    ) && let Some(marker_wrapped) = marker_wrapped_lines.pop()
-                    {
-                        let marker_x = if leading_ws == 0 {
-                            base_content_x
-                        } else {
-                            content_x
-                                + f32::from(
-                                    wrapped
-                                        .position_for_index(leading_ws, px(line_height))
-                                        .unwrap_or_default()
-                                        .x,
-                                )
-                        };
-                        let marker_offset = editor.scaled(
-                            editor
-                                .styles
-                                .editor
-                                .editor_unordered_list_marker_font_size_offset_px,
-                        );
-                        let marker_line_height = line_height
-                            + editor.scaled(
-                                editor
-                                    .styles
-                                    .editor
-                                    .editor_unordered_list_marker_line_height_offset_px,
-                            );
-                        unordered_list_markers.push((
-                            marker_wrapped,
-                            point(px(marker_x), px(text_line_top - marker_offset * 0.35)),
-                            px(marker_line_height),
-                        ));
-                    }
-                }
-            }
+            push_unordered_list_marker_paint(
+                editor,
+                line_content,
+                block_type,
+                prefix_collapsed,
+                wrapped,
+                font_size,
+                line_height,
+                content_x,
+                base_content_x,
+                text_line_top,
+                &monospace_font,
+                window,
+                &mut unordered_list_markers,
+            );
 
             y += total_line_height;
             _last_line_height = total_line_height;
@@ -5821,6 +6375,114 @@ impl Element for EditorElement {
             }
 
             let is_preview_action = preview_anchor.is_some();
+            if is_preview_action {
+                let Some(action_anchor_bounds) = preview_action_anchor_bounds else {
+                    continue;
+                };
+                let action_anchor_left = f32::from(action_anchor_bounds.origin.x);
+                let action_anchor_top = f32::from(action_anchor_bounds.origin.y);
+                let action_anchor_width = f32::from(action_anchor_bounds.size.width);
+                let action_button_size = preview_action_button_size;
+                let actions = [
+                    (
+                        GeneratedPreviewAction::Fullscreen,
+                        PREVIEW_FULLSCREEN_SVG_PATH,
+                        "FULL".to_string(),
+                    ),
+                    (
+                        GeneratedPreviewAction::Restore,
+                        PREVIEW_RESTORE_SVG_PATH,
+                        "RESET".to_string(),
+                    ),
+                    (
+                        GeneratedPreviewAction::ZoomIn,
+                        PREVIEW_ZOOM_IN_SVG_PATH,
+                        "+".to_string(),
+                    ),
+                    (
+                        GeneratedPreviewAction::ZoomOut,
+                        PREVIEW_ZOOM_OUT_SVG_PATH,
+                        "-".to_string(),
+                    ),
+                    (
+                        GeneratedPreviewAction::Copy,
+                        PREVIEW_COPY_SVG_PATH,
+                        "COPY".to_string(),
+                    ),
+                    (
+                        GeneratedPreviewAction::Code,
+                        FMT_INLINE_CODE_SVG,
+                        "CODE".to_string(),
+                    ),
+                ];
+                let action_group_width = actions.len() as f32 * action_button_size
+                    + actions.len().saturating_sub(1) as f32 * preview_button_gap;
+                let action_group_x = (action_anchor_left + action_anchor_width
+                    - preview_action_padding
+                    - action_group_width)
+                    .max(action_anchor_left + preview_action_padding)
+                    .round();
+                let button_y = (action_anchor_top + preview_action_padding).round();
+                for (index, (action, icon_path, label_text)) in actions.into_iter().enumerate() {
+                    let button_x = (action_group_x
+                        + index as f32 * (action_button_size + preview_button_gap))
+                        .round();
+                    let button_bounds = Bounds::new(
+                        point(px(button_x), px(button_y)),
+                        size(px(action_button_size), px(action_button_size)),
+                    );
+                    let hovered =
+                        editor.hovering_generated_preview_action == Some((*start_line, action));
+                    let (button_bg, icon_color, border_color) = if hovered {
+                        (
+                            code_block_styles.code_block_copy_button_hover_bg,
+                            code_block_styles.code_block_copy_button_hover_text_color,
+                            preview_action_border_color,
+                        )
+                    } else {
+                        (
+                            code_block_styles.code_block_copy_button_bg,
+                            code_block_styles.code_block_copy_button_text_color,
+                            preview_action_border_color,
+                        )
+                    };
+                    generated_preview_action_areas_local.push((button_bounds, *start_line, action));
+                    preview_zoom_hitboxes
+                        .push(window.insert_hitbox(button_bounds, HitboxBehavior::Normal));
+                    preview_zoom_buttons.push(CodeBlockCopyButtonPaint {
+                        quad: quad(
+                            button_bounds,
+                            Corners::all(preview_action_button_radius),
+                            button_bg,
+                            preview_action_border_width,
+                            border_color,
+                            BorderStyle::default(),
+                        ),
+                        label: None,
+                        origin: point(px(button_x), px(button_y)),
+                        line_height: px(button_text_line_height),
+                        icon: Some({
+                            let icon_left =
+                                button_x + (action_button_size - preview_action_icon_size) * 0.5;
+                            let icon_top =
+                                button_y + (action_button_size - preview_action_icon_size) * 0.5;
+                            (
+                                Bounds::new(
+                                    point(px(icon_left), px(icon_top)),
+                                    size(
+                                        px(preview_action_icon_size),
+                                        px(preview_action_icon_size),
+                                    ),
+                                ),
+                                icon_path,
+                                icon_color,
+                            )
+                        }),
+                    });
+                    let _ = label_text;
+                }
+                continue;
+            }
             let is_button_hovered = editor.hovering_code_block_copy_start == Some(*start_line);
             let (label_text, button_bg, button_text_color, button_border_color) = if is_copied {
                 (
@@ -6340,6 +7002,7 @@ impl Element for EditorElement {
             editor.generated_preview_click_areas = generated_preview_hit_areas.clone();
             editor.generated_preview_image_areas = generated_preview_image_areas.clone();
             editor.generated_preview_zoom_areas = generated_preview_zoom_areas_local.clone();
+            editor.generated_preview_action_areas = generated_preview_action_areas_local.clone();
             editor.code_block_hover_areas = code_block_hover_areas_local.clone();
             editor.code_block_copy_areas = code_block_copy_areas_local.clone();
             editor.table_click_areas = table_click_areas_local.clone();
@@ -6513,9 +7176,10 @@ impl Element for EditorElement {
             {
                 CursorStyle::ClosedHand
             }
+            None if editor.generated_preview_drag_state.is_some() => CursorStyle::ClosedHand,
             None if editor.preview_overlay_state().is_some() => CursorStyle::OpenHand,
-            None if editor.hovering_generated_preview_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_generated_preview_zoom_line.is_some() => CursorStyle::Arrow,
+            None if editor.hovering_generated_preview_line.is_some() => CursorStyle::OpenHand,
             None if editor.hovering_inline_diff_gutter_hunk.is_some() => CursorStyle::Arrow,
             None if editor.hovering_inline_diff_revert_hunk.is_some() => CursorStyle::Arrow,
             None if editor.editor_scrollbar_hovered => CursorStyle::Arrow,
