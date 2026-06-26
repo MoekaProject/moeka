@@ -705,9 +705,23 @@ impl EditorView {
         else {
             return false;
         };
-        self.generated_preview_code_views
-            .insert(preview.cache_key.clone());
+        let preserve_scroll = self.scroll_offset;
+        let target_offset = if preview.source_range.start <= self.cursor.offset
+            && self.cursor.offset < preview.source_range.end
+        {
+            preview.source_range.end.min(self.buffer.len())
+        } else {
+            preview.source_range.start.min(self.buffer.len())
+        };
         self.folded_sections.remove(&preview.start_line);
+        self.clear_extra_cursors();
+        self.cursor.anchor = target_offset;
+        self.cursor.offset = target_offset;
+        self.pending_scroll_to_cursor = false;
+        self.pending_center_cursor_in_view = false;
+        self.pending_preview_reveal = Some(PendingPreviewReveal {
+            scroll_offset: preserve_scroll,
+        });
         self.clear_line_display_info();
         true
     }
@@ -1360,6 +1374,7 @@ impl EditorView {
             .map(|(_, start_line)| *start_line);
         if hovering_code_block != self.hovering_code_block_start {
             self.hovering_code_block_start = hovering_code_block;
+            self.sync_generated_preview_action_opacity(cx);
             cx.notify();
         }
 
@@ -1409,6 +1424,7 @@ impl EditorView {
             });
         if hovering_generated_preview != self.hovering_generated_preview_line {
             self.hovering_generated_preview_line = hovering_generated_preview;
+            self.sync_generated_preview_action_opacity(cx);
             cx.notify();
         }
 
@@ -1419,6 +1435,7 @@ impl EditorView {
             .map(|(_, line, action)| (*line, *action));
         if hovering_generated_preview_action != self.hovering_generated_preview_action {
             self.hovering_generated_preview_action = hovering_generated_preview_action;
+            self.sync_generated_preview_action_opacity(cx);
             cx.notify();
         }
 

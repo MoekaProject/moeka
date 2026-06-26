@@ -364,15 +364,23 @@ impl EditorView {
 
     fn render_preview_overlay_actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let editor_handle = cx.entity().clone();
-        let action_size = self.scaled(30.0);
-        let icon_size = self.scaled(15.0);
-        let gap = self.scaled(6.0);
-        let top = self.scaled(18.0);
-        let right = self.scaled(18.0);
+        let action_size = self.scaled(
+            self.styles
+                .code_block
+                .generated_preview_action_button_size_px,
+        );
+        let icon_size = self.scaled(self.styles.code_block.generated_preview_action_icon_size_px);
+        let gap = self.scaled(self.styles.code_block.generated_preview_action_gap_px);
+        let top = self.scaled(self.styles.code_block.generated_preview_action_padding_px);
+        let right = self.scaled(self.styles.code_block.generated_preview_action_padding_px);
         let button_bg = self.styles.code_block.code_block_copy_button_bg;
         let button_hover_bg = self.styles.code_block.code_block_copy_button_hover_bg;
         let button_border = self.styles.code_block.generated_preview_action_border_color;
-        let button_radius = px(self.scaled(8.0));
+        let button_radius = px(self.scaled(
+            self.styles
+                .code_block
+                .generated_preview_action_button_radius_px,
+        ));
         let button_border_width = px(self.scaled(
             self.styles
                 .code_block
@@ -1455,6 +1463,40 @@ impl Render for EditorView {
                                                             .right(px(0.0))
                                                             .bottom(px(0.0)),
                                                         ))
+                                                        .child(
+                                                            div()
+                                                                .absolute()
+                                                                .left(px(0.0))
+                                                                .top(px(0.0))
+                                                                .right(px(0.0))
+                                                                .bottom(px(0.0))
+                                                                .bg(gpui::transparent_black())
+                                                                .cursor(CursorStyle::OpenHand)
+                                                                .on_mouse_down(
+                                                                    MouseButton::Left,
+                                                                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                                                        cx.stop_propagation();
+                                                                        this.on_mouse_down(event, window, cx);
+                                                                    }),
+                                                                )
+                                                                .on_mouse_up(
+                                                                    MouseButton::Left,
+                                                                    cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                                                                        cx.stop_propagation();
+                                                                        this.on_mouse_up(event, window, cx);
+                                                                    }),
+                                                                )
+                                                                .on_mouse_up_out(
+                                                                    MouseButton::Left,
+                                                                    cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                                                                        cx.stop_propagation();
+                                                                        this.on_mouse_up(event, window, cx);
+                                                                    }),
+                                                                )
+                                                                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                                                                    this.on_mouse_move(event, window, cx);
+                                                                })),
+                                                        )
                                                         .child(self.render_preview_overlay_actions(cx))
                                                     })
                                                     .when_some(

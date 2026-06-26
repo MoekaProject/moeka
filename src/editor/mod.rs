@@ -1341,6 +1341,11 @@ pub struct EditorView {
     pub(crate) hovering_generated_preview_line: Option<usize>,
     pub(crate) hovering_generated_preview_zoom_line: Option<usize>,
     pub(crate) hovering_generated_preview_action: Option<(usize, GeneratedPreviewAction)>,
+    pub(crate) generated_preview_actions_visible_line: Option<usize>,
+    pub(crate) generated_preview_actions_opacity: f32,
+    pub(crate) generated_preview_actions_opacity_target: f32,
+    pub(crate) generated_preview_actions_opacity_epoch: usize,
+    pub(crate) generated_preview_actions_opacity_task: Option<Task<()>>,
     pub(crate) code_block_hover_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) code_block_copy_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) hovering_code_block_start: Option<usize>,
@@ -1365,7 +1370,6 @@ pub struct EditorView {
     pub(crate) generated_preview_svg_cache: HashMap<String, Arc<str>>,
     pub(crate) generated_preview_overlay_cache: HashMap<String, (u16, Arc<RenderImage>)>,
     pub(crate) generated_preview_views: HashMap<String, ImageViewState>,
-    pub(crate) generated_preview_code_views: HashSet<String>,
     pub(crate) generated_preview_drag_state: Option<GeneratedPreviewDragState>,
     pub(crate) sidebar_root: PathBuf,
     pub(crate) expanded_dirs: HashSet<PathBuf>,
@@ -1786,6 +1790,11 @@ impl EditorView {
             hovering_generated_preview_line: None,
             hovering_generated_preview_zoom_line: None,
             hovering_generated_preview_action: None,
+            generated_preview_actions_visible_line: None,
+            generated_preview_actions_opacity: 0.0,
+            generated_preview_actions_opacity_target: 0.0,
+            generated_preview_actions_opacity_epoch: 0,
+            generated_preview_actions_opacity_task: None,
             code_block_hover_areas: Vec::new(),
             code_block_copy_areas: Vec::new(),
             hovering_code_block_start: None,
@@ -1803,7 +1812,6 @@ impl EditorView {
             generated_preview_svg_cache: HashMap::new(),
             generated_preview_overlay_cache: HashMap::new(),
             generated_preview_views: HashMap::new(),
-            generated_preview_code_views: HashSet::new(),
             generated_preview_drag_state: None,
             sidebar_root: sidebar_root.clone(),
             expanded_dirs,
@@ -3424,6 +3432,7 @@ impl EditorView {
     // ── Dialog ──────────────────────────────────────────────────────
 
     pub(crate) fn show_dialog(&mut self, dialog: Dialog, cx: &mut Context<Self>) {
+        self.close_preview_overlay();
         self.dialog = Some(dialog);
         cx.notify();
     }
@@ -4665,6 +4674,57 @@ impl EditorView {
         view.zoom_factor = (view.zoom_factor * factor).clamp(0.25, 6.0);
         view.pan_x = view.pan_x.clamp(-5000.0, 5000.0);
         view.pan_y = view.pan_y.clamp(-5000.0, 5000.0);
+    }
+
+    pub(crate) fn sync_generated_preview_action_opacity(&mut self, cx: &mut Context<Self>) {
+        let visible_line = self
+            .hovering_generated_preview_action
+            .map(|(line, _)| line)
+            .or(self.hovering_generated_preview_line)
+            .or(self.hovering_code_block_start);
+        if visible_line.is_some() {
+            self.generated_preview_actions_visible_line = visible_line;
+        }
+        let target = if visible_line.is_some() { 1.0 } else { 0.0 };
+        if (self.generated_preview_actions_opacity_target - target).abs() <= 0.001 {
+            return;
+        }
+
+        self.generated_preview_actions_opacity_target = target;
+        self.generated_preview_actions_opacity_epoch += 1;
+        let epoch = self.generated_preview_actions_opacity_epoch;
+        self.generated_preview_actions_opacity_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.generated_preview_actions_opacity_epoch != epoch {
+                            return true;
+                        }
+                        let diff = this.generated_preview_actions_opacity_target
+                            - this.generated_preview_actions_opacity;
+                        if diff.abs() <= 0.01 {
+                            this.generated_preview_actions_opacity =
+                                this.generated_preview_actions_opacity_target;
+                            if this.generated_preview_actions_opacity <= 0.01 {
+                                this.generated_preview_actions_visible_line = None;
+                            }
+                            this.generated_preview_actions_opacity_task = None;
+                            cx.notify();
+                            return true;
+                        }
+                        this.generated_preview_actions_opacity += diff * 0.22;
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+                if done {
+                    return;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+            }
+        }));
     }
 
     pub(crate) fn reset_preview_overlay_view(&mut self) {

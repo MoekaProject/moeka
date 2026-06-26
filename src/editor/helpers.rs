@@ -4165,22 +4165,11 @@ fn render_mermaid_block_preview_svg(
     font_families: GeneratedPreviewFontFamilies<'_>,
 ) -> anyhow::Result<String> {
     let mermaid_svg_source = normalize_mermaid_svg_source(source_text);
-    let mermaid_svg_source = with_default_mermaid_init(&mermaid_svg_source);
     let mermaid_theme = mermaid_svg::Theme::default().with_font_size(10.5);
     mermaid_svg::render_with(&mermaid_svg_source, &mermaid_theme)
-        .map(|svg| mermaid_edge_curves_to_polylines(&svg))
         .map(|svg| shrink_mermaid_arrow_markers(&svg))
         .map(|svg| apply_mermaid_svg_theme(&svg, theme, font_families))
         .map_err(Into::into)
-}
-
-fn with_default_mermaid_init(source_text: &str) -> String {
-    let trimmed = source_text.trim_start();
-    if trimmed.starts_with("%%{init:") || trimmed.starts_with("%%{ init:") {
-        return source_text.to_string();
-    }
-
-    format!("%%{{init: {{'flowchart': {{'curve': 'step'}}}}}}%%\n{source_text}")
 }
 
 fn normalize_mermaid_svg_source(source_text: &str) -> String {
@@ -4194,114 +4183,11 @@ fn normalize_mermaid_svg_source(source_text: &str) -> String {
     wrap_mermaid_svg_source_labels(&normalized, 18)
 }
 
-fn mermaid_edge_curves_to_polylines(svg: &str) -> String {
-    let mut output = String::with_capacity(svg.len());
-    let mut index = 0;
-    while let Some(path_start_rel) = svg[index..].find("<path ") {
-        let path_start = index + path_start_rel;
-        output.push_str(&svg[index..path_start]);
-        let Some(path_end_rel) = svg[path_start..].find('>') else {
-            output.push_str(&svg[path_start..]);
-            return output;
-        };
-        let path_end = path_start + path_end_rel + 1;
-        let path_tag = &svg[path_start..path_end];
-        if path_tag.contains("fill=\"none\"") && path_tag.contains("stroke=") {
-            output.push_str(&curve_path_tag_to_polyline(path_tag));
-        } else {
-            output.push_str(path_tag);
-        }
-        index = path_end;
-    }
-    output.push_str(&svg[index..]);
-    output
-}
-
 fn shrink_mermaid_arrow_markers(svg: &str) -> String {
     svg.replace(
         "<marker id=\"arrow-filled\" viewBox=\"0 0 10 10\" refX=\"10\" refY=\"5\" markerWidth=\"10\" markerHeight=\"10\" orient=\"auto-start-reverse\"><path d=\"M0 0 L10 5 L0 10 z\"",
         "<marker id=\"arrow-filled\" viewBox=\"0 0 10 10\" refX=\"8\" refY=\"5\" markerWidth=\"7\" markerHeight=\"7\" orient=\"auto-start-reverse\"><path d=\"M1.5 2 L8 5 L1.5 8 z\"",
     )
-}
-
-fn curve_path_tag_to_polyline(path_tag: &str) -> String {
-    let Some(d_attr_start) = path_tag.find("d=\"") else {
-        return path_tag.to_string();
-    };
-    let d_value_start = d_attr_start + 3;
-    let Some(d_value_end_rel) = path_tag[d_value_start..].find('"') else {
-        return path_tag.to_string();
-    };
-    let d_value_end = d_value_start + d_value_end_rel;
-    let d = &path_tag[d_value_start..d_value_end];
-    if !d.contains('C') {
-        return path_tag.to_string();
-    }
-
-    let polyline = cubic_path_to_polyline(d);
-    format!(
-        "{}{}{}",
-        &path_tag[..d_value_start],
-        polyline,
-        &path_tag[d_value_end..]
-    )
-}
-
-fn cubic_path_to_polyline(path: &str) -> String {
-    let mut output = String::with_capacity(path.len());
-    let mut index = 0;
-    while index < path.len() {
-        let Some(ch) = path[index..].chars().next() else {
-            break;
-        };
-        if ch != 'C' {
-            output.push(ch);
-            index += ch.len_utf8();
-            continue;
-        }
-        index += ch.len_utf8();
-        let mut numbers = Vec::with_capacity(6);
-        let mut next_index = index;
-        for _ in 0..6 {
-            if let Some((number, end)) = read_svg_path_number(path, next_index) {
-                numbers.push(number);
-                next_index = end;
-            } else {
-                output.push('C');
-                index = next_index;
-                break;
-            }
-        }
-        if numbers.len() == 6 {
-            output.push('L');
-            output.push_str(numbers[4]);
-            output.push(' ');
-            output.push_str(numbers[5]);
-            index = next_index;
-        }
-    }
-    output
-}
-
-fn read_svg_path_number(path: &str, mut index: usize) -> Option<(&str, usize)> {
-    while index < path.len() {
-        let ch = path[index..].chars().next()?;
-        if ch.is_ascii_whitespace() || ch == ',' {
-            index += ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    let start = index;
-    while index < path.len() {
-        let ch = path[index..].chars().next()?;
-        if ch.is_ascii_digit() || matches!(ch, '-' | '+' | '.' | 'e' | 'E') {
-            index += ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    (index > start).then_some((&path[start..index], index))
 }
 
 fn wrap_mermaid_svg_source_labels(source_text: &str, max_columns: usize) -> String {
