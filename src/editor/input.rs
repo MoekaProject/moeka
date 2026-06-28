@@ -234,7 +234,7 @@ impl EditorView {
                         self.copy_code_block_group_to_clipboard(line_idx, cx);
                     }
                     GeneratedPreviewAction::Code => {
-                        self.enter_generated_preview_code_view(line_idx);
+                        self.toggle_generated_preview_code_view(line_idx);
                     }
                 }
                 self.clear_wrap_boundary_affinity();
@@ -308,7 +308,7 @@ impl EditorView {
                 && let Some(cache_key) = self.generated_preview_cache_key_for_line(line_idx)
             {
                 if event.click_count >= 2 {
-                    self.enter_generated_preview_code_view(line_idx);
+                    self.toggle_generated_preview_code_view(line_idx);
                     self.clear_wrap_boundary_affinity();
                     self.is_selecting = false;
                     self.selection_drag_position = None;
@@ -329,7 +329,10 @@ impl EditorView {
                 return;
             }
 
-            if let Some(bounds) = self.preview_overlay_image_bounds {
+            if let Some(bounds) = self
+                .preview_overlay_bounds
+                .or(self.preview_overlay_image_bounds)
+            {
                 if bounds.contains(&event.position) {
                     if let Some(state) = self.preview_overlay_state() {
                         self.image_drag_state = Some(ImageDragState {
@@ -563,6 +566,7 @@ impl EditorView {
                         self.clear_wrap_boundary_affinity();
                         self.is_selecting = false;
                     } else {
+                        self.capture_focus_scroll_anchor(offset);
                         self.maybe_schedule_preview_reveal_for_click(
                             self.cursor.offset,
                             offset,
@@ -672,6 +676,7 @@ impl EditorView {
             self.maybe_schedule_preview_reveal_for_click(prev_offset, offset, event.position);
             self.cursor.select_to(offset, &self.buffer);
         } else {
+            self.capture_focus_scroll_anchor(offset);
             self.maybe_schedule_preview_reveal_for_click(prev_offset, offset, event.position);
             self.cursor.move_to(offset, &self.buffer);
             self.maybe_auto_select_link_url(prev_offset, true, cx);
@@ -696,7 +701,11 @@ impl EditorView {
             .map(|preview| preview.cache_key.clone())
     }
 
-    fn enter_generated_preview_code_view(&mut self, line_idx: usize) -> bool {
+    /// Toggles a generated preview between its rendered view and its source
+    /// (edit) view. When the cursor is already inside the preview's source it
+    /// moves out of the block so the chart/formula renders again; otherwise it
+    /// moves into the source to start editing.
+    fn toggle_generated_preview_code_view(&mut self, line_idx: usize) -> bool {
         let Some(preview) = self
             .decorations
             .get(line_idx)
@@ -705,16 +714,35 @@ impl EditorView {
         else {
             return false;
         };
-        let preserve_scroll = self.scroll_offset;
-        let target_offset = if preview.source_range.start <= self.cursor.offset
-            && self.cursor.offset < preview.source_range.end
-        {
-            preview.source_range.end.min(self.buffer.len())
+        let cursor_line = self.buffer.offset_to_line_col(self.cursor.offset).0;
+        let in_source = (preview.start_line..=preview.end_line).contains(&cursor_line)
+            && preview.source_range.start <= self.cursor.offset
+            && self.cursor.offset <= preview.source_range.end;
+        let target_offset = if in_source {
+            // Exit edit view: move the cursor out of the block so it renders.
+            let line_count = self.buffer.line_count();
+            if preview.end_line + 1 < line_count {
+                self.buffer.line_start(preview.end_line + 1)
+            } else if preview.start_line > 0 {
+                self.buffer.line_end(preview.start_line - 1)
+            } else {
+                preview.source_range.start.min(self.buffer.len())
+            }
         } else {
+            // Enter edit view.
             preview.source_range.start.min(self.buffer.len())
         };
         self.folded_sections.remove(&preview.start_line);
         self.clear_extra_cursors();
+        // Pin the block's TOP line (not the moving cursor line) so switching
+        // edit↔render keeps the chart/formula visually anchored in place. The
+        // cursor lands inside or just after the block, but anchoring its line
+        // would scroll the view by the block's height change; anchoring the
+        // block top leaves it put while the content below reflows. Capture the
+        // preserved scroll AFTER the anchor (mirrors the click path).
+        let block_top_offset = self.buffer.line_start(preview.start_line);
+        self.capture_focus_scroll_anchor(block_top_offset);
+        let preserve_scroll = self.scroll_offset;
         self.cursor.anchor = target_offset;
         self.cursor.offset = target_offset;
         self.pending_scroll_to_cursor = false;
@@ -823,6 +851,135 @@ impl EditorView {
         self.pending_preview_reveal = Some(PendingPreviewReveal {
             scroll_offset: self.scroll_offset,
         });
+    }
+
+    /// Records the focused line's current content-space top so an upcoming
+    /// focus-driven fold/expand of content above it can be compensated on the
+    /// next layout, keeping that line visually still. Used by both mouse clicks
+    /// and keyboard navigation. Skipped while the layout is dirty (geometry
+    /// cache unreliable) or when the line is currently off-screen, so that a
+    /// real scroll-into-view is never suppressed.
+    fn capture_focus_scroll_anchor(&mut self, offset: usize) {
+        if self.layout_dirty {
+            return;
+        }
+        let line = self
+            .buffer
+            .offset_to_line_col(offset.min(self.buffer.len()))
+            .0;
+        let rel_y_before = self.text_y_offset_for_line(line);
+        let screen_y = f32::from(self.content_origin.y) + rel_y_before - self.scroll_offset;
+        let viewport_top = f32::from(self.content_origin.y);
+        let viewport_bottom = viewport_top + self.last_viewport_height;
+        if screen_y < viewport_top || screen_y > viewport_bottom {
+            return;
+        }
+        let scroll_before = self.scroll_offset;
+        // Pre-apply the predictable part of the compensation (a generated
+        // preview above the new cursor collapsing from edit mode to its rendered
+        // image) so the very first painted frame is already correct and the view
+        // does not flash. The exact post-layout anchor below fixes any residual.
+        let predicted = self.predict_focus_fold_delta(line, offset);
+        if predicted.abs() > 0.5 {
+            self.scroll_offset = (scroll_before + predicted).max(0.0);
+        }
+        self.pending_click_anchor = Some(ClickScrollAnchor {
+            line,
+            rel_y_before,
+            scroll_before,
+        });
+    }
+
+    /// Predicts the content-height change above `anchor_line` caused by the
+    /// focus moving to `target_offset` — specifically a generated preview that
+    /// was in edit (code) mode collapsing to its rendered image. Returns the
+    /// signed delta (negative when content shrinks). Other focus changes are
+    /// left to the exact post-layout correction.
+    fn predict_focus_fold_delta(&self, anchor_line: usize, target_offset: usize) -> f32 {
+        let Some(old_key) = self.code_mode_preview_key.clone() else {
+            return 0.0;
+        };
+        // Still editing the same preview → no collapse.
+        if self
+            .focused_code_mode_preview_key_at(target_offset)
+            .as_deref()
+            == Some(old_key.as_str())
+        {
+            return 0.0;
+        }
+        let Some((start_line, end_line, kind, cache_key)) =
+            self.decorations.iter().find_map(|dec| {
+                dec.block_preview
+                    .as_ref()
+                    .filter(|preview| preview.is_anchor && preview.cache_key == old_key)
+                    .map(|preview| {
+                        (
+                            preview.start_line,
+                            preview.end_line,
+                            preview.kind,
+                            preview.cache_key.clone(),
+                        )
+                    })
+            })
+        else {
+            return 0.0;
+        };
+        // A collapse at or below the anchor does not shift it.
+        if start_line >= anchor_line {
+            return 0.0;
+        }
+        let line_count = self.buffer.line_count();
+        let old_height = self.line_y_offset((end_line + 1).min(line_count))
+            - self.line_y_offset(start_line.min(line_count));
+        let Some(Some(image)) = self.image_cache.get(&cache_key) else {
+            return 0.0;
+        };
+        let size = image.size(0);
+        let (img_w, img_h) = (size.width.0 as f32, size.height.0 as f32);
+        if img_w <= 0.0 || img_h <= 0.0 {
+            return 0.0;
+        }
+        let (_, _, _, bg_height) = helpers::fit_generated_preview_size(
+            img_w,
+            img_h,
+            kind,
+            self.last_text_width,
+            self.scaled(self.styles.code_block.generated_preview_min_height_px),
+            self.scaled(self.styles.code_block.generated_preview_max_height_px),
+            self.scaled(self.styles.code_block.generated_preview_padding_x_px),
+            self.scaled(self.styles.code_block.generated_preview_padding_y_px),
+        );
+        let (pad_top, pad_bottom) = self.block_padding_for_line(start_line);
+        let new_height = bg_height + pad_top + pad_bottom;
+        new_height - old_height
+    }
+
+    /// Like `focused_code_mode_preview_key`, but evaluated at an arbitrary
+    /// offset (used before the cursor has actually moved on click).
+    fn focused_code_mode_preview_key_at(&self, offset: usize) -> Option<String> {
+        let line = self
+            .buffer
+            .offset_to_line_col(offset.min(self.buffer.len()))
+            .0;
+        let preview = self.decorations.get(line)?.block_preview.as_ref()?;
+        if (preview.start_line..=preview.end_line).contains(&line)
+            && preview.source_range.start <= offset
+            && offset <= preview.source_range.end
+        {
+            Some(preview.cache_key.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Scrolls to the cursor for keyboard navigation while preserving visual
+    /// stability: anchors the destination line first so a fold/expand of the
+    /// just-defocused region above it does not make the view jump. The anchor
+    /// no-ops (and `scroll_to_cursor` proceeds) when there is no height change
+    /// or the line is off-screen.
+    pub(crate) fn navigate_scroll_to_cursor(&mut self) {
+        self.capture_focus_scroll_anchor(self.cursor.offset);
+        self.scroll_to_cursor();
     }
 
     fn preview_cache_key_for_offset(&self, offset: usize) -> Option<&str> {
@@ -1300,7 +1457,6 @@ impl EditorView {
                     overlay.view.pan_y = drag.start_pan_y
                         + (f32::from(event.position.y) - f32::from(drag.start_position.y));
                 }
-                self.clamp_preview_overlay_view();
                 if toolbar_hover_changed {
                     cx.notify();
                 }
@@ -1316,8 +1472,6 @@ impl EditorView {
                     + (f32::from(event.position.x) - f32::from(drag.start_position.x));
                 view.pan_y = drag.start_pan_y
                     + (f32::from(event.position.y) - f32::from(drag.start_position.y));
-                view.pan_x = view.pan_x.clamp(-5000.0, 5000.0);
-                view.pan_y = view.pan_y.clamp(-5000.0, 5000.0);
                 self.generated_preview_drag_state = Some(drag);
                 cx.notify();
                 return;
@@ -1436,6 +1590,16 @@ impl EditorView {
         if hovering_generated_preview_action != self.hovering_generated_preview_action {
             self.hovering_generated_preview_action = hovering_generated_preview_action;
             self.sync_generated_preview_action_opacity(cx);
+            cx.notify();
+        }
+
+        let hovering_preview_overlay_action = self
+            .preview_overlay_action_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(_, action)| *action);
+        if hovering_preview_overlay_action != self.hovering_preview_overlay_action {
+            self.hovering_preview_overlay_action = hovering_preview_overlay_action;
             cx.notify();
         }
 
@@ -2346,11 +2510,7 @@ impl EditorView {
             .into();
         self.scroll_offset -= delta_y;
         self.clamp_scroll();
-        self.toolbar_hidden_by_scroll = self.scroll_offset > 0.5;
-        if self.toolbar_hidden_by_scroll {
-            self.toolbar_corner_hovered = false;
-        }
-        self.sync_toolbar_opacity(cx);
+        self.update_toolbar_visibility_for_scroll(cx);
         self.reveal_editor_scrollbar(cx);
         cx.notify();
     }

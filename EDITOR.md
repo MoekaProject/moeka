@@ -68,65 +68,32 @@ $$
 ### Mermaid 图表示例
 用一个最简单的流程图来观察图表预览效果。
 
-```mermaid
-flowchart TD
-  A["商品页加载<br/>content script document_start 注入"] --> B["登录态检查<br/>chrome.storage.local.pluginAuth"]
-  B -->|未登录| B0["不进入商品分析<br/>只等登录态变化"]
-  B -->|已登录| C["白名单门控<br/>focus + host 白名单 + Shopify 自动发现"]
-  C -->|未命中| C0["静默退出<br/>页面完全不显示插件"]
-  C -->|命中| D["挂载 Shadow DOM React Root<br/>但 pluginActive 仍可为 false"]
-  D --> E["商品主管线准备<br/>XPath / Shopify JSON / URL PDP / 截图 OCR"]
-  E -->|非 PDP| E0["不显示插件"]
-  E -->|确认 PDP + 拿到商品| F["暂存 preparedAnalysis<br/>小女孩进入正常态，等待点击"]
-  F --> G["用户点击小女孩"]
-  G --> H["POST /api/plugin-ai/analyze<br/>带 pageData + extractedProduct + engine"]
-  H --> I{"engine?"}
-  I -->|server| J["服务端研究 + Tavily + 平台模型最终成稿"]
-  J --> K["SSE: analysis_report_start/component/done"]
-  I -->|user_ai| L["服务端只做品类 + 模板 + web prompt 备料"]
-  L --> M["SSE: bridge_prompt + bridgeHandoff done"]
-  M --> N["插件 Bridge Client 接管"]
-  N --> O["Bridge Tab 驱动 ChatGPT/Gemini iframe"]
-  O --> P["用户 AI 输出 JSONL 原文"]
-  P --> Q["POST /analyze/bridge-complete"]
-  Q --> R{"服务端验收通过?"}
-  R -->|通过| S["返回同构 events 数组"]
-  R -->|未 done 且有额度| O2["BRIDGE_CONTINUE 续写"]
-  O2 --> P
-  R -->|失败/额度尽| T["POST /analyze/bridge-fallback<br/>服务端兜底成稿"]
-  T --> K
-  S --> U["逐条喂 mapAnalyzeSseEvent"]
-  K --> U
-  U --> V["analysis-store streamingReport"]
-  V --> W["SidePanel 渲染最终组件报告"]
-```
-
 ### Mermaid 图表示例
 ```mermaid
-flowchart LR 
-  PDP["商品页 PDP<br/>Content Script + Shadow DOM"] --> ENTRY["白名单与商品页门控"]
-  ENTRY --> EXTRACT["商品提取<br/>XPath / Shopify JSON / 截图 OCR"]
-  EXTRACT --> CLICK["用户点击小女孩"]
-  CLICK --> API["POST /api/plugin-ai/analyze<br/>SSE"]
+mindmap
+  root((mindmap))
+    Origins
+      Long history
+      ::icon(fa fa-book)
+      Popularisation
+        British popular psychology <br/>author Tony Buzan
+    Research
+      On effectiveness<br/>and features
+      On Automatic creation
+        Uses
+            Creative techniques
+            Strategic planning
+            Argument mapping
+    Tools
+      Pen and paper
+      Mermaid
+```
 
-  API --> CACHE{"分析缓存命中？"}
-  CACHE -->|是| PLAYBACK["服务端回放缓存事件"]
-  CACHE -->|否| ENGINE{"engine"}
-
-  ENGINE -->|server| SERVER["服务端研究链<br/>品类 → Planner → Tavily → 最终模型"]
-  ENGINE -->|user_ai| HANDOFF["服务端准备 Web Prompt<br/>创建 analysis_bridge_session"]
-
-  HANDOFF --> SW["插件 Service Worker"]
-  SW --> PROVIDER{"provider"}
-  PROVIDER --> GEMINI["Gemini 网页私有接口"]
-  PROVIDER --> GPT["ChatGPT 网页私有接口"]
-  GEMINI --> COMPLETE["回答落库 + /complete 校验"]
-  GPT --> COMPLETE
-
-  SERVER --> FINALIZE["统一报告校验与事件化"]
-  COMPLETE --> FINALIZE
-  PLAYBACK --> RENDER["插件报告渲染器"]
-  FINALIZE --> RENDER
+```mermaid
+pie title Pets adopted by volunteers
+    "Dogs" : 386
+    "Cats" : 85
+    "Rats" : 15
 ```
 
 ## 行内语法

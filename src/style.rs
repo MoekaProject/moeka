@@ -594,6 +594,9 @@ pub struct CodeBlockStyles {
     pub code_block_bg: Hsla,
     pub code_block_border_width_px: f32,
     pub code_block_border_color: Hsla,
+    /// Brighter divider drawn between the source (left) and rendered (right)
+    /// panes in a generated preview's edit view.
+    pub code_block_split_border_color: Hsla,
     pub code_block_radius_px: f32,
     pub code_block_fill_inset_px: f32,
     pub code_block_text_padding_left_px: f32,
@@ -623,6 +626,10 @@ pub struct CodeBlockStyles {
     pub generated_preview_action_button_radius_px: f32,
     pub generated_preview_action_border_width_px: f32,
     pub generated_preview_action_border_color: Hsla,
+    pub generated_preview_min_height_px: f32,
+    pub generated_preview_max_height_px: f32,
+    pub generated_preview_padding_x_px: f32,
+    pub generated_preview_padding_y_px: f32,
 }
 
 // ── Quote Block ─────────────────────────────────────────────────────
@@ -1658,6 +1665,11 @@ impl Styles {
                 } else {
                     with_alpha(theme.text_secondary, 0.10)
                 },
+                code_block_split_border_color: if is_light {
+                    with_alpha(theme.border_primary, 0.90)
+                } else {
+                    with_alpha(theme.text_secondary, 0.38)
+                },
                 code_block_radius_px: 0.0,
                 code_block_fill_inset_px: 1.0,
                 code_block_text_padding_left_px: 20.0,
@@ -1679,7 +1691,7 @@ impl Styles {
                 code_block_copy_button_copied_bg: with_alpha(theme.text_accent, 0.14),
                 code_block_copy_button_copied_text_color: theme.text_bright,
                 code_block_copy_button_copied_border_color: with_alpha(theme.text_accent, 0.45),
-                generated_preview_action_padding_px: 5.0,
+                generated_preview_action_padding_px: 9.0,
                 generated_preview_action_inner_padding_x_px: 3.0,
                 generated_preview_action_gap_px: 3.0,
                 generated_preview_action_button_size_px: 22.0,
@@ -1687,6 +1699,10 @@ impl Styles {
                 generated_preview_action_button_radius_px: 5.0,
                 generated_preview_action_border_width_px: 1.0,
                 generated_preview_action_border_color: with_alpha(theme.border_primary, 0.85),
+                generated_preview_min_height_px: 50.0,
+                generated_preview_max_height_px: 300.0,
+                generated_preview_padding_x_px: 16.0,
+                generated_preview_padding_y_px: 12.0,
             },
             quote_block: QuoteBlockStyles {
                 quote_block_border_width_px: 4.0,

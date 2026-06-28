@@ -72,7 +72,6 @@ fn apply_code_highlight_segments(
 
 pub(crate) const GENERATED_PREVIEW_RASTER_SCALE: f32 = 2.0;
 pub(crate) const GENERATED_PREVIEW_MATH_RASTER_SCALE: f32 = 3.0;
-pub(crate) const GENERATED_PREVIEW_EDITOR_MAX_HEIGHT: f32 = 400.0;
 pub(crate) const GENERATED_PREVIEW_EDITOR_MERMAID_SCALE: f32 = 0.75;
 const GENERATED_PREVIEW_MATH_DISPLAY_SCALE: f32 = 1.5;
 const GENERATED_PREVIEW_DEFAULT_MONOSPACE_FONT_FAMILY: &str =
@@ -1294,6 +1293,48 @@ pub(crate) fn intrinsic_generated_preview_size_for_kind(
         ),
         BlockPreviewKind::Mermaid => (logical_width, logical_height),
     }
+}
+
+/// Computes the on-screen size of a generated preview and the background that
+/// hugs it (content size + padding on every side, no letterbox). Returns
+/// `(fitted_w, fitted_h, background_width, background_height)` in the same
+/// (scaled) pixel space. Used by the layout (extra-height), the background, and
+/// the draw paths so they always agree.
+///
+/// - Math is fit whole and never upscaled, so small formulas stay small with a
+///   snug padded background.
+/// - Mermaid fills a consistent height (`max_height - 2*pad_y`) so horizontal
+///   and vertical charts render at the same height; width follows the aspect
+///   ratio and only overflows (clipped/pannable) for extremely wide charts.
+pub(crate) fn fit_generated_preview_size(
+    image_width: f32,
+    image_height: f32,
+    kind: BlockPreviewKind,
+    avail_width: f32,
+    min_height: f32,
+    max_height: f32,
+    pad_x: f32,
+    pad_y: f32,
+) -> (f32, f32, f32, f32) {
+    let (w0, h0) = intrinsic_generated_preview_size_for_kind(image_width, image_height, kind);
+    if w0 <= 0.0 || h0 <= 0.0 {
+        return (0.0, 0.0, (2.0 * pad_x).max(1.0), min_height.max(1.0));
+    }
+    let inner_w = (avail_width - 2.0 * pad_x).max(1.0);
+    let inner_max_h = (max_height - 2.0 * pad_y).max(1.0);
+    let (fitted_w, fitted_h) = match kind {
+        BlockPreviewKind::Math => {
+            let scale = (inner_w / w0).min(inner_max_h / h0).min(1.0).max(0.0);
+            (w0 * scale, h0 * scale)
+        }
+        BlockPreviewKind::Mermaid => {
+            let scale = (inner_max_h / h0).max(0.0);
+            (w0 * scale, inner_max_h)
+        }
+    };
+    let background_width = (fitted_w + 2.0 * pad_x).min(avail_width).max(1.0);
+    let background_height = (fitted_h + 2.0 * pad_y).clamp(min_height, max_height);
+    (fitted_w, fitted_h, background_width, background_height)
 }
 
 fn compute_generated_preview_size_scaled(
@@ -4165,7 +4206,13 @@ fn render_mermaid_block_preview_svg(
     font_families: GeneratedPreviewFontFamilies<'_>,
 ) -> anyhow::Result<String> {
     let mermaid_svg_source = normalize_mermaid_svg_source(source_text);
-    let mermaid_theme = mermaid_svg::Theme::default().with_font_size(10.5);
+    // mermaid-svg sizes node boxes as `chars * 7.5px + padding`, a constant
+    // per-character budget that assumes narrow Latin glyphs. CJK glyphs render
+    // close to the full em, so at the default size they overflow the box (and
+    // the layout, which spaces nodes by those underestimated sizes, lets them
+    // overlap). Rendering a little smaller keeps wrapped CJK labels inside their
+    // boxes; the preview is scaled up for display, so readability is preserved.
+    let mermaid_theme = mermaid_svg::Theme::default().with_font_size(9.5);
     mermaid_svg::render_with(&mermaid_svg_source, &mermaid_theme)
         .map(|svg| shrink_mermaid_arrow_markers(&svg))
         .map(|svg| apply_mermaid_svg_theme(&svg, theme, font_families))

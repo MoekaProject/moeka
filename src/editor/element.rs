@@ -3012,26 +3012,29 @@ impl Element for EditorElement {
                     .table_info
                     .as_ref()
                     .is_some_and(|ti| !ti.is_front_matter);
+            let cursor_in_preview_source = |preview: &crate::markdown::BlockPreview| {
+                (preview.start_line..=preview.end_line).contains(&cursor_line)
+                    && preview.source_range.start <= cursor.offset
+                    && cursor.offset <= preview.source_range.end
+            };
+            let selection_intersects_preview_source = |preview: &crate::markdown::BlockPreview| {
+                all_sel_ranges.iter().any(|range| {
+                    range.start < preview.source_range.end && range.end > preview.source_range.start
+                })
+            };
+
             let block_preview_active = if active_tab_is_diff {
                 decoration.block_preview.is_some()
             } else {
                 decoration.block_preview.as_ref().is_some_and(|preview| {
-                    preview.source_range.start <= cursor.offset
-                        && cursor.offset < preview.source_range.end
-                        || all_sel_ranges.iter().any(|range| {
-                            range.start < preview.source_range.end
-                                && range.end > preview.source_range.start
-                        })
+                    cursor_in_preview_source(preview)
+                        || selection_intersects_preview_source(preview)
                 })
             };
             let block_preview_code_mode =
                 decoration.block_preview.as_ref().is_some_and(|preview| {
-                    preview.source_range.start <= cursor.offset
-                        && cursor.offset < preview.source_range.end
-                        || all_sel_ranges.iter().any(|range| {
-                            range.start < preview.source_range.end
-                                && range.end > preview.source_range.start
-                        })
+                    cursor_in_preview_source(preview)
+                        || selection_intersects_preview_source(preview)
                 });
             let collapsed_block_preview = decoration
                 .block_preview
@@ -3044,12 +3047,8 @@ impl Element for EditorElement {
                 .filter(|preview| !editor.folded_sections.contains(&preview.start_line))
                 .filter(|_| block_preview_active)
                 .filter(|preview| {
-                    if preview.source_range.start <= cursor.offset
-                        && cursor.offset < preview.source_range.end
-                        || all_sel_ranges.iter().any(|range| {
-                            range.start < preview.source_range.end
-                                && range.end > preview.source_range.start
-                        })
+                    if cursor_in_preview_source(preview)
+                        || selection_intersects_preview_source(preview)
                     {
                         line_idx == preview.start_line
                     } else {
@@ -3416,56 +3415,32 @@ impl Element for EditorElement {
             } else {
                 collapsed_block_preview.filter(|preview| preview.is_anchor)
             };
-            let generated_preview_extra_height = if let Some(preview) = rendered_block_preview {
-                if let Some(Some(img_data)) = image_cache.get(&preview.cache_key) {
-                    let img_size = img_data.size(0);
-                    let img_w = img_size.width.0 as f32;
-                    let img_h = img_size.height.0 as f32;
-                    if img_w > 0.0 && img_h > 0.0 {
-                        let (_, full_display_h) =
-                            if preview.kind == crate::markdown::BlockPreviewKind::Mermaid {
-                                let (_, intrinsic_h) =
-                                    helpers::intrinsic_generated_preview_size_for_kind(
-                                        img_w,
-                                        img_h,
-                                        preview.kind,
-                                    );
-                                (
-                                    0.0,
-                                    intrinsic_h * helpers::GENERATED_PREVIEW_EDITOR_MERMAID_SCALE,
-                                )
-                            } else {
-                                helpers::compute_generated_preview_size_for_kind(
-                                    img_w,
-                                    img_h,
-                                    text_width,
-                                    preview.kind,
-                                )
-                            };
-                        let code_mode = preview.source_range.start <= cursor.offset
-                            && cursor.offset < preview.source_range.end
-                            || all_sel_ranges.iter().any(|range| {
-                                range.start < preview.source_range.end
-                                    && range.end > preview.source_range.start
-                            });
-                        let display_h = if preview.kind
-                            == crate::markdown::BlockPreviewKind::Mermaid
-                        {
-                            full_display_h
-                                .min(editor.scaled(helpers::GENERATED_PREVIEW_EDITOR_MAX_HEIGHT))
-                        } else {
-                            full_display_h
-                        };
-                        if code_mode { 0.0 } else { display_h }
-                    } else {
-                        0.0
-                    }
-                } else {
-                    0.0
+            // Hoisted once so the background, layout (extra-height) and draw
+            // paths share identical geometry: (fitted_w, fitted_h, bg_w, bg_h).
+            let generated_preview_layout = rendered_block_preview.and_then(|preview| {
+                let Some(Some(img_data)) = image_cache.get(&preview.cache_key) else {
+                    return None;
+                };
+                let img_size = img_data.size(0);
+                let img_w = img_size.width.0 as f32;
+                let img_h = img_size.height.0 as f32;
+                if img_w <= 0.0 || img_h <= 0.0 {
+                    return None;
                 }
-            } else {
-                0.0
-            };
+                Some(helpers::fit_generated_preview_size(
+                    img_w,
+                    img_h,
+                    preview.kind,
+                    text_width,
+                    editor.scaled(editor.styles.code_block.generated_preview_min_height_px),
+                    editor.scaled(editor.styles.code_block.generated_preview_max_height_px),
+                    editor.scaled(editor.styles.code_block.generated_preview_padding_x_px),
+                    editor.scaled(editor.styles.code_block.generated_preview_padding_y_px),
+                ))
+            });
+            let generated_preview_extra_height = generated_preview_layout
+                .map(|(_, _, _, bg_h)| bg_h.max(text_line_height) - text_line_height)
+                .unwrap_or(0.0);
 
             // Compute table block extra height for header line (table rendered as block below)
             let table_extra_height = if *block_type == BlockType::Table && !active_tab_is_diff {
@@ -4537,62 +4512,49 @@ impl Element for EditorElement {
                     let img_size = img_data.size(0);
                     let img_w = img_size.width.0 as f32;
                     let img_h = img_size.height.0 as f32;
-                    if img_w > 0.0 && img_h > 0.0 {
+                    if img_w > 0.0
+                        && img_h > 0.0
+                        && let Some((fitted_w, fitted_h, _bg_width, bg_height)) =
+                            generated_preview_layout
+                    {
                         let overlay_open = editor
                             .preview_overlay_state()
                             .is_some_and(|overlay| overlay.line_idx == line_idx);
-                        let (display_w, full_display_h) =
-                            helpers::intrinsic_generated_preview_size_for_kind(
-                                img_w,
-                                img_h,
-                                preview.kind,
-                            );
-                        let mermaid_is_vertical = full_display_h > display_w;
-                        let display_h = if preview.kind
-                            == crate::markdown::BlockPreviewKind::Mermaid
-                        {
-                            full_display_h
-                                .min(editor.scaled(helpers::GENERATED_PREVIEW_EDITOR_MAX_HEIGHT))
-                        } else {
-                            full_display_h
-                        };
+                        let pad_x =
+                            editor.scaled(editor.styles.code_block.generated_preview_padding_x_px);
+                        let pad_y =
+                            editor.scaled(editor.styles.code_block.generated_preview_padding_y_px);
                         let block_left = editor_left + editor.padding_left();
-                        let block_top = line_top;
-                        let block_height = text_line_height + display_h;
-                        let block_bounds = Bounds::new(
-                            point(px(block_left), px(block_top)),
-                            size(px(text_width.max(1.0)), px(block_height)),
-                        );
-                        let preview_top = line_top + text_line_height;
+                        let block_height = bg_height.max(text_line_height);
+                        let preview_top = line_top;
                         let preview_left = block_left;
                         let preview_width = text_width;
                         let view = editor.generated_preview_view(&preview.cache_key);
                         let zoom = view.zoom_factor.clamp(0.25, 6.0);
-                        let display_w = display_w * zoom;
-                        let full_display_h = full_display_h * zoom;
-                        let img_left = if preview.kind == crate::markdown::BlockPreviewKind::Mermaid
-                        {
-                            preview_left + (preview_width - display_w) * 0.5
-                        } else {
-                            preview_left + ((preview_width - display_w) / 2.0).max(0.0)
-                        };
-                        let img_top = preview_top;
-                        let img_left = if preview.kind == crate::markdown::BlockPreviewKind::Mermaid
-                            && !mermaid_is_vertical
-                        {
-                            preview_left
-                        } else {
-                            img_left
-                        };
-                        let img_left = img_left + view.pan_x;
-                        let img_top = img_top + view.pan_y;
+                        let draw_w = fitted_w * zoom;
+                        let draw_h = fitted_h * zoom;
+                        // The background spans the full text column; the chart is
+                        // centred inside it with padding (vertical for Mermaid via
+                        // fill-height, both axes for math). Zooming in overflows
+                        // and the clip below keeps it within the padded viewport.
+                        let img_left = preview_left + (preview_width - draw_w) * 0.5 + view.pan_x;
+                        let img_top = preview_top + (block_height - draw_h) * 0.5 + view.pan_y;
                         let img_bounds = Bounds::new(
                             point(px(img_left), px(img_top)),
-                            size(px(display_w), px(full_display_h)),
+                            size(px(draw_w), px(draw_h)),
                         );
+                        // Clip to the full background, not the padded inner box,
+                        // so the padding is just the default centred spacing and
+                        // the chart stays visible all the way to the background
+                        // edge while being dragged.
                         let visible_img_bounds = Bounds::new(
                             point(px(preview_left), px(preview_top)),
-                            size(px(preview_width.max(1.0)), px(display_h.max(1.0))),
+                            size(px(preview_width.max(1.0)), px(block_height.max(1.0))),
+                        );
+                        let _ = (pad_x, pad_y);
+                        let hit_bounds = Bounds::new(
+                            point(px(preview_left), px(line_top)),
+                            size(px(preview_width.max(1.0)), px(block_height.max(1.0))),
                         );
                         // Generated math/Mermaid previews are cropped tightly to
                         // their glyph ink, so a rounded-corner clip would cut into
@@ -4600,10 +4562,9 @@ impl Element for EditorElement {
                         // in E=mc²). Keep square corners for these previews.
                         let clip_bounds = Some(visible_img_bounds);
                         image_previews.push((img_bounds, img_data.clone(), px(0.0), clip_bounds));
-                        generated_preview_hit_areas.push((block_bounds, preview.start_line));
-                        generated_preview_image_areas
-                            .push((visible_img_bounds, preview.start_line));
-                        let _ = (block_bounds, overlay_open);
+                        generated_preview_hit_areas.push((hit_bounds, preview.start_line));
+                        generated_preview_image_areas.push((hit_bounds, preview.start_line));
+                        let _ = overlay_open;
                     }
                 }
             }
@@ -5170,16 +5131,20 @@ impl Element for EditorElement {
                                             preview.kind,
                                         )
                                     };
-                                    let display_h =
-                                        if preview.kind
-                                            == crate::markdown::BlockPreviewKind::Mermaid
-                                        {
-                                            full_display_h.min(editor.scaled(
-                                                helpers::GENERATED_PREVIEW_EDITOR_MAX_HEIGHT,
-                                            ))
-                                        } else {
-                                            full_display_h
-                                        };
+                                    let display_h = full_display_h.clamp(
+                                        editor.scaled(
+                                            editor
+                                                .styles
+                                                .code_block
+                                                .generated_preview_min_height_px,
+                                        ),
+                                        editor.scaled(
+                                            editor
+                                                .styles
+                                                .code_block
+                                                .generated_preview_max_height_px,
+                                        ),
+                                    );
                                     let preview_top = row_top + text_height + image_gap_top;
                                     let img_left = if preview.kind
                                         == crate::markdown::BlockPreviewKind::Mermaid
@@ -5189,15 +5154,7 @@ impl Element for EditorElement {
                                         phantom_content_x
                                             + ((text_width - display_w) / 2.0).max(0.0)
                                     };
-                                    let img_top = if preview.kind
-                                        == crate::markdown::BlockPreviewKind::Mermaid
-                                        && !mermaid_is_vertical
-                                        && full_display_h > display_h
-                                    {
-                                        preview_top + (display_h - full_display_h) * 0.5
-                                    } else {
-                                        preview_top
-                                    };
+                                    let img_top = preview_top + (display_h - full_display_h) * 0.5;
                                     let img_left = if preview.kind
                                         == crate::markdown::BlockPreviewKind::Mermaid
                                         && !mermaid_is_vertical
@@ -5210,33 +5167,15 @@ impl Element for EditorElement {
                                         point(px(img_left), px(img_top)),
                                         size(px(display_w), px(full_display_h)),
                                     );
-                                    let visible_left = if preview.kind
-                                        == crate::markdown::BlockPreviewKind::Mermaid
-                                    {
-                                        img_left.max(phantom_content_x)
-                                    } else {
-                                        img_left
-                                    };
-                                    let visible_right = if preview.kind
-                                        == crate::markdown::BlockPreviewKind::Mermaid
-                                    {
-                                        (img_left + display_w).min(phantom_content_x + text_width)
-                                    } else {
-                                        img_left + display_w
-                                    };
-                                    let visible_w = (visible_right - visible_left).max(1.0);
                                     let visible_img_bounds = Bounds::new(
-                                        point(px(visible_left), px(preview_top)),
-                                        size(px(visible_w), px(display_h)),
+                                        point(px(phantom_content_x), px(preview_top)),
+                                        size(px(text_width.max(1.0)), px(display_h.max(1.0))),
                                     );
-                                    let clip_bounds = (display_h < full_display_h - 0.5
-                                        || visible_w < display_w - 0.5)
-                                        .then_some(visible_img_bounds);
                                     image_previews.push((
                                         img_bounds,
                                         img_data.clone(),
                                         px(0.0),
-                                        clip_bounds,
+                                        Some(visible_img_bounds),
                                     ));
                                     text_height
                                         + display_h
@@ -6281,15 +6220,32 @@ impl Element for EditorElement {
                 .and_then(|decoration| decoration.table_info.as_ref())
                 .is_some_and(|table_info| table_info.is_front_matter);
 
-            if is_front_matter_group {
-                continue;
-            }
-
             if overlay_active {
                 continue;
             }
 
+            // Track hover and draw an image-style blue border for every block
+            // group (code blocks, front matter, charts, formulas) on hover.
             code_block_hover_areas_local.push((group_bounds, *start_line));
+            if editor.hovering_code_block_start == Some(*start_line) {
+                let image_styles = &editor.styles.image_preview;
+                let hover_border_width =
+                    px(editor.scaled(image_styles.image_active_border_width_px));
+                code_block_bgs.push(quad(
+                    group_bounds,
+                    Corners::all(px(
+                        editor.scaled(editor.styles.code_block.code_block_radius_px)
+                    )),
+                    gpui::transparent_black(),
+                    hover_border_width,
+                    image_styles.image_active_border_color,
+                    BorderStyle::default(),
+                ));
+            }
+
+            if is_front_matter_group {
+                continue;
+            }
 
             let language_label = editor
                 .decorations
@@ -6305,8 +6261,9 @@ impl Element for EditorElement {
                 .and_then(|decoration| decoration.block_preview.as_ref())
                 .filter(|preview| preview.is_anchor);
             if let Some(preview) = preview_anchor {
-                let code_mode = preview.source_range.start <= cursor.offset
-                    && cursor.offset < preview.source_range.end
+                let code_mode = (preview.start_line..=preview.end_line).contains(&cursor_line)
+                    && preview.source_range.start <= cursor.offset
+                    && cursor.offset <= preview.source_range.end
                     || all_sel_ranges.iter().any(|range| {
                         range.start < preview.source_range.end
                             && range.end > preview.source_range.start
@@ -6316,7 +6273,7 @@ impl Element for EditorElement {
                     let img_w = img_size.width.0 as f32;
                     let img_h = img_size.height.0 as f32;
                     if img_w > 0.0 && img_h > 0.0 {
-                        let (display_w, display_h) =
+                        let (intrinsic_w, intrinsic_h) =
                             helpers::intrinsic_generated_preview_size_for_kind(
                                 img_w,
                                 img_h,
@@ -6326,28 +6283,60 @@ impl Element for EditorElement {
                         let preview_border_x = group.left + code_mode_text_width;
                         let preview_left = preview_border_x + 1.0;
                         let preview_width = (group.width - code_mode_text_width - 1.0).max(1.0);
-                        let preview_top = group.top;
-                        let preview_height = (group.bottom - group.top).max(1.0);
+                        // Use the block's TRUE top/bottom (from content geometry)
+                        // rather than the visible-clamped group bounds, so the
+                        // render scrolls with its source instead of sticking to
+                        // the viewport while scrolling.
+                        let block_scroll = scroll_offset + scroll_anchor_delta;
+                        let true_top =
+                            origin_y + editor.line_y_offset(preview.start_line) - block_scroll;
+                        let true_bottom = origin_y
+                            + editor.line_y_offset((preview.end_line + 1).min(buffer.line_count()))
+                            - block_scroll;
+                        let preview_top = true_top;
+                        let preview_height = (true_bottom - true_top).max(1.0);
                         code_block_bgs.push(fill(
                             Bounds::new(
-                                point(px(preview_border_x), px(group.top)),
+                                point(px(preview_border_x), px(preview_top)),
                                 size(px(1.0), px(preview_height)),
                             ),
-                            editor.styles.code_block.code_block_border_color,
+                            editor.styles.code_block.code_block_split_border_color,
                         ));
+
+                        let pad_x =
+                            editor.scaled(editor.styles.code_block.generated_preview_padding_x_px);
+                        let pad_y =
+                            editor.scaled(editor.styles.code_block.generated_preview_padding_y_px);
+                        let inner_width = (preview_width - 2.0 * pad_x).max(1.0);
+                        let inner_height = (preview_height - 2.0 * pad_y).max(1.0);
+                        let fit_scale = (inner_width / intrinsic_w.max(1.0))
+                            .min(inner_height / intrinsic_h.max(1.0))
+                            .min(1.0)
+                            .max(0.0);
+                        let fitted_w = intrinsic_w * fit_scale;
+                        let fitted_h = intrinsic_h * fit_scale;
 
                         let view = editor.generated_preview_view(&preview.cache_key);
                         let zoom = view.zoom_factor.clamp(0.25, 6.0);
-                        let display_w = display_w * zoom;
-                        let display_h = display_h * zoom;
-                        let img_left =
-                            preview_left + ((preview_width - display_w) * 0.5) + view.pan_x;
-                        let img_top = preview_top + view.pan_y;
+                        let draw_w = fitted_w * zoom;
+                        let draw_h = fitted_h * zoom;
+                        let img_left = preview_left + ((preview_width - draw_w) * 0.5) + view.pan_x;
+                        // Top-align in code (edit) mode: live re-rendering changes
+                        // the chart's intrinsic size on every keystroke, and a
+                        // vertically centred chart shifted up/down each time. Pin
+                        // the top so it only grows downward, keeping it steady.
+                        let img_top = preview_top + pad_y + view.pan_y;
                         let img_bounds = Bounds::new(
                             point(px(img_left), px(img_top)),
-                            size(px(display_w), px(display_h)),
+                            size(px(draw_w), px(draw_h)),
                         );
+                        // Clip to the full render pane, not the padded inner box,
+                        // so the chart stays visible to the pane edge when dragged.
                         let visible_img_bounds = Bounds::new(
+                            point(px(preview_left), px(preview_top)),
+                            size(px(preview_width), px(preview_height)),
+                        );
+                        let hit_bounds = Bounds::new(
                             point(px(preview_left), px(preview_top)),
                             size(px(preview_width), px(preview_height)),
                         );
@@ -6357,9 +6346,8 @@ impl Element for EditorElement {
                             px(0.0),
                             Some(visible_img_bounds),
                         ));
-                        generated_preview_hit_areas.push((group_bounds, preview.start_line));
-                        generated_preview_image_areas
-                            .push((visible_img_bounds, preview.start_line));
+                        generated_preview_hit_areas.push((hit_bounds, preview.start_line));
+                        generated_preview_image_areas.push((hit_bounds, preview.start_line));
                     }
                 }
             }
@@ -6467,7 +6455,19 @@ impl Element for EditorElement {
                     );
                     let hovered =
                         editor.hovering_generated_preview_action == Some((*start_line, action));
-                    let (mut button_bg, mut icon_color, mut border_color) = if hovered {
+                    let copy_copied = action == GeneratedPreviewAction::Copy && is_copied;
+                    let icon_path = if copy_copied {
+                        CHECK_SVG_PATH
+                    } else {
+                        icon_path
+                    };
+                    let (mut button_bg, mut icon_color, mut border_color) = if copy_copied {
+                        (
+                            code_block_styles.code_block_copy_button_copied_bg,
+                            code_block_styles.code_block_copy_button_copied_text_color,
+                            preview_action_border_color,
+                        )
+                    } else if hovered {
                         (
                             code_block_styles.code_block_copy_button_hover_bg,
                             code_block_styles.code_block_copy_button_hover_text_color,
@@ -7107,6 +7107,50 @@ impl Element for EditorElement {
             if deferred_offscreen_wrap_lines {
                 cx.notify();
             }
+            // Reset the rendered view (zoom/pan) whenever the cursor enters or
+            // leaves a preview's source, so every edit↔render switch starts the
+            // render fresh at its fitted, centred default.
+            let focused_code_mode = editor.focused_code_mode_preview_key();
+            if focused_code_mode != editor.code_mode_preview_key {
+                let leaving_code_view = editor.code_mode_preview_key.is_some();
+                if let Some(old_key) = editor.code_mode_preview_key.take() {
+                    editor.reset_generated_preview_view(&old_key);
+                }
+                if let Some(new_key) = focused_code_mode.clone() {
+                    editor.reset_generated_preview_view(&new_key);
+                }
+                editor.code_mode_preview_key = focused_code_mode;
+                // Leaving code view: cancel the pending debounce and rebuild now
+                // so the rendered chart reflects the final edited source instead
+                // of the frozen in-edit raster.
+                if leaving_code_view {
+                    editor.generated_preview_rerender_task = None;
+                    editor.generated_preview_rerender_pending = false;
+                    editor.rerender_generated_block_previews();
+                }
+                cx.notify();
+            }
+            // A keystroke froze the in-edit chart; (re)schedule its debounced
+            // rebuild so it refreshes once typing settles rather than jittering
+            // on every keystroke.
+            if editor.generated_preview_rerender_pending {
+                editor.generated_preview_rerender_pending = false;
+                editor.schedule_generated_preview_rerender(cx);
+            }
+            let mut did_adjust_click_anchor = false;
+            if let Some(anchor) = editor.pending_click_anchor.take() {
+                let line = anchor.line.min(editor.buffer.line_count());
+                let rel_y_after = editor.text_y_offset_for_line(line);
+                let target = (anchor.scroll_before + (rel_y_after - anchor.rel_y_before)).max(0.0);
+                if (target - editor.scroll_offset).abs() > 0.5 {
+                    editor.pending_preview_reveal = None;
+                    editor.pending_scroll_to_cursor = false;
+                    editor.pending_center_cursor_in_view = false;
+                    editor.scroll_offset = target;
+                    editor.clamp_scroll();
+                    did_adjust_click_anchor = true;
+                }
+            }
             let mut did_adjust_preview_reveal = false;
             if let Some(pending) = editor.pending_preview_reveal.take() {
                 editor.pending_scroll_to_cursor = false;
@@ -7120,7 +7164,7 @@ impl Element for EditorElement {
             } else if editor.pending_scroll_to_cursor {
                 editor.scroll_to_cursor();
                 cx.notify();
-            } else if did_adjust_preview_reveal {
+            } else if did_adjust_preview_reveal || did_adjust_click_anchor {
                 cx.notify();
             }
         });

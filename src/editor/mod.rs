@@ -73,7 +73,7 @@ use crate::i18n::{TextKey, UiLanguage};
 use crate::markdown::{self, BlockType, LineDecoration};
 use crate::theme::{EditorThemeMode, Theme, ThemeColorField, ThemeKind};
 
-const CODE_BLOCK_COPY_FEEDBACK_MS: u64 = 1200;
+const CODE_BLOCK_COPY_FEEDBACK_MS: u64 = 1000;
 const PANEL_ANIMATION_FRAME_MS: u64 = 8;
 /// Maximum gap between consecutive single-character edits for them to be merged
 /// into one undo step (time-interval undo grouping).
@@ -1156,6 +1156,16 @@ pub(crate) struct PendingPreviewReveal {
     pub(crate) scroll_offset: f32,
 }
 
+/// Anchors a clicked line to its current on-screen position so that a focus
+/// change which re-folds/expands content above it does not make the view jump.
+/// Captured at click time (old layout) and reconciled after the next layout.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ClickScrollAnchor {
+    pub(crate) line: usize,
+    pub(crate) rel_y_before: f32,
+    pub(crate) scroll_before: f32,
+}
+
 struct PendingLineDisplayTransfer {
     cached_lines: Vec<Option<LineDisplayInfo>>,
     start_line: usize,
@@ -1301,6 +1311,16 @@ pub struct EditorView {
     pub(crate) pending_scroll_to_cursor: bool,
     pub(crate) pending_center_cursor_in_view: bool,
     pub(crate) pending_preview_reveal: Option<PendingPreviewReveal>,
+    pub(crate) pending_click_anchor: Option<ClickScrollAnchor>,
+    /// Cache key of the generated preview currently shown in code (edit) mode,
+    /// tracked so the rendered view (zoom/pan) can be reset whenever the cursor
+    /// enters or leaves a preview's source, i.e. on every edit↔render switch.
+    pub(crate) code_mode_preview_key: Option<String>,
+    /// Debounced re-raster of the chart/formula being edited in code view, plus
+    /// a flag set whenever a keystroke froze the in-edit chart so the next
+    /// prepaint can (re)schedule the rebuild.
+    pub(crate) generated_preview_rerender_task: Option<Task<()>>,
+    pub(crate) generated_preview_rerender_pending: bool,
     pub(crate) last_viewport_height: f32,
     pub(crate) last_viewport_width: f32,
     /// Screen bounds of the whiteboard canvas element from the last paint, used
@@ -1341,6 +1361,7 @@ pub struct EditorView {
     pub(crate) hovering_generated_preview_line: Option<usize>,
     pub(crate) hovering_generated_preview_zoom_line: Option<usize>,
     pub(crate) hovering_generated_preview_action: Option<(usize, GeneratedPreviewAction)>,
+    pub(crate) hovering_preview_overlay_action: Option<GeneratedPreviewAction>,
     pub(crate) generated_preview_actions_visible_line: Option<usize>,
     pub(crate) generated_preview_actions_opacity: f32,
     pub(crate) generated_preview_actions_opacity_target: f32,
@@ -1564,6 +1585,7 @@ pub struct EditorView {
     pub(crate) toolbar_opacity_target: f32,
     pub(crate) toolbar_opacity_epoch: usize,
     pub(crate) toolbar_opacity_task: Option<Task<()>>,
+    pub(crate) toolbar_hide_task: Option<Task<()>>,
     pub(crate) tooltip_pending: Option<tooltip::TooltipState>,
     pub(crate) tooltip_visible: Option<tooltip::TooltipState>,
     pub(crate) tooltip_task: Option<Task<()>>,
@@ -1762,6 +1784,10 @@ impl EditorView {
             pending_scroll_to_cursor: false,
             pending_center_cursor_in_view: false,
             pending_preview_reveal: None,
+            pending_click_anchor: None,
+            code_mode_preview_key: None,
+            generated_preview_rerender_task: None,
+            generated_preview_rerender_pending: false,
             last_viewport_height: 600.0,
             last_viewport_width: init_max_width,
             whiteboard_canvas_bounds: None,
@@ -1790,6 +1816,7 @@ impl EditorView {
             hovering_generated_preview_line: None,
             hovering_generated_preview_zoom_line: None,
             hovering_generated_preview_action: None,
+            hovering_preview_overlay_action: None,
             generated_preview_actions_visible_line: None,
             generated_preview_actions_opacity: 0.0,
             generated_preview_actions_opacity_target: 0.0,
@@ -1998,6 +2025,7 @@ impl EditorView {
             toolbar_opacity_target: 1.0,
             toolbar_opacity_epoch: 0,
             toolbar_opacity_task: None,
+            toolbar_hide_task: None,
             tooltip_pending: None,
             tooltip_visible: None,
             tooltip_task: None,
@@ -2204,6 +2232,42 @@ impl EditorView {
                     .timer(Duration::from_millis(16))
                     .await;
             }
+        }));
+    }
+
+    /// Updates toolbar visibility in response to a scroll change. Showing (back
+    /// at the top) is immediate; hiding is throttled: the first scroll away from
+    /// the top schedules a hide ~2s later, and further scrolls within that
+    /// window neither re-trigger the hide nor reset the timer.
+    pub(crate) fn update_toolbar_visibility_for_scroll(&mut self, cx: &mut Context<Self>) {
+        if self.scroll_offset <= 0.5 {
+            self.toolbar_hide_task = None;
+            if self.toolbar_hidden_by_scroll {
+                self.toolbar_hidden_by_scroll = false;
+                self.sync_toolbar_opacity(cx);
+            }
+            return;
+        }
+
+        // Already hidden, or a hide is already pending: do nothing so the 2s
+        // window is not restarted on every scroll event.
+        if self.toolbar_hidden_by_scroll || self.toolbar_hide_task.is_some() {
+            return;
+        }
+
+        self.toolbar_hide_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(2000))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.toolbar_hide_task = None;
+                if this.scroll_offset > 0.5 {
+                    this.toolbar_hidden_by_scroll = true;
+                    this.toolbar_corner_hovered = false;
+                    this.sync_toolbar_opacity(cx);
+                    cx.notify();
+                }
+            });
         }));
     }
 
@@ -2533,11 +2597,7 @@ impl EditorView {
             thumb_top / drag.track_travel * drag.max_scroll
         };
         self.clamp_scroll();
-        self.toolbar_hidden_by_scroll = self.scroll_offset > 0.5;
-        if self.toolbar_hidden_by_scroll {
-            self.toolbar_corner_hovered = false;
-        }
-        self.sync_toolbar_opacity(cx);
+        self.update_toolbar_visibility_for_scroll(cx);
         cx.notify();
         true
     }
@@ -4287,6 +4347,24 @@ impl EditorView {
         self.refresh_generated_block_previews_with_mode(true);
     }
 
+    /// Debounced rebuild of the chart/formula being edited in code view: the
+    /// in-edit raster is frozen on each keystroke (see the freeze in
+    /// `refresh_generated_block_previews_with_mode`); this rebuilds it once
+    /// typing settles so the render stays steady while editing yet still
+    /// refreshes shortly after a pause. Each call resets the timer.
+    pub(crate) fn schedule_generated_preview_rerender(&mut self, cx: &mut Context<Self>) {
+        self.generated_preview_rerender_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.generated_preview_rerender_task = None;
+                this.rerender_generated_block_previews();
+                cx.notify();
+            });
+        }));
+    }
+
     fn refresh_generated_block_previews_with_mode(&mut self, force: bool) {
         if self.active_tab_is_diff() {
             self.generated_preview_keys.clear();
@@ -4317,6 +4395,31 @@ impl EditorView {
         }
 
         let mut next_generated_keys = HashSet::new();
+
+        // Freeze the chart/formula currently being edited in code view. Its cache
+        // key is content-derived, so each keystroke yields a new key with no
+        // cached image and forces an immediate re-raster — which made the render
+        // jitter on every keystroke. Carry the previous raster (and its SVG) onto
+        // the new key so the rebuild loop below skips it; a debounced rebuild
+        // (scheduled from prepaint) refreshes it once typing settles, and an
+        // immediate rebuild runs when the cursor leaves code view.
+        if !force
+            && let Some(old_key) = self.code_mode_preview_key.clone()
+            && let Some(new_key) = self.focused_code_mode_preview_key()
+            && old_key != new_key
+            && !self.image_cache.contains_key(&new_key)
+        {
+            let frozen_image = match self.image_cache.get(&old_key) {
+                Some(Some(image)) => Some(image.clone()),
+                _ => None,
+            };
+            let frozen_svg = self.generated_preview_svg_cache.get(&old_key).cloned();
+            if let (Some(frozen_image), Some(frozen_svg)) = (frozen_image, frozen_svg) {
+                self.image_cache.insert(new_key.clone(), Some(frozen_image));
+                self.generated_preview_svg_cache.insert(new_key, frozen_svg);
+                self.generated_preview_rerender_pending = true;
+            }
+        }
 
         for preview in preview_entries {
             next_generated_keys.insert(preview.cache_key.clone());
@@ -4359,6 +4462,25 @@ impl EditorView {
             self.image_cache.insert(preview.cache_key.clone(), image);
             self.generated_preview_overlay_cache
                 .remove(&preview.cache_key);
+        }
+
+        // Preserve the zoom/pan of the preview currently being edited in code
+        // view across content changes: the cache key is content-derived, so each
+        // keystroke produces a new key. Carry the old key's view state onto the
+        // new key (before the prune below) so the render keeps the user's zoom
+        // and pan instead of snapping back to the default fit on every edit.
+        if let Some(old_key) = self.code_mode_preview_key.clone()
+            && !next_generated_keys.contains(&old_key)
+            && let Some(new_key) = self.focused_code_mode_preview_key()
+            && next_generated_keys.contains(&new_key)
+        {
+            let view = self
+                .generated_preview_views
+                .get(&old_key)
+                .copied()
+                .unwrap_or_default();
+            self.generated_preview_views.insert(new_key.clone(), view);
+            self.code_mode_preview_key = Some(new_key);
         }
 
         self.generated_preview_keys = next_generated_keys;
@@ -4648,6 +4770,7 @@ impl EditorView {
         self.preview_overlay_bounds = None;
         self.preview_overlay_image_bounds = None;
         self.preview_overlay_action_areas.clear();
+        self.hovering_preview_overlay_action = None;
         self.image_drag_state = None;
     }
 
@@ -4667,6 +4790,22 @@ impl EditorView {
     pub(crate) fn reset_generated_preview_view(&mut self, cache_key: &str) {
         self.generated_preview_views
             .insert(cache_key.to_string(), ImageViewState::default());
+    }
+
+    /// The cache key of the preview whose source currently contains the cursor
+    /// (i.e. the one shown in code/edit mode), or None when the cursor is not
+    /// editing any preview.
+    pub(crate) fn focused_code_mode_preview_key(&self) -> Option<String> {
+        let cursor_line = self.buffer.offset_to_line_col(self.cursor.offset).0;
+        let preview = self.decorations.get(cursor_line)?.block_preview.as_ref()?;
+        if (preview.start_line..=preview.end_line).contains(&cursor_line)
+            && preview.source_range.start <= self.cursor.offset
+            && self.cursor.offset <= preview.source_range.end
+        {
+            Some(preview.cache_key.clone())
+        } else {
+            None
+        }
     }
 
     pub(crate) fn zoom_generated_preview_view(&mut self, cache_key: &str, factor: f32) {

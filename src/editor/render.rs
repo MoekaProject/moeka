@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Bounds, ContentMask, Corners, CursorStyle, ExternalPaths, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Window, canvas, deferred,
-    div, fill, img, prelude::*, px, quad,
+    AnyElement, App, Bounds, ContentMask, Corners, CursorStyle, ExternalPaths, HitboxBehavior,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Window,
+    canvas, deferred, div, fill, img, prelude::*, px, quad,
 };
 
 use super::tooltip::{TooltipState, toolbar_anchor_bounds};
@@ -399,12 +399,13 @@ impl EditorView {
         ];
         deferred(
             canvas(
-                move |bounds, _window, cx| {
-                    editor_handle.update(cx, |editor, _| {
+                move |bounds, window, cx| {
+                    let paints = editor_handle.update(cx, |editor, _| {
                         if editor.preview_overlay_state().is_none() {
                             editor.preview_overlay_action_areas.clear();
                             return Vec::new();
                         }
+                        let hovered_action = editor.hovering_preview_overlay_action;
                         let total_width = actions.len() as f32 * action_size
                             + actions.len().saturating_sub(1) as f32 * gap;
                         let start_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width)
@@ -420,19 +421,25 @@ impl EditorView {
                                 gpui::size(px(action_size), px(action_size)),
                             );
                             areas.push((button_bounds, action));
-                            paints.push((button_bounds, icon_path, action));
+                            let hovered = hovered_action == Some(action);
+                            paints.push((button_bounds, icon_path, hovered));
                         }
                         editor.preview_overlay_action_areas = areas;
                         paints
-                    })
+                    });
+                    paints
+                        .into_iter()
+                        .map(|(button_bounds, icon_path, hovered)| {
+                            let hitbox =
+                                window.insert_hitbox(button_bounds, HitboxBehavior::Normal);
+                            (button_bounds, icon_path, hovered, hitbox)
+                        })
+                        .collect::<Vec<_>>()
                 },
                 move |_bounds, paints, window, cx| {
-                    for (button_bounds, icon_path, action) in paints {
-                        let bg = if action == GeneratedPreviewAction::Restore {
-                            button_bg
-                        } else {
-                            button_bg
-                        };
+                    for (button_bounds, icon_path, hovered, hitbox) in paints {
+                        window.set_cursor_style(CursorStyle::Arrow, &hitbox);
+                        let bg = if hovered { button_hover_bg } else { button_bg };
                         window.paint_quad(quad(
                             button_bounds,
                             Corners::all(button_radius),
@@ -446,7 +453,7 @@ impl EditorView {
                         let icon_top = f32::from(button_bounds.origin.y)
                             + (f32::from(button_bounds.size.height) - icon_size) * 0.5;
                         let mut color = icon_color;
-                        color.a *= icon_opacity;
+                        color.a *= if hovered { 1.0 } else { icon_opacity };
                         window
                             .paint_svg(
                                 Bounds::new(
@@ -460,7 +467,6 @@ impl EditorView {
                             )
                             .ok();
                     }
-                    let _ = button_hover_bg;
                 },
             )
             .absolute()
@@ -1332,12 +1338,6 @@ impl Render for EditorView {
                                                                         let overlay_bounds = bounds;
                                                                         let overlay_width = f32::from(bounds.size.width).max(1.0);
                                                                         let overlay_height = f32::from(bounds.size.height).max(1.0);
-                                                                        let mermaid_overlay = matches!(
-                                                                            preview_kind,
-                                                                            Some(crate::markdown::BlockPreviewKind::Mermaid)
-                                                                        );
-                                                                        let mermaid_is_vertical =
-                                                                            intrinsic_height > intrinsic_width;
                                                                         let fit_scale = if preview_kind.is_some() {
                                                                             1.0
                                                                         } else {
@@ -1351,20 +1351,12 @@ impl Render for EditorView {
                                                                             base_display_width * overlay.view.zoom_factor;
                                                                         let display_height =
                                                                             base_display_height * overlay.view.zoom_factor;
-                                                                        let image_left = if mermaid_overlay && !mermaid_is_vertical {
-                                                                            f32::from(bounds.origin.x) + overlay.view.pan_x
-                                                                        } else {
-                                                                            f32::from(bounds.origin.x)
-                                                                                + (overlay_width - display_width) * 0.5
-                                                                                + overlay.view.pan_x
-                                                                        };
-                                                                        let image_top = if mermaid_overlay && mermaid_is_vertical {
-                                                                            f32::from(bounds.origin.y) + overlay.view.pan_y
-                                                                        } else {
-                                                                            f32::from(bounds.origin.y)
-                                                                                + (overlay_height - display_height) * 0.5
-                                                                                + overlay.view.pan_y
-                                                                        };
+                                                                        let image_left = f32::from(bounds.origin.x)
+                                                                            + (overlay_width - display_width) * 0.5
+                                                                            + overlay.view.pan_x;
+                                                                        let image_top = f32::from(bounds.origin.y)
+                                                                            + (overlay_height - display_height) * 0.5
+                                                                            + overlay.view.pan_y;
                                                                         let overlay_image_bounds = Bounds::new(
                                                                             gpui::point(px(image_left), px(image_top)),
                                                                             gpui::size(px(display_width), px(display_height)),

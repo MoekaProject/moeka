@@ -197,6 +197,19 @@ impl EntityInputHandler for EditorView {
             "replace_text_in_range resolved range_utf8={:?}",
             range
         ));
+        let preserve_preview_scroll = self
+            .decorations
+            .get(cursor_line_before)
+            .and_then(|decoration| decoration.block_preview.as_ref())
+            .is_some_and(|preview| {
+                preview.source_range.start <= self.cursor.offset
+                    && self.cursor.offset < preview.source_range.end
+            });
+        if preserve_preview_scroll {
+            self.pending_preview_reveal = Some(PendingPreviewReveal {
+                scroll_offset: self.scroll_offset,
+            });
+        }
         let (range_start_line, _) = self.buffer.offset_to_line_col(range.start);
         let (range_end_line, _) = self.buffer.offset_to_line_col(range.end);
         let range_spans_multiple_lines = range_start_line != range_end_line;
@@ -228,7 +241,9 @@ impl EntityInputHandler for EditorView {
                 self.buffer.replace(range.clone(), &paired_text);
                 self.cursor.move_to(range.start + open.len(), &self.buffer);
                 self.reparse();
-                if !cursor_had_inline_headroom || self.cursor_line() != cursor_line_before {
+                if !preserve_preview_scroll
+                    && (!cursor_had_inline_headroom || self.cursor_line() != cursor_line_before)
+                {
                     self.scroll_to_cursor();
                 }
                 self.pause_blinking(cx);
@@ -246,10 +261,11 @@ impl EntityInputHandler for EditorView {
             self.normalize_ordered_list_near_line(line, true);
             self.reparse();
         }
-        if !cursor_had_inline_headroom
-            || self.cursor_line() != cursor_line_before
-            || range_spans_multiple_lines
-            || new_text.contains('\n')
+        if !preserve_preview_scroll
+            && (!cursor_had_inline_headroom
+                || self.cursor_line() != cursor_line_before
+                || range_spans_multiple_lines
+                || new_text.contains('\n'))
         {
             self.scroll_to_cursor();
         }
@@ -348,6 +364,19 @@ impl EntityInputHandler for EditorView {
             "replace_and_mark_text_in_range resolved range_utf8={:?}",
             range
         ));
+        let preserve_preview_scroll = self
+            .decorations
+            .get(cursor_line_before)
+            .and_then(|decoration| decoration.block_preview.as_ref())
+            .is_some_and(|preview| {
+                preview.source_range.start <= self.cursor.offset
+                    && self.cursor.offset < preview.source_range.end
+            });
+        if preserve_preview_scroll {
+            self.pending_preview_reveal = Some(PendingPreviewReveal {
+                scroll_offset: self.scroll_offset,
+            });
+        }
         let (range_start_line, _) = self.buffer.offset_to_line_col(range.start);
         let (range_end_line, _) = self.buffer.offset_to_line_col(range.end);
         let range_spans_multiple_lines = range_start_line != range_end_line;
@@ -380,10 +409,11 @@ impl EntityInputHandler for EditorView {
             self.normalize_ordered_list_near_line(line, true);
             self.reparse();
         }
-        if !cursor_had_inline_headroom
-            || self.cursor_line() != cursor_line_before
-            || range_spans_multiple_lines
-            || new_text.contains('\n')
+        if !preserve_preview_scroll
+            && (!cursor_had_inline_headroom
+                || self.cursor_line() != cursor_line_before
+                || range_spans_multiple_lines
+                || new_text.contains('\n'))
         {
             self.scroll_to_cursor();
         }

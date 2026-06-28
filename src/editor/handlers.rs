@@ -491,7 +491,7 @@ impl EditorView {
             );
         }
         self.maybe_auto_select_link_url(prev_offset, false, cx);
-        self.scroll_to_cursor();
+        self.navigate_scroll_to_cursor();
         self.pause_blinking(cx);
         if self.wiki_link_start.is_some() {
             self.sync_wiki_link_menu(cx);
@@ -538,7 +538,7 @@ impl EditorView {
             }
         }
         self.maybe_auto_select_link_url(prev_offset, false, cx);
-        self.scroll_to_cursor();
+        self.navigate_scroll_to_cursor();
         self.pause_blinking(cx);
         if self.wiki_link_start.is_some() {
             self.sync_wiki_link_menu(cx);
@@ -589,7 +589,7 @@ impl EditorView {
         self.snap_cursor_to_content();
         self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
         self.maybe_auto_select_link_url(prev_offset, false, cx);
-        self.scroll_to_cursor();
+        self.navigate_scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
@@ -639,7 +639,7 @@ impl EditorView {
         self.snap_cursor_to_content();
         self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
         self.maybe_auto_select_link_url(prev_offset, false, cx);
-        self.scroll_to_cursor();
+        self.navigate_scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
@@ -737,7 +737,7 @@ impl EditorView {
         } else {
             self.cursor.move_to_line_start(&self.buffer);
         }
-        self.scroll_to_cursor();
+        self.navigate_scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
@@ -749,7 +749,7 @@ impl EditorView {
         } else {
             self.cursor.move_to_line_end(&self.buffer);
         }
-        self.scroll_to_cursor();
+        self.navigate_scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
