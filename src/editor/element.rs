@@ -1281,18 +1281,26 @@ fn push_rendered_inline_overlays(
         ) && pos_start.y == pos_end.y
         {
             let indent_start = helpers::indent_for_y(indent_px, pos_start.y, line_height);
-            let reserved_width = f32::from(pos_end.x - pos_start.x).max(font_size);
-            let icon_size = (font_size
-                * editor
+            // Left-align the callout icon (no left gap) and size it to fill the
+            // placeholder minus a small style-defined gap to the label, so the
+            // icon→label spacing is controlled from style.rs.
+            let callout_gap = editor.scaled(
+                editor
                     .styles
                     .quote_block
-                    .quote_block_callout_icon_size_factor)
-                .min(line_height * 0.95)
-                .max(10.0);
-            let icon_x = content_x
-                + indent_start
-                + f32::from(pos_start.x)
-                + (reserved_width - icon_size).max(0.0) / 2.0;
+                    .quote_block_callout_icon_label_gap_px,
+            );
+            let display_width = f32::from(pos_end.x - pos_start.x);
+            let icon_size = (display_width - callout_gap)
+                .min(
+                    font_size
+                        * editor
+                            .styles
+                            .quote_block
+                            .quote_block_callout_icon_size_factor,
+                )
+                .clamp(10.0, line_height * 0.95);
+            let icon_x = content_x + indent_start + f32::from(pos_start.x);
             let icon_y = text_line_top + f32::from(pos_start.y) + (line_height - icon_size) / 2.0;
             inline_svgs.push((
                 Bounds::new(
@@ -4662,18 +4670,26 @@ impl Element for EditorElement {
                 ) && pos_start.y == pos_end.y
                 {
                     let indent_start = helpers::indent_for_y(indent_px, pos_start.y, line_height);
-                    let reserved_width = f32::from(pos_end.x - pos_start.x).max(font_size);
-                    let icon_size = (font_size
-                        * editor
+                    // Left-align the callout icon (no left gap) and size it to
+                    // fill the placeholder minus a small style-defined gap to the
+                    // label, so the icon→label spacing comes from style.rs.
+                    let callout_gap = editor.scaled(
+                        editor
                             .styles
                             .quote_block
-                            .quote_block_callout_icon_size_factor)
-                        .min(line_height * 0.95)
-                        .max(10.0);
-                    let icon_x = content_x
-                        + indent_start
-                        + f32::from(pos_start.x)
-                        + (reserved_width - icon_size).max(0.0) / 2.0;
+                            .quote_block_callout_icon_label_gap_px,
+                    );
+                    let display_width = f32::from(pos_end.x - pos_start.x);
+                    let icon_size = (display_width - callout_gap)
+                        .min(
+                            font_size
+                                * editor
+                                    .styles
+                                    .quote_block
+                                    .quote_block_callout_icon_size_factor,
+                        )
+                        .clamp(10.0, line_height * 0.95);
+                    let icon_x = content_x + indent_start + f32::from(pos_start.x);
                     let icon_y =
                         text_line_top + f32::from(pos_start.y) + (line_height - icon_size) / 2.0;
                     inline_svgs.push((
@@ -6283,18 +6299,16 @@ impl Element for EditorElement {
                         let preview_border_x = group.left + code_mode_text_width;
                         let preview_left = preview_border_x + 1.0;
                         let preview_width = (group.width - code_mode_text_width - 1.0).max(1.0);
-                        // Use the block's TRUE top/bottom (from content geometry)
-                        // rather than the visible-clamped group bounds, so the
-                        // render scrolls with its source instead of sticking to
-                        // the viewport while scrolling.
-                        let block_scroll = scroll_offset + scroll_anchor_delta;
-                        let true_top =
-                            origin_y + editor.line_y_offset(preview.start_line) - block_scroll;
-                        let true_bottom = origin_y
-                            + editor.line_y_offset((preview.end_line + 1).min(buffer.line_count()))
-                            - block_scroll;
-                        let preview_top = true_top;
-                        let preview_height = (true_bottom - true_top).max(1.0);
+                        // Use the SAME geometry as the code-block background, which
+                        // is computed with fresh line heights during the main
+                        // layout loop. Recomputing the top from the line-geometry
+                        // cache (`line_y_offset`) can be momentarily stale right
+                        // after an edit — every line collapses to a default height
+                        // — which threw the render far above its block for a frame
+                        // ("jump out of background"). `group.top/bottom` already
+                        // scroll with the source, so behaviour is unchanged.
+                        let preview_top = group.top;
+                        let preview_height = (group.bottom - group.top).max(1.0);
                         code_block_bgs.push(fill(
                             Bounds::new(
                                 point(px(preview_border_x), px(preview_top)),
@@ -6320,11 +6334,12 @@ impl Element for EditorElement {
                         let zoom = view.zoom_factor.clamp(0.25, 6.0);
                         let draw_w = fitted_w * zoom;
                         let draw_h = fitted_h * zoom;
-                        let img_left = preview_left + ((preview_width - draw_w) * 0.5) + view.pan_x;
-                        // Top-align in code (edit) mode: live re-rendering changes
-                        // the chart's intrinsic size on every keystroke, and a
-                        // vertically centred chart shifted up/down each time. Pin
-                        // the top so it only grows downward, keeping it steady.
+                        // Pin the chart to the pane's top-left in code (edit)
+                        // mode. Live re-rendering changes the chart's intrinsic
+                        // size; centring it made it drift both horizontally and
+                        // vertically on each rebuild. Anchoring the corner lets it
+                        // only grow right/down, keeping it steady while editing.
+                        let img_left = preview_left + pad_x + view.pan_x;
                         let img_top = preview_top + pad_y + view.pan_y;
                         let img_bounds = Bounds::new(
                             point(px(img_left), px(img_top)),
@@ -7131,8 +7146,7 @@ impl Element for EditorElement {
                 cx.notify();
             }
             // A keystroke froze the in-edit chart; (re)schedule its debounced
-            // rebuild so it refreshes once typing settles rather than jittering
-            // on every keystroke.
+            // live rebuild so it refreshes once typing settles.
             if editor.generated_preview_rerender_pending {
                 editor.generated_preview_rerender_pending = false;
                 editor.schedule_generated_preview_rerender(cx);

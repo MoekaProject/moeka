@@ -643,6 +643,7 @@ pub struct QuoteBlockStyles {
     pub quote_block_padding_right_px: f32,
     pub quote_block_callout_icon_color: Hsla,
     pub quote_block_callout_icon_size_factor: f32,
+    pub quote_block_callout_icon_label_gap_px: f32,
     pub quote_block_bg: Hsla,
     pub quote_block_border_color: Hsla,
     pub quote_block_note_bg: Hsla,
@@ -1713,6 +1714,7 @@ impl Styles {
                 quote_block_padding_right_px: 10.0,
                 quote_block_callout_icon_color: theme.bold,
                 quote_block_callout_icon_size_factor: 1.04,
+                quote_block_callout_icon_label_gap_px: 3.0,
                 quote_block_bg: with_alpha(theme.text_secondary, if is_light { 0.0 } else { 0.0 }),
                 quote_block_border_color: with_alpha(
                     theme.text_secondary,

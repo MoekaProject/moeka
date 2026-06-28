@@ -1316,9 +1316,9 @@ pub struct EditorView {
     /// tracked so the rendered view (zoom/pan) can be reset whenever the cursor
     /// enters or leaves a preview's source, i.e. on every edit↔render switch.
     pub(crate) code_mode_preview_key: Option<String>,
-    /// Debounced re-raster of the chart/formula being edited in code view, plus
-    /// a flag set whenever a keystroke froze the in-edit chart so the next
-    /// prepaint can (re)schedule the rebuild.
+    /// Debounced live re-raster of the chart/formula being edited in code view.
+    /// The in-edit raster is frozen on each keystroke; this rebuilds it once
+    /// typing settles so the render updates live without jittering per keystroke.
     pub(crate) generated_preview_rerender_task: Option<Task<()>>,
     pub(crate) generated_preview_rerender_pending: bool,
     pub(crate) last_viewport_height: f32,
@@ -1586,6 +1586,7 @@ pub struct EditorView {
     pub(crate) toolbar_opacity_epoch: usize,
     pub(crate) toolbar_opacity_task: Option<Task<()>>,
     pub(crate) toolbar_hide_task: Option<Task<()>>,
+    pub(crate) toolbar_corner_hide_task: Option<Task<()>>,
     pub(crate) tooltip_pending: Option<tooltip::TooltipState>,
     pub(crate) tooltip_visible: Option<tooltip::TooltipState>,
     pub(crate) tooltip_task: Option<Task<()>>,
@@ -2026,6 +2027,7 @@ impl EditorView {
             toolbar_opacity_epoch: 0,
             toolbar_opacity_task: None,
             toolbar_hide_task: None,
+            toolbar_corner_hide_task: None,
             tooltip_pending: None,
             tooltip_visible: None,
             tooltip_task: None,
@@ -3055,12 +3057,34 @@ impl EditorView {
             && x >= left
             && x <= right;
         let hovering = hovering_side_gutters || hovering_top_reveal;
-        let changed = hovering != self.toolbar_corner_hovered;
-        self.toolbar_corner_hovered = hovering;
-        if changed {
+        if hovering {
+            // Entering the reveal zone: show immediately and cancel any pending
+            // delayed hide.
+            self.toolbar_corner_hide_task = None;
+            if self.toolbar_corner_hovered {
+                return false;
+            }
+            self.toolbar_corner_hovered = true;
             self.sync_toolbar_opacity(cx);
+            return true;
         }
-        changed
+        // Left the reveal zone (e.g. moved into the content): keep the revealed
+        // toolbar for 2s instead of hiding immediately. Throttled so an already
+        // pending hide is not restarted.
+        if self.toolbar_corner_hovered && self.toolbar_corner_hide_task.is_none() {
+            self.toolbar_corner_hide_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(2000))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.toolbar_corner_hide_task = None;
+                    this.toolbar_corner_hovered = false;
+                    this.sync_toolbar_opacity(cx);
+                    cx.notify();
+                });
+            }));
+        }
+        false
     }
 
     pub(crate) fn queue_image_load(&mut self, path: String, cx: &mut Context<Self>) {
@@ -4347,15 +4371,15 @@ impl EditorView {
         self.refresh_generated_block_previews_with_mode(true);
     }
 
-    /// Debounced rebuild of the chart/formula being edited in code view: the
+    /// Debounced live rebuild of the chart/formula being edited in code view: the
     /// in-edit raster is frozen on each keystroke (see the freeze in
     /// `refresh_generated_block_previews_with_mode`); this rebuilds it once
-    /// typing settles so the render stays steady while editing yet still
-    /// refreshes shortly after a pause. Each call resets the timer.
+    /// typing settles so the render updates live yet stays steady while typing.
+    /// Each call resets the timer.
     pub(crate) fn schedule_generated_preview_rerender(&mut self, cx: &mut Context<Self>) {
         self.generated_preview_rerender_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(300))
+                .timer(Duration::from_millis(350))
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.generated_preview_rerender_task = None;
@@ -4401,7 +4425,7 @@ impl EditorView {
         // cached image and forces an immediate re-raster — which made the render
         // jitter on every keystroke. Carry the previous raster (and its SVG) onto
         // the new key so the rebuild loop below skips it; a debounced rebuild
-        // (scheduled from prepaint) refreshes it once typing settles, and an
+        // (scheduled from prepaint) refreshes it live once typing settles, and an
         // immediate rebuild runs when the cursor leaves code view.
         if !force
             && let Some(old_key) = self.code_mode_preview_key.clone()
@@ -4766,7 +4790,11 @@ impl EditorView {
     }
 
     pub(crate) fn close_preview_overlay(&mut self) {
-        self.preview_overlay = None;
+        // Exiting fullscreen resets the inline rendered view (zoom/pan) so it
+        // returns to its default fitted state rather than keeping the overlay's.
+        if let Some(overlay) = self.preview_overlay.take() {
+            self.reset_generated_preview_view(&overlay.cache_key);
+        }
         self.preview_overlay_bounds = None;
         self.preview_overlay_image_bounds = None;
         self.preview_overlay_action_areas.clear();

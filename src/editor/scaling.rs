@@ -404,6 +404,13 @@ impl EditorView {
         }
 
         self.pending_scroll_to_cursor = false;
+        // While the cursor sits inside a generated preview's source (code view),
+        // keep the scroll fixed: any reflow-driven scroll adjustment here makes
+        // the right-side render bounce up/down on every keystroke. The preview
+        // source is already visible while editing, so no scroll is needed.
+        if self.focused_code_mode_preview_key().is_some() {
+            return;
+        }
         let cursor_line = self.cursor_line();
         let cursor_y = self.line_y_offset(cursor_line);
         let cursor_line_height = self.visual_height_for_line(cursor_line);

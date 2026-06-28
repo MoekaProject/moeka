@@ -268,6 +268,26 @@ impl EditorView {
                 return;
             }
 
+            // When the fullscreen overlay is open it owns the whole surface:
+            // start a pan-drag for any press that is not on one of its action
+            // buttons (handled above). Doing this before the inline preview hit
+            // tests prevents an inline preview behind the overlay from
+            // intercepting the press, which intermittently blocked dragging.
+            if self.preview_overlay.is_some() {
+                if let Some(state) = self.preview_overlay_state() {
+                    self.image_drag_state = Some(ImageDragState {
+                        start_position: event.position,
+                        start_pan_x: state.view.pan_x,
+                        start_pan_y: state.view.pan_y,
+                    });
+                }
+                self.clear_wrap_boundary_affinity();
+                self.is_selecting = false;
+                self.selection_drag_position = None;
+                cx.notify();
+                return;
+            }
+
             if let Some(line_idx) = self
                 .image_preview_zoom_areas
                 .iter()
@@ -322,31 +342,6 @@ impl EditorView {
                     start_pan_x: view.pan_x,
                     start_pan_y: view.pan_y,
                 });
-                self.clear_wrap_boundary_affinity();
-                self.is_selecting = false;
-                self.selection_drag_position = None;
-                cx.notify();
-                return;
-            }
-
-            if let Some(bounds) = self
-                .preview_overlay_bounds
-                .or(self.preview_overlay_image_bounds)
-            {
-                if bounds.contains(&event.position) {
-                    if let Some(state) = self.preview_overlay_state() {
-                        self.image_drag_state = Some(ImageDragState {
-                            start_position: event.position,
-                            start_pan_x: state.view.pan_x,
-                            start_pan_y: state.view.pan_y,
-                        });
-                        cx.notify();
-                        return;
-                    }
-                }
-            }
-
-            if self.preview_overlay.is_some() {
                 self.clear_wrap_boundary_affinity();
                 self.is_selecting = false;
                 self.selection_drag_position = None;

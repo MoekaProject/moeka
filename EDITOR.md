@@ -68,7 +68,6 @@ $$
 ### Mermaid 图表示例
 用一个最简单的流程图来观察图表预览效果。
 
-### Mermaid 图表示例
 ```mermaid
 mindmap
   root((mindmap))

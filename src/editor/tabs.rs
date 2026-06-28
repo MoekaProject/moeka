@@ -639,6 +639,7 @@ impl EditorView {
             self.marked_range = None;
             self.close_preview_overlay();
             self.toolbar_hide_task = None;
+            self.toolbar_corner_hide_task = None;
             self.toolbar_hidden_by_scroll = self.scroll_offset > 0.5;
             self.toolbar_corner_hovered = false;
             self.sync_toolbar_opacity(cx);

@@ -203,7 +203,7 @@ impl EntityInputHandler for EditorView {
             .and_then(|decoration| decoration.block_preview.as_ref())
             .is_some_and(|preview| {
                 preview.source_range.start <= self.cursor.offset
-                    && self.cursor.offset < preview.source_range.end
+                    && self.cursor.offset <= preview.source_range.end
             });
         if preserve_preview_scroll {
             self.pending_preview_reveal = Some(PendingPreviewReveal {
@@ -370,7 +370,7 @@ impl EntityInputHandler for EditorView {
             .and_then(|decoration| decoration.block_preview.as_ref())
             .is_some_and(|preview| {
                 preview.source_range.start <= self.cursor.offset
-                    && self.cursor.offset < preview.source_range.end
+                    && self.cursor.offset <= preview.source_range.end
             });
         if preserve_preview_scroll {
             self.pending_preview_reveal = Some(PendingPreviewReveal {

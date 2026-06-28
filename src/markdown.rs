@@ -1309,11 +1309,11 @@ fn parse_callout_kind(label: &str) -> Option<CalloutKind> {
 
 fn callout_replacement_text(kind: CalloutKind) -> &'static str {
     match kind {
-        CalloutKind::Note => "    ",
-        CalloutKind::Tip => "    ",
-        CalloutKind::Important => "    ",
-        CalloutKind::Warning => "    ",
-        CalloutKind::Caution => "    ",
+        CalloutKind::Note => "  ",
+        CalloutKind::Tip => "  ",
+        CalloutKind::Important => "  ",
+        CalloutKind::Warning => "  ",
+        CalloutKind::Caution => "  ",
     }
 }
 
@@ -1361,7 +1361,7 @@ fn detect_callouts(decorations: &mut [LineDecoration], text: &str, line_starts: 
         decoration.callout_kind = Some(kind);
         decoration.display_replacements.push(DisplayReplacement {
             source_range: marker_start..replacement_end,
-            display_text: format!("{} ", callout_replacement_text(kind)),
+            display_text: callout_replacement_text(kind).to_string(),
             trigger_range: marker_start..replacement_end,
         });
         let title_end = line_content.trim_end_matches([' ', '\t']).len();
