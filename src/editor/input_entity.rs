@@ -166,10 +166,11 @@ impl EntityInputHandler for EditorView {
                 self.pause_blinking(cx);
                 return;
             }
+            let in_code = self.offset_in_code_context(self.cursor.selection_range().start);
             let wrap = match new_text {
-                "*" => Some(("**", "**")),
-                "~" => Some(("~~", "~~")),
-                "+" => Some(("++", "++")),
+                "*" if !in_code => Some(("**", "**")),
+                "~" if !in_code => Some(("~~", "~~")),
+                "+" if !in_code => Some(("++", "++")),
                 "`" => Some(("`", "`")),
                 _ => None,
             };
@@ -231,6 +232,8 @@ impl EntityInputHandler for EditorView {
             }
 
             if new_text != "["
+                && !(matches!(new_text, "*" | "_" | "~" | "+" | "=")
+                    && self.offset_in_code_context(range.start))
                 && let Some((open, close)) =
                     input_ime::paired_delimiter_at(self.buffer.text(), range.start, new_text)
             {

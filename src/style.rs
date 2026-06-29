@@ -597,6 +597,11 @@ pub struct CodeBlockStyles {
     /// Brighter divider drawn between the source (left) and rendered (right)
     /// panes in a generated preview's edit view.
     pub code_block_split_border_color: Hsla,
+    /// Width of the edit/render split divider and its dash segment length and
+    /// gap (the divider is rendered as a dashed line).
+    pub code_block_split_border_width_px: f32,
+    pub code_block_split_border_dash_length_px: f32,
+    pub code_block_split_border_dash_gap_px: f32,
     pub code_block_radius_px: f32,
     pub code_block_fill_inset_px: f32,
     pub code_block_text_padding_left_px: f32,
@@ -1667,10 +1672,13 @@ impl Styles {
                     with_alpha(theme.text_secondary, 0.10)
                 },
                 code_block_split_border_color: if is_light {
-                    with_alpha(theme.border_primary, 0.90)
+                    with_alpha(theme.text_secondary, 0.5)
                 } else {
-                    with_alpha(theme.text_secondary, 0.38)
+                    with_alpha(theme.text_secondary, 0.2)
                 },
+                code_block_split_border_width_px: 1.0,
+                code_block_split_border_dash_length_px: 3.0,
+                code_block_split_border_dash_gap_px: 3.0,
                 code_block_radius_px: 0.0,
                 code_block_fill_inset_px: 1.0,
                 code_block_text_padding_left_px: 20.0,

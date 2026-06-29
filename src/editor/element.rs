@@ -6299,23 +6299,47 @@ impl Element for EditorElement {
                         let preview_border_x = group.left + code_mode_text_width;
                         let preview_left = preview_border_x + 1.0;
                         let preview_width = (group.width - code_mode_text_width - 1.0).max(1.0);
-                        // Use the SAME geometry as the code-block background, which
-                        // is computed with fresh line heights during the main
-                        // layout loop. Recomputing the top from the line-geometry
-                        // cache (`line_y_offset`) can be momentarily stale right
-                        // after an edit — every line collapses to a default height
-                        // — which threw the render far above its block for a frame
-                        // ("jump out of background"). `group.top/bottom` already
-                        // scroll with the source, so behaviour is unchanged.
-                        let preview_top = group.top;
-                        let preview_height = (group.bottom - group.top).max(1.0);
-                        code_block_bgs.push(fill(
-                            Bounds::new(
-                                point(px(preview_border_x), px(preview_top)),
-                                size(px(1.0), px(preview_height)),
-                            ),
-                            editor.styles.code_block.code_block_split_border_color,
-                        ));
+                        // Position the render from the block's true content
+                        // offset so it scrolls with its source. Right after an
+                        // edit the line-geometry cache is momentarily stale (all
+                        // lines collapse to a default height, throwing the render
+                        // far above its block); on that frame fall back to the
+                        // fresh per-line geometry (`group`) computed this frame.
+                        let (preview_top, preview_height) = if has_valid_cache {
+                            let block_scroll = scroll_offset + scroll_anchor_delta;
+                            let true_top =
+                                origin_y + editor.line_y_offset(preview.start_line) - block_scroll;
+                            let true_bottom = origin_y
+                                + editor
+                                    .line_y_offset((preview.end_line + 1).min(buffer.line_count()))
+                                - block_scroll;
+                            (true_top, (true_bottom - true_top).max(1.0))
+                        } else {
+                            (group.top, (group.bottom - group.top).max(1.0))
+                        };
+                        // Dashed divider between the source (left) and rendered
+                        // (right) panes; sizing/colour all come from style.rs.
+                        let split_styles = &editor.styles.code_block;
+                        let dash_w = editor.scaled(split_styles.code_block_split_border_width_px);
+                        let dash_len = editor
+                            .scaled(split_styles.code_block_split_border_dash_length_px)
+                            .max(0.5);
+                        let dash_gap =
+                            editor.scaled(split_styles.code_block_split_border_dash_gap_px);
+                        let dash_color = split_styles.code_block_split_border_color;
+                        let split_end_y = preview_top + preview_height;
+                        let mut dash_y = preview_top;
+                        while dash_y < split_end_y {
+                            let segment = dash_len.min(split_end_y - dash_y);
+                            code_block_bgs.push(fill(
+                                Bounds::new(
+                                    point(px(preview_border_x), px(dash_y)),
+                                    size(px(dash_w), px(segment)),
+                                ),
+                                dash_color,
+                            ));
+                            dash_y += dash_len + dash_gap;
+                        }
 
                         let pad_x =
                             editor.scaled(editor.styles.code_block.generated_preview_padding_x_px);

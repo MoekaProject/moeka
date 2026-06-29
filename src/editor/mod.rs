@@ -3045,11 +3045,8 @@ impl EditorView {
             - toolbar_gap;
         let toolbar_overlaps_content =
             left_toolbar_right > content_left || right_toolbar_left < content_right;
-        let hovering_side_gutters = y >= top
-            && y <= bottom
-            && x >= left
-            && x <= right
-            && (x < content_left || x > content_right);
+        let hovering_side_gutters =
+            y >= top && y <= bottom && (x < content_left || x > content_right);
         let hovering_top_reveal = toolbar_overlaps_content
             && y >= top
             && y <= (top + self.scaled(self.styles.toolbar.toolbar_reveal_hover_height_px))

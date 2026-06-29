@@ -107,6 +107,17 @@ pub(crate) fn paired_delimiter_at(
                 paired_delimiter(input)
             }
         }
+        "[" | "{" | "(" => {
+            // Don't auto-close brackets right before a word/number — the user is
+            // almost always wrapping what follows (e.g. typing "(" before "abc"
+            // wants "(abc)", not "()abc"). Closing is still inserted at line/word
+            // boundaries.
+            if next_is_word {
+                None
+            } else {
+                paired_delimiter(input)
+            }
+        }
         _ => paired_delimiter(input),
     }
 }
@@ -179,6 +190,27 @@ fn clamp_ime_offset(buffer: &Buffer, offset: usize, cumulative_delta: isize) -> 
 }
 
 impl EditorView {
+    /// Whether `offset` sits inside code (a fenced/indented code block, the body
+    /// of a non-markdown file, or inline code). Markdown emphasis auto-pairing is
+    /// suppressed there since `* _ ~ + =` are literal in code.
+    pub(crate) fn offset_in_code_context(&self, offset: usize) -> bool {
+        let (line, col) = self.buffer.offset_to_line_col(offset);
+        let Some(decoration) = self.decorations.get(line) else {
+            return false;
+        };
+        if matches!(
+            decoration.block_type,
+            BlockType::CodeBlock | BlockType::CodeBlockFence
+        ) {
+            return true;
+        }
+        decoration.inline_spans.iter().any(|span| {
+            span.kind == crate::markdown::InlineKind::InlineCode
+                && span.range.start <= col
+                && col <= span.range.end
+        })
+    }
+
     pub(crate) fn should_skip_auto_closing_delimiter(&self, new_text: &str) -> bool {
         if !is_auto_closing_delimiter(new_text) {
             return false;

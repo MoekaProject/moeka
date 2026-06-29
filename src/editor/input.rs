@@ -713,6 +713,7 @@ impl EditorView {
         let in_source = (preview.start_line..=preview.end_line).contains(&cursor_line)
             && preview.source_range.start <= self.cursor.offset
             && self.cursor.offset <= preview.source_range.end;
+        let entering = !in_source;
         let target_offset = if in_source {
             // Exit edit view: move the cursor out of the block so it renders.
             let line_count = self.buffer.line_count();
@@ -745,6 +746,14 @@ impl EditorView {
         self.pending_preview_reveal = Some(PendingPreviewReveal {
             scroll_offset: preserve_scroll,
         });
+        // Entering edit view: pre-track this preview as the code-mode key (and
+        // reset its zoom/pan) now so the first prepaint already sees focused ==
+        // tracked and does not fire an extra reset+notify frame, which flashed
+        // the render on entry.
+        if entering {
+            self.reset_generated_preview_view(&preview.cache_key);
+            self.code_mode_preview_key = Some(preview.cache_key.clone());
+        }
         self.clear_line_display_info();
         true
     }
