@@ -329,6 +329,10 @@ pub struct OutlineStyles {
     pub outline_rail_tick_active_color: Hsla,
     pub outline_rail_tick_active_extra_width_px: f32,
     pub outline_rail_tick_active_animation_seconds: f32,
+    /// Distance (px) over which ticks fade out near the top and bottom edges of
+    /// the visible rail viewport, and the hover highlight fade-in duration.
+    pub outline_rail_edge_fade_px: f32,
+    pub outline_rail_hover_animation_seconds: f32,
     // Flash highlight after clicking a heading
     pub outline_flash_initial_delay_ms: u64,
     pub outline_flash_show_duration_ms: u64,
@@ -1448,6 +1452,8 @@ impl Styles {
                 outline_rail_tick_active_color: with_alpha(theme.text_primary, 0.58),
                 outline_rail_tick_active_extra_width_px: 3.0,
                 outline_rail_tick_active_animation_seconds: 0.2,
+                outline_rail_edge_fade_px: 48.0,
+                outline_rail_hover_animation_seconds: 0.2,
                 outline_flash_initial_delay_ms: 500,
                 outline_flash_show_duration_ms: 170,
                 outline_flash_gap_duration_ms: 90,

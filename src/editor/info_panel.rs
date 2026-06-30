@@ -462,24 +462,12 @@ fn nsurl_from_directory(path: &Path) -> *mut objc::runtime::Object {
 }
 
 #[cfg(target_os = "macos")]
-fn run_current_run_loop_for(seconds: f64) {
-    unsafe {
-        let run_loop: *mut objc::runtime::Object = msg_send![class!(NSRunLoop), currentRunLoop];
-        let until_date: *mut objc::runtime::Object =
-            msg_send![class!(NSDate), dateWithTimeIntervalSinceNow: seconds];
-        let () = msg_send![run_loop, runUntilDate: until_date];
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn build_pdf_document_from_html_macos(
+async fn build_pdf_document_from_html_macos(
     html: &str,
     source_file_path: Option<&Path>,
+    cx: &mut gpui::AsyncApp,
 ) -> anyhow::Result<Vec<u8>> {
     unsafe {
-        let autorelease_pool: *mut objc::runtime::Object =
-            msg_send![class!(NSAutoreleasePool), new];
-
         let page_width = 595.0_f64;
         let page_height = 842.0_f64;
         let margin = 51.0_f64;
@@ -492,18 +480,20 @@ fn build_pdf_document_from_html_macos(
             },
         };
         let nil = std::ptr::null_mut::<objc::runtime::Object>();
-        let web_view: *mut objc::runtime::Object = msg_send![class!(WebView), alloc];
-        let web_view: *mut objc::runtime::Object = msg_send![
-            web_view,
-            initWithFrame: frame
-            frameName: nil
-            groupName: nil
-        ];
-        let () = msg_send![web_view, setMediaStyle: nsstring("print")];
+        // WKWebView renders its content out-of-process, so (unlike the legacy
+        // WebHTMLView, which laid out but drew nothing here) it produces real PDF
+        // output via `createPDFWithConfiguration:` even from a hidden window.
+        let configuration: *mut objc::runtime::Object =
+            msg_send![class!(WKWebViewConfiguration), new];
+        let web_view: *mut objc::runtime::Object = msg_send![class!(WKWebView), alloc];
+        let web_view: *mut objc::runtime::Object =
+            msg_send![web_view, initWithFrame: frame configuration: configuration];
 
-        // Host the WebView inside an offscreen, never-shown window. The legacy
-        // WebHTMLView only flows and draws its content when it is attached to a
-        // window; without one the print operation snapshots a blank page.
+        // Host the WebView in a window placed ON SCREEN but fully transparent
+        // (alpha 0). The legacy WebHTMLView only flows and *draws* its content
+        // when its window has a live on-screen graphics context; an offscreen or
+        // never-ordered window makes the print operation snapshot a blank page.
+        // Alpha 0 + ignoring mouse keeps it invisible and inert to the user.
         let host_window: *mut objc::runtime::Object = msg_send![class!(NSWindow), alloc];
         let host_window: *mut objc::runtime::Object = msg_send![
             host_window,
@@ -513,104 +503,104 @@ fn build_pdf_document_from_html_macos(
             defer: false
         ];
         let () = msg_send![host_window, setReleasedWhenClosed: false];
+        let () = msg_send![host_window, setAlphaValue: 0.0_f64];
+        let () = msg_send![host_window, setIgnoresMouseEvents: true];
         let () = msg_send![host_window, setContentView: web_view];
+        let on_screen_origin = NSPoint { x: 0.0, y: 0.0 };
+        let () = msg_send![host_window, setFrameOrigin: on_screen_origin];
+        let () = msg_send![host_window, orderFrontRegardless];
 
-        let main_frame: *mut objc::runtime::Object = msg_send![web_view, mainFrame];
         let base_url = source_file_path
             .and_then(Path::parent)
             .map(nsurl_from_directory)
             .unwrap_or(nil);
-        let () = msg_send![main_frame, loadHTMLString: nsstring(html) baseURL: base_url];
+        let () = msg_send![web_view, loadHTMLString: nsstring(html) baseURL: base_url];
 
         let start = std::time::Instant::now();
         loop {
+            // Yield to GPUI's real main run loop so WKWebView's out-of-process
+            // content can actually load. A nested `runUntilDate` pump does not
+            // service the WebContent process, which made loading hang.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(20))
+                .await;
             let is_loading: bool = msg_send![web_view, isLoading];
             if !is_loading {
                 break;
             }
-            if start.elapsed() > std::time::Duration::from_secs(10) {
-                let () = msg_send![autorelease_pool, drain];
+            if start.elapsed() > std::time::Duration::from_secs(20) {
+                let () = msg_send![host_window, close];
                 anyhow::bail!("timed out waiting for WebKit HTML rendering");
             }
-            run_current_run_loop_for(0.01);
         }
+        // Allow a final layout/paint pass before snapshotting.
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(100))
+            .await;
 
-        run_current_run_loop_for(0.05);
-
-        let frame_view: *mut objc::runtime::Object = msg_send![main_frame, frameView];
-        if frame_view.is_null() {
-            let () = msg_send![autorelease_pool, drain];
-            anyhow::bail!("WebKit frame view unavailable after HTML load");
-        }
-
-        let document_view: *mut objc::runtime::Object = msg_send![frame_view, documentView];
-        if document_view.is_null() {
-            let () = msg_send![autorelease_pool, drain];
-            anyhow::bail!("WebKit document view unavailable after HTML load");
-        }
-
-        let document_bounds: NSRect = msg_send![document_view, bounds];
-        let total_height = document_bounds.size.height.max(page_height);
-        let full_rect = NSRect {
-            origin: NSPoint { x: 0.0, y: 0.0 },
-            size: NSSize {
-                width: document_bounds.size.width.max(content_width),
-                height: total_height,
+        // `createPDFWithConfiguration:completionHandler:` is asynchronous; capture
+        // the result in a completion block and pump the run loop until it fires.
+        let result: std::rc::Rc<std::cell::RefCell<Option<Result<Vec<u8>, String>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let block_result = result.clone();
+        let completion = block::ConcreteBlock::new(
+            move |pdf_data: *mut objc::runtime::Object, error: *mut objc::runtime::Object| {
+                let outcome = if !pdf_data.is_null() {
+                    let length: usize = msg_send![pdf_data, length];
+                    let ptr: *const u8 = msg_send![pdf_data, bytes];
+                    if ptr.is_null() || length == 0 {
+                        Err("createPDF returned empty data".to_string())
+                    } else {
+                        Ok(std::slice::from_raw_parts(ptr, length).to_vec())
+                    }
+                } else {
+                    let message = if error.is_null() {
+                        "createPDF returned no data".to_string()
+                    } else {
+                        let desc: *mut objc::runtime::Object =
+                            msg_send![error, localizedDescription];
+                        let cstr: *const std::os::raw::c_char = msg_send![desc, UTF8String];
+                        if cstr.is_null() {
+                            "unknown createPDF error".to_string()
+                        } else {
+                            std::ffi::CStr::from_ptr(cstr)
+                                .to_string_lossy()
+                                .into_owned()
+                        }
+                    };
+                    Err(message)
+                };
+                *block_result.borrow_mut() = Some(outcome);
             },
-        };
-        let () = msg_send![web_view, setFrame: full_rect];
-
-        // Force the freshly-resized document view to lay out before we snapshot
-        // it, otherwise WebKit may report stale geometry and emit a blank page.
-        let () = msg_send![document_view, setNeedsDisplay: true];
-        run_current_run_loop_for(0.05);
-
-        let shared_print_info: *mut objc::runtime::Object =
-            msg_send![class!(NSPrintInfo), sharedPrintInfo];
-        let print_info: *mut objc::runtime::Object = msg_send![shared_print_info, copy];
-        let () =
-            msg_send![print_info, setPaperSize: NSSize { width: page_width, height: page_height }];
-        let () = msg_send![print_info, setTopMargin: margin];
-        let () = msg_send![print_info, setBottomMargin: margin];
-        let () = msg_send![print_info, setLeftMargin: margin];
-        let () = msg_send![print_info, setRightMargin: margin];
-        let () = msg_send![print_info, setHorizontallyCentered: false];
-        let () = msg_send![print_info, setVerticallyCentered: false];
-
-        let pdf_data: *mut objc::runtime::Object = msg_send![class!(NSMutableData), data];
-        // Print the frame's document view rather than the top-level WebView.
-        // The legacy `WebView` host view draws nothing itself, so printing it
-        // produces a blank PDF; the rendered content lives in the document view.
-        let document_print_bounds: NSRect = msg_send![document_view, bounds];
-        let print_rect = NSRect {
-            origin: NSPoint { x: 0.0, y: 0.0 },
-            size: NSSize {
-                width: document_print_bounds.size.width.max(content_width),
-                height: document_print_bounds.size.height.max(page_height),
-            },
-        };
-        let print_operation: *mut objc::runtime::Object = msg_send![
-            class!(NSPrintOperation),
-            PDFOperationWithView: document_view
-            insideRect: print_rect
-            toData: pdf_data
-            printInfo: print_info
+        );
+        let completion = completion.copy();
+        let pdf_config: *mut objc::runtime::Object = msg_send![class!(WKPDFConfiguration), new];
+        let () = msg_send![
+            web_view,
+            createPDFWithConfiguration: pdf_config
+            completionHandler: &*completion
         ];
-        let () = msg_send![print_operation, setShowsPrintPanel: false];
-        let () = msg_send![print_operation, setShowsProgressPanel: false];
-        let did_run: bool = msg_send![print_operation, runOperation];
-        if !did_run {
-            let () = msg_send![autorelease_pool, drain];
-            anyhow::bail!("failed to run AppKit PDF print operation");
-        }
 
-        let length: usize = msg_send![pdf_data, length];
-        let bytes_ptr: *const u8 = msg_send![pdf_data, bytes];
-        let bytes = std::slice::from_raw_parts(bytes_ptr, length).to_vec();
+        let wait_start = std::time::Instant::now();
+        while result.borrow().is_none() {
+            if wait_start.elapsed() > std::time::Duration::from_secs(30) {
+                break;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(20))
+                .await;
+        }
 
         let () = msg_send![host_window, close];
-        let () = msg_send![autorelease_pool, drain];
-        Ok(bytes)
+
+        match result.borrow_mut().take() {
+            Some(Ok(bytes)) => {
+                eprintln!("[pdf-export] WKWebView produced {} bytes", bytes.len());
+                Ok(bytes)
+            }
+            Some(Err(message)) => anyhow::bail!("WKWebView createPDF failed: {message}"),
+            None => anyhow::bail!("timed out waiting for WKWebView PDF generation"),
+        }
     }
 }
 
@@ -861,18 +851,12 @@ fn build_pdf_document_with_printpdf(title: &str, markdown: &str) -> anyhow::Resu
     Ok(bytes)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn build_pdf_document(
     title: &str,
     markdown: &str,
-    source_file_path: Option<&Path>,
+    _source_file_path: Option<&Path>,
 ) -> anyhow::Result<Vec<u8>> {
-    #[cfg(target_os = "macos")]
-    {
-        let html = build_html_document(title, markdown, source_file_path);
-        return build_pdf_document_from_html_macos(&html, source_file_path);
-    }
-
-    #[cfg(not(target_os = "macos"))]
     build_pdf_document_with_printpdf(title, markdown)
 }
 
@@ -2170,7 +2154,10 @@ impl EditorView {
             };
 
             #[cfg(target_os = "macos")]
-            let export_result = build_pdf_document(&title, &markdown, source_file_path.as_deref());
+            let export_result = {
+                let html = build_html_document(&title, &markdown, source_file_path.as_deref());
+                build_pdf_document_from_html_macos(&html, source_file_path.as_deref(), cx).await
+            };
 
             #[cfg(not(target_os = "macos"))]
             let export_result =

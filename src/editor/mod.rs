@@ -1529,12 +1529,16 @@ pub struct EditorView {
     pub(crate) temp_save_epochs: HashMap<String, usize>,
     pub(crate) outline_rail_visible: bool,
     pub(crate) outline_rail_hovered: bool,
-    pub(crate) outline_rail_hovered_line: Option<usize>,
     pub(crate) outline_rail_clicked_active_line: Option<usize>,
     pub(crate) outline_rail_scroll_offset: Option<f32>,
     pub(crate) outline_rail_collapsed_heading_lines: HashSet<usize>,
     pub(crate) outline_rail_last_active_line: Cell<Option<usize>>,
     pub(crate) outline_rail_active_since: Cell<Option<Instant>>,
+    pub(crate) outline_rail_hover_since: Cell<Option<Instant>>,
+    /// Width (px, from the right viewport edge) occupied by the outline rail's
+    /// interactive zone this frame, so toolbar-hover logic can treat hovering it
+    /// as keep-visible. 0 when the rail is not shown.
+    pub(crate) outline_rail_zone_from_right: Cell<f32>,
     pub(crate) info_panel_scroll_handle: ScrollHandle,
     pub(crate) git_history_scroll_handle: ScrollHandle,
     pub(crate) info_panel_cache_tab_id: Option<String>,
@@ -1973,12 +1977,13 @@ impl EditorView {
             temp_save_epochs: HashMap::new(),
             outline_rail_visible: app_settings.outline_rail_visible,
             outline_rail_hovered: false,
-            outline_rail_hovered_line: None,
             outline_rail_clicked_active_line: None,
             outline_rail_scroll_offset: None,
             outline_rail_collapsed_heading_lines: HashSet::new(),
             outline_rail_last_active_line: Cell::new(None),
             outline_rail_active_since: Cell::new(None),
+            outline_rail_hover_since: Cell::new(None),
+            outline_rail_zone_from_right: Cell::new(0.0),
             info_panel_scroll_handle: ScrollHandle::new(),
             git_history_scroll_handle: ScrollHandle::new(),
             info_panel_cache_tab_id: None,
@@ -2177,7 +2182,8 @@ impl EditorView {
         base_visible
             && (self.scroll_offset <= 0.5
                 || !self.toolbar_hidden_by_scroll
-                || self.toolbar_corner_hovered)
+                || self.toolbar_corner_hovered
+                || self.outline_rail_hovered)
     }
 
     fn toolbar_base_visible(&self) -> bool {
@@ -3053,7 +3059,20 @@ impl EditorView {
                 .min(bottom)
             && x >= left
             && x <= right;
-        let hovering = hovering_side_gutters || hovering_top_reveal;
+        // The outline rail and the editor scrollbar live in a strip at the right
+        // edge. Hovering anywhere in that strip must keep the toolbar visible
+        // (even when the document is full-width and the rail overlays content, so
+        // a plain content-bounds test would otherwise treat it as "inside"). The
+        // rail records its exact interactive width each frame.
+        let right_edge_zone = self.outline_rail_zone_from_right.get().max(self.scaled(
+            self.styles.editor.editor_scrollbar_right_margin_px
+                + self.styles.editor.editor_scrollbar_hover_width_px,
+        ));
+        let hovering_right_edge = y >= top && y <= bottom && x >= right - right_edge_zone;
+        let hovering = hovering_side_gutters
+            || hovering_top_reveal
+            || hovering_right_edge
+            || self.outline_rail_hovered;
         if hovering {
             // Entering the reveal zone: show immediately and cancel any pending
             // delayed hide.

@@ -174,6 +174,16 @@ fn multiply_alpha(color: gpui::Hsla, factor: f32) -> gpui::Hsla {
     }
 }
 
+fn lerp_hsla(from: gpui::Hsla, to: gpui::Hsla, t: f32) -> gpui::Hsla {
+    let t = t.clamp(0.0, 1.0);
+    gpui::Hsla {
+        h: from.h + (to.h - from.h) * t,
+        s: from.s + (to.s - from.s) * t,
+        l: from.l + (to.l - from.l) * t,
+        a: from.a + (to.a - from.a) * t,
+    }
+}
+
 fn heading_level_opacity(level: u8, level_opacities: [f32; 6]) -> f32 {
     let index = level.saturating_sub(1).min(5) as usize;
     level_opacities[index].clamp(0.0, 1.0)
@@ -317,8 +327,44 @@ impl EditorView {
     fn set_outline_rail_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
         let rail_changed = self.outline_rail_hovered != hovered;
         self.outline_rail_hovered = hovered;
-        if !hovered {
-            self.outline_rail_hovered_line = None;
+        if hovered {
+            // Cancel any pending toolbar auto-hide that was scheduled while the
+            // cursor was still over the content. Entering the rail does not
+            // re-run the editor's corner-hover check (the rail occludes it), so
+            // without this the queued hide fires ~2s later and hides the toolbar
+            // even though the cursor is on the rail.
+            self.toolbar_corner_hide_task = None;
+        }
+        if rail_changed && hovered {
+            // Start the hover highlight fade-in animation.
+            self.outline_rail_hover_since
+                .set(Some(std::time::Instant::now()));
+            let anim_seconds = self
+                .styles
+                .outline
+                .outline_rail_hover_animation_seconds
+                .max(0.001);
+            cx.spawn(async move |this, cx| {
+                let frames = ((anim_seconds / 0.016).ceil() as usize).max(1) + 1;
+                for _ in 0..frames {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(16))
+                        .await;
+                    let keep = this
+                        .update(cx, |this, cx| {
+                            if !this.outline_rail_hovered {
+                                return false;
+                            }
+                            cx.notify();
+                            true
+                        })
+                        .unwrap_or(false);
+                    if !keep {
+                        break;
+                    }
+                }
+            })
+            .detach();
         }
         let toolbar_changed = self.toolbar_corner_hovered != hovered;
         if self.toolbar_corner_hovered != hovered {
@@ -328,15 +374,6 @@ impl EditorView {
         if rail_changed || toolbar_changed {
             cx.notify();
         }
-    }
-
-    fn set_outline_rail_hovered_line(&mut self, line: Option<usize>, cx: &mut Context<Self>) {
-        if self.outline_rail_hovered_line == line {
-            return;
-        }
-
-        self.outline_rail_hovered_line = line;
-        cx.notify();
     }
 
     fn toggle_outline_rail_heading_collapsed(&mut self, line: usize, cx: &mut Context<Self>) {
@@ -450,10 +487,12 @@ impl EditorView {
 
     pub(crate) fn render_outline_rail(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.outline_rail_visible || !self.active_tab_is_markdown() {
+            self.outline_rail_zone_from_right.set(0.0);
             return None;
         }
         let headings = self.collect_outline_headings();
         if headings.is_empty() {
+            self.outline_rail_zone_from_right.set(0.0);
             return None;
         }
 
@@ -549,11 +588,36 @@ impl EditorView {
         };
 
         let mut row_elements: Vec<AnyElement> = Vec::with_capacity(rows.len());
-        for row in rows {
+        // Top of the tick column relative to the rail track (which spans the
+        // visible viewport): the absolute scroll offset when overflowing, else
+        // the vertically-centred position.
+        let column_top = if overflow {
+            top_offset
+        } else {
+            ((viewport_height - total_height) / 2.0).max(0.0)
+        };
+        let edge_fade = self.scaled(os.outline_rail_edge_fade_px).max(1.0);
+        let rail_hovered = self.outline_rail_hovered;
+        // Hover highlight fade-in progress (0..1), eased.
+        let hover_progress = if rail_hovered {
+            self.outline_rail_hover_since
+                .get()
+                .map(|started| {
+                    (started.elapsed().as_secs_f32()
+                        / os.outline_rail_hover_animation_seconds.max(0.001))
+                    .clamp(0.0, 1.0)
+                })
+                .unwrap_or(1.0)
+        } else {
+            0.0
+        };
+        let hover_ease = super::ease_in_out_cubic(hover_progress);
+        for (row_index, row) in rows.into_iter().enumerate() {
             let line = row.line;
             let level_opacity = heading_level_opacity(row.level, tick_level_opacities);
             let is_active = Some(line) == active_line;
-            let is_hovered = self.outline_rail_hovered_line == Some(line);
+            // Only the active tick animates its width; hovering brightens every
+            // tick uniformly rather than singling one out and lengthening it.
             let animated_tick_width = if is_active {
                 let progress = self
                     .outline_rail_active_since
@@ -564,16 +628,26 @@ impl EditorView {
                     .unwrap_or(1.0);
                 let ease = super::ease_in_out_cubic(progress);
                 tick_width + active_extra_width * ease
-            } else if is_hovered {
-                tick_width + active_extra_width
             } else {
                 tick_width
             };
-            let row_tick_color = if is_active || is_hovered {
+            // Fade ticks within `edge_fade` of the top and bottom edges of the
+            // visible rail viewport, giving a soft gradient at the viewport edges
+            // (off-screen ticks clamp to fully transparent).
+            let row_center_y = column_top + row_index as f32 * row_height + row_height / 2.0;
+            let edge_opacity = if viewport_height > 0.0 {
+                (row_center_y.min(viewport_height - row_center_y) / edge_fade).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let resting_color = multiply_alpha(tick_color, level_opacity);
+            let base_tick_color = if is_active {
                 tick_active_color
             } else {
-                multiply_alpha(tick_color, level_opacity)
+                // Animate from the resting colour to the active colour on hover.
+                lerp_hsla(resting_color, tick_active_color, hover_ease)
             };
+            let row_tick_color = multiply_alpha(base_tick_color, edge_opacity);
             row_elements.push(
                 div()
                     .id(SharedString::from(format!("outline-rail-{}", line)))
@@ -583,14 +657,6 @@ impl EditorView {
                     .items_center()
                     .justify_end()
                     .cursor(CursorStyle::Arrow)
-                    .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
-                        if *hovering {
-                            this.set_outline_rail_hovered(true, cx);
-                            this.set_outline_rail_hovered_line(Some(line), cx);
-                        } else {
-                            this.set_outline_rail_hovered_line(None, cx);
-                        }
-                    }))
                     .child(
                         div()
                             .w(px(tick_width + active_extra_width))
@@ -665,6 +731,13 @@ impl EditorView {
             (tick_width + active_extra_width).max(tick_thickness) + track_extra_right_padding
         };
 
+        // Record how far in from the right edge the rail's interactive zone
+        // reaches this frame so the editor's toolbar-hover logic can keep the
+        // toolbar visible while the rail is hovered, regardless of event
+        // occlusion or content width.
+        self.outline_rail_zone_from_right
+            .set(track_right + track_width + right_margin);
+
         let track = div()
             .id("outline-rail-track")
             .absolute()
@@ -675,11 +748,13 @@ impl EditorView {
             .occlude()
             .cursor(CursorStyle::Arrow)
             .on_scroll_wheel(cx.listener(Self::on_outline_rail_scroll))
-            .when(self.outline_rail_hovered, |this| {
-                this.on_hover(cx.listener(|this, hovering: &bool, _, cx| {
-                    this.set_outline_rail_hovered(*hovering, cx);
-                }))
-            })
+            // Always listen for hover (not only once already hovered) so hovering
+            // anywhere over the full-height rail track — including the empty space
+            // above the first tick and below the last — keeps the rail (and the
+            // editor toolbar) shown instead of letting the toolbar hide.
+            .on_hover(cx.listener(|this, hovering: &bool, _, cx| {
+                this.set_outline_rail_hovered(*hovering, cx);
+            }))
             .child(
                 div()
                     .absolute()
