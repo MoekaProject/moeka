@@ -8,7 +8,7 @@ use gpui::Context;
 use super::config_paths;
 use super::*;
 
-const UNTITLED_TEMP_DIR: &str = ".markdown-editor-cache/untitled";
+const UNTITLED_TEMP_DIR: &str = ".moeka-cache/untitled";
 const TEMP_SAVE_DEBOUNCE: Duration = Duration::from_secs(5);
 
 pub(crate) fn choose_temp_path_for_tab(
@@ -176,7 +176,7 @@ mod tests {
         let temp_path = choose_temp_path_for_tab("tab-7", None, None, Path::new("/tmp/workspace"));
         assert_eq!(
             temp_path,
-            PathBuf::from("/tmp/workspace/.markdown-editor-cache/untitled/tab-7.temp")
+            PathBuf::from("/tmp/workspace/.moeka-cache/untitled/tab-7.temp")
         );
     }
 

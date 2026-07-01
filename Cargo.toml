@@ -1,12 +1,12 @@
 [workspace]
 
 [package]
-name = "markdown-editor"
+name = "moeka"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "markdown-editor"
+name = "moeka"
 path = "src/main.rs"
 
 [dependencies]

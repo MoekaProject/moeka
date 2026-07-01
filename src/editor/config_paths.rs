@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
 
-const APP_NAME: &str = "markdown-editor";
+const APP_NAME: &str = "moeka";
 
 pub(crate) fn config_dir() -> PathBuf {
     project_dirs()

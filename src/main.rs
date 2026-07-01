@@ -11,6 +11,7 @@ mod table_ops;
 mod text_input;
 mod theme;
 
+use crate::i18n::system_application_display_name;
 use std::borrow::Cow;
 #[cfg(target_os = "macos")]
 use std::os::raw::c_char;
@@ -342,7 +343,7 @@ fn main() {
                     cx,
                 ))),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Markdown Editor".into()),
+                    title: Some(system_application_display_name().into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(15.0), px(13.0))),
                 }),

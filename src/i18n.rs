@@ -146,7 +146,7 @@ pub(crate) enum TextKey {
     CloseSaved,
     AppSettingsMenu,
     HelpManual,
-        OfficialWebsite,
+    OfficialWebsite,
     AddRowAbove,
     AddRowBelow,
     AddColumnLeft,
@@ -314,6 +314,18 @@ pub(crate) fn detect_system_language() -> UiLanguage {
 
 pub(crate) fn default_language_code() -> String {
     detect_system_language().code().to_string()
+}
+
+pub(crate) fn application_display_name(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "小语文稿",
+        UiLanguage::ChineseTraditional => "小語文稿",
+        _ => "Moeka",
+    }
+}
+
+pub(crate) fn system_application_display_name() -> &'static str {
+    application_display_name(detect_system_language())
 }
 
 pub(crate) fn language_picker_options() -> Vec<LanguageOption> {
@@ -821,7 +833,7 @@ fn translate_english(key: TextKey) -> &'static str {
         TextKey::CloseSaved => "Close Saved",
         TextKey::AppSettingsMenu => "App Settings...",
         TextKey::HelpManual => "Help Manual",
-            TextKey::OfficialWebsite => "Official Website",
+        TextKey::OfficialWebsite => "Official Website",
         TextKey::AddRowAbove => "Insert Row Above",
         TextKey::AddRowBelow => "Insert Row Below",
         TextKey::AddColumnLeft => "Insert Column Left",
@@ -994,7 +1006,7 @@ fn translate_zh_cn(key: TextKey) -> &'static str {
         TextKey::CloseSaved => "关闭已保存",
         TextKey::AppSettingsMenu => "应用设置",
         TextKey::HelpManual => "帮助手册",
-            TextKey::OfficialWebsite => "官方网站",
+        TextKey::OfficialWebsite => "官方网站",
         TextKey::AddRowAbove => "上方新增行",
         TextKey::AddRowBelow => "下方新增行",
         TextKey::AddColumnLeft => "左侧新增列",
@@ -1161,7 +1173,7 @@ fn translate_zh_tw(key: TextKey) -> &'static str {
         TextKey::CloseSaved => "關閉已儲存",
         TextKey::AppSettingsMenu => "應用程式設定...",
         TextKey::HelpManual => "幫助手冊",
-            TextKey::OfficialWebsite => "官方網站",
+        TextKey::OfficialWebsite => "官方網站",
         TextKey::AddRowAbove => "上方新增列",
         TextKey::AddRowBelow => "下方新增列",
         TextKey::AddColumnLeft => "左側新增欄",
@@ -1331,7 +1343,7 @@ fn translate_japanese(key: TextKey) -> &'static str {
         TextKey::CloseSaved => "保存済みを閉じる",
         TextKey::AppSettingsMenu => "アプリ設定...",
         TextKey::HelpManual => "ヘルプマニュアル",
-            TextKey::OfficialWebsite => "公式サイト",
+        TextKey::OfficialWebsite => "公式サイト",
         TextKey::AddRowAbove => "上に行を挿入",
         TextKey::AddRowBelow => "下に行を挿入",
         TextKey::AddColumnLeft => "左に列を挿入",
@@ -1501,7 +1513,7 @@ fn translate_korean(key: TextKey) -> &'static str {
         TextKey::CloseSaved => "저장된 탭 닫기",
         TextKey::AppSettingsMenu => "앱 설정...",
         TextKey::HelpManual => "도움말",
-            TextKey::OfficialWebsite => "공식 웹사이트",
+        TextKey::OfficialWebsite => "공식 웹사이트",
         TextKey::AddRowAbove => "위에 행 추가",
         TextKey::AddRowBelow => "아래에 행 추가",
         TextKey::AddColumnLeft => "왼쪽에 열 추가",
@@ -1673,7 +1685,7 @@ fn translate_french(key: TextKey) -> &'static str {
         TextKey::CloseSaved => "Fermer les onglets enregistrés",
         TextKey::AppSettingsMenu => "Paramètres de l'application...",
         TextKey::HelpManual => "Manuel d'aide",
-            TextKey::OfficialWebsite => "Site officiel",
+        TextKey::OfficialWebsite => "Site officiel",
         TextKey::AddRowAbove => "Insérer une ligne au-dessus",
         TextKey::AddRowBelow => "Insérer une ligne en dessous",
         TextKey::AddColumnLeft => "Insérer une colonne à gauche",
@@ -1843,7 +1855,7 @@ fn translate_german(key: TextKey) -> &'static str {
         TextKey::CloseSaved => "Gespeicherte schließen",
         TextKey::AppSettingsMenu => "App-Einstellungen...",
         TextKey::HelpManual => "Hilfshandbuch",
-            TextKey::OfficialWebsite => "Offizielle Website",
+        TextKey::OfficialWebsite => "Offizielle Website",
         TextKey::AddRowAbove => "Zeile darüber einfügen",
         TextKey::AddRowBelow => "Zeile darunter einfügen",
         TextKey::AddColumnLeft => "Spalte links einfügen",
@@ -2013,7 +2025,7 @@ fn translate_spanish(key: TextKey) -> &'static str {
         TextKey::CloseSaved => "Cerrar guardadas",
         TextKey::AppSettingsMenu => "Configuración de la aplicación...",
         TextKey::HelpManual => "Manual de ayuda",
-            TextKey::OfficialWebsite => "Sitio web oficial",
+        TextKey::OfficialWebsite => "Sitio web oficial",
         TextKey::AddRowAbove => "Insertar fila arriba",
         TextKey::AddRowBelow => "Insertar fila abajo",
         TextKey::AddColumnLeft => "Insertar columna a la izquierda",
@@ -2183,7 +2195,7 @@ fn translate_portuguese(key: TextKey) -> &'static str {
         TextKey::CloseSaved => "Fechar salvas",
         TextKey::AppSettingsMenu => "Configurações do app...",
         TextKey::HelpManual => "Manual de ajuda",
-            TextKey::OfficialWebsite => "Site oficial",
+        TextKey::OfficialWebsite => "Site oficial",
         TextKey::AddRowAbove => "Inserir linha acima",
         TextKey::AddRowBelow => "Inserir linha abaixo",
         TextKey::AddColumnLeft => "Inserir coluna à esquerda",
@@ -2353,7 +2365,7 @@ fn translate_russian(key: TextKey) -> &'static str {
         TextKey::CloseSaved => "Закрыть сохранённые",
         TextKey::AppSettingsMenu => "Настройки приложения...",
         TextKey::HelpManual => "Справка",
-            TextKey::OfficialWebsite => "Официальный сайт",
+        TextKey::OfficialWebsite => "Официальный сайт",
         TextKey::AddRowAbove => "Вставить строку выше",
         TextKey::AddRowBelow => "Вставить строку ниже",
         TextKey::AddColumnLeft => "Вставить столбец слева",
@@ -2521,7 +2533,7 @@ fn translate_arabic(key: TextKey) -> &'static str {
         TextKey::CloseSaved => "إغلاق المحفوظة",
         TextKey::AppSettingsMenu => "إعدادات التطبيق...",
         TextKey::HelpManual => "دليل المساعدة",
-            TextKey::OfficialWebsite => "الموقع الرسمي",
+        TextKey::OfficialWebsite => "الموقع الرسمي",
         TextKey::AddRowAbove => "إدراج صف أعلى",
         TextKey::AddRowBelow => "إدراج صف أسفل",
         TextKey::AddColumnLeft => "إدراج عمود إلى اليسار",
@@ -2689,7 +2701,7 @@ fn translate_hindi(key: TextKey) -> &'static str {
         TextKey::CloseSaved => "सहेजे हुए बंद करें",
         TextKey::AppSettingsMenu => "ऐप सेटिंग्स...",
         TextKey::HelpManual => "सहायता पुस्तिका",
-            TextKey::OfficialWebsite => "आधिकारिक वेबसाइट",
+        TextKey::OfficialWebsite => "आधिकारिक वेबसाइट",
         TextKey::AddRowAbove => "ऊपर पंक्ति जोड़ें",
         TextKey::AddRowBelow => "नीचे पंक्ति जोड़ें",
         TextKey::AddColumnLeft => "बाईं ओर स्तंभ जोड़ें",

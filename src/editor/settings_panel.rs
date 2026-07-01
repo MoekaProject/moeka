@@ -1875,7 +1875,7 @@ fn build_padded_dock_icon(index: usize) -> Option<std::path::PathBuf> {
     imageops::overlay(&mut canvas, &shadow, 0, 0);
     imageops::overlay(&mut canvas, &content, offset, offset);
 
-    let out_path = std::env::temp_dir().join(format!("markdown-editor-dock-icon-{index}.png"));
+    let out_path = std::env::temp_dir().join(format!("moeka-dock-icon-{index}.png"));
     canvas.save(&out_path).ok()?;
     Some(out_path)
 }

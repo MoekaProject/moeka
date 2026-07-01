@@ -3529,44 +3529,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "markdown-editor"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "block",
- "chrono",
- "directories",
- "emojis",
- "gpui",
- "image",
- "mathjax-svg-rs",
- "mermaid-svg",
- "notify",
- "objc",
- "pinyin",
- "portable-pty",
- "printpdf",
- "pulldown-cmark",
- "raw-window-handle",
- "regex",
- "resvg",
- "rfd",
- "serde",
- "serde_json",
- "serde_yaml",
- "similar",
- "smallvec",
- "syntect",
- "sys-locale",
- "tempfile",
- "trash",
- "unicode-segmentation",
- "ureq",
- "usvg",
-]
-
-[[package]]
 name = "mathjax-svg-rs"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3710,6 +3672,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "moeka"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "block",
+ "chrono",
+ "directories",
+ "emojis",
+ "gpui",
+ "image",
+ "mathjax-svg-rs",
+ "mermaid-svg",
+ "notify",
+ "objc",
+ "pinyin",
+ "portable-pty",
+ "printpdf",
+ "pulldown-cmark",
+ "raw-window-handle",
+ "regex",
+ "resvg",
+ "rfd",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "similar",
+ "smallvec",
+ "syntect",
+ "sys-locale",
+ "tempfile",
+ "trash",
+ "unicode-segmentation",
+ "ureq",
+ "usvg",
 ]
 
 [[package]]

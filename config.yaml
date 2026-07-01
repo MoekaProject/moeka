@@ -68,7 +68,7 @@ session:
       source_content_hash: samplehash
       recovered_from_temp: true
     history:
-      undo_log_path: /Users/example/Library/Caches/markdown-editor/history/note.md.44e0a532.undo.json
+      undo_log_path: /Users/example/Library/Caches/moeka/history/note.md.44e0a532.undo.json
       source_identity: /path/to/workspace-a/note.md
       current_index: 12
       entry_count: 18

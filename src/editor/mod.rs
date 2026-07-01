@@ -3296,7 +3296,7 @@ impl EditorView {
     fn is_internal_temp_change_path(&self, path: &Path) -> bool {
         if path
             .components()
-            .any(|component| component.as_os_str().to_str() == Some(".markdown-editor-cache"))
+            .any(|component| component.as_os_str().to_str() == Some(".moeka-cache"))
         {
             return true;
         }
