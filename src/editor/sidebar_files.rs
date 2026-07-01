@@ -591,6 +591,10 @@ impl EditorView {
             self.sidebar_git_statuses_task = None;
             self.context_menu = None;
             self._watcher_task = None;
+            // Collapse the panel to width 0; without this the sidebar keeps
+            // rendering (empty) because `should_render_sidebar_panel` still sees
+            // a non-zero display width.
+            self.sync_sidebar_width_animation(cx);
             cx.notify();
             session_store::persist_session(self);
             return;

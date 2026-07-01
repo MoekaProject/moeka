@@ -94,7 +94,14 @@ impl EditorView {
                                     .text_color(self.theme.text_bright)
                                     .child(self.t(TextKey::SettingsPanelTitle)),
                             )
-                            .child(self.render_settings_help_button(cx)),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(self.scaled(8.0)))
+                                    .child(self.render_settings_help_button(cx))
+                                    .child(self.render_settings_site_button(cx)),
+                            ),
                     )
                     .child(self.render_theme_section(cx))
                     .child(self.render_font_section(window, cx))
@@ -142,6 +149,49 @@ impl EditorView {
             .into_any_element()
     }
 
+    fn render_settings_site_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let height = self.scaled(30.0);
+        let icon_size = self.scaled(15.0);
+
+        div()
+            .id("settings-site-button")
+            .h(px(height))
+            .px(px(self.scaled(12.0)))
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(6.0)))
+            .rounded(px(self.scaled(8.0)))
+            .border(px(1.0))
+            .border_color(self.theme.border_primary)
+            .bg(self.theme.bg_secondary)
+            .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
+            .text_color(self.theme.text_primary)
+            .cursor(CursorStyle::Arrow)
+            .hover({
+                let hover_bg = self.theme.bg_hover;
+                move |style| style.bg(hover_bg)
+            })
+            .child(
+                svg()
+                    .path("assets/icons/site.svg")
+                    .size(px(icon_size))
+                    .text_color(self.theme.text_secondary),
+            )
+            .child(self.t(TextKey::OfficialWebsite))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, _| {
+                    if let Err(error) = std::process::Command::new("open")
+                        .arg("https://moeka.app/")
+                        .spawn()
+                    {
+                        eprintln!("failed to open official website: {error}");
+                    }
+                }),
+            )
+            .into_any_element()
+    }
+
     fn render_format_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.date_time_format_preview_label(self.app_settings.date_time_format());
 
@@ -172,14 +222,10 @@ impl EditorView {
             .gap(px(self.scaled(12.0)))
             .child(self.render_section_heading(self.t(TextKey::AppIconSection)))
             .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_between()
-                    .children(
-                        (0..crate::editor::helpers::APP_ICON_COUNT)
-                            .map(|index| self.render_app_icon_card(index, index == selected, cx)),
-                    ),
+                div().flex().flex_row().justify_between().children(
+                    (0..crate::editor::helpers::APP_ICON_COUNT)
+                        .map(|index| self.render_app_icon_card(index, index == selected, cx)),
+                ),
             )
             .into_any_element()
     }
@@ -195,8 +241,9 @@ impl EditorView {
         let size = self.scaled(46.0);
         let radius = size * 0.2237;
         let opacity = self.app_icon_tile_opacity(index, is_active);
-        let image_path =
-            crate::editor::helpers::resolve_asset_image_path(&crate::editor::helpers::app_icon_asset_path(index));
+        let image_path = crate::editor::helpers::resolve_asset_image_path(
+            &crate::editor::helpers::app_icon_asset_path(index),
+        );
 
         div()
             .id(SharedString::from(format!("app-icon-{index}")))
@@ -213,7 +260,12 @@ impl EditorView {
                     this.set_app_icon(index, cx);
                 }),
             )
-            .child(img(image_path).size_full().rounded(px(radius)).opacity(opacity))
+            .child(
+                img(image_path)
+                    .size_full()
+                    .rounded(px(radius))
+                    .opacity(opacity),
+            )
             .into_any_element()
     }
 
@@ -252,7 +304,8 @@ impl EditorView {
         }
         self.app_icon_hover_prev = self.app_icon_hovered;
         self.app_icon_hovered = target;
-        self.app_icon_hover_since.set(Some(std::time::Instant::now()));
+        self.app_icon_hover_since
+            .set(Some(std::time::Instant::now()));
 
         // Drive the opacity fade by re-rendering every frame for its duration.
         cx.spawn(async move |this, cx| {
@@ -386,8 +439,6 @@ impl EditorView {
         let now = chrono::Local::now();
         let formats = [
             "%Y-%m-%d %H:%M",
-            "%Y-%m-%d",
-            "%H:%M",
             "%Y/%m/%d %H:%M",
             "%m/%d/%Y %I:%M %p",
             "%d/%m/%Y %H:%M",
@@ -404,7 +455,7 @@ impl EditorView {
                 let preview = now.format(format).to_string();
                 PickerOption {
                     value: (*format).to_string(),
-                    label: format!("{preview}  ({format})"),
+                    label: preview.clone(),
                     search_text: format!("{preview} {format}").to_lowercase(),
                     preview_font: None,
                 }
@@ -413,8 +464,7 @@ impl EditorView {
     }
 
     fn date_time_format_preview_label(&self, format: &str) -> String {
-        let preview = chrono::Local::now().format(format).to_string();
-        format!("{preview}  ({format})")
+        chrono::Local::now().format(format).to_string()
     }
 
     // ── Section heading ─────────────────────────────────────────
@@ -1796,8 +1846,9 @@ fn build_padded_dock_icon(index: usize) -> Option<std::path::PathBuf> {
     const SHADOW_BLUR: f32 = 16.0;
     const SHADOW_STRENGTH: f32 = 0.28;
 
-    let tile_path =
-        crate::editor::helpers::resolve_asset_image_path(&crate::editor::helpers::app_icon_asset_path(index));
+    let tile_path = crate::editor::helpers::resolve_asset_image_path(
+        &crate::editor::helpers::app_icon_asset_path(index),
+    );
     let tile = image::open(&tile_path).ok()?.to_rgba8();
     let content = imageops::resize(&tile, CONTENT, CONTENT, imageops::FilterType::Lanczos3);
     let offset = ((CANVAS - CONTENT) / 2) as i64;

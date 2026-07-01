@@ -1808,8 +1808,12 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let parent = self.sidebar_root.clone();
-        self.create_new_whiteboard(parent, cx);
+        // Keep references alive while creation is temporarily disabled.
+        let _ = self.t(crate::i18n::TextKey::NewWhiteboard);
+        if false {
+            let parent = self.sidebar_root.clone();
+            self.create_new_whiteboard(parent, cx);
+        }
     }
 
     pub(crate) fn on_close_active_tab(

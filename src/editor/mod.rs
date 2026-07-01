@@ -1746,11 +1746,7 @@ impl EditorView {
         let expanded_dirs = HashSet::new();
         let sidebar_error = None;
         let app_settings = AppSettings::load();
-        // Restore a previously selected (non-default) Dock icon. Index 0 is the
-        // bundled AppIcon.icns, so leave it to the app bundle.
-        if app_settings.app_icon_index != 0 {
-            settings_panel::apply_app_icon_to_dock(app_settings.app_icon_index);
-        }
+        settings_panel::apply_app_icon_to_dock(app_settings.app_icon_index);
         let ui_language = app_settings.ui_language();
         let welcome_tab = builtin_welcome_tab(ui_language);
         let buffer = Buffer::from_text(&welcome_tab.snapshot.text);
@@ -4810,9 +4806,17 @@ impl EditorView {
                 let display_width = image_width * fit_scale * image_view.zoom_factor;
                 let display_height = image_height * fit_scale * image_view.zoom_factor;
                 let limit_x = ((display_width - viewport_width) / 2.0).max(0.0);
-                let limit_y = (display_height - viewport_height).max(0.0);
+                let limit_y = if display_height > viewport_height {
+                    (display_height - viewport_height).max(0.0)
+                } else {
+                    ((viewport_height - display_height) / 2.0).max(0.0)
+                };
                 image_view.pan_x = image_view.pan_x.clamp(-limit_x, limit_x);
-                image_view.pan_y = image_view.pan_y.clamp(-limit_y, 0.0);
+                image_view.pan_y = if display_height > viewport_height {
+                    image_view.pan_y.clamp(-limit_y, 0.0)
+                } else {
+                    image_view.pan_y.clamp(-limit_y, limit_y)
+                };
             } else {
                 image_view.pan_x = 0.0;
                 image_view.pan_y = 0.0;
@@ -4994,14 +4998,24 @@ impl EditorView {
         let display_height = intrinsic_height * fit_scale * view.zoom_factor;
         let limit_x = ((display_width - viewport_width) / 2.0).max(0.0);
         let limit_y = if preview_kind.is_some() {
-            (display_height - viewport_height).max(0.0)
-        } else {
+            if display_height > viewport_height {
+                (display_height - viewport_height).max(0.0)
+            } else {
+                ((viewport_height - display_height) / 2.0).max(0.0)
+            }
+        } else if display_height > viewport_height {
             ((display_height - viewport_height) / 2.0).max(0.0)
+        } else {
+            ((viewport_height - display_height) / 2.0).max(0.0)
         };
 
         view.pan_x = view.pan_x.clamp(-limit_x, limit_x);
         view.pan_y = if preview_kind.is_some() {
-            view.pan_y.clamp(-limit_y, 0.0)
+            if display_height > viewport_height {
+                view.pan_y.clamp(-limit_y, 0.0)
+            } else {
+                view.pan_y.clamp(-limit_y, limit_y)
+            }
         } else {
             view.pan_y.clamp(-limit_y, limit_y)
         };

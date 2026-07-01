@@ -94,7 +94,7 @@ impl EditorView {
             });
             let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
                 this.workspace_search_input_focused = false;
-                this.close_workspace_search_if_trimmed_empty(cx);
+                cx.notify();
             });
             self.workspace_search_focus_sub = Some(focus_sub);
             self.workspace_search_blur_sub = Some(blur_sub);
@@ -138,24 +138,6 @@ impl EditorView {
         self.workspace_search_highlight_path = None;
         self.workspace_search_highlight_ranges.clear();
         self.workspace_search_highlight_current_index = None;
-    }
-
-    fn close_workspace_search_if_trimmed_empty(&mut self, cx: &mut Context<Self>) {
-        if !self.workspace_search_query.trim().is_empty() {
-            return;
-        }
-
-        self.workspace_search_query.clear();
-        self.workspace_search_visible = false;
-        self.sidebar_visible = false;
-        self.workspace_search_results.clear();
-        self.workspace_search_focus_sub = None;
-        self.workspace_search_task = None;
-        self.workspace_search_blur_sub = None;
-        self.workspace_search_input_focused = false;
-        self.workspace_search_render_limit = 100;
-        self.clear_workspace_search_preview_state();
-        cx.notify();
     }
 
     fn workspace_search_total_match_count(&self) -> usize {

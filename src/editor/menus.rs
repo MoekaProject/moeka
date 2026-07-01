@@ -1940,18 +1940,6 @@ impl EditorView {
                     },
                 ));
             }
-            {
-                let pd = parent_dir.clone();
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::NewWhiteboard),
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.create_new_whiteboard(pd.clone(), cx);
-                    },
-                ));
-            }
             items.push(self.render_context_menu_separator());
             if has_clipboard {
                 let pd = parent_dir.clone();
@@ -2072,18 +2060,6 @@ impl EditorView {
                 cx,
                 move |this, window, cx| {
                     this.start_create_dir(pd.clone(), window, cx);
-                },
-            ));
-        }
-        {
-            let pd = parent_dir.clone();
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::NewWhiteboard),
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.close_context_menu(cx);
-                    this.create_new_whiteboard(pd.clone(), cx);
                 },
             ));
         }
@@ -3414,6 +3390,9 @@ impl EditorView {
             .w(px(width))
             .max_h(px(layout.max_height))
             .opacity(self.context_menu_opacity.clamp(0.0, 1.0))
+            // Occlude so hovering a menu item does not also hover the sidebar /
+            // file-tree item painted underneath the menu.
+            .occlude()
             .overflow_y_scroll()
             .py(px(self.scaled(ms.menu_padding_y_px)))
             .bg(ms.menu_bg)
@@ -3605,19 +3584,6 @@ impl EditorView {
                         cx,
                         move |this, window, cx| {
                             this.start_create_dir(parent.clone(), window, cx);
-                        },
-                    ));
-                }
-                {
-                    let parent = self.sidebar_root.clone();
-                    items.push(self.render_context_menu_item_with_icon(
-                        self.t(crate::i18n::TextKey::NewWhiteboard),
-                        "assets/icons/whiteboard/whiteboard.svg",
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.create_new_whiteboard(parent.clone(), cx);
                         },
                     ));
                 }

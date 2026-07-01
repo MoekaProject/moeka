@@ -648,6 +648,10 @@ pub struct QuoteBlockStyles {
     pub quote_block_radius_px: f32,
     pub quote_block_padding_top_px: f32,
     pub quote_block_padding_bottom_px: f32,
+    /// Extra inner vertical padding applied only to callout blocks
+    /// (`> [!KIND]`), on top of the plain quote padding.
+    pub quote_block_callout_padding_top_px: f32,
+    pub quote_block_callout_padding_bottom_px: f32,
     pub quote_block_padding_left_px: f32,
     pub quote_block_padding_right_px: f32,
     pub quote_block_callout_icon_color: Hsla,
@@ -1387,7 +1391,7 @@ impl Styles {
                 sidebar_edit_input_border_color: sidebar_theme.text_accent,
                 sidebar_edit_input_radius_px: 3.0,
                 sidebar_edit_input_font_size_px: ui_font_size_px,
-                sidebar_edit_input_cursor_height_ratio: 0.58,
+                sidebar_edit_input_cursor_height_ratio: 0.72,
                 sidebar_edit_input_text_color: sidebar_theme.text_bright,
                 sidebar_edit_input_placeholder_color: sidebar_theme.text_secondary,
                 sidebar_error_padding_x_px: 14.0,
@@ -1724,6 +1728,8 @@ impl Styles {
                 quote_block_radius_px: 0.0,
                 quote_block_padding_top_px: 0.0,
                 quote_block_padding_bottom_px: 0.0,
+                quote_block_callout_padding_top_px: 5.0,
+                quote_block_callout_padding_bottom_px: 5.0,
                 quote_block_padding_left_px: 12.0,
                 quote_block_padding_right_px: 10.0,
                 quote_block_callout_icon_color: theme.bold,

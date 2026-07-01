@@ -1467,26 +1467,45 @@ impl Render for EditorView {
                                                                 .on_mouse_down(
                                                                     MouseButton::Left,
                                                                     cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                                                                        cx.stop_propagation();
-                                                                        this.on_mouse_down(event, window, cx);
+                                                                        let should_capture = this
+                                                                            .preview_overlay_bounds
+                                                                            .is_some_and(|bounds| bounds.contains(&event.position));
+                                                                        if should_capture {
+                                                                            cx.stop_propagation();
+                                                                            this.on_mouse_down(event, window, cx);
+                                                                        }
                                                                     }),
                                                                 )
                                                                 .on_mouse_up(
                                                                     MouseButton::Left,
                                                                     cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                                                                        cx.stop_propagation();
-                                                                        this.on_mouse_up(event, window, cx);
+                                                                        let should_capture = this.image_drag_state.is_some()
+                                                                            || this
+                                                                                .preview_overlay_bounds
+                                                                                .is_some_and(|bounds| bounds.contains(&event.position));
+                                                                        if should_capture {
+                                                                            cx.stop_propagation();
+                                                                            this.on_mouse_up(event, window, cx);
+                                                                        }
                                                                     }),
                                                                 )
                                                                 .on_mouse_up_out(
                                                                     MouseButton::Left,
                                                                     cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                                                                        cx.stop_propagation();
-                                                                        this.on_mouse_up(event, window, cx);
+                                                                        if this.image_drag_state.is_some() {
+                                                                            cx.stop_propagation();
+                                                                            this.on_mouse_up(event, window, cx);
+                                                                        }
                                                                     }),
                                                                 )
                                                                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                                                                    this.on_mouse_move(event, window, cx);
+                                                                    let should_capture = this.image_drag_state.is_some()
+                                                                        || this
+                                                                            .preview_overlay_bounds
+                                                                            .is_some_and(|bounds| bounds.contains(&event.position));
+                                                                    if should_capture {
+                                                                        this.on_mouse_move(event, window, cx);
+                                                                    }
                                                                 })),
                                                         )
                                                         .child(self.render_preview_overlay_actions(cx))

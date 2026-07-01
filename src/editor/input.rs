@@ -2482,15 +2482,51 @@ impl EditorView {
             return;
         }
         if self.preview_overlay.is_some() {
+            let delta = event.delta.pixel_delta(px(40.0));
+            let dx = f32::from(delta.x);
+            let dy = f32::from(delta.y);
+            let zoom_gesture = event.modifiers.platform || event.modifiers.control;
+
+            if zoom_gesture {
+                if dy.abs() < 0.01 {
+                    return;
+                }
+                let zoom_ratio = 1.0 + (dy.abs() / 300.0).clamp(0.05, 0.35);
+                let factor = if dy < 0.0 {
+                    zoom_ratio
+                } else {
+                    1.0 / zoom_ratio
+                };
+                self.zoom_preview_overlay_view(factor);
+                cx.notify();
+                return;
+            }
+
+            if dx == 0.0 && dy == 0.0 {
+                return;
+            }
+            if let Some(overlay) = self.preview_overlay_state_mut() {
+                overlay.view.pan_x -= dx;
+                overlay.view.pan_y -= dy;
+            }
+            self.clamp_preview_overlay_view();
+            cx.notify();
             return;
         }
 
         if self.active_tab_is_image() {
-            let delta_y: f32 = event.delta.pixel_delta(px(40.0)).y.into();
-            if delta_y != 0.0 {
-                let zoom_ratio = 1.0 + (delta_y.abs() / 300.0).clamp(0.05, 0.35);
+            let delta = event.delta.pixel_delta(px(40.0));
+            let dx = f32::from(delta.x);
+            let dy = f32::from(delta.y);
+            let zoom_gesture = event.modifiers.platform || event.modifiers.control;
+
+            if zoom_gesture {
+                if dy.abs() < 0.01 {
+                    return;
+                }
+                let zoom_ratio = 1.0 + (dy.abs() / 300.0).clamp(0.05, 0.35);
                 if let Some(image_view) = self.active_image_view_state_mut() {
-                    if delta_y < 0.0 {
+                    if dy < 0.0 {
                         image_view.zoom_factor *= zoom_ratio;
                     } else {
                         image_view.zoom_factor /= zoom_ratio;
@@ -2498,7 +2534,18 @@ impl EditorView {
                 }
                 self.clamp_active_image_view();
                 cx.notify();
+                return;
             }
+
+            if dx == 0.0 && dy == 0.0 {
+                return;
+            }
+            if let Some(image_view) = self.active_image_view_state_mut() {
+                image_view.pan_x -= dx;
+                image_view.pan_y -= dy;
+            }
+            self.clamp_active_image_view();
+            cx.notify();
             return;
         }
 

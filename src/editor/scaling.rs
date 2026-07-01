@@ -247,13 +247,40 @@ impl EditorView {
         };
 
         if self.is_quote_line(line) {
+            // Callout blocks (`> [!KIND]`) get extra inner vertical padding on
+            // top of the plain quote padding; the callout kind is only tagged on
+            // the group's first line.
+            let group_start = self.quote_group_start(line);
+            let is_callout = self
+                .decorations
+                .get(group_start)
+                .is_some_and(|decoration| decoration.callout_kind.is_some());
+            let callout_top = if is_callout {
+                self.scaled(self.styles.quote_block.quote_block_callout_padding_top_px)
+            } else {
+                0.0
+            };
+            let callout_bottom = if is_callout {
+                self.scaled(
+                    self.styles
+                        .quote_block
+                        .quote_block_callout_padding_bottom_px,
+                )
+            } else {
+                0.0
+            };
             let top = self
                 .is_quote_group_start(line)
-                .then(|| self.scaled(self.styles.quote_block.quote_block_padding_top_px))
+                .then(|| {
+                    self.scaled(self.styles.quote_block.quote_block_padding_top_px) + callout_top
+                })
                 .unwrap_or(0.0);
             let bottom = self
                 .is_quote_group_end(line)
-                .then(|| self.scaled(self.styles.quote_block.quote_block_padding_bottom_px))
+                .then(|| {
+                    self.scaled(self.styles.quote_block.quote_block_padding_bottom_px)
+                        + callout_bottom
+                })
                 .unwrap_or(0.0);
             return (top, bottom);
         }
