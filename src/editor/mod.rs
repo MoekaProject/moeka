@@ -1130,6 +1130,16 @@ fn markdown_decoration_is_plain_text(decoration: &LineDecoration) -> bool {
         && decoration.image_path.is_none()
 }
 
+fn markdown_plain_edit_can_change_inline_delimiter_flanking(
+    inserted_text: &str,
+    line_before_edit: &str,
+) -> bool {
+    inserted_text.chars().any(char::is_whitespace)
+        && line_before_edit
+            .chars()
+            .any(|ch| matches!(ch, '*' | '_' | '~'))
+}
+
 fn finalize_multi_cursor_edits(
     mut edits: Vec<MultiCursorResolvedEdit>,
 ) -> (Vec<(usize, bool)>, Vec<(usize, bool)>) {
@@ -7750,11 +7760,17 @@ impl EditorView {
         // `.`/`)` and spaces, none of which appear in the blocklist above (unlike
         // unordered markers, which trip the `-`/`*`/`+` entries). Without this
         // check, typing an ordered marker on a plain line would be treated as a
-        // plain-text edit and never re-detected as a list. Force a full reparse
-        // when the edited line now starts with an ordered-list prefix.
-        let new_line = self.buffer.line_content(start_line);
-        let trimmed = new_line.trim_start_matches([' ', '\t']);
+        // plain-text edit and never re-detected as a list. Transfers are queued
+        // before the buffer mutation, and `ordered_list_prefix_len("1.")` is
+        // enough to catch the common "type a space after the marker" case.
+        let line_before_edit = self.buffer.line_content(start_line);
+        let trimmed = line_before_edit.trim_start_matches([' ', '\t']);
         if crate::markdown::ordered_list_prefix_len(trimmed) > 0 {
+            return false;
+        }
+
+        if markdown_plain_edit_can_change_inline_delimiter_flanking(inserted_text, line_before_edit)
+        {
             return false;
         }
 
@@ -8168,6 +8184,22 @@ mod tests {
             "# Title\n\npara one\npara two\n\nmore\n",
             "# Title\n\npara **one**\npara two\n\nmore\n",
         ));
+    }
+
+    #[test]
+    fn markdown_plain_transfer_rejects_whitespace_that_can_close_emphasis() {
+        assert!(
+            super::markdown_plain_edit_can_change_inline_delimiter_flanking(" ", "**生态改进：**")
+        );
+        assert!(super::markdown_plain_edit_can_change_inline_delimiter_flanking(" ", "*重点：*"));
+        assert!(super::markdown_plain_edit_can_change_inline_delimiter_flanking(" ", "~~删除：~~"));
+        assert!(
+            !super::markdown_plain_edit_can_change_inline_delimiter_flanking(
+                "高",
+                "**生态改进：** "
+            )
+        );
+        assert!(!super::markdown_plain_edit_can_change_inline_delimiter_flanking(" ", "普通文本"));
     }
 
     #[test]

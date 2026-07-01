@@ -453,8 +453,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#E06C75"),
             checkbox_checked: crate::hex_hsla!("#3778AE"),
             gutter_heading: with_alpha(crate::hex_hsla!("#ABB2BF"), 0.2),
-            git_status_added: crate::hex_hsla!("#3aa675"),
-            git_status_modified: crate::hex_hsla!("#3aa675"),
+            git_status_added: crate::hex_hsla!("#88C796"),
+            git_status_modified: crate::hex_hsla!("#DDC194"),
             diff_added_bg: crate::hex_hsla!("#1b5e42"),
             diff_removed_bg: crate::hex_hsla!("#7a2738"),
         }
@@ -503,8 +503,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#C74440"),
             checkbox_checked: crate::hex_hsla!("#2383E2"),
             gutter_heading: with_alpha(crate::hex_hsla!("#37352F"), 0.2),
-            git_status_added: crate::hex_hsla!("#3AA675"),
-            git_status_modified: crate::hex_hsla!("#3AA675"),
+            git_status_added: crate::hex_hsla!("#88C796"),
+            git_status_modified: crate::hex_hsla!("#DDC194"),
             diff_added_bg: crate::hex_hsla!("#217a4b"),
             diff_removed_bg: crate::hex_hsla!("#a44040"),
         }
@@ -553,8 +553,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#676767D1"),
             checkbox_checked: crate::hex_hsla!("#676767D1"),
             gutter_heading: with_alpha(crate::hex_hsla!("#323232"), 1.0),
-            git_status_added: crate::hex_hsla!("#2F8F63"),
-            git_status_modified: crate::hex_hsla!("#2F8F63"),
+            git_status_added: crate::hex_hsla!("#88C796"),
+            git_status_modified: crate::hex_hsla!("#DDC194"),
             diff_added_bg: crate::hex_hsla!("#1d6f46"),
             diff_removed_bg: crate::hex_hsla!("#a33b3b"),
         }
@@ -603,8 +603,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#e06c75"),
             checkbox_checked: crate::hex_hsla!("#3778ae"),
             gutter_heading: with_alpha(crate::hex_hsla!("#abb2bf"), 0.2),
-            git_status_added: crate::hex_hsla!("#3aa675"),
-            git_status_modified: crate::hex_hsla!("#3aa675"),
+            git_status_added: crate::hex_hsla!("#88C796"),
+            git_status_modified: crate::hex_hsla!("#DDC194"),
             diff_added_bg: crate::hex_hsla!("#1a5e40"),
             diff_removed_bg: crate::hex_hsla!("#7a2a37"),
         }

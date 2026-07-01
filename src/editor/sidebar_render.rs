@@ -390,11 +390,11 @@ impl EditorView {
             gpui::transparent_black()
         };
         let item_hover_bg = ss.sidebar_item_hover_bg;
-        let icon_color = git_status_color.unwrap_or(if is_selected {
+        let icon_color = if is_selected {
             ss.sidebar_item_selected_icon_color
         } else {
             ss.sidebar_item_icon_color
-        });
+        };
         let label_color = git_status_color.unwrap_or(if is_selected {
             ss.sidebar_item_selected_text_color
         } else {
@@ -675,11 +675,11 @@ impl EditorView {
                     current_path == cut_path || current_path.starts_with(&cut_path)
                 })
         });
-        let icon_color = git_status_color.unwrap_or(if is_selected {
+        let icon_color = if is_selected {
             ss.sidebar_item_selected_icon_color
         } else {
             ss.sidebar_item_icon_color
-        });
+        };
         let label_color = git_status_color.unwrap_or(if is_selected {
             ss.sidebar_item_selected_text_color
         } else {
