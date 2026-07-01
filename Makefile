@@ -18,6 +18,8 @@ BINARY_PATH := target/$(TARGET)/$(PROFILE)/$(APP_NAME)
 DMG_PATH := $(DIST_DIR)/$(APP_NAME)-$(TARGET).dmg
 INFO_PLIST_TEMPLATE := packaging/macos/Info.plist
 ICON_FILE := packaging/macos/AppIcon.icns
+ICON_SOURCE := assets/icons/app/icon-0.png
+ICON_SCRIPT := scripts/generate_app_icon.sh
 VOLUME_NAME := $(APP_NAME)
 
 .PHONY: dmg app build-release clean-dmg clean-app
@@ -36,7 +38,10 @@ $(DMG_PATH): app
 
 app: $(APP_DIR)
 
-$(APP_DIR): build-release $(INFO_PLIST_TEMPLATE)
+$(ICON_FILE): $(ICON_SOURCE) $(ICON_SCRIPT)
+	@bash "$(ICON_SCRIPT)" "$(ICON_SOURCE)" "$(ICON_FILE)"
+
+$(APP_DIR): build-release $(INFO_PLIST_TEMPLATE) $(ICON_FILE)
 	@rm -rf "$(APP_DIR)"
 	@mkdir -p "$(MACOS_DIR)" "$(RESOURCES_DIR)"
 	@cp "$(BINARY_PATH)" "$(MACOS_DIR)/$(APP_NAME)"

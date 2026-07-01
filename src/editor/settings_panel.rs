@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, Context, CursorStyle, Focusable, MouseButton, ScrollHandle, SharedString, Window,
-    div, prelude::*, px, svg,
+    div, img, prelude::*, px, svg,
 };
 
 use crate::i18n::{TextKey, UiLanguage, language_picker_options};
@@ -92,7 +92,8 @@ impl EditorView {
                     )
                     .child(self.render_theme_section(cx))
                     .child(self.render_font_section(window, cx))
-                    .child(self.render_format_section(cx)),
+                    .child(self.render_format_section(cx))
+                    .child(self.render_app_icon_section(cx)),
             )
             .into_any_element()
     }
@@ -152,6 +153,86 @@ impl EditorView {
                 cx,
             ))
             .into_any_element()
+    }
+
+    // ── App icon section ────────────────────────────────────────
+
+    fn render_app_icon_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.app_settings.app_icon_index;
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(self.scaled(12.0)))
+            .child(self.render_section_heading(self.t(TextKey::AppIconSection)))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_between()
+                    .children(
+                        (0..crate::editor::helpers::APP_ICON_COUNT)
+                            .map(|index| self.render_app_icon_card(index, index == selected, cx)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_app_icon_card(
+        &self,
+        index: usize,
+        is_active: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let active_accent = self.theme.text_accent;
+        let inactive_border = self.theme.border_secondary;
+        let inactive_hover_border = self.theme.border_tertiary;
+        // Square button sized so all nine sit in a single row; the corner radius
+        // matches the standard macOS icon (~22.37% of the side).
+        let size = self.scaled(46.0);
+        let radius = size * 0.2237;
+        let image_path =
+            crate::editor::helpers::resolve_asset_image_path(&crate::editor::helpers::app_icon_asset_path(index));
+
+        div()
+            .id(SharedString::from(format!("app-icon-{index}")))
+            .w(px(size))
+            .h(px(size))
+            .rounded(px(radius))
+            .border(px(2.0))
+            .border_color(if is_active {
+                active_accent
+            } else {
+                inactive_border
+            })
+            .cursor(CursorStyle::Arrow)
+            .hover(move |style| {
+                if is_active {
+                    style
+                } else {
+                    style.border_color(inactive_hover_border)
+                }
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.set_app_icon(index, cx);
+                }),
+            )
+            .child(img(image_path).size_full().rounded(px(radius)))
+            .into_any_element()
+    }
+
+    pub(crate) fn set_app_icon(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= crate::editor::helpers::APP_ICON_COUNT
+            || self.app_settings.app_icon_index == index
+        {
+            return;
+        }
+        self.app_settings.app_icon_index = index;
+        self.app_settings.save();
+        apply_app_icon_to_dock(index);
+        cx.notify();
     }
 
     fn render_editor_display_options(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1622,3 +1703,59 @@ impl EditorView {
         }
     }
 }
+
+/// Applies the selected application icon tile to the macOS Dock at runtime via
+/// `NSApplication setApplicationIconImage:`. No-op on other platforms.
+#[cfg(target_os = "macos")]
+pub(crate) fn apply_app_icon_to_dock(index: usize) {
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let Some(padded_path) = build_padded_dock_icon(index) else {
+        return;
+    };
+    let Some(path_str) = padded_path.to_str() else {
+        return;
+    };
+    let Ok(c_path) = std::ffi::CString::new(path_str) else {
+        return;
+    };
+
+    unsafe {
+        let ns_path: *mut objc::runtime::Object =
+            msg_send![class!(NSString), stringWithUTF8String: c_path.as_ptr()];
+        let image: *mut objc::runtime::Object = msg_send![class!(NSImage), alloc];
+        let image: *mut objc::runtime::Object = msg_send![image, initWithContentsOfFile: ns_path];
+        if image.is_null() {
+            return;
+        }
+        let app: *mut objc::runtime::Object = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![app, setApplicationIconImage: image];
+    }
+}
+
+/// Renders the full-bleed tile onto a padded, transparent canvas so the Dock
+/// shows it at the standard macOS app-icon size, and returns the temp PNG path.
+#[cfg(target_os = "macos")]
+fn build_padded_dock_icon(index: usize) -> Option<std::path::PathBuf> {
+    use image::{RgbaImage, imageops};
+
+    // Match the .icns margin: artwork fills ~80.5% of the canvas, centered.
+    const CANVAS: u32 = 1024;
+    const CONTENT: u32 = 824;
+
+    let tile_path =
+        crate::editor::helpers::resolve_asset_image_path(&crate::editor::helpers::app_icon_asset_path(index));
+    let tile = image::open(&tile_path).ok()?.to_rgba8();
+    let content = imageops::resize(&tile, CONTENT, CONTENT, imageops::FilterType::Lanczos3);
+
+    let mut canvas = RgbaImage::new(CANVAS, CANVAS);
+    let offset = ((CANVAS - CONTENT) / 2) as i64;
+    imageops::overlay(&mut canvas, &content, offset, offset);
+
+    let out_path = std::env::temp_dir().join(format!("markdown-editor-dock-icon-{index}.png"));
+    canvas.save(&out_path).ok()?;
+    Some(out_path)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn apply_app_icon_to_dock(_index: usize) {}

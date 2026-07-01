@@ -11,7 +11,8 @@ use gpui::{
 #[cfg(not(target_os = "macos"))]
 use printpdf::{Mm, PdfDocument};
 use pulldown_cmark::{
-    CodeBlockKind, CowStr, Event, LinkType, Options, Parser, Tag, TagEnd, html::push_html,
+    BlockQuoteKind, CodeBlockKind, CowStr, Event, LinkType, Options, Parser, Tag, TagEnd,
+    html::push_html,
 };
 use similar::{Algorithm, ChangeTag, InlineChange, TextDiff};
 use unicode_segmentation::UnicodeSegmentation;
@@ -309,13 +310,336 @@ fn export_code_block_preview_html(kind: &CodeBlockKind<'_>, source: &str) -> Opt
     ))
 }
 
-fn render_markdown_for_export(markdown: &str) -> String {
-    let mut html = String::new();
-    let parser = Parser::new_ext(markdown, Options::all());
-    let mut events = Vec::new();
-    let mut pending_code_block: Option<(CodeBlockKind<'_>, Vec<Event<'_>>, String)> = None;
+/// Syntax-highlights a fenced code block for export using the same syntect
+/// syntaxes the editor uses, emitting inline-styled HTML so the PDF is
+/// self-contained. Uses a bundled light theme (independent of the app theme so
+/// dark mode does not produce unreadable code on the light page). Returns
+/// `None` when the language is unknown so the caller falls back to a plain
+/// `<pre><code>` block.
+fn highlight_code_block_html(kind: &CodeBlockKind<'_>, source: &str) -> Option<String> {
+    let language = match kind {
+        CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or_default().trim(),
+        CodeBlockKind::Indented => return None,
+    };
+    if language.is_empty() {
+        return None;
+    }
+
+    let syntax = helpers::find_syntax_for_language(language)?;
+    let syntax_set = helpers::syntax_set();
+
+    static EXPORT_THEME: std::sync::OnceLock<Option<syntect::highlighting::Theme>> =
+        std::sync::OnceLock::new();
+    let theme = EXPORT_THEME
+        .get_or_init(|| {
+            syntect::highlighting::ThemeSet::load_defaults()
+                .themes
+                .remove("InspiredGitHub")
+        })
+        .as_ref()?;
+
+    let source = source.strip_suffix('\n').unwrap_or(source);
+    syntect::html::highlighted_html_for_string(source, syntax_set, syntax, theme).ok()
+}
+
+fn escape_export_html_text(text: &str, out: &mut String) {
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
+fn try_export_paired_syntax(
+    text: &str,
+    open: usize,
+    delimiter: &str,
+    tag: &str,
+    out: &mut String,
+) -> Option<usize> {
+    let inner_start = open + delimiter.len();
+    let rest = text.get(inner_start..)?;
+    let close_rel = rest.find(delimiter)?;
+    if close_rel == 0 {
+        return None;
+    }
+    let inner = &rest[..close_rel];
+    if inner.contains('\n') {
+        return None;
+    }
+    out.push('<');
+    out.push_str(tag);
+    out.push('>');
+    escape_export_html_text(inner, out);
+    out.push_str("</");
+    out.push_str(tag);
+    out.push('>');
+    Some(inner_start + close_rel + delimiter.len())
+}
+
+/// Attempts to convert a `:shortcode:` emoji starting at `open` (the `:`) into
+/// its emoji character, matching the editor's `emojis` lookup. Returns the byte
+/// index just past the closing `:` on success.
+fn try_export_emoji(text: &str, open: usize, out: &mut String) -> Option<usize> {
+    let inner_start = open + 1;
+    let rest = text.get(inner_start..)?;
+    let mut end_rel = 0;
+    for ch in rest.chars() {
+        if ch == ':' {
+            break;
+        }
+        if !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '+' | '-')) {
+            return None;
+        }
+        end_rel += ch.len_utf8();
+    }
+    if rest.get(end_rel..).and_then(|r| r.chars().next()) != Some(':') || end_rel == 0 {
+        return None;
+    }
+    let emoji = emojis::get_by_shortcode(&rest[..end_rel])?;
+    out.push_str(emoji.as_str());
+    Some(inner_start + end_rel + 1)
+}
+
+/// Converts the editor's inline syntaxes that pulldown-cmark does not emit on
+/// its own (or that it fails to form when extensions conflict) into inline
+/// HTML, escaping the surrounding literal text: `==highlight==`,
+/// `++underline++`, `^superscript^`, `~subscript~`, `~~strikethrough~~` and
+/// `:emoji:` shortcodes. Returns `None` when none are present so the caller
+/// keeps pulldown's default (escaped) text handling.
+fn convert_inline_custom_syntax(text: &str) -> Option<String> {
+    if !text.contains("==")
+        && !text.contains("++")
+        && !text.contains('^')
+        && !text.contains('~')
+        && !text.contains(':')
+    {
+        return None;
+    }
+
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut index = 0;
+    let mut changed = false;
+
+    while index < text.len() {
+        let two_char = text.get(index..index + 2);
+        if two_char == Some("==")
+            && let Some(next) = try_export_paired_syntax(text, index, "==", "mark", &mut out)
+        {
+            changed = true;
+            index = next;
+            continue;
+        }
+        if two_char == Some("++")
+            && let Some(next) = try_export_paired_syntax(text, index, "++", "u", &mut out)
+        {
+            changed = true;
+            index = next;
+            continue;
+        }
+        if two_char == Some("~~")
+            && let Some(next) = try_export_paired_syntax(text, index, "~~", "del", &mut out)
+        {
+            changed = true;
+            index = next;
+            continue;
+        }
+
+        let ch = text[index..].chars().next().unwrap_or('\u{0}');
+        if ch == '^'
+            && let Some(next) = try_export_paired_syntax(text, index, "^", "sup", &mut out)
+        {
+            changed = true;
+            index = next;
+            continue;
+        }
+        if ch == '~'
+            && let Some(next) = try_export_paired_syntax(text, index, "~", "sub", &mut out)
+        {
+            changed = true;
+            index = next;
+            continue;
+        }
+        if ch == ':'
+            && let Some(next) = try_export_emoji(text, index, &mut out)
+        {
+            changed = true;
+            index = next;
+            continue;
+        }
+
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+        index += ch.len_utf8();
+    }
+
+    changed.then_some(out)
+}
+
+const CALLOUT_NOTE_SVG: &str = include_str!("../../assets/icons/format/callout-note.svg");
+const CALLOUT_TIP_SVG: &str = include_str!("../../assets/icons/format/callout-tip.svg");
+const CALLOUT_IMPORTANT_SVG: &str = include_str!("../../assets/icons/format/callout-important.svg");
+const CALLOUT_WARNING_SVG: &str = include_str!("../../assets/icons/format/callout-warning.svg");
+const CALLOUT_CAUTION_SVG: &str = include_str!("../../assets/icons/format/callout-caution.svg");
+
+/// Renders an editor-style callout blockquote (`> [!KIND] optional title`) as a
+/// styled `<blockquote>` carrying the matching icon and title. `inner` is the
+/// event stream between the blockquote's start and end tags (exclusive).
+/// Returns `None` when the blockquote is not a callout so the caller renders it
+/// as a normal blockquote.
+fn callout_assets(kind: BlockQuoteKind) -> (&'static str, &'static str, &'static str) {
+    match kind {
+        BlockQuoteKind::Note => ("note", "Note", CALLOUT_NOTE_SVG),
+        BlockQuoteKind::Tip => ("tip", "Tip", CALLOUT_TIP_SVG),
+        BlockQuoteKind::Important => ("important", "Important", CALLOUT_IMPORTANT_SVG),
+        BlockQuoteKind::Warning => ("warning", "Warning", CALLOUT_WARNING_SVG),
+        BlockQuoteKind::Caution => ("caution", "Caution", CALLOUT_CAUTION_SVG),
+    }
+}
+
+/// Renders a callout blockquote with the given kind, optional title and body
+/// events. An empty `title` falls back to the kind's label.
+fn build_callout_html(kind: BlockQuoteKind, title: &str, body_events: Vec<Event<'_>>) -> String {
+    let (kind_class, kind_label, icon) = callout_assets(kind);
+    let icon = icon.replacen(
+        "<svg ",
+        "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\" ",
+        1,
+    );
+
+    let mut body_html = String::new();
+    push_html(
+        &mut body_html,
+        transform_export_events(body_events.into_iter()).into_iter(),
+    );
+
+    let mut title_html = String::new();
+    if title.is_empty() {
+        title_html.push_str(kind_label);
+    } else {
+        escape_export_html_text(title, &mut title_html);
+    }
+
+    format!(
+        "<blockquote class=\"callout callout-{kind_class}\">\
+         <p class=\"callout-title\">{icon}<span>{title_html}</span></p>\
+         {body_html}</blockquote>"
+    )
+}
+
+/// Detects the editor's same-line callout syntax (`> [!KIND] optional title`),
+/// which pulldown leaves as a plain blockquote because the title shares the
+/// marker line. `inner` is the event stream between the blockquote tags
+/// (exclusive). Returns `None` when it is not such a callout.
+fn try_render_callout(inner: &[Event<'_>]) -> Option<String> {
+    if !matches!(inner.first(), Some(Event::Start(Tag::Paragraph))) {
+        return None;
+    }
+
+    // pulldown fragments `[!KIND]` across several text events (a leading `[`
+    // looks like a reference link), so reconstruct the blockquote's first line
+    // by concatenating its inline text up to the first line break.
+    let para_end = inner
+        .iter()
+        .position(|event| matches!(event, Event::End(TagEnd::Paragraph)))?;
+    let mut first_line = String::new();
+    let mut first_line_end = para_end;
+    for (index, event) in inner.iter().enumerate().take(para_end).skip(1) {
+        match event {
+            Event::Text(text) | Event::Code(text) => first_line.push_str(text),
+            Event::SoftBreak | Event::HardBreak => {
+                first_line_end = index;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let rest = first_line.trim_start().strip_prefix("[!")?;
+    let close = rest.find(']')?;
+    let kind = match rest[..close].to_ascii_uppercase().as_str() {
+        "NOTE" => BlockQuoteKind::Note,
+        "TIP" => BlockQuoteKind::Tip,
+        "IMPORTANT" => BlockQuoteKind::Important,
+        "WARNING" => BlockQuoteKind::Warning,
+        "CAUTION" => BlockQuoteKind::Caution,
+        _ => return None,
+    };
+    let title = rest[close + 1..].trim();
+
+    // The body is the remainder of the marker paragraph (after its first line
+    // break) plus any later blocks in the blockquote.
+    let first_body = if matches!(
+        inner.get(first_line_end),
+        Some(Event::SoftBreak | Event::HardBreak)
+    ) {
+        &inner[first_line_end + 1..para_end]
+    } else {
+        &[][..]
+    };
+
+    let mut body_events: Vec<Event<'_>> = Vec::new();
+    if !first_body.is_empty() {
+        body_events.push(Event::Start(Tag::Paragraph));
+        body_events.extend(first_body.iter().cloned());
+        body_events.push(Event::End(TagEnd::Paragraph));
+    }
+    body_events.extend(inner[para_end + 1..].iter().cloned());
+
+    Some(build_callout_html(kind, title, body_events))
+}
+
+/// Walks pulldown's event stream and rewrites the constructs the export needs to
+/// render itself: fenced code-block previews (mermaid/math), math, the editor's
+/// custom inline syntaxes, and `[!KIND]` callouts. Blockquotes are buffered so a
+/// callout can be detected from their first line; the function recurses for
+/// blockquote bodies so nested constructs are handled too.
+fn transform_export_events<'a>(parser: impl Iterator<Item = Event<'a>>) -> Vec<Event<'a>> {
+    let mut events: Vec<Event<'a>> = Vec::new();
+    let mut pending_code_block: Option<(CodeBlockKind<'a>, Vec<Event<'a>>, String)> = None;
+    let mut pending_blockquote: Option<(usize, Option<BlockQuoteKind>, Vec<Event<'a>>)> = None;
 
     for event in parser {
+        if let Some((depth, kind, mut buffer)) = pending_blockquote.take() {
+            match &event {
+                Event::Start(Tag::BlockQuote(_)) => {
+                    buffer.push(event);
+                    pending_blockquote = Some((depth + 1, kind, buffer));
+                }
+                Event::End(TagEnd::BlockQuote(_)) if depth == 1 => {
+                    if let Some(callout_html) = try_render_callout(&buffer) {
+                        events.push(Event::Html(CowStr::Boxed(callout_html.into_boxed_str())));
+                    } else if let Some(alert_kind) = kind {
+                        // A GitHub-style alert (`> [!KIND]` on its own line):
+                        // pulldown already parsed the kind and stripped the
+                        // marker, so render the buffered body as a callout.
+                        let callout_html = build_callout_html(alert_kind, "", buffer);
+                        events.push(Event::Html(CowStr::Boxed(callout_html.into_boxed_str())));
+                    } else {
+                        events.push(Event::Start(Tag::BlockQuote(kind)));
+                        events.extend(transform_export_events(buffer.into_iter()));
+                        events.push(Event::End(TagEnd::BlockQuote(kind)));
+                    }
+                }
+                Event::End(TagEnd::BlockQuote(_)) => {
+                    buffer.push(event);
+                    pending_blockquote = Some((depth - 1, kind, buffer));
+                }
+                _ => {
+                    buffer.push(event);
+                    pending_blockquote = Some((depth, kind, buffer));
+                }
+            }
+            continue;
+        }
+
         if let Some((kind, mut buffered, mut source)) = pending_code_block.take() {
             if let Event::Text(content) = &event {
                 source.push_str(content);
@@ -325,6 +649,8 @@ fn render_markdown_for_export(markdown: &str) -> String {
             if is_end {
                 if let Some(preview_html) = export_code_block_preview_html(&kind, &source) {
                     events.push(Event::Html(CowStr::Boxed(preview_html.into_boxed_str())));
+                } else if let Some(highlighted) = highlight_code_block_html(&kind, &source) {
+                    events.push(Event::Html(CowStr::Boxed(highlighted.into_boxed_str())));
                 } else {
                     events.extend(buffered);
                 }
@@ -335,6 +661,9 @@ fn render_markdown_for_export(markdown: &str) -> String {
         }
 
         match event {
+            Event::Start(Tag::BlockQuote(kind)) => {
+                pending_blockquote = Some((1, kind, Vec::new()));
+            }
             Event::Start(Tag::CodeBlock(kind)) => {
                 pending_code_block = Some((
                     kind.clone(),
@@ -357,6 +686,17 @@ fn render_markdown_for_export(markdown: &str) -> String {
                     format!("<span class=\"export-math-inline\">{svg}</span>").into_boxed_str(),
                 )));
             }
+            Event::Text(content) => {
+                // pulldown emits the editor's custom inline syntaxes (highlight,
+                // underline, super/subscript, strikethrough, emoji shortcodes)
+                // as plain text; convert them to inline HTML so the export
+                // matches the editor.
+                if let Some(html) = convert_inline_custom_syntax(&content) {
+                    events.push(Event::Html(CowStr::Boxed(html.into_boxed_str())));
+                } else {
+                    events.push(Event::Text(content));
+                }
+            }
             _ => events.push(event),
         }
     }
@@ -364,8 +704,30 @@ fn render_markdown_for_export(markdown: &str) -> String {
     if let Some((_kind, buffered, _source)) = pending_code_block.take() {
         events.extend(buffered);
     }
+    if let Some((_depth, kind, buffer)) = pending_blockquote.take() {
+        events.push(Event::Start(Tag::BlockQuote(kind)));
+        events.extend(transform_export_events(buffer.into_iter()));
+        events.push(Event::End(TagEnd::BlockQuote(kind)));
+    }
 
-    push_html(&mut html, events.into_iter());
+    events
+}
+
+fn render_markdown_for_export(markdown: &str) -> String {
+    // Disable pulldown's inline extensions that overlap the editor's custom
+    // delimiters. Subscript/strikethrough both use `~` and, with both enabled,
+    // pulldown fragments `~x~` into separate text events without forming a
+    // subscript. Superscript (`^`) works on its own but we disable it too so
+    // every custom inline syntax (`^sup^`, `~sub~`, `~~strike~~`, `==hi==`,
+    // `++u++`) is handled uniformly in `convert_inline_custom_syntax`, where
+    // these delimiters are plain characters and the text is never split.
+    let mut options = Options::all();
+    options.remove(Options::ENABLE_SUBSCRIPT);
+    options.remove(Options::ENABLE_SUPERSCRIPT);
+    options.remove(Options::ENABLE_STRIKETHROUGH);
+    let parser = Parser::new_ext(markdown, options);
+    let mut html = String::new();
+    push_html(&mut html, transform_export_events(parser).into_iter());
     html
 }
 
@@ -387,19 +749,33 @@ fn build_html_document(title: &str, markdown: &str, source_file_path: Option<&Pa
         ".markdown-body h5{margin:24px 0 16px;font-size:.875em;}",
         ".markdown-body h6{margin:24px 0 16px;color:#57606a;font-size:.85em;}",
         ".markdown-body p,.markdown-body blockquote,.markdown-body ul,.markdown-body ol,.markdown-body dl,.markdown-body table,.markdown-body pre,.markdown-body details{margin-top:0;margin-bottom:16px;}",
+        ".markdown-body ul,.markdown-body ol{padding-left:1.5em;}",
+        ".markdown-body>ul:has(>li>input[type=checkbox]){padding-left:0;}",
+        ".markdown-body li:has(>input[type=checkbox]){list-style:none;}.markdown-body li>input[type=checkbox]{-webkit-appearance:none;appearance:none;box-sizing:border-box;display:inline-block;width:1.14em;height:1.14em;margin:0 .5em 0 0;border:1.5px solid #8c959f;border-radius:.25em;background:#fff;vertical-align:-.05em;}",
+        ".markdown-body li>input[type=checkbox]:checked{border-color:#0969da;background:#0969da url(data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2016%2016'%3E%3Cpath%20fill='none'%20stroke='white'%20stroke-width='2.2'%20stroke-linecap='round'%20stroke-linejoin='round'%20d='M3.5%208.5l3%203%206-7'/%3E%3C/svg%3E) center/85% 85% no-repeat;}",
         ".markdown-body a{color:#0969da;text-decoration:none;}.markdown-body a:hover{text-decoration:underline;}",
-        ".markdown-body blockquote{padding:0 1em;color:#57606a;border-left:.25em solid #d0d7de;}",
+        ".markdown-body blockquote{margin-left:0;margin-right:0;padding:0 1em;color:#57606a;border-left:.25em solid #d0d7de;}",
         ".markdown-body code,.markdown-body tt{padding:.2em .4em;margin:0;font-size:85%;white-space:break-spaces;background-color:rgba(175,184,193,.2);border-radius:6px;}",
         ".markdown-body pre{padding:16px;overflow:auto;font-size:85%;line-height:1.45;background-color:#f6f8fa;border-radius:6px;}",
         ".markdown-body pre code{padding:0;margin:0;font-size:100%;white-space:pre;background:transparent;border:0;}",
-        ".markdown-body table{display:block;width:max-content;max-width:100%;overflow:auto;border-spacing:0;border-collapse:collapse;}",
+        ".markdown-body pre{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;border:1px solid #d0d7de;}",
+        ".markdown-body table{display:table;width:100%;border-spacing:0;border-collapse:collapse;}",
         ".markdown-body table th{font-weight:600;}.markdown-body table th,.markdown-body table td{padding:6px 13px;border:1px solid #d0d7de;}",
         ".markdown-body table tr{background-color:#fff;border-top:1px solid #d8dee4;}.markdown-body table tr:nth-child(2n){background-color:#f6f8fa;}",
         ".markdown-body img{box-sizing:content-box;max-width:100%;height:auto;background-color:#fff;}",
         ".markdown-body hr{height:.25em;padding:0;margin:24px 0;background-color:#d0d7de;border:0;}",
         ".markdown-body kbd{display:inline-block;padding:3px 5px;font:11px ui-monospace,SFMono-Regular,SF Mono,Menlo,Consolas,Liberation Mono,monospace;line-height:10px;color:#24292f;vertical-align:middle;background-color:#f6f8fa;border:solid 1px rgba(175,184,193,.2);border-bottom-color:rgba(175,184,193,.2);border-radius:6px;box-shadow:inset 0 -1px 0 rgba(175,184,193,.2);}",
         ".export-preview{margin:16px 0;padding:12px;overflow:auto;text-align:center;background:#fff;border:1px solid #d0d7de;border-radius:6px;}",
-        ".export-preview svg{max-width:100%;height:auto;}.export-math-inline{display:inline-flex;max-width:100%;vertical-align:-.25em;}.export-math-inline svg{height:1.35em;width:auto;max-width:100%;}"
+        ".export-preview svg{max-width:100%;height:auto;}.export-math-inline{display:inline-flex;max-width:100%;vertical-align:-.25em;}.export-math-inline svg{height:1.35em;width:auto;max-width:100%;}",
+        ".markdown-body blockquote.callout{border-left:.25em solid var(--callout-color);background:color-mix(in srgb,var(--callout-color) 8%,transparent);padding:8px 1em;border-radius:0 6px 6px 0;color:#1f2328;}",
+        ".markdown-body blockquote.callout>:last-child{margin-bottom:0;}",
+        ".markdown-body .callout-title{display:flex;align-items:center;gap:.4em;margin:0 0 8px;font-weight:600;color:var(--callout-color);}",
+        ".markdown-body .callout-title svg{flex:0 0 auto;width:.9em;height:.9em;color:var(--callout-color);overflow:visible;}",
+        ".markdown-body .callout-note{--callout-color:#0969da;}",
+        ".markdown-body .callout-tip{--callout-color:#1a7f37;}",
+        ".markdown-body .callout-important{--callout-color:#8250df;}",
+        ".markdown-body .callout-warning{--callout-color:#9a6700;}",
+        ".markdown-body .callout-caution{--callout-color:#cf222e;}"
     );
 
     format!(
@@ -470,12 +846,13 @@ async fn build_pdf_document_from_html_macos(
     unsafe {
         let page_width = 595.0_f64;
         let page_height = 842.0_f64;
-        let margin = 51.0_f64;
-        let content_width = page_width - margin * 2.0;
+        // Lay the web content out at full A4 width (595pt) so the generated PDF
+        // page is A4-sized; the `.markdown-body` padding provides the page
+        // margins.
         let frame = NSRect {
             origin: NSPoint { x: 0.0, y: 0.0 },
             size: NSSize {
-                width: content_width,
+                width: page_width,
                 height: page_height,
             },
         };
@@ -594,10 +971,7 @@ async fn build_pdf_document_from_html_macos(
         let () = msg_send![host_window, close];
 
         match result.borrow_mut().take() {
-            Some(Ok(bytes)) => {
-                eprintln!("[pdf-export] WKWebView produced {} bytes", bytes.len());
-                Ok(bytes)
-            }
+            Some(Ok(bytes)) => Ok(bytes),
             Some(Err(message)) => anyhow::bail!("WKWebView createPDF failed: {message}"),
             None => anyhow::bail!("timed out waiting for WKWebView PDF generation"),
         }
@@ -2780,6 +3154,88 @@ mod tests {
     };
     use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
     use std::path::PathBuf;
+
+    #[test]
+    fn export_highlights_code_blocks_and_styles_tables() {
+        let md = "```rust\nfn main() { let x = 1; }\n```\n";
+        let html = super::render_markdown_for_export(md);
+        // syntect emits inline-styled spans for highlighted tokens.
+        assert!(
+            html.contains("<span style=\"color:"),
+            "code highlighting: {html}"
+        );
+
+        let doc = super::build_html_document("T", md, None);
+        assert!(
+            doc.contains(".markdown-body table{display:table;width:100%"),
+            "full-width tables: missing rule"
+        );
+        assert!(
+            doc.contains("li:has(>input[type=checkbox]){list-style:none;}"),
+            "task-list bullets removed: missing rule"
+        );
+        assert!(
+            doc.contains("li>input[type=checkbox]{-webkit-appearance:none;appearance:none;")
+                && doc.contains("width:1.14em;height:1.14em;"),
+            "task-list checkbox sizing: missing rule"
+        );
+        assert!(
+            doc.contains(".markdown-body ul,.markdown-body ol{padding-left:1.5em;}"),
+            "list indentation: missing rule"
+        );
+        assert!(
+            doc.contains(".markdown-body>ul:has(>li>input[type=checkbox]){padding-left:0;}"),
+            "top-level task list alignment: missing rule"
+        );
+        assert!(
+            doc.contains(".markdown-body blockquote{margin-left:0;margin-right:0;"),
+            "blockquote content-edge alignment: missing margin reset"
+        );
+        assert!(
+            doc.contains(".markdown-body .callout-title svg{flex:0 0 auto;width:.9em;height:.9em;"),
+            "callout icon sizing: missing rule"
+        );
+    }
+
+    #[test]
+    fn export_renders_custom_inline_syntax() {
+        let md = "H^2^O X~n~ ==hi== ++u++ ~~s~~ :rocket:";
+        let html = super::render_markdown_for_export(md);
+        assert!(html.contains("<sup>2</sup>"), "superscript: {html}");
+        assert!(html.contains("<sub>n</sub>"), "subscript: {html}");
+        assert!(html.contains("<mark>hi</mark>"), "highlight: {html}");
+        assert!(html.contains("<u>u</u>"), "underline: {html}");
+        assert!(html.contains("<del>s</del>"), "strikethrough: {html}");
+        assert!(html.contains('\u{1F680}'), "emoji: {html}");
+    }
+
+    #[test]
+    fn export_renders_callout_with_title_and_body() {
+        let md = "> [!TIP] Handy tip\n> body line";
+        let html = super::render_markdown_for_export(md);
+        assert!(
+            html.contains("blockquote class=\"callout callout-tip\""),
+            "callout class: {html}"
+        );
+        assert!(html.contains("callout-title"), "callout title row: {html}");
+        assert!(html.contains("Handy tip"), "callout title text: {html}");
+        assert!(html.contains("<svg"), "callout icon: {html}");
+        assert!(html.contains("body line"), "callout body: {html}");
+        assert!(!html.contains("[!TIP]"), "marker removed: {html}");
+    }
+
+    #[test]
+    fn export_renders_callout_without_title() {
+        let md = "> [!WARNING]\n> watch out";
+        let html = super::render_markdown_for_export(md);
+        assert!(
+            html.contains("callout callout-warning"),
+            "callout class: {html}"
+        );
+        assert!(html.contains("Warning"), "default title label: {html}");
+        assert!(html.contains("watch out"), "callout body: {html}");
+        assert!(!html.contains("[!WARNING]"), "marker removed: {html}");
+    }
 
     #[test]
     fn fallback_label_prefers_url_host_when_description_missing() {

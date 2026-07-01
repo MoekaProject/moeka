@@ -1731,6 +1731,11 @@ impl EditorView {
         let expanded_dirs = HashSet::new();
         let sidebar_error = None;
         let app_settings = AppSettings::load();
+        // Restore a previously selected (non-default) Dock icon. Index 0 is the
+        // bundled AppIcon.icns, so leave it to the app bundle.
+        if app_settings.app_icon_index != 0 {
+            settings_panel::apply_app_icon_to_dock(app_settings.app_icon_index);
+        }
         let ui_language = app_settings.ui_language();
         let welcome_tab = builtin_welcome_tab(ui_language);
         let buffer = Buffer::from_text(&welcome_tab.snapshot.text);

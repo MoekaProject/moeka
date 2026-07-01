@@ -3940,6 +3940,15 @@ pub(crate) fn resolve_asset_image_path(path: &str) -> PathBuf {
     crate::resolve_runtime_path(path).unwrap_or_else(|| PathBuf::from(path))
 }
 
+/// Number of selectable application icons (a 3x3 grid sliced from
+/// `assets/icons/app/icons.png` into `icon-0.png`..`icon-8.png`).
+pub(crate) const APP_ICON_COUNT: usize = 9;
+
+/// Asset path for a selectable application icon tile by index (0-based).
+pub(crate) fn app_icon_asset_path(index: usize) -> String {
+    format!("assets/icons/app/icon-{index}.png")
+}
+
 pub(crate) fn is_remote_image_url(path: &str) -> bool {
     path.starts_with("http://") || path.starts_with("https://")
 }

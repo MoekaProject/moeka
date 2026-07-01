@@ -49,6 +49,8 @@ pub(crate) struct AppSettings {
     pub show_whitespace: bool,
     #[serde(default = "default_highlight_line_background")]
     pub highlight_line_background: bool,
+    #[serde(default = "default_app_icon_index")]
+    pub app_icon_index: usize,
 }
 
 fn default_theme() -> String {
@@ -135,6 +137,10 @@ fn default_highlight_line_background() -> bool {
     false
 }
 
+fn default_app_icon_index() -> usize {
+    0
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -159,6 +165,7 @@ impl Default for AppSettings {
             outline_rail_visible: default_outline_rail_visible(),
             show_whitespace: default_show_whitespace(),
             highlight_line_background: default_highlight_line_background(),
+            app_icon_index: default_app_icon_index(),
         }
     }
 }
