@@ -18,7 +18,7 @@ BINARY_PATH := target/$(TARGET)/$(PROFILE)/$(APP_NAME)
 DMG_PATH := $(DIST_DIR)/$(APP_NAME)-$(TARGET).dmg
 INFO_PLIST_TEMPLATE := packaging/macos/Info.plist
 ICON_FILE := packaging/macos/AppIcon.icns
-ICON_SOURCE := assets/icons/app/icon-0.png
+ICON_SOURCE := packaging/macos/AppIcon-1024.png
 ICON_SCRIPT := scripts/generate_app_icon.sh
 VOLUME_NAME := $(APP_NAME)
 

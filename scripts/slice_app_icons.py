@@ -20,12 +20,14 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 GRID = 3
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE = REPO_ROOT / "assets" / "icons" / "app" / "icons.png"
 OUT_DIR = SOURCE.parent
+# Padded 1024 master (icon 0) that the .icns is built from.
+MASTER = REPO_ROOT / "packaging" / "macos" / "AppIcon-1024.png"
 
 # How close (Euclidean RGB distance) a pixel must be to the sampled corner mat
 # color to count as card artwork ("non-background").
@@ -37,6 +39,15 @@ CORNER_RATIO = 0.2237
 EDGE_SAFETY = 3
 # Supersampling factor used when rasterizing the rounded-rectangle mask.
 SUPERSAMPLE = 4
+# App-icon master (Dock / .icns) geometry: the artwork fills ~80.5% of a 1024
+# canvas, centered, with a soft drop shadow baked into the transparent margin so
+# the Dock icon has the same depth as a native macOS app icon. These shadow
+# parameters mirror `build_padded_dock_icon` in settings_panel.rs.
+MASTER_CANVAS = 1024
+MASTER_CONTENT_RATIO = 0.8047
+SHADOW_OFFSET_Y = 10
+SHADOW_BLUR = 16
+SHADOW_STRENGTH = 0.28
 
 
 def sample_background_color(rgb: np.ndarray) -> np.ndarray:
@@ -92,6 +103,28 @@ def build_tile(image: Image.Image, center: tuple[int, int], side: int, mask: Ima
     return Image.merge("RGBA", (red, green, blue, mask))
 
 
+def build_app_icon_master(tile: Image.Image) -> Image.Image:
+    """Pad a tile to the macOS icon grid and bake a soft drop shadow into it."""
+    content_side = round(MASTER_CANVAS * MASTER_CONTENT_RATIO)
+    offset = (MASTER_CANVAS - content_side) // 2
+    content = tile.resize((content_side, content_side), Image.LANCZOS)
+
+    # Black silhouette of the artwork, offset downward and blurred into a shadow.
+    shadow_alpha = (
+        np.asarray(content)[:, :, 3].astype(np.float32) * SHADOW_STRENGTH
+    ).round().astype(np.uint8)
+    silhouette_pixels = np.zeros((content_side, content_side, 4), dtype=np.uint8)
+    silhouette_pixels[:, :, 3] = shadow_alpha
+    shadow = Image.new("RGBA", (MASTER_CANVAS, MASTER_CANVAS), (0, 0, 0, 0))
+    shadow.paste(Image.fromarray(silhouette_pixels), (offset, offset + SHADOW_OFFSET_Y))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(SHADOW_BLUR))
+
+    canvas = Image.new("RGBA", (MASTER_CANVAS, MASTER_CANVAS), (0, 0, 0, 0))
+    canvas.alpha_composite(shadow)
+    canvas.alpha_composite(content, (offset, offset))
+    return canvas
+
+
 def main() -> int:
     if not SOURCE.exists():
         print(f"error: source grid not found: {SOURCE}", file=sys.stderr)
@@ -133,6 +166,10 @@ def main() -> int:
             out_path = OUT_DIR / f"icon-{index}.png"
             tile.save(out_path)
             print(f"wrote {out_path.relative_to(REPO_ROOT)} ({tile.width}x{tile.height})")
+            if index == 0:
+                MASTER.parent.mkdir(parents=True, exist_ok=True)
+                build_app_icon_master(tile).save(MASTER)
+                print(f"wrote {MASTER.relative_to(REPO_ROOT)} ({MASTER_CANVAS}x{MASTER_CANVAS})")
 
     return 0
 

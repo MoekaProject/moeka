@@ -1535,6 +1535,11 @@ pub struct EditorView {
     pub(crate) outline_rail_last_active_line: Cell<Option<usize>>,
     pub(crate) outline_rail_active_since: Cell<Option<Instant>>,
     pub(crate) outline_rail_hover_since: Cell<Option<Instant>>,
+    /// App-icon picker hover state: which tile is hovered, the tile losing
+    /// hover (for the fade-out), and when the current transition started.
+    pub(crate) app_icon_hovered: Option<usize>,
+    pub(crate) app_icon_hover_prev: Option<usize>,
+    pub(crate) app_icon_hover_since: Cell<Option<Instant>>,
     /// Width (px, from the right viewport edge) occupied by the outline rail's
     /// interactive zone this frame, so toolbar-hover logic can treat hovering it
     /// as keep-visible. 0 when the rail is not shown.
@@ -1988,6 +1993,9 @@ impl EditorView {
             outline_rail_last_active_line: Cell::new(None),
             outline_rail_active_since: Cell::new(None),
             outline_rail_hover_since: Cell::new(None),
+            app_icon_hovered: None,
+            app_icon_hover_prev: None,
+            app_icon_hover_since: Cell::new(None),
             outline_rail_zone_from_right: Cell::new(0.0),
             info_panel_scroll_handle: ScrollHandle::new(),
             git_history_scroll_handle: ScrollHandle::new(),

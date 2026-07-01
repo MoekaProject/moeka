@@ -1,23 +1,18 @@
 #!/usr/bin/env bash
 #
-# Generate a macOS AppIcon.icns from a single square PNG tile.
+# Generate a macOS AppIcon.icns from the padded 1024 app-icon master.
 #
-# Usage: generate_app_icon.sh <source.png> <output.icns>
+# Usage: generate_app_icon.sh <source-1024.png> <output.icns>
 #
-# Defaults to the first sliced application-icon tile when no arguments are
-# given, matching the tile picker in the settings panel. The tile is a
-# full-bleed rounded square, so the standard macOS icon margin (~10% on each
-# side, leaving the artwork at ~80.5% of the canvas) is added here before the
-# .icns is built.
+# The master (produced by scripts/slice_app_icons.py) is already a 1024x1024
+# canvas with the standard macOS margin and a baked drop shadow, so this script
+# only downsamples it into the iconset. Keeping it pure sips/iconutil means
+# `make dmg` needs no Python.
 
 set -euo pipefail
 
-SOURCE="${1:-assets/icons/app/icon-0.png}"
+SOURCE="${1:-packaging/macos/AppIcon-1024.png}"
 OUTPUT="${2:-packaging/macos/AppIcon.icns}"
-
-# Fraction of the icon canvas occupied by the rounded-square artwork; the rest
-# is transparent margin, matching Apple's macOS icon grid (824 / 1024).
-CONTENT_RATIO=0.8047
 
 if [[ ! -f "$SOURCE" ]]; then
   echo "error: source icon not found: $SOURCE" >&2
@@ -31,19 +26,12 @@ fi
 
 WORK_DIR="$(mktemp -d)"
 ICONSET_DIR="$WORK_DIR/AppIcon.iconset"
-MASTER="$WORK_DIR/master.png"
 mkdir -p "$ICONSET_DIR"
-
-# Build a padded 1024 master: shrink the tile to the content size and center it
-# on a transparent 1024x1024 canvas (sips padding keeps the alpha channel).
-CONTENT=$(awk "BEGIN { printf \"%d\", 1024 * $CONTENT_RATIO }")
-sips -z "$CONTENT" "$CONTENT" "$SOURCE" --out "$WORK_DIR/content.png" >/dev/null
-sips -p 1024 1024 "$WORK_DIR/content.png" --out "$MASTER" >/dev/null
 
 # name              pixel size
 render() {
   local size="$1" name="$2"
-  sips -z "$size" "$size" "$MASTER" --out "$ICONSET_DIR/$name" >/dev/null
+  sips -z "$size" "$size" "$SOURCE" --out "$ICONSET_DIR/$name" >/dev/null
 }
 
 render 16   icon_16x16.png

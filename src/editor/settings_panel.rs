@@ -14,6 +14,12 @@ use super::{
     THEME_LIGHT_MINI_SVG_PATH,
 };
 
+/// Duration of the app-icon tile opacity fade on hover enter/leave.
+const APP_ICON_HOVER_SECONDS: f32 = 0.16;
+/// Resting and hovered opacity for unselected app-icon tiles.
+const APP_ICON_REST_OPACITY: f32 = 0.5;
+const APP_ICON_HOVER_OPACITY: f32 = 0.9;
+
 // ── Font picker state ───────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -184,13 +190,11 @@ impl EditorView {
         is_active: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let active_accent = self.theme.text_accent;
-        let inactive_border = self.theme.border_secondary;
-        let inactive_hover_border = self.theme.border_tertiary;
         // Square button sized so all nine sit in a single row; the corner radius
         // matches the standard macOS icon (~22.37% of the side).
         let size = self.scaled(46.0);
         let radius = size * 0.2237;
+        let opacity = self.app_icon_tile_opacity(index, is_active);
         let image_path =
             crate::editor::helpers::resolve_asset_image_path(&crate::editor::helpers::app_icon_asset_path(index));
 
@@ -199,28 +203,71 @@ impl EditorView {
             .w(px(size))
             .h(px(size))
             .rounded(px(radius))
-            .border(px(2.0))
-            .border_color(if is_active {
-                active_accent
-            } else {
-                inactive_border
-            })
             .cursor(CursorStyle::Arrow)
-            .hover(move |style| {
-                if is_active {
-                    style
-                } else {
-                    style.border_color(inactive_hover_border)
-                }
-            })
+            .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+                this.set_app_icon_hovered(index, *hovering, cx);
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
                     this.set_app_icon(index, cx);
                 }),
             )
-            .child(img(image_path).size_full().rounded(px(radius)))
+            .child(img(image_path).size_full().rounded(px(radius)).opacity(opacity))
             .into_any_element()
+    }
+
+    /// Opacity for an app-icon tile: selected tiles stay fully opaque, others
+    /// rest at 0.5 and animate toward 0.9 while hovered (and back on leave).
+    fn app_icon_tile_opacity(&self, index: usize, is_active: bool) -> f32 {
+        if is_active {
+            return 1.0;
+        }
+        let progress = self
+            .app_icon_hover_since
+            .get()
+            .map(|since| (since.elapsed().as_secs_f32() / APP_ICON_HOVER_SECONDS).clamp(0.0, 1.0))
+            .unwrap_or(1.0);
+        let ease = super::ease_in_out_cubic(progress);
+        let span = APP_ICON_HOVER_OPACITY - APP_ICON_REST_OPACITY;
+        if self.app_icon_hovered == Some(index) {
+            APP_ICON_REST_OPACITY + span * ease
+        } else if self.app_icon_hover_prev == Some(index) {
+            APP_ICON_HOVER_OPACITY - span * ease
+        } else {
+            APP_ICON_REST_OPACITY
+        }
+    }
+
+    fn set_app_icon_hovered(&mut self, index: usize, hovering: bool, cx: &mut Context<Self>) {
+        let target = if hovering {
+            Some(index)
+        } else if self.app_icon_hovered == Some(index) {
+            None
+        } else {
+            self.app_icon_hovered
+        };
+        if target == self.app_icon_hovered {
+            return;
+        }
+        self.app_icon_hover_prev = self.app_icon_hovered;
+        self.app_icon_hovered = target;
+        self.app_icon_hover_since.set(Some(std::time::Instant::now()));
+
+        // Drive the opacity fade by re-rendering every frame for its duration.
+        cx.spawn(async move |this, cx| {
+            let frames = ((APP_ICON_HOVER_SECONDS / 0.016).ceil() as usize).max(1) + 1;
+            for _ in 0..frames {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
     }
 
     pub(crate) fn set_app_icon(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1735,21 +1782,46 @@ pub(crate) fn apply_app_icon_to_dock(index: usize) {
 
 /// Renders the full-bleed tile onto a padded, transparent canvas so the Dock
 /// shows it at the standard macOS app-icon size, and returns the temp PNG path.
+/// A soft drop shadow is baked in so the Dock icon gains the same depth as the
+/// bundled app icon.
 #[cfg(target_os = "macos")]
 fn build_padded_dock_icon(index: usize) -> Option<std::path::PathBuf> {
-    use image::{RgbaImage, imageops};
+    use image::{Rgba, RgbaImage, imageops};
 
     // Match the .icns margin: artwork fills ~80.5% of the canvas, centered.
     const CANVAS: u32 = 1024;
     const CONTENT: u32 = 824;
+    // Soft drop shadow tuned to sit within the transparent margin.
+    const SHADOW_OFFSET_Y: i64 = 10;
+    const SHADOW_BLUR: f32 = 16.0;
+    const SHADOW_STRENGTH: f32 = 0.28;
 
     let tile_path =
         crate::editor::helpers::resolve_asset_image_path(&crate::editor::helpers::app_icon_asset_path(index));
     let tile = image::open(&tile_path).ok()?.to_rgba8();
     let content = imageops::resize(&tile, CONTENT, CONTENT, imageops::FilterType::Lanczos3);
+    let offset = ((CANVAS - CONTENT) / 2) as i64;
+
+    // Build a black silhouette of the artwork, offset downward, then blur it
+    // into a soft shadow.
+    let mut shadow = RgbaImage::new(CANVAS, CANVAS);
+    for (x, y, pixel) in content.enumerate_pixels() {
+        let alpha = pixel[3];
+        if alpha == 0 {
+            continue;
+        }
+        let sx = offset + x as i64;
+        let sy = offset + SHADOW_OFFSET_Y + y as i64;
+        if sx < 0 || sy < 0 || sx >= CANVAS as i64 || sy >= CANVAS as i64 {
+            continue;
+        }
+        let shadow_alpha = (alpha as f32 * SHADOW_STRENGTH).round() as u8;
+        shadow.put_pixel(sx as u32, sy as u32, Rgba([0, 0, 0, shadow_alpha]));
+    }
+    let shadow = imageops::blur(&shadow, SHADOW_BLUR);
 
     let mut canvas = RgbaImage::new(CANVAS, CANVAS);
-    let offset = ((CANVAS - CONTENT) / 2) as i64;
+    imageops::overlay(&mut canvas, &shadow, 0, 0);
     imageops::overlay(&mut canvas, &content, offset, offset);
 
     let out_path = std::env::temp_dir().join(format!("markdown-editor-dock-icon-{index}.png"));
