@@ -21,20 +21,22 @@ INFO_PLIST_TEMPLATE := packaging/macos/Info.plist
 ICON_FILE := packaging/macos/AppIcon.icns
 ICON_SOURCE := packaging/macos/AppIcon-1024.png
 ICON_SCRIPT := scripts/generate_app_icon.sh
+DMG_BACKGROUND := install-bg.jpg
+DMG_SCRIPT := scripts/create_dmg.sh
 VOLUME_NAME := $(APP_DISPLAY_NAME)
 
 .PHONY: dmg app build-release clean-dmg clean-app
 
 dmg: $(DMG_PATH)
 
-$(DMG_PATH): app
+$(DMG_PATH): app $(DMG_BACKGROUND) $(DMG_SCRIPT)
 	@mkdir -p "$(DIST_DIR)"
 	@rm -rf "$(DMG_STAGING_DIR)"
 	@mkdir -p "$(DMG_STAGING_DIR)"
 	@cp -R "$(APP_DIR)" "$(DMG_STAGING_DIR)/$(APP_DISPLAY_NAME).app"
 	@ln -sfn /Applications "$(DMG_STAGING_DIR)/Applications"
 	@rm -f "$(DMG_PATH)"
-	@hdiutil create -volname "$(VOLUME_NAME)" -srcfolder "$(DMG_STAGING_DIR)" -ov -format UDZO "$(DMG_PATH)"
+	@bash "$(DMG_SCRIPT)" "$(DMG_STAGING_DIR)" "$(DMG_PATH)" "$(VOLUME_NAME)" "$(APP_DISPLAY_NAME)" "$(DMG_BACKGROUND)"
 	@echo "Created $(DMG_PATH)"
 
 app: $(APP_DIR)
