@@ -166,7 +166,8 @@ impl EditorView {
         let cursor_y = self.line_y_offset(cursor_line);
         let cursor_line_height = self.visual_height_for_line(cursor_line);
         let viewport_top = self.scroll_offset + self.padding_top();
-        let viewport_bottom = self.scroll_offset + self.last_viewport_height - self.padding_top();
+        let viewport_bottom =
+            self.scroll_offset + self.editor_visible_height() - self.padding_bottom();
 
         if cursor_y < viewport_top || cursor_y + cursor_line_height > viewport_bottom {
             return false;

@@ -654,6 +654,14 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_move_word_left))
             .on_action(cx.listener(Self::on_move_word_right))
             .on_action(cx.listener(Self::on_delete_word_left))
+            .on_action(cx.listener(Self::on_delete_word_right))
+            .on_action(cx.listener(Self::on_toggle_line_comment))
+            .on_action(cx.listener(Self::on_fold))
+            .on_action(cx.listener(Self::on_unfold))
+            .on_action(cx.listener(Self::on_toggle_fold))
+            .on_action(cx.listener(Self::on_fold_all))
+            .on_action(cx.listener(Self::on_unfold_all))
+            .on_action(cx.listener(Self::on_join_lines))
             .on_action(cx.listener(Self::on_toggle_bold))
             .on_action(cx.listener(Self::on_toggle_italic))
             .on_action(cx.listener(Self::on_toggle_strikethrough))
@@ -1521,7 +1529,8 @@ impl Render for EditorView {
                                                             this.child(self.render_search_bar(cx))
                                                         },
                                                             ),
-                                                    ),
+                                                        )
+                                                        .child(self.render_status_bar(cx)),
                                             )
                                             .when(
                                                 self.should_render_right_panels(),
@@ -1646,7 +1655,7 @@ impl Render for EditorView {
                                                         ),
                                                 ),
                                         )
-                                    }),
+                                    })
                             )
                         },
                     ),
@@ -1800,6 +1809,9 @@ impl Render for EditorView {
             })
             .when(self.quick_open_visible, |this| {
                 this.child(deferred(self.render_quick_open_overlay(cx)))
+            })
+            .when(self.language_picker_visible, |this| {
+                this.child(deferred(self.render_language_picker_overlay(cx)))
             })
             .when(self.dialog.is_some(), |this| {
                 this.child(self.render_dialog(cx))

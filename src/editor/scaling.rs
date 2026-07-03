@@ -445,11 +445,12 @@ impl EditorView {
         if cursor_y < self.scroll_offset + self.padding_top() {
             self.scroll_offset = (cursor_y - self.padding_top()).max(0.0);
         }
+        let viewport_height = self.editor_visible_height();
         if cursor_y + cursor_line_height
-            > self.scroll_offset + self.last_viewport_height - self.padding_top()
+            > self.scroll_offset + viewport_height - self.padding_bottom()
         {
             self.scroll_offset =
-                cursor_y + cursor_line_height - self.last_viewport_height + self.padding_top();
+                cursor_y + cursor_line_height - viewport_height + self.padding_bottom();
         }
     }
 

@@ -58,6 +58,10 @@ impl EditorView {
             self.close_quick_open(window, cx);
             return;
         }
+        if self.language_picker_visible {
+            self.close_language_picker(window, cx);
+            return;
+        }
         if self.workspace_search_visible {
             self.close_workspace_search(window, cx);
             return;
@@ -945,24 +949,25 @@ impl EditorView {
         self.checkpoint();
         let (line_indices, has_selection, has_list_line) =
             self.collect_line_indices_for_block_indent();
+        let indent_text = self.current_indent_text();
 
         if has_list_line {
             self.indent_selected_list_lines();
         } else if has_selection {
             if self.has_extra_cursors() {
-                self.indent_line_indices(&line_indices, "  ");
+                self.indent_line_indices(&line_indices, &indent_text);
             } else {
-                self.indent_current_lines("  ");
+                self.indent_current_lines(&indent_text);
             }
         } else {
             if self.has_extra_cursors() {
-                self.multi_cursor_insert("  ");
+                self.multi_cursor_insert(&indent_text);
                 self.reparse();
                 self.scroll_to_cursor();
             } else {
                 let insert_range = self.cursor.selection_range();
-                self.queue_non_markdown_line_display_transfer(&insert_range, "  ");
-                self.cursor.insert(&mut self.buffer, "  ");
+                self.queue_non_markdown_line_display_transfer(&insert_range, &indent_text);
+                self.cursor.insert(&mut self.buffer, &indent_text);
                 self.reparse();
                 self.scroll_to_cursor();
             }
@@ -977,14 +982,15 @@ impl EditorView {
         self.checkpoint();
         let (line_indices, has_selection, has_list_line) =
             self.collect_line_indices_for_block_indent();
+        let unindent_width = self.current_unindent_width();
 
         if has_list_line {
             self.unindent_selected_list_lines();
         } else if has_selection {
             if self.has_extra_cursors() {
-                self.unindent_line_indices(&line_indices, 2);
+                self.unindent_line_indices(&line_indices, unindent_width);
             } else {
-                self.unindent_current_lines(2);
+                self.unindent_current_lines(unindent_width);
             }
         }
         self.pause_blinking(cx);
@@ -1071,6 +1077,30 @@ impl EditorView {
             self.multi_cursor_delete_word_left();
         } else {
             self.cursor.delete_word_left(&mut self.buffer);
+        }
+        self.reparse();
+        if !cursor_had_inline_headroom || self.cursor_line() != cursor_line_before {
+            self.scroll_to_cursor();
+        }
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_delete_word_right(
+        &mut self,
+        _: &DeleteWordRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
+        self.checkpoint();
+        let cursor_line_before = self.cursor_line();
+        let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
+        if self.has_extra_cursors() {
+            self.multi_cursor_delete_word_right();
+        } else {
+            self.cursor.delete_word_right(&mut self.buffer);
         }
         self.reparse();
         if !cursor_had_inline_headroom || self.cursor_line() != cursor_line_before {

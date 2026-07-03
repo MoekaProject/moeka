@@ -1,6 +1,7 @@
 mod app_settings;
 mod assets;
 mod chat_panel;
+mod code_commands;
 mod config_paths;
 mod config_store;
 mod element;
@@ -16,6 +17,8 @@ mod input_entity;
 mod input_ime;
 mod input_table;
 mod input_wrap;
+mod language_detection;
+mod language_picker;
 mod menus;
 mod outline;
 mod quick_open;
@@ -33,6 +36,7 @@ mod sidebar_render;
 mod sidebar_state;
 mod sidebar_tree;
 mod sidebar_ui;
+mod status_bar;
 mod tabs;
 mod temp_store;
 mod theme_debugger;
@@ -49,7 +53,9 @@ mod workspace_search;
 
 pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
 pub(crate) use assets::*;
+use language_detection::classify_pasted_text_kind;
 pub(crate) use scrollbar::{PanelScrollbarKind, PanelScrollbarState};
+pub(crate) use status_bar::IndentSettings;
 pub(crate) use types::*;
 pub(crate) use updater::UpdateState;
 pub(crate) use whiteboard::*;
@@ -448,6 +454,7 @@ pub(crate) enum ContextMenuKind {
         col: usize,
     },
     Terminal,
+    Indentation,
     ChatTabCreate,
     ChatTab {
         tab_id: String,
@@ -1494,6 +1501,7 @@ pub struct EditorView {
     pub(crate) menu_selected_index: usize,
     pub(crate) sidebar_visible: bool,
     pub(crate) editor_left_aligned: bool,
+    pub(crate) indent_settings: IndentSettings,
     pub(crate) tab_drag_candidate_id: Option<String>,
     pub(crate) tab_drag_press_position: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) tab_dragging_id: Option<String>,
@@ -1694,6 +1702,11 @@ pub struct EditorView {
     pub(crate) quick_open_task: Option<Task<()>>,
     pub(crate) quick_open_scroll_handle: ScrollHandle,
     pub(crate) quick_open_render_limit: usize,
+    pub(crate) language_picker_visible: bool,
+    pub(crate) language_picker_query: String,
+    pub(crate) language_picker_items: Vec<language_picker::LanguagePickerItem>,
+    pub(crate) language_picker_selected_index: usize,
+    pub(crate) language_picker_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
 
     // ── Chat panel state ───────────────────────────────────────────
     pub(crate) chat_tabs: Vec<chat_panel::ChatTab>,
@@ -1958,6 +1971,7 @@ impl EditorView {
             wiki_link_search_task: None,
             sidebar_visible: false,
             editor_left_aligned: false,
+            indent_settings: IndentSettings::default(),
             tab_drag_candidate_id: None,
             tab_drag_press_position: None,
             tab_dragging_id: None,
@@ -2120,6 +2134,11 @@ impl EditorView {
             quick_open_task: None,
             quick_open_scroll_handle: ScrollHandle::new(),
             quick_open_render_limit: 100,
+            language_picker_visible: false,
+            language_picker_query: String::new(),
+            language_picker_items: Vec::new(),
+            language_picker_selected_index: 0,
+            language_picker_editor: None,
             chat_tabs: Vec::new(),
             active_chat_tab_id: None,
             chat_tab_activation_history: Vec::new(),
@@ -5480,6 +5499,34 @@ impl EditorView {
         self.apply_multi_cursor_resolved_edits(edits);
     }
 
+    pub(crate) fn multi_cursor_delete_word_right(&mut self) {
+        if self.extra_cursors.is_empty() {
+            self.cursor.delete_word_right(&mut self.buffer);
+            return;
+        }
+
+        let all = self.collect_multi_cursor_targets_desc();
+        let mut edits = Vec::with_capacity(all.len());
+        for (offset, anchor, is_primary) in &all {
+            let before_len = self.buffer.len();
+            let mut cursor = Cursor {
+                offset: *offset,
+                anchor: *anchor,
+            };
+            cursor.delete_word_right(&mut self.buffer);
+            let after_len = self.buffer.len();
+            edits.push(MultiCursorResolvedEdit {
+                start: cursor.offset,
+                cursor_after: cursor.offset,
+                delta: after_len as isize - before_len as isize,
+                is_primary: *is_primary,
+                ordered_list_update: None,
+            });
+        }
+
+        self.apply_multi_cursor_resolved_edits(edits);
+    }
+
     pub(crate) fn multi_cursor_enter(&mut self) {
         if self.extra_cursors.is_empty() {
             self.cursor.insert(&mut self.buffer, "\n");
@@ -7412,276 +7459,6 @@ pub(crate) fn classify_file_kind_for_bytes(path: &Path, bytes: &[u8]) -> FileKin
     }
 }
 
-fn code_file_kind_for_syntax_name(name: &str) -> Option<FileKind> {
-    (!matches!(name, "Plain Text" | "Markdown")).then(|| FileKind::Code {
-        language: name.to_string(),
-    })
-}
-
-fn code_file_kind_for_language(language: &str) -> Option<FileKind> {
-    if matches!(language, "Plain Text" | "Markdown") {
-        return None;
-    }
-    Some(FileKind::Code {
-        language: helpers::find_syntax_for_language(language)
-            .map(|syntax| syntax.name.to_string())
-            .unwrap_or_else(|| language.to_string()),
-    })
-}
-
-fn first_non_empty_line(text: &str) -> Option<&str> {
-    text.lines().find(|line| !line.trim().is_empty())
-}
-
-fn pasted_text_has_markdown_features(text: &str) -> bool {
-    let mut table_separator_lines = 0usize;
-    let mut list_lines = 0usize;
-    let mut link_like = false;
-
-    for line in text.lines().take(120) {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```")
-            || trimmed.starts_with("~~~")
-            || trimmed.starts_with("# ")
-            || trimmed.starts_with("## ")
-            || trimmed.starts_with("### ")
-            || trimmed.starts_with("> ")
-            || trimmed.starts_with("- [ ] ")
-            || trimmed.starts_with("- [x] ")
-            || trimmed.starts_with("- [X] ")
-            || trimmed.starts_with("![")
-            || trimmed.starts_with("[[")
-        {
-            return true;
-        }
-
-        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
-            list_lines += 1;
-        }
-
-        if trimmed.contains('|')
-            && trimmed.contains("---")
-            && trimmed
-                .chars()
-                .all(|ch| matches!(ch, ' ' | '\t' | '|' | '-' | ':'))
-        {
-            table_separator_lines += 1;
-        }
-
-        link_like |= (trimmed.contains("](") && trimmed.contains('['))
-            || (trimmed.contains("]:") && trimmed.contains('['))
-            || (trimmed.contains("[[") && trimmed.contains("]]"));
-    }
-
-    if text.trim_start().starts_with("---") {
-        let mut non_empty_lines = text.lines().filter(|line| !line.trim().is_empty());
-        let _ = non_empty_lines.next();
-        if non_empty_lines.any(|line| line.trim() == "---") && link_like {
-            return true;
-        }
-    }
-
-    table_separator_lines > 0 || list_lines >= 2 || link_like
-}
-
-fn pasted_text_shebang_language(text: &str) -> Option<FileKind> {
-    let first_line = text.lines().next()?.trim();
-    let shebang = first_line.strip_prefix("#!")?.to_ascii_lowercase();
-    for (needle, language) in [
-        ("python", "Python"),
-        ("node", "JavaScript"),
-        ("deno", "TypeScript"),
-        ("bun", "JavaScript"),
-        ("bash", "Shell-Unix-Generic"),
-        ("zsh", "Shell-Unix-Generic"),
-        ("fish", "Shell-Unix-Generic"),
-        ("sh", "Shell-Unix-Generic"),
-        ("ruby", "Ruby"),
-        ("perl", "Perl"),
-        ("php", "PHP"),
-        ("lua", "Lua"),
-        ("swift", "Swift"),
-        ("awk", "Awk"),
-        ("rscript", "R"),
-    ] {
-        if shebang.contains(needle) {
-            return code_file_kind_for_language(language);
-        }
-    }
-    None
-}
-
-fn pasted_text_first_line_language(text: &str) -> Option<FileKind> {
-    let first_line = first_non_empty_line(text)?;
-    let syntax = helpers::syntax_set().find_syntax_by_first_line(first_line)?;
-    code_file_kind_for_syntax_name(&syntax.name)
-}
-
-fn pasted_text_structured_language(text: &str) -> Option<FileKind> {
-    let trimmed = text.trim();
-    let lower = trimmed.to_ascii_lowercase();
-
-    if matches!(trimmed.as_bytes().first(), Some(b'{') | Some(b'['))
-        && serde_json::from_str::<serde_json::Value>(trimmed).is_ok()
-    {
-        return code_file_kind_for_language("JSON");
-    }
-
-    if lower.starts_with("<!doctype html")
-        || lower.starts_with("<html")
-        || (lower.contains("<head") && lower.contains("<body"))
-    {
-        return code_file_kind_for_language("HTML");
-    }
-
-    if lower.starts_with("<?xml") {
-        return code_file_kind_for_language("XML");
-    }
-
-    if lower.starts_with("<?php") {
-        return code_file_kind_for_language("PHP");
-    }
-
-    let yaml_like_lines = text
-        .lines()
-        .take(80)
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            !trimmed.starts_with('#')
-                && trimmed
-                    .split_once(':')
-                    .is_some_and(|(key, value)| !key.trim().is_empty() && !value.contains("//"))
-        })
-        .count();
-    if yaml_like_lines >= 3 && !trimmed.contains('{') && !trimmed.contains(';') {
-        return code_file_kind_for_language("YAML");
-    }
-
-    let toml_like_lines = text
-        .lines()
-        .take(80)
-        .filter(|line| {
-            let trimmed = line.trim();
-            (trimmed.starts_with('[') && trimmed.ends_with(']'))
-                || trimmed
-                    .split_once('=')
-                    .is_some_and(|(key, value)| !key.trim().is_empty() && !value.trim().is_empty())
-        })
-        .count();
-    if toml_like_lines >= 3 && !trimmed.contains('{') {
-        return code_file_kind_for_language("TOML");
-    }
-
-    None
-}
-
-fn pasted_text_common_code_language(text: &str) -> Option<FileKind> {
-    let lower = text.to_ascii_lowercase();
-    let trimmed = text.trim_start();
-    let first_original = first_non_empty_line(text).unwrap_or_default().trim_start();
-    let first = first_non_empty_line(text)
-        .unwrap_or_default()
-        .trim_start()
-        .to_ascii_lowercase();
-    let has = |needle: &str| lower.contains(needle);
-    let starts = |needle: &str| first.starts_with(needle);
-    let docker_directive_count = text
-        .lines()
-        .take(20)
-        .filter(|line| {
-            let upper = line.trim_start().to_ascii_uppercase();
-            ["FROM ", "RUN ", "COPY ", "ADD ", "CMD ", "ENTRYPOINT "]
-                .iter()
-                .any(|prefix| upper.starts_with(prefix))
-        })
-        .count();
-
-    let language = if first_original.starts_with("FROM ") || docker_directive_count >= 2 {
-        Some("Dockerfile")
-    } else if has("#include <") || has("#include \"") || has("std::") {
-        Some("C++")
-    } else if has("using system;") || has("namespace ") && has("public class ") {
-        Some("C#")
-    } else if has("public class ") || has("public static void main") {
-        Some("Java")
-    } else if starts("package ") && has("func ") {
-        Some("Go")
-    } else if has("fn main") || has("use std::") || has("println!(") || has("impl ") {
-        Some("Rust")
-    } else if has("interface ")
-        || has("type ") && has(" = ") && (has(": string") || has(": number") || has(": boolean"))
-    {
-        Some("TypeScript")
-    } else if has("import ") && has(" from ")
-        || has("export default")
-        || has("console.log")
-        || has("function ") && has("{")
-        || has("const ") && (has("=>") || has(";"))
-        || has("let ") && (has("=>") || has(";"))
-    {
-        Some("JavaScript")
-    } else if starts("def ")
-        || starts("class ") && has(":")
-        || has("if __name__ ==")
-        || has("print(") && !has(";")
-    {
-        Some("Python")
-    } else if has("select ") && has(" from ") || has("create table") || has("insert into") {
-        Some("SQL")
-    } else if has("function ") && has("end") && has("local ") {
-        Some("Lua")
-    } else if starts("def ") && has("\nend") || has("puts ") && has("\nend") {
-        Some("Ruby")
-    } else if has("import foundation") || has("func ") && has("let ") && has("var ") {
-        Some("Swift")
-    } else if has("fun main") || has("val ") && has("println(") {
-        Some("Kotlin")
-    } else if has("void main()") || has("import 'package:") {
-        Some("Dart")
-    } else if has("defmodule ") || has("iex>") {
-        Some("Elixir")
-    } else if has("-module(") || has("-export(") {
-        Some("Erlang")
-    } else if starts("module ") && has(" where") {
-        Some("Haskell")
-    } else if has("library(") || has(" <- ") {
-        Some("R")
-    } else if has("<?php") {
-        Some("PHP")
-    } else if has("{") && has("}") && has(":") && has(";") && !has("function ") {
-        Some("CSS")
-    } else if text
-        .lines()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .any(|pair| pair[0].contains(':') && pair[1].starts_with('\t'))
-    {
-        Some("Makefile")
-    } else if trimmed.starts_with('(') && (has("defn ") || has("lambda ")) {
-        Some("Clojure")
-    } else {
-        None
-    }?;
-
-    code_file_kind_for_language(language)
-}
-
-pub(crate) fn classify_pasted_text_kind(text: &str) -> Option<FileKind> {
-    if text.trim().is_empty() {
-        return None;
-    }
-
-    if pasted_text_has_markdown_features(text) {
-        return Some(FileKind::Markdown);
-    }
-
-    pasted_text_shebang_language(text)
-        .or_else(|| pasted_text_first_line_language(text))
-        .or_else(|| pasted_text_structured_language(text))
-        .or_else(|| pasted_text_common_code_language(text))
-        .or(Some(FileKind::Markdown))
-}
-
 pub(crate) fn file_kind_badge_text(path: &Path) -> Option<String> {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -8448,10 +8225,10 @@ pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileKind, classify_pasted_text_kind, compute_incremental_markdown_decorations,
-        heading_matches_anchor, line_display_transfer_line_bounds,
-        markdown_reference_for_import_name, normalize_ordered_list_numbers_in_buffer,
-        resolve_markdown_target_path, split_markdown_target, text_tab_is_dirty, unique_import_path,
+        compute_incremental_markdown_decorations, heading_matches_anchor,
+        line_display_transfer_line_bounds, markdown_reference_for_import_name,
+        normalize_ordered_list_numbers_in_buffer, resolve_markdown_target_path,
+        split_markdown_target, text_tab_is_dirty, unique_import_path,
     };
     use crate::buffer::Buffer;
     use crate::markdown::parse_decorations;
@@ -8518,81 +8295,6 @@ mod tests {
             "# Title\n\npara one\npara two\n\nmore\n",
             "# Title\n\npara **one**\npara two\n\nmore\n",
         ));
-    }
-
-    #[test]
-    fn pasted_text_classifier_detects_markdown() {
-        assert_eq!(
-            classify_pasted_text_kind("# Title\n\n- [ ] task\n\n[link](https://example.com)"),
-            Some(FileKind::Markdown)
-        );
-        assert_eq!(
-            classify_pasted_text_kind("```rust\nfn main() {}\n```"),
-            Some(FileKind::Markdown)
-        );
-    }
-
-    #[test]
-    fn pasted_text_classifier_detects_common_code_languages() {
-        assert_eq!(
-            classify_pasted_text_kind("fn main() {\n    println!(\"hi\");\n}\n"),
-            Some(FileKind::Code {
-                language: "Rust".to_string()
-            })
-        );
-        assert_eq!(
-            classify_pasted_text_kind("{\"name\": \"moeka\", \"version\": 1}"),
-            Some(FileKind::Code {
-                language: "JSON".to_string()
-            })
-        );
-        assert_eq!(
-            classify_pasted_text_kind("#!/usr/bin/env python3\nprint('hi')\n"),
-            Some(FileKind::Code {
-                language: "Python".to_string()
-            })
-        );
-        assert_eq!(
-            classify_pasted_text_kind("<!doctype html>\n<html><body>Hello</body></html>"),
-            Some(FileKind::Code {
-                language: "HTML".to_string()
-            })
-        );
-        assert_eq!(
-            classify_pasted_text_kind("name: moeka\nversion: 1\nenabled: true\n"),
-            Some(FileKind::Code {
-                language: "YAML".to_string()
-            })
-        );
-        assert_eq!(
-            classify_pasted_text_kind("[package]\nname = \"moeka\"\nversion = \"0.1.0\"\n"),
-            Some(FileKind::Code {
-                language: "TOML".to_string()
-            })
-        );
-        assert_eq!(
-            classify_pasted_text_kind(
-                "interface User {\n  name: string\n}\nconst user: User = { name: 'Moeka' };\n"
-            ),
-            Some(FileKind::Code {
-                language: "TypeScript".to_string()
-            })
-        );
-        assert_eq!(
-            classify_pasted_text_kind("FROM alpine:3\nRUN echo hi\n"),
-            Some(FileKind::Code {
-                language: "Dockerfile".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn pasted_text_classifier_keeps_plain_prose_as_markdown() {
-        assert_eq!(
-            classify_pasted_text_kind("这是一段普通文本，不应该被识别成代码。"),
-            Some(FileKind::Markdown)
-        );
-        assert_eq!(classify_pasted_text_kind("   \n\t"), None);
     }
 
     #[test]

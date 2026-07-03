@@ -3554,6 +3554,28 @@ impl EditorView {
                     self.scaled(self.styles.context_menu.menu_sidebar_width_px),
                 )
             }
+            ContextMenuKind::Indentation => {
+                let mut items = Vec::new();
+                for (label, settings) in [
+                    ("空格: 2", IndentSettings::spaces(2)),
+                    ("空格: 4", IndentSettings::spaces(4)),
+                    ("制表符: 2", IndentSettings::tabs(2)),
+                    ("制表符: 4", IndentSettings::tabs(4)),
+                ] {
+                    items.push(self.render_context_menu_choice_item(
+                        label,
+                        self.indent_settings == settings,
+                        cx,
+                        move |this, _, cx| {
+                            this.set_indent_settings(settings, cx);
+                        },
+                    ));
+                }
+                (
+                    items,
+                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                )
+            }
             ContextMenuKind::SidebarCreate => {
                 let mut items = Vec::new();
                 {

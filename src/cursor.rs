@@ -184,6 +184,17 @@ impl Cursor {
             self.move_to(prev, buffer);
         }
     }
+
+    pub fn delete_word_right(&mut self, buffer: &mut Buffer) {
+        if self.has_selection() {
+            let range = self.selection_range();
+            buffer.delete(range.clone());
+            self.move_to(range.start, buffer);
+        } else {
+            let next = next_word_boundary(buffer.text(), self.offset);
+            buffer.delete(self.offset..next);
+        }
+    }
 }
 
 fn prev_word_boundary(text: &str, offset: usize) -> usize {
