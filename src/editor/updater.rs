@@ -6,7 +6,7 @@ use std::process::Command;
 use gpui::Context;
 use serde::Deserialize;
 
-use super::{config_paths, EditorView};
+use super::{EditorView, config_paths};
 
 const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/MoekaProject/release/releases/latest";
@@ -103,7 +103,9 @@ fn check_and_download_update() -> Result<Option<PreparedUpdate>, String> {
 
     let asset = select_update_asset(&release.assets)
         .ok_or_else(|| format!("no macOS update zip found in release {}", release.tag_name))?;
-    let update_dir = config_paths::cache_dir().join("updates").join(safe_file_name(&release.tag_name));
+    let update_dir = config_paths::cache_dir()
+        .join("updates")
+        .join(safe_file_name(&release.tag_name));
     fs::create_dir_all(&update_dir).map_err(|error| error.to_string())?;
     let out_path = update_dir.join(safe_file_name(&asset.name));
     download_asset(&asset.browser_download_url, &out_path)?;
@@ -123,7 +125,9 @@ fn fetch_latest_release() -> Result<GitHubRelease, String> {
     {
         request = request.set("Authorization", &format!("Bearer {}", token.trim()));
     }
-    let text = request.call().map_err(|error| error.to_string())?
+    let text = request
+        .call()
+        .map_err(|error| error.to_string())?
         .into_string()
         .map_err(|error| error.to_string())?;
     serde_json::from_str(&text).map_err(|error| error.to_string())
@@ -178,17 +182,24 @@ fn download_asset(url: &str, out_path: &Path) -> Result<(), String> {
     let mut file = fs::File::create(out_path).map_err(|error| error.to_string())?;
     let mut buffer = [0u8; 64 * 1024];
     loop {
-        let read = reader.read(&mut buffer).map_err(|error| error.to_string())?;
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
         if read == 0 {
             break;
         }
-        file.write_all(&buffer[..read]).map_err(|error| error.to_string())?;
+        file.write_all(&buffer[..read])
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
 
 fn user_agent() -> String {
-    let build = if GIT_TAG.is_empty() { GIT_COMMIT } else { GIT_TAG };
+    let build = if GIT_TAG.is_empty() {
+        GIT_COMMIT
+    } else {
+        GIT_TAG
+    };
     format!("{USER_AGENT} ({APP_VERSION}; {build})")
 }
 
@@ -252,6 +263,12 @@ fn current_app_bundle_path() -> Option<PathBuf> {
 fn safe_file_name(value: &str) -> String {
     value
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') { ch } else { '-' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
         .collect()
 }

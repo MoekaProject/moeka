@@ -1,4 +1,3 @@
-use std::env;
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -6,6 +5,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
+use std::{env, ffi::OsString};
 
 use alacritty_terminal::{
     event::{Event as AlacTermEvent, EventListener},
@@ -815,6 +815,7 @@ impl ChatTerminalSession {
 
         let mut command = agent_cli.build_command();
         command.cwd(cwd.clone());
+        configure_chat_terminal_environment(&mut command);
 
         let child = pair.slave.spawn_command(command)?;
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
@@ -1061,12 +1062,52 @@ fn agent_cli_command_exists(agent_cli: ChatAgentCli) -> bool {
     }
 
     let command_name = agent_cli.command_name();
-    let Some(paths) = env::var_os("PATH") else {
-        return false;
-    };
+    let paths = chat_terminal_path_env();
     env::split_paths(&paths)
         .map(|path| path.join(command_name))
         .any(|path| path.is_file())
+}
+
+fn chat_terminal_path_env() -> OsString {
+    let mut paths: Vec<PathBuf> = env::var_os("PATH")
+        .map(|paths| env::split_paths(&paths).collect())
+        .unwrap_or_default();
+
+    for candidate in [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        let candidate = PathBuf::from(candidate);
+        if !paths.iter().any(|path| path == &candidate) {
+            paths.push(candidate);
+        }
+    }
+
+    env::join_paths(paths).unwrap_or_else(|_| env::var_os("PATH").unwrap_or_default())
+}
+
+fn chat_terminal_locale_env(key: &str) -> OsString {
+    env::var_os(key)
+        .filter(|value| {
+            value
+                .to_string_lossy()
+                .to_ascii_uppercase()
+                .contains("UTF-8")
+        })
+        .unwrap_or_else(|| OsString::from("en_US.UTF-8"))
+}
+
+fn configure_chat_terminal_environment(command: &mut CommandBuilder) {
+    command.env("PATH", chat_terminal_path_env());
+    command.env("LANG", chat_terminal_locale_env("LANG"));
+    command.env("LC_ALL", chat_terminal_locale_env("LC_ALL"));
+    command.env("LC_CTYPE", chat_terminal_locale_env("LC_CTYPE"));
 }
 
 fn convert_terminal_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -2123,21 +2164,20 @@ impl EditorView {
         let Some(relative_path) = self.relative_path_for_path(path) else {
             return;
         };
-        if range.is_empty() {
-            self.add_path_to_chat(path, cx);
-            return;
-        }
-
-        let end_anchor = range.end.saturating_sub(1);
         let (start_line, start_col) = self.chat_reference_position(range.start);
-        let (end_line, end_col) = self.chat_reference_position(end_anchor);
+        let text = if range.is_empty() {
+            format!("@{} L{}:C{} ", relative_path, start_line, start_col)
+        } else {
+            let end_anchor = range.end.saturating_sub(1);
+            let (end_line, end_col) = self.chat_reference_position(end_anchor);
+            format!(
+                "@{} L{}:C{}-L{}:C{} ",
+                relative_path, start_line, start_col, end_line, end_col
+            )
+        };
 
         self.ensure_chat_terminal_visible(cx);
         if let Some(session) = self.active_chat_terminal_mut() {
-            let text = format!(
-                "@{} L{}:C{}-L{}:C{} ",
-                relative_path, start_line, start_col, end_line, end_col
-            );
             let _ = session.write_bytes(text.as_bytes());
         }
     }

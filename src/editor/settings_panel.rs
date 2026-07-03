@@ -183,7 +183,11 @@ impl EditorView {
             .gap(px(self.scaled(6.0)))
             .rounded(px(self.scaled(8.0)))
             .border(px(1.0))
-            .border_color(if update_ready { update_color } else { self.theme.border_primary })
+            .border_color(if update_ready {
+                update_color
+            } else {
+                self.theme.border_primary
+            })
             .bg(self.theme.bg_secondary)
             .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
             .text_color(text_color)

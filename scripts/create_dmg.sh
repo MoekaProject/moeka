@@ -14,7 +14,7 @@ background_image="$5"
 
 background_dir="$staging_dir/.background"
 background_name="install-bg.jpg"
-rw_dmg="${dmg_path%.dmg}.rw.dmg"
+rw_dmg="$(mktemp "${TMPDIR:-/tmp}/moeka-dmg.XXXXXX.rw.dmg")"
 mount_dir=""
 device=""
 window_left=120
@@ -35,7 +35,7 @@ trap cleanup EXIT
 mkdir -p "$background_dir"
 cp "$background_image" "$background_dir/$background_name"
 sips -z "$window_height" "$window_width" -s dpiWidth 72 -s dpiHeight 72 "$background_dir/$background_name" >/dev/null
-rm -f "$dmg_path" "$rw_dmg"
+rm -f "$dmg_path"
 
 hdiutil create \
   -volname "$volume_name" \
@@ -44,10 +44,6 @@ hdiutil create \
   -format UDRW \
   -ov \
   "$rw_dmg" >/dev/null
-
-if [[ -d "/Volumes/$volume_name" ]]; then
-  hdiutil detach "/Volumes/$volume_name" -quiet >/dev/null 2>&1 || true
-fi
 
 attach_output="$(hdiutil attach "$rw_dmg" -readwrite -noverify -noautoopen)"
 device="$(awk '/Apple_HFS/ { print $1; exit }' <<<"$attach_output")"

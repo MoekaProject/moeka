@@ -106,7 +106,7 @@ fn default_font_size() -> f32 {
 }
 
 fn default_line_height() -> f32 {
-    1.5
+    1.7
 }
 
 fn default_letter_spacing() -> f32 {

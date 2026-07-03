@@ -1476,6 +1476,7 @@ impl EditorView {
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
                     cx.stop_propagation();
+                    this.close_context_menu(cx);
                     handler(this, window, cx);
                 }),
             )
@@ -1542,6 +1543,7 @@ impl EditorView {
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
                     cx.stop_propagation();
+                    this.close_context_menu(cx);
                     handler(this, window, cx);
                 }),
             )
@@ -1613,6 +1615,7 @@ impl EditorView {
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
                     cx.stop_propagation();
+                    this.close_context_menu(cx);
                     handler(this, window, cx);
                 }),
             )
@@ -1665,6 +1668,7 @@ impl EditorView {
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
                     cx.stop_propagation();
+                    this.close_context_menu(cx);
                     handler(this, window, cx);
                 }),
             )
@@ -2616,28 +2620,21 @@ impl EditorView {
                     },
                 ));
 
-                let selection = self.cursor.selection_range();
-                if !selection.is_empty() {
-                    let selection_path = current_path.clone();
-                    let selection_range = selection.clone();
-                    items.push(self.render_format_context_menu_item_with_hover_behavior(
-                        ADD_SELECTION_TO_CHAT_LABEL,
-                        Some(CHAT_SVG_PATH),
-                        None,
-                        false,
-                        false,
-                        FormatMenuHoverBehavior::ClearSubmenu,
-                        cx,
-                        move |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.add_selection_to_chat(
-                                &selection_path,
-                                selection_range.clone(),
-                                cx,
-                            );
-                        },
-                    ));
-                }
+                let selection_path = current_path.clone();
+                let selection_range = self.cursor.selection_range();
+                items.push(self.render_format_context_menu_item_with_hover_behavior(
+                    ADD_SELECTION_TO_CHAT_LABEL,
+                    Some(CHAT_SVG_PATH),
+                    None,
+                    false,
+                    false,
+                    FormatMenuHoverBehavior::ClearSubmenu,
+                    cx,
+                    move |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.add_selection_to_chat(&selection_path, selection_range.clone(), cx);
+                    },
+                ));
             }
 
             items.push(self.render_context_menu_separator());
@@ -3478,11 +3475,7 @@ impl EditorView {
         let padding = self.scaled(ms.menu_padding_y_px) * 2.0;
         let separator_height = self.context_menu_separator_block_height();
         let chat_rows = if self.current_file_path.is_some() {
-            if self.cursor.selection_range().is_empty() {
-                1.0
-            } else {
-                2.0
-            }
+            2.0
         } else {
             0.0
         };

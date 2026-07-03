@@ -201,7 +201,7 @@ mod tests {
             body_cjk_font: "PingFang SC".to_string(),
             code_font: "JetBrains Mono".to_string(),
             font_size: 17.0,
-            line_height: 1.8,
+            line_height: 1.7,
             letter_spacing: 0.5,
             sidebar_sort_mode: "created_desc".to_string(),
             outline_rail_visible: true,
@@ -209,6 +209,7 @@ mod tests {
             highlight_line_background: false,
             date_time_format: "%Y-%m-%d %H:%M".to_string(),
             starred_files: Vec::new(),
+            app_icon_index: 0,
         }
     }
 

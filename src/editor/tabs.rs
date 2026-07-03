@@ -2003,7 +2003,12 @@ impl EditorView {
             .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
             .text_color(update_color)
             .cursor(CursorStyle::Arrow)
-            .hover(move |style| style.bg(gpui::Hsla { a: 0.12, ..update_color }))
+            .hover(move |style| {
+                style.bg(gpui::Hsla {
+                    a: 0.12,
+                    ..update_color
+                })
+            })
             .child(
                 svg()
                     .path(SITE_SVG_PATH)
