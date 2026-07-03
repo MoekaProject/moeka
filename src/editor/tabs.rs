@@ -1983,6 +1983,48 @@ impl EditorView {
             .into_any_element()
     }
 
+    fn render_update_ready_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let update_color = crate::theme::hex_to_hsla("#d6a100");
+        let button_height = (self.tab_bar_height() - self.scaled(6.0)).max(18.0);
+        let icon_size = self.scaled(ts.tab_item_icon_size_px);
+        let padding_x = self.scaled(10.0);
+        let gap = self.scaled(6.0);
+
+        div()
+            .id("tab-bar-update-ready")
+            .h(px(button_height))
+            .px(px(padding_x))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(gap))
+            .rounded(px(self.scaled(8.0)))
+            .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
+            .text_color(update_color)
+            .cursor(CursorStyle::Arrow)
+            .hover(move |style| style.bg(gpui::Hsla { a: 0.12, ..update_color }))
+            .child(
+                svg()
+                    .path(SITE_SVG_PATH)
+                    .size(px(icon_size))
+                    .text_color(update_color),
+            )
+            .child(
+                self.prepared_update()
+                    .map(|update| format!("重启以安装新版本 {}", update.version))
+                    .unwrap_or_else(|| "重启以安装新版本".to_string()),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.install_prepared_update();
+                }),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let ts = &self.styles.tab_bar;
         let inner_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
@@ -2168,6 +2210,9 @@ impl EditorView {
             .items_center()
             .gap(px(0.0))
             .pr(px(self.scaled(ts.tab_item_padding_right_px)))
+            .when(self.prepared_update().is_some(), |this| {
+                this.child(self.render_update_ready_button(cx))
+            })
             .child(self.render_tab_bar_action_button(
                 "tab-bar-chat-toggle",
                 CHAT_PANEL_SVG_PATH,

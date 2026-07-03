@@ -67,8 +67,19 @@ $(APP_DIR): build-release $(INFO_PLIST_TEMPLATE) $(ICON_FILE)
 	@echo "Created $(APP_DIR)"
 
 build-release:
-	@rustup target add "$(TARGET)"
-	@cargo build --profile "$(PROFILE)" --target "$(TARGET)"
+	@if [[ "$(TARGET)" == "universal-apple-darwin" ]]; then \
+		rustup target add aarch64-apple-darwin x86_64-apple-darwin; \
+		cargo build --profile "$(PROFILE)" --target aarch64-apple-darwin; \
+		cargo build --profile "$(PROFILE)" --target x86_64-apple-darwin; \
+		mkdir -p "target/$(TARGET)/$(PROFILE)"; \
+		lipo -create \
+			"target/aarch64-apple-darwin/$(PROFILE)/$(APP_NAME)" \
+			"target/x86_64-apple-darwin/$(PROFILE)/$(APP_NAME)" \
+			-output "$(BINARY_PATH)"; \
+	else \
+		rustup target add "$(TARGET)"; \
+		cargo build --profile "$(PROFILE)" --target "$(TARGET)"; \
+	fi
 
 clean-dmg:
 	@rm -f "$(DMG_PATH)"

@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        type: string
+      release_notes:
+        description: "Release notes. If empty, the workflow uses the tag message when available."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS release assets
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Prepare release notes
+        id: release_meta
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+          RELEASE_NOTES_INPUT: ${{ inputs.release_notes }}
+        run: |
+          set -euo pipefail
+          release_tag="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            release_tag="${RELEASE_TAG_INPUT}"
+          fi
+          if [[ -z "${release_tag}" ]]; then
+            echo "release tag is required" >&2
+            exit 1
+          fi
+
+          echo "tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+
+          if [[ -n "${RELEASE_NOTES_INPUT}" ]]; then
+            printf '%s\n' "${RELEASE_NOTES_INPUT}" > release-notes.md
+          else
+            git fetch --force --tags
+            if git rev-parse -q --verify "refs/tags/${release_tag}" >/dev/null; then
+              git for-each-ref "refs/tags/${release_tag}" --format='%(contents)' > release-notes.md
+            fi
+            if [[ ! -s release-notes.md ]]; then
+              printf 'Release %s\n' "${release_tag}" > release-notes.md
+            fi
+          fi
+
+      - name: Build arm64 app and dmg
+        run: |
+          make dmg TARGET=aarch64-apple-darwin DMG_PATH=dist/Moeka-macos-arm64.dmg
+          ditto -c -k --keepParent target/macos/aarch64-apple-darwin/Moeka.app dist/Moeka-macos-arm64.zip
+
+      - name: Build x86_64 app and dmg
+        run: |
+          make dmg TARGET=x86_64-apple-darwin DMG_PATH=dist/Moeka-macos-x86_64.dmg
+          ditto -c -k --keepParent target/macos/x86_64-apple-darwin/Moeka.app dist/Moeka-macos-x86_64.zip
+
+      - name: Build universal app and dmg
+        run: |
+          make dmg TARGET=universal-apple-darwin DMG_PATH=dist/Moeka-macos-universal.dmg
+          ditto -c -k --keepParent target/macos/universal-apple-darwin/Moeka.app dist/Moeka-macos-universal.zip
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: MoekaProject/release
+          token: ${{ secrets.MOEKA_PUBLIC_RELEASE_TOKEN }}
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
+          files: |
+            dist/Moeka-macos-arm64.dmg
+            dist/Moeka-macos-arm64.zip
+            dist/Moeka-macos-x86_64.dmg
+            dist/Moeka-macos-x86_64.zip
+            dist/Moeka-macos-universal.dmg
+            dist/Moeka-macos-universal.zip

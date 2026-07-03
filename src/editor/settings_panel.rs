@@ -7,11 +7,11 @@ use gpui::{
 };
 
 use crate::i18n::{TextKey, UiLanguage, language_picker_options};
-use crate::theme::{EditorThemeMode, ThemeKind};
+use crate::theme::{EditorThemeMode, ThemeKind, hex_to_hsla};
 
 use super::{
-    DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, THEME_DARK_MINI_SVG_PATH,
-    THEME_LIGHT_MINI_SVG_PATH,
+    DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, SITE_SVG_PATH,
+    THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH,
 };
 
 /// Duration of the app-icon tile opacity fade on hover enter/leave.
@@ -152,6 +152,27 @@ impl EditorView {
     fn render_settings_site_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let height = self.scaled(30.0);
         let icon_size = self.scaled(15.0);
+        let update_ready = self.prepared_update().is_some();
+        let update_color = hex_to_hsla("#d6a100");
+        let text_color = if update_ready {
+            update_color
+        } else {
+            self.theme.text_primary
+        };
+        let icon_color = if update_ready {
+            update_color
+        } else {
+            self.theme.text_secondary
+        };
+        let label = if let Some(update) = self.prepared_update() {
+            if update.version.is_empty() {
+                "发现新版本".to_string()
+            } else {
+                format!("发现新版本 {}", update.version)
+            }
+        } else {
+            self.t(TextKey::OfficialWebsite).to_string()
+        };
 
         div()
             .id("settings-site-button")
@@ -162,10 +183,10 @@ impl EditorView {
             .gap(px(self.scaled(6.0)))
             .rounded(px(self.scaled(8.0)))
             .border(px(1.0))
-            .border_color(self.theme.border_primary)
+            .border_color(if update_ready { update_color } else { self.theme.border_primary })
             .bg(self.theme.bg_secondary)
             .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
-            .text_color(self.theme.text_primary)
+            .text_color(text_color)
             .cursor(CursorStyle::Arrow)
             .hover({
                 let hover_bg = self.theme.bg_hover;
@@ -173,15 +194,17 @@ impl EditorView {
             })
             .child(
                 svg()
-                    .path("assets/icons/site.svg")
+                    .path(SITE_SVG_PATH)
                     .size(px(icon_size))
-                    .text_color(self.theme.text_secondary),
+                    .text_color(icon_color),
             )
-            .child(self.t(TextKey::OfficialWebsite))
+            .child(label)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_, _, _, _| {
-                    if let Err(error) = std::process::Command::new("open")
+                cx.listener(|this, _, _, _| {
+                    if this.prepared_update().is_some() {
+                        this.install_prepared_update();
+                    } else if let Err(error) = std::process::Command::new("open")
                         .arg("https://moeka.app/")
                         .spawn()
                     {

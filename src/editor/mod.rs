@@ -38,6 +38,7 @@ mod temp_store;
 mod theme_debugger;
 mod tooltip;
 mod types;
+mod updater;
 mod whiteboard;
 mod whiteboard_element;
 mod whiteboard_export;
@@ -50,6 +51,7 @@ pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
 pub(crate) use assets::*;
 pub(crate) use scrollbar::{PanelScrollbarKind, PanelScrollbarState};
 pub(crate) use types::*;
+pub(crate) use updater::UpdateState;
 pub(crate) use whiteboard::*;
 
 use std::cell::{Cell, RefCell};
@@ -1730,6 +1732,8 @@ pub struct EditorView {
         std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     >,
     pub(crate) cached_font_names: Option<Vec<String>>,
+    pub(crate) update_state: UpdateState,
+    pub(crate) update_task: Option<Task<()>>,
     pub(crate) ui_language: UiLanguage,
     pub(crate) app_settings: AppSettings,
 }
@@ -2149,6 +2153,8 @@ impl EditorView {
             font_picker_trigger_position: None,
             font_picker_button_bounds: std::collections::HashMap::new(),
             cached_font_names: None,
+            update_state: UpdateState::Idle,
+            update_task: None,
             ui_language,
             app_settings,
         };
@@ -2158,6 +2164,7 @@ impl EditorView {
         session_store::restore_session(&mut this);
         this.refresh_builtin_tab_titles();
         this.sync_panel_display_state();
+        this.start_update_check(cx);
         this.start_blinking(cx);
         if !this.sidebar_root.as_os_str().is_empty() {
             this.start_watching(cx);
