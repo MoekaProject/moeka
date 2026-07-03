@@ -389,8 +389,45 @@ impl EditorView {
         self.line_geometry_cache.borrow().prefix_y_offsets[target_line]
     }
 
+    /// Extra height reserved above an image line's syntax text by its inline
+    /// preview (image plus top/bottom gaps). The preview is painted above the
+    /// syntax text, so this offset shifts the text row down within the line
+    /// box. Keep in sync with the per-line layout in `element.rs`.
+    pub(crate) fn image_preview_extra_height_for_line(&self, line: usize) -> f32 {
+        if self.folded_image_previews.contains(&line) {
+            return 0.0;
+        }
+        let Some(path) = self
+            .decorations
+            .get(line)
+            .and_then(|decoration| decoration.image_path.as_ref())
+        else {
+            return 0.0;
+        };
+        let Some(Some(img_data)) = self.image_cache.get(path) else {
+            return 0.0;
+        };
+        let img_size = img_data.size(0);
+        let img_w = img_size.width.0 as f32;
+        let img_h = img_size.height.0 as f32;
+        if img_w <= 0.0 || img_h <= 0.0 {
+            return 0.0;
+        }
+        let (_, display_h) = helpers::compute_image_preview_size(
+            img_w,
+            img_h,
+            self.last_text_width,
+            self.last_window_scale_factor,
+        );
+        display_h
+            + self.scaled(self.styles.image_preview.image_gap_top_px)
+            + self.scaled(self.styles.image_preview.image_gap_bottom_px)
+    }
+
     pub(crate) fn text_y_offset_for_line(&self, line: usize) -> f32 {
-        self.line_y_offset(line) + self.block_padding_for_line(line).0
+        self.line_y_offset(line)
+            + self.block_padding_for_line(line).0
+            + self.image_preview_extra_height_for_line(line)
     }
 
     pub(crate) fn total_content_height(&self) -> f32 {

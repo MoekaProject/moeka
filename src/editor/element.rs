@@ -3416,6 +3416,17 @@ impl Element for EditorElement {
             } else {
                 0.0
             };
+            // `![](url)` lines without alt text conceal to an empty display
+            // string while the syntax is inactive; the preview alone
+            // represents the line, so drop the blank caption row from the
+            // layout instead of leaving an empty row under the image.
+            let image_caption_hidden =
+                image_extra_height > 0.0 && !image_active && display_text.trim().is_empty();
+            let text_line_height = if image_caption_hidden {
+                0.0
+            } else {
+                text_line_height
+            };
             let rendered_block_preview = if block_preview_code_mode {
                 None
             } else if block_preview_active {
@@ -3520,7 +3531,10 @@ impl Element for EditorElement {
             let effective_scroll_offset = scroll_offset + scroll_anchor_delta;
             let line_top = y - effective_scroll_offset;
             let line_bottom = line_top + total_line_height;
-            let text_line_top = line_top + block_padding_top;
+            // The inline image preview is painted above its syntax text, so the
+            // text row is pushed down by the preview's reserved height. Keep
+            // this in sync with `EditorView::text_y_offset_for_line`.
+            let text_line_top = line_top + block_padding_top + image_extra_height;
             if line_bottom >= origin_y && line_top <= origin_y + viewport_height {
                 inline_diff_line_geometry.push((line_idx, line_top, total_line_height));
             }
@@ -3549,8 +3563,33 @@ impl Element for EditorElement {
             } else {
                 base_content_x
             };
-            let selection_padding_left_px =
-                (content_x - (editor_left + editor.padding_left())).max(0.0);
+            // Image-only lines render their syntax as a caption under the
+            // (centred) preview, centred both while collapsed and while the
+            // cursor expands it for editing. Wrapped captions stay
+            // left-aligned, as does the syntax when the preview is
+            // gutter-folded (or not loaded) and no image is shown above.
+            let image_caption_centered = decoration.image_path.is_some()
+                && image_extra_height > 0.0
+                && !image_caption_hidden
+                && wrapped.wrap_boundaries().is_empty()
+                && helpers::image_syntax_range(line_content).is_some_and(|range| {
+                    line_content[..range.start].trim().is_empty()
+                        && line_content[range.end..].trim().is_empty()
+                });
+            let content_x = if image_caption_centered {
+                let caption_width = wrapped
+                    .position_for_index(display_text.len(), px(line_height))
+                    .map(|pos| f32::from(pos.x))
+                    .unwrap_or_else(|| f32::from(wrapped.unwrapped_layout.width));
+                content_x + ((text_width - caption_width) / 2.0).max(0.0)
+            } else {
+                content_x
+            };
+            let selection_padding_left_px = if image_caption_centered {
+                0.0
+            } else {
+                (content_x - (editor_left + editor.padding_left())).max(0.0)
+            };
             let wrap_boundary_upstream_xs = compute_wrap_boundary_upstream_xs(
                 window,
                 wrapped,
@@ -3570,7 +3609,11 @@ impl Element for EditorElement {
                     base_runs: runs.clone(),
                     font_size,
                     line_height,
-                    visual_line_count,
+                    visual_line_count: if image_caption_hidden {
+                        0
+                    } else {
+                        visual_line_count
+                    },
                     wrapped_line: wrapped.clone(),
                     wrap_width_px: wrapped.wrap_width.map(f32::from),
                     unwrapped_width_px: f32::from(wrapped.unwrapped_layout.width),
@@ -4480,7 +4523,9 @@ impl Element for EditorElement {
                                 text_width,
                                 window_scale_factor,
                             );
-                            let img_top = text_line_top + text_line_height + image_gap_top;
+                            // Preview sits above the syntax text within the
+                            // line box reserved by `image_extra_height`.
+                            let img_top = text_line_top - image_extra_height + image_gap_top;
                             let img_left = editor_left
                                 + editor.padding_left()
                                 + ((text_width - display_w) / 2.0).max(0.0);
@@ -4805,7 +4850,14 @@ impl Element for EditorElement {
                     let is_img_folded = editor.folded_image_previews.contains(&line_idx);
                     let is_hovered = editor.hovering_gutter_fold_area
                         || editor.hovering_fold_line == Some(line_idx);
-                    let fi_y = text_line_top + (line_height - fi_size) / 2.0;
+                    // Align the fold icon with the top of the rendered preview
+                    // (painted above the syntax text); fall back to the syntax
+                    // row when the preview is folded or not loaded.
+                    let fi_y = if image_extra_height > 0.0 {
+                        text_line_top - image_extra_height + image_gap_top
+                    } else {
+                        text_line_top + (line_height - fi_size) / 2.0
+                    };
                     let gs = &editor.styles.gutter;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
                     let fi_alpha = if is_img_folded {
@@ -7132,6 +7184,7 @@ impl Element for EditorElement {
                 cx.notify();
             }
             editor.last_text_width = text_width;
+            editor.last_window_scale_factor = window_scale_factor;
             if scroll_anchor_delta.abs() > 0.5
                 && editor.active_tab_is_non_markdown_text()
                 && editor.editor_wraps_to_available_width()
