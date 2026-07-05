@@ -1918,7 +1918,7 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn render_tab_bar_action_button(
+    pub(super) fn render_tab_bar_action_button(
         &self,
         id: &'static str,
         icon_path: &'static str,
@@ -1962,9 +1962,7 @@ impl EditorView {
             .justify_center()
             .opacity(button_opacity)
             .when(is_enabled, |this| {
-                this.hover(move |style| {
-                    style.opacity(ts.tab_item_icon_active_opacity)
-                })
+                this.hover(move |style| style.opacity(ts.tab_item_icon_active_opacity))
             })
             .cursor(CursorStyle::Arrow)
             .child(
@@ -2262,7 +2260,6 @@ impl EditorView {
                     this.toggle_git_history_panel(cx);
                 },
             ));
-        let right_panel_w = self.right_panel_width();
         let action_chrome = div()
             .id("tab-bar-actions-chrome")
             .h(px(inner_height))
@@ -2270,14 +2267,9 @@ impl EditorView {
             .flex()
             .items_center()
             .justify_end()
-            .when(right_panel_w > 0.5, |this| {
-                let ups = &self.styles.utility_panel;
-                this.w(px(right_panel_w))
-                    .bg(ups.utility_panel_bg)
-                    .border_l(px(ups.utility_panel_border_width_px))
-                    .border_color(ups.utility_panel_border_color)
-            })
-            .child(action_buttons);
+            .when(self.right_panel_width() <= 0.5, |this| {
+                this.child(action_buttons)
+            });
 
         div()
             .id("tab-bar")
@@ -2329,11 +2321,7 @@ impl EditorView {
                     .right_0()
                     .bottom_0()
                     .h(px(ts.tab_bar_border_width_px))
-                    .bg(if self.right_panel_width() > 0.5 {
-                        self.styles.utility_panel.utility_panel_border_color
-                    } else {
-                        ts.tab_bar_border_color
-                    }),
+                    .bg(ts.tab_bar_border_color),
             )
             .child(left_controls_group)
             .child(
@@ -2353,6 +2341,46 @@ impl EditorView {
                     .children(tab_items),
             )
             .child(action_chrome)
+            .into_any_element()
+    }
+
+    pub(crate) fn render_panel_toggle_actions(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let inner_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
+        div()
+            .id("panel-toggle-actions")
+            .h(px(inner_height))
+            .flex()
+            .items_center()
+            .gap(px(0.0))
+            .pr(px(self.scaled(ts.tab_item_padding_right_px)))
+            .child(self.render_tab_bar_action_button(
+                "panel-chat-toggle",
+                CHAT_PANEL_SVG_PATH,
+                self.is_utility_panel_active(RightUtilityPanel::Chat),
+                true,
+                Some(Self::show_chat_panel_bottom),
+                cx,
+                |this, cx| this.toggle_chat_panel(cx),
+            ))
+            .child(self.render_tab_bar_action_button(
+                "panel-info-toggle",
+                INFO_PANEL_SVG_PATH,
+                self.is_utility_panel_active(RightUtilityPanel::Info),
+                true,
+                None,
+                cx,
+                |this, cx| this.toggle_info_panel(cx),
+            ))
+            .child(self.render_tab_bar_action_button(
+                "panel-git-toggle",
+                GIT_HISTORY_SVG_PATH,
+                self.is_utility_panel_active(RightUtilityPanel::GitHistory),
+                true,
+                None,
+                cx,
+                |this, cx| this.toggle_git_history_panel(cx),
+            ))
             .into_any_element()
     }
 }

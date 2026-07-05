@@ -202,7 +202,29 @@ impl EditorView {
                             div()
                                 .h_full()
                                 .w(px(panel_layout_w))
-                                .child(self.render_utility_panel(chat_panel_focused, cx)),
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .id("utility-panel-top-bar")
+                                        .h(px(self.tab_bar_height()))
+                                        .w_full()
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_end()
+                                        .bg(ups.utility_panel_bg)
+                                        .border_l(px(ups.utility_panel_border_width_px))
+                                        .border_b(px(ups.utility_panel_border_width_px))
+                                        .border_color(ups.utility_panel_border_color)
+                                        .child(self.render_panel_toggle_actions(cx)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_h(px(0.0))
+                                        .child(self.render_utility_panel(chat_panel_focused, cx)),
+                                ),
                         )
                         .child(
                             div()
@@ -886,11 +908,20 @@ impl Render for EditorView {
                     .overflow_hidden()
                     .relative()
                     .flex()
-                    .flex_col()
+                    .flex_row()
                     .bg(self.styles.editor.editor_bg)
-                    .when(!self.tabs.is_empty(), |this| {
-                        this.child(self.render_tab_bar(cx))
-                    })
+                    .child(
+                        div()
+                            .id("workspace-main-column")
+                            .flex_1()
+                            .h_full()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .flex()
+                            .flex_col()
+                            .when(!self.tabs.is_empty(), |this| {
+                                this.child(self.render_tab_bar(cx))
+                            })
                     .when(self.tabs.is_empty(), |this| {
                         // Empty state: no tabs open
                         let bg_hover = self.styles.sidebar.sidebar_item_hover_bg;
@@ -1616,15 +1647,6 @@ impl Render for EditorView {
                                                             ),
                                                         )
                                                         .child(self.render_status_bar(cx)),
-                                            )
-                                            .when(
-                                                self.should_render_right_panels(),
-                                                |this| {
-                                                    this.child(self.render_right_panels(
-                                                        chat_panel_focused,
-                                                        cx,
-                                                    ))
-                                                },
                                             ),
                                     )
                                     .when(self.should_render_bottom_chat_panel(), |this| {
@@ -1743,7 +1765,11 @@ impl Render for EditorView {
                                     })
                             )
                         },
-                    ),
+                    )
+                    )
+                    .when(self.should_render_right_panels(), |this| {
+                        this.child(self.render_right_panels(chat_panel_focused, cx))
+                    }),
             )
             .when(resizing, |this| {
                 let indicator_line = if self.sidebar_resizing {
