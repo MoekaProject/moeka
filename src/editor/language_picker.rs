@@ -1,14 +1,23 @@
 use std::collections::HashSet;
 
-use gpui::{AnyElement, Context, CursorStyle, MouseButton, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, CursorStyle, MouseButton, Pixels, Point, Window, div, prelude::*, px,
+};
 
 use super::*;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LanguagePickerMode {
+    Language,
+    Indentation,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LanguagePickerKind {
     Markdown,
     PlainText,
     Code(String),
+    Indentation(IndentSettings),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +67,52 @@ fn all_language_picker_items() -> Vec<LanguagePickerItem> {
     items
 }
 
+fn all_indentation_picker_items() -> Vec<LanguagePickerItem> {
+    [
+        (
+            "缩进: 空格 2",
+            "将文档缩进转换为每级 2 个空格",
+            IndentSettings::spaces(2),
+        ),
+        (
+            "缩进: 空格 4",
+            "将文档缩进转换为每级 4 个空格",
+            IndentSettings::spaces(4),
+        ),
+        (
+            "缩进: 制表符 2",
+            "将文档缩进转换为制表符，宽度 2",
+            IndentSettings::tabs(2),
+        ),
+        (
+            "缩进: 制表符 4",
+            "将文档缩进转换为制表符，宽度 4",
+            IndentSettings::tabs(4),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, detail, settings)| LanguagePickerItem {
+        name: name.to_string(),
+        detail: detail.to_string(),
+        kind: LanguagePickerKind::Indentation(settings),
+    })
+    .collect()
+}
+
+fn picker_items_for_mode(mode: LanguagePickerMode) -> Vec<LanguagePickerItem> {
+    match mode {
+        LanguagePickerMode::Language => all_language_picker_items(),
+        LanguagePickerMode::Indentation => all_indentation_picker_items(),
+    }
+}
+
+fn picker_placeholder(mode: LanguagePickerMode) -> &'static str {
+    match mode {
+        LanguagePickerMode::Language => "搜索语言或扩展名",
+        LanguagePickerMode::Indentation => "搜索缩进方式",
+    }
+}
+
 fn language_item_matches(item: &LanguagePickerItem, query: &str) -> bool {
     let query = query.trim().to_ascii_lowercase();
     if query.is_empty() {
@@ -71,33 +126,54 @@ fn language_item_matches(item: &LanguagePickerItem, query: &str) -> bool {
 impl EditorView {
     fn language_picker_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
-        styles.text_input_padding_left_px =
-            self.styles.quick_open.quick_open_input_text_padding_left_px;
-        styles.text_input_bg = self.styles.quick_open.quick_open_input_bg;
-        styles.text_input_focus_bg = self.styles.quick_open.quick_open_input_focus_bg;
-        styles.text_input_text_color = self.styles.quick_open.quick_open_input_text_color;
-        styles.text_input_cursor_height_ratio =
-            self.styles.quick_open.quick_open_input_cursor_height_ratio;
-        styles.text_input_cursor_height_adjust_px = self
-            .styles
-            .quick_open
-            .quick_open_input_cursor_height_adjust_px;
+        styles.text_input_bg = gpui::Hsla::transparent_black();
+        styles.text_input_focus_bg = gpui::Hsla::transparent_black();
+        styles.text_input_border_width_px = 0.0;
+        styles.text_input_cursor_height_ratio = 0.6;
         styles
     }
 
-    pub(crate) fn open_language_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_language_picker(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_status_picker(LanguagePickerMode::Language, position, window, cx);
+    }
+
+    pub(crate) fn open_indentation_picker(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_status_picker(LanguagePickerMode::Indentation, position, window, cx);
+    }
+
+    fn open_status_picker(
+        &mut self,
+        mode: LanguagePickerMode,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.active_tab_supports_text_buffer() {
             return;
         }
 
         self.language_picker_visible = true;
+        self.language_picker_mode = mode;
+        self.language_picker_anchor = Some(position);
+        self.language_picker_query.clear();
         self.language_picker_selected_index = 0;
         self.update_language_picker_results(cx);
 
         if self.language_picker_editor.is_none() {
             let styles = self.language_picker_text_input_styles();
-            let editor =
-                cx.new(move |cx| crate::text_input::TextInput::new(styles, "搜索语言或扩展名", cx));
+            let editor = cx.new(move |cx| {
+                crate::text_input::TextInput::new(styles, picker_placeholder(mode), cx)
+            });
             cx.subscribe(
                 &editor,
                 |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -129,6 +205,8 @@ impl EditorView {
         if let Some(editor) = &self.language_picker_editor {
             editor.update(cx, |input, cx| {
                 input.styles = self.language_picker_text_input_styles();
+                input.placeholder =
+                    SharedString::from(picker_placeholder(self.language_picker_mode));
                 input.set_text(&self.language_picker_query, cx);
                 input.select_all(cx);
             });
@@ -139,12 +217,13 @@ impl EditorView {
 
     pub(crate) fn close_language_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.language_picker_visible = false;
+        self.language_picker_anchor = None;
         window.focus(&self.focus_handle(cx));
         cx.notify();
     }
 
     fn update_language_picker_results(&mut self, cx: &mut Context<Self>) {
-        self.language_picker_items = all_language_picker_items()
+        self.language_picker_items = picker_items_for_mode(self.language_picker_mode)
             .into_iter()
             .filter(|item| language_item_matches(item, &self.language_picker_query))
             .take(240)
@@ -181,6 +260,13 @@ impl EditorView {
     }
 
     fn apply_language_picker_item(&mut self, item: LanguagePickerItem, cx: &mut Context<Self>) {
+        if let LanguagePickerKind::Indentation(settings) = item.kind {
+            self.language_picker_visible = false;
+            self.language_picker_anchor = None;
+            self.set_indent_settings(settings, cx);
+            return;
+        }
+
         let Some(index) = self.active_tab_index() else {
             return;
         };
@@ -188,6 +274,7 @@ impl EditorView {
             LanguagePickerKind::Markdown => FileKind::Markdown,
             LanguagePickerKind::PlainText => FileKind::Text,
             LanguagePickerKind::Code(language) => FileKind::Code { language },
+            LanguagePickerKind::Indentation(_) => unreachable!(),
         };
         let is_code_or_text = matches!(file_kind, FileKind::Code { .. } | FileKind::Text);
 
@@ -197,6 +284,7 @@ impl EditorView {
         }
         self.editor_left_aligned = is_code_or_text;
         self.language_picker_visible = false;
+        self.language_picker_anchor = None;
         self.layout_dirty = true;
         self.reparse();
         session_store::persist_session(self);
@@ -204,37 +292,69 @@ impl EditorView {
     }
 
     pub(crate) fn render_language_picker_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
-        let styles = &self.styles.quick_open;
-        let bg = styles.quick_open_panel_bg;
-        let border = styles.quick_open_panel_border_color;
-        let backdrop = styles.quick_open_backdrop_bg;
-        let selected_bg = styles.quick_open_result_selected_bg;
-        let hover_bg = styles.quick_open_result_hover_bg;
-        let text_primary = styles.quick_open_result_text_color;
-        let text_secondary = styles.quick_open_result_secondary_text_color;
+        let bg = self.theme.bg_elevated;
+        let border = self.theme.border_primary;
+        let selected_bg = self.theme.bg_selected;
+        let hover_bg = self.theme.bg_hover;
+        let text_primary = self.theme.text_primary;
+        let text_secondary = self.theme.text_secondary;
+        let row_h = self.scaled(24.0);
+        let name_font = self.scaled(12.0);
+        let input_h = self.scaled(42.0);
+        let max_visible = 12usize;
+        let visible_rows = self
+            .language_picker_items
+            .len()
+            .min(200)
+            .min(max_visible)
+            .max(1);
+        let desired_h = input_h + visible_rows as f32 * row_h;
+        let (target_w, min_w) = match self.language_picker_mode {
+            LanguagePickerMode::Indentation => (120.0, 112.0),
+            LanguagePickerMode::Language => (160.0, 140.0),
+        };
         let panel_w = self
-            .scaled(styles.quick_open_panel_width_px)
-            .min(self.last_window_width - 24.0);
-        let panel_left = (self.last_window_width - panel_w) / 2.0;
-        let panel_top =
-            (self.last_window_height / 5.0).max(self.scaled(styles.quick_open_panel_top_offset_px));
-        let row_h = self.scaled(styles.quick_open_result_row_height_px);
-        let name_font = self.scaled(styles.quick_open_result_name_font_size_px);
-        let detail_font = self.scaled(styles.quick_open_result_path_font_size_px);
-        let max_results_h = self.scaled(styles.quick_open_results_max_height_px);
+            .scaled(target_w)
+            .min(self.last_window_width - 16.0)
+            .max(self.scaled(min_w));
+        let anchor = self.language_picker_anchor.unwrap_or_else(|| {
+            gpui::point(
+                px(self.last_window_width - 8.0),
+                px(self.last_window_height - 8.0),
+            )
+        });
+        let anchor_x = f32::from(anchor.x);
+        let anchor_y = f32::from(anchor.y);
+        let gap = self.scaled(4.0);
+        let available_below = (self.last_window_height - anchor_y - gap - 8.0).max(0.0);
+        let available_above = (anchor_y - gap - 8.0).max(0.0);
+        let show_above = desired_h > available_below && available_above > available_below;
+        let panel_h = if show_above {
+            desired_h.min(available_above).max(self.scaled(100.0))
+        } else {
+            desired_h.min(available_below).max(self.scaled(100.0))
+        };
+        let panel_left =
+            (anchor_x - panel_w).clamp(8.0, (self.last_window_width - panel_w - 8.0).max(8.0));
+        let panel_top = if show_above {
+            (anchor_y - panel_h - gap).max(8.0)
+        } else {
+            (anchor_y + gap).min((self.last_window_height - panel_h - 8.0).max(8.0))
+        };
+        let max_results_h = (panel_h - input_h).max(row_h);
 
         let mut rows = Vec::new();
         if self.language_picker_items.is_empty() {
             rows.push(
                 div()
                     .w_full()
-                    .h(px(self.scaled(styles.quick_open_empty_height_px)))
+                    .h(px(self.scaled(56.0)))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(self.scaled(styles.quick_open_empty_font_size_px)))
-                    .text_color(styles.quick_open_empty_text_color)
-                    .child("没有匹配的语言")
+                    .text_size(px(self.scaled(13.0)))
+                    .text_color(text_secondary)
+                    .child("没有匹配项")
                     .into_any_element(),
             );
         } else {
@@ -245,7 +365,7 @@ impl EditorView {
                         .id(SharedString::from(format!("language-picker-{index}")))
                         .w_full()
                         .h(px(row_h))
-                        .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
+                        .px(px(self.scaled(10.0)))
                         .flex()
                         .items_center()
                         .cursor(CursorStyle::Arrow)
@@ -255,20 +375,11 @@ impl EditorView {
                             div()
                                 .flex_1()
                                 .min_w(px(0.0))
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(name_font))
-                                        .text_color(text_primary)
-                                        .child(item.name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(detail_font))
-                                        .text_color(text_secondary)
-                                        .child(item.detail.clone()),
-                                ),
+                                .overflow_hidden()
+                                .truncate()
+                                .text_size(px(name_font))
+                                .text_color(text_primary)
+                                .child(item.name.clone()),
                         )
                         .on_mouse_down(
                             MouseButton::Left,
@@ -296,7 +407,6 @@ impl EditorView {
                     .top(px(0.0))
                     .w_full()
                     .h_full()
-                    .bg(backdrop)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
@@ -315,7 +425,7 @@ impl EditorView {
                     .bg(bg)
                     .border(px(1.0))
                     .border_color(border)
-                    .rounded(px(self.scaled(styles.quick_open_panel_radius_px)))
+                    .rounded(px(self.scaled(8.0)))
                     .shadow_md()
                     .overflow_hidden()
                     .on_mouse_down(
@@ -328,8 +438,8 @@ impl EditorView {
                     .child(
                         div()
                             .w_full()
-                            .px(px(self.scaled(styles.quick_open_input_padding_x_px)))
-                            .py(px(self.scaled(styles.quick_open_input_padding_y_px)))
+                            .px(px(self.scaled(6.0)))
+                            .py(px(self.scaled(6.0)))
                             .border_b(px(1.0))
                             .border_color(border)
                             .when_some(self.language_picker_editor.clone(), |this, editor| {

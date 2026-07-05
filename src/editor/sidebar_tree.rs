@@ -9,6 +9,7 @@ use super::*;
 impl EditorView {
     pub(crate) fn invalidate_sidebar_items_cache(&mut self) {
         self.sidebar_items_dirty = true;
+        self.file_list_dirty = true;
     }
 
     pub(crate) fn invalidate_sidebar_git_statuses(&mut self) {
@@ -27,65 +28,7 @@ impl EditorView {
         left: &std::fs::DirEntry,
         right: &std::fs::DirEntry,
     ) -> std::cmp::Ordering {
-        let left_is_dir = left.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-        let right_is_dir = right.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-        right_is_dir
-            .cmp(&left_is_dir)
-            .then_with(|| match self.sidebar_sort_mode {
-                SidebarSortMode::NameAsc => left
-                    .file_name()
-                    .to_string_lossy()
-                    .to_lowercase()
-                    .cmp(&right.file_name().to_string_lossy().to_lowercase()),
-                SidebarSortMode::NameDesc => right
-                    .file_name()
-                    .to_string_lossy()
-                    .to_lowercase()
-                    .cmp(&left.file_name().to_string_lossy().to_lowercase()),
-                SidebarSortMode::Type => {
-                    let left_ext = left
-                        .path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .unwrap_or("")
-                        .to_ascii_lowercase();
-                    let right_ext = right
-                        .path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .unwrap_or("")
-                        .to_ascii_lowercase();
-                    left_ext.cmp(&right_ext).then_with(|| {
-                        left.file_name()
-                            .to_string_lossy()
-                            .to_lowercase()
-                            .cmp(&right.file_name().to_string_lossy().to_lowercase())
-                    })
-                }
-                SidebarSortMode::CreatedDesc | SidebarSortMode::CreatedAsc => {
-                    let fallback = SystemTime::UNIX_EPOCH;
-                    let left_created = left
-                        .metadata()
-                        .and_then(|meta| meta.created().or_else(|_| meta.modified()))
-                        .unwrap_or(fallback);
-                    let right_created = right
-                        .metadata()
-                        .and_then(|meta| meta.created().or_else(|_| meta.modified()))
-                        .unwrap_or(fallback);
-                    let order = left_created.cmp(&right_created);
-                    let order = if self.sidebar_sort_mode == SidebarSortMode::CreatedDesc {
-                        order.reverse()
-                    } else {
-                        order
-                    };
-                    order.then_with(|| {
-                        left.file_name()
-                            .to_string_lossy()
-                            .to_lowercase()
-                            .cmp(&right.file_name().to_string_lossy().to_lowercase())
-                    })
-                }
-            })
+        compare_dir_entries(self.sidebar_sort_mode, left, right)
     }
 
     pub(crate) fn toggle_sidebar_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -165,6 +108,9 @@ impl EditorView {
             if should_skip_path(&entry_path, is_dir) {
                 continue;
             }
+            if self.file_list_visible && !is_dir {
+                continue;
+            }
             let is_expanded = is_dir && self.expanded_dirs.contains(&entry_path);
             items.push(SidebarItem {
                 name: entry.file_name().to_string_lossy().into_owned(),
@@ -194,4 +140,70 @@ impl EditorView {
 
         self.sidebar_items_cache.clone()
     }
+}
+
+pub(crate) fn compare_dir_entries(
+    sort_mode: SidebarSortMode,
+    left: &std::fs::DirEntry,
+    right: &std::fs::DirEntry,
+) -> std::cmp::Ordering {
+    let left_is_dir = left.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+    let right_is_dir = right.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+    right_is_dir
+        .cmp(&left_is_dir)
+        .then_with(|| match sort_mode {
+            SidebarSortMode::NameAsc => left
+                .file_name()
+                .to_string_lossy()
+                .to_lowercase()
+                .cmp(&right.file_name().to_string_lossy().to_lowercase()),
+            SidebarSortMode::NameDesc => right
+                .file_name()
+                .to_string_lossy()
+                .to_lowercase()
+                .cmp(&left.file_name().to_string_lossy().to_lowercase()),
+            SidebarSortMode::Type => {
+                let left_ext = left
+                    .path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let right_ext = right
+                    .path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                left_ext.cmp(&right_ext).then_with(|| {
+                    left.file_name()
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .cmp(&right.file_name().to_string_lossy().to_lowercase())
+                })
+            }
+            SidebarSortMode::CreatedDesc | SidebarSortMode::CreatedAsc => {
+                let fallback = SystemTime::UNIX_EPOCH;
+                let left_created = left
+                    .metadata()
+                    .and_then(|meta| meta.created().or_else(|_| meta.modified()))
+                    .unwrap_or(fallback);
+                let right_created = right
+                    .metadata()
+                    .and_then(|meta| meta.created().or_else(|_| meta.modified()))
+                    .unwrap_or(fallback);
+                let order = left_created.cmp(&right_created);
+                let order = if sort_mode == SidebarSortMode::CreatedDesc {
+                    order.reverse()
+                } else {
+                    order
+                };
+                order.then_with(|| {
+                    left.file_name()
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .cmp(&right.file_name().to_string_lossy().to_lowercase())
+                })
+            }
+        })
 }

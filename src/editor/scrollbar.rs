@@ -8,14 +8,16 @@ use super::EditorView;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum PanelScrollbarKind {
     Sidebar,
+    FileList,
     Info,
     GitHistory,
     ChatTerminal,
 }
 
 impl PanelScrollbarKind {
-    pub(crate) const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::Sidebar,
+        Self::FileList,
         Self::Info,
         Self::GitHistory,
         Self::ChatTerminal,
@@ -24,6 +26,7 @@ impl PanelScrollbarKind {
     fn id(self) -> &'static str {
         match self {
             Self::Sidebar => "sidebar-scrollbar",
+            Self::FileList => "file-list-scrollbar",
             Self::Info => "info-scrollbar",
             Self::GitHistory => "git-history-scrollbar",
             Self::ChatTerminal => "chat-terminal-scrollbar",
@@ -50,6 +53,8 @@ pub(crate) struct PanelScrollbarState {
     width_target: f32,
     width_epoch: usize,
     width_task: Option<Task<()>>,
+    hover_epoch: usize,
+    hover_task: Option<Task<()>>,
     idle_epoch: usize,
     idle_task: Option<Task<()>>,
     drag: Option<PanelScrollbarDragState>,
@@ -68,6 +73,8 @@ impl PanelScrollbarState {
             width_target: width,
             width_epoch: 0,
             width_task: None,
+            hover_epoch: 0,
+            hover_task: None,
             idle_epoch: 0,
             idle_task: None,
             drag: None,
@@ -168,7 +175,14 @@ impl EditorView {
         let width = self.scaled(state.width);
         let hit_width = self.scaled(self.styles.editor.editor_scrollbar_hit_width_px);
         let radius = self.scaled(self.styles.editor.editor_scrollbar_radius_px);
-        let mut thumb_color = self.styles.editor.editor_scrollbar_thumb_color;
+        // Sidebar-side panels sit on the dark chrome palette even in light
+        // mode, so their thumb must not use the (dark) editor text color.
+        let mut thumb_color = match kind {
+            PanelScrollbarKind::Sidebar | PanelScrollbarKind::FileList => {
+                self.styles.sidebar.sidebar_scrollbar_thumb_color
+            }
+            _ => self.styles.editor.editor_scrollbar_thumb_color,
+        };
         thumb_color.a *= state.opacity.clamp(0.0, 1.0);
 
         Some(
@@ -215,6 +229,11 @@ impl EditorView {
                     self.active_sidebar_scrollbar_handle(),
                 )?;
                 (metrics, self.sidebar_scrollbar_track_height(), 0.0)
+            }
+            PanelScrollbarKind::FileList => {
+                let metrics =
+                    VerticalScrollbarMetrics::from_scroll_handle(&self.file_list_scroll_handle)?;
+                (metrics, self.last_window_height, 0.0)
             }
             PanelScrollbarKind::Info => {
                 let metrics =
@@ -295,6 +314,7 @@ impl EditorView {
     fn panel_scrollbar_handle(&self, kind: PanelScrollbarKind) -> Option<&ScrollHandle> {
         match kind {
             PanelScrollbarKind::Sidebar => Some(self.active_sidebar_scrollbar_handle()),
+            PanelScrollbarKind::FileList => Some(&self.file_list_scroll_handle),
             PanelScrollbarKind::Info => Some(&self.info_panel_scroll_handle),
             PanelScrollbarKind::GitHistory => Some(&self.git_history_scroll_handle),
             PanelScrollbarKind::ChatTerminal => None,
@@ -444,6 +464,46 @@ impl EditorView {
         }
     }
 
+    fn cancel_panel_scrollbar_hover_reveal(&mut self, kind: PanelScrollbarKind) {
+        if let Some(state) = self.panel_scrollbar_state_mut(kind) {
+            state.hover_epoch = state.hover_epoch.wrapping_add(1);
+            state.hover_task = None;
+        }
+    }
+
+    fn schedule_panel_scrollbar_hover_reveal(
+        &mut self,
+        kind: PanelScrollbarKind,
+        cx: &mut Context<Self>,
+    ) {
+        const HOVER_REVEAL_DELAY_MS: u64 = 100;
+        let Some(state) = self.panel_scrollbar_state_mut(kind) else {
+            return;
+        };
+
+        state.hover_epoch = state.hover_epoch.wrapping_add(1);
+        let epoch = state.hover_epoch;
+        state.hover_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(HOVER_REVEAL_DELAY_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(state) = this.panel_scrollbar_state_mut(kind) else {
+                    return;
+                };
+                if state.hover_epoch != epoch || !state.hovered || state.drag.is_some() {
+                    return;
+                }
+                state.revealed = true;
+                state.hover_task = None;
+                this.cancel_panel_scrollbar_idle_fade(kind);
+                this.sync_panel_scrollbar_opacity(kind, cx);
+                this.sync_panel_scrollbar_width(kind, cx);
+                cx.notify();
+            });
+        }));
+    }
+
     fn schedule_panel_scrollbar_idle_fade(
         &mut self,
         kind: PanelScrollbarKind,
@@ -521,13 +581,12 @@ impl EditorView {
 
         if let Some(state) = self.panel_scrollbar_state_mut(kind) {
             state.hovered = hovered;
-            if hovered {
-                state.revealed = true;
-            }
         }
         if hovered {
             self.cancel_panel_scrollbar_idle_fade(kind);
+            self.schedule_panel_scrollbar_hover_reveal(kind, cx);
         } else {
+            self.cancel_panel_scrollbar_hover_reveal(kind);
             let should_schedule = self
                 .panel_scrollbar_state(kind)
                 .map(|state| state.revealed && state.drag.is_none())
@@ -565,6 +624,7 @@ impl EditorView {
                 max_scroll: geometry.metrics.max_scroll,
             });
         }
+        self.cancel_panel_scrollbar_hover_reveal(kind);
         self.cancel_panel_scrollbar_idle_fade(kind);
         self.sync_panel_scrollbar_opacity(kind, cx);
         self.sync_panel_scrollbar_width(kind, cx);
@@ -630,6 +690,7 @@ impl EditorView {
                 self.set_active_chat_terminal_scrollbar_top(scroll_top, cx);
             }
             PanelScrollbarKind::Sidebar
+            | PanelScrollbarKind::FileList
             | PanelScrollbarKind::Info
             | PanelScrollbarKind::GitHistory => {
                 if let Some(handle) = self.panel_scrollbar_handle(kind) {

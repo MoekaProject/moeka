@@ -3053,10 +3053,11 @@ impl EditorView {
 
     fn render_chat_tab_title_label(&self, tab: &ChatTab, is_active: bool) -> AnyElement {
         let ts = &self.styles.tab_bar;
+        let ups = &self.styles.utility_panel;
         let text_color = if is_active {
-            ts.tab_item_active_text_color
+            ups.utility_panel_item_value_text_color
         } else {
-            ts.tab_item_text_color
+            ups.utility_panel_item_label_text_color
         };
         let suffix_opacity = if is_active { 0.7 } else { 0.5 };
 
@@ -3110,17 +3111,18 @@ impl EditorView {
         let drop_tab_id = tab.id.clone();
         let drag_title = tab.display_title();
         let ts = &self.styles.tab_bar;
-        let tab_hover_bg = ts.tab_item_hover_bg;
-        let close_hover_bg = ts.tab_item_close_hover_bg;
-        let drop_indicator_color = ts.tab_drop_indicator_color;
+        let ups = &self.styles.utility_panel;
+        let tab_hover_bg = ups.utility_panel_button_hover_bg;
+        let close_hover_bg = ups.utility_panel_button_hover_bg;
+        let drop_indicator_color = ups.utility_panel_resize_active_indicator_color;
         let drop_indicator_width = ts.tab_drop_indicator_width_px;
         let source_opacity = ts.tab_drag_source_opacity;
         let agent_icon_size = self.scaled(ts.tab_item_icon_size_px);
         let tab_surface_height = self.tab_bar_height();
         let tab_bg = if is_active {
-            ts.tab_item_active_bg
+            ups.utility_panel_bg
         } else {
-            ts.tab_item_bg
+            gpui::transparent_black()
         };
         let is_being_dragged = self.chat_tab_dragging_id.as_deref() == Some(tab.id.as_str());
         let current_tab_ids: Vec<String> =
@@ -3211,13 +3213,13 @@ impl EditorView {
                     .gap(px(self.scaled(ts.tab_item_gap_px)))
                     .bg(tab_bg)
                     .border_r(px(ts.tab_item_border_width_px))
-                    .border_color(ts.tab_item_border_color)
+                    .border_color(ups.utility_panel_border_color)
                     .hover(move |style| style.bg(tab_hover_bg))
                     .child(
                         svg()
                             .path(tab.agent_cli.icon_path())
                             .size(px(agent_icon_size))
-                            .text_color(ts.tab_item_icon_color)
+                            .text_color(ups.utility_panel_item_label_text_color)
                             .opacity(if is_active {
                                 ts.tab_item_icon_active_opacity
                             } else {
@@ -3248,7 +3250,7 @@ impl EditorView {
                             .justify_center()
                             .items_center()
                             .text_size(px(self.scaled(ts.tab_item_close_font_size_px)))
-                            .text_color(ts.tab_item_close_text_color)
+                            .text_color(ups.utility_panel_item_label_text_color)
                             .opacity(if is_active {
                                 ts.tab_item_close_active_opacity
                             } else {
@@ -3277,7 +3279,7 @@ impl EditorView {
                             .bg(if is_active {
                                 gpui::transparent_black()
                             } else {
-                                ts.tab_bar_border_color
+                                ups.utility_panel_border_color
                             }),
                     ),
             )
@@ -3352,8 +3354,9 @@ impl EditorView {
 
     fn render_chat_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let ts = &self.styles.tab_bar;
+        let ups = &self.styles.utility_panel;
         let inner_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
-        let end_drop_indicator_color = ts.tab_drop_indicator_color;
+        let end_drop_indicator_color = ups.utility_panel_resize_active_indicator_color;
         let end_drop_indicator_width = ts.tab_drop_indicator_width_px;
         let current_tab_ids: Vec<String> =
             self.chat_tabs.iter().map(|tab| tab.id.clone()).collect();
@@ -3363,8 +3366,8 @@ impl EditorView {
             .map(|tab| self.render_chat_tab(tab, cx))
             .collect();
 
-        let new_hover_color = ts.tab_new_hover_text_color;
-        let new_hover_bg = ts.tab_item_hover_bg;
+        let new_hover_color = ups.utility_panel_item_value_text_color;
+        let new_hover_bg = ups.utility_panel_button_hover_bg;
         let end_drop_target_width = self.scaled(ts.tab_end_drop_target_width_px);
         let new_tab_button = div()
             .id("chat-tab-bar-new")
@@ -3377,12 +3380,12 @@ impl EditorView {
             .border_r(px(ts.tab_item_border_width_px))
             .border_color(gpui::transparent_black())
             .text_size(px(self.scaled(ts.tab_new_font_size_px)))
-            .text_color(ts.tab_new_text_color)
+            .text_color(ups.utility_panel_item_label_text_color)
             .hover(move |style| {
                 style
                     .text_color(new_hover_color)
                     .bg(new_hover_bg)
-                    .border_color(ts.tab_item_border_color)
+                    .border_color(ups.utility_panel_border_color)
             })
             .child("+")
             .on_mouse_down(
@@ -3440,7 +3443,7 @@ impl EditorView {
             .h(px(self.tab_bar_height()))
             .flex()
             .items_start()
-            .bg(ts.tab_bar_bg)
+            .bg(ups.utility_panel_bg)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -3486,7 +3489,7 @@ impl EditorView {
                     .right_0()
                     .bottom_0()
                     .h(px(ts.tab_bar_border_width_px))
-                    .bg(ts.tab_bar_border_color),
+                    .bg(ups.utility_panel_border_color),
             )
             .child(
                 div()
@@ -3517,14 +3520,10 @@ impl EditorView {
         let terminal_padding = self.scaled(ups.utility_panel_terminal_padding_px);
         let monospace = SharedString::from(self.styles.editor.editor_monospace_font_family);
         let default_fg = ups.utility_panel_item_value_text_color;
-        let default_bg = self.styles.editor.editor_bg;
-        let cursor_color = self.theme.cursor;
-        let palette = terminal_theme_palette(&self.theme, default_bg);
-        let content_opacity = if is_focused {
-            1.0
-        } else {
-            ups.utility_panel_terminal_inactive_opacity
-        };
+        let default_bg = ups.utility_panel_bg;
+        let terminal_theme = self.app_settings.dark_theme_kind().build();
+        let cursor_color = terminal_theme.cursor;
+        let palette = terminal_theme_palette(&terminal_theme, default_bg);
         let file_drop_bg = self.styles.editor.editor_file_drop_bg;
 
         let snapshot = self
@@ -3536,7 +3535,8 @@ impl EditorView {
         let cursor_visible = matches!(
             self.active_chat_terminal().map(|session| &session.status),
             Some(ChatTerminalStatus::Running)
-        ) && snapshot.cursor.shape != AlacCursorShape::Hidden
+        ) && is_focused
+            && snapshot.cursor.shape != AlacCursorShape::Hidden
             && cursor_row.is_some();
         let selection = self
             .chat_terminal_selection
@@ -3721,7 +3721,6 @@ impl EditorView {
                     .w_full()
                     .h_full()
                     .relative()
-                    .opacity(content_opacity)
                     .child(
                         div()
                             .w_full()

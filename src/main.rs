@@ -353,7 +353,10 @@ fn main() {
                 titlebar: Some(TitlebarOptions {
                     title: Some(system_application_display_name().into()),
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(15.0), px(13.0))),
+                    // Align the native traffic lights with the sidebar top
+                    // toggle row: top spacer is 40px high, macOS buttons are
+                    // ~14px tall, so y=13px puts their center at 20px.
+                    traffic_light_position: Some(point(px(18.0), px(18.0))),
                 }),
                 window_background: WindowBackgroundAppearance::Transparent,
                 ..Default::default()

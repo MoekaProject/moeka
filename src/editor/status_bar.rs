@@ -1,6 +1,6 @@
 use gpui::{AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, div, prelude::*, px};
 
-use crate::markdown::BlockType;
+use crate::markdown::{self, BlockType};
 use crate::theme::with_alpha;
 
 use super::*;
@@ -45,10 +45,10 @@ impl IndentSettings {
         }
     }
 
-    pub(crate) fn status_label(self) -> String {
+    pub(crate) fn status_parts(self) -> (&'static str, String) {
         match self.kind {
-            IndentKind::Spaces => format!("空格: {}", self.size),
-            IndentKind::Tabs => format!("制表符: {}", self.size),
+            IndentKind::Spaces => ("缩进", format!("空格 {}", self.size)),
+            IndentKind::Tabs => ("缩进", format!("制表符 {}", self.size)),
         }
     }
 }
@@ -83,6 +83,30 @@ fn indent_for_columns(columns: usize, old_size: usize, settings: IndentSettings)
     }
 }
 
+fn ordered_list_indent_for_level(level: usize, settings: IndentSettings) -> String {
+    match settings.kind {
+        IndentKind::Spaces => " ".repeat(level * 3),
+        IndentKind::Tabs => format!("{}{}", "\t".repeat(level), " ".repeat(level)),
+    }
+}
+
+fn convert_line_indentation(
+    content: &str,
+    old_settings: IndentSettings,
+    new_settings: IndentSettings,
+) -> String {
+    let (leading_bytes, columns) = leading_columns(content, old_settings.size);
+    let body = &content[leading_bytes..];
+    let ordered_prefix_len = markdown::ordered_list_prefix_len(body);
+    let new_indent = if ordered_prefix_len >= 2 {
+        ordered_list_indent_for_level(columns / 3, new_settings)
+    } else {
+        indent_for_columns(columns, old_settings.size, new_settings)
+    };
+
+    format!("{}{}", new_indent, body)
+}
+
 fn convert_text_indentation(
     text: &str,
     old_settings: IndentSettings,
@@ -98,13 +122,11 @@ fn convert_text_indentation(
             .strip_suffix('\r')
             .map(|line| (line, "\r"))
             .unwrap_or((line, ""));
-        let (leading_bytes, columns) = leading_columns(content, old_settings.size);
-        converted.push_str(&indent_for_columns(
-            columns,
-            old_settings.size,
+        converted.push_str(&convert_line_indentation(
+            content,
+            old_settings,
             new_settings,
         ));
-        converted.push_str(&content[leading_bytes..]);
         converted.push_str(carriage_return);
         converted.push_str(newline);
     }
@@ -156,29 +178,24 @@ impl EditorView {
         self.close_context_menu(cx);
     }
 
-    pub(crate) fn open_indentation_context_menu(
-        &mut self,
-        position: gpui::Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_context_menu(
-            ContextMenu {
-                position,
-                kind: ContextMenuKind::Indentation,
-            },
-            false,
-            cx,
-        );
-    }
-
     pub(crate) fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let bg = self.theme.bg_elevated;
-        let border = with_alpha(self.theme.border_secondary, 0.55);
-        let text_color = self.theme.text_secondary;
+        // Light themes get the paler bar color; dark themes keep the elevated
+        // surface. The border matches the tab bar so the two chrome strips
+        // frame the editor consistently.
+        let is_light = self.theme.bg_primary.l >= 0.5;
+        let bg = if is_light {
+            self.theme.bg_bar
+        } else {
+            self.theme.bg_elevated
+        };
+        let border = self.styles.tab_bar.tab_bar_border_color;
+        let border_width = self.styles.tab_bar.tab_bar_border_width_px;
+        let title_color = self.theme.text_secondary;
+        let value_color = with_alpha(self.theme.text_secondary, 0.62);
         let hover_bg = with_alpha(self.theme.text_primary, 0.08);
         let cursor_label = self.cursor_status_label();
-        let indent_label = self.indent_settings.status_label();
-        let language_label = self.language_status_label();
+        let (indent_title, indent_value) = self.indent_settings.status_parts();
+        let language_value = self.language_status_label();
 
         div()
             .id("editor-status-bar")
@@ -190,20 +207,25 @@ impl EditorView {
             .justify_end()
             .pl(px(self.scaled(10.0)))
             .pr(px(0.0))
-            .border_t(px(1.0))
+            .border_t(px(border_width))
             .border_color(border)
             .bg(bg)
             .text_size(px(self.scaled(12.0)))
-            .text_color(text_color)
-            .child(self.render_status_bar_button(cursor_label, hover_bg, None, cx))
+            .child(self.render_status_bar_label(cursor_label, value_color))
             .child(self.render_status_bar_button(
-                indent_label,
+                indent_title,
+                indent_value,
+                title_color,
+                value_color,
                 hover_bg,
                 Some(StatusBarAction::OpenIndentationMenu),
                 cx,
             ))
             .child(self.render_status_bar_button(
-                language_label,
+                "语言",
+                language_value,
+                title_color,
+                value_color,
                 hover_bg,
                 Some(StatusBarAction::OpenLanguagePicker),
                 cx,
@@ -211,9 +233,23 @@ impl EditorView {
             .into_any_element()
     }
 
+    fn render_status_bar_label(&self, label: String, color: gpui::Hsla) -> AnyElement {
+        div()
+            .px(px(self.scaled(6.0)))
+            .h_full()
+            .flex()
+            .items_center()
+            .text_color(color)
+            .child(label)
+            .into_any_element()
+    }
+
     fn render_status_bar_button(
         &self,
-        label: String,
+        title: &'static str,
+        value: String,
+        title_color: gpui::Hsla,
+        value_color: gpui::Hsla,
         hover_bg: gpui::Hsla,
         action: Option<StatusBarAction>,
         cx: &mut Context<Self>,
@@ -225,7 +261,8 @@ impl EditorView {
             .items_center()
             .cursor(CursorStyle::Arrow)
             .hover(move |style| style.bg(hover_bg))
-            .child(label)
+            .child(div().text_color(title_color).child(format!("{}: ", title)))
+            .child(div().text_color(value_color).child(value))
             .when_some(action, |this, action| {
                 this.on_mouse_down(
                     MouseButton::Left,
@@ -233,10 +270,10 @@ impl EditorView {
                         cx.stop_propagation();
                         match action {
                             StatusBarAction::OpenIndentationMenu => {
-                                this.open_indentation_context_menu(event.position, cx);
+                                this.open_indentation_picker(event.position, window, cx);
                             }
                             StatusBarAction::OpenLanguagePicker => {
-                                this.open_language_picker(window, cx);
+                                this.open_language_picker(event.position, window, cx);
                             }
                         }
                     }),
@@ -246,16 +283,16 @@ impl EditorView {
     }
 
     fn cursor_status_label(&self) -> String {
-        let range = self.cursor.selection_range();
-        let start = self.position_label(range.start);
-        if range.is_empty() {
-            start
+        let (line, col) = self.position_components(self.cursor.offset);
+        let selected_chars = self.selected_character_count();
+        if selected_chars > 0 {
+            format!("行 {} 列 {} (选择 {} 字符)", line, col, selected_chars)
         } else {
-            format!("{}-{}", start, self.position_label(range.end))
+            format!("行 {} 列 {}", line, col)
         }
     }
 
-    fn position_label(&self, offset: usize) -> String {
+    fn position_components(&self, offset: usize) -> (usize, usize) {
         let clamped = self.buffer.clamp_offset(offset.min(self.buffer.len()));
         let (line, byte_col) = self.buffer.offset_to_line_col(clamped);
         let line_content = self.buffer.line_content(line);
@@ -263,7 +300,22 @@ impl EditorView {
             .chars()
             .count()
             + 1;
-        format!("L{}:C{}", line + 1, col)
+        (line + 1, col)
+    }
+
+    fn selected_character_count(&self) -> usize {
+        let text = self.buffer.text();
+        std::iter::once(self.cursor)
+            .chain(self.extra_cursors.iter().copied())
+            .map(|cursor| {
+                let range = cursor.selection_range();
+                if range.is_empty() || range.end > text.len() {
+                    0
+                } else {
+                    text[range].chars().count()
+                }
+            })
+            .sum()
     }
 
     fn language_status_label(&self) -> String {
@@ -324,6 +376,26 @@ mod tests {
                 IndentSettings::spaces(2)
             ),
             "    a\n  b"
+        );
+    }
+
+    #[test]
+    fn ordered_list_indentation_stays_visually_aligned() {
+        assert_eq!(
+            convert_text_indentation(
+                "   1. child\n      1. grandchild",
+                IndentSettings::spaces(2),
+                IndentSettings::tabs(2)
+            ),
+            "\t 1. child\n\t\t  1. grandchild"
+        );
+        assert_eq!(
+            convert_text_indentation(
+                "\t 1. child\n\t\t  1. grandchild",
+                IndentSettings::tabs(2),
+                IndentSettings::spaces(4)
+            ),
+            "   1. child\n      1. grandchild"
         );
     }
 }

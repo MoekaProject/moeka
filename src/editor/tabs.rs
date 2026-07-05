@@ -1929,6 +1929,8 @@ impl EditorView {
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
         let ts = &self.styles.tab_bar;
+        let ups = &self.styles.utility_panel;
+        let in_right_panel_chrome = self.right_panel_width() > 0.5;
         let button_height = (self.tab_bar_height() - self.scaled(6.0)).max(18.0);
         let icon_size = self.scaled(ts.tab_item_icon_size_px);
         let button_padding_x = self.scaled(ts.tab_action_button_padding_x_px);
@@ -1938,11 +1940,18 @@ impl EditorView {
             ts.tab_item_icon_inactive_opacity
         };
         let icon_color = if is_active {
-            ts.tab_item_active_text_color
+            if in_right_panel_chrome {
+                ups.utility_panel_item_value_text_color
+            } else {
+                ts.tab_item_active_text_color
+            }
         } else {
-            ts.tab_item_icon_color
+            if in_right_panel_chrome {
+                ups.utility_panel_item_label_text_color
+            } else {
+                ts.tab_item_icon_color
+            }
         };
-
         div()
             .id(id)
             .w(px(icon_size + button_padding_x * 2.0))
@@ -1953,7 +1962,9 @@ impl EditorView {
             .justify_center()
             .opacity(button_opacity)
             .when(is_enabled, |this| {
-                this.hover(move |style| style.opacity(ts.tab_item_icon_active_opacity))
+                this.hover(move |style| {
+                    style.opacity(ts.tab_item_icon_active_opacity)
+                })
             })
             .cursor(CursorStyle::Arrow)
             .child(
@@ -2251,6 +2262,22 @@ impl EditorView {
                     this.toggle_git_history_panel(cx);
                 },
             ));
+        let right_panel_w = self.right_panel_width();
+        let action_chrome = div()
+            .id("tab-bar-actions-chrome")
+            .h(px(inner_height))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_end()
+            .when(right_panel_w > 0.5, |this| {
+                let ups = &self.styles.utility_panel;
+                this.w(px(right_panel_w))
+                    .bg(ups.utility_panel_bg)
+                    .border_l(px(ups.utility_panel_border_width_px))
+                    .border_color(ups.utility_panel_border_color)
+            })
+            .child(action_buttons);
 
         div()
             .id("tab-bar")
@@ -2302,7 +2329,11 @@ impl EditorView {
                     .right_0()
                     .bottom_0()
                     .h(px(ts.tab_bar_border_width_px))
-                    .bg(ts.tab_bar_border_color),
+                    .bg(if self.right_panel_width() > 0.5 {
+                        self.styles.utility_panel.utility_panel_border_color
+                    } else {
+                        ts.tab_bar_border_color
+                    }),
             )
             .child(left_controls_group)
             .child(
@@ -2321,7 +2352,7 @@ impl EditorView {
                     )
                     .children(tab_items),
             )
-            .child(action_buttons)
+            .child(action_chrome)
             .into_any_element()
     }
 }

@@ -102,7 +102,7 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn render_sidebar_header_action_button(
+    pub(super) fn render_sidebar_header_action_button(
         &self,
         id: &'static str,
         icon_path: &'static str,
@@ -180,6 +180,7 @@ impl EditorView {
     fn render_sidebar_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let ss = &self.styles.sidebar;
         let root_name = self.sidebar_root_name().to_uppercase();
+        let is_selected = self.is_sidebar_item_selected(&self.sidebar_root);
         let header_hover_bg = ss.sidebar_header_hover_bg;
         let header_drag_over_bg = ss.sidebar_item_selected_bg;
         let root_drag_over = self
@@ -191,6 +192,8 @@ impl EditorView {
             .h(px(self.scaled(ss.sidebar_header_height_px)))
             .bg(if root_drag_over {
                 header_drag_over_bg
+            } else if is_selected {
+                ss.sidebar_item_selected_bg
             } else {
                 ss.sidebar_header_bg
             })
@@ -212,7 +215,11 @@ impl EditorView {
                     .flex_1()
                     .min_w(px(0.0))
                     .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
-                    .text_color(ss.sidebar_header_text_color)
+                    .text_color(if is_selected {
+                        ss.sidebar_item_selected_text_color
+                    } else {
+                        ss.sidebar_header_text_color
+                    })
                     .overflow_hidden()
                     .truncate()
                     .child(root_name),
@@ -250,7 +257,11 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    this.toggle_sidebar_directory(this.sidebar_root.clone(), cx);
+                    let root = this.sidebar_root.clone();
+                    this.sidebar_select_item(&root, false, false);
+                    this.focused_sidebar_path = Some(root.clone());
+                    this.set_file_list_dir_for_path(&root, cx);
+                    cx.notify();
                 }),
             )
             .on_mouse_down(
@@ -510,6 +521,7 @@ impl EditorView {
                     let has_modifier = mods.platform || mods.shift;
                     this.sidebar_select_item(&click_path, mods.shift, mods.platform);
                     if !has_modifier {
+                        this.set_file_list_dir_for_path(&click_path, cx);
                         this.suppress_next_sidebar_sync_path = Some(click_path.clone());
                         if event.click_count() >= 2 {
                             this.focused_sidebar_path = None;
@@ -631,6 +643,7 @@ impl EditorView {
             path: ref rp,
             ref editor,
         }) = self.sidebar_edit
+            && !self.sidebar_edit_in_file_list
             && *rp == item.path
         {
             return self.render_sidebar_edit_row(editor, item.depth, item.is_dir, cx);
@@ -860,6 +873,7 @@ impl EditorView {
                     let has_modifier = mods.platform || mods.shift;
                     this.sidebar_select_item(&path, mods.shift, mods.platform);
                     if !has_modifier {
+                        this.set_file_list_dir_for_path(&path, cx);
                         if path.is_dir() {
                             this.toggle_sidebar_directory(path.clone(), cx);
                         } else {
@@ -1016,6 +1030,18 @@ impl EditorView {
                             )),
                     )
             })
+            .when(!self.workspace_search_visible, |this| {
+                this.pr(px(self.scaled(ss.sidebar_top_button_padding_right_px)))
+                    .child(self.render_sidebar_top_button(
+                        "sidebar-top-file-list-toggle",
+                        "assets/icons/file-list-toggle.svg",
+                        self.file_list_visible,
+                        cx,
+                        |this, _event, _window, cx| {
+                            this.toggle_file_list_visible(cx);
+                        },
+                    ))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
@@ -1075,26 +1101,34 @@ impl EditorView {
                     .into_any_element(),
             );
         } else {
-            let create_parent = match &self.sidebar_edit {
-                Some(SidebarEditMode::CreateFile { parent, .. })
-                | Some(SidebarEditMode::CreateDir { parent, .. }) => Some(parent.clone()),
-                _ => None,
+            let create_parent = if self.sidebar_edit_in_file_list {
+                None
+            } else {
+                match &self.sidebar_edit {
+                    Some(SidebarEditMode::CreateFile { parent, .. })
+                    | Some(SidebarEditMode::CreateDir { parent, .. }) => Some(parent.clone()),
+                    _ => None,
+                }
             };
             let create_depth = create_parent.as_ref().map(|p| {
                 p.strip_prefix(&self.sidebar_root)
                     .map(|rel| rel.components().count() + 1)
                     .unwrap_or(1)
             });
-            let create_editor = match &self.sidebar_edit {
-                Some(SidebarEditMode::CreateFile { editor, .. })
-                | Some(SidebarEditMode::CreateDir { editor, .. }) => Some(editor.clone()),
-                _ => None,
+            let create_editor = if self.sidebar_edit_in_file_list {
+                None
+            } else {
+                match &self.sidebar_edit {
+                    Some(SidebarEditMode::CreateFile { editor, .. })
+                    | Some(SidebarEditMode::CreateDir { editor, .. }) => Some(editor.clone()),
+                    _ => None,
+                }
             };
             let create_is_dir =
                 matches!(&self.sidebar_edit, Some(SidebarEditMode::CreateDir { .. }));
 
             let items = items.unwrap_or_default();
-            let render_all_items = self.sidebar_edit.is_some();
+            let render_all_items = self.sidebar_edit.is_some() && !self.sidebar_edit_in_file_list;
 
             let mut next_at_depth: HashMap<usize, usize> = HashMap::new();
             let mut item_guide_levels: Vec<HashSet<usize>> = vec![HashSet::new(); items.len()];

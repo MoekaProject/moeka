@@ -578,6 +578,7 @@ impl EditorView {
             ancestor = dir.parent();
         }
 
+        self.set_file_list_dir_for_path(&path, cx);
         self.invalidate_sidebar_items_cache();
         let items = self.sidebar_items();
         let item_count = items.len();

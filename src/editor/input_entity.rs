@@ -95,6 +95,7 @@ impl EntityInputHandler for EditorView {
         if !self.active_tab_supports_text_buffer() || self.active_tab_is_read_only() {
             return;
         }
+        self.last_scroll_cursor_visual_x = None;
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
         // Typing into the buffer dismisses any read-only phantom-row selection.
@@ -317,6 +318,7 @@ impl EntityInputHandler for EditorView {
         if !self.active_tab_supports_text_buffer() || self.active_tab_is_read_only() {
             return;
         }
+        self.last_scroll_cursor_visual_x = None;
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
         self.clear_phantom_selection();

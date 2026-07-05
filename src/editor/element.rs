@@ -3417,16 +3417,12 @@ impl Element for EditorElement {
                 0.0
             };
             // `![](url)` lines without alt text conceal to an empty display
-            // string while the syntax is inactive; the preview alone
-            // represents the line, so drop the blank caption row from the
-            // layout instead of leaving an empty row under the image.
+            // string while the syntax is inactive. Keep their caption row's
+            // layout height stable though: dropping it to zero was introduced
+            // in a recent UI tweak and makes cursor navigation above/below
+            // image previews visibly jump as focus toggles the syntax row.
             let image_caption_hidden =
                 image_extra_height > 0.0 && !image_active && display_text.trim().is_empty();
-            let text_line_height = if image_caption_hidden {
-                0.0
-            } else {
-                text_line_height
-            };
             let rendered_block_preview = if block_preview_code_mode {
                 None
             } else if block_preview_active {
@@ -3609,11 +3605,7 @@ impl Element for EditorElement {
                     base_runs: runs.clone(),
                     font_size,
                     line_height,
-                    visual_line_count: if image_caption_hidden {
-                        0
-                    } else {
-                        visual_line_count
-                    },
+                    visual_line_count,
                     wrapped_line: wrapped.clone(),
                     wrap_width_px: wrapped.wrap_width.map(f32::from),
                     unwrapped_width_px: f32::from(wrapped.unwrapped_layout.width),

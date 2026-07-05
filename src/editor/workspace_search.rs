@@ -361,10 +361,14 @@ impl EditorView {
             self.scaled(self.styles.text_input.text_input_font_size_px);
         styles.text_input_bg = gpui::transparent_black();
         styles.text_input_focus_bg = gpui::transparent_black();
+        styles.text_input_text_color = self.styles.sidebar.sidebar_item_text_color;
+        styles.text_input_placeholder_color = self.styles.sidebar.sidebar_empty_text_color;
         styles.text_input_radius_px = self.scaled(workspace_styles.ws_search_input_radius_px);
         styles.text_input_border_width_px = 0.0;
+        styles.text_input_cursor_color = self.styles.sidebar.sidebar_item_selected_text_color;
         styles.text_input_cursor_width_px =
             self.scaled(self.styles.text_input.text_input_cursor_width_px);
+        styles.text_input_selection_color = self.styles.sidebar.sidebar_item_selected_bg;
         styles.text_input_cursor_height_ratio =
             workspace_styles.ws_search_input_cursor_height_ratio;
         styles.text_input_cursor_height_adjust_px =
@@ -398,6 +402,11 @@ impl EditorView {
         } else {
             workspace_styles.ws_search_input_bg
         };
+        let search_hover_bg = if self.workspace_search_input_focused {
+            workspace_styles.ws_search_input_focus_bg
+        } else {
+            workspace_styles.ws_search_input_hover_bg
+        };
         let result_selected_bg = self.styles.sidebar.sidebar_item_selected_bg;
 
         let mut children: Vec<AnyElement> = Vec::new();
@@ -411,6 +420,7 @@ impl EditorView {
                         .h(px(input_height))
                         .px(px(chrome_padding_x))
                         .bg(search_bg)
+                        .hover(move |style| style.bg(search_hover_bg))
                         .border(px(search_border_width))
                         .border_color(search_border_color)
                         .rounded(px(self.scaled(workspace_styles.ws_search_input_radius_px)))
@@ -673,9 +683,9 @@ impl EditorView {
                         .items_center()
                         .gap(px(self.scaled(4.0)))
                         .bg(workspace_styles.ws_search_file_header_bg)
-                        .border_t(px(1.0))
-                        .border_b(px(1.0))
-                        .border_color(self.theme.border_primary)
+                        .border_t(px(workspace_styles.ws_search_file_header_border_width_px))
+                        .border_b(px(workspace_styles.ws_search_file_header_border_width_px))
+                        .border_color(workspace_styles.ws_search_file_header_border_color)
                         .child(
                             div()
                                 .flex_1()

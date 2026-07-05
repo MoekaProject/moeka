@@ -837,7 +837,7 @@ impl EditorView {
             );
         } else {
             children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-            let active_bg = self.theme.bg_selected;
+            let active_bg = ups.utility_panel_button_hover_bg;
             let fold_icon_hover_color = os.outline_rail_label_hover_color;
             for (heading_index, depth) in visible_heading_indices {
                 let heading = &headings[heading_index];

@@ -562,7 +562,6 @@ impl EditorView {
                         self.clear_wrap_boundary_affinity();
                         self.is_selecting = false;
                     } else {
-                        self.capture_focus_scroll_anchor(offset);
                         self.maybe_schedule_preview_reveal_for_click(
                             self.cursor.offset,
                             offset,
@@ -672,7 +671,6 @@ impl EditorView {
             self.maybe_schedule_preview_reveal_for_click(prev_offset, offset, event.position);
             self.cursor.select_to(offset, &self.buffer);
         } else {
-            self.capture_focus_scroll_anchor(offset);
             self.maybe_schedule_preview_reveal_for_click(prev_offset, offset, event.position);
             self.cursor.move_to(offset, &self.buffer);
             self.maybe_auto_select_link_url(prev_offset, true, cx);
@@ -883,7 +881,9 @@ impl EditorView {
         // Pre-apply the predictable part of the compensation (a generated
         // preview above the new cursor collapsing from edit mode to its rendered
         // image) so the very first painted frame is already correct and the view
-        // does not flash. The exact post-layout anchor below fixes any residual.
+        // does not flash. Other focus-driven height changes above the caret are
+        // compensated within the same frame by the markdown scroll-anchor delta
+        // in `element.rs`; the exact post-layout anchor below fixes any residual.
         let predicted = self.predict_focus_fold_delta(line, offset);
         if predicted.abs() > 0.5 {
             self.scroll_offset = (scroll_before + predicted).max(0.0);
@@ -978,12 +978,12 @@ impl EditorView {
     }
 
     /// Scrolls to the cursor for keyboard navigation while preserving visual
-    /// stability: anchors the destination line first so a fold/expand of the
-    /// just-defocused region above it does not make the view jump. The anchor
-    /// no-ops (and `scroll_to_cursor` proceeds) when there is no height change
-    /// or the line is off-screen.
+    /// stability: ordinary left/right/up/down navigation must not change the
+    /// editor scroll position unless the cursor enters the top/bottom third of
+    /// the visible editor. Avoid the post-layout click anchor here because that
+    /// anchor intentionally mutates `scroll_offset` after syntax fold/expand,
+    /// which reads as view jitter during keyboard navigation.
     pub(crate) fn navigate_scroll_to_cursor(&mut self) {
-        self.capture_focus_scroll_anchor(self.cursor.offset);
         self.scroll_to_cursor();
     }
 

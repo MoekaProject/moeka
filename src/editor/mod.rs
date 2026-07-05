@@ -5,6 +5,7 @@ mod code_commands;
 mod config_paths;
 mod config_store;
 mod element;
+mod file_list;
 mod fold;
 mod handlers;
 mod helpers;
@@ -53,6 +54,7 @@ mod workspace_search;
 
 pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
 pub(crate) use assets::*;
+pub(crate) use file_list::FileListItem;
 use language_detection::classify_pasted_text_kind;
 pub(crate) use scrollbar::{PanelScrollbarKind, PanelScrollbarState};
 pub(crate) use status_bar::IndentSettings;
@@ -436,6 +438,9 @@ pub(crate) enum ContextMenuKind {
     SidebarStarred {
         path: PathBuf,
     },
+    FileList {
+        path: PathBuf,
+    },
     SidebarSort,
     SidebarCreate,
     Format,
@@ -454,7 +459,6 @@ pub(crate) enum ContextMenuKind {
         col: usize,
     },
     Terminal,
-    Indentation,
     ChatTabCreate,
     ChatTab {
         tab_id: String,
@@ -1319,6 +1323,7 @@ pub struct EditorView {
     pub(crate) scroll_offset: f32,
     pub(crate) is_selecting: bool,
     pub(crate) vertical_move_goal_x: Option<f32>,
+    pub(crate) last_scroll_cursor_visual_x: Option<f32>,
     pub(crate) wrap_boundary_affinity: Option<WrapBoundaryAffinity>,
     pub(crate) line_display_info: Vec<Option<LineDisplayInfo>>,
     pending_line_display_transfer: Option<PendingLineDisplayTransfer>,
@@ -1539,6 +1544,31 @@ pub struct EditorView {
     pub(crate) sidebar_scroll_handle: ScrollHandle,
     pub(crate) tab_bar_scroll_handle: ScrollHandle,
     pub(crate) sidebar_render_limit: usize,
+    /// FileList pane (right of the file tree): current directory and cached items.
+    pub(crate) file_list_dir: PathBuf,
+    pub(crate) file_list_items: Vec<FileListItem>,
+    pub(crate) file_list_dirty: bool,
+    pub(crate) file_list_loaded_dir: Option<PathBuf>,
+    pub(crate) file_list_epoch: usize,
+    pub(crate) file_list_task: Option<Task<()>>,
+    pub(crate) file_list_scroll_handle: ScrollHandle,
+    pub(crate) file_list_custom_width: Option<f32>,
+    pub(crate) file_list_visible: bool,
+    pub(crate) file_list_display_width: f32,
+    pub(crate) file_list_layout_width: f32,
+    pub(crate) file_list_width_target: f32,
+    pub(crate) file_list_width_epoch: usize,
+    pub(crate) file_list_width_task: Option<Task<()>>,
+    pub(crate) file_list_resizing: bool,
+    /// A markdown file whose FileList item should be scrolled into view once
+    /// the current directory's items finish loading (tab/FileTree linkage).
+    pub(crate) file_list_pending_reveal_path: Option<PathBuf>,
+    /// True while the active `sidebar_edit` (create/rename input) should render
+    /// inside the FileList pane instead of the file tree.
+    pub(crate) sidebar_edit_in_file_list: bool,
+    /// True when the currently open sidebar context menu was opened from a
+    /// FileList item (used to route the follow-up rename/create input row).
+    pub(crate) file_list_menu_origin: bool,
     pub(crate) sidebar_git_statuses: HashMap<PathBuf, SidebarGitStatus>,
     pub(crate) sidebar_git_statuses_dirty: bool,
     pub(crate) sidebar_git_statuses_scanned_at: Option<SystemTime>,
@@ -1704,6 +1734,8 @@ pub struct EditorView {
     pub(crate) quick_open_scroll_handle: ScrollHandle,
     pub(crate) quick_open_render_limit: usize,
     pub(crate) language_picker_visible: bool,
+    pub(crate) language_picker_mode: language_picker::LanguagePickerMode,
+    pub(crate) language_picker_anchor: Option<gpui::Point<Pixels>>,
     pub(crate) language_picker_query: String,
     pub(crate) language_picker_items: Vec<language_picker::LanguagePickerItem>,
     pub(crate) language_picker_selected_index: usize,
@@ -1812,6 +1844,7 @@ impl EditorView {
             scroll_offset: 0.0,
             is_selecting: false,
             vertical_move_goal_x: None,
+            last_scroll_cursor_visual_x: None,
             wrap_boundary_affinity: None,
             line_display_info: Vec::new(),
             pending_line_display_transfer: None,
@@ -2002,6 +2035,24 @@ impl EditorView {
             sidebar_scroll_handle: ScrollHandle::new(),
             tab_bar_scroll_handle: ScrollHandle::new(),
             sidebar_render_limit: 200,
+            file_list_dir: PathBuf::new(),
+            file_list_items: Vec::new(),
+            file_list_dirty: true,
+            file_list_loaded_dir: None,
+            file_list_epoch: 0,
+            file_list_task: None,
+            file_list_scroll_handle: ScrollHandle::new(),
+            file_list_custom_width: app_settings.file_list_width,
+            file_list_visible: app_settings.file_list_visible,
+            file_list_display_width: 0.0,
+            file_list_layout_width: 0.0,
+            file_list_width_target: 0.0,
+            file_list_width_epoch: 0,
+            file_list_width_task: None,
+            file_list_resizing: false,
+            file_list_pending_reveal_path: None,
+            sidebar_edit_in_file_list: false,
+            file_list_menu_origin: false,
             sidebar_git_statuses: HashMap::new(),
             sidebar_git_statuses_dirty: true,
             sidebar_git_statuses_scanned_at: None,
@@ -2137,6 +2188,8 @@ impl EditorView {
             quick_open_scroll_handle: ScrollHandle::new(),
             quick_open_render_limit: 100,
             language_picker_visible: false,
+            language_picker_mode: language_picker::LanguagePickerMode::Language,
+            language_picker_anchor: None,
             language_picker_query: String::new(),
             language_picker_items: Vec::new(),
             language_picker_selected_index: 0,
@@ -2852,6 +2905,16 @@ impl EditorView {
         self.sidebar_layout_width = sidebar_width;
         self.sidebar_width_target = sidebar_width;
         self.sidebar_width_task = None;
+
+        let file_list_width = if self.file_list_visible {
+            self.file_list_target_width()
+        } else {
+            0.0
+        };
+        self.file_list_display_width = file_list_width;
+        self.file_list_layout_width = file_list_width;
+        self.file_list_width_target = file_list_width;
+        self.file_list_width_task = None;
 
         self.displayed_utility_panel = self.utility_panel;
         let utility_width = if self.utility_panel.is_some() {
@@ -5173,6 +5236,7 @@ impl EditorView {
 
     pub(crate) fn clear_vertical_move_goal_x(&mut self) {
         self.vertical_move_goal_x = None;
+        self.last_scroll_cursor_visual_x = None;
     }
 
     pub(crate) fn set_wrap_boundary_affinity(

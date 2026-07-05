@@ -39,6 +39,10 @@ pub(crate) struct AppSettings {
     pub letter_spacing: f32,
     #[serde(default = "default_sidebar_sort_mode")]
     pub sidebar_sort_mode: String,
+    #[serde(default)]
+    pub file_list_width: Option<f32>,
+    #[serde(default = "default_file_list_visible")]
+    pub file_list_visible: bool,
     #[serde(default = "default_date_time_format")]
     pub date_time_format: String,
     #[serde(default = "default_starred_files")]
@@ -121,6 +125,10 @@ fn default_date_time_format() -> String {
     "%Y-%m-%d %H:%M".to_string()
 }
 
+fn default_file_list_visible() -> bool {
+    true
+}
+
 fn default_starred_files() -> Vec<PathBuf> {
     Vec::new()
 }
@@ -160,6 +168,8 @@ impl Default for AppSettings {
             line_height: default_line_height(),
             letter_spacing: default_letter_spacing(),
             sidebar_sort_mode: default_sidebar_sort_mode(),
+            file_list_width: None,
+            file_list_visible: default_file_list_visible(),
             date_time_format: default_date_time_format(),
             starred_files: default_starred_files(),
             outline_rail_visible: default_outline_rail_visible(),

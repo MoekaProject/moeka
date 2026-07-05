@@ -86,6 +86,8 @@ impl EditorView {
         self.context_submenu = None;
         self.context_submenu_aim = None;
         self.context_submenu_hovered = false;
+        // Menus opened from the FileList set this back to true right after.
+        self.file_list_menu_origin = false;
         if clear_sidebar_edit {
             self.sidebar_edit = None;
         }
@@ -723,6 +725,22 @@ impl EditorView {
             ContextMenu {
                 position,
                 kind: ContextMenuKind::Sidebar { path, is_dir },
+            },
+            true,
+            cx,
+        );
+    }
+
+    pub(crate) fn open_file_list_context_menu(
+        &mut self,
+        path: PathBuf,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_context_menu(
+            ContextMenu {
+                position,
+                kind: ContextMenuKind::FileList { path },
             },
             true,
             cx,
@@ -2424,6 +2442,90 @@ impl EditorView {
         items
     }
 
+    fn render_file_list_context_menu(
+        &self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let parent_dir = path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.file_list_effective_dir());
+        let mut items: Vec<AnyElement> = Vec::new();
+
+        {
+            let parent = parent_dir.clone();
+            items.push(self.render_context_menu_item(
+                self.t(crate::i18n::TextKey::NewFile),
+                false,
+                cx,
+                move |this, window, cx| {
+                    this.start_create_file(parent.clone(), window, cx);
+                    this.sidebar_edit_in_file_list = true;
+                },
+            ));
+        }
+        {
+            let chat_path = path.clone();
+            items.push(self.render_context_menu_item(
+                ADD_FILE_TO_CHAT_LABEL,
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.close_context_menu(cx);
+                    this.add_path_to_chat(&chat_path, cx);
+                },
+            ));
+        }
+        items.push(self.render_context_menu_separator());
+        if self.selected_sidebar_paths.len() <= 1 {
+            let rename_path = path.clone();
+            items.push(self.render_context_menu_item(
+                self.t(crate::i18n::TextKey::Rename),
+                false,
+                cx,
+                move |this, window, cx| {
+                    this.file_list_menu_origin = true;
+                    this.start_rename(rename_path.clone(), window, cx);
+                },
+            ));
+        }
+        {
+            let delete_path = path.clone();
+            items.push(self.render_context_menu_item(
+                self.t(crate::i18n::TextKey::Delete),
+                true,
+                cx,
+                move |this, _, cx| {
+                    this.show_sidebar_delete_dialog(vec![delete_path.clone()], cx);
+                },
+            ));
+        }
+        items.push(self.render_context_menu_separator());
+        if let Some(copy_path_text) = self.sidebar_paths_copy_text(&path, false) {
+            items.push(self.render_context_menu_item(
+                self.t(crate::i18n::TextKey::CopyPath),
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.copy_text_to_clipboard(copy_path_text.clone(), cx);
+                },
+            ));
+        }
+        if let Some(copy_relative_path_text) = self.sidebar_paths_copy_text(&path, true) {
+            items.push(self.render_context_menu_item(
+                self.t(crate::i18n::TextKey::CopyRelativePath),
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.copy_text_to_clipboard(copy_relative_path_text.clone(), cx);
+                },
+            ));
+        }
+
+        items
+    }
+
     fn render_heading_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let active_actions = self.active_format_actions();
         let heading_items = [
@@ -3526,6 +3628,10 @@ impl EditorView {
                 self.render_starred_sidebar_context_menu(path.clone(), cx),
                 self.scaled(self.styles.context_menu.menu_sidebar_width_px),
             ),
+            ContextMenuKind::FileList { path } => (
+                self.render_file_list_context_menu(path.clone(), cx),
+                self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+            ),
             ContextMenuKind::SidebarSort => {
                 let mut items = Vec::new();
                 for mode in [
@@ -3533,7 +3639,6 @@ impl EditorView {
                     SidebarSortMode::CreatedAsc,
                     SidebarSortMode::NameAsc,
                     SidebarSortMode::NameDesc,
-                    SidebarSortMode::Type,
                 ] {
                     items.push(self.render_context_menu_choice_item(
                         self.t(mode.label_key()),
@@ -3546,28 +3651,6 @@ impl EditorView {
                             this.invalidate_sidebar_items_cache();
                             this.context_menu = None;
                             cx.notify();
-                        },
-                    ));
-                }
-                (
-                    items,
-                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
-                )
-            }
-            ContextMenuKind::Indentation => {
-                let mut items = Vec::new();
-                for (label, settings) in [
-                    ("空格: 2", IndentSettings::spaces(2)),
-                    ("空格: 4", IndentSettings::spaces(4)),
-                    ("制表符: 2", IndentSettings::tabs(2)),
-                    ("制表符: 4", IndentSettings::tabs(4)),
-                ] {
-                    items.push(self.render_context_menu_choice_item(
-                        label,
-                        self.indent_settings == settings,
-                        cx,
-                        move |this, _, cx| {
-                            this.set_indent_settings(settings, cx);
                         },
                     ));
                 }

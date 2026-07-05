@@ -204,6 +204,8 @@ mod tests {
             line_height: 1.7,
             letter_spacing: 0.5,
             sidebar_sort_mode: "created_desc".to_string(),
+            file_list_width: None,
+            file_list_visible: true,
             outline_rail_visible: true,
             show_whitespace: false,
             highlight_line_background: false,

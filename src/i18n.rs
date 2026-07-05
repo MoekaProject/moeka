@@ -184,6 +184,7 @@ pub(crate) enum TextKey {
     SortType,
     WorkingTree,
     EmptyFile,
+    FileListEmpty,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -871,6 +872,7 @@ fn translate_english(key: TextKey) -> &'static str {
         TextKey::SortType => "Type",
         TextKey::WorkingTree => "Working Tree",
         TextKey::EmptyFile => "Empty File",
+        TextKey::FileListEmpty => "No Documents",
     }
 }
 
@@ -1043,6 +1045,7 @@ fn translate_zh_cn(key: TextKey) -> &'static str {
         TextKey::SortType => "类型",
         TextKey::WorkingTree => "工作区",
         TextKey::EmptyFile => "空文件",
+        TextKey::FileListEmpty => "无文档",
     }
 }
 
@@ -1210,6 +1213,7 @@ fn translate_zh_tw(key: TextKey) -> &'static str {
         TextKey::SortType => "類型",
         TextKey::WorkingTree => "工作樹",
         TextKey::EmptyFile => "空檔案",
+        TextKey::FileListEmpty => "無文件",
         _ => translate_english(key),
     }
 }
@@ -1380,6 +1384,7 @@ fn translate_japanese(key: TextKey) -> &'static str {
         TextKey::SortType => "種類",
         TextKey::WorkingTree => "作業ツリー",
         TextKey::EmptyFile => "空のファイル",
+        TextKey::FileListEmpty => "ドキュメントなし",
         _ => translate_english(key),
     }
 }
@@ -1550,6 +1555,7 @@ fn translate_korean(key: TextKey) -> &'static str {
         TextKey::SortType => "유형",
         TextKey::WorkingTree => "작업 트리",
         TextKey::EmptyFile => "빈 파일",
+        TextKey::FileListEmpty => "문서 없음",
         _ => translate_english(key),
     }
 }
@@ -1722,6 +1728,7 @@ fn translate_french(key: TextKey) -> &'static str {
         TextKey::SortType => "Type",
         TextKey::WorkingTree => "Arbre de travail",
         TextKey::EmptyFile => "Fichier vide",
+        TextKey::FileListEmpty => "Aucun document",
         _ => translate_english(key),
     }
 }
@@ -1892,6 +1899,7 @@ fn translate_german(key: TextKey) -> &'static str {
         TextKey::SortType => "Typ",
         TextKey::WorkingTree => "Arbeitsbereich",
         TextKey::EmptyFile => "Leere Datei",
+        TextKey::FileListEmpty => "Keine Dokumente",
         _ => translate_english(key),
     }
 }
@@ -2062,6 +2070,7 @@ fn translate_spanish(key: TextKey) -> &'static str {
         TextKey::SortType => "Tipo",
         TextKey::WorkingTree => "Árbol de trabajo",
         TextKey::EmptyFile => "Archivo vacío",
+        TextKey::FileListEmpty => "Sin documentos",
         _ => translate_english(key),
     }
 }
@@ -2232,6 +2241,7 @@ fn translate_portuguese(key: TextKey) -> &'static str {
         TextKey::SortType => "Tipo",
         TextKey::WorkingTree => "Árvore de trabalho",
         TextKey::EmptyFile => "Arquivo vazio",
+        TextKey::FileListEmpty => "Sem documentos",
         _ => translate_english(key),
     }
 }
@@ -2402,6 +2412,7 @@ fn translate_russian(key: TextKey) -> &'static str {
         TextKey::SortType => "Тип",
         TextKey::WorkingTree => "Рабочее дерево",
         TextKey::EmptyFile => "Пустой файл",
+        TextKey::FileListEmpty => "Нет документов",
         _ => translate_english(key),
     }
 }
@@ -2570,6 +2581,7 @@ fn translate_arabic(key: TextKey) -> &'static str {
         TextKey::SortType => "النوع",
         TextKey::WorkingTree => "شجرة العمل",
         TextKey::EmptyFile => "ملف فارغ",
+        TextKey::FileListEmpty => "لا توجد مستندات",
         _ => translate_english(key),
     }
 }
@@ -2738,6 +2750,7 @@ fn translate_hindi(key: TextKey) -> &'static str {
         TextKey::SortType => "प्रकार",
         TextKey::WorkingTree => "वर्किंग ट्री",
         TextKey::EmptyFile => "खाली फ़ाइल",
+        TextKey::FileListEmpty => "कोई दस्तावेज़ नहीं",
         _ => translate_english(key),
     }
 }

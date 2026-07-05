@@ -5,6 +5,10 @@ use crate::markdown::BlockType;
 use super::*;
 
 impl EditorView {
+    fn actual_visual_line_count(info: &LineDisplayInfo) -> usize {
+        info.wrapped_line.wrap_boundaries().len() + 1
+    }
+
     pub(crate) fn set_visible_utility_panel(
         &mut self,
         next_panel: Option<RightUtilityPanel>,
@@ -476,18 +480,69 @@ impl EditorView {
             return;
         }
         let cursor_line = self.cursor_line();
-        let cursor_y = self.line_y_offset(cursor_line);
-        let cursor_line_height = self.visual_height_for_line(cursor_line);
-
-        if cursor_y < self.scroll_offset + self.padding_top() {
-            self.scroll_offset = (cursor_y - self.padding_top()).max(0.0);
-        }
+        let (cursor_visual_row, cursor_visual_x) = self
+            .cursor_visual_position(self.cursor.offset)
+            .unwrap_or((0, 0.0));
+        let cursor_y = self.text_y_offset_for_line(cursor_line)
+            + cursor_visual_row as f32
+                * self
+                    .line_display_info
+                    .get(cursor_line)
+                    .and_then(|info| info.as_ref())
+                    .map(|info| info.line_height)
+                    .unwrap_or_else(|| {
+                        let block_type = self
+                            .decorations
+                            .get(cursor_line)
+                            .map(|decoration| &decoration.block_type)
+                            .unwrap_or(&BlockType::Normal);
+                        self.line_height_for_block(block_type)
+                    });
+        let cursor_line_height = self
+            .line_display_info
+            .get(cursor_line)
+            .and_then(|info| info.as_ref())
+            .map(|info| info.line_height)
+            .unwrap_or_else(|| {
+                let block_type = self
+                    .decorations
+                    .get(cursor_line)
+                    .map(|decoration| &decoration.block_type)
+                    .unwrap_or(&BlockType::Normal);
+                self.line_height_for_block(block_type)
+            });
         let viewport_height = self.editor_visible_height();
-        if cursor_y + cursor_line_height
-            > self.scroll_offset + viewport_height - self.padding_bottom()
+        let viewport_top = self.scroll_offset + self.padding_top();
+        let viewport_bottom = self.scroll_offset + viewport_height - self.padding_bottom();
+        let usable_height = (viewport_bottom - viewport_top).max(cursor_line_height.max(1.0));
+        // Follow common editor behavior: keep a small scroll margin around the
+        // caret, not a large 1/3-zone that makes the viewport follow too early.
+        // Three visual rows feels stable while the 12% cap keeps tiny windows
+        // from reserving too much space.
+        let scroll_margin = (cursor_line_height * 3.0).min(usable_height * 0.12);
+        let upper_threshold = viewport_top + scroll_margin;
+        let lower_threshold = viewport_bottom - scroll_margin;
+        let cursor_top = cursor_y;
+        let cursor_bottom = cursor_y + cursor_line_height;
+        let is_visible = cursor_top >= viewport_top && cursor_bottom <= viewport_bottom;
+
+        if is_visible
+            && self
+                .last_scroll_cursor_visual_x
+                .is_some_and(|previous_x| (previous_x - cursor_visual_x).abs() < 0.5)
         {
-            self.scroll_offset =
-                cursor_y + cursor_line_height - viewport_height + self.padding_bottom();
+            return;
+        }
+
+        if cursor_top < upper_threshold {
+            self.scroll_offset = (cursor_y - self.padding_top() - scroll_margin).max(0.0);
+            self.clamp_scroll();
+            self.last_scroll_cursor_visual_x = Some(cursor_visual_x);
+        } else if cursor_bottom > lower_threshold {
+            self.scroll_offset = cursor_y + cursor_line_height + scroll_margin - viewport_height
+                + self.padding_bottom();
+            self.clamp_scroll();
+            self.last_scroll_cursor_visual_x = Some(cursor_visual_x);
         }
     }
 
@@ -615,7 +670,7 @@ impl EditorView {
             Some(self.disp_to_buffer_offset(info, line, new_disp))
         } else if line > 0 {
             let prev_info = self.line_display_info.get(line - 1)?.as_ref()?;
-            let last_visual = prev_info.visual_line_count.saturating_sub(1);
+            let last_visual = Self::actual_visual_line_count(prev_info).saturating_sub(1);
             let target_y = gpui::px((last_visual as f32 + 0.5) * prev_info.line_height);
             let target_indent = if last_visual > 0 {
                 prev_info.indent_px
@@ -647,7 +702,7 @@ impl EditorView {
         let (cur_visual, current_x) = self.cursor_visual_position(current_offset)?;
         let goal_x = self.vertical_move_goal_x.unwrap_or(current_x);
 
-        if cur_visual + 1 < info.visual_line_count {
+        if cur_visual + 1 < Self::actual_visual_line_count(info) {
             let target_visual = cur_visual + 1;
             let target_y = gpui::px((cur_visual as f32 + 1.5) * info.line_height);
             let target_indent = if target_visual > 0 {

@@ -48,6 +48,7 @@ impl EditorView {
         } else {
             SidebarEditMode::Rename { path, editor }
         });
+        self.sidebar_edit_in_file_list = !starred_surface && self.file_list_menu_origin;
         self.sidebar_edit_blur_sub = Some(blur_sub);
         self.context_menu = None;
         cx.notify();
@@ -205,6 +206,7 @@ impl EditorView {
         });
         window.focus(&focus_handle);
         self.sidebar_edit = Some(SidebarEditMode::CreateFile { parent, editor });
+        self.sidebar_edit_in_file_list = self.file_list_menu_origin;
         self.sidebar_edit_blur_sub = Some(blur_sub);
         self.context_menu = None;
         cx.notify();
@@ -239,6 +241,7 @@ impl EditorView {
         });
         window.focus(&focus_handle);
         self.sidebar_edit = Some(SidebarEditMode::CreateDir { parent, editor });
+        self.sidebar_edit_in_file_list = false;
         self.sidebar_edit_blur_sub = Some(blur_sub);
         self.context_menu = None;
         cx.notify();
@@ -532,6 +535,8 @@ impl EditorView {
 
     pub(crate) fn switch_workspace(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.sidebar_root = path.clone();
+        self.file_list_dir = path.clone();
+        self.file_list_loaded_dir = None;
         self.sidebar_visible = true;
         self.sidebar_resizing = false;
         self.workspace_search_visible = false;

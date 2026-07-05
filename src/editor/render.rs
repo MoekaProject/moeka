@@ -501,7 +501,8 @@ impl Render for EditorView {
             window.invalidate_character_coordinates();
         }
         let chat_panel_focused = self.chat_panel_focus_handle.is_focused(window);
-        let resizing = self.sidebar_resizing || self.utility_panel_resizing;
+        let resizing =
+            self.sidebar_resizing || self.file_list_resizing || self.utility_panel_resizing;
         let toolbar_base_visible =
             self.tabs.len() > 0 && !self.active_tab_is_settings() && !self.active_tab_is_binary();
         let show_editor_toolbar = self.should_show_editor_toolbar(toolbar_base_visible);
@@ -723,6 +724,8 @@ impl Render for EditorView {
             .when(self.should_render_sidebar_panel(), |this| {
                 let sidebar_w = self.sidebar_width();
                 let sidebar_layout_w = self.sidebar_layout_width();
+                let file_list_w = self.file_list_width();
+                let file_list_layout_w = self.file_list_layout_width();
                 let ss = &self.styles.sidebar;
                 let hover_indicator_color = ss.sidebar_resize_active_indicator_color;
                 let hover_indicator_width =
@@ -731,16 +734,39 @@ impl Render for EditorView {
                 this.child(
                     div()
                         .id("sidebar-wrap")
-                        .w(px(sidebar_w))
+                        .w(px(sidebar_w + file_list_w))
                         .h_full()
                         .overflow_hidden()
                         .flex_none()
+                        .flex()
                         .child(
                             div()
                                 .h_full()
-                                .w(px(sidebar_layout_w))
-                                .child(self.render_sidebar(cx)),
-                        ),
+                                .w(px(sidebar_w))
+                                .flex_none()
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(px(sidebar_layout_w))
+                                        .child(self.render_sidebar(cx)),
+                                ),
+                        )
+                        .when(file_list_w > 0.5, |this| {
+                            this.child(
+                                div()
+                                    .h_full()
+                                    .w(px(file_list_w))
+                                    .flex_none()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(px(file_list_layout_w))
+                                            .child(self.render_file_list(cx)),
+                                    ),
+                            )
+                        }),
                 )
                     // Transparent sensing area for resize drag
                     .child(
@@ -793,6 +819,64 @@ impl Render for EditorView {
                                 }),
                             ),
                     )
+                    .when(file_list_w > 0.5, |this| {
+                        this.child(
+                            div()
+                                .id("file-list-resize-handle")
+                                .absolute()
+                                .left(px(sidebar_w + file_list_w - handle_width / 2.0))
+                                .top_0()
+                                .w(px(handle_width))
+                                .h_full()
+                                .cursor(CursorStyle::ResizeLeftRight)
+                                .hover(move |style| {
+                                    style
+                                        .border_l(px(hover_indicator_width))
+                                        .border_color(hover_indicator_color)
+                                })
+                                .on_mouse_move(cx.listener(
+                                    |this, event: &MouseMoveEvent, _, cx| {
+                                        if this.file_list_resizing {
+                                            let new_width = f32::from(event.position.x)
+                                                - this.sidebar_width();
+                                            let min_w = this.scaled(
+                                                this.styles.sidebar.file_list_resize_min_width_px,
+                                            );
+                                            let max_w = this.scaled(
+                                                this.styles.sidebar.file_list_resize_max_width_px,
+                                            );
+                                            let new_width =
+                                                clamp_resize_dimension(new_width, min_w, max_w);
+                                            this.file_list_custom_width = Some(new_width);
+                                            this.file_list_display_width = new_width;
+                                            this.file_list_layout_width = new_width;
+                                            this.file_list_width_target = new_width;
+                                            this.file_list_width_task = None;
+                                            cx.notify();
+                                        }
+                                    },
+                                ))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                        this.file_list_resizing = true;
+                                        cx.notify();
+                                    }),
+                                )
+                                .on_mouse_up(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.finish_file_list_resize(cx);
+                                    }),
+                                )
+                                .on_mouse_up_out(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.finish_file_list_resize(cx);
+                                    }),
+                                ),
+                        )
+                    })
             })
             .child(
                 div()
@@ -800,6 +884,7 @@ impl Render for EditorView {
                     .flex_1()
                     .size_full()
                     .overflow_hidden()
+                    .relative()
                     .flex()
                     .flex_col()
                     .bg(self.styles.editor.editor_bg)
@@ -1676,6 +1761,21 @@ impl Render for EditorView {
                             .bg(ic)
                             .into_any_element(),
                     )
+                } else if self.file_list_resizing {
+                    let iw =
+                        self.scaled(self.styles.sidebar.sidebar_resize_active_indicator_width_px);
+                    let ic = self.styles.sidebar.sidebar_resize_active_indicator_color;
+                    let x = self.sidebar_width() + self.file_list_width() - iw;
+                    Some(
+                        div()
+                            .absolute()
+                            .left(px(x))
+                            .top_0()
+                            .w(px(iw))
+                            .h_full()
+                            .bg(ic)
+                            .into_any_element(),
+                    )
                 } else if self.utility_panel_resizing {
                     let iw = self.scaled(
                         self.styles
@@ -1754,6 +1854,20 @@ impl Render for EditorView {
                                 this.set_active_sidebar_custom_width(new_width);
                                 this.set_sidebar_width_immediately(new_width);
                                 cx.notify();
+                            } else if this.file_list_resizing {
+                                let new_width =
+                                    f32::from(event.position.x) - this.sidebar_width();
+                                let min_w = this
+                                    .scaled(this.styles.sidebar.file_list_resize_min_width_px);
+                                let max_w = this
+                                    .scaled(this.styles.sidebar.file_list_resize_max_width_px);
+                                let new_width = clamp_resize_dimension(new_width, min_w, max_w);
+                                this.file_list_custom_width = Some(new_width);
+                                this.file_list_display_width = new_width;
+                                this.file_list_layout_width = new_width;
+                                this.file_list_width_target = new_width;
+                                this.file_list_width_task = None;
+                                cx.notify();
                             } else if this.utility_panel_resizing {
                                 let window_width = f32::from(window.bounds().size.width);
                                 let active_panel = this.active_resizable_utility_panel();
@@ -1791,6 +1905,7 @@ impl Render for EditorView {
                             cx.listener(|this, _, _, cx| {
                                 this.sidebar_resizing = false;
                                 this.utility_panel_resizing = false;
+                                this.finish_file_list_resize(cx);
                                 cx.notify();
                             }),
                         )

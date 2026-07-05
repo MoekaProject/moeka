@@ -91,7 +91,7 @@ impl EditorView {
                                 div()
                                     .text_size(px(self.scaled(self.styles.ui_font_size_px + 9.0)))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(self.theme.text_bright)
+                                    .text_color(self.app_settings.dark_theme_kind().build().text_bright)
                                     .child(self.t(TextKey::SettingsPanelTitle)),
                             )
                             .child(
@@ -124,20 +124,20 @@ impl EditorView {
             .gap(px(self.scaled(6.0)))
             .rounded(px(self.scaled(8.0)))
             .border(px(1.0))
-            .border_color(self.theme.border_primary)
-            .bg(self.theme.bg_secondary)
+            .border_color(self.app_settings.dark_theme_kind().build().border_primary)
+            .bg(self.app_settings.dark_theme_kind().build().bg_secondary)
             .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
-            .text_color(self.theme.text_primary)
+            .text_color(self.app_settings.dark_theme_kind().build().text_primary)
             .cursor(CursorStyle::Arrow)
             .hover({
-                let hover_bg = self.theme.bg_hover;
+                let hover_bg = self.app_settings.dark_theme_kind().build().bg_hover;
                 move |style| style.bg(hover_bg)
             })
             .child(
                 svg()
                     .path(DOC_SVG_PATH)
                     .size(px(icon_size))
-                    .text_color(self.theme.text_secondary),
+                    .text_color(self.app_settings.dark_theme_kind().build().text_secondary),
             )
             .child(self.t(TextKey::HelpManual))
             .on_mouse_down(
@@ -157,12 +157,12 @@ impl EditorView {
         let text_color = if update_ready {
             update_color
         } else {
-            self.theme.text_primary
+            self.app_settings.dark_theme_kind().build().text_primary
         };
         let icon_color = if update_ready {
             update_color
         } else {
-            self.theme.text_secondary
+            self.app_settings.dark_theme_kind().build().text_secondary
         };
         let label = if let Some(update) = self.prepared_update() {
             if update.version.is_empty() {
@@ -186,14 +186,14 @@ impl EditorView {
             .border_color(if update_ready {
                 update_color
             } else {
-                self.theme.border_primary
+                self.app_settings.dark_theme_kind().build().border_primary
             })
-            .bg(self.theme.bg_secondary)
+            .bg(self.app_settings.dark_theme_kind().build().bg_secondary)
             .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
             .text_color(text_color)
             .cursor(CursorStyle::Arrow)
             .hover({
-                let hover_bg = self.theme.bg_hover;
+                let hover_bg = self.app_settings.dark_theme_kind().build().bg_hover;
                 move |style| style.bg(hover_bg)
             })
             .child(
@@ -372,7 +372,7 @@ impl EditorView {
                 div()
                     .w(px(self.scaled(120.0)))
                     .text_size(px(self.scaled(13.0)))
-                    .text_color(self.theme.text_secondary)
+                    .text_color(self.app_settings.dark_theme_kind().build().text_secondary)
                     .child("编辑器显示"),
             )
             .child(
@@ -497,7 +497,7 @@ impl EditorView {
     // ── Section heading ─────────────────────────────────────────
 
     fn render_section_heading(&self, label: &str) -> AnyElement {
-        let border_color = self.theme.border_secondary;
+        let border_color = self.app_settings.dark_theme_kind().build().border_secondary;
         div()
             .w_full()
             .flex()
@@ -507,7 +507,7 @@ impl EditorView {
                 div()
                     .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(self.theme.text_secondary)
+                    .text_color(self.app_settings.dark_theme_kind().build().text_secondary)
                     .child(label.to_uppercase()),
             )
             .child(div().w_full().h(px(1.0)).bg(border_color))
@@ -571,10 +571,10 @@ impl EditorView {
         } else {
             ThemeKind::light_themes()
         };
-        let text_secondary = self.theme.text_secondary;
-        let hover_bg = self.theme.bg_hover;
-        let toggle_active_bg = self.theme.text_primary;
-        let toggle_active_text = self.theme.bg_primary;
+        let text_secondary = self.app_settings.dark_theme_kind().build().text_secondary;
+        let hover_bg = self.app_settings.dark_theme_kind().build().bg_hover;
+        let toggle_active_bg = self.app_settings.dark_theme_kind().build().text_primary;
+        let toggle_active_text = self.app_settings.dark_theme_kind().build().bg_primary;
         let icon_size = self.scaled(settings_styles.settings_theme_toggle_icon_size_px);
         let toggle_height = self.scaled(settings_styles.settings_theme_toggle_height_px);
         let toggle_padding_x = self.scaled(settings_styles.settings_theme_toggle_padding_x_px);
@@ -614,7 +614,7 @@ impl EditorView {
                             .gap(px(0.0))
                             .rounded(px(toggle_radius))
                             .border(px(toggle_border_width))
-                            .border_color(self.theme.border_primary)
+                            .border_color(self.app_settings.dark_theme_kind().build().border_primary)
                             .overflow_hidden()
                             .child(
                                 div()
@@ -802,7 +802,7 @@ impl EditorView {
         let swatch_heading = preview.heading;
         let swatch_code = preview.inline_code;
         let swatch_secondary_bg = preview.bg_secondary;
-        let active_accent = self.theme.text_accent;
+        let active_accent = self.app_settings.dark_theme_kind().build().text_accent;
         let inactive_border = preview.border_secondary;
         let inactive_hover_border = preview.border_tertiary;
 
@@ -960,10 +960,10 @@ impl EditorView {
         option_index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let hover_bg = self.theme.bg_hover;
-        let text_primary = self.theme.text_primary;
-        let text_secondary = self.theme.text_secondary;
-        let border_color = self.theme.border_primary;
+        let hover_bg = self.app_settings.dark_theme_kind().build().bg_hover;
+        let text_primary = self.app_settings.dark_theme_kind().build().text_primary;
+        let text_secondary = self.app_settings.dark_theme_kind().build().text_secondary;
+        let border_color = self.app_settings.dark_theme_kind().build().border_primary;
         let current_value = current_value.to_string();
 
         div()
@@ -1065,10 +1065,10 @@ impl EditorView {
     }
 
     fn render_ui_font_size_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let text_primary = self.theme.text_primary;
-        let text_secondary = self.theme.text_secondary;
-        let hover_bg = self.theme.bg_hover;
-        let border_color = self.theme.border_primary;
+        let text_primary = self.app_settings.dark_theme_kind().build().text_primary;
+        let text_secondary = self.app_settings.dark_theme_kind().build().text_secondary;
+        let hover_bg = self.app_settings.dark_theme_kind().build().bg_hover;
+        let border_color = self.app_settings.dark_theme_kind().build().border_primary;
 
         div()
             .flex()
@@ -1194,10 +1194,10 @@ impl EditorView {
 
     fn render_line_height_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_line_height_editor(cx);
-        let text_primary = self.theme.text_primary;
-        let text_secondary = self.theme.text_secondary;
-        let hover_bg = self.theme.bg_hover;
-        let border_color = self.theme.border_primary;
+        let text_primary = self.app_settings.dark_theme_kind().build().text_primary;
+        let text_secondary = self.app_settings.dark_theme_kind().build().text_secondary;
+        let hover_bg = self.app_settings.dark_theme_kind().build().bg_hover;
+        let border_color = self.app_settings.dark_theme_kind().build().border_primary;
 
         div()
             .flex()
@@ -1323,10 +1323,10 @@ impl EditorView {
 
     fn render_letter_spacing_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_letter_spacing_editor(cx);
-        let text_primary = self.theme.text_primary;
-        let text_secondary = self.theme.text_secondary;
-        let hover_bg = self.theme.bg_hover;
-        let border_color = self.theme.border_primary;
+        let text_primary = self.app_settings.dark_theme_kind().build().text_primary;
+        let text_secondary = self.app_settings.dark_theme_kind().build().text_secondary;
+        let hover_bg = self.app_settings.dark_theme_kind().build().bg_hover;
+        let border_color = self.app_settings.dark_theme_kind().build().border_primary;
 
         div()
             .flex()
@@ -1589,11 +1589,11 @@ impl EditorView {
         picker: &FontPickerState,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let bg = self.theme.bg_elevated;
-        let border_color = self.theme.border_primary;
-        let text_primary = self.theme.text_primary;
-        let hover_bg = self.theme.bg_hover;
-        let selected_bg = self.theme.bg_selected;
+        let bg = self.app_settings.dark_theme_kind().build().bg_elevated;
+        let border_color = self.app_settings.dark_theme_kind().build().border_primary;
+        let text_primary = self.app_settings.dark_theme_kind().build().text_primary;
+        let hover_bg = self.app_settings.dark_theme_kind().build().bg_hover;
+        let selected_bg = self.app_settings.dark_theme_kind().build().bg_selected;
 
         let max_visible = 12;
         let item_h = self.scaled(28.0);
