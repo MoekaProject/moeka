@@ -32,6 +32,9 @@ impl EditorView {
         let mut styles = self.styles.text_input.clone();
         styles.text_input_padding_left_px =
             self.styles.quick_open.quick_open_input_text_padding_left_px;
+        styles.text_input_height_px = self.scaled(24.0);
+        styles.text_input_font_size_px =
+            self.scaled(self.styles.quick_open.quick_open_result_name_font_size_px);
         styles.text_input_bg = self.styles.quick_open.quick_open_input_bg;
         styles.text_input_focus_bg = self.styles.quick_open.quick_open_input_focus_bg;
         styles.text_input_text_color = self.styles.quick_open.quick_open_input_text_color;

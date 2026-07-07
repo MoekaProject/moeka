@@ -743,10 +743,11 @@ pub(crate) fn find_search_matches(
         return matches;
     }
 
-    let haystack = if case_sensitive {
-        text.to_string()
+    let (haystack, byte_map) = if case_sensitive {
+        (text.to_string(), None)
     } else {
-        text.to_lowercase()
+        let (folded, map) = fold_with_original_byte_map(text);
+        (folded, Some(map))
     };
     let needle = if case_sensitive {
         query.to_string()
@@ -756,21 +757,54 @@ pub(crate) fn find_search_matches(
 
     let mut start = 0;
     while let Some(position) = haystack[start..].find(&needle) {
-        let match_start = start + position;
-        let match_end = match_start + needle.len();
+        let folded_match_start = start + position;
+        let folded_match_end = folded_match_start + needle.len();
+        let (match_start, match_end) = if let Some(byte_map) = &byte_map {
+            (byte_map[folded_match_start], byte_map[folded_match_end])
+        } else {
+            (folded_match_start, folded_match_end)
+        };
 
         if whole_word
             && (!is_word_boundary(text, match_start) || !is_word_boundary(text, match_end))
         {
-            start = match_start + 1;
+            start = next_char_boundary(&haystack, folded_match_start);
             continue;
         }
 
         matches.push(match_start..match_end);
-        start = match_end;
+        start = folded_match_end;
     }
 
     matches
+}
+
+fn fold_with_original_byte_map(text: &str) -> (String, Vec<usize>) {
+    let mut folded = String::new();
+    let mut byte_map = Vec::with_capacity(text.len() + 1);
+    byte_map.push(0);
+
+    for (original_start, ch) in text.char_indices() {
+        let original_end = original_start + ch.len_utf8();
+        for folded_ch in ch.to_lowercase() {
+            let folded_len = folded_ch.len_utf8();
+            folded.push(folded_ch);
+            for _ in 1..folded_len {
+                byte_map.push(original_start);
+            }
+            byte_map.push(original_end);
+        }
+    }
+
+    (folded, byte_map)
+}
+
+fn next_char_boundary(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    let next = index + text[index..].chars().next().map_or(1, char::len_utf8);
+    next.min(text.len())
 }
 
 fn is_word_boundary(text: &str, index: usize) -> bool {
@@ -785,4 +819,19 @@ fn is_word_boundary(text: &str, index: usize) -> bool {
 
 fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_search_matches;
+
+    #[test]
+    fn case_insensitive_whole_word_search_keeps_original_utf8_boundaries() {
+        let text = "abc选FOO xyz 选 FOO";
+
+        let matches = find_search_matches(text, "foo", false, true, false);
+
+        assert_eq!(matches, vec![18..21]);
+        assert_eq!(&text[matches[0].clone()], "FOO");
+    }
 }

@@ -257,6 +257,7 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
                     let root = this.sidebar_root.clone();
                     this.sidebar_select_item(&root, false, false);
                     this.focused_sidebar_path = Some(root.clone());
@@ -267,6 +268,7 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
                     this.open_sidebar_context_menu(
                         this.sidebar_root.clone(),
                         true,
@@ -769,6 +771,16 @@ impl EditorView {
                 .text_color(icon_color)
                 .into_any_element()
         } else if let Some(label) = file_kind_badge_text(&item.path) {
+            let badge_bg = if is_selected || is_focused {
+                ss.sidebar_item_selected_icon_color
+            } else {
+                ss.sidebar_item_badge_bg
+            };
+            let badge_text_color = if is_selected || is_focused {
+                ss.sidebar_item_selected_bg
+            } else {
+                ss.sidebar_item_badge_text_color
+            };
             div()
                 .min_w(px(self.scaled(ss.sidebar_item_badge_min_width_px)))
                 .h(px(self.scaled(ss.sidebar_item_badge_height_px)))
@@ -777,9 +789,9 @@ impl EditorView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(ss.sidebar_item_badge_bg)
+                .bg(badge_bg)
                 .text_size(px(self.scaled(ss.sidebar_item_badge_font_size_px)))
-                .text_color(ss.sidebar_item_badge_text_color)
+                .text_color(badge_text_color)
                 .font_weight(FontWeight::EXTRA_BOLD)
                 .child(label)
                 .into_any_element()

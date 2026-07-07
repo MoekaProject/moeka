@@ -277,11 +277,13 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_file_list_visible(&mut self, cx: &mut Context<Self>) {
+        let reveal_dir = self.file_list_effective_dir();
         self.file_list_visible = !self.file_list_visible;
         self.file_list_resizing = false;
         self.app_settings.file_list_visible = self.file_list_visible;
         self.app_settings.save();
         self.invalidate_sidebar_items_cache();
+        self.reveal_file_list_dir_in_sidebar(&reveal_dir, cx);
         if self.file_list_visible {
             self.file_list_dirty = true;
         } else {
@@ -289,6 +291,28 @@ impl EditorView {
         }
         self.sync_file_list_width_animation(cx);
         cx.notify();
+    }
+
+    fn reveal_file_list_dir_in_sidebar(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        let items = self.sidebar_items();
+        if let Some(index) = items.iter().position(|item| item.path == dir) {
+            if self.ensure_sidebar_item_visible(index, items.len()) {
+                cx.notify();
+            }
+        }
+    }
+
+    fn file_list_item_height_px(&self) -> f32 {
+        let ss = &self.styles.sidebar;
+        self.scaled(
+            2.0 * ss.file_list_item_padding_y_px
+                + ss.file_list_item_title_font_size_px
+                    .max(ss.file_list_item_time_font_size_px)
+                + ss.file_list_item_gap_px
+                + ss.file_list_item_preview_line_height_px
+                    * ss.file_list_item_preview_max_lines as f32
+                + ss.file_list_item_separator_width_px,
+        )
     }
 
     pub(crate) fn file_list_layout_width(&self) -> f32 {
@@ -702,8 +726,41 @@ impl EditorView {
         if let Some(editor) = &create_editor {
             list_children.push(self.render_file_list_edit_row(editor));
         }
-        for item in self.file_list_items.clone() {
+        let item_height = self.file_list_item_height_px();
+        let prefix_height = if create_editor.is_some() {
+            item_height
+        } else {
+            0.0
+        };
+        let (visible_start, visible_end, top_spacer_height, bottom_spacer_height) = self
+            .visible_uniform_list_range(
+                &self.file_list_scroll_handle,
+                prefix_height,
+                item_height,
+                self.file_list_items.len(),
+                8,
+            );
+        if top_spacer_height > 0.0 {
+            list_children.push(
+                div()
+                    .w_full()
+                    .h(px(top_spacer_height))
+                    .flex_none()
+                    .into_any_element(),
+            );
+        }
+        for idx in visible_start..visible_end {
+            let item = self.file_list_items[idx].clone();
             list_children.push(self.render_file_list_item(&item, cx));
+        }
+        if bottom_spacer_height > 0.0 {
+            list_children.push(
+                div()
+                    .w_full()
+                    .h(px(bottom_spacer_height))
+                    .flex_none()
+                    .into_any_element(),
+            );
         }
 
         // Scroll the linked item (active tab / FileTree selection) into view

@@ -1482,7 +1482,6 @@ pub struct EditorView {
     pub(crate) editor_scrollbar_drag: Option<EditorScrollbarDragState>,
     pub(crate) panel_scrollbars: HashMap<PanelScrollbarKind, PanelScrollbarState>,
     pub(crate) sidebar_custom_width: Option<f32>,
-    pub(crate) search_sidebar_custom_width: Option<f32>,
     /// Time of the last grouped typing checkpoint, used to coalesce rapid
     /// single-character edits into a single undo step (time-interval grouping).
     pub(crate) last_typing_checkpoint_time: Option<Instant>,
@@ -1985,7 +1984,6 @@ impl EditorView {
                 })
                 .collect(),
             sidebar_custom_width: None,
-            search_sidebar_custom_width: None,
             last_typing_checkpoint_time: None,
             last_typing_checkpoint_offset: None,
             sidebar_resizing: false,
@@ -2736,22 +2734,14 @@ impl EditorView {
             .unwrap_or_else(|| self.scaled(self.styles.sidebar.sidebar_width_px))
     }
 
-    /// The custom width for the currently displayed left sidebar mode.
-    /// Workspace search and the file tree keep independent widths.
+    /// The custom width for the left sidebar. Workspace search uses the same
+    /// width as the file tree so switching panels does not resize the sidebar.
     pub(crate) fn active_sidebar_custom_width(&self) -> Option<f32> {
-        if self.workspace_search_visible {
-            self.search_sidebar_custom_width
-        } else {
-            self.sidebar_custom_width
-        }
+        self.sidebar_custom_width
     }
 
     pub(crate) fn set_active_sidebar_custom_width(&mut self, width: f32) {
-        if self.workspace_search_visible {
-            self.search_sidebar_custom_width = Some(width);
-        } else {
-            self.sidebar_custom_width = Some(width);
-        }
+        self.sidebar_custom_width = Some(width);
     }
 
     pub(crate) fn sidebar_width(&self) -> f32 {
@@ -6495,9 +6485,6 @@ impl EditorView {
             return;
         }
         if let Some(ref mut w) = self.sidebar_custom_width {
-            *w = *w * (clamped / self.ui_scale);
-        }
-        if let Some(ref mut w) = self.search_sidebar_custom_width {
             *w = *w * (clamped / self.ui_scale);
         }
         self.ui_scale = clamped;

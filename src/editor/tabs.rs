@@ -442,7 +442,7 @@ impl EditorView {
             String::new()
         };
         let cursor_offset = if matches!(file_kind, FileKind::Markdown) {
-            first_markdown_heading_line_end(&text)
+            first_markdown_content_line_end(&text)
                 .unwrap_or_else(|| text.find('\n').unwrap_or(text.len()))
         } else {
             text.find('\n').unwrap_or(text.len())
@@ -2385,20 +2385,30 @@ impl EditorView {
     }
 }
 
-/// Returns the byte offset of the end of the first ATX markdown heading line
-/// (e.g. `# Title`, `## Section`) in `text`, or `None` if there is no heading.
-fn first_markdown_heading_line_end(text: &str) -> Option<usize> {
+/// Returns the byte offset of the end of the first Markdown content line,
+/// skipping YAML front matter when present.
+fn first_markdown_content_line_end(text: &str) -> Option<usize> {
     let mut offset = 0usize;
-    for line in text.split_inclusive('\n') {
+    let mut lines = text.split_inclusive('\n').peekable();
+    if lines
+        .peek()
+        .map(|line| line.strip_suffix('\n').unwrap_or(line).trim())
+        == Some("---")
+    {
+        let line = lines.next()?;
+        offset += line.len();
+        for line in lines.by_ref() {
+            let trimmed_line = line.strip_suffix('\n').unwrap_or(line);
+            offset += line.len();
+            if trimmed_line.trim() == "---" {
+                break;
+            }
+        }
+    }
+
+    for line in lines {
         let trimmed_line = line.strip_suffix('\n').unwrap_or(line);
-        let content = trimmed_line.trim_start_matches([' ', '\t']);
-        let hashes = content.chars().take_while(|&c| c == '#').count();
-        if (1..=6).contains(&hashes)
-            && content[hashes..]
-                .chars()
-                .next()
-                .is_some_and(|c| c == ' ' || c == '\t')
-        {
+        if !trimmed_line.trim().is_empty() {
             return Some(offset + trimmed_line.len());
         }
         offset += line.len();

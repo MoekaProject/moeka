@@ -208,7 +208,7 @@ mod tests {
             file_list_visible: true,
             outline_rail_visible: true,
             show_whitespace: false,
-            highlight_line_background: false,
+            highlight_line_background: true,
             date_time_format: "%Y-%m-%d %H:%M".to_string(),
             starred_files: Vec::new(),
             app_icon_index: 0,

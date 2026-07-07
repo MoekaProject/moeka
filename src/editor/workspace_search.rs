@@ -208,7 +208,7 @@ impl EditorView {
         self.workspace_search_highlight_current_index = Some(0);
         self.cursor.offset = search_match.byte_offset.min(self.buffer.len());
         self.cursor.anchor = self.cursor.offset;
-        self.center_cursor_in_view(cx);
+        self.center_cursor_in_view_immediately(cx);
     }
 
     fn preview_workspace_search_match_at(
@@ -757,9 +757,12 @@ impl EditorView {
                     let is_selected =
                         self.workspace_search_selected_match == Some(current_match_index);
 
-                    let before = &line_text[..start.min(line_text.len())];
-                    let matched = &line_text[start.min(line_text.len())..end.min(line_text.len())];
-                    let after = &line_text[end.min(line_text.len())..];
+                    let (before, matched, after) = self.workspace_search_match_excerpt(
+                        &line_text,
+                        start,
+                        end,
+                        workspace_styles.ws_search_match_font_size_px,
+                    );
 
                     children.push(
                         div()
@@ -801,14 +804,9 @@ impl EditorView {
                                     ))
                                     .text_color(workspace_styles.ws_search_match_text_color)
                                     .flex()
-                                    .child(before.to_string())
-                                    .child(
-                                        div()
-                                            .bg(hl_bg)
-                                            .text_color(hl_color)
-                                            .child(matched.to_string()),
-                                    )
-                                    .child(after.to_string()),
+                                    .child(before)
+                                    .child(div().bg(hl_bg).text_color(hl_color).child(matched))
+                                    .child(after),
                             )
                             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                                 let is_double_click = event.click_count() >= 2;
@@ -863,6 +861,84 @@ impl EditorView {
             .children(children)
             .into_any_element()
     }
+
+    fn workspace_search_match_excerpt(
+        &self,
+        line_text: &str,
+        match_start: usize,
+        match_end: usize,
+        font_size_px: f32,
+    ) -> (String, String, String) {
+        let start = previous_char_boundary(line_text, match_start.min(line_text.len()));
+        let end = next_char_boundary(line_text, match_end.min(line_text.len()));
+        let matched = line_text[start..end].to_string();
+        let available_width = (self.sidebar_target_width()
+            - self.scaled(
+                28.0 + 4.0 + 2.0 * self.styles.workspace_search.ws_search_match_padding_x_px,
+            ))
+        .max(self.scaled(80.0));
+        let approx_char_width = (self.scaled(font_size_px) * 0.58).max(1.0);
+        let max_chars = (available_width / approx_char_width).floor().max(8.0) as usize;
+        let match_chars = line_text[start..end].chars().count();
+        if line_text.chars().count() <= max_chars || match_chars >= max_chars.saturating_sub(2) {
+            return (
+                line_text[..start].to_string(),
+                matched,
+                line_text[end..].to_string(),
+            );
+        }
+
+        let context_chars = max_chars.saturating_sub(match_chars).saturating_sub(2);
+        let before_chars = context_chars / 2;
+        let after_chars = context_chars.saturating_sub(before_chars);
+        let before_start = byte_index_before(line_text, start, before_chars);
+        let after_end = byte_index_after(line_text, end, after_chars);
+        let before_prefix = if before_start > 0 { "..." } else { "" };
+        let after_suffix = if after_end < line_text.len() {
+            "..."
+        } else {
+            ""
+        };
+        (
+            format!("{}{}", before_prefix, &line_text[before_start..start]),
+            matched,
+            format!("{}{}", &line_text[end..after_end], after_suffix),
+        )
+    }
+}
+
+fn previous_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn next_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+fn byte_index_before(text: &str, end: usize, max_chars: usize) -> usize {
+    text[..end]
+        .char_indices()
+        .rev()
+        .nth(max_chars.saturating_sub(1))
+        .map_or(0, |(idx, _)| idx)
+}
+
+fn byte_index_after(text: &str, start: usize, max_chars: usize) -> usize {
+    if max_chars == 0 {
+        return start;
+    }
+    text[start..]
+        .char_indices()
+        .nth(max_chars)
+        .map_or(text.len(), |(idx, _)| start + idx)
 }
 
 fn search_directory(

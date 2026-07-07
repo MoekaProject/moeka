@@ -193,7 +193,7 @@ impl EditorView {
         }
     }
 
-    fn ensure_sidebar_item_visible(&self, index: usize, item_count: usize) -> bool {
+    pub(super) fn ensure_sidebar_item_visible(&self, index: usize, item_count: usize) -> bool {
         if item_count == 0 {
             return false;
         }

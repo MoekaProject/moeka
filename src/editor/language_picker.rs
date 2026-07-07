@@ -125,11 +125,17 @@ fn language_item_matches(item: &LanguagePickerItem, query: &str) -> bool {
 
 impl EditorView {
     fn language_picker_text_input_styles(&self) -> crate::style::TextInputStyles {
+        let theme = self.app_settings.dark_theme_kind().build();
         let mut styles = self.styles.text_input.clone();
+        styles.text_input_height_px = self.scaled(24.0);
+        styles.text_input_font_size_px = self.scaled(12.0);
         styles.text_input_bg = gpui::Hsla::transparent_black();
         styles.text_input_focus_bg = gpui::Hsla::transparent_black();
+        styles.text_input_text_color = theme.text_primary;
+        styles.text_input_placeholder_color = theme.text_secondary;
         styles.text_input_border_width_px = 0.0;
-        styles.text_input_cursor_height_ratio = 0.6;
+        styles.text_input_cursor_color = theme.cursor;
+        styles.text_input_cursor_height_ratio = 0.72;
         styles
     }
 
@@ -286,21 +292,23 @@ impl EditorView {
         self.language_picker_visible = false;
         self.language_picker_anchor = None;
         self.layout_dirty = true;
+        self.clear_all_tab_layout_caches();
         self.reparse();
         session_store::persist_session(self);
         cx.notify();
     }
 
     pub(crate) fn render_language_picker_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
-        let bg = self.theme.bg_elevated;
-        let border = self.theme.border_primary;
-        let selected_bg = self.theme.bg_selected;
-        let hover_bg = self.theme.bg_hover;
-        let text_primary = self.theme.text_primary;
-        let text_secondary = self.theme.text_secondary;
+        let theme = self.app_settings.dark_theme_kind().build();
+        let bg = theme.bg_elevated;
+        let border = theme.border_primary;
+        let selected_bg = theme.bg_selected;
+        let hover_bg = theme.bg_hover;
+        let text_primary = theme.text_primary;
+        let text_secondary = theme.text_secondary;
         let row_h = self.scaled(24.0);
         let name_font = self.scaled(12.0);
-        let input_h = self.scaled(42.0);
+        let input_h = self.scaled(36.0);
         let max_visible = 12usize;
         let visible_rows = self
             .language_picker_items

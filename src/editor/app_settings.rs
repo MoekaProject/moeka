@@ -142,7 +142,7 @@ fn default_show_whitespace() -> bool {
 }
 
 fn default_highlight_line_background() -> bool {
-    false
+    true
 }
 
 fn default_app_icon_index() -> usize {

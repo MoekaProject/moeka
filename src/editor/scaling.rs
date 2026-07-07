@@ -609,6 +609,24 @@ impl EditorView {
         self.animate_scroll_to(target_scroll, cx);
     }
 
+    pub(crate) fn center_cursor_in_view_immediately(&mut self, cx: &mut Context<Self>) {
+        if self.layout_dirty {
+            self.pending_center_cursor_in_view = true;
+            self.pending_scroll_to_cursor = false;
+            return;
+        }
+
+        self.pending_center_cursor_in_view = false;
+        self.pending_scroll_to_cursor = false;
+        let cursor_line = self.cursor_line();
+        let cursor_y = self.line_y_offset(cursor_line);
+        let cursor_line_height = self.visual_height_for_line(cursor_line);
+        self.scroll_offset =
+            (cursor_y + cursor_line_height * 0.5 - self.last_viewport_height * 0.5).max(0.0);
+        self.clamp_scroll();
+        cx.notify();
+    }
+
     pub(crate) fn clamp_scroll(&mut self) {
         // Allow scrolling the last line to the top (like Monaco's scrollBeyondLastLine)
         let last_line_height =

@@ -1173,7 +1173,7 @@ pub(crate) fn build_highlight_bounds(
             bounds_list.push(Bounds::from_corners(
                 point(
                     px(if overlap_start == segment_start {
-                        content_x - leading_padding_px
+                        content_x + indent - leading_padding_px
                     } else {
                         content_x + indent + start_x
                     }),
@@ -1303,9 +1303,8 @@ pub(crate) fn intrinsic_generated_preview_size_for_kind(
 ///
 /// - Math is fit whole and never upscaled, so small formulas stay small with a
 ///   snug padded background.
-/// - Mermaid fills a consistent height (`max_height - 2*pad_y`) so horizontal
-///   and vertical charts render at the same height; width follows the aspect
-///   ratio and only overflows (clipped/pannable) for extremely wide charts.
+/// - Mermaid fills available height or width, whichever constrains the chart
+///   first, so wide horizontal charts fit the editor width instead of clipping.
 pub(crate) fn fit_generated_preview_size(
     image_width: f32,
     image_height: f32,
@@ -1328,8 +1327,8 @@ pub(crate) fn fit_generated_preview_size(
             (w0 * scale, h0 * scale)
         }
         BlockPreviewKind::Mermaid => {
-            let scale = (inner_max_h / h0).max(0.0);
-            (w0 * scale, inner_max_h)
+            let scale = (inner_w / w0).min(inner_max_h / h0).max(0.0);
+            (w0 * scale, h0 * scale)
         }
     };
     let background_width = (fitted_w + 2.0 * pad_x).min(avail_width).max(1.0);

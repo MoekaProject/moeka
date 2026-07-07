@@ -123,6 +123,7 @@ struct CodeBlockCopyButtonPaint {
     origin: Point<Pixels>,
     line_height: Pixels,
     icon: Option<(Bounds<Pixels>, &'static str, Hsla)>,
+    trailing_labels: Vec<(WrappedLine, Point<Pixels>)>,
 }
 
 fn shape_preview_button(
@@ -166,6 +167,18 @@ fn paint_code_block_button(button: &CodeBlockCopyButtonPaint, window: &mut Windo
         label
             .paint(
                 button.origin,
+                button.line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            )
+            .ok();
+    }
+    for (label, origin) in &button.trailing_labels {
+        label
+            .paint(
+                *origin,
                 button.line_height,
                 TextAlign::Left,
                 None,
@@ -6598,6 +6611,7 @@ impl Element for EditorElement {
                                 icon_color,
                             )
                         }),
+                        trailing_labels: Vec::new(),
                     });
                     let _ = label_text;
                 }
@@ -6794,6 +6808,7 @@ impl Element for EditorElement {
                         button_text_color,
                     )
                 }),
+                trailing_labels: Vec::new(),
             });
 
             if let Some((zoom_button_width, _, zoom_bg, zoom_border_color, zoom_text_color)) =
@@ -6832,6 +6847,7 @@ impl Element for EditorElement {
                             zoom_text_color,
                         )
                     }),
+                    trailing_labels: Vec::new(),
                 });
             }
         }
@@ -6887,6 +6903,7 @@ impl Element for EditorElement {
                     ),
                     line_height: px(button_text_line_height),
                     icon: None,
+                    trailing_labels: Vec::new(),
                 });
             }
         }
@@ -7020,14 +7037,7 @@ impl Element for EditorElement {
                     continue;
                 }
 
-                // Full-width hover region that reveals the revert button.
-                inline_diff_hunk_areas_local.push((
-                    Bounds::new(
-                        point(px(editor_left), px(region_top)),
-                        size(px(editor_width), px(region_bottom - region_top)),
-                    ),
-                    hunk_index,
-                ));
+                let mut hunk_hover_top = region_top;
 
                 // The revert button only appears once a hunk is expanded, and
                 // then only while the hunk is hovered. It sits flush against the
@@ -7049,6 +7059,18 @@ impl Element for EditorElement {
                         .scaled(selection_styles.selection_diff_revert_button_border_width_px));
                     let revert_button_gap_y =
                         editor.scaled(selection_styles.selection_diff_revert_button_gap_y_px);
+                    let revert_button_icon_size =
+                        editor.scaled(selection_styles.selection_diff_revert_button_icon_size_px);
+                    let revert_button_icon_gap =
+                        editor.scaled(selection_styles.selection_diff_revert_button_icon_gap_px);
+                    let revert_button_stat_leading_gap = editor.scaled(8.0);
+                    let revert_button_stat_inner_gap = editor.scaled(3.0);
+                    let brighten_stat_color = |mut color: Hsla| {
+                        color.l = (color.l + 0.24).min(0.92);
+                        color
+                    };
+                    let added_count = hunk.buffer_end.saturating_sub(hunk.buffer_start);
+                    let removed_count = hunk.removed_lines.len();
                     let (revert_bg, revert_text_color, revert_border_color) = if is_revert_hovered {
                         (
                             selection_styles.selection_diff_revert_button_hover_bg,
@@ -7067,7 +7089,9 @@ impl Element for EditorElement {
                             window,
                             &button_font,
                             revert_button_font_size,
-                            revert_button_padding_x,
+                            revert_button_padding_x
+                                + revert_button_icon_size
+                                + revert_button_icon_gap,
                             revert_button_padding_x,
                             revert_button_padding_y,
                             revert_button_text_line_height,
@@ -7075,7 +7099,57 @@ impl Element for EditorElement {
                             revert_text_color,
                         )
                     {
-                        let revert_button_width = revert_button_width.ceil();
+                        let stat_runs = [
+                            (
+                                format!("+{added_count}"),
+                                brighten_stat_color(editor.theme.diff_added_bg),
+                                added_count > 0,
+                            ),
+                            (
+                                format!("-{removed_count}"),
+                                brighten_stat_color(editor.theme.diff_removed_bg),
+                                removed_count > 0,
+                            ),
+                        ];
+                        let mut stat_labels = Vec::new();
+                        let mut stat_width = 0.0;
+                        for (text, color, visible) in stat_runs {
+                            if !visible {
+                                continue;
+                            }
+                            let stat_run = TextRun {
+                                len: text.len(),
+                                font: button_font.clone(),
+                                color,
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            };
+                            if let Ok(mut lines) = window.text_system().shape_text(
+                                text.into(),
+                                px(revert_button_font_size),
+                                &[stat_run],
+                                None,
+                                None,
+                            ) {
+                                if let Some(label) = lines.pop() {
+                                    stat_width += f32::from(label.width());
+                                    stat_labels.push(label);
+                                }
+                            }
+                        }
+                        if stat_labels.len() > 1 {
+                            stat_width += revert_button_stat_inner_gap
+                                * stat_labels.len().saturating_sub(1) as f32;
+                        }
+                        let label_width = f32::from(revert_label.width());
+                        let stat_leading_gap = if stat_labels.is_empty() {
+                            0.0
+                        } else {
+                            revert_button_stat_leading_gap
+                        };
+                        let revert_button_width =
+                            (revert_button_width + stat_leading_gap + stat_width).ceil();
                         let revert_button_height = revert_button_height.ceil();
                         let content_left = editor_left + editor.padding_left();
                         let content_text_right = content_left + text_width;
@@ -7085,10 +7159,25 @@ impl Element for EditorElement {
                         let revert_y = (region_top - revert_button_height - revert_button_gap_y)
                             .max(origin_y)
                             .round();
+                        hunk_hover_top = hunk_hover_top.min(revert_y);
                         let revert_bounds = Bounds::new(
                             point(px(revert_x), px(revert_y)),
                             size(px(revert_button_width), px(revert_button_height)),
                         );
+                        let label_x = revert_x
+                            + revert_button_padding_x
+                            + revert_button_icon_size
+                            + revert_button_icon_gap;
+                        let mut stat_x = label_x + label_width + stat_leading_gap;
+                        let trailing_labels = stat_labels
+                            .into_iter()
+                            .map(|label| {
+                                let origin =
+                                    point(px(stat_x), px(revert_y + revert_button_padding_y));
+                                stat_x += f32::from(label.width()) + revert_button_stat_inner_gap;
+                                (label, origin)
+                            })
+                            .collect();
                         inline_diff_revert_buttons.push(CodeBlockCopyButtonPaint {
                             quad: quad(
                                 revert_bounds,
@@ -7099,16 +7188,41 @@ impl Element for EditorElement {
                                 BorderStyle::default(),
                             ),
                             label: Some(revert_label),
-                            origin: point(
-                                px(revert_x + revert_button_padding_x),
-                                px(revert_y + revert_button_padding_y),
-                            ),
+                            origin: point(px(label_x), px(revert_y + revert_button_padding_y)),
                             line_height: px(revert_button_text_line_height),
-                            icon: None,
+                            icon: Some({
+                                let icon_left = revert_x + revert_button_padding_x;
+                                let icon_top = revert_y
+                                    + (revert_button_height - revert_button_icon_size) * 0.5;
+                                (
+                                    Bounds::new(
+                                        point(px(icon_left), px(icon_top)),
+                                        size(
+                                            px(revert_button_icon_size),
+                                            px(revert_button_icon_size),
+                                        ),
+                                    ),
+                                    BACK_SVG_PATH,
+                                    revert_text_color,
+                                )
+                            }),
+                            trailing_labels,
                         });
                         inline_diff_revert_areas_local.push((revert_bounds, hunk_index));
                     }
                 }
+
+                // Full-width hover region that reveals the revert button. The
+                // button is drawn above the diff rows, so include the vertical
+                // gap between the rows and the button; otherwise crossing that
+                // gap clears the hunk hover state and hides the button.
+                inline_diff_hunk_areas_local.push((
+                    Bounds::new(
+                        point(px(editor_left), px(hunk_hover_top)),
+                        size(px(editor_width), px(region_bottom - hunk_hover_top)),
+                    ),
+                    hunk_index,
+                ));
             }
         }
 
