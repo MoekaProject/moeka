@@ -9,7 +9,7 @@ use serde::Deserialize;
 use super::{EditorView, config_paths};
 
 const LATEST_RELEASE_URL: &str =
-    "https://api.github.com/repos/MoekaProject/release/releases/latest";
+    "https://api.github.com/repos/MoekaProject/moeka/releases/latest";
 const USER_AGENT: &str = "MoekaUpdater/1.0";
 
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
