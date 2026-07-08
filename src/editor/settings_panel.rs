@@ -165,11 +165,7 @@ impl EditorView {
             self.theme.text_secondary
         };
         let label = if let Some(update) = self.prepared_update() {
-            if update.version.is_empty() {
-                "发现新版本".to_string()
-            } else {
-                format!("发现新版本 {}", update.version)
-            }
+            crate::i18n::restart_to_install_label(self.ui_language, Some(&update.version))
         } else {
             self.t(TextKey::OfficialWebsite).to_string()
         };
@@ -373,7 +369,10 @@ impl EditorView {
                     .w(px(self.scaled(120.0)))
                     .text_size(px(self.scaled(13.0)))
                     .text_color(self.theme.text_secondary)
-                    .child("编辑器显示"),
+                    .child(crate::i18n::settings_label(
+                        self.ui_language,
+                        "editor_display",
+                    )),
             )
             .child(
                 div()
@@ -384,7 +383,7 @@ impl EditorView {
                     )))
                     .child(self.render_settings_option_button(
                         "settings-show-whitespace",
-                        "显示空白符",
+                        crate::i18n::settings_label(self.ui_language, "show_whitespace"),
                         self.app_settings.show_whitespace,
                         cx,
                         |this, cx| {
@@ -394,7 +393,7 @@ impl EditorView {
                     ))
                     .child(self.render_settings_option_button(
                         "settings-highlight-line-background",
-                        "高亮行背景",
+                        crate::i18n::settings_label(self.ui_language, "highlight_line"),
                         self.app_settings.highlight_line_background,
                         cx,
                         |this, cx| {
@@ -498,6 +497,11 @@ impl EditorView {
 
     fn render_section_heading(&self, label: &str) -> AnyElement {
         let border_color = self.theme.border_secondary;
+        let heading_label = if self.ui_language == UiLanguage::English {
+            label.to_uppercase()
+        } else {
+            label.to_string()
+        };
         div()
             .w_full()
             .flex()
@@ -508,7 +512,7 @@ impl EditorView {
                     .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(self.theme.text_secondary)
-                    .child(label.to_uppercase()),
+                    .child(heading_label),
             )
             .child(div().w_full().h(px(1.0)).bg(border_color))
             .into_any_element()
@@ -914,7 +918,7 @@ impl EditorView {
             // Interface language
             .child(self.render_picker_row(
                 self.t(TextKey::InterfaceLanguage),
-                &self.ui_language.picker_label(),
+                &self.ui_language.picker_label_for(self.ui_language),
                 FontRole::InterfaceLanguage,
                 0,
                 cx,
@@ -1463,7 +1467,7 @@ impl EditorView {
                 self.t(TextKey::SearchDateTimeFormats).to_string(),
             ),
             FontRole::InterfaceLanguage => (
-                language_picker_options()
+                language_picker_options(self.ui_language)
                     .into_iter()
                     .map(|option| PickerOption {
                         value: option.language.code().to_string(),
@@ -1514,7 +1518,10 @@ impl EditorView {
         styles.text_input_bg = gpui::Hsla::transparent_black();
         styles.text_input_focus_bg = gpui::Hsla::transparent_black();
         styles.text_input_border_width_px = 0.0;
-        styles.text_input_cursor_height_ratio = 0.6;
+        styles.text_input_height_px = self.scaled(28.0);
+        styles.text_input_font_size_px = self.scaled(13.0);
+        styles.text_input_cursor_height_ratio = 1.0;
+        styles.text_input_cursor_height_adjust_px = -self.scaled(15.0);
         let editor = cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
         cx.subscribe(
             &editor,

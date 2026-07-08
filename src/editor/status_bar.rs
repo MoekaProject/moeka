@@ -45,11 +45,8 @@ impl IndentSettings {
         }
     }
 
-    pub(crate) fn status_parts(self) -> (&'static str, String) {
-        match self.kind {
-            IndentKind::Spaces => ("缩进", format!("空格 {}", self.size)),
-            IndentKind::Tabs => ("缩进", format!("制表符 {}", self.size)),
-        }
+    pub(crate) fn status_parts(self, language: crate::i18n::UiLanguage) -> (&'static str, String) {
+        crate::i18n::status_indent_parts(language, matches!(self.kind, IndentKind::Tabs), self.size)
     }
 }
 
@@ -194,7 +191,7 @@ impl EditorView {
         let value_color = with_alpha(self.theme.text_secondary, 0.62);
         let hover_bg = with_alpha(self.theme.text_primary, 0.08);
         let cursor_label = self.cursor_status_label();
-        let (indent_title, indent_value) = self.indent_settings.status_parts();
+        let (indent_title, indent_value) = self.indent_settings.status_parts(self.ui_language);
         let language_value = self.language_status_label();
 
         div()
@@ -222,7 +219,7 @@ impl EditorView {
                 cx,
             ))
             .child(self.render_status_bar_button(
-                "语言",
+                crate::i18n::status_language_label(self.ui_language),
                 language_value,
                 title_color,
                 value_color,
@@ -285,11 +282,7 @@ impl EditorView {
     fn cursor_status_label(&self) -> String {
         let (line, col) = self.position_components(self.cursor.offset);
         let selected_chars = self.selected_character_count();
-        if selected_chars > 0 {
-            format!("行 {} 列 {} (选择 {} 字符)", line, col, selected_chars)
-        } else {
-            format!("行 {} 列 {}", line, col)
-        }
+        crate::i18n::cursor_status_label(self.ui_language, line, col, selected_chars)
     }
 
     fn position_components(&self, offset: usize) -> (usize, usize) {

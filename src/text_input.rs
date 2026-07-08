@@ -472,6 +472,7 @@ impl TextInput {
         let menu_width = s.text_input_menu_width_px;
         let menu_shadow = s.text_input_menu_shadow;
         let has_sel = self.has_selection();
+        let language = crate::i18n::detect_system_language();
 
         let item =
             |id: &str,
@@ -523,19 +524,37 @@ impl TextInput {
             .flex()
             .flex_col()
             .text_size(px(menu_font_size))
-            .child(item("cut", "剪切", has_sel, cx, |this, w, cx| {
-                this.on_cut(&TextInputCut, w, cx);
-            }))
-            .child(item("copy", "复制", has_sel, cx, |this, w, cx| {
-                this.on_copy(&TextInputCopy, w, cx);
-            }))
-            .child(item("paste", "粘贴", true, cx, |this, w, cx| {
-                this.on_paste(&TextInputPaste, w, cx);
-            }))
+            .child(item(
+                "cut",
+                crate::i18n::text_input_menu_label(language, "cut"),
+                has_sel,
+                cx,
+                |this, w, cx| {
+                    this.on_cut(&TextInputCut, w, cx);
+                },
+            ))
+            .child(item(
+                "copy",
+                crate::i18n::text_input_menu_label(language, "copy"),
+                has_sel,
+                cx,
+                |this, w, cx| {
+                    this.on_copy(&TextInputCopy, w, cx);
+                },
+            ))
+            .child(item(
+                "paste",
+                crate::i18n::text_input_menu_label(language, "paste"),
+                true,
+                cx,
+                |this, w, cx| {
+                    this.on_paste(&TextInputPaste, w, cx);
+                },
+            ))
             .child(div().w_full().h(px(1.0)).my(px(4.0)).bg(separator_color))
             .child(item(
                 "select-all",
-                "全选",
+                crate::i18n::text_input_menu_label(language, "select_all"),
                 !self.text.is_empty(),
                 cx,
                 |this, _w, cx| {

@@ -819,7 +819,7 @@ impl EditorView {
                 .px(px(header_padding_x))
                 .text_size(px(header_font_size))
                 .text_color(ups.utility_panel_header_text_color)
-                .child("大纲")
+                .child(crate::i18n::outline_title(self.ui_language))
                 .into_any_element(),
         ];
 
@@ -832,7 +832,7 @@ impl EditorView {
                     .justify_center()
                     .text_size(px(empty_font_size))
                     .text_color(ups.utility_panel_empty_text_color)
-                    .child("当前文档没有标题")
+                    .child(crate::i18n::outline_empty(self.ui_language))
                     .into_any_element(),
             );
         } else {
@@ -976,7 +976,10 @@ impl EditorView {
             &self.outline_rail_collapsed_heading_lines,
         );
         let header_width = header_padding_x * 2.0
-            + outline_heading_text_width("大纲", header_font_size)
+            + outline_heading_text_width(
+                crate::i18n::outline_title(self.ui_language),
+                header_font_size,
+            )
             + self.scaled(20.0);
         let content_width = visible_heading_indices
             .iter()

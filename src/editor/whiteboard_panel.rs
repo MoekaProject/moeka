@@ -187,7 +187,10 @@ impl EditorView {
             cx,
             Self::whiteboard_apply_stroke_color,
         );
-        fields.push(self.wb_field("描边颜色", stroke_swatches));
+        fields.push(self.wb_field(
+            crate::i18n::whiteboard_label(self.ui_language, "stroke_color"),
+            stroke_swatches,
+        ));
 
         // 填充颜色 (edits the canvas background when nothing is selected).
         let canvas_mode = !self.whiteboard_has_selection();
@@ -212,9 +215,9 @@ impl EditorView {
         );
         fields.push(self.wb_field(
             if canvas_mode {
-                "画布颜色"
+                crate::i18n::whiteboard_label(self.ui_language, "canvas_color")
             } else {
-                "填充颜色"
+                crate::i18n::whiteboard_label(self.ui_language, "fill_color")
             },
             bg_swatches,
         ));
@@ -237,7 +240,10 @@ impl EditorView {
                     move |this, cx| this.whiteboard_apply_background_opacity(opacity, cx),
                 ));
             }
-            fields.push(self.wb_field("填充颜色透明度", fill_opacity_row.into_any_element()));
+            fields.push(self.wb_field(
+                crate::i18n::whiteboard_label(self.ui_language, "fill_opacity"),
+                fill_opacity_row.into_any_element(),
+            ));
         }
 
         // 描边宽度 (fixed clean solid previews).
@@ -263,7 +269,10 @@ impl EditorView {
                 move |this, cx| this.whiteboard_apply_stroke_width(option, cx),
             ));
         }
-        fields.push(self.wb_field("描边宽度", self.wb_segmented(width_row)));
+        fields.push(self.wb_field(
+            crate::i18n::whiteboard_label(self.ui_language, "stroke_width"),
+            self.wb_segmented(width_row),
+        ));
 
         // 描边样式 (solid / dashed / dotted at a fixed width, clean).
         let line_style = style.stroke.style;
@@ -282,7 +291,10 @@ impl EditorView {
                 move |this, cx| this.whiteboard_apply_stroke_style(option, cx),
             ));
         }
-        fields.push(self.wb_field("描边样式", self.wb_segmented(style_row)));
+        fields.push(self.wb_field(
+            crate::i18n::whiteboard_label(self.ui_language, "stroke_style"),
+            self.wb_segmented(style_row),
+        ));
 
         // 描边风格 (clean / sketch / draft, exaggerated previews).
         let roughness = style.stroke.roughness;
@@ -305,7 +317,10 @@ impl EditorView {
                 move |this, cx| this.whiteboard_apply_roughness(option, cx),
             ));
         }
-        fields.push(self.wb_field("描边风格", self.wb_segmented(roughness_row)));
+        fields.push(self.wb_field(
+            crate::i18n::whiteboard_label(self.ui_language, "stroke_roughness"),
+            self.wb_segmented(roughness_row),
+        ));
 
         // 描边圆角 (rounded squares).
         let radius = style.corner_radius;
@@ -336,7 +351,10 @@ impl EditorView {
                 move |this, cx| this.whiteboard_apply_corner_radius(option, cx),
             ));
         }
-        fields.push(self.wb_field("描边圆角", self.wb_segmented(radius_row)));
+        fields.push(self.wb_field(
+            crate::i18n::whiteboard_label(self.ui_language, "corner_radius"),
+            self.wb_segmented(radius_row),
+        ));
 
         // 路径 (linear elements only).
         if self.whiteboard_show_route() {
@@ -360,7 +378,10 @@ impl EditorView {
                     move |this, cx| this.whiteboard_apply_route(option, cx),
                 ));
             }
-            fields.push(self.wb_field("路径", self.wb_segmented(route_row)));
+            fields.push(self.wb_field(
+                crate::i18n::whiteboard_label(self.ui_language, "route"),
+                self.wb_segmented(route_row),
+            ));
         }
 
         // 填充样式 (fixed neutral previews).
@@ -380,7 +401,10 @@ impl EditorView {
                 move |this, cx| this.whiteboard_apply_fill(option, cx),
             ));
         }
-        fields.push(self.wb_field("填充样式", self.wb_segmented(fill_row)));
+        fields.push(self.wb_field(
+            crate::i18n::whiteboard_label(self.ui_language, "fill_style"),
+            self.wb_segmented(fill_row),
+        ));
 
         // 字体大小 ("A" previews at proportional sizes).
         let size = style.font.size;
@@ -408,7 +432,10 @@ impl EditorView {
                 move |this, cx| this.whiteboard_apply_font_size(option, cx),
             ));
         }
-        fields.push(self.wb_field("字体大小", self.wb_segmented(size_row)));
+        fields.push(self.wb_field(
+            crate::i18n::whiteboard_label(self.ui_language, "font_size"),
+            self.wb_segmented(size_row),
+        ));
 
         // 字体颜色 (9 colors, no transparent; falls back to stroke color).
         let font_color = style.font.effective_color(style.stroke.color);
@@ -419,11 +446,17 @@ impl EditorView {
             cx,
             Self::whiteboard_apply_font_color,
         );
-        fields.push(self.wb_field("字体颜色", font_swatches));
+        fields.push(self.wb_field(
+            crate::i18n::whiteboard_label(self.ui_language, "font_color"),
+            font_swatches,
+        ));
 
         // 字体 (searchable system-font dropdown, shared with settings).
         let family_trigger = self.wb_font_family_trigger(&style.font.family, cx);
-        fields.push(self.wb_field("字体", family_trigger));
+        fields.push(self.wb_field(
+            crate::i18n::whiteboard_label(self.ui_language, "font"),
+            family_trigger,
+        ));
 
         // 文本对齐
         let align = style.font.align;
@@ -454,7 +487,10 @@ impl EditorView {
                 cx,
                 |this, cx| this.whiteboard_apply_align(CanvasTextAlign::Right, cx),
             ));
-        fields.push(self.wb_field("文本对齐", self.wb_segmented(align_row)));
+        fields.push(self.wb_field(
+            crate::i18n::whiteboard_label(self.ui_language, "text_align"),
+            self.wb_segmented(align_row),
+        ));
 
         // 画布颜色透明度 (only when nothing is selected).
         if canvas_mode {
@@ -481,7 +517,10 @@ impl EditorView {
                     move |this, cx| this.whiteboard_apply_background_opacity(value, cx),
                 ));
             }
-            fields.push(self.wb_field("画布颜色透明度", self.wb_segmented(opacity_row)));
+            fields.push(self.wb_field(
+                crate::i18n::whiteboard_label(self.ui_language, "canvas_opacity"),
+                self.wb_segmented(opacity_row),
+            ));
         }
 
         // 导出 (selected elements, or the whole canvas when unselected).
@@ -503,7 +542,10 @@ impl EditorView {
                     this.whiteboard_export_json(cx)
                 }),
             );
-        fields.push(self.wb_field("导出", self.wb_segmented(export_row)));
+        fields.push(self.wb_field(
+            crate::i18n::whiteboard_label(self.ui_language, "export"),
+            self.wb_segmented(export_row),
+        ));
 
         fields
     }
@@ -716,7 +758,9 @@ impl EditorView {
         family: &Option<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let label = family.clone().unwrap_or_else(|| "默认".to_string());
+        let label = family.clone().unwrap_or_else(|| {
+            crate::i18n::whiteboard_label(self.ui_language, "default").to_string()
+        });
         let bounds_cell = self
             .font_picker_button_bounds
             .entry((FontRole::WhiteboardFont, 0))

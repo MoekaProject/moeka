@@ -1828,7 +1828,11 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn on_new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_panel_focus_handle.is_focused(window) {
+            self.create_chat_tab(cx);
+            return;
+        }
         self.create_scratch_tab(cx);
     }
 
@@ -1849,9 +1853,17 @@ impl EditorView {
     pub(crate) fn on_close_active_tab(
         &mut self,
         _: &CloseActiveTab,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.chat_panel_focus_handle.is_focused(window) {
+            if let Some(index) = self.active_chat_tab_index()
+                && let Some(tab_id) = self.chat_tabs.get(index).map(|tab| tab.id.clone())
+            {
+                self.close_chat_tab(&tab_id, cx);
+            }
+            return;
+        }
         self.close_active_tab(cx);
     }
 

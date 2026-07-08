@@ -1840,9 +1840,8 @@ impl Element for EditorElement {
         italic_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_italic_latin_font_family);
 
         let mut italic_cjk_font = text_style.font();
-        italic_cjk_font.family =
-            configured_font_family(editor_styles.editor_italic_cjk_font_family);
-        italic_cjk_font.fallbacks = None;
+        italic_cjk_font.family = configured_font_family(editor_styles.editor_body_cjk_font_family);
+        italic_cjk_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_body_cjk_font_family);
 
         let base_char_width = {
             let test_run = TextRun {

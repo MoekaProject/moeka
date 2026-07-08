@@ -507,6 +507,16 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                         let underline_line = (line..=end_line.min(decorations.len() - 1))
                             .rev()
                             .find(|&candidate| {
+                                if decorations[candidate].block_contexts.iter().any(|context| {
+                                    matches!(
+                                        context,
+                                        BlockContext::ListItem
+                                            | BlockContext::UnorderedList
+                                            | BlockContext::OrderedList
+                                    )
+                                }) {
+                                    return false;
+                                }
                                 let candidate_content = get_line_content(
                                     text,
                                     &line_starts,
@@ -3050,6 +3060,15 @@ mod tests {
         assert_ne!(decorations[1].block_type, BlockType::HorizontalRule);
         assert_eq!(decorations[1].syntax_ranges.len(), 1);
         assert_eq!(decorations[1].syntax_ranges[0].range, 0..9);
+    }
+
+    #[test]
+    fn unordered_nested_list_marker_is_not_setext_heading() {
+        let text = "- parent\n  - child\n";
+        let decorations = parse_decorations(text);
+
+        assert_eq!(decorations[0].block_type, BlockType::UnorderedList);
+        assert_eq!(decorations[1].block_type, BlockType::UnorderedList);
     }
 
     #[test]

@@ -216,6 +216,13 @@ impl EntityInputHandler for EditorView {
         let (range_end_line, _) = self.buffer.offset_to_line_col(range.end);
         let range_spans_multiple_lines = range_start_line != range_end_line;
         let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
+        let markdown_syntax_edit = self.active_tab_is_markdown()
+            && (new_text.contains(['=', '*', '_', '~', '`', '+', '[', ']', '(', ')'])
+                || self
+                    .buffer
+                    .text()
+                    .get(range.clone())
+                    .is_some_and(|text| text.contains(['=', '*', '_', '~', '`', '+'])));
 
         if range.is_empty() && self.marked_range.is_none() && range_utf16.is_none() {
             if let Some(code_block_range) =
@@ -244,6 +251,9 @@ impl EntityInputHandler for EditorView {
                 self.queue_non_markdown_line_display_transfer(&range, &paired_text);
                 self.buffer.replace(range.clone(), &paired_text);
                 self.cursor.move_to(range.start + open.len(), &self.buffer);
+                if markdown_syntax_edit {
+                    self.invalidate_line_display_info_for_line(range_start_line);
+                }
                 self.reparse();
                 if !preserve_preview_scroll
                     && (!cursor_had_inline_headroom || self.cursor_line() != cursor_line_before)
@@ -260,6 +270,9 @@ impl EntityInputHandler for EditorView {
         let new_offset = range.start + new_text.len();
         self.cursor.move_to(new_offset, &self.buffer);
         self.clear_marked_ranges();
+        if markdown_syntax_edit {
+            self.invalidate_line_display_info_for_line(range_start_line);
+        }
         self.reparse();
         if let Some(line) = touched_ordered_prefix {
             self.normalize_ordered_list_near_line(line, true);

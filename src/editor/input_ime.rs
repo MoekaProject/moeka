@@ -52,7 +52,7 @@ pub(crate) fn paired_delimiter_at(
 
     match input {
         "`" => {
-            if previous_is_escape {
+            if previous_is_escape || (previous == Some('`') && next == Some('`')) {
                 None
             } else {
                 Some(("`", "`"))
@@ -112,7 +112,11 @@ pub(crate) fn paired_delimiter_at(
             // almost always wrapping what follows (e.g. typing "(" before "abc"
             // wants "(abc)", not "()abc"). Closing is still inserted at line/word
             // boundaries.
-            if next_is_word {
+            if next_is_word
+                || paired_delimiter(input).is_some_and(|(open, close)| {
+                    previous == open.chars().next() && next == close.chars().next()
+                })
+            {
                 None
             } else {
                 paired_delimiter(input)

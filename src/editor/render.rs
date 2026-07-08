@@ -107,7 +107,7 @@ impl EditorView {
                     .bg(drop_target_label_bg)
                     .text_size(px(label_font_size))
                     .text_color(drop_target_label_text_color)
-                    .child("终端放在右侧"),
+                    .child(crate::i18n::terminal_drop_label(self.ui_language, true)),
             )
             .into_any_element();
 
@@ -144,7 +144,7 @@ impl EditorView {
                     .bg(drop_target_label_bg)
                     .text_size(px(label_font_size))
                     .text_color(drop_target_label_text_color)
-                    .child("终端放到下方"),
+                    .child(crate::i18n::terminal_drop_label(self.ui_language, false)),
             )
             .into_any_element();
 
@@ -186,6 +186,11 @@ impl EditorView {
                 let ups = &self.styles.utility_panel;
                 let panel_w = self.utility_panel_width();
                 let panel_layout_w = self.utility_panel_layout_width();
+                let panel_styles = crate::style::Styles::from_theme(
+                    &self.app_settings.dark_theme_kind().build(),
+                    &self.app_settings.dark_theme_kind().build(),
+                );
+                let panel_border_color = panel_styles.tab_bar.tab_bar_border_color;
                 let hover_indicator_color = ups.utility_panel_resize_active_indicator_color;
                 let hover_indicator_width =
                     self.scaled(ups.utility_panel_resize_active_indicator_width_px);
@@ -216,7 +221,7 @@ impl EditorView {
                                         .bg(ups.utility_panel_bg)
                                         .border_l(px(ups.utility_panel_border_width_px))
                                         .border_b(px(ups.utility_panel_border_width_px))
-                                        .border_color(ups.utility_panel_border_color)
+                                        .border_color(panel_border_color)
                                         .child(self.render_panel_toggle_actions(cx)),
                                 )
                                 .child(

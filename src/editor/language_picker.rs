@@ -67,50 +67,40 @@ fn all_language_picker_items() -> Vec<LanguagePickerItem> {
     items
 }
 
-fn all_indentation_picker_items() -> Vec<LanguagePickerItem> {
+fn all_indentation_picker_items(language: crate::i18n::UiLanguage) -> Vec<LanguagePickerItem> {
     [
-        (
-            "缩进: 空格 2",
-            "将文档缩进转换为每级 2 个空格",
-            IndentSettings::spaces(2),
-        ),
-        (
-            "缩进: 空格 4",
-            "将文档缩进转换为每级 4 个空格",
-            IndentSettings::spaces(4),
-        ),
-        (
-            "缩进: 制表符 2",
-            "将文档缩进转换为制表符，宽度 2",
-            IndentSettings::tabs(2),
-        ),
-        (
-            "缩进: 制表符 4",
-            "将文档缩进转换为制表符，宽度 4",
-            IndentSettings::tabs(4),
-        ),
+        (false, 2, IndentSettings::spaces(2)),
+        (false, 4, IndentSettings::spaces(4)),
+        (true, 2, IndentSettings::tabs(2)),
+        (true, 4, IndentSettings::tabs(4)),
     ]
     .into_iter()
-    .map(|(name, detail, settings)| LanguagePickerItem {
-        name: name.to_string(),
-        detail: detail.to_string(),
-        kind: LanguagePickerKind::Indentation(settings),
+    .map(|(tabs, size, settings)| {
+        let (name, detail) = crate::i18n::indentation_picker_item(language, tabs, size);
+        LanguagePickerItem {
+            name: name.to_string(),
+            detail: detail.to_string(),
+            kind: LanguagePickerKind::Indentation(settings),
+        }
     })
     .collect()
 }
 
-fn picker_items_for_mode(mode: LanguagePickerMode) -> Vec<LanguagePickerItem> {
+fn picker_items_for_mode(
+    mode: LanguagePickerMode,
+    language: crate::i18n::UiLanguage,
+) -> Vec<LanguagePickerItem> {
     match mode {
         LanguagePickerMode::Language => all_language_picker_items(),
-        LanguagePickerMode::Indentation => all_indentation_picker_items(),
+        LanguagePickerMode::Indentation => all_indentation_picker_items(language),
     }
 }
 
-fn picker_placeholder(mode: LanguagePickerMode) -> &'static str {
-    match mode {
-        LanguagePickerMode::Language => "搜索语言或扩展名",
-        LanguagePickerMode::Indentation => "搜索缩进方式",
-    }
+fn picker_placeholder(mode: LanguagePickerMode, language: crate::i18n::UiLanguage) -> &'static str {
+    crate::i18n::language_picker_placeholder(
+        language,
+        matches!(mode, LanguagePickerMode::Indentation),
+    )
 }
 
 fn language_item_matches(item: &LanguagePickerItem, query: &str) -> bool {
@@ -177,9 +167,9 @@ impl EditorView {
 
         if self.language_picker_editor.is_none() {
             let styles = self.language_picker_text_input_styles();
-            let editor = cx.new(move |cx| {
-                crate::text_input::TextInput::new(styles, picker_placeholder(mode), cx)
-            });
+            let placeholder = picker_placeholder(mode, self.ui_language);
+            let editor =
+                cx.new(move |cx| crate::text_input::TextInput::new(styles, placeholder, cx));
             cx.subscribe(
                 &editor,
                 |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -211,8 +201,10 @@ impl EditorView {
         if let Some(editor) = &self.language_picker_editor {
             editor.update(cx, |input, cx| {
                 input.styles = self.language_picker_text_input_styles();
-                input.placeholder =
-                    SharedString::from(picker_placeholder(self.language_picker_mode));
+                input.placeholder = SharedString::from(picker_placeholder(
+                    self.language_picker_mode,
+                    self.ui_language,
+                ));
                 input.set_text(&self.language_picker_query, cx);
                 input.select_all(cx);
             });
@@ -229,11 +221,12 @@ impl EditorView {
     }
 
     fn update_language_picker_results(&mut self, cx: &mut Context<Self>) {
-        self.language_picker_items = picker_items_for_mode(self.language_picker_mode)
-            .into_iter()
-            .filter(|item| language_item_matches(item, &self.language_picker_query))
-            .take(240)
-            .collect();
+        self.language_picker_items =
+            picker_items_for_mode(self.language_picker_mode, self.ui_language)
+                .into_iter()
+                .filter(|item| language_item_matches(item, &self.language_picker_query))
+                .take(240)
+                .collect();
         self.language_picker_selected_index = self
             .language_picker_selected_index
             .min(self.language_picker_items.len().saturating_sub(1));
@@ -362,7 +355,7 @@ impl EditorView {
                     .justify_center()
                     .text_size(px(self.scaled(13.0)))
                     .text_color(text_secondary)
-                    .child("没有匹配项")
+                    .child(crate::i18n::no_matches_label(self.ui_language))
                     .into_any_element(),
             );
         } else {

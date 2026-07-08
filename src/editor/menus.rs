@@ -11,11 +11,6 @@ use crate::markdown::{BlockType, InlineKind, LineDecoration, raw_wiki_link_range
 use super::shortcut::{ShortcutRenderStyle, render_shortcut};
 use super::*;
 
-const ADD_FILE_TO_CHAT_LABEL: &str = "添加文件到聊天";
-const ADD_SELECTION_TO_CHAT_LABEL: &str = "添加选区到聊天";
-const COPY_PLAIN_TEXT_LABEL: &str = "复制纯文本";
-const TERMINAL_SELECT_ALL_LABEL: &str = "全选";
-
 fn current_raw_wiki_link_range(
     decoration: Option<&LineDecoration>,
     line_content: &str,
@@ -355,8 +350,12 @@ impl EditorView {
             current if current == self.t(crate::i18n::TextKey::RevealInFileTree) => {
                 Some(MENU_LOCATE_TREE_SVG_PATH)
             }
-            ADD_FILE_TO_CHAT_LABEL => Some(MENU_AT_SVG_PATH),
-            ADD_SELECTION_TO_CHAT_LABEL => Some(CHAT_SVG_PATH),
+            current if current == self.t(crate::i18n::TextKey::AddFileToChat) => {
+                Some(MENU_AT_SVG_PATH)
+            }
+            current if current == self.t(crate::i18n::TextKey::AddSelectionToChat) => {
+                Some(CHAT_SVG_PATH)
+            }
             _ if label == self.t(crate::i18n::TextKey::Delete)
                 || label.starts_with(&delete_prefix) =>
             {
@@ -417,42 +416,20 @@ impl EditorView {
     }
 
     fn extra_format_action_label(&self, action: FormatMenuAction) -> &'static str {
-        match self.ui_language {
-            UiLanguage::ChineseSimplified => match action {
-                FormatMenuAction::Highlight => "高亮",
-                FormatMenuAction::Underline => "下划线",
-                FormatMenuAction::Superscript => "上标",
-                FormatMenuAction::Subscript => "下标",
-                FormatMenuAction::Footnote => "脚注",
-                FormatMenuAction::CalloutTip => "提示块",
-                _ => "",
-            },
-            UiLanguage::ChineseTraditional => match action {
-                FormatMenuAction::Highlight => "高亮",
-                FormatMenuAction::Underline => "底線",
-                FormatMenuAction::Superscript => "上標",
-                FormatMenuAction::Subscript => "下標",
-                FormatMenuAction::Footnote => "腳註",
-                FormatMenuAction::CalloutTip => "提示區塊",
-                _ => "",
-            },
-            _ => match action {
-                FormatMenuAction::Highlight => "Highlight",
-                FormatMenuAction::Underline => "Underline",
-                FormatMenuAction::Superscript => "Superscript",
-                FormatMenuAction::Subscript => "Subscript",
-                FormatMenuAction::Footnote => "Footnote",
-                FormatMenuAction::CalloutTip => "Tip Callout",
-                _ => "",
-            },
-        }
+        let key = match action {
+            FormatMenuAction::Highlight => "highlight",
+            FormatMenuAction::Underline => "underline",
+            FormatMenuAction::Superscript => "superscript",
+            FormatMenuAction::Subscript => "subscript",
+            FormatMenuAction::Footnote => "footnote",
+            FormatMenuAction::CalloutTip => "callout_tip",
+            _ => "",
+        };
+        crate::i18n::format_extra_label(self.ui_language, key)
     }
 
     fn more_formats_menu_label(&self) -> &'static str {
-        match self.ui_language {
-            UiLanguage::ChineseSimplified | UiLanguage::ChineseTraditional => "更多格式",
-            _ => "More Formats",
-        }
+        crate::i18n::format_extra_label(self.ui_language, "more_formats")
     }
 
     fn path_copy_text(&self, path: &Path, relative: bool) -> Option<String> {
@@ -2039,7 +2016,7 @@ impl EditorView {
             {
                 let chat_paths = self.sidebar_context_paths(&path);
                 items.push(self.render_context_menu_item(
-                    ADD_FILE_TO_CHAT_LABEL,
+                    self.t(crate::i18n::TextKey::AddFileToChat),
                     false,
                     cx,
                     move |this, _, cx| {
@@ -2130,7 +2107,7 @@ impl EditorView {
         {
             let chat_paths = context_paths.clone();
             items.push(self.render_context_menu_item(
-                ADD_FILE_TO_CHAT_LABEL,
+                self.t(crate::i18n::TextKey::AddFileToChat),
                 false,
                 cx,
                 move |this, _, cx| {
@@ -2468,7 +2445,7 @@ impl EditorView {
         {
             let chat_path = path.clone();
             items.push(self.render_context_menu_item(
-                ADD_FILE_TO_CHAT_LABEL,
+                self.t(crate::i18n::TextKey::AddFileToChat),
                 false,
                 cx,
                 move |this, _, cx| {
@@ -2477,7 +2454,6 @@ impl EditorView {
                 },
             ));
         }
-        items.push(self.render_context_menu_separator());
         if self.selected_sidebar_paths.len() <= 1 {
             let rename_path = path.clone();
             items.push(self.render_context_menu_item(
@@ -2501,6 +2477,30 @@ impl EditorView {
                 },
             ));
         }
+        {
+            let star_path = path.clone();
+            let normalized = Self::normalize_sidebar_path(&star_path);
+            let is_starred = self.app_settings.is_starred_file(&normalized);
+            let label = if is_starred {
+                self.t(crate::i18n::TextKey::Unstar)
+            } else {
+                self.t(crate::i18n::TextKey::Star)
+            };
+            items.push(
+                self.render_context_menu_item(label, false, cx, move |this, _, cx| {
+                    let normalized = Self::normalize_sidebar_path(&star_path);
+                    if is_starred {
+                        this.app_settings.remove_starred_file(&normalized);
+                    } else {
+                        this.app_settings.add_starred_file(normalized);
+                        this.sidebar_starred_collapsed = false;
+                    }
+                    this.app_settings.save();
+                    this.close_context_menu(cx);
+                    cx.notify();
+                }),
+            );
+        }
         items.push(self.render_context_menu_separator());
         if let Some(copy_path_text) = self.sidebar_paths_copy_text(&path, false) {
             items.push(self.render_context_menu_item(
@@ -2519,6 +2519,18 @@ impl EditorView {
                 cx,
                 move |this, _, cx| {
                     this.copy_text_to_clipboard(copy_relative_path_text.clone(), cx);
+                },
+            ));
+        }
+        {
+            let reveal_path = path.clone();
+            items.push(self.render_context_menu_item(
+                self.t(crate::i18n::TextKey::RevealInFinder),
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.close_context_menu(cx);
+                    this.reveal_in_finder(&reveal_path);
                 },
             ));
         }
@@ -2692,7 +2704,7 @@ impl EditorView {
             // Operates on the selection when present (still excluding any syntax
             // characters inside it), otherwise on the whole document.
             items.push(self.render_format_context_menu_item_with_hover_behavior(
-                COPY_PLAIN_TEXT_LABEL,
+                self.t(crate::i18n::TextKey::CopyPlainText),
                 Some(MENU_COPY_SVG_PATH),
                 None,
                 false,
@@ -2709,7 +2721,7 @@ impl EditorView {
 
                 let chat_path = current_path.clone();
                 items.push(self.render_format_context_menu_item_with_hover_behavior(
-                    ADD_FILE_TO_CHAT_LABEL,
+                    self.t(crate::i18n::TextKey::AddFileToChat),
                     Some(MENU_AT_SVG_PATH),
                     None,
                     false,
@@ -2725,7 +2737,7 @@ impl EditorView {
                 let selection_path = current_path.clone();
                 let selection_range = self.cursor.selection_range();
                 items.push(self.render_format_context_menu_item_with_hover_behavior(
-                    ADD_SELECTION_TO_CHAT_LABEL,
+                    self.t(crate::i18n::TextKey::AddSelectionToChat),
                     Some(CHAT_SVG_PATH),
                     None,
                     false,
@@ -3974,7 +3986,7 @@ impl EditorView {
                     if let Some(path) = &tab.path {
                         let chat_path = path.clone();
                         items.push(self.render_context_menu_item(
-                            ADD_FILE_TO_CHAT_LABEL,
+                            self.t(crate::i18n::TextKey::AddFileToChat),
                             false,
                             cx,
                             move |this, _, cx| {
@@ -4055,7 +4067,7 @@ impl EditorView {
                     },
                 ));
                 items.push(self.render_context_menu_item(
-                    TERMINAL_SELECT_ALL_LABEL,
+                    self.t(crate::i18n::TextKey::SelectAll),
                     false,
                     cx,
                     move |this, _, cx| {

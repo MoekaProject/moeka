@@ -1874,9 +1874,8 @@ impl EditorView {
         italic_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_italic_latin_font_family);
 
         let mut italic_cjk_font = text_style.font();
-        italic_cjk_font.family =
-            configured_font_family(editor_styles.editor_italic_cjk_font_family);
-        italic_cjk_font.fallbacks = None;
+        italic_cjk_font.family = configured_font_family(editor_styles.editor_body_cjk_font_family);
+        italic_cjk_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_body_cjk_font_family);
 
         let font_size = self.base_font_size();
         let mut cell_runs = helpers::build_text_runs_for_display(
@@ -2016,9 +2015,8 @@ impl EditorView {
         italic_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_italic_latin_font_family);
 
         let mut italic_cjk_font = text_style.font();
-        italic_cjk_font.family =
-            configured_font_family(editor_styles.editor_italic_cjk_font_family);
-        italic_cjk_font.fallbacks = None;
+        italic_cjk_font.family = configured_font_family(editor_styles.editor_body_cjk_font_family);
+        italic_cjk_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_body_cjk_font_family);
 
         let base_char_width = {
             let test_run = TextRun {

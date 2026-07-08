@@ -1182,35 +1182,18 @@ impl EditorView {
 
     fn diff_path_bar_navigation_labels(&self) -> (&'static str, &'static str, &'static str) {
         let show_only_changes = self.active_git_diff_show_only_changes();
-        match self.ui_language {
-            crate::i18n::UiLanguage::ChineseSimplified => (
+        (
+            crate::i18n::diff_nav_label(
+                self.ui_language,
                 if show_only_changes {
-                    "展开"
+                    "expand"
                 } else {
-                    "折叠"
+                    "collapse"
                 },
-                "上一个",
-                "下一个",
             ),
-            crate::i18n::UiLanguage::ChineseTraditional => (
-                if show_only_changes {
-                    "展開"
-                } else {
-                    "摺疊"
-                },
-                "上一個",
-                "下一個",
-            ),
-            _ => (
-                if show_only_changes {
-                    "Expand"
-                } else {
-                    "Collapse"
-                },
-                "Prev",
-                "Next",
-            ),
-        }
+            crate::i18n::diff_nav_label(self.ui_language, "previous"),
+            crate::i18n::diff_nav_label(self.ui_language, "next"),
+        )
     }
 
     pub(crate) fn render_active_tab_path_bar(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2026,8 +2009,15 @@ impl EditorView {
             )
             .child(
                 self.prepared_update()
-                    .map(|update| format!("重启以安装新版本 {}", update.version))
-                    .unwrap_or_else(|| "重启以安装新版本".to_string()),
+                    .map(|update| {
+                        crate::i18n::restart_to_install_label(
+                            self.ui_language,
+                            Some(&update.version),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        crate::i18n::restart_to_install_label(self.ui_language, None)
+                    }),
             )
             .on_mouse_down(
                 MouseButton::Left,

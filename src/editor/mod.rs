@@ -4228,6 +4228,11 @@ impl EditorView {
         let save_btn_text = ds.dialog_btn_primary_text_color;
         let secondary_bg = ds.dialog_btn_secondary_bg;
         let secondary_text = ds.dialog_btn_secondary_text_color;
+        let confirm_text = if dialog.is_danger {
+            ds.dialog_btn_danger_bg
+        } else {
+            secondary_text
+        };
 
         div()
             .absolute()
@@ -4284,7 +4289,7 @@ impl EditorView {
                                     .items_center()
                                     .justify_center()
                                     .bg(secondary_bg)
-                                    .text_color(secondary_text)
+                                    .text_color(confirm_text)
                                     .text_size(px(self.scaled(ds.dialog_btn_font_size_px)))
                                     .rounded(px(ds.dialog_btn_radius_px))
                                     .cursor(CursorStyle::Arrow)
@@ -7722,6 +7727,13 @@ impl EditorView {
     fn clear_line_display_info(&mut self) {
         self.line_display_info.clear();
         self.invalidate_line_geometry_cache();
+    }
+
+    pub(crate) fn invalidate_line_display_info_for_line(&mut self, line: usize) {
+        if line < self.line_display_info.len() {
+            self.line_display_info[line] = None;
+            self.invalidate_line_geometry_cache();
+        }
     }
 
     /// Invalidate the cached per-line layout for the active editor AND every
