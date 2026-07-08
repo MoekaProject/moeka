@@ -49,7 +49,10 @@ $(APP_DIR): build-release $(INFO_PLIST_TEMPLATE) $(ICON_FILE)
 	@mkdir -p "$(MACOS_DIR)" "$(RESOURCES_DIR)"
 	@cp "$(BINARY_PATH)" "$(MACOS_DIR)/$(APP_NAME)"
 	@chmod +x "$(MACOS_DIR)/$(APP_NAME)"
-	@cp -R assets "$(RESOURCES_DIR)/"
+	@rsync -a \
+		--exclude '.DS_Store' \
+		--exclude 'icons/app/icons.png' \
+		assets "$(RESOURCES_DIR)/"
 	@cp -R packaging/macos/*.lproj "$(RESOURCES_DIR)/"
 	@cp EDITOR.md "$(RESOURCES_DIR)/EDITOR.md"
 	@sed \

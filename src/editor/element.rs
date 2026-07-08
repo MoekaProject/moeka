@@ -360,6 +360,49 @@ fn pad_bounds_horizontally(bounds: Bounds<Pixels>, padding: Pixels) -> Bounds<Pi
     )
 }
 
+fn cursor_aligned_vertical_inset(editor: &EditorView, line_height: f32) -> Pixels {
+    let cursor_height = line_height * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
+    px(((line_height - cursor_height) / 2.0).max(0.0))
+}
+
+fn push_cursor_aligned_highlight_quads(
+    quads: &mut Vec<PaintQuad>,
+    editor: &EditorView,
+    display_text: &str,
+    runs: &[TextRun],
+    wrapped: &WrappedLine,
+    disp_start: usize,
+    disp_end: usize,
+    content_x: f32,
+    text_line_top: f32,
+    line_height: f32,
+    font_size: f32,
+    indent_px: f32,
+    leading_padding_px: f32,
+    color: Hsla,
+    letter_spacing: f32,
+    window: &mut Window,
+) {
+    let vertical_inset = cursor_aligned_vertical_inset(editor, line_height);
+    for bounds in helpers::build_highlight_bounds(
+        display_text,
+        runs,
+        wrapped,
+        disp_start,
+        disp_end,
+        content_x,
+        text_line_top,
+        line_height,
+        font_size,
+        indent_px,
+        leading_padding_px,
+        letter_spacing,
+        window,
+    ) {
+        quads.push(fill(inset_bounds_vertically(bounds, vertical_inset), color));
+    }
+}
+
 fn raw_offset_to_display_offset(buffer_to_display: &[usize], raw_offset: usize) -> usize {
     buffer_to_display
         .get(raw_offset)
@@ -2663,10 +2706,25 @@ impl Element for EditorElement {
                     && !skip_block_line_highlight
                     && editor.app_settings.highlight_line_background
                 {
+                    let highlight_vertical_inset = if matches!(block_type, BlockType::Heading(_)) {
+                        f32::from(cursor_aligned_vertical_inset(editor, line_height))
+                    } else {
+                        0.0
+                    };
+                    let highlight_top = if matches!(block_type, BlockType::Heading(_)) {
+                        text_line_top + highlight_vertical_inset
+                    } else {
+                        line_top
+                    };
+                    let highlight_height = if matches!(block_type, BlockType::Heading(_)) {
+                        (line_height - highlight_vertical_inset * 2.0).max(0.0)
+                    } else {
+                        total_line_height
+                    };
                     line_highlight = Some(fill(
                         Bounds::new(
-                            point(px(origin_x), px(line_top)),
-                            size(px(viewport_width), px(total_line_height)),
+                            point(px(origin_x), px(highlight_top)),
+                            size(px(viewport_width), px(highlight_height)),
                         ),
                         theme.line_highlight,
                     ));
@@ -2707,7 +2765,9 @@ impl Element for EditorElement {
                                 cached.selection_padding_left_px
                             };
                         if matches!(block_type, BlockType::Heading(_)) && selection_spans_line {
-                            for bounds in helpers::build_highlight_bounds(
+                            push_cursor_aligned_highlight_quads(
+                                &mut selection_quads,
+                                editor,
                                 &cached.display_text,
                                 &runs,
                                 &cached.wrapped_line,
@@ -2719,17 +2779,10 @@ impl Element for EditorElement {
                                 font_size,
                                 cached.indent_px,
                                 selection_leading_padding_left_px,
+                                theme.selection,
                                 editor_styles.editor_letter_spacing_px,
                                 window,
-                            ) {
-                                selection_quads.push(fill(
-                                    Bounds::new(
-                                        point(bounds.origin.x, px(line_top)),
-                                        size(bounds.size.width, px(total_line_height)),
-                                    ),
-                                    theme.selection,
-                                ));
-                            }
+                            );
                         } else {
                             selection_quads.extend(helpers::build_selection_quads(
                                 &cached.display_text,
@@ -2812,7 +2865,9 @@ impl Element for EditorElement {
                                 &cached.buffer_to_display,
                                 buf_end_col,
                             );
-                            search_match_quads.extend(helpers::build_selection_quads(
+                            push_cursor_aligned_highlight_quads(
+                                &mut search_match_quads,
+                                editor,
                                 &cached.display_text,
                                 &runs,
                                 &cached.wrapped_line,
@@ -2827,7 +2882,7 @@ impl Element for EditorElement {
                                 if is_active { active_bg } else { match_bg },
                                 editor_styles.editor_letter_spacing_px,
                                 window,
-                            ));
+                            );
                         }
                     }
                 }
@@ -2851,14 +2906,16 @@ impl Element for EditorElement {
                                 &cached.buffer_to_display,
                                 buf_end_col,
                             );
-                            search_match_quads.extend(helpers::build_selection_quads(
+                            push_cursor_aligned_highlight_quads(
+                                &mut search_match_quads,
+                                editor,
                                 &cached.display_text,
                                 &runs,
                                 &cached.wrapped_line,
                                 disp_start,
                                 disp_end,
                                 content_x,
-                                line_top,
+                                text_line_top,
                                 line_height,
                                 font_size,
                                 cached.indent_px,
@@ -2866,7 +2923,7 @@ impl Element for EditorElement {
                                 if is_active { active_bg } else { match_bg },
                                 editor_styles.editor_letter_spacing_px,
                                 window,
-                            ));
+                            );
                         }
                     }
                 }
@@ -5590,10 +5647,25 @@ impl Element for EditorElement {
                 && !skip_block_line_highlight
                 && editor.app_settings.highlight_line_background
             {
+                let highlight_vertical_inset = if matches!(block_type, BlockType::Heading(_)) {
+                    f32::from(cursor_aligned_vertical_inset(editor, line_height))
+                } else {
+                    0.0
+                };
+                let highlight_top = if matches!(block_type, BlockType::Heading(_)) {
+                    text_line_top + highlight_vertical_inset
+                } else {
+                    line_top
+                };
+                let highlight_height = if matches!(block_type, BlockType::Heading(_)) {
+                    (line_height - highlight_vertical_inset * 2.0).max(0.0)
+                } else {
+                    total_line_height
+                };
                 line_highlight = Some(fill(
                     Bounds::new(
-                        point(px(origin_x), px(line_top)),
-                        size(px(viewport_width), px(total_line_height)),
+                        point(px(origin_x), px(highlight_top)),
+                        size(px(viewport_width), px(highlight_height)),
                     ),
                     theme.line_highlight,
                 ));
@@ -5626,7 +5698,9 @@ impl Element for EditorElement {
                             selection_padding_left_px
                         };
                     if matches!(block_type, BlockType::Heading(_)) && selection_spans_line {
-                        for bounds in helpers::build_highlight_bounds(
+                        push_cursor_aligned_highlight_quads(
+                            &mut selection_quads,
+                            editor,
                             &display_text,
                             &runs,
                             wrapped,
@@ -5638,17 +5712,10 @@ impl Element for EditorElement {
                             font_size,
                             indent_px,
                             selection_leading_padding_left_px,
+                            theme.selection,
                             letter_spacing,
                             window,
-                        ) {
-                            selection_quads.push(fill(
-                                Bounds::new(
-                                    point(bounds.origin.x, px(line_top)),
-                                    size(bounds.size.width, px(total_line_height)),
-                                ),
-                                theme.selection,
-                            ));
-                        }
+                        );
                     } else {
                         selection_quads.extend(helpers::build_selection_quads(
                             &display_text,
@@ -5747,7 +5814,9 @@ impl Element for EditorElement {
                             helpers::buffer_to_display_offset(&buffer_to_display, buf_start_col);
                         let disp_end =
                             helpers::buffer_to_display_offset(&buffer_to_display, buf_end_col);
-                        search_match_quads.extend(helpers::build_selection_quads(
+                        push_cursor_aligned_highlight_quads(
+                            &mut search_match_quads,
+                            editor,
                             &display_text,
                             &runs,
                             wrapped,
@@ -5762,7 +5831,7 @@ impl Element for EditorElement {
                             if is_active { active_bg } else { match_bg },
                             letter_spacing,
                             window,
-                        ));
+                        );
                     }
                 }
             }
@@ -5780,14 +5849,16 @@ impl Element for EditorElement {
                             helpers::buffer_to_display_offset(&buffer_to_display, buf_start_col);
                         let disp_end =
                             helpers::buffer_to_display_offset(&buffer_to_display, buf_end_col);
-                        search_match_quads.extend(helpers::build_selection_quads(
+                        push_cursor_aligned_highlight_quads(
+                            &mut search_match_quads,
+                            editor,
                             &display_text,
                             &runs,
                             wrapped,
                             disp_start,
                             disp_end,
                             content_x,
-                            line_top,
+                            text_line_top,
                             line_height,
                             font_size,
                             indent_px,
@@ -5795,7 +5866,7 @@ impl Element for EditorElement {
                             if is_active { active_bg } else { match_bg },
                             letter_spacing,
                             window,
-                        ));
+                        );
                     }
                 }
             }

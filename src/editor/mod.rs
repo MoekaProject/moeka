@@ -1482,6 +1482,7 @@ pub struct EditorView {
     pub(crate) editor_scrollbar_drag: Option<EditorScrollbarDragState>,
     pub(crate) panel_scrollbars: HashMap<PanelScrollbarKind, PanelScrollbarState>,
     pub(crate) sidebar_custom_width: Option<f32>,
+    pub(crate) search_sidebar_custom_width: Option<f32>,
     /// Time of the last grouped typing checkpoint, used to coalesce rapid
     /// single-character edits into a single undo step (time-interval grouping).
     pub(crate) last_typing_checkpoint_time: Option<Instant>,
@@ -1559,6 +1560,7 @@ pub struct EditorView {
     pub(crate) file_list_width_epoch: usize,
     pub(crate) file_list_width_task: Option<Task<()>>,
     pub(crate) file_list_resizing: bool,
+    pub(crate) file_list_resize_grab_offset_x: f32,
     /// A markdown file whose FileList item should be scrolled into view once
     /// the current directory's items finish loading (tab/FileTree linkage).
     pub(crate) file_list_pending_reveal_path: Option<PathBuf>,
@@ -1984,6 +1986,7 @@ impl EditorView {
                 })
                 .collect(),
             sidebar_custom_width: None,
+            search_sidebar_custom_width: None,
             last_typing_checkpoint_time: None,
             last_typing_checkpoint_offset: None,
             sidebar_resizing: false,
@@ -2048,6 +2051,7 @@ impl EditorView {
             file_list_width_epoch: 0,
             file_list_width_task: None,
             file_list_resizing: false,
+            file_list_resize_grab_offset_x: 0.0,
             file_list_pending_reveal_path: None,
             sidebar_edit_in_file_list: false,
             file_list_menu_origin: false,
@@ -2734,14 +2738,22 @@ impl EditorView {
             .unwrap_or_else(|| self.scaled(self.styles.sidebar.sidebar_width_px))
     }
 
-    /// The custom width for the left sidebar. Workspace search uses the same
-    /// width as the file tree so switching panels does not resize the sidebar.
+    /// The custom width for the currently displayed left sidebar mode.
+    /// Workspace search and the file tree keep independent widths.
     pub(crate) fn active_sidebar_custom_width(&self) -> Option<f32> {
-        self.sidebar_custom_width
+        if self.workspace_search_visible {
+            self.search_sidebar_custom_width
+        } else {
+            self.sidebar_custom_width
+        }
     }
 
     pub(crate) fn set_active_sidebar_custom_width(&mut self, width: f32) {
-        self.sidebar_custom_width = Some(width);
+        if self.workspace_search_visible {
+            self.search_sidebar_custom_width = Some(width);
+        } else {
+            self.sidebar_custom_width = Some(width);
+        }
     }
 
     pub(crate) fn sidebar_width(&self) -> f32 {
@@ -4228,11 +4240,6 @@ impl EditorView {
         let save_btn_text = ds.dialog_btn_primary_text_color;
         let secondary_bg = ds.dialog_btn_secondary_bg;
         let secondary_text = ds.dialog_btn_secondary_text_color;
-        let confirm_text = if dialog.is_danger {
-            ds.dialog_btn_danger_bg
-        } else {
-            secondary_text
-        };
 
         div()
             .absolute()
@@ -4289,7 +4296,7 @@ impl EditorView {
                                     .items_center()
                                     .justify_center()
                                     .bg(secondary_bg)
-                                    .text_color(confirm_text)
+                                    .text_color(secondary_text)
                                     .text_size(px(self.scaled(ds.dialog_btn_font_size_px)))
                                     .rounded(px(ds.dialog_btn_radius_px))
                                     .cursor(CursorStyle::Arrow)
@@ -6492,7 +6499,14 @@ impl EditorView {
         if let Some(ref mut w) = self.sidebar_custom_width {
             *w = *w * (clamped / self.ui_scale);
         }
+        if let Some(ref mut w) = self.search_sidebar_custom_width {
+            *w = *w * (clamped / self.ui_scale);
+        }
+        if let Some(ref mut w) = self.file_list_custom_width {
+            *w = *w * (clamped / self.ui_scale);
+        }
         self.ui_scale = clamped;
+        self.sync_panel_display_state();
         self.sync_overlay_text_input_styles(cx);
         // Zooming changes the scaled font sizes, so the cached per-line layout
         // (heights, wrapping, geometry) must be rebuilt to avoid geometry drift.
@@ -7729,11 +7743,12 @@ impl EditorView {
         self.invalidate_line_geometry_cache();
     }
 
-    pub(crate) fn invalidate_line_display_info_for_line(&mut self, line: usize) {
-        if line < self.line_display_info.len() {
-            self.line_display_info[line] = None;
-            self.invalidate_line_geometry_cache();
+    fn invalidate_line_display_info_for_line(&mut self, line: usize) {
+        if let Some(info) = self.line_display_info.get_mut(line) {
+            *info = None;
         }
+        self.layout_dirty = true;
+        self.invalidate_line_geometry_cache();
     }
 
     /// Invalidate the cached per-line layout for the active editor AND every

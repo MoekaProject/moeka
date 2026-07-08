@@ -44,6 +44,15 @@ impl EditorView {
         clear_sidebar_edit: bool,
         cx: &mut Context<Self>,
     ) {
+        let same_menu_open = self
+            .context_menu
+            .as_ref()
+            .is_some_and(|menu| menu.kind == kind);
+        if same_menu_open {
+            self.close_context_menu(cx);
+            return;
+        }
+
         self.open_context_menu(ContextMenu { position, kind }, clear_sidebar_edit, cx);
         if clear_sidebar_edit {
             self.sidebar_edit = None;

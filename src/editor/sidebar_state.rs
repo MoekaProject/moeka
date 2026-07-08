@@ -579,14 +579,13 @@ impl EditorView {
         }
 
         self.set_file_list_dir_for_path(&path, cx);
+        self.selected_sidebar_paths.clear();
+        self.selected_sidebar_paths.insert(path.clone());
+        self.sidebar_selection_anchor = Some(path.clone());
         self.invalidate_sidebar_items_cache();
         let items = self.sidebar_items();
         let item_count = items.len();
         if let Some(index) = items.iter().position(|item| item.path == path) {
-            self.selected_sidebar_paths.clear();
-            self.selected_sidebar_paths.insert(path.clone());
-            self.sidebar_selection_anchor = Some(path.clone());
-
             let sidebar_is_available = show_sidebar || self.sidebar_visible;
             if sidebar_is_available {
                 self.focused_sidebar_path = Some(path.clone());

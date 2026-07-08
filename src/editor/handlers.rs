@@ -8,6 +8,12 @@ use super::*;
 impl EditorView {
     // ── Action handlers ─────────────────────────────────────────────
 
+    fn finish_horizontal_cursor_move(&mut self, cx: &mut Context<Self>) {
+        self.pending_scroll_to_cursor = false;
+        self.pending_center_cursor_in_view = false;
+        self.pause_blinking(cx);
+    }
+
     fn apply_history_snapshot(
         &mut self,
         cx: &mut Context<Self>,
@@ -452,8 +458,7 @@ impl EditorView {
         self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_move_left();
-            self.scroll_to_cursor();
-            self.pause_blinking(cx);
+            self.finish_horizontal_cursor_move(cx);
             return;
         }
         let prev_offset = self.cursor.offset;
@@ -495,8 +500,7 @@ impl EditorView {
             );
         }
         self.maybe_auto_select_link_url(prev_offset, false, cx);
-        self.navigate_scroll_to_cursor();
-        self.pause_blinking(cx);
+        self.finish_horizontal_cursor_move(cx);
         if self.wiki_link_start.is_some() {
             self.sync_wiki_link_menu(cx);
         }
@@ -515,8 +519,7 @@ impl EditorView {
         self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_move_right();
-            self.scroll_to_cursor();
-            self.pause_blinking(cx);
+            self.finish_horizontal_cursor_move(cx);
             return;
         }
         let prev_offset = self.cursor.offset;
@@ -542,8 +545,7 @@ impl EditorView {
             }
         }
         self.maybe_auto_select_link_url(prev_offset, false, cx);
-        self.navigate_scroll_to_cursor();
-        self.pause_blinking(cx);
+        self.finish_horizontal_cursor_move(cx);
         if self.wiki_link_start.is_some() {
             self.sync_wiki_link_menu(cx);
         }
@@ -659,8 +661,7 @@ impl EditorView {
         } else {
             self.cursor.select_left(&self.buffer);
         }
-        self.scroll_to_cursor();
-        self.pause_blinking(cx);
+        self.finish_horizontal_cursor_move(cx);
     }
 
     pub(crate) fn on_select_right(
@@ -675,8 +676,7 @@ impl EditorView {
         } else {
             self.cursor.select_right(&self.buffer);
         }
-        self.scroll_to_cursor();
-        self.pause_blinking(cx);
+        self.finish_horizontal_cursor_move(cx);
     }
 
     pub(crate) fn on_select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -741,8 +741,7 @@ impl EditorView {
         } else {
             self.cursor.move_to_line_start(&self.buffer);
         }
-        self.navigate_scroll_to_cursor();
-        self.pause_blinking(cx);
+        self.finish_horizontal_cursor_move(cx);
     }
 
     pub(crate) fn on_end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
@@ -753,8 +752,7 @@ impl EditorView {
         } else {
             self.cursor.move_to_line_end(&self.buffer);
         }
-        self.navigate_scroll_to_cursor();
-        self.pause_blinking(cx);
+        self.finish_horizontal_cursor_move(cx);
     }
 
     pub(crate) fn on_select_home(
@@ -768,8 +766,7 @@ impl EditorView {
         } else {
             self.cursor.select_to_line_start(&self.buffer);
         }
-        self.scroll_to_cursor();
-        self.pause_blinking(cx);
+        self.finish_horizontal_cursor_move(cx);
     }
 
     pub(crate) fn on_select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
@@ -778,8 +775,7 @@ impl EditorView {
         } else {
             self.cursor.select_to_line_end(&self.buffer);
         }
-        self.scroll_to_cursor();
-        self.pause_blinking(cx);
+        self.finish_horizontal_cursor_move(cx);
     }
 
     pub(crate) fn on_enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
@@ -1041,8 +1037,7 @@ impl EditorView {
         } else {
             self.cursor.move_word_left(&self.buffer);
         }
-        self.scroll_to_cursor();
-        self.pause_blinking(cx);
+        self.finish_horizontal_cursor_move(cx);
     }
 
     pub(crate) fn on_move_word_right(
@@ -1057,8 +1052,7 @@ impl EditorView {
         } else {
             self.cursor.move_word_right(&self.buffer);
         }
-        self.scroll_to_cursor();
-        self.pause_blinking(cx);
+        self.finish_horizontal_cursor_move(cx);
     }
 
     pub(crate) fn on_delete_word_left(
@@ -1828,11 +1822,7 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        if self.chat_panel_focus_handle.is_focused(window) {
-            self.create_chat_tab(cx);
-            return;
-        }
+    pub(crate) fn on_new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) {
         self.create_scratch_tab(cx);
     }
 
@@ -1853,17 +1843,9 @@ impl EditorView {
     pub(crate) fn on_close_active_tab(
         &mut self,
         _: &CloseActiveTab,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.chat_panel_focus_handle.is_focused(window) {
-            if let Some(index) = self.active_chat_tab_index()
-                && let Some(tab_id) = self.chat_tabs.get(index).map(|tab| tab.id.clone())
-            {
-                self.close_chat_tab(&tab_id, cx);
-            }
-            return;
-        }
         self.close_active_tab(cx);
     }
 

@@ -20,7 +20,6 @@ pulldown-cmark = { version = "0.13.0", default-features = false, features = [
 similar = { version = "2", features = ["inline", "unicode"] }
 unicode-segmentation = "1.10"
 image = "0.25"
-smallvec = "1.6"
 syntect = { version = "5.2", default-features = false, features = [
   "default-fancy",
 ] }
@@ -66,3 +65,8 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

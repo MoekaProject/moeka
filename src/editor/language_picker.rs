@@ -4,6 +4,7 @@ use gpui::{
     AnyElement, Context, CursorStyle, MouseButton, Pixels, Point, Window, div, prelude::*, px,
 };
 
+use super::status_bar::IndentKind;
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,19 +68,23 @@ fn all_language_picker_items() -> Vec<LanguagePickerItem> {
     items
 }
 
-fn all_indentation_picker_items(language: crate::i18n::UiLanguage) -> Vec<LanguagePickerItem> {
+fn all_indentation_picker_items(language: UiLanguage) -> Vec<LanguagePickerItem> {
     [
-        (false, 2, IndentSettings::spaces(2)),
-        (false, 4, IndentSettings::spaces(4)),
-        (true, 2, IndentSettings::tabs(2)),
-        (true, 4, IndentSettings::tabs(4)),
+        IndentSettings::spaces(2),
+        IndentSettings::spaces(4),
+        IndentSettings::tabs(2),
+        IndentSettings::tabs(4),
     ]
     .into_iter()
-    .map(|(tabs, size, settings)| {
-        let (name, detail) = crate::i18n::indentation_picker_item(language, tabs, size);
+    .map(|settings| {
+        let (name, detail) = crate::i18n::indentation_picker_item(
+            language,
+            matches!(settings.kind, IndentKind::Tabs),
+            settings.size,
+        );
         LanguagePickerItem {
-            name: name.to_string(),
-            detail: detail.to_string(),
+            name,
+            detail,
             kind: LanguagePickerKind::Indentation(settings),
         }
     })
@@ -88,7 +93,7 @@ fn all_indentation_picker_items(language: crate::i18n::UiLanguage) -> Vec<Langua
 
 fn picker_items_for_mode(
     mode: LanguagePickerMode,
-    language: crate::i18n::UiLanguage,
+    language: UiLanguage,
 ) -> Vec<LanguagePickerItem> {
     match mode {
         LanguagePickerMode::Language => all_language_picker_items(),
@@ -96,11 +101,8 @@ fn picker_items_for_mode(
     }
 }
 
-fn picker_placeholder(mode: LanguagePickerMode, language: crate::i18n::UiLanguage) -> &'static str {
-    crate::i18n::language_picker_placeholder(
-        language,
-        matches!(mode, LanguagePickerMode::Indentation),
-    )
+fn picker_placeholder(mode: LanguagePickerMode, language: UiLanguage) -> &'static str {
+    crate::i18n::language_picker_placeholder(language, mode == LanguagePickerMode::Indentation)
 }
 
 fn language_item_matches(item: &LanguagePickerItem, query: &str) -> bool {
@@ -115,17 +117,11 @@ fn language_item_matches(item: &LanguagePickerItem, query: &str) -> bool {
 
 impl EditorView {
     fn language_picker_text_input_styles(&self) -> crate::style::TextInputStyles {
-        let theme = self.app_settings.dark_theme_kind().build();
         let mut styles = self.styles.text_input.clone();
-        styles.text_input_height_px = self.scaled(24.0);
-        styles.text_input_font_size_px = self.scaled(12.0);
         styles.text_input_bg = gpui::Hsla::transparent_black();
         styles.text_input_focus_bg = gpui::Hsla::transparent_black();
-        styles.text_input_text_color = theme.text_primary;
-        styles.text_input_placeholder_color = theme.text_secondary;
         styles.text_input_border_width_px = 0.0;
-        styles.text_input_cursor_color = theme.cursor;
-        styles.text_input_cursor_height_ratio = 0.72;
+        styles.text_input_cursor_height_ratio = 0.6;
         styles
     }
 
@@ -167,9 +163,10 @@ impl EditorView {
 
         if self.language_picker_editor.is_none() {
             let styles = self.language_picker_text_input_styles();
-            let placeholder = picker_placeholder(mode, self.ui_language);
-            let editor =
-                cx.new(move |cx| crate::text_input::TextInput::new(styles, placeholder, cx));
+            let ui_language = self.ui_language;
+            let editor = cx.new(move |cx| {
+                crate::text_input::TextInput::new(styles, picker_placeholder(mode, ui_language), cx)
+            });
             cx.subscribe(
                 &editor,
                 |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -285,23 +282,21 @@ impl EditorView {
         self.language_picker_visible = false;
         self.language_picker_anchor = None;
         self.layout_dirty = true;
-        self.clear_all_tab_layout_caches();
         self.reparse();
         session_store::persist_session(self);
         cx.notify();
     }
 
     pub(crate) fn render_language_picker_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = self.app_settings.dark_theme_kind().build();
-        let bg = theme.bg_elevated;
-        let border = theme.border_primary;
-        let selected_bg = theme.bg_selected;
-        let hover_bg = theme.bg_hover;
-        let text_primary = theme.text_primary;
-        let text_secondary = theme.text_secondary;
+        let bg = self.theme.bg_elevated;
+        let border = self.theme.border_primary;
+        let selected_bg = self.theme.bg_selected;
+        let hover_bg = self.theme.bg_hover;
+        let text_primary = self.theme.text_primary;
+        let text_secondary = self.theme.text_secondary;
         let row_h = self.scaled(24.0);
         let name_font = self.scaled(12.0);
-        let input_h = self.scaled(36.0);
+        let input_h = self.scaled(42.0);
         let max_visible = 12usize;
         let visible_rows = self
             .language_picker_items

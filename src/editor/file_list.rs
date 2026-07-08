@@ -401,6 +401,7 @@ impl EditorView {
             return;
         }
         self.file_list_resizing = false;
+        self.file_list_resize_grab_offset_x = 0.0;
         self.app_settings.file_list_width = self.file_list_custom_width;
         self.app_settings.save();
         cx.notify();
@@ -584,7 +585,7 @@ impl EditorView {
         let path = item.path.clone();
         let is_selected = self.is_sidebar_item_selected(&path);
         let is_active = self.current_file_path.as_deref() == Some(path.as_path());
-        let row_bg = if is_selected {
+        let row_bg = if is_selected || is_active {
             ss.file_list_item_selected_bg
         } else {
             gpui::transparent_black()
@@ -795,7 +796,7 @@ impl EditorView {
 
         div()
             .id("file-list")
-            .w(px(self.file_list_target_width()))
+            .w(px(self.file_list_layout_width()))
             .h_full()
             .flex_none()
             .flex()

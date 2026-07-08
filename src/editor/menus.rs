@@ -1024,6 +1024,15 @@ impl EditorView {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .context_menu
+            .as_ref()
+            .is_some_and(|menu| menu.kind == ContextMenuKind::ChatTabCreate)
+        {
+            self.close_context_menu(cx);
+            return;
+        }
+
         self.open_context_menu(
             ContextMenu {
                 position,

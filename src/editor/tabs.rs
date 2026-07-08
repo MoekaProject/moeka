@@ -659,6 +659,10 @@ impl EditorView {
                 .is_some_and(|suppressed| suppressed == &path);
             if suppress_sidebar_sync {
                 self.suppress_next_sidebar_sync_path = None;
+                self.set_file_list_dir_for_path(&path, cx);
+                self.selected_sidebar_paths.clear();
+                self.selected_sidebar_paths.insert(path.clone());
+                self.sidebar_selection_anchor = Some(path.clone());
             } else {
                 self.sync_path_in_sidebar_state(path, cx);
             }

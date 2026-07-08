@@ -865,7 +865,8 @@ impl Render for EditorView {
                                     |this, event: &MouseMoveEvent, _, cx| {
                                         if this.file_list_resizing {
                                             let new_width = f32::from(event.position.x)
-                                                - this.sidebar_width();
+                                                - this.sidebar_width()
+                                                - this.file_list_resize_grab_offset_x;
                                             let min_w = this.scaled(
                                                 this.styles.sidebar.file_list_resize_min_width_px,
                                             );
@@ -885,7 +886,10 @@ impl Render for EditorView {
                                 ))
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                        let border_x = this.sidebar_width() + this.file_list_width();
+                                        this.file_list_resize_grab_offset_x =
+                                            f32::from(event.position.x) - border_x;
                                         this.file_list_resizing = true;
                                         cx.notify();
                                     }),
@@ -1887,7 +1891,9 @@ impl Render for EditorView {
                                 cx.notify();
                             } else if this.file_list_resizing {
                                 let new_width =
-                                    f32::from(event.position.x) - this.sidebar_width();
+                                    f32::from(event.position.x)
+                                        - this.sidebar_width()
+                                        - this.file_list_resize_grab_offset_x;
                                 let min_w = this
                                     .scaled(this.styles.sidebar.file_list_resize_min_width_px);
                                 let max_w = this
