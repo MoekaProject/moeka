@@ -183,7 +183,7 @@ fn unordered_list_prefix_len(content: &str) -> usize {
         return 0;
     }
     if rest.is_empty() {
-        return 1;
+        return 0;
     }
     if !matches!(rest[0], b' ' | b'\t') {
         return 0;
@@ -1017,6 +1017,13 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
 
     for (line, decoration) in decorations.iter_mut().enumerate() {
         if decoration.table_info.is_some() {
+            continue;
+        }
+
+        if matches!(
+            decoration.block_type,
+            BlockType::CodeBlock | BlockType::CodeBlockFence
+        ) {
             continue;
         }
 
@@ -3069,6 +3076,30 @@ mod tests {
 
         assert_eq!(decorations[0].block_type, BlockType::UnorderedList);
         assert_eq!(decorations[1].block_type, BlockType::UnorderedList);
+    }
+
+    #[test]
+    fn bare_unordered_markers_are_visible_until_space_is_typed() {
+        for marker in ["-", "+", "*"] {
+            let decorations = parse_decorations(marker);
+            assert!(decorations[0].syntax_ranges.is_empty());
+        }
+
+        for marker in ["- ", "+ ", "* "] {
+            let decorations = parse_decorations(marker);
+            assert_eq!(decorations[0].block_type, BlockType::UnorderedList);
+            assert_eq!(decorations[0].syntax_ranges[0].range, 0..2);
+        }
+    }
+
+    #[test]
+    fn ordered_list_marker_inside_fenced_code_stays_code() {
+        let text = "```\n1. item\n```\n";
+        let decorations = parse_decorations(text);
+
+        assert_eq!(decorations[0].block_type, BlockType::CodeBlockFence);
+        assert_eq!(decorations[1].block_type, BlockType::CodeBlock);
+        assert_eq!(decorations[2].block_type, BlockType::CodeBlockFence);
     }
 
     #[test]

@@ -21,14 +21,17 @@ pub(crate) fn paired_delimiter(input: &str) -> Option<(&'static str, &'static st
         "<" => Some(("<", ">")),
         "\"" => Some(("\"", "\"")),
         "'" => Some(("'", "'")),
-        "`" => Some(("`", "`")),
+        "［" => Some(("［", "］")),
         "【" => Some(("【", "】")),
         "｛" => Some(("｛", "｝")),
         "（" => Some(("（", "）")),
+        "＜" => Some(("＜", "＞")),
         "《" => Some(("《", "》")),
         "〈" => Some(("〈", "〉")),
         "「" => Some(("「", "」")),
         "『" => Some(("『", "』")),
+        "＂" => Some(("＂", "＂")),
+        "＇" => Some(("＇", "＇")),
         "“" => Some(("“", "”")),
         "‘" => Some(("‘", "’")),
         _ => None,
@@ -51,48 +54,6 @@ pub(crate) fn paired_delimiter_at(
     let previous_is_word = previous.is_some_and(|ch| ch.is_alphanumeric() || ch == '_');
 
     match input {
-        "`" => {
-            if previous_is_escape || (previous == Some('`') && next == Some('`')) {
-                None
-            } else {
-                Some(("`", "`"))
-            }
-        }
-        "*" => {
-            if previous_is_escape || next == Some('*') {
-                None
-            } else {
-                Some(("*", "*"))
-            }
-        }
-        "_" => {
-            if previous_is_escape || previous_is_word || next_is_word || next == Some('_') {
-                None
-            } else {
-                Some(("_", "_"))
-            }
-        }
-        "~" => {
-            if previous_is_escape || (previous == Some('~') && next == Some('~')) {
-                None
-            } else {
-                Some(("~", "~"))
-            }
-        }
-        "+" => {
-            if previous_is_escape || (previous == Some('+') && next == Some('+')) {
-                None
-            } else {
-                Some(("+", "+"))
-            }
-        }
-        "=" => {
-            if previous_is_escape || (previous == Some('=') && next == Some('=')) {
-                None
-            } else {
-                Some(("=", "="))
-            }
-        }
         "<" => {
             if previous_is_escape || at_line_start || next_is_word {
                 None
@@ -154,14 +115,17 @@ fn is_auto_closing_delimiter(input: &str) -> bool {
             | ">"
             | "\""
             | "'"
-            | "`"
+            | "］"
             | "】"
             | "｝"
             | "）"
+            | "＞"
             | "》"
             | "〉"
             | "」"
             | "』"
+            | "＂"
+            | "＇"
             | "”"
             | "’"
     )
@@ -176,14 +140,17 @@ fn auto_paired_delimiter_matches(open: char, close: char) -> bool {
             | ('<', '>')
             | ('"', '"')
             | ('\'', '\'')
-            | ('`', '`')
+            | ('［', '］')
             | ('【', '】')
             | ('｛', '｝')
             | ('（', '）')
+            | ('＜', '＞')
             | ('《', '》')
             | ('〈', '〉')
             | ('「', '」')
             | ('『', '』')
+            | ('＂', '＂')
+            | ('＇', '＇')
             | ('“', '”')
             | ('‘', '’')
     )
@@ -195,8 +162,7 @@ fn clamp_ime_offset(buffer: &Buffer, offset: usize, cumulative_delta: isize) -> 
 
 impl EditorView {
     /// Whether `offset` sits inside code (a fenced/indented code block, the body
-    /// of a non-markdown file, or inline code). Markdown emphasis auto-pairing is
-    /// suppressed there since `* _ ~ + =` are literal in code.
+    /// of a non-markdown file, or inline code).
     pub(crate) fn offset_in_code_context(&self, offset: usize) -> bool {
         let (line, col) = self.buffer.offset_to_line_col(offset);
         let Some(decoration) = self.decorations.get(line) else {
@@ -409,12 +375,14 @@ mod tests {
     }
 
     #[test]
-    fn paired_delimiter_at_handles_markdown_backticks_and_emphasis() {
-        assert_eq!(paired_delimiter_at("", 0, "`"), Some(("`", "`")));
-        assert_eq!(paired_delimiter_at("\\", 1, "`"), None);
+    fn paired_delimiter_at_does_not_pair_markdown_syntax_delimiters() {
+        assert_eq!(paired_delimiter_at("", 0, "`"), None);
         assert_eq!(paired_delimiter_at("foo", 3, "_"), None);
-        assert_eq!(paired_delimiter_at("foo ", 4, "_"), Some(("_", "_")));
-        assert_eq!(paired_delimiter_at("*", 1, "*"), Some(("*", "*")));
+        assert_eq!(paired_delimiter_at("foo ", 4, "_"), None);
+        assert_eq!(paired_delimiter_at("*", 1, "*"), None);
+        assert_eq!(paired_delimiter_at("", 0, "~"), None);
+        assert_eq!(paired_delimiter_at("", 0, "+"), None);
+        assert_eq!(paired_delimiter_at("", 0, "="), None);
     }
 
     #[test]
@@ -429,16 +397,10 @@ mod tests {
     fn paired_delimiter_at_covers_markdown_extension_delimiters() {
         assert_eq!(paired_delimiter_at("", 0, "("), Some(("(", ")")));
         assert_eq!(paired_delimiter_at("", 0, "{"), Some(("{", "}")));
-        assert_eq!(paired_delimiter_at("", 0, "~"), Some(("~", "~")));
-        assert_eq!(paired_delimiter_at("~", 1, "~"), Some(("~", "~")));
-        assert_eq!(paired_delimiter_at("~~", 1, "~"), None);
-        assert_eq!(paired_delimiter_at("", 0, "+"), Some(("+", "+")));
-        assert_eq!(paired_delimiter_at("+", 1, "+"), Some(("+", "+")));
-        assert_eq!(paired_delimiter_at("++", 1, "+"), None);
-        assert_eq!(paired_delimiter_at("", 0, "="), Some(("=", "=")));
-        assert_eq!(paired_delimiter_at("=", 1, "="), Some(("=", "=")));
-        assert_eq!(paired_delimiter_at("==", 1, "="), None);
+        assert_eq!(paired_delimiter_at("", 0, "［"), Some(("［", "］")));
         assert_eq!(paired_delimiter_at("", 0, "【"), Some(("【", "】")));
+        assert_eq!(paired_delimiter_at("", 0, "＂"), Some(("＂", "＂")));
+        assert_eq!(paired_delimiter_at("", 0, "＇"), Some(("＇", "＇")));
     }
 
     #[test]

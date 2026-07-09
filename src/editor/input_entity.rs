@@ -294,9 +294,8 @@ impl EntityInputHandler for EditorView {
                 return;
             }
 
-            if new_text != "["
-                && !(matches!(new_text, "*" | "_" | "~" | "+" | "=")
-                    && self.offset_in_code_context(range.start))
+            if !(matches!(new_text, "*" | "_" | "~" | "+" | "=")
+                && self.offset_in_code_context(range.start))
                 && let Some((open, close)) =
                     input_ime::paired_delimiter_at(self.buffer.text(), range.start, new_text)
             {
