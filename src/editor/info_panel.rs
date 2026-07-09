@@ -1,7 +1,9 @@
 use std::fs;
+use std::mem::size_of;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use gpui::{
@@ -1591,7 +1593,86 @@ fn visible_git_diff_rows(rows: &[GitDiffRow], show_only_changes: bool) -> Vec<Gi
     }
 }
 
+fn estimate_line_display_cache(lines: &[Option<Box<LineDisplayInfo>>]) -> (usize, usize) {
+    let mut cached = 0usize;
+    let mut bytes = lines.len() * size_of::<Option<Box<LineDisplayInfo>>>();
+    for info in lines.iter().flatten() {
+        cached += 1;
+        bytes += size_of::<LineDisplayInfo>();
+        bytes += info.display_text.capacity();
+        bytes += info.display_to_buffer.capacity() * size_of::<usize>();
+        bytes += info.buffer_to_display.capacity() * size_of::<usize>();
+        bytes += info.base_runs.capacity() * size_of::<gpui::TextRun>();
+        bytes +=
+            info.wrap_boundary_upstream_xs.capacity() * (size_of::<usize>() + size_of::<f32>());
+    }
+    (cached, bytes)
+}
+
 impl EditorView {
+    pub(crate) fn runtime_profile_diagnostics(&self) -> super::profiler::RuntimeProfileDiagnostics {
+        let (line_display_cached, line_display_estimated_bytes) =
+            estimate_line_display_cache(&self.line_display_info);
+        let (tab_layout_cached_slots, tab_layout_cached_lines, tab_layout_estimated_bytes) = self
+            .tab_layout_cache
+            .values()
+            .fold((0usize, 0usize, 0usize), |acc, (lines, _)| {
+                let (cached, bytes) = estimate_line_display_cache(lines);
+                (acc.0 + lines.len(), acc.1 + cached, acc.2 + bytes)
+            });
+        let (info_panel_primary_rows, info_panel_reference_items) = self
+            .info_panel_cache_result
+            .as_ref()
+            .and_then(|result| result.as_ref())
+            .map(|data| {
+                (
+                    data.primary_rows.len(),
+                    data.attachment_items.len()
+                        + data.image_items.len()
+                        + data.external_link_items.len()
+                        + data.wiki_link_items.len(),
+                )
+            })
+            .unwrap_or((0, 0));
+
+        super::profiler::RuntimeProfileDiagnostics {
+            active_tab_id: self.active_tab_id.clone(),
+            buffer_bytes: self.buffer.len(),
+            buffer_lines: self.buffer.line_count(),
+            decorations_len: self.decorations.len(),
+            decorations_estimated_struct_bytes: self.decorations.len()
+                * size_of::<LineDecoration>(),
+            line_display_slots: self.line_display_info.len(),
+            line_display_cached,
+            line_display_estimated_bytes,
+            tab_layout_cached_tabs: self.tab_layout_cache.len(),
+            tab_layout_cached_slots,
+            tab_layout_cached_lines,
+            tab_layout_estimated_bytes,
+            image_cache_entries: self.image_cache.len(),
+            image_cache_loaded_entries: self
+                .image_cache
+                .values()
+                .filter(|image| image.is_some())
+                .count(),
+            generated_preview_keys: self.generated_preview_keys.len(),
+            generated_preview_svg_entries: self.generated_preview_svg_cache.len(),
+            generated_preview_svg_bytes: self
+                .generated_preview_svg_cache
+                .values()
+                .map(|svg| svg.len())
+                .sum(),
+            generated_preview_overlay_entries: self.generated_preview_overlay_cache.len(),
+            generated_preview_view_entries: self.generated_preview_views.len(),
+            outline_heading_count: self.outline_headings_cache.borrow().len(),
+            info_panel_primary_rows,
+            info_panel_reference_items,
+            sidebar_items: self.sidebar_items_cache.len(),
+            file_list_items: self.file_list_items.len(),
+            open_tabs: self.tabs.len(),
+        }
+    }
+
     pub(crate) fn invalidate_info_panel_cache(&mut self) {
         self.info_panel_cache_tab_id = None;
         self.info_panel_cache_result = None;
@@ -1608,15 +1689,16 @@ impl EditorView {
         self.invalidate_git_history_cache();
     }
 
-    fn cached_info_panel_data(&mut self) -> Option<InfoPanelData> {
+    fn cached_info_panel_data(&mut self) -> Option<Arc<InfoPanelData>> {
         let current_tab_id = self.active_tab_id.clone();
-        if self.info_panel_cache_tab_id == current_tab_id {
-            return self.info_panel_cache_result.clone().flatten();
+        if self.info_panel_cache_tab_id != current_tab_id {
+            self.info_panel_cache_tab_id = current_tab_id;
+            self.info_panel_cache_result = Some(self.collect_info_panel_data().map(Arc::new));
         }
 
-        self.info_panel_cache_tab_id = current_tab_id;
-        self.info_panel_cache_result = Some(self.collect_info_panel_data());
-        self.info_panel_cache_result.clone().flatten()
+        self.info_panel_cache_result
+            .as_ref()
+            .and_then(|result| result.as_ref().cloned())
     }
 
     fn schedule_git_history_refresh(&mut self, cx: &mut Context<Self>) {
@@ -2811,6 +2893,53 @@ impl EditorView {
             .into_any_element()
     }
 
+    fn push_info_reference_section(
+        &self,
+        children: &mut Vec<AnyElement>,
+        content_y: &mut f32,
+        title: &str,
+        icon_path: &'static str,
+        empty_text: &str,
+        items: &[InfoPanelReferenceItem],
+        cx: &mut Context<Self>,
+    ) {
+        let ups = &self.styles.utility_panel;
+        let section_gap = self.scaled(ups.utility_panel_section_gap_px);
+        let item_height = self.scaled(ups.utility_panel_item_height_px).max(1.0);
+        let section_title_height = self
+            .scaled(ups.utility_panel_section_title_font_size_px + 8.0)
+            .max(1.0);
+
+        children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
+        *content_y += section_gap;
+        children.push(self.render_info_section_title(title, icon_path));
+        *content_y += section_title_height;
+
+        if items.is_empty() {
+            children.push(self.render_info_empty_line(empty_text));
+            *content_y += item_height;
+            return;
+        }
+
+        let (visible_start, visible_end, top_gap, bottom_gap) = self.visible_uniform_list_range(
+            &self.info_panel_scroll_handle,
+            *content_y,
+            item_height,
+            items.len(),
+            10,
+        );
+        if top_gap > 0.0 {
+            children.push(div().h(px(top_gap)).flex_shrink_0().into_any_element());
+        }
+        for item in &items[visible_start..visible_end] {
+            children.push(self.render_reference_item(item, cx));
+        }
+        if bottom_gap > 0.0 {
+            children.push(div().h(px(bottom_gap)).flex_shrink_0().into_any_element());
+        }
+        *content_y += items.len() as f32 * item_height;
+    }
+
     pub(crate) fn render_utility_panel(
         &mut self,
         is_chat_focused: bool,
@@ -2841,6 +2970,14 @@ impl EditorView {
         let item_gap = self.scaled(ups.utility_panel_item_gap_px);
         let section_padding_x = self.scaled(ups.utility_panel_section_padding_x_px);
         let empty_font_size = self.scaled(ups.utility_panel_empty_font_size_px);
+        let item_height = self.scaled(ups.utility_panel_item_height_px).max(1.0);
+        let section_title_height = self
+            .scaled(ups.utility_panel_section_title_font_size_px + 8.0)
+            .max(1.0);
+        let export_height = self
+            .scaled(ups.utility_panel_button_height_px)
+            .max(item_height);
+        let mut content_y = top_spacer + header_height;
 
         let mut children: Vec<AnyElement> = vec![
             div().h(px(top_spacer)).flex_shrink_0().into_any_element(),
@@ -2858,19 +2995,24 @@ impl EditorView {
 
         if let Some(data) = data {
             children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
+            content_y += section_gap;
             children.push(self.render_info_section_title(
                 self.t(crate::i18n::TextKey::Statistics),
                 FILE_INFO_SECTION_INFO_SVG_PATH,
             ));
+            content_y += section_title_height;
             for row in &data.primary_rows {
                 children.push(self.render_info_row(row));
             }
+            content_y += data.primary_rows.len() as f32 * item_height;
 
             children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
+            content_y += section_gap;
             children.push(self.render_info_section_title(
                 self.t(crate::i18n::TextKey::Export),
                 FILE_INFO_SECTION_EXPORT_SVG_PATH,
             ));
+            content_y += section_title_height;
             children.push(
                 div()
                     .px(px(section_padding_x))
@@ -2899,71 +3041,45 @@ impl EditorView {
                     ])
                     .into_any_element(),
             );
+            content_y += export_height;
 
             if data.supports_text_export {
-                children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                children.push(self.render_info_section_title(
+                self.push_info_reference_section(
+                    &mut children,
+                    &mut content_y,
                     self.t(crate::i18n::TextKey::Attachments),
                     FILE_INFO_SECTION_ATTACHMENT_SVG_PATH,
-                ));
-                if data.attachment_items.is_empty() {
-                    children.push(
-                        self.render_info_empty_line(
-                            self.t(crate::i18n::TextKey::NoLocalAttachments),
-                        ),
-                    );
-                } else {
-                    for item in &data.attachment_items {
-                        children.push(self.render_reference_item(item, cx));
-                    }
-                }
-
-                children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                children.push(self.render_info_section_title(
+                    self.t(crate::i18n::TextKey::NoLocalAttachments),
+                    &data.attachment_items,
+                    cx,
+                );
+                self.push_info_reference_section(
+                    &mut children,
+                    &mut content_y,
                     self.t(crate::i18n::TextKey::Images),
                     FMT_IMAGE_SVG,
-                ));
-                if data.image_items.is_empty() {
-                    children.push(
-                        self.render_info_empty_line(self.t(crate::i18n::TextKey::NoImageLinks)),
-                    );
-                } else {
-                    for item in &data.image_items {
-                        children.push(self.render_reference_item(item, cx));
-                    }
-                }
-
-                children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                children.push(
-                    self.render_info_section_title(
-                        self.t(crate::i18n::TextKey::Links),
-                        FMT_LINK_SVG,
-                    ),
+                    self.t(crate::i18n::TextKey::NoImageLinks),
+                    &data.image_items,
+                    cx,
                 );
-                if data.external_link_items.is_empty() {
-                    children.push(
-                        self.render_info_empty_line(self.t(crate::i18n::TextKey::NoRemoteLinks)),
-                    );
-                } else {
-                    for item in &data.external_link_items {
-                        children.push(self.render_reference_item(item, cx));
-                    }
-                }
-
-                children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                children.push(self.render_info_section_title(
+                self.push_info_reference_section(
+                    &mut children,
+                    &mut content_y,
+                    self.t(crate::i18n::TextKey::Links),
+                    FMT_LINK_SVG,
+                    self.t(crate::i18n::TextKey::NoRemoteLinks),
+                    &data.external_link_items,
+                    cx,
+                );
+                self.push_info_reference_section(
+                    &mut children,
+                    &mut content_y,
                     self.t(crate::i18n::TextKey::Backlinks),
                     FMT_WIKI_LINK_SVG,
-                ));
-                if data.wiki_link_items.is_empty() {
-                    children.push(
-                        self.render_info_empty_line(self.t(crate::i18n::TextKey::NoBacklinks)),
-                    );
-                } else {
-                    for item in &data.wiki_link_items {
-                        children.push(self.render_reference_item(item, cx));
-                    }
-                }
+                    self.t(crate::i18n::TextKey::NoBacklinks),
+                    &data.wiki_link_items,
+                    cx,
+                );
             }
         } else {
             children.push(

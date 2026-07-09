@@ -1,14 +1,59 @@
-use std::ops::Range;
+use std::{collections::HashMap, ops::Range};
 
 use gpui::{
     App, Bounds, Context, EntityInputHandler, FocusHandle, Focusable, Pixels, Point,
-    UTF16Selection, Window, point, px, size,
+    UTF16Selection, Window, WrappedLine, point, px, size,
 };
 
 use crate::markdown::BlockType;
 
-use super::input::{InlineLineDisplayInfo, ime_debug_log};
+use super::input::{InlineLineDisplayInfo, ime_debug_enabled, ime_debug_log};
 use super::*;
+
+impl EditorView {
+    fn input_bounds_for_display_line(
+        &self,
+        anchor_offset: usize,
+        line: usize,
+        col: usize,
+        text_top_y: f32,
+        display_text: &str,
+        buffer_to_display: &[usize],
+        wrapped_line: &WrappedLine,
+        font_size: f32,
+        line_height: f32,
+        indent_px: f32,
+        wrap_boundary_upstream_xs: &HashMap<usize, f32>,
+        content_x: f32,
+    ) -> Bounds<Pixels> {
+        let disp_col = helpers::buffer_to_display_offset(buffer_to_display, col);
+        let affinity = self
+            .wrap_boundary_affinity
+            .and_then(|current| (current.offset == anchor_offset).then_some(current.kind));
+        let pos = Self::visual_position_for_wrapped_display(
+            wrapped_line,
+            display_text,
+            disp_col,
+            line_height,
+            indent_px,
+            wrap_boundary_upstream_xs,
+            affinity,
+        )
+        .unwrap_or_default();
+        let x = content_x + f32::from(pos.x);
+        let y = text_top_y + f32::from(pos.y);
+        if ime_debug_enabled() {
+            ime_debug_log(format!(
+                "bounds_for_range normal line={} col={} anchor_utf8={} -> x={} y={} h={}",
+                line, col, anchor_offset, x, y, line_height
+            ));
+        }
+        Bounds::new(
+            point(px(x), px(y)),
+            size(px(font_size * 0.6), px(line_height)),
+        )
+    }
+}
 
 impl EntityInputHandler for EditorView {
     fn text_for_range(
@@ -47,10 +92,12 @@ impl EntityInputHandler for EditorView {
             range: self.range_to_utf16(&self.cursor.selection_range()),
             reversed: self.cursor.offset < self.cursor.anchor,
         };
-        ime_debug_log(format!(
-            "selected_text_range -> {:?}, cursor=({},{}) marked={:?}",
-            selection.range, self.cursor.anchor, self.cursor.offset, self.marked_range
-        ));
+        if ime_debug_enabled() {
+            ime_debug_log(format!(
+                "selected_text_range -> {:?}, cursor=({},{}) marked={:?}",
+                selection.range, self.cursor.anchor, self.cursor.offset, self.marked_range
+            ));
+        }
         Some(selection)
     }
 
@@ -70,10 +117,12 @@ impl EntityInputHandler for EditorView {
             .marked_range
             .as_ref()
             .map(|range| self.range_to_utf16(range));
-        ime_debug_log(format!(
-            "marked_text_range -> {:?} (utf8={:?})",
-            marked, self.marked_range
-        ));
+        if ime_debug_enabled() {
+            ime_debug_log(format!(
+                "marked_text_range -> {:?} (utf8={:?})",
+                marked, self.marked_range
+            ));
+        }
         marked
     }
 
@@ -114,13 +163,15 @@ impl EntityInputHandler for EditorView {
             }
             return;
         }
-        ime_debug_log(format!(
-            "replace_text_in_range start range_utf16={:?} new_text={:?} marked_before={:?} selection_before={:?}",
-            range_utf16,
-            new_text,
-            self.marked_range,
-            self.cursor.selection_range()
-        ));
+        if ime_debug_enabled() {
+            ime_debug_log(format!(
+                "replace_text_in_range start range_utf16={:?} new_text={:?} marked_before={:?} selection_before={:?}",
+                range_utf16,
+                new_text,
+                self.marked_range,
+                self.cursor.selection_range()
+            ));
+        }
         let had_ime_composition = self.ime_composition_snapshot.is_some();
         if !had_ime_composition {
             self.checkpoint_for_typing(new_text);
@@ -152,12 +203,14 @@ impl EntityInputHandler for EditorView {
             if had_ime_composition {
                 self.finish_ime_composition();
             }
-            ime_debug_log(format!(
-                "replace_text_in_range multi-cursor end cursor={} marked_after={:?} extra_marked_count={}",
-                self.cursor.offset,
-                self.marked_range,
-                self.extra_marked_ranges.len()
-            ));
+            if ime_debug_enabled() {
+                ime_debug_log(format!(
+                    "replace_text_in_range multi-cursor end cursor={} marked_after={:?} extra_marked_count={}",
+                    self.cursor.offset,
+                    self.marked_range,
+                    self.extra_marked_ranges.len()
+                ));
+            }
             return;
         }
 
@@ -195,10 +248,12 @@ impl EntityInputHandler for EditorView {
             .map(|range| self.range_from_utf16(range))
             .or_else(|| self.marked_range.clone())
             .unwrap_or_else(|| self.cursor.selection_range());
-        ime_debug_log(format!(
-            "replace_text_in_range resolved range_utf8={:?}",
-            range
-        ));
+        if ime_debug_enabled() {
+            ime_debug_log(format!(
+                "replace_text_in_range resolved range_utf8={:?}",
+                range
+            ));
+        }
         let preserve_preview_scroll = self
             .decorations
             .get(cursor_line_before)
@@ -290,10 +345,12 @@ impl EntityInputHandler for EditorView {
         if had_ime_composition {
             self.finish_ime_composition();
         }
-        ime_debug_log(format!(
-            "replace_text_in_range end cursor={} marked_after={:?}",
-            self.cursor.offset, self.marked_range
-        ));
+        if ime_debug_enabled() {
+            ime_debug_log(format!(
+                "replace_text_in_range end cursor={} marked_after={:?}",
+                self.cursor.offset, self.marked_range
+            ));
+        }
 
         if self.slash_menu_start.is_some() {
             self.update_slash_filter(cx);
@@ -335,14 +392,16 @@ impl EntityInputHandler for EditorView {
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
         self.clear_phantom_selection();
-        ime_debug_log(format!(
-            "replace_and_mark_text_in_range start range_utf16={:?} new_text={:?} new_selected_range_utf16={:?} marked_before={:?} selection_before={:?}",
-            range_utf16,
-            new_text,
-            new_selected_range_utf16,
-            self.marked_range,
-            self.cursor.selection_range()
-        ));
+        if ime_debug_enabled() {
+            ime_debug_log(format!(
+                "replace_and_mark_text_in_range start range_utf16={:?} new_text={:?} new_selected_range_utf16={:?} marked_before={:?} selection_before={:?}",
+                range_utf16,
+                new_text,
+                new_selected_range_utf16,
+                self.marked_range,
+                self.cursor.selection_range()
+            ));
+        }
         self.begin_ime_composition();
 
         if self.has_extra_cursors() {
@@ -363,13 +422,15 @@ impl EntityInputHandler for EditorView {
                 self.scroll_to_cursor();
             }
             self.pause_blinking(cx);
-            ime_debug_log(format!(
-                "replace_and_mark_text_in_range multi-cursor end selection=({},{}) marked_after={:?} extra_marked_count={}",
-                self.cursor.anchor,
-                self.cursor.offset,
-                self.marked_range,
-                self.extra_marked_ranges.len()
-            ));
+            if ime_debug_enabled() {
+                ime_debug_log(format!(
+                    "replace_and_mark_text_in_range multi-cursor end selection=({},{}) marked_after={:?} extra_marked_count={}",
+                    self.cursor.anchor,
+                    self.cursor.offset,
+                    self.marked_range,
+                    self.extra_marked_ranges.len()
+                ));
+            }
             return;
         }
 
@@ -378,10 +439,12 @@ impl EntityInputHandler for EditorView {
             .map(|range| self.range_from_utf16(range))
             .or_else(|| self.marked_range.clone())
             .unwrap_or_else(|| self.cursor.selection_range());
-        ime_debug_log(format!(
-            "replace_and_mark_text_in_range resolved range_utf8={:?}",
-            range
-        ));
+        if ime_debug_enabled() {
+            ime_debug_log(format!(
+                "replace_and_mark_text_in_range resolved range_utf8={:?}",
+                range
+            ));
+        }
         let preserve_preview_scroll = self
             .decorations
             .get(cursor_line_before)
@@ -436,10 +499,12 @@ impl EntityInputHandler for EditorView {
             self.scroll_to_cursor();
         }
         self.pause_blinking(cx);
-        ime_debug_log(format!(
-            "replace_and_mark_text_in_range end selection=({},{}) marked_after={:?}",
-            self.cursor.anchor, self.cursor.offset, self.marked_range
-        ));
+        if ime_debug_enabled() {
+            ime_debug_log(format!(
+                "replace_and_mark_text_in_range end selection=({},{}) marked_after={:?}",
+                self.cursor.anchor, self.cursor.offset, self.marked_range
+            ));
+        }
     }
 
     fn bounds_for_range(
@@ -452,10 +517,12 @@ impl EntityInputHandler for EditorView {
         if !self.active_tab_supports_text_buffer() {
             return None;
         }
-        ime_debug_log(format!(
-            "bounds_for_range start range_utf16={:?}",
-            range_utf16
-        ));
+        if ime_debug_enabled() {
+            ime_debug_log(format!(
+                "bounds_for_range start range_utf16={:?}",
+                range_utf16
+            ));
+        }
         let queried_range = self.range_from_utf16(&range_utf16);
         let anchor_offset = if self.marked_range.as_ref().is_some_and(|marked| {
             queried_range.start >= marked.start && queried_range.end <= marked.end
@@ -475,27 +542,31 @@ impl EntityInputHandler for EditorView {
         if self.layout_dirty
             && let Some(bounds) = self.last_stable_input_bounds
         {
-            ime_debug_log(format!(
-                "bounds_for_range using cached stable bounds during layout_dirty anchor_utf8={} -> x={} y={} w={} h={}",
-                anchor_offset,
-                f32::from(bounds.origin.x),
-                f32::from(bounds.origin.y),
-                f32::from(bounds.size.width),
-                f32::from(bounds.size.height)
-            ));
+            if ime_debug_enabled() {
+                ime_debug_log(format!(
+                    "bounds_for_range using cached stable bounds during layout_dirty anchor_utf8={} -> x={} y={} w={} h={}",
+                    anchor_offset,
+                    f32::from(bounds.origin.x),
+                    f32::from(bounds.origin.y),
+                    f32::from(bounds.size.width),
+                    f32::from(bounds.size.height)
+                ));
+            }
             return Some(bounds);
         }
         if self.layout_dirty
             && let Some(bounds) = self.pending_input_bounds
         {
-            ime_debug_log(format!(
-                "bounds_for_range using pending input bounds during layout_dirty anchor_utf8={} -> x={} y={} w={} h={}",
-                anchor_offset,
-                f32::from(bounds.origin.x),
-                f32::from(bounds.origin.y),
-                f32::from(bounds.size.width),
-                f32::from(bounds.size.height)
-            ));
+            if ime_debug_enabled() {
+                ime_debug_log(format!(
+                    "bounds_for_range using pending input bounds during layout_dirty anchor_utf8={} -> x={} y={} w={} h={}",
+                    anchor_offset,
+                    f32::from(bounds.origin.x),
+                    f32::from(bounds.origin.y),
+                    f32::from(bounds.size.width),
+                    f32::from(bounds.size.height)
+                ));
+            }
             return Some(bounds);
         }
         let (line, col) = self.buffer.offset_to_line_col(anchor_offset);
@@ -555,10 +626,20 @@ impl EntityInputHandler for EditorView {
                 self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
             let x = f32::from(cell_bounds.origin.x) + padding_x + f32::from(pos.x);
             let y = f32::from(cell_bounds.origin.y) + padding_y + f32::from(pos.y);
-            ime_debug_log(format!(
-                "bounds_for_range table line={} col={} cell_col={} visual_row={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",
-                line, col, cell_col, visual_row, queried_range, anchor_offset, x, y, line_height
-            ));
+            if ime_debug_enabled() {
+                ime_debug_log(format!(
+                    "bounds_for_range table line={} col={} cell_col={} visual_row={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",
+                    line,
+                    col,
+                    cell_col,
+                    visual_row,
+                    queried_range,
+                    anchor_offset,
+                    x,
+                    y,
+                    line_height
+                ));
+            }
             let bounds = Bounds::new(
                 point(px(x), px(y)),
                 size(px(self.base_font_size() * 0.6), px(line_height)),
@@ -568,67 +649,53 @@ impl EntityInputHandler for EditorView {
             return Some(bounds);
         }
 
-        let line_info = if self.layout_dirty {
-            self.inline_line_display_info(window, line, editor_bounds)
-                .or_else(|| {
-                    self.line_display_info
-                        .get(line)
-                        .cloned()
-                        .flatten()
-                        .map(|info| InlineLineDisplayInfo {
-                            display_text: info.display_text,
-                            buffer_to_display: info.buffer_to_display,
-                            font_size: info.font_size,
-                            line_height: info.line_height,
-                            wrapped_line: info.wrapped_line,
-                            wrap_boundary_upstream_xs: info.wrap_boundary_upstream_xs,
-                            indent_px: info.indent_px,
-                            content_x: info.content_x,
-                        })
-                })
-        } else {
-            self.line_display_info
+        let cached_line_bounds = |this: &Self| {
+            this.line_display_info
                 .get(line)
-                .cloned()
-                .flatten()
-                .map(|info| InlineLineDisplayInfo {
-                    display_text: info.display_text,
-                    buffer_to_display: info.buffer_to_display,
-                    font_size: info.font_size,
-                    line_height: info.line_height,
-                    wrapped_line: info.wrapped_line,
-                    wrap_boundary_upstream_xs: info.wrap_boundary_upstream_xs,
-                    indent_px: info.indent_px,
-                    content_x: info.content_x,
+                .and_then(|info| info.as_deref())
+                .map(|info| {
+                    this.input_bounds_for_display_line(
+                        anchor_offset,
+                        line,
+                        col,
+                        text_top_y,
+                        &info.display_text,
+                        &info.buffer_to_display,
+                        &info.wrapped_line,
+                        info.font_size,
+                        info.line_height,
+                        info.indent_px,
+                        &info.wrap_boundary_upstream_xs,
+                        info.content_x,
+                    )
                 })
-                .or_else(|| self.inline_line_display_info(window, line, editor_bounds))
+        };
+        let inline_line_bounds = |this: &Self, window: &mut Window| -> Option<Bounds<Pixels>> {
+            this.inline_line_display_info(window, line, editor_bounds)
+                .map(|info: InlineLineDisplayInfo| {
+                    this.input_bounds_for_display_line(
+                        anchor_offset,
+                        line,
+                        col,
+                        text_top_y,
+                        &info.display_text,
+                        &info.buffer_to_display,
+                        &info.wrapped_line,
+                        info.font_size,
+                        info.line_height,
+                        info.indent_px,
+                        &info.wrap_boundary_upstream_xs,
+                        info.content_x,
+                    )
+                })
+        };
+        let line_bounds = if self.layout_dirty {
+            inline_line_bounds(self, window).or_else(|| cached_line_bounds(self))
+        } else {
+            cached_line_bounds(self).or_else(|| inline_line_bounds(self, window))
         };
 
-        if let Some(info) = line_info {
-            let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
-            let affinity = self
-                .wrap_boundary_affinity
-                .and_then(|current| (current.offset == anchor_offset).then_some(current.kind));
-            let pos = Self::visual_position_for_wrapped_display(
-                &info.wrapped_line,
-                &info.display_text,
-                disp_col,
-                info.line_height,
-                info.indent_px,
-                &info.wrap_boundary_upstream_xs,
-                affinity,
-            )
-            .unwrap_or_default();
-            let x = info.content_x + f32::from(pos.x);
-            let y = text_top_y + f32::from(pos.y);
-            ime_debug_log(format!(
-                "bounds_for_range normal line={} col={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",
-                line, col, queried_range, anchor_offset, x, y, info.line_height
-            ));
-            let bounds = Bounds::new(
-                point(px(x), px(y)),
-                size(px(info.font_size * 0.6), px(info.line_height)),
-            );
+        if let Some(bounds) = line_bounds {
             self.pending_input_bounds = None;
             self.last_stable_input_bounds = Some(bounds);
             Some(bounds)
@@ -660,29 +727,33 @@ impl EntityInputHandler for EditorView {
             let dx = (f32::from(target_point.x) - f32::from(point.x)).abs();
             let dy = (f32::from(target_point.y) - f32::from(point.y)).abs();
             let utf16_offset = self.offset_to_utf16(target_offset);
-            ime_debug_log(format!(
-                "character_index_for_point consumed_latch point=({}, {}) target=({}, {}) dx={} dy={} -> utf8={} utf16={}",
-                f32::from(point.x),
-                f32::from(point.y),
-                f32::from(target_point.x),
-                f32::from(target_point.y),
-                dx,
-                dy,
-                target_offset,
-                utf16_offset
-            ));
+            if ime_debug_enabled() {
+                ime_debug_log(format!(
+                    "character_index_for_point consumed_latch point=({}, {}) target=({}, {}) dx={} dy={} -> utf8={} utf16={}",
+                    f32::from(point.x),
+                    f32::from(point.y),
+                    f32::from(target_point.x),
+                    f32::from(target_point.y),
+                    dx,
+                    dy,
+                    target_offset,
+                    utf16_offset
+                ));
+            }
             return Some(utf16_offset);
         }
 
         let utf8_offset = self.offset_for_position(point);
         let utf16_offset = self.offset_to_utf16(utf8_offset);
-        ime_debug_log(format!(
-            "character_index_for_point point=({}, {}) -> utf8={} utf16={}",
-            f32::from(point.x),
-            f32::from(point.y),
-            utf8_offset,
-            utf16_offset
-        ));
+        if ime_debug_enabled() {
+            ime_debug_log(format!(
+                "character_index_for_point point=({}, {}) -> utf8={} utf16={}",
+                f32::from(point.x),
+                f32::from(point.y),
+                utf8_offset,
+                utf16_offset
+            ));
+        }
         Some(utf16_offset)
     }
 }

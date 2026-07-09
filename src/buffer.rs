@@ -4,6 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 pub struct Buffer {
     text: String,
     line_starts: Vec<usize>,
+    line_utf16_starts: Vec<usize>,
 }
 
 impl Buffer {
@@ -11,6 +12,7 @@ impl Buffer {
         let mut buf = Self {
             text: String::new(),
             line_starts: Vec::new(),
+            line_utf16_starts: Vec::new(),
         };
         buf.rebuild_line_starts();
         buf
@@ -20,6 +22,7 @@ impl Buffer {
         let mut buf = Self {
             text: text.to_string(),
             line_starts: Vec::new(),
+            line_utf16_starts: Vec::new(),
         };
         buf.rebuild_line_starts();
         buf
@@ -35,16 +38,19 @@ impl Buffer {
 
     pub fn insert(&mut self, offset: usize, text: &str) {
         let offset = snap_char_start(&self.text, offset.min(self.text.len()));
+        let start_utf16 = self.utf16_offset_for_offset(offset);
         self.text.insert_str(offset, text);
-        self.splice_line_starts(offset, offset, text);
+        self.splice_line_starts(offset, offset, start_utf16, start_utf16, text);
     }
 
     pub fn delete(&mut self, range: std::ops::Range<usize>) {
         let start = snap_char_start(&self.text, range.start.min(self.text.len()));
         let end = snap_char_start(&self.text, range.end.min(self.text.len()));
         if start < end {
+            let start_utf16 = self.utf16_offset_for_offset(start);
+            let end_utf16 = self.utf16_offset_for_offset(end);
             self.text.drain(start..end);
-            self.splice_line_starts(start, end, "");
+            self.splice_line_starts(start, end, start_utf16, end_utf16, "");
         }
     }
 
@@ -52,8 +58,10 @@ impl Buffer {
         let start = snap_char_start(&self.text, range.start.min(self.text.len()));
         let end = snap_char_start(&self.text, range.end.min(self.text.len()));
         if start <= end {
+            let start_utf16 = self.utf16_offset_for_offset(start);
+            let end_utf16 = self.utf16_offset_for_offset(end);
             self.text.replace_range(start..end, text);
-            self.splice_line_starts(start, end, text);
+            self.splice_line_starts(start, end, start_utf16, end_utf16, text);
         }
     }
 
@@ -106,6 +114,36 @@ impl Buffer {
         line_start + col.min(max_col)
     }
 
+    pub fn utf16_offset_for_offset(&self, offset: usize) -> usize {
+        let offset = snap_char_start(&self.text, offset.min(self.text.len()));
+        let (line, col) = self.offset_to_line_col(offset);
+        self.line_utf16_starts[line] + self.line_content(line)[..col].encode_utf16().count()
+    }
+
+    pub fn offset_for_utf16_offset(&self, utf16_offset: usize) -> usize {
+        let total_utf16 = self.line_utf16_starts.last().copied().unwrap_or(0)
+            + self
+                .line_content(self.line_count().saturating_sub(1))
+                .encode_utf16()
+                .count();
+        let utf16_offset = utf16_offset.min(total_utf16);
+        let line = match self.line_utf16_starts.binary_search(&utf16_offset) {
+            Ok(line) => line,
+            Err(line) => line.saturating_sub(1),
+        };
+        let line_start_utf16 = self.line_utf16_starts[line];
+        let target_col = utf16_offset.saturating_sub(line_start_utf16);
+        let line_start = self.line_start(line);
+        let mut utf16_count = 0usize;
+        for (byte_idx, ch) in self.line_content(line).char_indices() {
+            if utf16_count >= target_col {
+                return line_start + byte_idx;
+            }
+            utf16_count += ch.len_utf16();
+        }
+        self.line_end(line)
+    }
+
     pub fn clamp_offset(&self, offset: usize) -> usize {
         let offset = offset.min(self.text.len());
         let mut o = offset;
@@ -116,23 +154,81 @@ impl Buffer {
     }
 
     pub fn clamp_grapheme_offset(&self, offset: usize) -> usize {
-        clamp_grapheme_boundary(&self.text, offset)
+        self.clamp_grapheme_offset_in_line(offset)
     }
 
     pub fn prev_grapheme_boundary(&self, offset: usize) -> usize {
-        prev_grapheme_boundary(&self.text, offset)
+        if self.text.is_empty() {
+            return 0;
+        }
+
+        let offset = self.clamp_grapheme_offset_in_line(offset);
+        let (line, _) = self.offset_to_line_col(offset);
+        let line_start = self.line_start(line);
+        if offset <= line_start {
+            return line
+                .checked_sub(1)
+                .map(|prev_line| self.line_end(prev_line))
+                .unwrap_or(0);
+        }
+
+        let line_text = self.line_content(line);
+        line_start + prev_grapheme_boundary(line_text, offset - line_start)
     }
 
     pub fn next_grapheme_boundary(&self, offset: usize) -> usize {
-        next_grapheme_boundary(&self.text, offset)
+        if self.text.is_empty() {
+            return 0;
+        }
+
+        let offset = self.clamp_grapheme_offset_in_line(offset);
+        let (line, _) = self.offset_to_line_col(offset);
+        let line_start = self.line_start(line);
+        let line_end = self.line_end(line);
+        if offset >= line_end {
+            return if line + 1 < self.line_count() {
+                self.line_start(line + 1)
+            } else {
+                self.text.len()
+            };
+        }
+
+        let line_text = self.line_content(line);
+        line_start + next_grapheme_boundary(line_text, offset - line_start)
+    }
+
+    fn clamp_grapheme_offset_in_line(&self, offset: usize) -> usize {
+        if self.text.is_empty() {
+            return 0;
+        }
+
+        let offset = snap_char_start(&self.text, offset.min(self.text.len()));
+        if offset >= self.text.len() {
+            return self.text.len();
+        }
+
+        let (line, _) = self.offset_to_line_col(offset);
+        let line_start = self.line_start(line);
+        let line_end = self.line_end(line);
+        if offset <= line_start || offset >= line_end {
+            return offset;
+        }
+
+        let line_text = self.line_content(line);
+        line_start + clamp_grapheme_boundary(line_text, offset - line_start)
     }
 
     fn rebuild_line_starts(&mut self) {
         self.line_starts.clear();
+        self.line_utf16_starts.clear();
         self.line_starts.push(0);
-        for (i, byte) in self.text.bytes().enumerate() {
-            if byte == b'\n' {
-                self.line_starts.push(i + 1);
+        self.line_utf16_starts.push(0);
+        let mut utf16_offset = 0usize;
+        for (i, ch) in self.text.char_indices() {
+            utf16_offset += ch.len_utf16();
+            if ch == '\n' {
+                self.line_starts.push(i + ch.len_utf8());
+                self.line_utf16_starts.push(utf16_offset);
             }
         }
     }
@@ -144,8 +240,18 @@ impl Buffer {
     /// which is the dominant per-keystroke cost on very large files. The caller
     /// must already have applied the edit to `self.text` using the same snapped
     /// `start`/`end` offsets.
-    fn splice_line_starts(&mut self, start: usize, end: usize, inserted: &str) {
+    fn splice_line_starts(
+        &mut self,
+        start: usize,
+        end: usize,
+        start_utf16: usize,
+        end_utf16: usize,
+        inserted: &str,
+    ) {
         let delta = inserted.len() as isize - (end - start) as isize;
+        let inserted_utf16_len = inserted.encode_utf16().count();
+        let utf16_delta =
+            inserted_utf16_len as isize - end_utf16.saturating_sub(start_utf16) as isize;
 
         // Line starts in `(start, end]` correspond to newlines inside the removed
         // region and must be dropped; line starts strictly after `end` only shift
@@ -154,9 +260,13 @@ impl Buffer {
         let last = self.line_starts.partition_point(|&v| v <= end);
 
         let mut new_starts: Vec<usize> = Vec::new();
-        for (i, byte) in inserted.bytes().enumerate() {
-            if byte == b'\n' {
-                new_starts.push(start + i + 1);
+        let mut new_utf16_starts: Vec<usize> = Vec::new();
+        let mut inserted_utf16_offset = 0usize;
+        for (i, ch) in inserted.char_indices() {
+            inserted_utf16_offset += ch.len_utf16();
+            if ch == '\n' {
+                new_starts.push(start + i + ch.len_utf8());
+                new_utf16_starts.push(start_utf16 + inserted_utf16_offset);
             }
         }
 
@@ -165,7 +275,13 @@ impl Buffer {
                 *v = (*v as isize + delta) as usize;
             }
         }
+        if utf16_delta != 0 {
+            for v in &mut self.line_utf16_starts[last..] {
+                *v = (*v as isize + utf16_delta) as usize;
+            }
+        }
         self.line_starts.splice(first..last, new_starts);
+        self.line_utf16_starts.splice(first..last, new_utf16_starts);
     }
 }
 
@@ -269,11 +385,29 @@ mod tests {
         starts
     }
 
+    fn expected_line_utf16_starts(text: &str) -> Vec<usize> {
+        let mut starts = vec![0usize];
+        let mut utf16_offset = 0usize;
+        for ch in text.chars() {
+            utf16_offset += ch.len_utf16();
+            if ch == '\n' {
+                starts.push(utf16_offset);
+            }
+        }
+        starts
+    }
+
     fn assert_line_starts_consistent(buffer: &Buffer) {
         assert_eq!(
             buffer.line_starts,
             expected_line_starts(buffer.text()),
             "incremental line_starts diverged from full rebuild for {:?}",
+            buffer.text()
+        );
+        assert_eq!(
+            buffer.line_utf16_starts,
+            expected_line_utf16_starts(buffer.text()),
+            "incremental line_utf16_starts diverged from full rebuild for {:?}",
             buffer.text()
         );
     }
@@ -312,5 +446,33 @@ mod tests {
         // Insert into empty buffer.
         buffer.insert(0, "first\nsecond");
         assert_line_starts_consistent(&buffer);
+    }
+
+    #[test]
+    fn utf16_offsets_use_line_cache_and_handle_multibyte_text() {
+        let mut buffer = Buffer::from_text("a😀\n中👍🏻z");
+        let emoji = buffer.text().find('😀').expect("emoji offset");
+        let second_line = buffer.line_start(1);
+        let z = buffer.text().find('z').expect("z offset");
+
+        assert_eq!(buffer.utf16_offset_for_offset(0), 0);
+        assert_eq!(buffer.utf16_offset_for_offset(emoji), 1);
+        assert_eq!(buffer.utf16_offset_for_offset(second_line), 4);
+        assert_eq!(buffer.offset_for_utf16_offset(0), 0);
+        assert_eq!(buffer.offset_for_utf16_offset(1), emoji);
+        assert_eq!(buffer.offset_for_utf16_offset(4), second_line);
+        assert_eq!(
+            buffer.offset_for_utf16_offset(buffer.utf16_offset_for_offset(z)),
+            z
+        );
+
+        buffer.replace(1..z, "é\n🙂");
+        assert_line_starts_consistent(&buffer);
+        for offset in 0..=buffer.len() {
+            if buffer.text().is_char_boundary(offset) {
+                let utf16 = buffer.utf16_offset_for_offset(offset);
+                assert_eq!(buffer.offset_for_utf16_offset(utf16), offset);
+            }
+        }
     }
 }

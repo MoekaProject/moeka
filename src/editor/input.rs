@@ -76,13 +76,14 @@ fn compute_inline_wrap_boundary_upstream_xs(
     upstream_xs
 }
 
-pub(super) fn ime_debug_enabled() -> bool {
+#[inline(always)]
+pub(super) const fn ime_debug_enabled() -> bool {
     false
 }
 
-pub(super) fn ime_debug_log(_message: impl AsRef<str>) {
+pub(super) fn ime_debug_log(message: impl AsRef<str>) {
     if ime_debug_enabled() {
-        eprintln!("[ime-debug] logging enabled");
+        eprintln!("[ime-debug] {}", message.as_ref());
     }
 }
 
@@ -1723,6 +1724,8 @@ impl EditorView {
         }
 
         if self.is_selecting {
+            let old_cursor_offset = self.cursor.offset;
+            let old_scroll_offset = self.scroll_offset;
             if self
                 .last_mouse_down_target
                 .is_some_and(|(start_position, _)| {
@@ -1771,11 +1774,17 @@ impl EditorView {
                 self.offset_for_position(event.position)
             };
             self.update_wrap_boundary_affinity_for_position(offset, event.position);
-            self.cursor.select_to(offset, &self.buffer);
+            if offset != self.cursor.offset {
+                self.cursor.select_to(offset, &self.buffer);
+            }
             if self.cursor.has_selection() {
                 self.suppress_fold_for_empty_selection_drag = false;
             }
-            cx.notify();
+            if self.cursor.offset != old_cursor_offset
+                || (self.scroll_offset - old_scroll_offset).abs() > f32::EPSILON
+            {
+                cx.notify();
+            }
         } else if toolbar_hover_changed {
             cx.notify();
         }

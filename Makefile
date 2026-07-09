@@ -51,7 +51,6 @@ $(APP_DIR): build-release $(INFO_PLIST_TEMPLATE) $(ICON_FILE)
 	@chmod +x "$(MACOS_DIR)/$(APP_NAME)"
 	@rsync -a \
 		--exclude '.DS_Store' \
-		--exclude 'icons/app/icons.png' \
 		assets "$(RESOURCES_DIR)/"
 	@cp -R packaging/macos/*.lproj "$(RESOURCES_DIR)/"
 	@cp EDITOR.md "$(RESOURCES_DIR)/EDITOR.md"

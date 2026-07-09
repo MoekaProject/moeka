@@ -385,7 +385,7 @@ impl EditorView {
         if self.workspace_search_visible {
             return 0.0;
         }
-        if self.sidebar_root.as_os_str().is_empty() || !self.sidebar_root.exists() {
+        if self.sidebar_root.as_os_str().is_empty() {
             return 0.0;
         }
         let sidebar_target = self.sidebar_target_width();

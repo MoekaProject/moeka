@@ -100,6 +100,8 @@ actions!(
         OpenFileDialog,
         FindInFiles,
         QuickOpen,
+        ToggleRuntimeProfile,
+        WriteRuntimeProfileSnapshot,
     ]
 );
 

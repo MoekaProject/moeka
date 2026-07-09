@@ -68,9 +68,19 @@ impl EditorView {
     }
 
     pub(crate) fn active_tab_index(&self) -> Option<usize> {
-        self.active_tab_id
-            .as_ref()
-            .and_then(|id| self.tabs.iter().position(|tab| &tab.id == id))
+        let active_tab_id = self.active_tab_id.as_ref()?;
+        if let Some(index) = self.active_tab_index_cache.get()
+            && self
+                .tabs
+                .get(index)
+                .is_some_and(|tab| tab.id == *active_tab_id)
+        {
+            return Some(index);
+        }
+
+        let index = self.tabs.iter().position(|tab| tab.id == *active_tab_id)?;
+        self.active_tab_index_cache.set(Some(index));
+        Some(index)
     }
 
     pub(crate) fn active_tab_is_settings(&self) -> bool {
@@ -619,6 +629,8 @@ impl EditorView {
         let tab = self.tabs[index].clone();
         self.invalidate_active_file_panel_caches();
         self.active_tab_id = Some(tab.id.clone());
+        self.active_tab_index_cache.set(Some(index));
+        self.active_file_kind_cache = tab.file_kind.clone();
         self.current_file_path = tab.path.clone();
         self.editor_left_aligned = tab.editor_left_aligned;
         if matches!(tab.kind, TabKind::Editor | TabKind::Diff) {
@@ -697,6 +709,8 @@ impl EditorView {
         }
         if self.tabs.is_empty() {
             self.active_tab_id = None;
+            self.active_tab_index_cache.set(None);
+            self.active_file_kind_cache = None;
             self.pending_close_tab_ids.clear();
             cx.notify();
             session_store::persist_session(self);

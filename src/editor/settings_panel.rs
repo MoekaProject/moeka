@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, Context, CursorStyle, Focusable, MouseButton, ScrollHandle, SharedString, Window,
-    div, img, prelude::*, px, svg,
+    div, prelude::*, px, svg,
 };
 
 use crate::i18n::{TextKey, UiLanguage, language_picker_options};
@@ -13,12 +13,6 @@ use super::{
     DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, SITE_SVG_PATH,
     THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH,
 };
-
-/// Duration of the app-icon tile opacity fade on hover enter/leave.
-const APP_ICON_HOVER_SECONDS: f32 = 0.16;
-/// Resting and hovered opacity for unselected app-icon tiles.
-const APP_ICON_REST_OPACITY: f32 = 0.5;
-const APP_ICON_HOVER_OPACITY: f32 = 0.9;
 
 // ── Font picker state ───────────────────────────────────────────────
 
@@ -105,8 +99,7 @@ impl EditorView {
                     )
                     .child(self.render_theme_section(cx))
                     .child(self.render_font_section(window, cx))
-                    .child(self.render_format_section(cx))
-                    .child(self.render_app_icon_section(cx)),
+                    .child(self.render_format_section(cx)),
             )
             .into_any_element()
     }
@@ -232,130 +225,6 @@ impl EditorView {
                 cx,
             ))
             .into_any_element()
-    }
-
-    // ── App icon section ────────────────────────────────────────
-
-    fn render_app_icon_section(&self, cx: &mut Context<Self>) -> AnyElement {
-        let selected = self.app_settings.app_icon_index;
-
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(self.scaled(12.0)))
-            .child(self.render_section_heading(self.t(TextKey::AppIconSection)))
-            .child(
-                div().flex().flex_row().justify_between().children(
-                    (0..crate::editor::helpers::APP_ICON_COUNT)
-                        .map(|index| self.render_app_icon_card(index, index == selected, cx)),
-                ),
-            )
-            .into_any_element()
-    }
-
-    fn render_app_icon_card(
-        &self,
-        index: usize,
-        is_active: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        // Square button sized so all nine sit in a single row; the corner radius
-        // matches the standard macOS icon (~22.37% of the side).
-        let size = self.scaled(46.0);
-        let radius = size * 0.2237;
-        let opacity = self.app_icon_tile_opacity(index, is_active);
-        let image_path = crate::editor::helpers::resolve_asset_image_path(
-            &crate::editor::helpers::app_icon_asset_path(index),
-        );
-
-        div()
-            .id(SharedString::from(format!("app-icon-{index}")))
-            .w(px(size))
-            .h(px(size))
-            .rounded(px(radius))
-            .cursor(CursorStyle::Arrow)
-            .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
-                this.set_app_icon_hovered(index, *hovering, cx);
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.set_app_icon(index, cx);
-                }),
-            )
-            .child(
-                img(image_path)
-                    .size_full()
-                    .rounded(px(radius))
-                    .opacity(opacity),
-            )
-            .into_any_element()
-    }
-
-    /// Opacity for an app-icon tile: selected tiles stay fully opaque, others
-    /// rest at 0.5 and animate toward 0.9 while hovered (and back on leave).
-    fn app_icon_tile_opacity(&self, index: usize, is_active: bool) -> f32 {
-        if is_active {
-            return 1.0;
-        }
-        let progress = self
-            .app_icon_hover_since
-            .get()
-            .map(|since| (since.elapsed().as_secs_f32() / APP_ICON_HOVER_SECONDS).clamp(0.0, 1.0))
-            .unwrap_or(1.0);
-        let ease = super::ease_in_out_cubic(progress);
-        let span = APP_ICON_HOVER_OPACITY - APP_ICON_REST_OPACITY;
-        if self.app_icon_hovered == Some(index) {
-            APP_ICON_REST_OPACITY + span * ease
-        } else if self.app_icon_hover_prev == Some(index) {
-            APP_ICON_HOVER_OPACITY - span * ease
-        } else {
-            APP_ICON_REST_OPACITY
-        }
-    }
-
-    fn set_app_icon_hovered(&mut self, index: usize, hovering: bool, cx: &mut Context<Self>) {
-        let target = if hovering {
-            Some(index)
-        } else if self.app_icon_hovered == Some(index) {
-            None
-        } else {
-            self.app_icon_hovered
-        };
-        if target == self.app_icon_hovered {
-            return;
-        }
-        self.app_icon_hover_prev = self.app_icon_hovered;
-        self.app_icon_hovered = target;
-        self.app_icon_hover_since
-            .set(Some(std::time::Instant::now()));
-
-        // Drive the opacity fade by re-rendering every frame for its duration.
-        cx.spawn(async move |this, cx| {
-            let frames = ((APP_ICON_HOVER_SECONDS / 0.016).ceil() as usize).max(1) + 1;
-            for _ in 0..frames {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(16))
-                    .await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    pub(crate) fn set_app_icon(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= crate::editor::helpers::APP_ICON_COUNT
-            || self.app_settings.app_icon_index == index
-        {
-            return;
-        }
-        self.app_settings.app_icon_index = index;
-        self.app_settings.save();
-        apply_app_icon_to_dock(index);
-        cx.notify();
     }
 
     fn render_editor_display_options(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1835,13 +1704,13 @@ impl EditorView {
     }
 }
 
-/// Applies the selected application icon tile to the macOS Dock at runtime via
+/// Applies the default application icon tile to the macOS Dock at runtime via
 /// `NSApplication setApplicationIconImage:`. No-op on other platforms.
 #[cfg(target_os = "macos")]
-pub(crate) fn apply_app_icon_to_dock(index: usize) {
+pub(crate) fn apply_app_icon_to_dock() {
     use objc::{class, msg_send, sel, sel_impl};
 
-    let Some(padded_path) = build_padded_dock_icon(index) else {
+    let Some(padded_path) = build_padded_dock_icon() else {
         return;
     };
     let Some(path_str) = padded_path.to_str() else {
@@ -1869,7 +1738,7 @@ pub(crate) fn apply_app_icon_to_dock(index: usize) {
 /// A soft drop shadow is baked in so the Dock icon gains the same depth as the
 /// bundled app icon.
 #[cfg(target_os = "macos")]
-fn build_padded_dock_icon(index: usize) -> Option<std::path::PathBuf> {
+fn build_padded_dock_icon() -> Option<std::path::PathBuf> {
     use image::{Rgba, RgbaImage, imageops};
 
     // Match the .icns margin: artwork fills ~80.5% of the canvas, centered.
@@ -1880,9 +1749,8 @@ fn build_padded_dock_icon(index: usize) -> Option<std::path::PathBuf> {
     const SHADOW_BLUR: f32 = 16.0;
     const SHADOW_STRENGTH: f32 = 0.28;
 
-    let tile_path = crate::editor::helpers::resolve_asset_image_path(
-        &crate::editor::helpers::app_icon_asset_path(index),
-    );
+    let tile_path =
+        crate::editor::helpers::resolve_asset_image_path(crate::editor::helpers::APP_ICON_PATH);
     let tile = image::open(&tile_path).ok()?.to_rgba8();
     let content = imageops::resize(&tile, CONTENT, CONTENT, imageops::FilterType::Lanczos3);
     let offset = ((CANVAS - CONTENT) / 2) as i64;
@@ -1909,10 +1777,10 @@ fn build_padded_dock_icon(index: usize) -> Option<std::path::PathBuf> {
     imageops::overlay(&mut canvas, &shadow, 0, 0);
     imageops::overlay(&mut canvas, &content, offset, offset);
 
-    let out_path = std::env::temp_dir().join(format!("moeka-dock-icon-{index}.png"));
+    let out_path = std::env::temp_dir().join("moeka-dock-icon.png");
     canvas.save(&out_path).ok()?;
     Some(out_path)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn apply_app_icon_to_dock(_index: usize) {}
+pub(crate) fn apply_app_icon_to_dock() {}

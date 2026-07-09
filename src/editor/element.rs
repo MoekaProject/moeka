@@ -7404,6 +7404,7 @@ impl Element for EditorElement {
                 editor.generated_preview_rerender_pending = false;
                 editor.schedule_generated_preview_rerender(cx);
             }
+            editor.ensure_visible_generated_block_previews(cx);
             let mut did_adjust_click_anchor = false;
             if let Some(anchor) = editor.pending_click_anchor.take() {
                 let line = anchor.line.min(editor.buffer.line_count());

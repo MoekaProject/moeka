@@ -20,6 +20,7 @@ fn utf8_offset_in_text_for_utf16(text: &str, utf16_offset: usize) -> usize {
     utf8_offset.min(text.len())
 }
 
+#[cfg(test)]
 fn utf16_offset_in_text_for_utf8(text: &str, utf8_offset: usize) -> usize {
     let mut utf16_offset = 0usize;
     let mut utf8_count = 0usize;
@@ -221,11 +222,11 @@ impl EditorView {
     }
 
     pub(crate) fn offset_from_utf16(&self, utf16_offset: usize) -> usize {
-        utf8_offset_in_text_for_utf16(self.buffer.text(), utf16_offset)
+        self.buffer.offset_for_utf16_offset(utf16_offset)
     }
 
     pub(crate) fn offset_to_utf16(&self, utf8_offset: usize) -> usize {
-        utf16_offset_in_text_for_utf8(self.buffer.text(), utf8_offset)
+        self.buffer.utf16_offset_for_offset(utf8_offset)
     }
 
     pub(crate) fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {

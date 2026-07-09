@@ -18,6 +18,7 @@ use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::sync::Once;
+use std::sync::OnceLock;
 
 use gpui::*;
 
@@ -63,6 +64,14 @@ pub(crate) fn resolve_runtime_path(path: impl AsRef<Path>) -> Option<PathBuf> {
 }
 
 fn runtime_search_roots() -> Vec<PathBuf> {
+    static RUNTIME_SEARCH_ROOTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+    RUNTIME_SEARCH_ROOTS
+        .get_or_init(build_runtime_search_roots)
+        .clone()
+}
+
+fn build_runtime_search_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
     if let Ok(executable_path) = std::env::current_exe() {
@@ -252,6 +261,16 @@ fn main() {
             KeyBinding::new("cmd-shift-f", FindInFiles, Some("MarkdownEditor")),
             KeyBinding::new("cmd-p", QuickOpen, Some("MarkdownEditor")),
             KeyBinding::new("cmd-o", OpenFileDialog, None),
+            KeyBinding::new(
+                "cmd-alt-ctrl-p",
+                ToggleRuntimeProfile,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new(
+                "cmd-shift-alt-ctrl-p",
+                WriteRuntimeProfileSnapshot,
+                Some("MarkdownEditor"),
+            ),
         ]);
 
         // TextInput keybindings

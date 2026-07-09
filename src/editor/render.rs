@@ -748,6 +748,8 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_add_cursor_below))
             .on_action(cx.listener(Self::on_select_next_occurrence))
             .on_action(cx.listener(Self::on_select_all_occurrences))
+            .on_action(cx.listener(Self::on_toggle_runtime_profile))
+            .on_action(cx.listener(Self::on_write_runtime_profile_snapshot))
             .when(self.should_render_sidebar_panel(), |this| {
                 let sidebar_w = self.sidebar_width();
                 let sidebar_layout_w = self.sidebar_layout_width();

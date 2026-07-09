@@ -3936,17 +3936,25 @@ fn adjust_code_block_highlight_color_for_theme(mut color: Hsla, theme: &Theme) -
 }
 
 pub(crate) fn resolve_asset_image_path(path: &str) -> PathBuf {
-    crate::resolve_runtime_path(path).unwrap_or_else(|| PathBuf::from(path))
+    use std::sync::{Mutex, OnceLock};
+
+    static RESOLVED_ASSET_PATHS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+
+    let cache = RESOLVED_ASSET_PATHS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(cache) = cache.lock()
+        && let Some(resolved) = cache.get(path)
+    {
+        return resolved.clone();
+    }
+
+    let resolved = crate::resolve_runtime_path(path).unwrap_or_else(|| PathBuf::from(path));
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(path.to_string(), resolved.clone());
+    }
+    resolved
 }
 
-/// Number of selectable application icons (a 3x3 grid sliced from
-/// `assets/icons/app/icons.png` into `icon-0.png`..`icon-8.png`).
-pub(crate) const APP_ICON_COUNT: usize = 9;
-
-/// Asset path for a selectable application icon tile by index (0-based).
-pub(crate) fn app_icon_asset_path(index: usize) -> String {
-    format!("assets/icons/app/icon-{index}.png")
-}
+pub(crate) const APP_ICON_PATH: &str = "assets/icons/app/icon-0.png";
 
 pub(crate) fn is_remote_image_url(path: &str) -> bool {
     path.starts_with("http://") || path.starts_with("https://")

@@ -273,6 +273,7 @@ impl EditorView {
             LanguagePickerKind::Indentation(_) => unreachable!(),
         };
         let is_code_or_text = matches!(file_kind, FileKind::Code { .. } | FileKind::Text);
+        self.active_file_kind_cache = Some(file_kind.clone());
 
         if let Some(tab) = self.tabs.get_mut(index) {
             tab.file_kind = Some(file_kind);

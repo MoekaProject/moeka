@@ -32,6 +32,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sys-locale = "0.3"
+sysinfo = "0.31.4"
 pinyin = "0.10"
 trash = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -49,6 +50,9 @@ usvg = { version = "0.45.1", default-features = false, features = [
   "system-fonts",
   "memmap-fonts",
 ] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+pprof = { version = "0.15", features = ["flamegraph"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -70,3 +74,10 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+lto = false
+codegen-units = 16

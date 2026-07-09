@@ -211,7 +211,6 @@ mod tests {
             highlight_line_background: true,
             date_time_format: "%Y-%m-%d %H:%M".to_string(),
             starred_files: Vec::new(),
-            app_icon_index: 0,
         }
     }
 

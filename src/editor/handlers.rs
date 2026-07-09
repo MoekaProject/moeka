@@ -3,6 +3,7 @@ use gpui::{Context, KeyDownEvent, Window};
 use crate::actions::*;
 use crate::markdown::{self, BlockType};
 
+use super::profiler::{RuntimeProfilePaths, RuntimeProfiler};
 use super::*;
 
 impl EditorView {
@@ -127,6 +128,120 @@ impl EditorView {
             return;
         }
         self.apply_history_snapshot(cx, |history, current| history.take_redo(current));
+    }
+
+    pub(crate) fn on_toggle_runtime_profile(
+        &mut self,
+        _: &ToggleRuntimeProfile,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(profiler) = self.runtime_profiler.take() {
+            let diagnostics = self.runtime_profile_diagnostics();
+            match profiler.stop_with_diagnostics("manual-stop", Some(diagnostics)) {
+                Ok(paths) => self.show_runtime_profile_paths("Runtime profile stopped", paths, cx),
+                Err(error) => self.show_runtime_profile_error(
+                    "Failed to stop runtime profile",
+                    format!("{error:#}"),
+                    cx,
+                ),
+            }
+            return;
+        }
+
+        match RuntimeProfiler::start_manual() {
+            Ok(profiler) => {
+                let output_dir = profiler.output_dir().to_path_buf();
+                self.runtime_profiler = Some(profiler);
+                self.show_dialog(
+                    Dialog {
+                        title: "Runtime profile started".to_string(),
+                        message: format!(
+                            "Profile output directory:\n{}\n\nPress Cmd+Ctrl+Option+P to stop, or Cmd+Ctrl+Option+Shift+P to write an intermediate snapshot.",
+                            output_dir.display()
+                        ),
+                        save_label: None,
+                        confirm_label: "OK".to_string(),
+                        cancel_label: "Close".to_string(),
+                        is_danger: false,
+                        action: DialogAction::DismissOnly,
+                    },
+                    cx,
+                );
+            }
+            Err(error) => self.show_runtime_profile_error(
+                "Failed to start runtime profile",
+                format!("{error:#}"),
+                cx,
+            ),
+        }
+    }
+
+    pub(crate) fn on_write_runtime_profile_snapshot(
+        &mut self,
+        _: &WriteRuntimeProfileSnapshot,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.runtime_profiler.is_none() {
+            self.show_runtime_profile_error(
+                "Runtime profile is not running",
+                "Press Cmd+Ctrl+Option+P to start profiling before taking a snapshot.".to_string(),
+                cx,
+            );
+            return;
+        }
+
+        let diagnostics = self.runtime_profile_diagnostics();
+        let profiler = self
+            .runtime_profiler
+            .as_mut()
+            .expect("runtime profiler checked above");
+        match profiler.write_snapshot_with_diagnostics("manual-snapshot", Some(diagnostics)) {
+            Ok(paths) => {
+                self.show_runtime_profile_paths("Runtime profile snapshot written", paths, cx)
+            }
+            Err(error) => self.show_runtime_profile_error(
+                "Failed to write runtime profile snapshot",
+                format!("{error:#}"),
+                cx,
+            ),
+        }
+    }
+
+    fn show_runtime_profile_paths(
+        &mut self,
+        title: &str,
+        paths: RuntimeProfilePaths,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_dialog(
+            Dialog {
+                title: title.to_string(),
+                message: paths.message(),
+                save_label: None,
+                confirm_label: "OK".to_string(),
+                cancel_label: "Close".to_string(),
+                is_danger: false,
+                action: DialogAction::DismissOnly,
+            },
+            cx,
+        );
+    }
+
+    fn show_runtime_profile_error(&mut self, title: &str, message: String, cx: &mut Context<Self>) {
+        self.show_dialog(
+            Dialog {
+                title: title.to_string(),
+                message,
+                save_label: None,
+                confirm_label: "OK".to_string(),
+                cancel_label: "Close".to_string(),
+                is_danger: false,
+                action: DialogAction::DismissOnly,
+            },
+            cx,
+        );
     }
 
     pub(crate) fn on_backspace(

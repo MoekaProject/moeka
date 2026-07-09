@@ -22,6 +22,7 @@ mod language_detection;
 mod language_picker;
 mod menus;
 mod outline;
+mod profiler;
 mod quick_open;
 mod render;
 mod scaling;
@@ -90,6 +91,14 @@ const PANEL_ANIMATION_FRAME_MS: u64 = 8;
 const UNDO_GROUP_INTERVAL: Duration = Duration::from_millis(300);
 const SIDEBAR_GIT_STATUS_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 const GIT_HISTORY_REFRESH_MIN_INTERVAL_MS: u64 = 350;
+const GENERATED_PREVIEW_RENDER_BUDGET: usize = 24;
+const GENERATED_PREVIEW_VISIBLE_MARGIN_LINES: usize = 80;
+const GENERATED_PREVIEW_CACHE_RETAIN: usize = 96;
+const LINE_DISPLAY_CACHE_TRIM_MIN_LINES: usize = 20_000;
+const LINE_DISPLAY_CACHE_MAX_CACHED_LINES: usize = 2_000;
+const LINE_DISPLAY_CACHE_VISIBLE_MARGIN_LINES: usize = 600;
+const LINE_DISPLAY_CACHE_CURSOR_MARGIN_LINES: usize = 200;
+const LINE_DISPLAY_CACHE_TRIM_UPDATE_INTERVAL: usize = 64;
 pub(super) const WELCOME_TAB_ID: &str = "welcome-1";
 
 #[derive(Clone, Copy, Default)]
@@ -764,6 +773,8 @@ pub(crate) struct LineDisplayInfo {
     pub selection_padding_left_px: f32,
 }
 
+pub(crate) type LineDisplayCache = Vec<Option<Box<LineDisplayInfo>>>;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WordCharClass {
     AsciiWord,
@@ -1190,7 +1201,7 @@ pub(crate) struct ClickScrollAnchor {
 }
 
 struct PendingLineDisplayTransfer {
-    cached_lines: Vec<Option<LineDisplayInfo>>,
+    cached_lines: LineDisplayCache,
     start_line: usize,
     old_end_line_exclusive: usize,
     new_end_line_exclusive: usize,
@@ -1205,41 +1216,32 @@ struct PendingLineDisplayTransfer {
 }
 
 impl PendingLineDisplayTransfer {
-    fn apply(mut self, new_line_count: usize) -> Vec<Option<LineDisplayInfo>> {
-        let mut next: Vec<Option<LineDisplayInfo>> = std::iter::repeat_with(|| None)
-            .take(new_line_count)
-            .collect();
-        let prefix_end = self
-            .start_line
+    fn apply(mut self, new_line_count: usize) -> LineDisplayCache {
+        let replace_start = self.start_line.min(self.cached_lines.len());
+        let replace_end = self
+            .old_end_line_exclusive
             .min(self.cached_lines.len())
-            .min(new_line_count);
-        // Move the unchanged prefix/suffix lines instead of deep-cloning them.
-        // `LineDisplayInfo` owns a String plus several Vecs/HashMap, so on a large
-        // document cloning thousands of these on every keystroke was a major cost;
-        // `Option::take` transfers ownership at pointer cost.
-        for idx in 0..prefix_end {
-            next[idx] = self.cached_lines[idx].take();
-        }
+            .max(replace_start);
+        let inserted_line_count = self.new_end_line_exclusive.saturating_sub(self.start_line);
 
-        let old_suffix_start = self.old_end_line_exclusive.min(self.cached_lines.len());
-        let new_suffix_start = self.new_end_line_exclusive.min(new_line_count);
-        let suffix_len = self
-            .cached_lines
-            .len()
-            .saturating_sub(old_suffix_start)
-            .min(new_line_count.saturating_sub(new_suffix_start));
+        self.cached_lines.splice(
+            replace_start..replace_end,
+            std::iter::repeat_with(|| None).take(inserted_line_count),
+        );
 
-        for idx in 0..suffix_len {
-            next[new_suffix_start + idx] = self.cached_lines[old_suffix_start + idx].take();
+        if self.cached_lines.len() > new_line_count {
+            self.cached_lines.truncate(new_line_count);
+        } else if self.cached_lines.len() < new_line_count {
+            self.cached_lines.resize_with(new_line_count, || None);
         }
 
         let dirty_start = self.dirty_start_line.min(new_line_count);
         let dirty_end = self.dirty_end_line_exclusive.min(new_line_count);
         for line_idx in dirty_start..dirty_end {
-            next[line_idx] = None;
+            self.cached_lines[line_idx] = None;
         }
 
-        next
+        self.cached_lines
     }
 
     fn apply_non_markdown_decoration_transfer(
@@ -1325,8 +1327,9 @@ pub struct EditorView {
     pub(crate) vertical_move_goal_x: Option<f32>,
     pub(crate) last_scroll_cursor_visual_x: Option<f32>,
     pub(crate) wrap_boundary_affinity: Option<WrapBoundaryAffinity>,
-    pub(crate) line_display_info: Vec<Option<LineDisplayInfo>>,
+    pub(crate) line_display_info: LineDisplayCache,
     pending_line_display_transfer: Option<PendingLineDisplayTransfer>,
+    line_display_trim_update_counter: Cell<usize>,
     line_geometry_cache_dirty: Cell<bool>,
     line_geometry_cache: RefCell<LineGeometryCacheState>,
     indent_guide_step_cache_dirty: Cell<bool>,
@@ -1423,8 +1426,10 @@ pub struct EditorView {
     pub(crate) current_file_path: Option<PathBuf>,
     pub(crate) sidebar_error: Option<String>,
     pub(crate) tabs: Vec<OpenTab>,
-    pub(crate) tab_layout_cache: HashMap<String, (Vec<Option<LineDisplayInfo>>, f32)>,
+    pub(crate) tab_layout_cache: HashMap<String, (LineDisplayCache, f32)>,
     pub(crate) active_tab_id: Option<String>,
+    pub(crate) active_tab_index_cache: Cell<Option<usize>>,
+    pub(crate) active_file_kind_cache: Option<FileKind>,
     pub(crate) next_tab_id: usize,
     pub(crate) last_editor_left: f32,
     pub(crate) last_editor_width: f32,
@@ -1584,22 +1589,20 @@ pub struct EditorView {
     pub(crate) outline_rail_clicked_active_line: Option<usize>,
     pub(crate) outline_rail_scroll_offset: Option<f32>,
     pub(crate) outline_rail_collapsed_heading_lines: HashSet<usize>,
+    pub(crate) outline_headings_cache: RefCell<Vec<outline::OutlineHeading>>,
+    pub(crate) outline_headings_cache_dirty: Cell<bool>,
     pub(crate) outline_rail_last_active_line: Cell<Option<usize>>,
     pub(crate) outline_rail_active_since: Cell<Option<Instant>>,
     pub(crate) outline_rail_hover_since: Cell<Option<Instant>>,
-    /// App-icon picker hover state: which tile is hovered, the tile losing
-    /// hover (for the fade-out), and when the current transition started.
-    pub(crate) app_icon_hovered: Option<usize>,
-    pub(crate) app_icon_hover_prev: Option<usize>,
-    pub(crate) app_icon_hover_since: Cell<Option<Instant>>,
     /// Width (px, from the right viewport edge) occupied by the outline rail's
     /// interactive zone this frame, so toolbar-hover logic can treat hovering it
     /// as keep-visible. 0 when the rail is not shown.
     pub(crate) outline_rail_zone_from_right: Cell<f32>,
     pub(crate) info_panel_scroll_handle: ScrollHandle,
     pub(crate) git_history_scroll_handle: ScrollHandle,
+    pub(crate) outline_panel_scroll_handle: ScrollHandle,
     pub(crate) info_panel_cache_tab_id: Option<String>,
-    pub(crate) info_panel_cache_result: Option<Option<info_panel::InfoPanelData>>,
+    pub(crate) info_panel_cache_result: Option<Option<Arc<info_panel::InfoPanelData>>>,
     pub(crate) git_history_cache_path: Option<PathBuf>,
     pub(crate) git_history_cache_result: Option<Option<Vec<info_panel::GitHistoryItem>>>,
     pub(crate) git_history_cache_dirty: bool,
@@ -1783,11 +1786,18 @@ pub struct EditorView {
     pub(crate) update_task: Option<Task<()>>,
     pub(crate) ui_language: UiLanguage,
     pub(crate) app_settings: AppSettings,
+    pub(crate) runtime_profiler: Option<profiler::RuntimeProfiler>,
 }
 
 impl Drop for EditorView {
     fn drop(&mut self) {
         self.stop_chat_terminal();
+        let diagnostics = self.runtime_profile_diagnostics();
+        if let Some(profiler) = self.runtime_profiler.take()
+            && let Err(error) = profiler.stop_with_diagnostics("drop", Some(diagnostics))
+        {
+            eprintln!("Failed to write runtime profile on shutdown: {error:#}");
+        }
     }
 }
 
@@ -1797,9 +1807,17 @@ impl EditorView {
         let expanded_dirs = HashSet::new();
         let sidebar_error = None;
         let app_settings = AppSettings::load();
-        settings_panel::apply_app_icon_to_dock(app_settings.app_icon_index);
+        let runtime_profiler = match profiler::RuntimeProfiler::start_from_env() {
+            Ok(profiler) => profiler,
+            Err(error) => {
+                eprintln!("Failed to start runtime profiler from environment: {error:#}");
+                None
+            }
+        };
+        settings_panel::apply_app_icon_to_dock();
         let ui_language = app_settings.ui_language();
         let welcome_tab = builtin_welcome_tab(ui_language);
+        let welcome_file_kind = welcome_tab.file_kind.clone();
         let buffer = Buffer::from_text(&welcome_tab.snapshot.text);
         let decorations = markdown::parse_decorations(buffer.text());
         let theme_kind = app_settings.theme_kind();
@@ -1849,6 +1867,7 @@ impl EditorView {
             wrap_boundary_affinity: None,
             line_display_info: Vec::new(),
             pending_line_display_transfer: None,
+            line_display_trim_update_counter: Cell::new(0),
             line_geometry_cache_dirty: Cell::new(true),
             line_geometry_cache: RefCell::new(LineGeometryCacheState::default()),
             indent_guide_step_cache_dirty: Cell::new(true),
@@ -1921,6 +1940,8 @@ impl EditorView {
             tabs: vec![welcome_tab],
             tab_layout_cache: HashMap::new(),
             active_tab_id: Some(WELCOME_TAB_ID.to_string()),
+            active_tab_index_cache: Cell::new(Some(0)),
+            active_file_kind_cache: welcome_file_kind,
             next_tab_id: 1,
             last_editor_left: 0.0,
             last_editor_width: init_max_width,
@@ -2069,15 +2090,15 @@ impl EditorView {
             outline_rail_clicked_active_line: None,
             outline_rail_scroll_offset: None,
             outline_rail_collapsed_heading_lines: HashSet::new(),
+            outline_headings_cache: RefCell::new(Vec::new()),
+            outline_headings_cache_dirty: Cell::new(true),
             outline_rail_last_active_line: Cell::new(None),
             outline_rail_active_since: Cell::new(None),
             outline_rail_hover_since: Cell::new(None),
-            app_icon_hovered: None,
-            app_icon_hover_prev: None,
-            app_icon_hover_since: Cell::new(None),
             outline_rail_zone_from_right: Cell::new(0.0),
             info_panel_scroll_handle: ScrollHandle::new(),
             git_history_scroll_handle: ScrollHandle::new(),
+            outline_panel_scroll_handle: ScrollHandle::new(),
             info_panel_cache_tab_id: None,
             info_panel_cache_result: None,
             git_history_cache_path: None,
@@ -2233,6 +2254,7 @@ impl EditorView {
             update_task: None,
             ui_language,
             app_settings,
+            runtime_profiler,
         };
         this.last_content_left = this.padding_left();
         this.last_text_width =
@@ -3810,6 +3832,7 @@ impl EditorView {
             return;
         };
         let is_code_or_text = matches!(file_kind, FileKind::Code { .. } | FileKind::Text);
+        self.active_file_kind_cache = Some(file_kind.clone());
         if let Some(tab) = self.tabs.get_mut(index) {
             tab.file_kind = Some(file_kind);
             if is_code_or_text {
@@ -4535,6 +4558,28 @@ impl EditorView {
         self.refresh_generated_block_previews_with_mode(true);
     }
 
+    pub(crate) fn ensure_visible_generated_block_previews(&mut self, cx: &mut Context<Self>) {
+        if self.decorations.is_empty() {
+            return;
+        }
+        let (visible_start, visible_end) = self.generated_preview_priority_line_range();
+        let visible_start = visible_start.min(self.decorations.len().saturating_sub(1));
+        let visible_end = visible_end.min(self.decorations.len().saturating_sub(1));
+        let needs_visible_preview =
+            self.decorations[visible_start..=visible_end]
+                .iter()
+                .any(|decoration| {
+                    let Some(preview) = decoration.block_preview.as_ref() else {
+                        return false;
+                    };
+                    preview.is_anchor && !self.image_cache.contains_key(&preview.cache_key)
+                });
+        if needs_visible_preview {
+            self.refresh_generated_block_previews();
+            cx.notify();
+        }
+    }
+
     /// Debounced live rebuild of the chart/formula being edited in code view: the
     /// in-edit raster is frozen on each keystroke (see the freeze in
     /// `refresh_generated_block_previews_with_mode`); this rebuilds it once
@@ -4555,7 +4600,7 @@ impl EditorView {
 
     fn refresh_generated_block_previews_with_mode(&mut self, force: bool) {
         if self.active_tab_is_diff() {
-            self.generated_preview_keys.clear();
+            self.prune_generated_preview_caches(HashSet::new());
             return;
         }
 
@@ -4582,7 +4627,10 @@ impl EditorView {
             }
         }
 
-        let mut next_generated_keys = HashSet::new();
+        let next_generated_keys = preview_entries
+            .iter()
+            .map(|preview| preview.cache_key.clone())
+            .collect::<HashSet<_>>();
 
         // Freeze the chart/formula currently being edited in code view. Its cache
         // key is content-derived, so each keystroke yields a new key with no
@@ -4609,8 +4657,19 @@ impl EditorView {
             }
         }
 
+        let (priority_start, priority_end) = self.generated_preview_priority_line_range();
+        preview_entries.sort_by_key(|preview| {
+            let in_priority_range =
+                preview.start_line <= priority_end && preview.end_line >= priority_start;
+            let cursor_distance = preview.start_line.abs_diff(
+                self.cursor_line()
+                    .min(self.buffer.line_count().saturating_sub(1)),
+            );
+            (!in_priority_range, cursor_distance, preview.start_line)
+        });
+
+        let mut rendered_count = 0usize;
         for preview in preview_entries {
-            next_generated_keys.insert(preview.cache_key.clone());
             let has_cached_image = self.image_cache.contains_key(&preview.cache_key);
             if !force
                 && has_cached_image
@@ -4618,6 +4677,10 @@ impl EditorView {
                     .generated_preview_svg_cache
                     .contains_key(&preview.cache_key)
             {
+                continue;
+            }
+
+            if rendered_count >= GENERATED_PREVIEW_RENDER_BUDGET {
                 continue;
             }
 
@@ -4650,6 +4713,7 @@ impl EditorView {
             self.image_cache.insert(preview.cache_key.clone(), image);
             self.generated_preview_overlay_cache
                 .remove(&preview.cache_key);
+            rendered_count += 1;
         }
 
         // Preserve the zoom/pan of the preview currently being edited in code
@@ -4671,15 +4735,117 @@ impl EditorView {
             self.code_mode_preview_key = Some(new_key);
         }
 
-        self.generated_preview_keys = next_generated_keys;
+        self.prune_generated_preview_caches(next_generated_keys);
+    }
+
+    fn generated_preview_priority_line_range(&self) -> (usize, usize) {
+        let line_count = self.buffer.line_count();
+        if line_count == 0 {
+            return (0, 0);
+        }
+
+        let viewport_start = self
+            .line_at_y((self.scroll_offset - self.padding_top()).max(0.0))
+            .min(line_count.saturating_sub(1));
+        let viewport_end = self
+            .line_at_y(self.scroll_offset + self.editor_visible_height() + self.padding_bottom())
+            .min(line_count.saturating_sub(1));
+        let cursor_line = self.cursor_line().min(line_count.saturating_sub(1));
+
+        let start = viewport_start
+            .min(cursor_line)
+            .saturating_sub(GENERATED_PREVIEW_VISIBLE_MARGIN_LINES);
+        let end = viewport_end
+            .max(cursor_line)
+            .saturating_add(GENERATED_PREVIEW_VISIBLE_MARGIN_LINES)
+            .min(line_count.saturating_sub(1));
+        (start, end)
+    }
+
+    fn prune_generated_preview_caches(&mut self, next_generated_keys: HashSet<String>) {
+        let previous_generated_keys =
+            std::mem::replace(&mut self.generated_preview_keys, next_generated_keys);
+        for stale_key in previous_generated_keys {
+            if self.generated_preview_keys.contains(&stale_key) {
+                continue;
+            }
+            self.image_cache.remove(&stale_key);
+            self.generated_preview_svg_cache.remove(&stale_key);
+            self.generated_preview_overlay_cache.remove(&stale_key);
+            self.generated_preview_views.remove(&stale_key);
+        }
         self.generated_preview_views
             .retain(|cache_key, _| self.generated_preview_keys.contains(cache_key));
+        self.trim_generated_preview_render_caches();
+    }
+
+    fn trim_generated_preview_render_caches(&mut self) {
+        if self.generated_preview_keys.len() <= GENERATED_PREVIEW_CACHE_RETAIN {
+            return;
+        }
+
+        let (priority_start, priority_end) = self.generated_preview_priority_line_range();
+        let cursor_line = self
+            .cursor_line()
+            .min(self.buffer.line_count().saturating_sub(1));
+        let mut ranked_keys = self
+            .decorations
+            .iter()
+            .filter_map(|decoration| decoration.block_preview.as_ref())
+            .filter(|preview| preview.is_anchor)
+            .filter(|preview| {
+                self.image_cache.contains_key(&preview.cache_key)
+                    || self
+                        .generated_preview_svg_cache
+                        .contains_key(&preview.cache_key)
+                    || self
+                        .generated_preview_overlay_cache
+                        .contains_key(&preview.cache_key)
+                    || self
+                        .generated_preview_views
+                        .contains_key(&preview.cache_key)
+            })
+            .map(|preview| {
+                let in_priority_range =
+                    preview.start_line <= priority_end && preview.end_line >= priority_start;
+                let cursor_distance = preview.start_line.abs_diff(cursor_line);
+                (
+                    !in_priority_range,
+                    cursor_distance,
+                    preview.cache_key.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if ranked_keys.len() <= GENERATED_PREVIEW_CACHE_RETAIN {
+            return;
+        }
+
+        ranked_keys.sort();
+        let mut keep_keys = ranked_keys
+            .into_iter()
+            .take(GENERATED_PREVIEW_CACHE_RETAIN)
+            .map(|(_, _, cache_key)| cache_key)
+            .collect::<HashSet<_>>();
+        if let Some(cache_key) = self.code_mode_preview_key.as_ref() {
+            keep_keys.insert(cache_key.clone());
+        }
+        if let Some(overlay) = self.preview_overlay.as_ref() {
+            keep_keys.insert(overlay.cache_key.clone());
+        }
+
+        for cache_key in self.generated_preview_keys.iter() {
+            if keep_keys.contains(cache_key) {
+                continue;
+            }
+            self.image_cache.remove(cache_key);
+            self.generated_preview_svg_cache.remove(cache_key);
+            self.generated_preview_overlay_cache.remove(cache_key);
+            self.generated_preview_views.remove(cache_key);
+        }
     }
 
     pub(crate) fn active_file_kind(&self) -> Option<&FileKind> {
-        self.active_tab_index()
-            .and_then(|index| self.tabs.get(index))
-            .and_then(|tab| tab.file_kind.as_ref())
+        self.active_file_kind_cache.as_ref()
     }
 
     pub(crate) fn active_tab_supports_text_buffer(&self) -> bool {
@@ -4812,7 +4978,9 @@ impl EditorView {
         let scroll_y = (-f32::from(scroll_handle.offset().y)).max(0.0);
         let content_start = (scroll_y - prefix_height).max(0.0);
         let content_end = (scroll_y + viewport_height - prefix_height).max(0.0);
-        let start = ((content_start / item_height).floor() as usize).saturating_sub(overscan);
+        let start = ((content_start / item_height).floor() as usize)
+            .saturating_sub(overscan)
+            .min(item_count);
         let end = ((content_end / item_height).ceil() as usize)
             .saturating_add(overscan)
             .min(item_count)
@@ -7761,9 +7929,10 @@ impl EditorView {
         self.tab_layout_cache.clear();
     }
 
-    fn set_line_display_info(&mut self, line_display_info: Vec<Option<LineDisplayInfo>>) {
+    fn set_line_display_info(&mut self, line_display_info: LineDisplayCache) {
         self.line_display_info = line_display_info;
         self.invalidate_line_geometry_cache();
+        self.maybe_trim_line_display_info_cache_after_update();
     }
 
     fn apply_line_display_info_updates(
@@ -7788,7 +7957,7 @@ impl EditorView {
         for (line_idx, info) in updates {
             if line_idx < line_count {
                 if !geometry_changed {
-                    let old_height = info_height(self.line_display_info[line_idx].as_ref());
+                    let old_height = info_height(self.line_display_info[line_idx].as_deref());
                     let new_height = info_height(info.as_ref());
                     geometry_changed = match (old_height, new_height) {
                         (Some(a), Some(b)) => (a - b).abs() > 0.01,
@@ -7796,23 +7965,82 @@ impl EditorView {
                         _ => true,
                     };
                 }
-                self.line_display_info[line_idx] = info;
+                self.line_display_info[line_idx] = info.map(Box::new);
             }
         }
 
         if geometry_changed {
             self.invalidate_line_geometry_cache();
         }
+        self.maybe_trim_line_display_info_cache_after_update();
     }
 
-    fn take_line_display_info(&mut self) -> Vec<Option<LineDisplayInfo>> {
+    fn take_line_display_info(&mut self) -> LineDisplayCache {
         self.invalidate_line_geometry_cache();
         std::mem::take(&mut self.line_display_info)
     }
 
     fn set_decorations(&mut self, decorations: Vec<LineDecoration>) {
         self.decorations = decorations;
+        self.outline_headings_cache_dirty.set(true);
         self.invalidate_line_geometry_cache();
+    }
+
+    fn trim_line_display_info_cache_for_large_document(&mut self) {
+        let line_count = self.line_display_info.len();
+        if line_count < LINE_DISPLAY_CACHE_TRIM_MIN_LINES {
+            return;
+        }
+
+        let cached_count = self
+            .line_display_info
+            .iter()
+            .filter(|info| info.is_some())
+            .count();
+        if cached_count <= LINE_DISPLAY_CACHE_MAX_CACHED_LINES {
+            return;
+        }
+
+        let viewport_start = self
+            .line_at_y((self.scroll_offset - self.padding_top()).max(0.0))
+            .min(line_count.saturating_sub(1));
+        let viewport_end = self
+            .line_at_y(self.scroll_offset + self.editor_visible_height() + self.padding_bottom())
+            .min(line_count.saturating_sub(1));
+        let visible_start = viewport_start.saturating_sub(LINE_DISPLAY_CACHE_VISIBLE_MARGIN_LINES);
+        let visible_end = viewport_end
+            .saturating_add(LINE_DISPLAY_CACHE_VISIBLE_MARGIN_LINES)
+            .min(line_count.saturating_sub(1));
+        let cursor_line = self.cursor_line().min(line_count.saturating_sub(1));
+        let cursor_start = cursor_line.saturating_sub(LINE_DISPLAY_CACHE_CURSOR_MARGIN_LINES);
+        let cursor_end = cursor_line
+            .saturating_add(LINE_DISPLAY_CACHE_CURSOR_MARGIN_LINES)
+            .min(line_count.saturating_sub(1));
+
+        let mut pruned = false;
+        for (line_idx, info) in self.line_display_info.iter_mut().enumerate() {
+            let keep_visible = visible_start <= line_idx && line_idx <= visible_end;
+            let keep_cursor = cursor_start <= line_idx && line_idx <= cursor_end;
+            if !keep_visible && !keep_cursor && info.take().is_some() {
+                pruned = true;
+            }
+        }
+
+        if pruned {
+            self.invalidate_line_geometry_cache();
+        }
+    }
+
+    fn maybe_trim_line_display_info_cache_after_update(&mut self) {
+        if self.line_display_info.len() < LINE_DISPLAY_CACHE_TRIM_MIN_LINES {
+            return;
+        }
+
+        let next = self.line_display_trim_update_counter.get().wrapping_add(1);
+        self.line_display_trim_update_counter.set(next);
+        if next % LINE_DISPLAY_CACHE_TRIM_UPDATE_INTERVAL == 0 {
+            self.trim_line_display_info_cache_for_large_document();
+        }
     }
 
     fn queue_non_markdown_line_display_transfer(

@@ -4,10 +4,9 @@
 #
 # Usage: generate_app_icon.sh <source-1024.png> <output.icns>
 #
-# The master (produced by scripts/slice_app_icons.py) is already a 1024x1024
-# canvas with the standard macOS margin and a baked drop shadow, so this script
-# only downsamples it into the iconset. Keeping it pure sips/iconutil means
-# `make dmg` needs no Python.
+# The master is a 1024x1024 canvas with the standard macOS margin and a baked
+# drop shadow, so this script only downsamples it into the iconset. Keeping it
+# pure sips/iconutil means `make dmg` needs no Python.
 
 set -euo pipefail
 
@@ -50,4 +49,3 @@ iconutil -c icns "$ICONSET_DIR" -o "$OUTPUT"
 rm -rf "$WORK_DIR"
 
 echo "Created $OUTPUT from $SOURCE"
-
