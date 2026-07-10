@@ -1995,11 +1995,17 @@ impl EditorView {
 
     fn render_update_ready_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let ts = &self.styles.tab_bar;
-        let update_color = crate::theme::hex_to_hsla("#d6a100");
-        let button_height = (self.tab_bar_height() - self.scaled(6.0)).max(18.0);
-        let icon_size = self.scaled(ts.tab_item_icon_size_px);
-        let padding_x = self.scaled(10.0);
-        let gap = self.scaled(6.0);
+        let button_height = (self.tab_bar_height()
+            - self.scaled(ts.tab_update_button_height_inset_px))
+        .max(self.scaled(ts.tab_update_button_min_height_px));
+        let icon_size = self.scaled(ts.tab_update_button_icon_size_px);
+        let padding_x = self.scaled(ts.tab_update_button_padding_x_px);
+        let gap = self.scaled(ts.tab_update_button_gap_px);
+        let text_color = ts.tab_update_button_text_color;
+        let hover_text_color = ts.tab_update_button_hover_text_color;
+        let icon_color = ts.tab_update_button_icon_color;
+        let bg = ts.tab_update_button_bg;
+        let hover_bg = ts.tab_update_button_hover_bg;
 
         div()
             .id("tab-bar-update-ready")
@@ -2009,39 +2015,30 @@ impl EditorView {
             .flex()
             .items_center()
             .gap(px(gap))
-            .rounded(px(self.scaled(8.0)))
-            .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
-            .text_color(update_color)
+            .rounded(px(self.scaled(ts.tab_update_button_radius_px)))
+            .bg(bg)
+            .text_size(px(self.scaled(ts.tab_update_button_font_size_px)))
+            .text_color(text_color)
             .cursor(CursorStyle::Arrow)
-            .hover(move |style| {
-                style.bg(gpui::Hsla {
-                    a: 0.12,
-                    ..update_color
-                })
-            })
+            .hover(move |style| style.text_color(hover_text_color).bg(hover_bg))
             .child(
                 svg()
                     .path(SITE_SVG_PATH)
                     .size(px(icon_size))
-                    .text_color(update_color),
+                    .text_color(icon_color),
             )
             .child(
                 self.prepared_update()
                     .map(|update| {
-                        crate::i18n::restart_to_install_label(
-                            self.ui_language,
-                            Some(&update.version),
-                        )
+                        crate::i18n::update_available_label(self.ui_language, Some(&update.version))
                     })
-                    .unwrap_or_else(|| {
-                        crate::i18n::restart_to_install_label(self.ui_language, None)
-                    }),
+                    .unwrap_or_else(|| crate::i18n::update_available_label(self.ui_language, None)),
             )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
-                    this.install_prepared_update();
+                    this.show_prepared_update_dialog(cx);
                 }),
             )
             .into_any_element()
@@ -2275,7 +2272,7 @@ impl EditorView {
             .flex()
             .items_center()
             .justify_end()
-            .when(self.right_panel_width() <= 0.5, |this| {
+            .when(!self.should_render_utility_panel_on_right(), |this| {
                 this.child(action_buttons)
             });
 
@@ -2362,6 +2359,9 @@ impl EditorView {
             .items_center()
             .gap(px(0.0))
             .pr(px(self.scaled(ts.tab_item_padding_right_px)))
+            .when(self.prepared_update().is_some(), |this| {
+                this.child(self.render_update_ready_button(cx))
+            })
             .child(self.render_tab_bar_action_button(
                 "panel-chat-toggle",
                 CHAT_PANEL_SVG_PATH,

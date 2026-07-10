@@ -52,8 +52,10 @@ $(APP_DIR): build-release $(INFO_PLIST_TEMPLATE) $(ICON_FILE)
 	@rsync -a \
 		--exclude '.DS_Store' \
 		assets "$(RESOURCES_DIR)/"
+	@rsync -a \
+		--exclude '.DS_Store' \
+		docs "$(RESOURCES_DIR)/"
 	@cp -R packaging/macos/*.lproj "$(RESOURCES_DIR)/"
-	@cp EDITOR.md "$(RESOURCES_DIR)/EDITOR.md"
 	@sed \
 		-e 's|__APP_EXECUTABLE__|$(APP_NAME)|g' \
 		-e 's|__APP_NAME__|$(APP_DISPLAY_NAME)|g' \

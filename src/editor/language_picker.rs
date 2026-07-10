@@ -289,7 +289,12 @@ impl EditorView {
     }
 
     pub(crate) fn render_language_picker_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
-        let bg = self.theme.bg_elevated;
+        let is_light = self.theme.bg_primary.l >= 0.5;
+        let bg = if is_light {
+            self.theme.bg_primary
+        } else {
+            self.theme.bg_elevated
+        };
         let border = self.theme.border_primary;
         let selected_bg = self.theme.bg_selected;
         let hover_bg = self.theme.bg_hover;

@@ -188,7 +188,10 @@ impl EditorView {
         let border = self.styles.tab_bar.tab_bar_border_color;
         let border_width = self.styles.tab_bar.tab_bar_border_width_px;
         let title_color = self.theme.text_secondary;
-        let value_color = with_alpha(self.theme.text_secondary, 0.62);
+        let value_color = with_alpha(
+            self.theme.text_secondary,
+            if is_light { 0.82 } else { 0.62 },
+        );
         let hover_bg = with_alpha(self.theme.text_primary, 0.08);
         let cursor_label = self.cursor_status_label();
         let (indent_title, indent_value) = self.indent_settings.status_parts(self.ui_language);

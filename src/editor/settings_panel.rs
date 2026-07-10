@@ -7,10 +7,10 @@ use gpui::{
 };
 
 use crate::i18n::{TextKey, UiLanguage, language_picker_options};
-use crate::theme::{EditorThemeMode, ThemeKind, hex_to_hsla};
+use crate::theme::{EditorThemeMode, ThemeKind};
 
 use super::{
-    DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, SITE_SVG_PATH,
+    APP_VERSION, DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, SITE_SVG_PATH,
     THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH,
 };
 
@@ -56,6 +56,8 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let bg = self.styles.editor.editor_bg;
+        let sps = &self.styles.settings_panel;
+        let version_label = format!("v{APP_VERSION}");
 
         div()
             .id("settings-panel")
@@ -78,21 +80,41 @@ impl EditorView {
                         div()
                             .w_full()
                             .flex()
-                            .items_center()
+                            .items_end()
                             .justify_between()
-                            .gap(px(self.scaled(12.0)))
+                            .gap(px(self.scaled(sps.settings_header_gap_px)))
                             .child(
                                 div()
-                                    .text_size(px(self.scaled(self.styles.ui_font_size_px + 9.0)))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(self.theme.text_bright)
-                                    .child(self.t(TextKey::SettingsPanelTitle)),
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .flex()
+                                    .items_end()
+                                    .gap(px(self.scaled(sps.settings_title_version_gap_px)))
+                                    .child(
+                                        div()
+                                            .text_size(px(
+                                                self.scaled(self.styles.ui_font_size_px + 9.0)
+                                            ))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(self.theme.text_bright)
+                                            .child(self.t(TextKey::SettingsPanelTitle)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(self
+                                                .scaled(sps.settings_title_version_font_size_px)))
+                                            .text_color(sps.settings_title_version_text_color)
+                                            .child(version_label),
+                                    ),
                             )
                             .child(
                                 div()
+                                    .ml_auto()
+                                    .flex_none()
                                     .flex()
                                     .items_center()
-                                    .gap(px(self.scaled(8.0)))
+                                    .justify_end()
+                                    .gap(px(self.scaled(sps.settings_header_actions_gap_px)))
                                     .child(self.render_settings_help_button(cx))
                                     .child(self.render_settings_site_button(cx)),
                             ),
@@ -105,34 +127,43 @@ impl EditorView {
     }
 
     fn render_settings_help_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let height = self.scaled(30.0);
-        let icon_size = self.scaled(15.0);
+        let sps = &self.styles.settings_panel;
+        let height = self.scaled(sps.settings_site_button_height_px);
+        let icon_size = self.scaled(sps.settings_site_button_icon_size_px);
 
         div()
             .id("settings-help-button")
             .h(px(height))
-            .px(px(self.scaled(12.0)))
+            .max_w(px(self.scaled(sps.settings_header_button_max_width_px)))
+            .px(px(self.scaled(sps.settings_site_button_padding_x_px)))
             .flex()
             .items_center()
-            .gap(px(self.scaled(6.0)))
-            .rounded(px(self.scaled(8.0)))
-            .border(px(1.0))
-            .border_color(self.theme.border_primary)
-            .bg(self.theme.bg_secondary)
-            .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
-            .text_color(self.theme.text_primary)
+            .gap(px(self.scaled(sps.settings_site_button_gap_px)))
+            .rounded(px(self.scaled(sps.settings_site_button_radius_px)))
+            .border(px(sps.settings_site_button_border_width_px))
+            .border_color(sps.settings_site_button_border_color)
+            .bg(sps.settings_site_button_bg)
+            .text_size(px(self.scaled(sps.settings_site_button_font_size_px)))
+            .text_color(sps.settings_site_button_text_color)
             .cursor(CursorStyle::Arrow)
             .hover({
-                let hover_bg = self.theme.bg_hover;
+                let hover_bg = sps.settings_site_button_hover_bg;
                 move |style| style.bg(hover_bg)
             })
             .child(
                 svg()
                     .path(DOC_SVG_PATH)
                     .size(px(icon_size))
-                    .text_color(self.theme.text_secondary),
+                    .text_color(sps.settings_site_button_icon_color),
             )
-            .child(self.t(TextKey::HelpManual))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .truncate()
+                    .whitespace_nowrap()
+                    .child(self.t(TextKey::HelpManual)),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -143,22 +174,22 @@ impl EditorView {
     }
 
     fn render_settings_site_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let height = self.scaled(30.0);
-        let icon_size = self.scaled(15.0);
+        let sps = &self.styles.settings_panel;
+        let height = self.scaled(sps.settings_site_button_height_px);
+        let icon_size = self.scaled(sps.settings_site_button_icon_size_px);
         let update_ready = self.prepared_update().is_some();
-        let update_color = hex_to_hsla("#d6a100");
         let text_color = if update_ready {
-            update_color
+            sps.settings_site_button_update_text_color
         } else {
-            self.theme.text_primary
+            sps.settings_site_button_text_color
         };
         let icon_color = if update_ready {
-            update_color
+            sps.settings_site_button_update_icon_color
         } else {
-            self.theme.text_secondary
+            sps.settings_site_button_icon_color
         };
         let label = if let Some(update) = self.prepared_update() {
-            crate::i18n::restart_to_install_label(self.ui_language, Some(&update.version))
+            crate::i18n::update_available_label(self.ui_language, Some(&update.version))
         } else {
             self.t(TextKey::OfficialWebsite).to_string()
         };
@@ -166,23 +197,20 @@ impl EditorView {
         div()
             .id("settings-site-button")
             .h(px(height))
-            .px(px(self.scaled(12.0)))
+            .max_w(px(self.scaled(sps.settings_header_button_max_width_px)))
+            .px(px(self.scaled(sps.settings_site_button_padding_x_px)))
             .flex()
             .items_center()
-            .gap(px(self.scaled(6.0)))
-            .rounded(px(self.scaled(8.0)))
-            .border(px(1.0))
-            .border_color(if update_ready {
-                update_color
-            } else {
-                self.theme.border_primary
-            })
-            .bg(self.theme.bg_secondary)
-            .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
+            .gap(px(self.scaled(sps.settings_site_button_gap_px)))
+            .rounded(px(self.scaled(sps.settings_site_button_radius_px)))
+            .border(px(sps.settings_site_button_border_width_px))
+            .border_color(sps.settings_site_button_border_color)
+            .bg(sps.settings_site_button_bg)
+            .text_size(px(self.scaled(sps.settings_site_button_font_size_px)))
             .text_color(text_color)
             .cursor(CursorStyle::Arrow)
             .hover({
-                let hover_bg = self.theme.bg_hover;
+                let hover_bg = sps.settings_site_button_hover_bg;
                 move |style| style.bg(hover_bg)
             })
             .child(
@@ -191,12 +219,19 @@ impl EditorView {
                     .size(px(icon_size))
                     .text_color(icon_color),
             )
-            .child(label)
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .truncate()
+                    .whitespace_nowrap()
+                    .child(label),
+            )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| {
+                cx.listener(|this, _, _, cx| {
                     if this.prepared_update().is_some() {
-                        this.install_prepared_update();
+                        this.show_prepared_update_dialog(cx);
                     } else if let Err(error) = std::process::Command::new("open")
                         .arg("https://moeka.app/")
                         .spawn()
@@ -446,8 +481,8 @@ impl EditorView {
         };
         let text_secondary = self.theme.text_secondary;
         let hover_bg = self.theme.bg_hover;
-        let toggle_active_bg = self.theme.text_primary;
-        let toggle_active_text = self.theme.bg_primary;
+        let toggle_active_bg = settings_styles.settings_option_button_active_bg;
+        let toggle_active_text = settings_styles.settings_option_button_active_text_color;
         let icon_size = self.scaled(settings_styles.settings_theme_toggle_icon_size_px);
         let toggle_height = self.scaled(settings_styles.settings_theme_toggle_height_px);
         let toggle_padding_x = self.scaled(settings_styles.settings_theme_toggle_padding_x_px);
@@ -1465,7 +1500,12 @@ impl EditorView {
         picker: &FontPickerState,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let bg = self.theme.bg_elevated;
+        let is_light = self.theme.bg_primary.l >= 0.5;
+        let bg = if is_light {
+            self.theme.bg_primary
+        } else {
+            self.theme.bg_elevated
+        };
         let border_color = self.theme.border_primary;
         let text_primary = self.theme.text_primary;
         let hover_bg = self.theme.bg_hover;

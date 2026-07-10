@@ -44,7 +44,7 @@ pub(crate) fn restore_session(editor: &mut EditorView) {
 
     let mut restored_tabs = Vec::new();
     for record in &config.session.tabs {
-        if let Some(tab) = restore_tab_from_record(record) {
+        if let Some(tab) = restore_tab_from_record(record, editor.ui_language) {
             restored_tabs.push(tab);
         }
     }
@@ -126,14 +126,14 @@ fn tab_to_record(tab: &OpenTab) -> TabSessionRecord {
     }
 }
 
-fn restore_tab_from_record(record: &TabSessionRecord) -> Option<OpenTab> {
+fn restore_tab_from_record(record: &TabSessionRecord, ui_language: UiLanguage) -> Option<OpenTab> {
     let kind = deserialize_tab_kind(&record.kind)?;
     if kind == TabKind::Settings {
         return Some(settings_tab(record.id.clone()));
     }
 
     let file_kind = record.file_kind.as_deref().and_then(deserialize_file_kind);
-    let (path, snapshot, is_dirty) = resolve_snapshot(record, file_kind.as_ref())?;
+    let (path, snapshot, is_dirty) = resolve_snapshot(record, file_kind.as_ref(), ui_language)?;
     let whiteboard = if matches!(file_kind, Some(FileKind::Whiteboard)) {
         path.as_deref().map(WhiteboardTabState::load_from_path)
     } else {
@@ -173,6 +173,7 @@ fn restore_tab_from_record(record: &TabSessionRecord) -> Option<OpenTab> {
 fn resolve_snapshot(
     record: &TabSessionRecord,
     file_kind: Option<&FileKind>,
+    ui_language: UiLanguage,
 ) -> Option<(Option<PathBuf>, EditorSnapshot, bool)> {
     let temp_text = record
         .recovery
@@ -243,7 +244,7 @@ fn resolve_snapshot(
         None if record.id == super::WELCOME_TAB_ID
             && file_kind.is_some_and(FileKind::supports_text_buffer) =>
         {
-            let text = temp_text.unwrap_or_else(super::default_document_text);
+            let text = temp_text.unwrap_or_else(|| super::default_document_text(ui_language));
             let snapshot = EditorSnapshot {
                 cursor_offset: record.view.cursor_offset.min(text.len()),
                 cursor_anchor: record.view.cursor_anchor.min(text.len()),
@@ -481,7 +482,7 @@ mod tests {
             },
         };
 
-        let restored = restore_tab_from_record(&record).unwrap();
+        let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
 
         assert_eq!(restored.history.journal_path, Some(custom_journal_path));
         assert_eq!(restored.history.undo_stack, vec![snapshot("before", 6)]);

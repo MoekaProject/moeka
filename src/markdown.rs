@@ -3218,7 +3218,7 @@ mod tests {
 
     #[test]
     fn parse_decorations_handles_editor_document_without_utf8_boundary_panics() {
-        let text = include_str!("../EDITOR.md");
+        let text = include_str!("../docs/help-zh-cn.md");
         let decorations = parse_decorations(text);
 
         assert!(!decorations.is_empty());
@@ -3236,7 +3236,7 @@ mod tests {
 
     #[test]
     fn parse_decorations_detects_all_editor_math_block_previews() {
-        let text = include_str!("../EDITOR.md");
+        let text = include_str!("../docs/help-zh-cn.md");
         let decorations = parse_decorations(text);
 
         let math_previews: Vec<_> = decorations

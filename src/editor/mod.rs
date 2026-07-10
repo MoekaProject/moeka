@@ -60,7 +60,7 @@ use language_detection::classify_pasted_text_kind;
 pub(crate) use scrollbar::{PanelScrollbarKind, PanelScrollbarState};
 pub(crate) use status_bar::IndentSettings;
 pub(crate) use types::*;
-pub(crate) use updater::UpdateState;
+pub(crate) use updater::{APP_VERSION, PreparedUpdate, UpdateState};
 pub(crate) use whiteboard::*;
 
 use std::cell::{Cell, RefCell};
@@ -732,6 +732,7 @@ pub(crate) enum DialogAction {
     SaveAndCloseTab { tab_id: String },
     DeletePath { path: PathBuf },
     DeletePaths { paths: Vec<PathBuf> },
+    InstallUpdate { update: PreparedUpdate },
     DismissOnly,
 }
 
@@ -2291,6 +2292,36 @@ impl EditorView {
         }
     }
 
+    pub(crate) fn refresh_welcome_tab_content(&mut self, cx: &mut Context<Self>) {
+        let text = default_document_text(self.ui_language);
+        let first_line_end = text.find('\n').unwrap_or(text.len());
+        let active_welcome = self
+            .active_tab_index()
+            .and_then(|index| self.tabs.get(index))
+            .is_some_and(|tab| tab.id == WELCOME_TAB_ID && tab.path.is_none());
+
+        for tab in &mut self.tabs {
+            if tab.id == WELCOME_TAB_ID && tab.path.is_none() {
+                tab.snapshot.text = text.clone();
+                tab.snapshot.cursor_offset = first_line_end;
+                tab.snapshot.cursor_anchor = first_line_end;
+                tab.snapshot.scroll_offset = 0.0;
+                tab.snapshot.extra_cursors.clear();
+                tab.is_dirty = false;
+            }
+        }
+
+        if active_welcome {
+            self.buffer = Buffer::from_text(&text);
+            self.cursor.move_to(first_line_end, &self.buffer);
+            self.extra_cursors.clear();
+            self.scroll_offset = 0.0;
+            self.reparse();
+        }
+        session_store::persist_session(self);
+        cx.notify();
+    }
+
     pub(crate) fn apply_ui_language(&mut self, language: UiLanguage, cx: &mut Context<Self>) {
         if self.ui_language == language {
             self.close_font_picker(cx);
@@ -2299,6 +2330,7 @@ impl EditorView {
         self.ui_language = language;
         self.app_settings.language = language.code().to_string();
         self.refresh_builtin_tab_titles();
+        self.refresh_welcome_tab_content(cx);
         self.finalize_settings_change(cx);
     }
 
@@ -3697,6 +3729,9 @@ impl EditorView {
             DialogAction::DeletePaths { paths } => {
                 self.delete_paths_to_trash(&paths, cx);
             }
+            DialogAction::InstallUpdate { update } => {
+                self.install_update(update);
+            }
             DialogAction::DismissOnly => {}
         }
         cx.notify();
@@ -3768,7 +3803,9 @@ impl EditorView {
                     self.close_tab(&tab_id, cx);
                 }
             }
-            DialogAction::DeletePath { .. } | DialogAction::DeletePaths { .. } => {
+            DialogAction::DeletePath { .. }
+            | DialogAction::DeletePaths { .. }
+            | DialogAction::InstallUpdate { .. } => {
                 // No save action for delete
             }
             DialogAction::DismissOnly => {
@@ -8460,14 +8497,49 @@ impl EditorView {
     }
 }
 
-pub(crate) fn default_document_text() -> String {
-    crate::resolve_runtime_path("EDITOR.md")
+pub(crate) fn default_document_text(ui_language: UiLanguage) -> String {
+    let help_path = help_document_path(ui_language);
+    crate::resolve_runtime_path(help_path)
         .and_then(|path| std::fs::read_to_string(path).ok())
-        .unwrap_or_else(|| include_str!("../../EDITOR.md").to_string())
+        .unwrap_or_else(|| bundled_help_document(ui_language).to_string())
+}
+
+fn help_document_path(ui_language: UiLanguage) -> &'static str {
+    match ui_language {
+        UiLanguage::English => "docs/help-en.md",
+        UiLanguage::ChineseSimplified => "docs/help-zh-cn.md",
+        UiLanguage::ChineseTraditional => "docs/help-zh-tw.md",
+        UiLanguage::Japanese => "docs/help-ja.md",
+        UiLanguage::Korean => "docs/help-ko.md",
+        UiLanguage::French => "docs/help-fr.md",
+        UiLanguage::German => "docs/help-de.md",
+        UiLanguage::Spanish => "docs/help-es.md",
+        UiLanguage::Portuguese => "docs/help-pt.md",
+        UiLanguage::Russian => "docs/help-ru.md",
+        UiLanguage::Arabic => "docs/help-ar.md",
+        UiLanguage::Hindi => "docs/help-hi.md",
+    }
+}
+
+fn bundled_help_document(ui_language: UiLanguage) -> &'static str {
+    match ui_language {
+        UiLanguage::English => include_str!("../../docs/help-en.md"),
+        UiLanguage::ChineseSimplified => include_str!("../../docs/help-zh-cn.md"),
+        UiLanguage::ChineseTraditional => include_str!("../../docs/help-zh-tw.md"),
+        UiLanguage::Japanese => include_str!("../../docs/help-ja.md"),
+        UiLanguage::Korean => include_str!("../../docs/help-ko.md"),
+        UiLanguage::French => include_str!("../../docs/help-fr.md"),
+        UiLanguage::German => include_str!("../../docs/help-de.md"),
+        UiLanguage::Spanish => include_str!("../../docs/help-es.md"),
+        UiLanguage::Portuguese => include_str!("../../docs/help-pt.md"),
+        UiLanguage::Russian => include_str!("../../docs/help-ru.md"),
+        UiLanguage::Arabic => include_str!("../../docs/help-ar.md"),
+        UiLanguage::Hindi => include_str!("../../docs/help-hi.md"),
+    }
 }
 
 pub(super) fn builtin_welcome_tab(ui_language: UiLanguage) -> OpenTab {
-    let initial_text = default_document_text();
+    let initial_text = default_document_text(ui_language);
     let first_line_end = initial_text.find('\n').unwrap_or(initial_text.len());
 
     OpenTab {

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use gpui::{FontWeight, Hsla};
 
-use crate::theme::{Theme, with_alpha};
+use crate::theme::{Theme, hex_to_hsla, with_alpha};
 
 /// Per-component style configuration, derived from the active theme.
 ///
@@ -485,6 +485,19 @@ pub struct TabBarStyles {
     pub tab_new_hover_text_color: Hsla,
     // Fixed trailing drop target after the new-tab button
     pub tab_end_drop_target_width_px: f32,
+    // Update button
+    pub tab_update_button_height_inset_px: f32,
+    pub tab_update_button_min_height_px: f32,
+    pub tab_update_button_padding_x_px: f32,
+    pub tab_update_button_gap_px: f32,
+    pub tab_update_button_radius_px: f32,
+    pub tab_update_button_bg: Hsla,
+    pub tab_update_button_hover_bg: Hsla,
+    pub tab_update_button_icon_size_px: f32,
+    pub tab_update_button_font_size_px: f32,
+    pub tab_update_button_text_color: Hsla,
+    pub tab_update_button_hover_text_color: Hsla,
+    pub tab_update_button_icon_color: Hsla,
     // Tab drag ghost
     pub tab_drag_ghost_opacity: f32,
     pub tab_drag_source_opacity: f32,
@@ -1157,6 +1170,26 @@ pub struct QuickOpenStyles {
 // ── Settings Panel ─────────────────────────────────────────────────
 
 pub struct SettingsPanelStyles {
+    pub settings_title_version_gap_px: f32,
+    pub settings_title_version_font_size_px: f32,
+    pub settings_title_version_text_color: Hsla,
+    pub settings_header_gap_px: f32,
+    pub settings_header_actions_gap_px: f32,
+    pub settings_header_button_max_width_px: f32,
+    pub settings_site_button_height_px: f32,
+    pub settings_site_button_padding_x_px: f32,
+    pub settings_site_button_radius_px: f32,
+    pub settings_site_button_border_width_px: f32,
+    pub settings_site_button_gap_px: f32,
+    pub settings_site_button_icon_size_px: f32,
+    pub settings_site_button_font_size_px: f32,
+    pub settings_site_button_text_color: Hsla,
+    pub settings_site_button_icon_color: Hsla,
+    pub settings_site_button_update_text_color: Hsla,
+    pub settings_site_button_update_icon_color: Hsla,
+    pub settings_site_button_bg: Hsla,
+    pub settings_site_button_hover_bg: Hsla,
+    pub settings_site_button_border_color: Hsla,
     pub settings_option_button_height_px: f32,
     pub settings_option_button_padding_x_px: f32,
     pub settings_option_button_radius_px: f32,
@@ -1230,6 +1263,24 @@ impl Styles {
             theme.checkbox_checked
         };
         let code_block_bg = deepen_block_background(theme.bg_code, is_light);
+        let text_input_theme = if is_light { theme } else { ui_theme };
+        let text_input_shadow = !is_light;
+        let settings_theme = if is_light { theme } else { ui_theme };
+        let settings_active_bg = if is_light {
+            theme.bg_selected
+        } else {
+            ui_theme.text_primary
+        };
+        let settings_active_text_color = if is_light {
+            theme.text_bright
+        } else {
+            ui_theme.bg_primary
+        };
+        let settings_update_color = if is_light {
+            hex_to_hsla("#8a6400")
+        } else {
+            hex_to_hsla("#d6a100")
+        };
         Self {
             ui_font_family: ".SystemUIFont",
             ui_font_size_px,
@@ -1637,6 +1688,18 @@ impl Styles {
                 tab_new_text_color: theme.text_secondary,
                 tab_new_hover_text_color: theme.text_bright,
                 tab_end_drop_target_width_px: 18.0,
+                tab_update_button_height_inset_px: 6.0,
+                tab_update_button_min_height_px: 18.0,
+                tab_update_button_padding_x_px: 10.0,
+                tab_update_button_gap_px: 6.0,
+                tab_update_button_radius_px: 8.0,
+                tab_update_button_bg: with_alpha(hex_to_hsla("#d6a100"), 0.08),
+                tab_update_button_hover_bg: with_alpha(hex_to_hsla("#d6a100"), 0.2),
+                tab_update_button_icon_size_px: 16.0,
+                tab_update_button_font_size_px: ui_font_size_sm_px,
+                tab_update_button_text_color: hex_to_hsla("#d6a100"),
+                tab_update_button_hover_text_color: hex_to_hsla("#ffd24d"),
+                tab_update_button_icon_color: hex_to_hsla("#d6a100"),
                 tab_drag_ghost_opacity: 0.7,
                 tab_drag_source_opacity: 0.3,
                 tab_drop_indicator_width_px: 2.0,
@@ -2098,33 +2161,33 @@ impl Styles {
                 text_input_padding_left_px: 6.0,
                 text_input_padding_right_px: 6.0,
                 text_input_font_size_px: ui_font_size_px,
-                text_input_bg: ui_theme.bg_primary,
-                text_input_focus_bg: ui_theme.bg_elevated,
-                text_input_text_color: ui_theme.text_bright,
-                text_input_placeholder_color: ui_theme.text_secondary,
+                text_input_bg: text_input_theme.bg_primary,
+                text_input_focus_bg: text_input_theme.bg_elevated,
+                text_input_text_color: text_input_theme.text_bright,
+                text_input_placeholder_color: text_input_theme.text_secondary,
                 text_input_border_width_px: 1.0,
-                text_input_border_color: ui_theme.border_primary,
-                text_input_focus_border_color: ui_theme.text_accent,
+                text_input_border_color: text_input_theme.border_primary,
+                text_input_focus_border_color: text_input_theme.text_accent,
                 text_input_radius_px: 4.0,
-                text_input_cursor_color: ui_theme.cursor,
+                text_input_cursor_color: text_input_theme.cursor,
                 text_input_cursor_width_px: 2.0,
                 text_input_cursor_height_ratio: 1.0,
                 text_input_cursor_height_adjust_px: 0.0,
-                text_input_selection_color: ui_theme.selection,
+                text_input_selection_color: text_input_theme.selection,
                 text_input_center: false,
                 text_input_right: false,
-                text_input_menu_bg: ui_theme.bg_elevated,
-                text_input_menu_text_color: ui_theme.text_primary,
+                text_input_menu_bg: text_input_theme.bg_elevated,
+                text_input_menu_text_color: text_input_theme.text_primary,
                 text_input_menu_font_size_px: ui_font_size_px,
-                text_input_menu_border_color: ui_theme.border_primary,
+                text_input_menu_border_color: text_input_theme.border_primary,
                 text_input_menu_radius_px: 10.0,
                 text_input_menu_padding_y_px: 10.0,
                 text_input_menu_item_height_px: 28.0,
                 text_input_menu_item_padding_x_px: 12.0,
-                text_input_menu_hover_bg: ui_theme.bg_hover,
-                text_input_menu_separator_color: ui_theme.border_primary,
+                text_input_menu_hover_bg: text_input_theme.bg_hover,
+                text_input_menu_separator_color: text_input_theme.border_primary,
                 text_input_menu_width_px: 160.0,
-                text_input_menu_shadow: ui_theme.bg_primary.l < 0.5,
+                text_input_menu_shadow: text_input_shadow,
             },
             search: SearchStyles {
                 search_bar_width_px: 360.0,
@@ -2261,19 +2324,39 @@ impl Styles {
                 quick_open_empty_text_color: ui_theme.text_secondary,
             },
             settings_panel: SettingsPanelStyles {
+                settings_title_version_gap_px: 10.0,
+                settings_title_version_font_size_px: ui_font_size_sm_px,
+                settings_title_version_text_color: with_alpha(settings_theme.text_secondary, 0.62),
+                settings_header_gap_px: 12.0,
+                settings_header_actions_gap_px: 8.0,
+                settings_header_button_max_width_px: 150.0,
+                settings_site_button_height_px: 30.0,
+                settings_site_button_padding_x_px: 12.0,
+                settings_site_button_radius_px: 8.0,
+                settings_site_button_border_width_px: 1.0,
+                settings_site_button_gap_px: 6.0,
+                settings_site_button_icon_size_px: 15.0,
+                settings_site_button_font_size_px: ui_font_size_sm_px,
+                settings_site_button_text_color: settings_theme.text_primary,
+                settings_site_button_icon_color: settings_theme.text_secondary,
+                settings_site_button_update_text_color: settings_update_color,
+                settings_site_button_update_icon_color: settings_update_color,
+                settings_site_button_bg: settings_theme.bg_secondary,
+                settings_site_button_hover_bg: settings_theme.bg_hover,
+                settings_site_button_border_color: settings_theme.border_primary,
                 settings_option_button_height_px: 28.0,
                 settings_option_button_padding_x_px: 12.0,
                 settings_option_button_radius_px: 999.0,
                 settings_option_button_border_width_px: 1.0,
                 settings_option_button_gap_px: 8.0,
                 settings_option_button_font_size_px: ui_font_size_sm_px,
-                settings_option_button_text_color: ui_theme.text_secondary,
-                settings_option_button_active_text_color: ui_theme.bg_primary,
-                settings_option_button_bg: ui_theme.bg_secondary,
-                settings_option_button_hover_bg: ui_theme.bg_hover,
-                settings_option_button_active_bg: ui_theme.text_primary,
-                settings_option_button_border_color: ui_theme.border_primary,
-                settings_option_button_active_border_color: ui_theme.text_primary,
+                settings_option_button_text_color: settings_theme.text_secondary,
+                settings_option_button_active_text_color: settings_active_text_color,
+                settings_option_button_bg: settings_theme.bg_secondary,
+                settings_option_button_hover_bg: settings_theme.bg_hover,
+                settings_option_button_active_bg: settings_active_bg,
+                settings_option_button_border_color: settings_theme.border_primary,
+                settings_option_button_active_border_color: settings_active_bg,
                 settings_theme_group_gap_px: 10.0,
                 settings_theme_toggle_height_px: 30.0,
                 settings_theme_toggle_padding_x_px: 12.0,
@@ -2286,11 +2369,11 @@ impl Styles {
                 settings_theme_option_radius_px: 6.0,
                 settings_theme_option_border_width_px: 1.0,
                 settings_theme_option_font_size_px: ui_font_size_sm_px,
-                settings_theme_option_hover_bg: ui_theme.bg_hover,
-                settings_theme_option_active_bg: ui_theme.bg_selected,
-                settings_theme_option_active_text_color: ui_theme.text_bright,
-                settings_theme_option_text_color: ui_theme.text_secondary,
-                settings_theme_option_border_color: ui_theme.border_primary,
+                settings_theme_option_hover_bg: settings_theme.bg_hover,
+                settings_theme_option_active_bg: settings_theme.bg_selected,
+                settings_theme_option_active_text_color: settings_theme.text_bright,
+                settings_theme_option_text_color: settings_theme.text_secondary,
+                settings_theme_option_border_color: settings_theme.border_primary,
             },
         }
     }
