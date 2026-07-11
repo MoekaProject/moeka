@@ -173,6 +173,16 @@ impl Cursor {
         self.move_to(offset, buffer);
     }
 
+    pub fn select_word_left(&mut self, buffer: &Buffer) {
+        let offset = prev_word_boundary(buffer.text(), self.offset);
+        self.select_to(offset, buffer);
+    }
+
+    pub fn select_word_right(&mut self, buffer: &Buffer) {
+        let offset = next_word_boundary(buffer.text(), self.offset);
+        self.select_to(offset, buffer);
+    }
+
     pub fn delete_word_left(&mut self, buffer: &mut Buffer) {
         if self.has_selection() {
             let range = self.selection_range();
@@ -230,4 +240,26 @@ fn next_word_boundary(text: &str, offset: usize) -> usize {
         }
     }
     text.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cursor;
+    use crate::buffer::Buffer;
+
+    #[test]
+    fn selects_words_without_splitting_utf8() {
+        let buffer = Buffer::from_text("alpha 中文 beta");
+        let mut cursor = Cursor {
+            offset: "alpha 中文".len(),
+            anchor: "alpha 中文".len(),
+        };
+
+        cursor.select_word_left(&buffer);
+        assert_eq!(&buffer.text()[cursor.selection_range()], "中文");
+
+        cursor.move_to("alpha ".len(), &buffer);
+        cursor.select_word_right(&buffer);
+        assert_eq!(&buffer.text()[cursor.selection_range()], "中文 ");
+    }
 }

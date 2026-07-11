@@ -532,6 +532,8 @@ impl EditorView {
                     .child(self.render_sidebar_header_action_button(
                         "file-list-header-sort",
                         FILETREE_SORT_SVG_PATH,
+                        crate::i18n::sidebar_action_label(self.ui_language, "sort"),
+                        None,
                         cx,
                         |this, event, _window, cx| {
                             this.open_sidebar_sort_menu(event.position, cx);
@@ -540,6 +542,8 @@ impl EditorView {
                     .child(self.render_sidebar_header_action_button(
                         "file-list-header-create",
                         FILETREE_ADD_SVG_PATH,
+                        crate::i18n::sidebar_action_label(self.ui_language, "create"),
+                        None,
                         cx,
                         move |this, _event, window, cx| {
                             this.start_create_file(create_parent.clone(), window, cx);

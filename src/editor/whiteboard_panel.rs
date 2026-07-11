@@ -26,16 +26,48 @@ impl EditorView {
 
     pub(crate) fn render_whiteboard_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let tools = [
-            ("wb-tool-select", "select.svg", WhiteboardTool::Select),
+            (
+                "wb-tool-select",
+                "select.svg",
+                WhiteboardTool::Select,
+                "select",
+                "V",
+            ),
             (
                 "wb-tool-rectangle",
                 "rectangle.svg",
                 WhiteboardTool::Rectangle,
+                "rectangle",
+                "R",
             ),
-            ("wb-tool-ellipse", "ellipse.svg", WhiteboardTool::Ellipse),
-            ("wb-tool-arrow", "arrow.svg", WhiteboardTool::Arrow),
-            ("wb-tool-line", "line.svg", WhiteboardTool::Line),
-            ("wb-tool-text", "text.svg", WhiteboardTool::Text),
+            (
+                "wb-tool-ellipse",
+                "ellipse.svg",
+                WhiteboardTool::Ellipse,
+                "ellipse",
+                "O",
+            ),
+            (
+                "wb-tool-arrow",
+                "arrow.svg",
+                WhiteboardTool::Arrow,
+                "arrow",
+                "A",
+            ),
+            (
+                "wb-tool-line",
+                "line.svg",
+                WhiteboardTool::Line,
+                "line",
+                "L",
+            ),
+            (
+                "wb-tool-text",
+                "text.svg",
+                WhiteboardTool::Text,
+                "text",
+                "T",
+            ),
         ];
         let active = self
             .active_whiteboard()
@@ -59,8 +91,16 @@ impl EditorView {
                 MouseButton::Left,
                 cx.listener(|_, _: &gpui::MouseDownEvent, _, cx| cx.stop_propagation()),
             );
-        for (id, icon, tool) in tools {
-            pill = pill.child(self.wb_tool_button(id, icon, tool, active == tool, cx));
+        for (id, icon, tool, label, shortcut) in tools {
+            pill = pill.child(self.wb_tool_button(
+                id,
+                icon,
+                tool,
+                active == tool,
+                crate::i18n::whiteboard_tool_label(self.ui_language, label),
+                shortcut,
+                cx,
+            ));
         }
 
         div()
@@ -80,6 +120,8 @@ impl EditorView {
         icon: &'static str,
         tool: WhiteboardTool,
         active: bool,
+        tooltip_title: &'static str,
+        shortcut: &'static str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let toolbar = &self.styles.toolbar;
@@ -94,7 +136,7 @@ impl EditorView {
             toolbar.toolbar_whiteboard_btn_bg
         };
         let hover_bg = toolbar.toolbar_whiteboard_btn_hover_bg;
-        div()
+        let button = div()
             .id(id)
             .w(px(self.scaled(toolbar.toolbar_whiteboard_btn_size_px)))
             .h(px(self.scaled(toolbar.toolbar_whiteboard_btn_size_px)))
@@ -117,8 +159,8 @@ impl EditorView {
                     cx.stop_propagation();
                     this.whiteboard_set_tool(tool, cx);
                 }),
-            )
-            .into_any_element()
+            );
+        tooltip::with_tooltip(button, cx.entity().clone(), tooltip_title, Some(shortcut))
     }
 
     // ── Properties panel (rendered inside the right utility panel) ──────────
@@ -967,7 +1009,7 @@ impl EditorView {
         WhiteboardStyle::default()
     }
 
-    fn whiteboard_set_tool(&mut self, tool: WhiteboardTool, cx: &mut Context<Self>) {
+    pub(crate) fn whiteboard_set_tool(&mut self, tool: WhiteboardTool, cx: &mut Context<Self>) {
         if let Some(state) = self.active_whiteboard_mut() {
             state.tool = tool;
         }

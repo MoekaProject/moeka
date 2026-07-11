@@ -6,7 +6,7 @@ use gpui::{
     canvas, deferred, div, fill, img, prelude::*, px, quad,
 };
 
-use super::tooltip::{TooltipState, toolbar_anchor_bounds};
+use super::tooltip::toolbar_anchor_bounds;
 use super::*;
 
 fn clamp_resize_dimension(value: f32, minimum: f32, maximum: f32) -> f32 {
@@ -319,7 +319,7 @@ impl EditorView {
         base_opacity: f32,
         hover_opacity: f32,
         icon_path: &'static str,
-        anchor_bounds: Bounds<gpui::Pixels>,
+        _anchor_bounds: Bounds<gpui::Pixels>,
         tooltip_title: &'static str,
         tooltip_subtitle: Option<&'static str>,
         cx: &mut Context<Self>,
@@ -330,7 +330,7 @@ impl EditorView {
         let subtitle = tooltip_subtitle.map(SharedString::from);
         let is_hovered = self.hovered_toolbar_button == Some(id);
 
-        div()
+        let button = div()
             .id(id)
             .w(px(button_width))
             .h(px(button_height))
@@ -341,8 +341,6 @@ impl EditorView {
             .cursor(CursorStyle::Arrow)
             .on_hover({
                 let editor = editor.clone();
-                let title = title.clone();
-                let subtitle = subtitle.clone();
                 move |hovering: &bool, _: &mut Window, cx: &mut App| {
                     let _ = editor.update(cx, |this, cx| {
                         let next_hover = if *hovering { Some(id) } else { None };
@@ -351,19 +349,6 @@ impl EditorView {
                                 this.hovered_toolbar_button = next_hover;
                                 cx.notify();
                             }
-                        }
-                        if *hovering {
-                            this.begin_tooltip_hover(
-                                TooltipState {
-                                    id,
-                                    title: title.clone(),
-                                    subtitle: subtitle.clone(),
-                                    anchor_bounds,
-                                },
-                                cx,
-                            );
-                        } else {
-                            this.end_tooltip_hover(id, cx);
                         }
                     });
                 }
@@ -381,12 +366,11 @@ impl EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
-                    this.clear_tooltip(cx);
                     cx.stop_propagation();
                     on_click(this, cx);
                 }),
-            )
-            .into_any_element()
+            );
+        tooltip::with_tooltip(button, cx.entity().clone(), title, subtitle)
     }
 
     fn render_preview_overlay_actions(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -449,16 +433,52 @@ impl EditorView {
                             );
                             areas.push((button_bounds, action));
                             let hovered = hovered_action == Some(action);
-                            paints.push((button_bounds, icon_path, hovered));
+                            paints.push((button_bounds, icon_path, hovered, action));
                         }
                         editor.preview_overlay_action_areas = areas;
                         paints
                     });
                     paints
                         .into_iter()
-                        .map(|(button_bounds, icon_path, hovered)| {
+                        .map(|(button_bounds, icon_path, hovered, action)| {
                             let hitbox =
                                 window.insert_hitbox(button_bounds, HitboxBehavior::Normal);
+                            let tooltip_title = {
+                                let editor = editor_handle.read(cx);
+                                match action {
+                                    GeneratedPreviewAction::Fullscreen => {
+                                        crate::i18n::preview_action_label(
+                                            editor.ui_language,
+                                            "fullscreen",
+                                        )
+                                    }
+                                    GeneratedPreviewAction::Restore => {
+                                        editor.t(crate::i18n::TextKey::Reset)
+                                    }
+                                    GeneratedPreviewAction::ZoomIn => {
+                                        crate::i18n::preview_action_label(
+                                            editor.ui_language,
+                                            "zoom_in",
+                                        )
+                                    }
+                                    GeneratedPreviewAction::ZoomOut => {
+                                        crate::i18n::preview_action_label(
+                                            editor.ui_language,
+                                            "zoom_out",
+                                        )
+                                    }
+                                    _ => "",
+                                }
+                            };
+                            tooltip::request_tooltip_for_hitbox(
+                                window,
+                                cx,
+                                editor_handle.clone(),
+                                &hitbox,
+                                button_bounds,
+                                tooltip_title,
+                                None::<&'static str>,
+                            );
                             (button_bounds, icon_path, hovered, hitbox)
                         })
                         .collect::<Vec<_>>()
@@ -508,6 +528,7 @@ impl EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.execute_pending_command(window, cx);
         self.refresh_chat_terminal_metrics(window, cx);
         self.process_pending_inline_diff(cx);
         if self.pending_editor_focus {
@@ -618,7 +639,13 @@ impl Render for EditorView {
         self.last_window_height = f32::from(wb.size.height);
         div()
             .id("editor-root")
-            .key_context("MarkdownEditor")
+            .key_context(if self.focused_sidebar_path.is_some() {
+                "MarkdownEditor Sidebar"
+            } else if self.active_tab_is_whiteboard() {
+                "MarkdownEditor Whiteboard"
+            } else {
+                "MarkdownEditor"
+            })
             .track_focus(&self.focus_handle(cx))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if this.active_tab_is_whiteboard()
@@ -678,11 +705,21 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_copy))
             .on_action(cx.listener(Self::on_cut))
             .on_action(cx.listener(Self::on_paste))
+            .on_action(cx.listener(Self::on_paste_plain_text))
+            .on_action(cx.listener(Self::on_insert_soft_break))
             .on_action(cx.listener(Self::on_show_character_palette))
             .on_action(cx.listener(Self::on_move_word_left))
             .on_action(cx.listener(Self::on_move_word_right))
+            .on_action(cx.listener(Self::on_select_word_left))
+            .on_action(cx.listener(Self::on_select_word_right))
             .on_action(cx.listener(Self::on_delete_word_left))
             .on_action(cx.listener(Self::on_delete_word_right))
+            .on_action(cx.listener(Self::on_move_to_document_start))
+            .on_action(cx.listener(Self::on_move_to_document_end))
+            .on_action(cx.listener(Self::on_select_to_document_start))
+            .on_action(cx.listener(Self::on_select_to_document_end))
+            .on_action(cx.listener(Self::on_delete_to_line_start))
+            .on_action(cx.listener(Self::on_delete_to_line_end))
             .on_action(cx.listener(Self::on_toggle_line_comment))
             .on_action(cx.listener(Self::on_fold))
             .on_action(cx.listener(Self::on_unfold))
@@ -692,6 +729,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_join_lines))
             .on_action(cx.listener(Self::on_toggle_bold))
             .on_action(cx.listener(Self::on_toggle_italic))
+            .on_action(cx.listener(Self::on_toggle_underline))
             .on_action(cx.listener(Self::on_toggle_strikethrough))
             .on_action(cx.listener(Self::on_toggle_inline_code))
             .on_action(cx.listener(Self::on_toggle_link))
@@ -700,6 +738,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_toggle_todo))
             .on_action(cx.listener(Self::on_toggle_unordered_list))
             .on_action(cx.listener(Self::on_toggle_ordered_list))
+            .on_action(cx.listener(Self::on_insert_table))
             .on_action(cx.listener(Self::on_insert_code_block))
             .on_action(cx.listener(Self::on_insert_horizontal_rule))
             .on_action(cx.listener(Self::on_insert_heading1))
@@ -708,20 +747,27 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_insert_heading4))
             .on_action(cx.listener(Self::on_insert_heading5))
             .on_action(cx.listener(Self::on_insert_heading6))
+            .on_action(cx.listener(Self::on_set_paragraph))
             .on_action(cx.listener(Self::on_zoom_in))
             .on_action(cx.listener(Self::on_zoom_out))
             .on_action(cx.listener(Self::on_zoom_reset))
             .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_toggle_chat_panel))
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_toggle_editor_left_align))
+            .on_action(cx.listener(Self::on_toggle_word_wrap))
             .on_action(cx.listener(Self::on_select_line))
             .on_action(cx.listener(Self::on_insert_line_below))
             .on_action(cx.listener(Self::on_insert_line_above))
             .on_action(cx.listener(Self::on_duplicate_line))
+            .on_action(cx.listener(Self::on_copy_line_up))
+            .on_action(cx.listener(Self::on_copy_line_down))
             .on_action(cx.listener(Self::on_delete_line))
             .on_action(cx.listener(Self::on_move_line_up))
             .on_action(cx.listener(Self::on_move_line_down))
             .on_action(cx.listener(Self::on_save))
+            .on_action(cx.listener(Self::on_save_as))
+            .on_action(cx.listener(Self::on_new_document))
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_new_whiteboard))
             .on_action(cx.listener(Self::on_close_active_tab))
@@ -733,11 +779,16 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_find_previous))
             .on_action(cx.listener(Self::on_dismiss_search))
             .on_action(cx.listener(Self::on_toggle_replace))
+            .on_action(cx.listener(Self::on_toggle_search_case_sensitive))
+            .on_action(cx.listener(Self::on_toggle_search_whole_word))
+            .on_action(cx.listener(Self::on_toggle_search_regex))
             .on_action(cx.listener(Self::on_replace_next))
             .on_action(cx.listener(Self::on_replace_all))
             .on_action(cx.listener(Self::on_open_file_dialog))
             .on_action(cx.listener(Self::on_find_in_files))
             .on_action(cx.listener(Self::on_quick_open))
+            .on_action(cx.listener(Self::on_open_settings))
+            .on_action(cx.listener(Self::on_toggle_command_palette))
             .on_action(cx.listener(Self::on_escape))
             .on_key_down(cx.listener(Self::on_preview_overlay_key_down))
             .on_action(cx.listener(Self::on_toggle_outline))
@@ -750,6 +801,16 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_select_all_occurrences))
             .on_action(cx.listener(Self::on_toggle_runtime_profile))
             .on_action(cx.listener(Self::on_write_runtime_profile_snapshot))
+            .on_action(cx.listener(Self::on_whiteboard_select_tool))
+            .on_action(cx.listener(Self::on_whiteboard_rectangle_tool))
+            .on_action(cx.listener(Self::on_whiteboard_ellipse_tool))
+            .on_action(cx.listener(Self::on_whiteboard_arrow_tool))
+            .on_action(cx.listener(Self::on_whiteboard_line_tool))
+            .on_action(cx.listener(Self::on_whiteboard_text_tool))
+            .on_action(cx.listener(Self::on_sidebar_create_file))
+            .on_action(cx.listener(Self::on_sidebar_create_folder))
+            .on_action(cx.listener(Self::on_sidebar_rename))
+            .on_action(cx.listener(Self::on_sidebar_delete))
             .when(self.should_render_sidebar_panel(), |this| {
                 let sidebar_w = self.sidebar_width();
                 let sidebar_layout_w = self.sidebar_layout_width();
@@ -1106,7 +1167,10 @@ impl Render for EditorView {
                                                             ))
                                                             .on_drop(cx.listener(
                                                                 |this, paths: &ExternalPaths, _, cx| {
-                                                                    this.open_external_paths_in_tabs(paths.paths(), cx);
+                                                                    this.import_external_paths_as_attachments(
+                                                                        paths.paths(),
+                                                                        cx,
+                                                                    );
                                                                 },
                                                             ))
                                                             .child(if self.active_tab_is_whiteboard() {
@@ -1270,14 +1334,18 @@ impl Render for EditorView {
                                                         } else {
                                                             self.t(crate::i18n::TextKey::ToolbarAlignTooltip)
                                                         };
-                                                        self.sync_tooltip_anchor(
-                                                            "toolbar-sidebar-toggle",
-                                                            sidebar_anchor,
-                                                        );
-                                                        self.sync_tooltip_anchor(
-                                                            "toolbar-align-toggle",
-                                                            align_anchor,
-                                                        );
+                                                        let align_shortcut = self
+                                                            .active_tab_is_non_markdown_text()
+                                                            .then_some("⌥Z");
+                                                        let sidebar_tooltip = if self.workspaces.is_empty() {
+                                                            self.t(crate::i18n::TextKey::OpenFolder)
+                                                        } else {
+                                                            crate::i18n::sidebar_visibility_action_label(
+                                                                self.ui_language,
+                                                                self.sidebar_visible,
+                                                            )
+                                                        };
+                                                        let sidebar_shortcut = (!self.workspaces.is_empty()).then_some("⌘⌥S");
                                                         div()
                                                             .absolute()
                                                             .left(px(toolbar_left))
@@ -1295,8 +1363,8 @@ impl Render for EditorView {
                                                                 primary_hover,
                                                                 SIDEBAR_TOGGLE_SVG_PATH,
                                                                 sidebar_anchor,
-                                                                self.t(crate::i18n::TextKey::ToolbarSidebarTooltip),
-                                                                Some("⌘\\"),
+                                                                sidebar_tooltip,
+                                                                sidebar_shortcut,
                                                                 cx,
                                                                 |this, cx| {
                                                                     if this.workspaces.is_empty() {
@@ -1316,7 +1384,7 @@ impl Render for EditorView {
                                                                 EDITOR_ALIGN_LEFT_SVG_PATH,
                                                                 align_anchor,
                                                                 align_tooltip,
-                                                                Some("⌘⇧L"),
+                                                                align_shortcut,
                                                                 cx,
                                                                 |this, cx| {
                                                                     this.toggle_editor_alignment(cx);
@@ -1350,6 +1418,10 @@ impl Render for EditorView {
                                                         let toolbar_right = toolbar_min_right.round();
                                                         let toolbar_top = toolbar_min_top.round();
                                                         let outline_active = self.utility_panel == Some(RightUtilityPanel::Outline);
+                                                        let outline_tooltip = crate::i18n::outline_action_label(
+                                                            self.ui_language,
+                                                            outline_active,
+                                                        );
                                                         let outline_x = editor_pane_width
                                                             - toolbar_right
                                                             - secondary_btn_width * 2.0
@@ -1366,14 +1438,6 @@ impl Render for EditorView {
                                                             theme_x,
                                                             toolbar_top,
                                                             secondary_btn_width,
-                                                        );
-                                                        self.sync_tooltip_anchor(
-                                                            "toolbar-outline-toggle",
-                                                            outline_anchor,
-                                                        );
-                                                        self.sync_tooltip_anchor(
-                                                            "toolbar-theme-toggle",
-                                                            theme_anchor,
                                                         );
                                                         div()
                                                             .absolute()
@@ -1392,8 +1456,8 @@ impl Render for EditorView {
                                                                 secondary_hover,
                                                                 OUTLINE_TOGGLE_SVG_PATH,
                                                                 outline_anchor,
-                                                                self.t(crate::i18n::TextKey::ToolbarOutlineTooltip),
-                                                                None,
+                                                                outline_tooltip,
+                                                                Some("⌃⌘1"),
                                                                 cx,
                                                                 |this, cx| {
                                                                     this.toggle_outline_visibility(cx);
@@ -1413,7 +1477,7 @@ impl Render for EditorView {
                                                                 },
                                                                 theme_anchor,
                                                                 self.t(crate::i18n::TextKey::ToolbarThemeTooltip),
-                                                                Some("⌘⌥\\"),
+                                                                None,
                                                                 cx,
                                                                 |this, cx| {
                                                                     this.toggle_theme(cx);
@@ -1645,10 +1709,6 @@ impl Render for EditorView {
                                                         )
                                                         .child(self.render_preview_overlay_actions(cx))
                                                     })
-                                                    .when_some(
-                                                        self.render_tooltip_overlay(editor_pane_width),
-                                                        |this, tooltip| this.child(tooltip),
-                                                    )
                                                     .when(
                                                         self.search_visible
                                                             && self.active_tab_supports_text_search(),
@@ -1963,6 +2023,9 @@ impl Render for EditorView {
             })
             .when(self.quick_open_visible, |this| {
                 this.child(deferred(self.render_quick_open_overlay(cx)))
+            })
+            .when(self.command_palette_visible, |this| {
+                this.child(deferred(self.render_command_palette_overlay(cx)))
             })
             .when(self.language_picker_visible, |this| {
                 this.child(deferred(self.render_language_picker_overlay(cx)))

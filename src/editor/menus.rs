@@ -221,7 +221,7 @@ impl EditorView {
             })
     }
 
-    fn current_heading_action(&self) -> Option<FormatMenuAction> {
+    pub(crate) fn current_heading_action(&self) -> Option<FormatMenuAction> {
         match self.decorations.get(self.cursor_line())?.block_type {
             BlockType::Heading(1) => Some(FormatMenuAction::Heading1),
             BlockType::Heading(2) => Some(FormatMenuAction::Heading2),
@@ -2784,13 +2784,13 @@ impl EditorView {
                 (
                     self.format_action_label(FormatMenuAction::Strikethrough),
                     Some(FMT_STRIKETHROUGH_SVG),
-                    Some("⌘⇧S"),
+                    Some("⌘⇧X"),
                     FormatMenuAction::Strikethrough,
                 ),
                 (
                     self.format_action_label(FormatMenuAction::Underline),
                     Some(FMT_UNDERLINE_SVG),
-                    Some("++"),
+                    Some("⌘U"),
                     FormatMenuAction::Underline,
                 ),
                 (
@@ -2821,7 +2821,7 @@ impl EditorView {
                 (
                     self.format_action_label(FormatMenuAction::Todo),
                     Some(FMT_TODO_SVG),
-                    Some("⌘⌥T"),
+                    Some("⌘⌥↩"),
                     FormatMenuAction::Todo,
                 ),
                 (
@@ -2861,7 +2861,7 @@ impl EditorView {
                 self.format_action_label(FormatMenuAction::Todo),
                 "todo task checkbox",
                 Some(FMT_TODO_SVG),
-                Some("⌘⌥T"),
+                Some("⌘⌥↩"),
                 FormatMenuAction::Todo,
             ),
             (
@@ -2875,7 +2875,7 @@ impl EditorView {
                 self.format_action_label(FormatMenuAction::Table),
                 "table grid 2x2",
                 Some(FMT_TABLE_SVG),
-                Some("2×2"),
+                Some("⌘⌥T"),
                 FormatMenuAction::Table,
             ),
             (
@@ -2910,7 +2910,7 @@ impl EditorView {
                 self.format_action_label(FormatMenuAction::Image),
                 "image photo",
                 Some(FMT_IMAGE_SVG),
-                Some("⌘⇧I"),
+                None,
                 FormatMenuAction::Image,
             ),
         ];
@@ -3001,7 +3001,7 @@ impl EditorView {
             (
                 self.format_action_label(FormatMenuAction::Image),
                 Some(FMT_IMAGE_SVG),
-                Some("⌘⇧I"),
+                None,
                 FormatMenuAction::Image,
             ),
             (

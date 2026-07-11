@@ -1823,6 +1823,9 @@ impl Element for EditorElement {
         let mut image_zoom_button_targets: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut preview_zoom_buttons: Vec<CodeBlockCopyButtonPaint> = Vec::new();
         let mut preview_zoom_hitboxes = Vec::new();
+        let mut generated_preview_tooltips: Vec<(Hitbox, Bounds<Pixels>, SharedString)> =
+            Vec::new();
+        let mut editor_icon_tooltips: Vec<(Bounds<Pixels>, SharedString)> = Vec::new();
         let mut unordered_list_markers: Vec<(WrappedLine, Point<Pixels>, Pixels)> = Vec::new();
         let mut inline_overlays: Vec<(ShapedLine, Point<Pixels>, Pixels)> = Vec::new();
         let mut preview_overlay_bounds_local: Option<Bounds<Pixels>> = None;
@@ -2594,6 +2597,8 @@ impl Element for EditorElement {
                         gutter_styles.gutter_fold_default_opacity * reveal
                     };
                     if fi_alpha > 0.0 {
+                        let icon_bounds =
+                            Bounds::new(point(px(fi_x), px(fi_y)), size(px(fi_size), px(fi_size)));
                         let mut fi_color = if is_folded {
                             gutter_styles.gutter_fold_folded_color
                         } else {
@@ -2601,13 +2606,20 @@ impl Element for EditorElement {
                         };
                         fi_color.a = fi_alpha;
                         gutter_fold_icons.push((
-                            Bounds::new(point(px(fi_x), px(fi_y)), size(px(fi_size), px(fi_size))),
+                            icon_bounds,
                             if is_folded {
                                 FOLD_SVG_PATH
                             } else {
                                 FOLD_EXPANDED_SVG_PATH
                             },
                             fi_color,
+                        ));
+                        editor_icon_tooltips.push((
+                            icon_bounds,
+                            SharedString::from(crate::i18n::fold_action_label(
+                                editor.ui_language,
+                                is_folded,
+                            )),
                         ));
                     }
                     gutter_fold_hit_areas_local.push((
@@ -4863,6 +4875,8 @@ impl Element for EditorElement {
                         gs.gutter_fold_default_opacity * reveal
                     };
                     if fi_alpha > 0.0 {
+                        let icon_bounds =
+                            Bounds::new(point(px(fi_x), px(fi_y)), size(px(fi_size), px(fi_size)));
                         let mut fi_color = if is_folded {
                             gs.gutter_fold_folded_color
                         } else {
@@ -4870,13 +4884,20 @@ impl Element for EditorElement {
                         };
                         fi_color.a = fi_alpha;
                         gutter_fold_icons.push((
-                            Bounds::new(point(px(fi_x), px(fi_y)), size(px(fi_size), px(fi_size))),
+                            icon_bounds,
                             if is_folded {
                                 FOLD_SVG_PATH
                             } else {
                                 FOLD_EXPANDED_SVG_PATH
                             },
                             fi_color,
+                        ));
+                        editor_icon_tooltips.push((
+                            icon_bounds,
+                            SharedString::from(crate::i18n::fold_action_label(
+                                editor.ui_language,
+                                is_folded,
+                            )),
                         ));
                     }
                     gutter_fold_hit_areas_local.push((
@@ -4929,6 +4950,8 @@ impl Element for EditorElement {
                         gs.gutter_fold_default_opacity * reveal
                     };
                     if fi_alpha > 0.0 {
+                        let icon_bounds =
+                            Bounds::new(point(px(fi_x), px(fi_y)), size(px(fi_size), px(fi_size)));
                         let mut fi_color = if is_img_folded {
                             gs.gutter_fold_folded_color
                         } else {
@@ -4936,13 +4959,20 @@ impl Element for EditorElement {
                         };
                         fi_color.a = fi_alpha;
                         gutter_fold_icons.push((
-                            Bounds::new(point(px(fi_x), px(fi_y)), size(px(fi_size), px(fi_size))),
+                            icon_bounds,
                             if is_img_folded {
                                 FOLD_SVG_PATH
                             } else {
                                 FOLD_EXPANDED_SVG_PATH
                             },
                             fi_color,
+                        ));
+                        editor_icon_tooltips.push((
+                            icon_bounds,
+                            SharedString::from(crate::i18n::fold_action_label(
+                                editor.ui_language,
+                                is_img_folded,
+                            )),
                         ));
                     }
                     gutter_fold_hit_areas_local.push((
@@ -4984,6 +5014,10 @@ impl Element for EditorElement {
                 let alpha = if is_hovered { 0.55 } else { 0.7 };
                 image_edit_icons.push((ie_bounds, line_idx, alpha));
                 image_edit_hit_areas_local.push((ie_bounds, line_idx));
+                editor_icon_tooltips.push((
+                    ie_bounds,
+                    SharedString::from(editor.t(crate::i18n::TextKey::EditUrl)),
+                ));
             }
 
             // Line highlight
@@ -6650,8 +6684,27 @@ impl Element for EditorElement {
                     icon_color.a *= action_opacity;
                     border_color.a *= action_opacity;
                     generated_preview_action_areas_local.push((button_bounds, *start_line, action));
-                    preview_zoom_hitboxes
-                        .push(window.insert_hitbox(button_bounds, HitboxBehavior::Normal));
+                    let hitbox = window.insert_hitbox(button_bounds, HitboxBehavior::Normal);
+                    let tooltip_title = match action {
+                        GeneratedPreviewAction::Fullscreen => {
+                            crate::i18n::preview_action_label(editor.ui_language, "fullscreen")
+                        }
+                        GeneratedPreviewAction::Restore => editor.t(crate::i18n::TextKey::Reset),
+                        GeneratedPreviewAction::ZoomIn => {
+                            crate::i18n::preview_action_label(editor.ui_language, "zoom_in")
+                        }
+                        GeneratedPreviewAction::ZoomOut => {
+                            crate::i18n::preview_action_label(editor.ui_language, "zoom_out")
+                        }
+                        GeneratedPreviewAction::Copy => editor.t(crate::i18n::TextKey::Copy),
+                        GeneratedPreviewAction::Code => editor.t(crate::i18n::TextKey::InlineCode),
+                    };
+                    generated_preview_tooltips.push((
+                        hitbox.clone(),
+                        button_bounds,
+                        SharedString::from(tooltip_title),
+                    ));
+                    preview_zoom_hitboxes.push(hitbox);
                     preview_zoom_buttons.push(CodeBlockCopyButtonPaint {
                         quad: quad(
                             button_bounds,
@@ -7294,6 +7347,31 @@ impl Element for EditorElement {
                     hunk_index,
                 ));
             }
+        }
+
+        for (hitbox, tooltip_bounds, tooltip_title) in generated_preview_tooltips {
+            tooltip::request_tooltip_for_hitbox(
+                window,
+                cx,
+                self.editor.clone(),
+                &hitbox,
+                tooltip_bounds,
+                tooltip_title,
+                None::<&'static str>,
+            );
+        }
+
+        for (tooltip_bounds, tooltip_title) in editor_icon_tooltips {
+            let hitbox = window.insert_hitbox(tooltip_bounds, HitboxBehavior::Normal);
+            tooltip::request_tooltip_for_hitbox(
+                window,
+                cx,
+                self.editor.clone(),
+                &hitbox,
+                tooltip_bounds,
+                tooltip_title,
+                None::<&'static str>,
+            );
         }
 
         self.editor.update(cx, |editor, cx| {

@@ -2781,7 +2781,7 @@ impl EditorView {
                     .text_color(ups.utility_panel_item_value_text_color)
                     .child(SharedString::from(item.label.clone())),
             )
-            .child(
+            .child(tooltip::with_tooltip(
                 div()
                     .flex_none()
                     .w(px(icon_size + self.scaled(8.0)))
@@ -2807,7 +2807,10 @@ impl EditorView {
                             .size(px(icon_size))
                             .text_color(share_icon_color),
                     ),
-            )
+                cx.entity().clone(),
+                self.t(crate::i18n::TextKey::RevealInFinder),
+                None::<&'static str>,
+            ))
             .into_any_element()
     }
 

@@ -3,7 +3,7 @@ SHELL := /bin/bash
 APP_NAME := moeka
 APP_DISPLAY_NAME := Moeka
 TARGET ?= x86_64-apple-darwin
-PROFILE ?= release
+PROFILE ?= dist
 VERSION := $(shell awk -F '"' '/^version = / { print $$2; exit }' Cargo.toml)
 BUNDLE_ID ?= app.moeka.moeka
 BUILD_VERSION ?= $(VERSION)

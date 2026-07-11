@@ -1,6 +1,10 @@
-use std::time::Duration;
+use std::{cell::Cell, rc::Rc};
 
-use gpui::{AnyElement, Bounds, Context, Pixels, SharedString, div, point, prelude::*, px, size};
+use gpui::{
+    AnyElement, AnyTooltip, App, AppContext, Bounds, DispatchPhase, Element, ElementId, Entity,
+    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
+    MouseMoveEvent, Pixels, Render, SharedString, Window, div, point, prelude::*, px, size,
+};
 
 use super::{
     EditorView,
@@ -9,204 +13,339 @@ use super::{
     },
 };
 
-#[derive(Clone, PartialEq)]
-pub(crate) struct TooltipState {
-    pub id: &'static str,
-    pub title: SharedString,
-    pub subtitle: Option<SharedString>,
-    pub anchor_bounds: Bounds<Pixels>,
+pub(crate) fn with_tooltip(
+    child: impl IntoElement,
+    editor: Entity<EditorView>,
+    title: impl Into<SharedString>,
+    shortcut: Option<impl Into<SharedString>>,
+) -> AnyElement {
+    TooltipTrigger {
+        child: child.into_any_element(),
+        editor,
+        title: title.into(),
+        shortcut: shortcut.map(Into::into),
+    }
+    .into_any_element()
 }
 
-impl EditorView {
-    pub(crate) fn sync_tooltip_anchor(
+pub(crate) fn request_tooltip_for_hitbox(
+    window: &mut Window,
+    cx: &mut App,
+    editor: Entity<EditorView>,
+    hitbox: &Hitbox,
+    bounds: Bounds<Pixels>,
+    title: impl Into<SharedString>,
+    shortcut: Option<impl Into<SharedString>>,
+) {
+    if editor.read(cx).context_menu.is_some() {
+        return;
+    }
+
+    let is_hovered = bounds.contains(&window.mouse_position());
+    register_hover_refresh(window, hitbox, is_hovered);
+    if !is_hovered {
+        return;
+    }
+
+    let title = title.into();
+    let shortcut = shortcut.map(Into::into);
+    let (tooltip_width, _) = tooltip_size(
+        editor.read(cx),
+        &title,
+        shortcut.as_ref().map(|shortcut| shortcut.as_ref()),
+    );
+    let tooltip_view = cx.new(|_| TooltipView {
+        editor: editor.clone(),
+        title: title.clone(),
+        shortcut: shortcut.clone(),
+        width: tooltip_width,
+    });
+    let deployment = tooltip_deployment_point(
+        editor.read(cx),
+        bounds,
+        &title,
+        shortcut.as_ref().map(|shortcut| shortcut.as_ref()),
+    );
+    let visible_bounds = bounds;
+    let visible_editor = editor.clone();
+    window.set_tooltip(AnyTooltip {
+        view: tooltip_view.into(),
+        mouse_position: deployment - point(px(1.0), px(1.0)),
+        check_visible_and_update: Rc::new(move |_, window, cx| {
+            visible_editor.read(cx).context_menu.is_none()
+                && visible_bounds.contains(&window.mouse_position())
+        }),
+    });
+}
+
+fn register_hover_refresh(window: &mut Window, hitbox: &Hitbox, is_hovered: bool) {
+    let hover_state = Rc::new(Cell::new(is_hovered));
+    let hitbox = hitbox.clone();
+    window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _cx| {
+        if phase != DispatchPhase::Bubble {
+            return;
+        }
+        let next_hovered = hitbox.is_hovered(window);
+        if hover_state.replace(next_hovered) != next_hovered {
+            window.refresh();
+        }
+    });
+}
+
+struct TooltipTrigger {
+    child: AnyElement,
+    editor: Entity<EditorView>,
+    title: SharedString,
+    shortcut: Option<SharedString>,
+}
+
+impl IntoElement for TooltipTrigger {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for TooltipTrigger {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
         &mut self,
-        tooltip_id: &'static str,
-        anchor_bounds: Bounds<Pixels>,
-    ) {
-        if let Some(pending) = self.tooltip_pending.as_mut() {
-            if pending.id == tooltip_id {
-                pending.anchor_bounds = anchor_bounds;
-            }
-        }
-
-        if let Some(visible) = self.tooltip_visible.as_mut() {
-            if visible.id == tooltip_id {
-                visible.anchor_bounds = anchor_bounds;
-            }
-        }
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        (self.child.request_layout(window, cx), ())
     }
 
-    pub(crate) fn begin_tooltip_hover(&mut self, tooltip: TooltipState, cx: &mut Context<Self>) {
-        let pending_same = self
-            .tooltip_pending
-            .as_ref()
-            .is_some_and(|pending| pending.id == tooltip.id);
-        let visible_same = self
-            .tooltip_visible
-            .as_ref()
-            .is_some_and(|visible| visible.id == tooltip.id);
-
-        self.tooltip_pending = Some(tooltip.clone());
-
-        if visible_same {
-            self.tooltip_visible = Some(tooltip);
-            cx.notify();
-            return;
-        }
-
-        if pending_same {
-            return;
-        }
-
-        self.tooltip_task = None;
-        self.tooltip_visible = None;
-
-        let tooltip_id = tooltip.id;
-        let delay = Duration::from_millis(self.styles.tooltip.tooltip_delay_ms);
-        self.tooltip_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(delay).await;
-            let _ = this.update(cx, |this, cx| {
-                if this
-                    .tooltip_pending
-                    .as_ref()
-                    .is_some_and(|pending| pending.id == tooltip_id)
-                {
-                    this.tooltip_visible = this.tooltip_pending.clone();
-                    this.tooltip_task = None;
-                    cx.notify();
-                }
-            });
-        }));
-    }
-
-    pub(crate) fn end_tooltip_hover(&mut self, tooltip_id: &'static str, cx: &mut Context<Self>) {
-        let mut changed = false;
-
-        if self
-            .tooltip_pending
-            .as_ref()
-            .is_some_and(|pending| pending.id == tooltip_id)
-        {
-            self.tooltip_pending = None;
-            self.tooltip_task = None;
-            changed = true;
-        }
-
-        if self
-            .tooltip_visible
-            .as_ref()
-            .is_some_and(|visible| visible.id == tooltip_id)
-        {
-            self.tooltip_visible = None;
-            changed = true;
-        }
-
-        if changed {
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn clear_tooltip(&mut self, cx: &mut Context<Self>) {
-        if self.tooltip_pending.is_none()
-            && self.tooltip_visible.is_none()
-            && self.tooltip_task.is_none()
-        {
-            return;
-        }
-
-        self.tooltip_pending = None;
-        self.tooltip_visible = None;
-        self.tooltip_task = None;
-        cx.notify();
-    }
-
-    pub(crate) fn render_tooltip_overlay(&self, pane_width: f32) -> Option<AnyElement> {
-        let tooltip = self.tooltip_visible.as_ref()?;
-        let ts = &self.styles.tooltip;
-
-        let viewport_padding = self.scaled(ts.tooltip_viewport_padding_px);
-        let max_width = self.scaled(ts.tooltip_max_width_px);
-        let offset = self.scaled(ts.tooltip_offset_px);
-        let padding_x = self.scaled(ts.tooltip_padding_x_px);
-        let padding_y = self.scaled(ts.tooltip_padding_y_px);
-        let title_font_size = self.scaled(ts.tooltip_title_font_size_px);
-        let subtitle_font_size = self.scaled(ts.tooltip_subtitle_font_size_px);
-        let subtitle_shortcut_style = ShortcutRenderStyle {
-            font_size_px: subtitle_font_size,
-            font_family: self.styles.ui_font_family,
-            text_color: ts.tooltip_subtitle_text_color,
-            gap_px: self.scaled(ts.tooltip_shortcut_gap_px),
-        };
-        let title_width = estimate_text_width(tooltip.title.as_ref(), title_font_size);
-        let subtitle_width = tooltip
-            .subtitle
-            .as_ref()
-            .map(|subtitle| estimate_shortcut_width(subtitle, subtitle_shortcut_style))
-            .unwrap_or(0.0);
-        let content_width = title_width
-            + if subtitle_width > 0.0 {
-                self.scaled(ts.tooltip_gap_px) + subtitle_width
-            } else {
-                0.0
-            };
-        let tooltip_width = (content_width + padding_x * 2.0)
-            .min(max_width)
-            .max(padding_x * 2.0 + title_font_size);
-        let tooltip_height = padding_y * 2.0 + title_font_size.max(subtitle_font_size);
-        let pane_width = pane_width.max(tooltip_width + viewport_padding * 2.0);
-        let pane_height = self
-            .last_viewport_height
-            .max(tooltip_height + viewport_padding * 2.0);
-        let anchor_center_x = f32::from(tooltip.anchor_bounds.origin.x)
-            + f32::from(tooltip.anchor_bounds.size.width) / 2.0;
-        let anchor_top = f32::from(tooltip.anchor_bounds.origin.y);
-        let anchor_height = f32::from(tooltip.anchor_bounds.size.height);
-        let left = (anchor_center_x - tooltip_width / 2.0).clamp(
-            viewport_padding,
-            (pane_width - tooltip_width - viewport_padding).max(viewport_padding),
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.child.prepaint(window, cx);
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        request_tooltip_for_hitbox(
+            window,
+            cx,
+            self.editor.clone(),
+            &hitbox,
+            bounds,
+            self.title.clone(),
+            self.shortcut.clone(),
         );
-        let above_top = anchor_top - offset - tooltip_height;
-        let below_top = anchor_top + anchor_height + offset;
-        let fits_above = above_top >= viewport_padding;
-        let fits_below = below_top + tooltip_height <= pane_height - viewport_padding;
-        let top = if fits_above || !fits_below {
-            above_top.max(viewport_padding)
-        } else {
-            below_top
+        hitbox
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+    }
+}
+
+struct TooltipView {
+    editor: Entity<EditorView>,
+    title: SharedString,
+    shortcut: Option<SharedString>,
+    width: f32,
+}
+
+impl Render for TooltipView {
+    fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let editor = self.editor.read(cx);
+        let styles = &editor.styles.tooltip;
+        let title_font_size = editor.scaled(styles.tooltip_title_font_size_px);
+        let shortcut_font_size = editor.scaled(styles.tooltip_subtitle_font_size_px);
+        let shortcut_style = ShortcutRenderStyle {
+            font_size_px: shortcut_font_size,
+            font_family: editor.styles.ui_font_family,
+            text_color: styles.tooltip_subtitle_text_color,
+            gap_px: editor.scaled(styles.tooltip_shortcut_gap_px),
         };
 
-        Some(
-            div()
-                .absolute()
-                .left(px(left))
-                .top(px(top))
-                .w(px(tooltip_width))
-                .px(px(padding_x))
-                .py(px(padding_y))
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(self.scaled(ts.tooltip_gap_px)))
-                .bg(ts.tooltip_bg)
-                .rounded(px(self.scaled(ts.tooltip_radius_px)))
-                .child(
+        div()
+            .w(px(self.width))
+            .px(px(editor.scaled(styles.tooltip_padding_x_px)))
+            .py(px(editor.scaled(styles.tooltip_padding_y_px)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(editor.scaled(styles.tooltip_gap_px)))
+            .bg(styles.tooltip_bg)
+            .border(px(editor.scaled(styles.tooltip_border_width_px)))
+            .border_color(styles.tooltip_border_color)
+            .rounded(px(editor.scaled(styles.tooltip_radius_px)))
+            .child(
+                div()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_size(px(title_font_size))
+                    .text_color(styles.tooltip_title_text_color)
+                    .child(self.title.clone()),
+            )
+            .when_some(self.shortcut.as_ref(), |this, shortcut| {
+                this.child(
                     div()
-                        .text_size(px(title_font_size))
-                        .text_color(ts.tooltip_title_text_color)
-                        .child(tooltip.title.clone()),
+                        .min_w(px(editor.scaled(styles.tooltip_shortcut_key_min_width_px)))
+                        .h(px(editor.scaled(styles.tooltip_shortcut_key_height_px)))
+                        .px(px(editor.scaled(styles.tooltip_shortcut_key_padding_x_px)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(editor.scaled(styles.tooltip_shortcut_key_radius_px)))
+                        .bg(styles.tooltip_shortcut_key_bg)
+                        .child(render_shortcut(shortcut, shortcut_style)),
                 )
-                .when_some(tooltip.subtitle.as_ref(), |this, subtitle| {
-                    this.child(
-                        div()
-                            .opacity(ts.tooltip_subtitle_opacity)
-                            .child(render_shortcut(subtitle, subtitle_shortcut_style)),
-                    )
-                })
-                .into_any_element(),
-        )
+            })
     }
+}
+
+fn tooltip_size(editor: &EditorView, title: &str, shortcut: Option<&str>) -> (f32, f32) {
+    let styles = &editor.styles.tooltip;
+    let title_font_size = editor.scaled(styles.tooltip_title_font_size_px);
+    let shortcut_font_size = editor.scaled(styles.tooltip_subtitle_font_size_px);
+    let shortcut_style = ShortcutRenderStyle {
+        font_size_px: shortcut_font_size,
+        font_family: editor.styles.ui_font_family,
+        text_color: styles.tooltip_subtitle_text_color,
+        gap_px: editor.scaled(styles.tooltip_shortcut_gap_px),
+    };
+    let shortcut_width = shortcut
+        .map(|shortcut| {
+            estimate_shortcut_width(shortcut, shortcut_style)
+                + editor.scaled(styles.tooltip_shortcut_key_padding_x_px) * 2.0
+        })
+        .unwrap_or(0.0);
+    let gap = if shortcut_width > 0.0 {
+        editor.scaled(styles.tooltip_gap_px)
+    } else {
+        0.0
+    };
+    let width = estimate_text_width(title, title_font_size)
+        + shortcut_width
+        + gap
+        + title_font_size
+        + editor.scaled(styles.tooltip_padding_x_px) * 2.0;
+    let content_height = title_font_size.max(if shortcut_width > 0.0 {
+        editor.scaled(styles.tooltip_shortcut_key_height_px)
+    } else {
+        0.0
+    });
+    let height = content_height + editor.scaled(styles.tooltip_padding_y_px) * 2.0;
+    (width, height)
+}
+
+fn tooltip_deployment_point(
+    editor: &EditorView,
+    anchor: Bounds<Pixels>,
+    title: &str,
+    shortcut: Option<&str>,
+) -> gpui::Point<Pixels> {
+    let styles = &editor.styles.tooltip;
+    let (width, height) = tooltip_size(editor, title, shortcut);
+    let viewport_padding = editor.scaled(styles.tooltip_viewport_padding_px);
+    let offset = editor.scaled(styles.tooltip_offset_px);
+    let viewport_width = editor.last_window_width.max(width + viewport_padding * 2.0);
+    let viewport_height = editor
+        .last_window_height
+        .max(height + viewport_padding * 2.0);
+    position_tooltip(
+        anchor,
+        width,
+        height,
+        viewport_width,
+        viewport_height,
+        viewport_padding,
+        offset,
+    )
+}
+
+fn position_tooltip(
+    anchor: Bounds<Pixels>,
+    width: f32,
+    height: f32,
+    viewport_width: f32,
+    viewport_height: f32,
+    viewport_padding: f32,
+    offset: f32,
+) -> gpui::Point<Pixels> {
+    let anchor_left = f32::from(anchor.origin.x);
+    let anchor_top = f32::from(anchor.origin.y);
+    let anchor_width = f32::from(anchor.size.width);
+    let anchor_height = f32::from(anchor.size.height);
+    let left = (anchor_left + anchor_width / 2.0 - width / 2.0).clamp(
+        viewport_padding,
+        (viewport_width - width - viewport_padding).max(viewport_padding),
+    );
+    let below = anchor_top + anchor_height + offset;
+    let above = anchor_top - offset - height;
+    let top = if below + height <= viewport_height - viewport_padding {
+        below
+    } else {
+        above.max(viewport_padding)
+    };
+    point(px(left), px(top))
 }
 
 pub(crate) fn toolbar_anchor_bounds(x: f32, y: f32, button_size: f32) -> Bounds<Pixels> {
     Bounds::new(point(px(x), px(y)), size(px(button_size), px(button_size)))
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Bounds, point, px, size};
+
+    use super::position_tooltip;
+
+    #[test]
+    fn positions_below_anchor_center_by_default() {
+        let anchor = Bounds::new(point(px(100.0), px(50.0)), size(px(20.0), px(20.0)));
+        let position = position_tooltip(anchor, 80.0, 30.0, 300.0, 200.0, 8.0, 5.0);
+
+        assert_eq!(f32::from(position.x), 70.0);
+        assert_eq!(f32::from(position.y), 75.0);
+    }
+
+    #[test]
+    fn clamps_to_viewport_edges() {
+        let left_anchor = Bounds::new(point(px(0.0), px(20.0)), size(px(16.0), px(16.0)));
+        let right_anchor = Bounds::new(point(px(292.0), px(20.0)), size(px(8.0), px(16.0)));
+
+        let left = position_tooltip(left_anchor, 100.0, 30.0, 300.0, 200.0, 8.0, 5.0);
+        let right = position_tooltip(right_anchor, 100.0, 30.0, 300.0, 200.0, 8.0, 5.0);
+
+        assert_eq!(f32::from(left.x), 8.0);
+        assert_eq!(f32::from(right.x), 192.0);
+    }
+
+    #[test]
+    fn flips_above_when_bottom_space_is_insufficient() {
+        let anchor = Bounds::new(point(px(100.0), px(170.0)), size(px(20.0), px(20.0)));
+        let position = position_tooltip(anchor, 80.0, 30.0, 300.0, 200.0, 8.0, 5.0);
+
+        assert_eq!(f32::from(position.y), 135.0);
+    }
 }

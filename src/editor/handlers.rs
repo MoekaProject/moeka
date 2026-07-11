@@ -65,6 +65,10 @@ impl EditorView {
             self.close_quick_open(window, cx);
             return;
         }
+        if self.command_palette_visible {
+            self.close_command_palette(window, cx);
+            return;
+        }
         if self.language_picker_visible {
             self.close_language_picker(window, cx);
             return;
@@ -1053,6 +1057,22 @@ impl EditorView {
         self.pause_blinking(cx);
     }
 
+    pub(crate) fn on_insert_soft_break(
+        &mut self,
+        _: &InsertSoftBreak,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
+        self.checkpoint();
+        self.multi_cursor_enter();
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
     pub(crate) fn on_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
         if self.active_tab_is_read_only() {
             return;
@@ -1131,6 +1151,20 @@ impl EditorView {
         self.paste_from_clipboard(cx);
     }
 
+    pub(crate) fn on_paste_plain_text(
+        &mut self,
+        _: &PastePlainText,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab_is_read_only() || self.active_tab_is_whiteboard() {
+            return;
+        }
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.insert_pasted_text(&text, cx);
+        }
+    }
+
     pub(crate) fn on_show_character_palette(
         &mut self,
         _: &ShowCharacterPalette,
@@ -1168,6 +1202,158 @@ impl EditorView {
             self.cursor.move_word_right(&self.buffer);
         }
         self.finish_horizontal_cursor_move(cx);
+    }
+
+    pub(crate) fn on_select_word_left(
+        &mut self,
+        _: &SelectWordLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_phantom_selection();
+        self.reset_cursor_visual_targeting();
+        self.cursor.select_word_left(&self.buffer);
+        for cursor in &mut self.extra_cursors {
+            cursor.select_word_left(&self.buffer);
+        }
+        self.dedup_cursors();
+        self.finish_horizontal_cursor_move(cx);
+    }
+
+    pub(crate) fn on_select_word_right(
+        &mut self,
+        _: &SelectWordRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_phantom_selection();
+        self.reset_cursor_visual_targeting();
+        self.cursor.select_word_right(&self.buffer);
+        for cursor in &mut self.extra_cursors {
+            cursor.select_word_right(&self.buffer);
+        }
+        self.dedup_cursors();
+        self.finish_horizontal_cursor_move(cx);
+    }
+
+    pub(crate) fn on_move_to_document_start(
+        &mut self,
+        _: &MoveToDocumentStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_phantom_selection();
+        self.cursor.move_to(0, &self.buffer);
+        for cursor in &mut self.extra_cursors {
+            cursor.move_to(0, &self.buffer);
+        }
+        self.dedup_cursors();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_move_to_document_end(
+        &mut self,
+        _: &MoveToDocumentEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_phantom_selection();
+        let end = self.buffer.len();
+        self.cursor.move_to(end, &self.buffer);
+        for cursor in &mut self.extra_cursors {
+            cursor.move_to(end, &self.buffer);
+        }
+        self.dedup_cursors();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_select_to_document_start(
+        &mut self,
+        _: &SelectToDocumentStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_phantom_selection();
+        self.cursor.select_to(0, &self.buffer);
+        for cursor in &mut self.extra_cursors {
+            cursor.select_to(0, &self.buffer);
+        }
+        self.dedup_cursors();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_select_to_document_end(
+        &mut self,
+        _: &SelectToDocumentEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_phantom_selection();
+        let end = self.buffer.len();
+        self.cursor.select_to(end, &self.buffer);
+        for cursor in &mut self.extra_cursors {
+            cursor.select_to(end, &self.buffer);
+        }
+        self.dedup_cursors();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    fn delete_to_line_boundary(&mut self, to_start: bool, cx: &mut Context<Self>) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
+        self.checkpoint();
+        let mut targets = self.cursor_states_with_primary_flag();
+        targets.sort_by_key(|(cursor, _)| std::cmp::Reverse(cursor.selection_range().start));
+        let mut edits = Vec::with_capacity(targets.len());
+        for (cursor, is_primary) in targets {
+            let range = if cursor.has_selection() {
+                cursor.selection_range()
+            } else {
+                let (line, _) = self.buffer.offset_to_line_col(cursor.offset);
+                if to_start {
+                    self.buffer.line_start(line)..cursor.offset
+                } else {
+                    cursor.offset..self.buffer.line_end(line)
+                }
+            };
+            let start = range.start;
+            let removed = range.end.saturating_sub(range.start);
+            self.buffer.delete(range);
+            edits.push(MultiCursorResolvedEdit {
+                start,
+                cursor_after: start,
+                delta: -(removed as isize),
+                is_primary,
+                ordered_list_update: None,
+            });
+        }
+        self.apply_multi_cursor_resolved_edits(edits);
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_delete_to_line_start(
+        &mut self,
+        _: &DeleteToLineStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_to_line_boundary(true, cx);
+    }
+
+    pub(crate) fn on_delete_to_line_end(
+        &mut self,
+        _: &DeleteToLineEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_to_line_boundary(false, cx);
     }
 
     pub(crate) fn on_delete_word_left(
@@ -1245,6 +1431,20 @@ impl EditorView {
         }
         self.checkpoint();
         self.apply_wrap("*", "*");
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_toggle_underline(
+        &mut self,
+        _: &ToggleUnderline,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
+        self.checkpoint();
+        self.apply_wrap("++", "++");
         self.pause_blinking(cx);
     }
 
@@ -1362,6 +1562,17 @@ impl EditorView {
         self.pause_blinking(cx);
     }
 
+    pub(crate) fn on_insert_table(
+        &mut self,
+        _: &InsertTable,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab_is_markdown() {
+            self.execute_format_menu_action(FormatMenuAction::Table, cx);
+        }
+    }
+
     pub(crate) fn on_insert_code_block(
         &mut self,
         _: &InsertCodeBlock,
@@ -1469,6 +1680,33 @@ impl EditorView {
         self.pause_blinking(cx);
     }
 
+    pub(crate) fn on_set_paragraph(
+        &mut self,
+        _: &SetParagraph,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.active_tab_is_markdown() {
+            return;
+        }
+        if let Some(level) = self
+            .current_heading_action()
+            .and_then(|action| match action {
+                FormatMenuAction::Heading1 => Some(1),
+                FormatMenuAction::Heading2 => Some(2),
+                FormatMenuAction::Heading3 => Some(3),
+                FormatMenuAction::Heading4 => Some(4),
+                FormatMenuAction::Heading5 => Some(5),
+                FormatMenuAction::Heading6 => Some(6),
+                _ => None,
+            })
+        {
+            self.checkpoint();
+            self.apply_heading(level);
+            self.pause_blinking(cx);
+        }
+    }
+
     pub(crate) fn on_zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
         self.set_ui_scale(self.ui_scale + self.styles.editor.editor_scale_step, cx);
     }
@@ -1486,6 +1724,24 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.toggle_sidebar_visibility(cx);
+    }
+
+    pub(crate) fn on_toggle_chat_panel(
+        &mut self,
+        _: &ToggleChatPanel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_chat_panel(cx);
+    }
+
+    pub(crate) fn on_open_settings(
+        &mut self,
+        _: &OpenSettings,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_tab(cx);
     }
 
     pub(crate) fn on_toggle_outline(
@@ -1540,6 +1796,62 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.toggle_editor_alignment(cx);
+    }
+
+    pub(crate) fn on_toggle_word_wrap(
+        &mut self,
+        _: &ToggleWordWrap,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab_is_non_markdown_text() {
+            self.toggle_editor_alignment(cx);
+        }
+    }
+
+    pub(crate) fn on_toggle_search_case_sensitive(
+        &mut self,
+        _: &ToggleSearchCaseSensitive,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_search_visible {
+            self.workspace_search_case_sensitive = !self.workspace_search_case_sensitive;
+            self.run_workspace_search(cx);
+        } else if self.search_visible {
+            self.search_case_sensitive = !self.search_case_sensitive;
+            self.run_search(cx);
+        }
+    }
+
+    pub(crate) fn on_toggle_search_whole_word(
+        &mut self,
+        _: &ToggleSearchWholeWord,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_search_visible {
+            self.workspace_search_whole_word = !self.workspace_search_whole_word;
+            self.run_workspace_search(cx);
+        } else if self.search_visible {
+            self.search_whole_word = !self.search_whole_word;
+            self.run_search(cx);
+        }
+    }
+
+    pub(crate) fn on_toggle_search_regex(
+        &mut self,
+        _: &ToggleSearchRegex,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_search_visible {
+            self.workspace_search_use_regex = !self.workspace_search_use_regex;
+            self.run_workspace_search(cx);
+        } else if self.search_visible {
+            self.search_use_regex = !self.search_use_regex;
+            self.run_search(cx);
+        }
     }
 
     pub(crate) fn on_select_line(
@@ -1636,6 +1948,58 @@ impl EditorView {
         self.reparse();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
+    }
+
+    fn copy_selected_lines(&mut self, upward: bool, cx: &mut Context<Self>) {
+        if self.sidebar_edit.is_some() || self.active_tab_is_read_only() {
+            return;
+        }
+        self.checkpoint();
+        let selection = self.cursor.selection_range();
+        let start_line = self.buffer.offset_to_line_col(selection.start).0;
+        let mut end_line = self.buffer.offset_to_line_col(selection.end).0;
+        if selection.start != selection.end
+            && selection.end == self.buffer.line_start(end_line)
+            && end_line > start_line
+        {
+            end_line -= 1;
+        }
+        let start = self.buffer.line_start(start_line);
+        let end = self.buffer.line_end(end_line);
+        let text = self.buffer.text()[start..end].to_string();
+        let inserted_len = text.len() + 1;
+        if upward {
+            self.buffer.insert(start, &format!("{text}\n"));
+            self.cursor.offset = self.cursor.offset.min(self.buffer.len());
+            self.cursor.anchor = self.cursor.anchor.min(self.buffer.len());
+        } else {
+            self.buffer.insert(end, &format!("\n{text}"));
+            self.cursor.offset = (self.cursor.offset + inserted_len).min(self.buffer.len());
+            self.cursor.anchor = (self.cursor.anchor + inserted_len).min(self.buffer.len());
+        }
+        self.extra_cursors.clear();
+        self.mark_active_tab_dirty();
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    pub(crate) fn on_copy_line_up(
+        &mut self,
+        _: &CopyLineUp,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_selected_lines(true, cx);
+    }
+
+    pub(crate) fn on_copy_line_down(
+        &mut self,
+        _: &CopyLineDown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_selected_lines(false, cx);
     }
 
     pub(crate) fn on_delete_line(
@@ -1892,6 +2256,94 @@ impl EditorView {
         }
     }
 
+    pub(crate) fn on_save_as(&mut self, _: &SaveAs, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.active_tab_supports_persistent_save() {
+            return;
+        }
+        let Some(index) = self.active_tab_index() else {
+            return;
+        };
+        let tab_id = self.tabs[index].id.clone();
+        let is_whiteboard = self.tabs[index]
+            .file_kind
+            .as_ref()
+            .is_some_and(FileKind::is_whiteboard);
+        let (contents, default_name) = if is_whiteboard {
+            let Some(contents) = self.tabs[index]
+                .whiteboard
+                .as_ref()
+                .map(|state| state.document.to_json_string())
+            else {
+                return;
+            };
+            (
+                contents,
+                format!("{}.{}", self.tabs[index].title, WHITEBOARD_EXTENSION),
+            )
+        } else {
+            let contents = self.normalize_text_for_save();
+            let default_name = self.tabs[index]
+                .path
+                .as_deref()
+                .and_then(std::path::Path::file_name)
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{}.md", self.tabs[index].title));
+            (contents, default_name)
+        };
+        let snapshot = self.current_snapshot();
+        let title = self.t(crate::i18n::TextKey::SaveFileDialog).to_string();
+
+        cx.spawn(async move |this, cx| {
+            let maybe_path = cx
+                .background_executor()
+                .spawn(async move { helpers::save_file_blocking(&default_name, &title) })
+                .await;
+            let Some(path) = maybe_path else {
+                return;
+            };
+            let contents_for_kind = contents.clone();
+            if std::fs::write(&path, contents).is_err() {
+                return;
+            }
+
+            this.update(cx, |editor, cx| {
+                let Some(index) = editor.tabs.iter().position(|tab| tab.id == tab_id) else {
+                    return;
+                };
+                editor.clear_temp_file_for_tab(&tab_id);
+                editor.tabs[index].path = Some(path.clone());
+                editor.tabs[index].title = EditorView::title_for_path(&path);
+                editor.tabs[index].file_kind = Some(classify_file_kind_for_bytes(
+                    &path,
+                    contents_for_kind.as_bytes(),
+                ));
+                editor.tabs[index].is_dirty = false;
+                editor.tabs[index].snapshot = snapshot.clone();
+                editor.tabs[index].history.source_identity = Some(
+                    history_store::default_source_identity(&tab_id, Some(path.as_path())),
+                );
+                editor.tabs[index].history.journal_path = Some(
+                    history_store::default_journal_path(&tab_id, Some(path.as_path())),
+                );
+                let _ = history_store::persist_tab_history(
+                    &tab_id,
+                    Some(path.as_path()),
+                    &mut editor.tabs[index].history,
+                    &snapshot,
+                );
+                if editor.active_tab_index() == Some(index) {
+                    editor.current_file_path = Some(path);
+                }
+                editor.invalidate_sidebar_items_cache();
+                session_store::persist_session(editor);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn save_active_whiteboard(&mut self, cx: &mut Context<Self>) {
         let Some(index) = self.active_tab_index() else {
             return;
@@ -1941,6 +2393,15 @@ impl EditorView {
         self.create_scratch_tab(cx);
     }
 
+    pub(crate) fn on_new_document(
+        &mut self,
+        _: &NewDocument,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_scratch_tab(cx);
+    }
+
     pub(crate) fn on_new_whiteboard(
         &mut self,
         _: &NewWhiteboard,
@@ -1952,6 +2413,131 @@ impl EditorView {
         if false {
             let parent = self.sidebar_root.clone();
             self.create_new_whiteboard(parent, cx);
+        }
+    }
+
+    fn set_whiteboard_tool_from_action(&mut self, tool: WhiteboardTool, cx: &mut Context<Self>) {
+        if self.active_tab_is_whiteboard() && self.whiteboard_text_editor.is_none() {
+            self.whiteboard_set_tool(tool, cx);
+        }
+    }
+
+    pub(crate) fn on_whiteboard_select_tool(
+        &mut self,
+        _: &WhiteboardSelectTool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_whiteboard_tool_from_action(WhiteboardTool::Select, cx);
+    }
+
+    pub(crate) fn on_whiteboard_rectangle_tool(
+        &mut self,
+        _: &WhiteboardRectangleTool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_whiteboard_tool_from_action(WhiteboardTool::Rectangle, cx);
+    }
+
+    pub(crate) fn on_whiteboard_ellipse_tool(
+        &mut self,
+        _: &WhiteboardEllipseTool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_whiteboard_tool_from_action(WhiteboardTool::Ellipse, cx);
+    }
+
+    pub(crate) fn on_whiteboard_arrow_tool(
+        &mut self,
+        _: &WhiteboardArrowTool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_whiteboard_tool_from_action(WhiteboardTool::Arrow, cx);
+    }
+
+    pub(crate) fn on_whiteboard_line_tool(
+        &mut self,
+        _: &WhiteboardLineTool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_whiteboard_tool_from_action(WhiteboardTool::Line, cx);
+    }
+
+    pub(crate) fn on_whiteboard_text_tool(
+        &mut self,
+        _: &WhiteboardTextTool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_whiteboard_tool_from_action(WhiteboardTool::Text, cx);
+    }
+
+    fn sidebar_action_parent(&self) -> std::path::PathBuf {
+        let target = self
+            .focused_sidebar_path
+            .clone()
+            .unwrap_or_else(|| self.sidebar_root.clone());
+        if target.is_dir() {
+            target
+        } else {
+            target
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| self.sidebar_root.clone())
+        }
+    }
+
+    pub(crate) fn on_sidebar_create_file(
+        &mut self,
+        _: &SidebarCreateFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let parent = self.sidebar_action_parent();
+        self.start_create_file(parent, window, cx);
+    }
+
+    pub(crate) fn on_sidebar_create_folder(
+        &mut self,
+        _: &SidebarCreateFolder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let parent = self.sidebar_action_parent();
+        self.start_create_dir(parent, window, cx);
+    }
+
+    pub(crate) fn on_sidebar_rename(
+        &mut self,
+        _: &SidebarRename,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(path) = self
+            .focused_sidebar_path
+            .clone()
+            .filter(|path| path != &self.sidebar_root)
+        {
+            self.start_rename(path, window, cx);
+        }
+    }
+
+    pub(crate) fn on_sidebar_delete(
+        &mut self,
+        _: &SidebarDelete,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .focused_sidebar_path
+            .as_ref()
+            .is_some_and(|path| path != &self.sidebar_root)
+        {
+            self.sidebar_delete_focused(cx);
         }
     }
 

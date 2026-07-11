@@ -29,24 +29,24 @@ Moeka टेक्स्ट प्रारूप के रूप में `Ma
 - [ ] बाद में पूर्ण किए गए और आइटम जोड़ें।
 ***
 ### तालिका इंटरैक्शन
-| सुविधा                    | शॉर्टकट      |
-| ---------------------- | ---------- |
-| `Command + B`          | बोल्ड        |
-| `Command + I`          | इटैलिक       |
-| `Command + Shift + S`  | स्ट्राइकथ्रू    |
-| `Command + E`          | इनलाइन कोड   |
-| `Command + Option + C` | कोड ब्लॉक     |
-| `Command + Option + Q` | उद्धरण      |
-| `Command + Option + U` | अव्यवस्थित सूची |
-| `Command + Option + O` | व्यवस्थित सूची  |
-| `Command + Option + T` | कार्य        |
-| `Command + K`          | लिंक         |
-| `Command + Shift + I`  | चित्र        |
+| सुविधा                        | शॉर्टकट      |
+| -------------------------- | ---------- |
+| `Command + B`              | बोल्ड        |
+| `Command + I`              | इटैलिक       |
+| `Command + Shift + X`      | स्ट्राइकथ्रू    |
+| `Command + E`              | इनलाइन कोड   |
+| `Command + Option + C`     | कोड ब्लॉक     |
+| `Command + Option + Q`     | उद्धरण      |
+| `Command + Option + U`     | अव्यवस्थित सूची |
+| `Command + Option + O`     | व्यवस्थित सूची  |
+| `Command + Option + Enter` | कार्य        |
+| `Command + K`              | लिंक         |
+| `/ image`                  | चित्र        |
 
 | --------------------- | -------- |
 | --------------------- | -------- |
 | `[[`                  | wiki लिंक  |
-| `Command + Shift + I` | चित्र      |
+| `/ image`             | चित्र      |
 ## कोड ब्लॉक सिंटैक्स
 ```rust
 fn greet(name: &str) {

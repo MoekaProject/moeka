@@ -27,6 +27,7 @@ notify = "8"
 rfd = "0.15"
 ureq = "2.12"
 regex = "1"
+percent-encoding = "2"
 directories = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -70,14 +71,37 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 
+# Fast native builds for daily `cargo run --release` testing. Dependencies
+# remain fully optimized; only the application crate favors compile speed.
 [profile.release]
+lto = false
+codegen-units = 16
+incremental = true
+strip = true
+
+[profile.release.package.moeka]
+opt-level = 1
+codegen-units = 256
+
+# Shipping builds keep the previous maximum-optimization settings.
+[profile.dist]
+inherits = "release"
 lto = "thin"
 codegen-units = 1
+incremental = false
 strip = true
+
+[profile.dist.package.moeka]
+opt-level = 3
+codegen-units = 1
 
 [profile.profiling]
 inherits = "release"
 debug = true
 strip = false
 lto = false
+codegen-units = 16
+
+[profile.profiling.package.moeka]
+opt-level = 3
 codegen-units = 16

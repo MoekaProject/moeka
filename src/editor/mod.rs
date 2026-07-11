@@ -1,7 +1,9 @@
 mod app_settings;
 mod assets;
+mod attachments;
 mod chat_panel;
 mod code_commands;
+mod command_palette;
 mod config_paths;
 mod config_store;
 mod element;
@@ -55,6 +57,7 @@ mod workspace_search;
 
 pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
 pub(crate) use assets::*;
+pub(crate) use attachments::AttachmentPolicy;
 pub(crate) use file_list::FileListItem;
 use language_detection::classify_pasted_text_kind;
 pub(crate) use scrollbar::{PanelScrollbarKind, PanelScrollbarState};
@@ -263,14 +266,6 @@ fn is_image_path(path: &Path) -> bool {
                 "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" | "bmp" | "tif" | "tiff"
             )
         })
-}
-
-fn markdown_reference_for_import_name(file_name: &str, is_image: bool) -> String {
-    if is_image {
-        format!("![]({file_name})")
-    } else {
-        format!("[{file_name}]({file_name})")
-    }
 }
 
 fn unique_import_path(directory: &Path, stem: &str, extension: Option<&str>) -> PathBuf {
@@ -1488,7 +1483,6 @@ pub struct EditorView {
     pub(crate) editor_scrollbar_drag: Option<EditorScrollbarDragState>,
     pub(crate) panel_scrollbars: HashMap<PanelScrollbarKind, PanelScrollbarState>,
     pub(crate) sidebar_custom_width: Option<f32>,
-    pub(crate) search_sidebar_custom_width: Option<f32>,
     /// Time of the last grouped typing checkpoint, used to coalesce rapid
     /// single-character edits into a single undo step (time-interval grouping).
     pub(crate) last_typing_checkpoint_time: Option<Instant>,
@@ -1652,9 +1646,6 @@ pub struct EditorView {
     pub(crate) toolbar_opacity_task: Option<Task<()>>,
     pub(crate) toolbar_hide_task: Option<Task<()>>,
     pub(crate) toolbar_corner_hide_task: Option<Task<()>>,
-    pub(crate) tooltip_pending: Option<tooltip::TooltipState>,
-    pub(crate) tooltip_visible: Option<tooltip::TooltipState>,
-    pub(crate) tooltip_task: Option<Task<()>>,
     pub(crate) last_window_width: f32,
     pub(crate) last_window_height: f32,
 
@@ -1738,6 +1729,12 @@ pub struct EditorView {
     pub(crate) quick_open_task: Option<Task<()>>,
     pub(crate) quick_open_scroll_handle: ScrollHandle,
     pub(crate) quick_open_render_limit: usize,
+    pub(crate) command_palette_visible: bool,
+    pub(crate) command_palette_query: String,
+    pub(crate) command_palette_selected_index: usize,
+    pub(crate) command_palette_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) command_palette_scroll_handle: ScrollHandle,
+    pub(crate) command_palette_pending: Option<shortcut::CommandId>,
     pub(crate) language_picker_visible: bool,
     pub(crate) language_picker_mode: language_picker::LanguagePickerMode,
     pub(crate) language_picker_anchor: Option<gpui::Point<Pixels>>,
@@ -1777,6 +1774,8 @@ pub struct EditorView {
     pub(crate) settings_ui_font_size_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) settings_line_height_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) settings_letter_spacing_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) settings_attachment_folder_editor:
+        Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) font_picker_trigger_position: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) font_picker_button_bounds: std::collections::HashMap<
         (crate::editor::settings_panel::FontRole, usize),
@@ -2008,7 +2007,6 @@ impl EditorView {
                 })
                 .collect(),
             sidebar_custom_width: None,
-            search_sidebar_custom_width: None,
             last_typing_checkpoint_time: None,
             last_typing_checkpoint_offset: None,
             sidebar_resizing: false,
@@ -2147,9 +2145,6 @@ impl EditorView {
             toolbar_opacity_task: None,
             toolbar_hide_task: None,
             toolbar_corner_hide_task: None,
-            tooltip_pending: None,
-            tooltip_visible: None,
-            tooltip_task: None,
             last_window_width: 1360.0,
             last_window_height: 820.0,
 
@@ -2211,6 +2206,12 @@ impl EditorView {
             quick_open_task: None,
             quick_open_scroll_handle: ScrollHandle::new(),
             quick_open_render_limit: 100,
+            command_palette_visible: false,
+            command_palette_query: String::new(),
+            command_palette_selected_index: 0,
+            command_palette_editor: None,
+            command_palette_scroll_handle: ScrollHandle::new(),
+            command_palette_pending: None,
             language_picker_visible: false,
             language_picker_mode: language_picker::LanguagePickerMode::Language,
             language_picker_anchor: None,
@@ -2248,6 +2249,7 @@ impl EditorView {
             settings_ui_font_size_editor: None,
             settings_line_height_editor: None,
             settings_letter_spacing_editor: None,
+            settings_attachment_folder_editor: None,
             font_picker_trigger_position: None,
             font_picker_button_bounds: std::collections::HashMap::new(),
             cached_font_names: None,
@@ -2792,22 +2794,13 @@ impl EditorView {
             .unwrap_or_else(|| self.scaled(self.styles.sidebar.sidebar_width_px))
     }
 
-    /// The custom width for the currently displayed left sidebar mode.
-    /// Workspace search and the file tree keep independent widths.
+    /// The custom width shared by all left sidebar modes.
     pub(crate) fn active_sidebar_custom_width(&self) -> Option<f32> {
-        if self.workspace_search_visible {
-            self.search_sidebar_custom_width
-        } else {
-            self.sidebar_custom_width
-        }
+        self.sidebar_custom_width
     }
 
     pub(crate) fn set_active_sidebar_custom_width(&mut self, width: f32) {
-        if self.workspace_search_visible {
-            self.search_sidebar_custom_width = Some(width);
-        } else {
-            self.sidebar_custom_width = Some(width);
-        }
+        self.sidebar_custom_width = Some(width);
     }
 
     pub(crate) fn sidebar_width(&self) -> f32 {
@@ -3277,6 +3270,7 @@ impl EditorView {
         self.image_cache.insert(path.clone(), None);
         let current_file = self.current_file_path.clone();
         let workspaces = self.workspaces.clone();
+        let workspace_root = self.sidebar_root.clone();
         cx.spawn(async move |this, cx| {
             let image_path = path.clone();
             let file_dir = current_file
@@ -3285,7 +3279,17 @@ impl EditorView {
             let maybe_image = cx
                 .background_executor()
                 .spawn(async move {
-                    helpers::load_image(&image_path, file_dir.as_ref(), &workspaces)
+                    let resolved_path = if helpers::is_remote_image_url(&image_path) {
+                        None
+                    } else {
+                        attachments::WorkspaceLinkIndex::build(&workspace_root)
+                            .resolve(current_file.as_deref(), &image_path)
+                    };
+                    let load_path = resolved_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or(image_path);
+                    helpers::load_image(&load_path, file_dir.as_ref(), &workspaces)
                         .ok()
                         .map(Arc::new)
                 })
@@ -3931,15 +3935,20 @@ impl EditorView {
 
         let Some(target_dir) = self
             .current_file_path
-            .as_ref()
-            .and_then(|path| path.parent())
-            .map(Path::to_path_buf)
+            .as_deref()
+            .map(|current_file| {
+                self.app_settings
+                    .attachment_policy()
+                    .target_directory(&self.sidebar_root, current_file)
+            })
+            .transpose()?
         else {
             self.show_save_before_import_dialog(cx);
             return Ok(ClipboardPasteOutcome::Consumed);
         };
+        std::fs::create_dir_all(&target_dir)?;
 
-        let mut markdown_lines = Vec::new();
+        let mut imported = Vec::new();
         for image in images {
             let target_path = unique_import_path(
                 &target_dir,
@@ -3947,33 +3956,184 @@ impl EditorView {
                 Some(image_extension(image.format)),
             );
             std::fs::write(&target_path, &image.bytes)?;
-            let file_name = target_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            markdown_lines.push(markdown_reference_for_import_name(file_name, true));
+            imported.push((target_path, true));
         }
 
         for source_path in file_paths {
             let extension = source_path
                 .extension()
                 .and_then(|extension| extension.to_str());
-            let target_path = unique_import_path(&target_dir, &timestamp_file_stem(), extension);
+            let stem = source_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.is_empty())
+                .unwrap_or("attachment");
+            let target_path = unique_import_path(&target_dir, stem, extension);
             std::fs::copy(&source_path, &target_path)?;
-            let file_name = target_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            markdown_lines.push(markdown_reference_for_import_name(
-                file_name,
-                is_image_path(&source_path),
-            ));
+            imported.push((target_path, is_image_path(&source_path)));
         }
 
-        if markdown_lines.is_empty() {
+        if imported.is_empty() {
             Ok(ClipboardPasteOutcome::Consumed)
         } else {
-            Ok(ClipboardPasteOutcome::Insert(markdown_lines.join("\n")))
+            Ok(ClipboardPasteOutcome::Insert(
+                self.references_for_imported_paths(&imported)?.join("\n"),
+            ))
+        }
+    }
+
+    fn references_for_imported_paths(
+        &self,
+        imported: &[(PathBuf, bool)],
+    ) -> anyhow::Result<Vec<String>> {
+        let current_file = self.current_file_path.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("save the current document before importing attachments")
+        })?;
+        let policy = self.app_settings.attachment_policy();
+        let index = attachments::WorkspaceLinkIndex::build(&self.sidebar_root);
+        imported
+            .iter()
+            .map(|(path, is_image)| {
+                policy.reference_for(
+                    &self.sidebar_root,
+                    current_file,
+                    path,
+                    *is_image,
+                    Some(&index),
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn import_external_paths_as_attachments(
+        &mut self,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab_is_read_only() || !self.active_tab_is_markdown() {
+            self.open_external_paths_in_tabs(paths, cx);
+            return;
+        }
+        let Some(current_file) = self.current_file_path.as_deref() else {
+            self.show_save_before_import_dialog(cx);
+            return;
+        };
+        let result = (|| -> anyhow::Result<String> {
+            let policy = self.app_settings.attachment_policy();
+            let target_dir = policy.target_directory(&self.sidebar_root, current_file)?;
+            std::fs::create_dir_all(&target_dir)?;
+            let mut imported = Vec::new();
+            for source_path in paths.iter().filter(|path| path.is_file()) {
+                let extension = source_path
+                    .extension()
+                    .and_then(|extension| extension.to_str());
+                let stem = source_path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .filter(|stem| !stem.is_empty())
+                    .unwrap_or("attachment");
+                let target_path = unique_import_path(&target_dir, stem, extension);
+                std::fs::copy(source_path, &target_path)?;
+                imported.push((target_path, is_image_path(source_path)));
+            }
+            Ok(self.references_for_imported_paths(&imported)?.join("\n"))
+        })();
+        match result {
+            Ok(insertion) if !insertion.is_empty() => self.insert_pasted_text(&insertion, cx),
+            Ok(_) => {}
+            Err(error) => eprintln!("failed to import dropped attachments: {error}"),
+        }
+    }
+
+    pub(crate) fn capture_workspace_rewrite_context(
+        &self,
+    ) -> Option<attachments::WorkspaceRewriteContext> {
+        if !self.app_settings.automatically_update_links {
+            return None;
+        }
+        let mut open_documents = HashMap::new();
+        for tab in &self.tabs {
+            if tab.kind != TabKind::Editor
+                || !tab.file_kind.as_ref().is_some_and(FileKind::is_markdown)
+            {
+                continue;
+            }
+            let Some(path) = tab.path.as_ref() else {
+                continue;
+            };
+            let text = if self.active_tab_id.as_deref() == Some(tab.id.as_str()) {
+                self.buffer.text().to_string()
+            } else {
+                tab.snapshot.text.clone()
+            };
+            open_documents.insert(path.clone(), text);
+        }
+        Some(attachments::WorkspaceRewriteContext::capture(
+            &self.sidebar_root,
+            &open_documents,
+        ))
+    }
+
+    pub(crate) fn apply_workspace_link_rewrites(
+        &mut self,
+        context: Option<attachments::WorkspaceRewriteContext>,
+        mappings: &[attachments::PathMapping],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(context) = context else {
+            return;
+        };
+        let rewrites = context.plan(mappings, &self.app_settings.attachment_policy());
+        let mut active_changed = false;
+        let mut changed = false;
+        for rewrite in rewrites {
+            let open_tab_index = self.tabs.iter().position(|tab| {
+                tab.kind == TabKind::Editor
+                    && tab.path.as_deref() == Some(rewrite.new_path.as_path())
+            });
+            let is_dirty = open_tab_index.is_some_and(|index| self.tabs[index].is_dirty);
+            if !is_dirty
+                && let Err(error) =
+                    attachments::write_text_atomically(&rewrite.new_path, &rewrite.text)
+            {
+                eprintln!(
+                    "failed to update links in {}: {error}",
+                    rewrite.new_path.display()
+                );
+                continue;
+            }
+
+            if let Some(index) = open_tab_index {
+                self.tabs[index].snapshot.text = rewrite.text.clone();
+                self.tabs[index].snapshot.cursor_offset = self.tabs[index]
+                    .snapshot
+                    .cursor_offset
+                    .min(rewrite.text.len());
+                self.tabs[index].snapshot.cursor_anchor = self.tabs[index]
+                    .snapshot
+                    .cursor_anchor
+                    .min(rewrite.text.len());
+                if self.active_tab_id.as_deref() == Some(self.tabs[index].id.as_str()) {
+                    self.buffer = Buffer::from_text(&rewrite.text);
+                    self.cursor.offset = self.cursor.offset.min(self.buffer.len());
+                    self.cursor.anchor = self.cursor.anchor.min(self.buffer.len());
+                    for cursor in &mut self.extra_cursors {
+                        cursor.offset = cursor.offset.min(self.buffer.len());
+                        cursor.anchor = cursor.anchor.min(self.buffer.len());
+                    }
+                    active_changed = true;
+                }
+            }
+            changed = true;
+        }
+
+        if active_changed {
+            self.reparse();
+        }
+        if changed {
+            self.invalidate_info_panel_cache();
+            session_store::persist_session(self);
+            cx.notify();
         }
     }
 
@@ -6174,6 +6334,19 @@ impl EditorView {
             return;
         }
 
+        if self
+            .cursor_states_with_primary_flag()
+            .iter()
+            .all(|(cursor, _)| !cursor.has_selection())
+        {
+            let text = self.cursor_lines_clipboard_text();
+            if !text.is_empty() {
+                self.multi_cursor_clipboard = None;
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            return;
+        }
+
         let texts = self.multi_cursor_selected_texts();
         if texts.is_empty() {
             return;
@@ -6335,6 +6508,31 @@ impl EditorView {
         if self.active_tab_is_read_only() {
             return;
         }
+        if self
+            .cursor_states_with_primary_flag()
+            .iter()
+            .all(|(cursor, _)| !cursor.has_selection())
+        {
+            let text = self.cursor_lines_clipboard_text();
+            let ranges = self.cursor_line_delete_ranges();
+            if text.is_empty() || ranges.is_empty() {
+                return;
+            }
+            self.checkpoint();
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            let cursor_offset = ranges.first().map(|range| range.start).unwrap_or(0);
+            for range in ranges.into_iter().rev() {
+                self.buffer.delete(range);
+            }
+            self.extra_cursors.clear();
+            self.cursor
+                .move_to(cursor_offset.min(self.buffer.len()), &self.buffer);
+            self.multi_cursor_clipboard = None;
+            self.reparse();
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
+        }
         let texts = self.multi_cursor_selected_texts();
         if texts.is_empty() {
             return;
@@ -6376,6 +6574,56 @@ impl EditorView {
 
         self.reparse();
         self.pause_blinking(cx);
+    }
+
+    fn cursor_line_indices(&self) -> Vec<usize> {
+        let mut lines = self
+            .cursor_states_with_primary_flag()
+            .into_iter()
+            .map(|(cursor, _)| self.buffer.offset_to_line_col(cursor.offset).0)
+            .collect::<Vec<_>>();
+        lines.sort_unstable();
+        lines.dedup();
+        lines
+    }
+
+    fn cursor_lines_clipboard_text(&self) -> String {
+        let mut text = String::new();
+        for line in self.cursor_line_indices() {
+            text.push_str(self.buffer.line_content(line));
+            text.push('\n');
+        }
+        text
+    }
+
+    fn cursor_line_delete_ranges(&self) -> Vec<std::ops::Range<usize>> {
+        let lines = self.cursor_line_indices();
+        let mut ranges = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            let first_line = lines[index];
+            let mut last_line = first_line;
+            while index + 1 < lines.len() && lines[index + 1] == last_line + 1 {
+                index += 1;
+                last_line = lines[index];
+            }
+
+            let mut start = self.buffer.line_start(first_line);
+            let end = self.buffer.line_end(last_line);
+            let end = if end < self.buffer.len() {
+                end + 1
+            } else {
+                end
+            };
+            if end == self.buffer.len() && start == end && start > 0 {
+                start -= 1;
+            } else if end == self.buffer.len() && start > 0 {
+                start -= 1;
+            }
+            ranges.push(start..end);
+            index += 1;
+        }
+        ranges
     }
 
     pub(crate) fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
@@ -6702,9 +6950,6 @@ impl EditorView {
             return;
         }
         if let Some(ref mut w) = self.sidebar_custom_width {
-            *w = *w * (clamped / self.ui_scale);
-        }
-        if let Some(ref mut w) = self.search_sidebar_custom_width {
             *w = *w * (clamped / self.ui_scale);
         }
         if let Some(ref mut w) = self.file_list_custom_width {
@@ -7160,15 +7405,23 @@ impl EditorView {
             return;
         }
 
+        let policy = self.app_settings.attachment_policy();
+        let index = attachments::WorkspaceLinkIndex::build(&self.sidebar_root);
+        let Some(current_file) = self.current_file_path.as_deref() else {
+            return;
+        };
         let links: Vec<String> = paths
             .iter()
-            .map(|path| {
-                let relative = path
-                    .strip_prefix(&self.sidebar_root)
-                    .unwrap_or(path.as_path())
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                format!("[[{relative}]]")
+            .filter_map(|path| {
+                policy
+                    .reference_for(
+                        &self.sidebar_root,
+                        current_file,
+                        path,
+                        is_image_path(path),
+                        Some(&index),
+                    )
+                    .ok()
             })
             .collect();
         if links.is_empty() {
@@ -7871,21 +8124,7 @@ fn resolve_markdown_target_path(
         return current_file_path.map(Path::to_path_buf);
     }
 
-    let relative = PathBuf::from(path_part);
-    let candidates = if relative.is_absolute() {
-        vec![relative]
-    } else {
-        let mut candidates = Vec::new();
-        if let Some(current_file_path) = current_file_path
-            && let Some(parent) = current_file_path.parent()
-        {
-            candidates.push(parent.join(&relative));
-        }
-        candidates.push(sidebar_root.join(&relative));
-        candidates
-    };
-
-    candidates.into_iter().find(|candidate| candidate.exists())
+    attachments::WorkspaceLinkIndex::build(sidebar_root).resolve(current_file_path, path_part)
 }
 
 pub(crate) fn resolve_wiki_link_target_path(sidebar_root: &Path, target: &str) -> Option<PathBuf> {
@@ -8606,9 +8845,8 @@ pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
 mod tests {
     use super::{
         compute_incremental_markdown_decorations, heading_matches_anchor,
-        line_display_transfer_line_bounds, markdown_reference_for_import_name,
-        normalize_ordered_list_numbers_in_buffer, resolve_markdown_target_path,
-        split_markdown_target, text_tab_is_dirty, unique_import_path,
+        line_display_transfer_line_bounds, normalize_ordered_list_numbers_in_buffer,
+        resolve_markdown_target_path, split_markdown_target, text_tab_is_dirty, unique_import_path,
     };
     use crate::buffer::Buffer;
     use crate::markdown::parse_decorations;
@@ -8834,18 +9072,6 @@ mod tests {
         assert_eq!(
             next_path.file_name().and_then(|name| name.to_str()),
             Some("20260507153045-2.png")
-        );
-    }
-
-    #[test]
-    fn markdown_reference_for_import_name_formats_images_and_files() {
-        assert_eq!(
-            markdown_reference_for_import_name("20260507153045.png", true),
-            "![](20260507153045.png)"
-        );
-        assert_eq!(
-            markdown_reference_for_import_name("20260507153045.pdf", false),
-            "[20260507153045.pdf](20260507153045.pdf)"
         );
     }
 

@@ -106,12 +106,14 @@ impl EditorView {
         &self,
         id: &'static str,
         icon_path: &'static str,
+        tooltip_title: &'static str,
+        shortcut: Option<&'static str>,
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &MouseDownEvent, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
         let ss = &self.styles.sidebar;
         let hover_opacity = ss.sidebar_header_action_hover_opacity;
-        div()
+        let button = div()
             .id(id)
             .w(px(self.scaled(ss.sidebar_header_action_btn_size_px)))
             .h(px(self.scaled(ss.sidebar_header_action_btn_size_px)))
@@ -134,8 +136,8 @@ impl EditorView {
                     cx.stop_propagation();
                     handler(this, event, window, cx);
                 }),
-            )
-            .into_any_element()
+            );
+        tooltip::with_tooltip(button, cx.entity().clone(), tooltip_title, shortcut)
     }
 
     fn render_sidebar_top_button(
@@ -143,6 +145,8 @@ impl EditorView {
         id: &'static str,
         icon_path: &'static str,
         is_active: bool,
+        tooltip_title: &'static str,
+        shortcut: Option<&'static str>,
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &MouseDownEvent, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
@@ -152,7 +156,7 @@ impl EditorView {
         } else {
             ss.sidebar_top_button_inactive_color
         };
-        div()
+        let button = div()
             .id(id)
             .w(px(self.scaled(ss.sidebar_top_button_size_px)))
             .h(px(self.scaled(ss.sidebar_top_button_size_px)))
@@ -173,8 +177,8 @@ impl EditorView {
                     cx.stop_propagation();
                     handler(this, event, window, cx);
                 }),
-            )
-            .into_any_element()
+            );
+        tooltip::with_tooltip(button, cx.entity().clone(), tooltip_title, shortcut)
     }
 
     fn render_sidebar_header(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -232,6 +236,8 @@ impl EditorView {
                     .child(self.render_sidebar_header_action_button(
                         "sidebar-header-search",
                         FILETREE_SEARCH_SVG_PATH,
+                        crate::i18n::sidebar_action_label(self.ui_language, "search"),
+                        Some("⌘⇧F"),
                         cx,
                         |this, _event, window, cx| {
                             this.toggle_workspace_search(window, cx);
@@ -240,6 +246,8 @@ impl EditorView {
                     .child(self.render_sidebar_header_action_button(
                         "sidebar-header-sort",
                         FILETREE_SORT_SVG_PATH,
+                        crate::i18n::sidebar_action_label(self.ui_language, "sort"),
+                        None,
                         cx,
                         |this, event, _window, cx| {
                             this.open_sidebar_sort_menu(event.position, cx);
@@ -248,6 +256,8 @@ impl EditorView {
                     .child(self.render_sidebar_header_action_button(
                         "sidebar-header-create",
                         FILETREE_ADD_SVG_PATH,
+                        crate::i18n::sidebar_action_label(self.ui_language, "create"),
+                        None,
                         cx,
                         |this, event, _window, cx| {
                             this.open_sidebar_create_menu(event.position, cx);
@@ -1021,6 +1031,8 @@ impl EditorView {
                                 "sidebar-top-filetree",
                                 "assets/icons/filetree.svg",
                                 !self.workspace_search_visible,
+                                crate::i18n::sidebar_action_label(self.ui_language, "files"),
+                                None,
                                 cx,
                                 |this, _event, window, cx| {
                                     this.sidebar_visible = true;
@@ -1035,6 +1047,8 @@ impl EditorView {
                                 "sidebar-top-search",
                                 "assets/icons/search.svg",
                                 self.workspace_search_visible,
+                                crate::i18n::sidebar_action_label(self.ui_language, "search"),
+                                Some("⌘⇧F"),
                                 cx,
                                 |this, _event, window, cx| {
                                     this.toggle_workspace_search(window, cx);
@@ -1048,6 +1062,8 @@ impl EditorView {
                         "sidebar-top-file-list-toggle",
                         "assets/icons/file-list-toggle.svg",
                         self.file_list_visible,
+                        crate::i18n::sidebar_action_label(self.ui_language, "file_list"),
+                        None,
                         cx,
                         |this, _event, _window, cx| {
                             this.toggle_file_list_visible(cx);

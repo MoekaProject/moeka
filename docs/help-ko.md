@@ -29,24 +29,24 @@ Moeka는 `Markdown`을 텍스트 편집 형식으로 사용합니다. Markdown�
 - [ ] 완료된 항목을 나중에 추가할 수 있습니다.
 ***
 ### 표 상호작용
-| 기능                   | 단축키         |
-| ---------------------- | -------------- |
-| `Command + B`          | 굵게           |
-| `Command + I`          | 기울임         |
-| `Command + Shift + S`  | 취소선         |
-| `Command + E`          | 인라인 코드    |
-| `Command + Option + C` | 코드 블록      |
-| `Command + Option + Q` | 인용           |
-| `Command + Option + U` | 순서 없는 목록 |
-| `Command + Option + O` | 순서 있는 목록 |
-| `Command + Option + T` | 할 일          |
-| `Command + K`          | 링크           |
-| `Command + Shift + I`  | 이미지         |
+| 기능                       | 단축키         |
+| -------------------------- | -------------- |
+| `Command + B`              | 굵게           |
+| `Command + I`              | 기울임         |
+| `Command + Shift + X`      | 취소선         |
+| `Command + E`              | 인라인 코드    |
+| `Command + Option + C`     | 코드 블록      |
+| `Command + Option + Q`     | 인용           |
+| `Command + Option + U`     | 순서 없는 목록 |
+| `Command + Option + O`     | 순서 있는 목록 |
+| `Command + Option + Enter` | 할 일          |
+| `Command + K`              | 링크           |
+| `/ image`                  | 이미지         |
 
 | --------------------- | --------  |
 | --------------------- | --------- |
 | `[[`                  | 위키 링크 |
-| `Command + Shift + I` | 이미지    |
+| `/ image`             | 이미지    |
 ## 코드 블록 문법
 ```rust
 fn greet(name: &str) {

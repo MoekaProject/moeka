@@ -29,24 +29,24 @@ description: 介绍小语文稿的使用
 - [ ] 追加录入一些已完成事项。
 ***
 ### 表格交互
-| 功能                   | 快捷键   |
-| ---------------------- | -------- |
-| `Command + B`          | 加粗     |
-| `Command + I`          | 斜体     |
-| `Command + Shift + S`  | 删除线   |
-| `Command + E`          | 行内代码 |
-| `Command + Option + C` | 代码块   |
-| `Command + Option + Q` | 引用     |
-| `Command + Option + U` | 无序列表 |
-| `Command + Option + O` | 有序列表 |
-| `Command + Option + T` | 待办事项 |
-| `Command + K`          | 链接     |
-| `Command + Shift + I`  | 图片     |
+| 功能                       | 快捷键   |
+| -------------------------- | -------- |
+| `Command + B`              | 加粗     |
+| `Command + I`              | 斜体     |
+| `Command + Shift + X`      | 删除线   |
+| `Command + E`              | 行内代码 |
+| `Command + Option + C`     | 代码块   |
+| `Command + Option + Q`     | 引用     |
+| `Command + Option + U`     | 无序列表 |
+| `Command + Option + O`     | 有序列表 |
+| `Command + Option + Enter` | 待办事项 |
+| `Command + K`              | 链接     |
+| `/ image`                  | 图片     |
 
 | --------------------- | -------- |
 | --------------------- | -------- |
 | `[[`                  | 双向链接 |
-| `Command + Shift + I` | 图片     |
+| `/ image`             | 图片     |
 ## 代码块语法
 ```rust
 fn greet(name: &str) {
@@ -109,6 +109,12 @@ pie title Pets adopted by volunteers
 - 还可以使用脚注语法[^note]跳转到脚注行用于引用参考。
 - 另外可以使用[文件链接](功能规划.md)跳转到指定文件的指定标题。
 - 以上所有语法，都可以按住 `Command` 键并点击后跳转。
+## 本地附件
+- 在 Markdown 文档中粘贴图片或文件，或者从 Finder 拖入文件时，小语文稿会把资源复制到“设置”中选择的附件位置。从小语文稿侧边栏拖入文件只会插入链接，不会重复复制。
+- 附件可以保存在当前文档同级、工作区根目录、工作区指定目录，或当前文档旁的子文件夹。自定义目录必须是工作区内的相对路径。
+- 可以生成标准 Markdown 链接或 Obsidian 风格的 WikiLink；路径可选择文档相对、工作区根相对或工作区内最短唯一路径。
+- 支持预览 `![[assets/image.png]]` 形式的 Obsidian 图片嵌入。若同一批文件也会使用 Typora 或其他 Markdown 工具编辑，建议选择标准 Markdown 语法 `![](assets/image.png)`。
+- 开启“移动后自动更新链接”后，在小语文稿内移动或重命名文件、文件夹会更新工作区中的本地 Markdown 与 WikiLink 目标；直接在 Finder 中重命名不会被自动追踪。
 ## 行内扩展语法
 - 下标示例：H~2~O，上标示例：E=mc^2^，可以用英文：Foo~zoo~ 或者 Bar^baz^ 等。
 - 另外也支持==高亮==语法，让文本显得更加醒目强调。

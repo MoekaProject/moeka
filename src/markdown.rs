@@ -1,6 +1,7 @@
 use emojis::get_by_shortcode;
 use pulldown_cmark::{CodeBlockKind, Event, LinkType, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
+use std::path::Path;
 
 fn cell_display_width(s: &str) -> usize {
     s.chars()
@@ -87,6 +88,21 @@ pub struct WikiLinkSpan {
     pub full_range: Range<usize>,
     pub collapsed_range: Range<usize>,
     pub target_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalLinkSyntax {
+    Markdown,
+    WikiLink,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalLinkTarget {
+    pub source_range: Range<usize>,
+    pub target_range: Range<usize>,
+    pub target: String,
+    pub syntax: LocalLinkSyntax,
+    pub is_embed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2012,6 +2028,19 @@ fn parse_wiki_link_parts(source: &str) -> Option<(String, Range<usize>)> {
     Some((target.to_string(), collapsed_start..inner_end))
 }
 
+fn is_wiki_image_target(target: &str) -> bool {
+    let path = target.split_once('#').map_or(target, |(path, _)| path);
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" | "bmp" | "tif" | "tiff"
+            )
+        })
+}
+
 fn add_wiki_link_span(
     decorations: &mut [LineDecoration],
     _line_starts: &[usize],
@@ -2093,10 +2122,20 @@ fn detect_raw_wiki_links(decorations: &mut [LineDecoration], text: &str, line_st
                 trigger_range: full_range.clone(),
             });
             decoration.wiki_links.push(WikiLinkSpan {
-                full_range,
+                full_range: full_range.clone(),
                 collapsed_range: collapsed_start..collapsed_end,
-                target_path,
+                target_path: target_path.clone(),
             });
+            if full_range.start > 0
+                && line_content.as_bytes().get(full_range.start - 1) == Some(&b'!')
+                && is_wiki_image_target(&target_path)
+            {
+                decoration.syntax_ranges.push(SyntaxRange {
+                    range: full_range.start - 1..full_range.start,
+                    trigger_range: full_range.start - 1..full_range.end,
+                });
+                decoration.image_path = Some(target_path);
+            }
         }
     }
 }
@@ -2658,11 +2697,153 @@ fn assign_block_preview(
     }
 }
 
+pub(crate) fn parse_local_link_targets(text: &str) -> Vec<LocalLinkTarget> {
+    enum OpenLink {
+        Markdown { start: usize, is_embed: bool },
+        WikiLink,
+    }
+
+    let options = Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_SUBSCRIPT
+        | Options::ENABLE_SUPERSCRIPT
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_HEADING_ATTRIBUTES
+        | Options::ENABLE_MATH
+        | Options::ENABLE_TABLES;
+    let mut open_links = Vec::new();
+    let mut links = Vec::new();
+    for (event, source_range) in Parser::new_ext(text, options).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Link { link_type, .. }) => {
+                if matches!(link_type, LinkType::WikiLink { .. }) {
+                    open_links.push(OpenLink::WikiLink);
+                } else {
+                    open_links.push(OpenLink::Markdown {
+                        start: source_range.start,
+                        is_embed: false,
+                    });
+                }
+            }
+            Event::Start(Tag::Image { .. }) => open_links.push(OpenLink::Markdown {
+                start: source_range.start,
+                is_embed: true,
+            }),
+            Event::End(TagEnd::Link | TagEnd::Image) => {
+                let Some(open) = open_links.pop() else {
+                    continue;
+                };
+                let OpenLink::Markdown { start, is_embed } = open else {
+                    continue;
+                };
+                let end = source_range.end.min(text.len());
+                let Some(source) = text.get(start..end) else {
+                    continue;
+                };
+                let Some(relative_target_range) = markdown_inline_target_range(source) else {
+                    continue;
+                };
+                let target_range =
+                    start + relative_target_range.start..start + relative_target_range.end;
+                let Some(target) = text.get(target_range.clone()) else {
+                    continue;
+                };
+                links.push(LocalLinkTarget {
+                    source_range: start..end,
+                    target_range,
+                    target: target.to_string(),
+                    syntax: LocalLinkSyntax::Markdown,
+                    is_embed,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let decorations = parse_decorations(text);
+    let mut line_start = 0usize;
+    for (line, line_content) in text.split('\n').enumerate() {
+        let Some(decoration) = decorations.get(line) else {
+            break;
+        };
+        for wiki_link in &decoration.wiki_links {
+            let Some(source) = line_content.get(wiki_link.full_range.clone()) else {
+                continue;
+            };
+            let inner_end = source.len().saturating_sub(2);
+            let target_end = source[2..inner_end]
+                .find('|')
+                .map_or(inner_end, |separator| 2 + separator);
+            let Some(raw_target) = source.get(2..target_end) else {
+                continue;
+            };
+            let leading = raw_target
+                .len()
+                .saturating_sub(raw_target.trim_start().len());
+            let trailing = raw_target.len().saturating_sub(raw_target.trim_end().len());
+            let target_start = line_start + wiki_link.full_range.start + 2 + leading;
+            let target_end = line_start + wiki_link.full_range.start + target_end - trailing;
+            if target_start >= target_end {
+                continue;
+            }
+            let is_embed = wiki_link.full_range.start > 0
+                && line_content.as_bytes().get(wiki_link.full_range.start - 1) == Some(&b'!');
+            let source_start = line_start + wiki_link.full_range.start - usize::from(is_embed);
+            links.push(LocalLinkTarget {
+                source_range: source_start..line_start + wiki_link.full_range.end,
+                target_range: target_start..target_end,
+                target: text[target_start..target_end].to_string(),
+                syntax: LocalLinkSyntax::WikiLink,
+                is_embed,
+            });
+        }
+        line_start += line_content.len() + 1;
+    }
+    links.sort_by_key(|link| link.source_range.start);
+    links
+}
+
+fn markdown_inline_target_range(source: &str) -> Option<Range<usize>> {
+    let mut start = source.find("](")? + 2;
+    while source
+        .as_bytes()
+        .get(start)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        start += 1;
+    }
+    if source.as_bytes().get(start) == Some(&b'<') {
+        let target_start = start + 1;
+        let end = source.get(target_start..)?.find('>')? + target_start;
+        return (target_start < end).then_some(target_start..end);
+    }
+
+    let mut escaped = false;
+    let mut end = start;
+    for (offset, character) in source.get(start..)?.char_indices() {
+        if escaped {
+            escaped = false;
+            end = start + offset + character.len_utf8();
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            end = start + offset + 1;
+            continue;
+        }
+        if character == ')' || character.is_whitespace() {
+            break;
+        }
+        end = start + offset + character.len_utf8();
+    }
+    (start < end).then_some(start..end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BlockContext, BlockPreviewKind, BlockType, CalloutKind, InlineKind, LineDecoration,
-        parse_decorations, raw_wiki_link_ranges,
+        LocalLinkSyntax, parse_decorations, parse_local_link_targets, raw_wiki_link_ranges,
     };
 
     #[derive(Debug, serde::Deserialize)]
@@ -2769,6 +2950,55 @@ mod tests {
             "notes/file.md#intro"
         );
         assert_eq!(decorations[0].wiki_links[0].collapsed_range, 29..37);
+    }
+
+    #[test]
+    fn wiki_image_embed_sets_image_preview_path() {
+        let text = "![[assets/示例 image.png|320]]";
+        let decorations = parse_decorations(text);
+
+        assert_eq!(
+            decorations[0].image_path.as_deref(),
+            Some("assets/示例 image.png")
+        );
+        assert_eq!(
+            decorations[0].wiki_links[0].target_path,
+            "assets/示例 image.png"
+        );
+        assert!(
+            decorations[0]
+                .syntax_ranges
+                .iter()
+                .any(|range| range.range == (0..1))
+        );
+    }
+
+    #[test]
+    fn wiki_file_embed_does_not_set_image_preview_path() {
+        let decorations = parse_decorations("![[attachments/document.pdf]]");
+
+        assert!(decorations[0].image_path.is_none());
+    }
+
+    #[test]
+    fn local_link_targets_preserve_standard_and_wiki_metadata() {
+        let text = "![alt](../assets/a%20b.png \"title\") and ![[assets/图.png|320]]";
+        let links = parse_local_link_targets(text);
+
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].target, "../assets/a%20b.png");
+        assert_eq!(links[0].syntax, LocalLinkSyntax::Markdown);
+        assert!(links[0].is_embed);
+        assert_eq!(links[1].target, "assets/图.png");
+        assert_eq!(links[1].syntax, LocalLinkSyntax::WikiLink);
+        assert!(links[1].is_embed);
+    }
+
+    #[test]
+    fn local_link_targets_skip_reference_style_and_code() {
+        let text = "`[code](ignored.png)` [ref][image]\n\n[image]: actual.png";
+
+        assert!(parse_local_link_targets(text).is_empty());
     }
 
     #[test]

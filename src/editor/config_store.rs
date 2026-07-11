@@ -209,6 +209,11 @@ mod tests {
             outline_rail_visible: true,
             show_whitespace: false,
             highlight_line_background: true,
+            attachment_location: "current_file".to_string(),
+            attachment_folder: "attachments".to_string(),
+            attachment_link_syntax: "markdown".to_string(),
+            attachment_path_style: "relative".to_string(),
+            automatically_update_links: true,
             date_time_format: "%Y-%m-%d %H:%M".to_string(),
             starred_files: Vec::new(),
         }

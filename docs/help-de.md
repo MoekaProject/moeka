@@ -29,24 +29,24 @@ Moeka verwendet `Markdown` als Textformat. Markdown eignet sich gut für Autorin
 - [ ] Füge später weitere erledigte Einträge hinzu.
 ***
 ### Tabelleninteraktion
-| Funktion               | Kurzbefehl        |
-| ---------------------- | ----------------- |
-| `Command + B`          | Fett              |
-| `Command + I`          | Kursiv            |
-| `Command + Shift + S`  | Durchgestrichen   |
-| `Command + E`          | Inline-Code       |
-| `Command + Option + C` | Codeblock         |
-| `Command + Option + Q` | Zitat             |
-| `Command + Option + U` | Ungeordnete Liste |
-| `Command + Option + O` | Geordnete Liste   |
-| `Command + Option + T` | Aufgabe           |
-| `Command + K`          | Link              |
-| `Command + Shift + I`  | Bild              |
+| Funktion                   | Kurzbefehl        |
+| -------------------------- | ----------------- |
+| `Command + B`              | Fett              |
+| `Command + I`              | Kursiv            |
+| `Command + Shift + X`      | Durchgestrichen   |
+| `Command + E`              | Inline-Code       |
+| `Command + Option + C`     | Codeblock         |
+| `Command + Option + Q`     | Zitat             |
+| `Command + Option + U`     | Ungeordnete Liste |
+| `Command + Option + O`     | Geordnete Liste   |
+| `Command + Option + Enter` | Aufgabe           |
+| `Command + K`              | Link              |
+| `/ image`                  | Bild              |
 
 | --------------------- | --------  |
 | --------------------- | --------- |
 | `[[`                  | Wiki-Link |
-| `Command + Shift + I` | Bild      |
+| `/ image`             | Bild      |
 ## Codeblock-Syntax
 ```rust
 fn greet(name: &str) {

@@ -53,6 +53,16 @@ pub(crate) struct AppSettings {
     pub show_whitespace: bool,
     #[serde(default = "default_highlight_line_background")]
     pub highlight_line_background: bool,
+    #[serde(default = "default_attachment_location")]
+    pub attachment_location: String,
+    #[serde(default = "default_attachment_folder")]
+    pub attachment_folder: String,
+    #[serde(default = "default_attachment_link_syntax")]
+    pub attachment_link_syntax: String,
+    #[serde(default = "default_attachment_path_style")]
+    pub attachment_path_style: String,
+    #[serde(default = "default_automatically_update_links")]
+    pub automatically_update_links: bool,
 }
 
 fn default_theme() -> String {
@@ -143,6 +153,26 @@ fn default_highlight_line_background() -> bool {
     true
 }
 
+fn default_attachment_location() -> String {
+    "current_file".to_string()
+}
+
+fn default_attachment_folder() -> String {
+    "attachments".to_string()
+}
+
+fn default_attachment_link_syntax() -> String {
+    "markdown".to_string()
+}
+
+fn default_attachment_path_style() -> String {
+    "relative".to_string()
+}
+
+fn default_automatically_update_links() -> bool {
+    true
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -169,11 +199,26 @@ impl Default for AppSettings {
             outline_rail_visible: default_outline_rail_visible(),
             show_whitespace: default_show_whitespace(),
             highlight_line_background: default_highlight_line_background(),
+            attachment_location: default_attachment_location(),
+            attachment_folder: default_attachment_folder(),
+            attachment_link_syntax: default_attachment_link_syntax(),
+            attachment_path_style: default_attachment_path_style(),
+            automatically_update_links: default_automatically_update_links(),
         }
     }
 }
 
 impl AppSettings {
+    pub(crate) fn attachment_policy(&self) -> super::AttachmentPolicy {
+        super::AttachmentPolicy::from_settings(
+            &self.attachment_location,
+            &self.attachment_folder,
+            &self.attachment_link_syntax,
+            &self.attachment_path_style,
+            self.automatically_update_links,
+        )
+    }
+
     pub(crate) fn load() -> Self {
         config_store::load_settings()
     }

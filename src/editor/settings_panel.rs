@@ -6,12 +6,12 @@ use gpui::{
     div, prelude::*, px, svg,
 };
 
-use crate::i18n::{TextKey, UiLanguage, language_picker_options};
+use crate::i18n::{TextKey, UiLanguage, attachment_settings_label, language_picker_options};
 use crate::theme::{EditorThemeMode, ThemeKind};
 
 use super::{
     APP_VERSION, DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, SITE_SVG_PATH,
-    THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH,
+    THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH, attachments, tooltip,
 };
 
 // ── Font picker state ───────────────────────────────────────────────
@@ -47,6 +47,16 @@ pub(crate) struct FontPickerState {
     pub show_above: std::cell::Cell<Option<bool>>,
 }
 
+#[derive(Clone, Copy)]
+enum SettingsOptionAction {
+    AttachmentLocation(&'static str),
+    AttachmentSyntax(&'static str),
+    AttachmentPath(&'static str),
+    AutomaticallyUpdateLinks(bool),
+    ShowWhitespace(bool),
+    HighlightLine(bool),
+}
+
 // ── Settings panel rendering ────────────────────────────────────────
 
 impl EditorView {
@@ -69,7 +79,7 @@ impl EditorView {
             .text_size(px(self.scaled(self.styles.ui_font_size_px)))
             .child(
                 div()
-                    .max_w(px(self.scaled(560.0)))
+                    .max_w(px(self.scaled(640.0)))
                     .mx_auto()
                     .py(px(self.scaled(60.0)))
                     .px(px(self.scaled(40.0)))
@@ -101,6 +111,9 @@ impl EditorView {
                                     )
                                     .child(
                                         div()
+                                            .mb(px(self.scaled(
+                                                sps.settings_title_version_margin_bottom_px,
+                                            )))
                                             .text_size(px(self
                                                 .scaled(sps.settings_title_version_font_size_px)))
                                             .text_color(sps.settings_title_version_text_color)
@@ -121,7 +134,8 @@ impl EditorView {
                     )
                     .child(self.render_theme_section(cx))
                     .child(self.render_font_section(window, cx))
-                    .child(self.render_format_section(cx)),
+                    .child(self.render_format_section(cx))
+                    .child(self.render_attachment_settings_section(cx)),
             )
             .into_any_element()
     }
@@ -262,107 +276,331 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn render_editor_display_options(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_attachment_settings_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.ensure_attachment_folder_editor(cx);
+        let label = |key| attachment_settings_label(self.ui_language, key);
+        let location = self.app_settings.attachment_location.as_str();
+        let syntax = self.app_settings.attachment_link_syntax.as_str();
+        let path_style = self.app_settings.attachment_path_style.as_str();
+        let location_controls = div()
+            .flex()
+            .flex_col()
+            .gap(px(self.scaled(6.0)))
+            .child(self.render_settings_segmented_control(
+                vec![
+                    (
+                        "attachment-location-current-file",
+                        label("current_file"),
+                        location == "current_file",
+                        SettingsOptionAction::AttachmentLocation("current_file"),
+                    ),
+                    (
+                        "attachment-location-workspace-root",
+                        label("workspace_root"),
+                        location == "workspace_root",
+                        SettingsOptionAction::AttachmentLocation("workspace_root"),
+                    ),
+                ],
+                cx,
+            ))
+            .child(self.render_settings_segmented_control(
+                vec![
+                    (
+                        "attachment-location-workspace-folder",
+                        label("workspace_folder"),
+                        location == "workspace_folder",
+                        SettingsOptionAction::AttachmentLocation("workspace_folder"),
+                    ),
+                    (
+                        "attachment-location-current-subfolder",
+                        label("current_file_subfolder"),
+                        location == "current_file_subfolder",
+                        SettingsOptionAction::AttachmentLocation("current_file_subfolder"),
+                    ),
+                ],
+                cx,
+            ))
+            .into_any_element();
+        let syntax_controls = self.render_settings_segmented_control(
+            vec![
+                (
+                    "attachment-syntax-markdown",
+                    label("markdown"),
+                    syntax == "markdown",
+                    SettingsOptionAction::AttachmentSyntax("markdown"),
+                ),
+                (
+                    "attachment-syntax-wikilink",
+                    label("wikilink"),
+                    syntax == "wikilink",
+                    SettingsOptionAction::AttachmentSyntax("wikilink"),
+                ),
+            ],
+            cx,
+        );
+        let path_controls = self.render_settings_segmented_control(
+            vec![
+                (
+                    "attachment-path-relative",
+                    label("relative"),
+                    path_style == "relative",
+                    SettingsOptionAction::AttachmentPath("relative"),
+                ),
+                (
+                    "attachment-path-workspace",
+                    label("workspace_absolute"),
+                    path_style == "workspace_absolute",
+                    SettingsOptionAction::AttachmentPath("workspace_absolute"),
+                ),
+                (
+                    "attachment-path-shortest",
+                    label("shortest"),
+                    path_style == "shortest",
+                    SettingsOptionAction::AttachmentPath("shortest"),
+                ),
+            ],
+            cx,
+        );
+        let update_controls = self.render_boolean_settings_control(
+            "attachment-update-links",
+            self.app_settings.automatically_update_links,
+            SettingsOptionAction::AutomaticallyUpdateLinks(false),
+            SettingsOptionAction::AutomaticallyUpdateLinks(true),
+            cx,
+        );
+
         div()
             .flex()
-            .flex_row()
-            .items_center()
+            .flex_col()
             .gap(px(self.scaled(12.0)))
-            .child(
-                div()
-                    .w(px(self.scaled(120.0)))
-                    .text_size(px(self.scaled(13.0)))
-                    .text_color(self.theme.text_secondary)
-                    .child(crate::i18n::settings_label(
-                        self.ui_language,
-                        "editor_display",
-                    )),
+            .child(self.render_section_heading(label("section")))
+            .child(self.render_attachment_settings_row(label("location"), location_controls))
+            .when(
+                matches!(location, "workspace_folder" | "current_file_subfolder"),
+                |this| this.child(self.render_attachment_folder_row()),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(self.scaled(
-                        self.styles.settings_panel.settings_option_button_gap_px,
-                    )))
-                    .child(self.render_settings_option_button(
-                        "settings-show-whitespace",
-                        crate::i18n::settings_label(self.ui_language, "show_whitespace"),
-                        self.app_settings.show_whitespace,
-                        cx,
-                        |this, cx| {
-                            this.app_settings.show_whitespace = !this.app_settings.show_whitespace;
-                            this.finalize_settings_change(cx);
-                        },
-                    ))
-                    .child(self.render_settings_option_button(
-                        "settings-highlight-line-background",
-                        crate::i18n::settings_label(self.ui_language, "highlight_line"),
-                        self.app_settings.highlight_line_background,
-                        cx,
-                        |this, cx| {
-                            this.app_settings.highlight_line_background =
-                                !this.app_settings.highlight_line_background;
-                            this.finalize_settings_change(cx);
-                        },
-                    )),
-            )
+            .child(self.render_attachment_settings_row(label("syntax"), syntax_controls))
+            .child(self.render_attachment_settings_row(label("path_style"), path_controls))
+            .child(self.render_attachment_settings_row(label("update_links"), update_controls))
             .into_any_element()
     }
 
-    fn render_settings_option_button(
+    fn render_attachment_settings_row(&self, label: &str, control: AnyElement) -> AnyElement {
+        div()
+            .flex()
+            .items_start()
+            .gap(px(self.scaled(12.0)))
+            .child(
+                div()
+                    .w(px(self.scaled(140.0)))
+                    .pt(px(self.scaled(6.0)))
+                    .text_size(px(self.scaled(13.0)))
+                    .text_color(self.styles.settings_panel.settings_secondary_text_color)
+                    .child(label.to_string()),
+            )
+            .child(div().flex_1().min_w(px(0.0)).child(control))
+            .into_any_element()
+    }
+
+    fn render_attachment_folder_row(&self) -> AnyElement {
+        let border_color = self.theme.border_primary;
+        let editor = self.settings_attachment_folder_editor.clone();
+        let control = div()
+            .w_full()
+            .h(px(self.scaled(30.0)))
+            .border(px(1.0))
+            .border_color(border_color)
+            .rounded(px(self.scaled(4.0)))
+            .when_some(editor, |this, editor| this.child(editor))
+            .into_any_element();
+        self.render_attachment_settings_row(
+            attachment_settings_label(self.ui_language, "folder"),
+            control,
+        )
+    }
+
+    fn ensure_attachment_folder_editor(&mut self, cx: &mut Context<Self>) {
+        if self.settings_attachment_folder_editor.is_some() {
+            return;
+        }
+        let mut styles = self.inline_stepper_input_styles();
+        styles.text_input_center = false;
+        styles.text_input_padding_left_px = 8.0;
+        styles.text_input_padding_right_px = 8.0;
+        let initial = self.app_settings.attachment_folder.clone();
+        let editor = cx.new(move |cx| {
+            let mut input = crate::text_input::TextInput::new(styles, "attachments", cx);
+            input.set_text(&initial, cx);
+            input
+        });
+        cx.subscribe(
+            &editor,
+            |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Submit => {
+                    let text = editor.read(cx).text().to_string();
+                    if let Some(folder) = attachments::validated_attachment_folder(&text) {
+                        this.app_settings.attachment_folder = folder;
+                        this.finalize_settings_change(cx);
+                    } else {
+                        let current = this.app_settings.attachment_folder.clone();
+                        editor.update(cx, |input, cx| input.set_text(&current, cx));
+                    }
+                }
+                crate::text_input::TextInputEvent::Escape => {
+                    let current = this.app_settings.attachment_folder.clone();
+                    editor.update(cx, |input, cx| input.set_text(&current, cx));
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        self.settings_attachment_folder_editor = Some(editor);
+    }
+
+    fn render_editor_display_options(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(self.scaled(8.0)))
+            .child(self.render_attachment_settings_row(
+                crate::i18n::settings_label(self.ui_language, "show_whitespace"),
+                self.render_boolean_settings_control(
+                    "settings-show-whitespace",
+                    self.app_settings.show_whitespace,
+                    SettingsOptionAction::ShowWhitespace(false),
+                    SettingsOptionAction::ShowWhitespace(true),
+                    cx,
+                ),
+            ))
+            .child(self.render_attachment_settings_row(
+                crate::i18n::settings_label(self.ui_language, "highlight_line"),
+                self.render_boolean_settings_control(
+                    "settings-highlight-line-background",
+                    self.app_settings.highlight_line_background,
+                    SettingsOptionAction::HighlightLine(false),
+                    SettingsOptionAction::HighlightLine(true),
+                    cx,
+                ),
+            ))
+            .into_any_element()
+    }
+
+    fn render_boolean_settings_control(
         &self,
-        id: &'static str,
-        label: &'static str,
-        active: bool,
+        id_prefix: &'static str,
+        enabled: bool,
+        disabled_action: SettingsOptionAction,
+        enabled_action: SettingsOptionAction,
         cx: &mut Context<Self>,
-        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
+        let disabled_id = SharedString::from(format!("{id_prefix}-off"));
+        let enabled_id = SharedString::from(format!("{id_prefix}-on"));
+        self.render_settings_segmented_control(
+            vec![
+                (
+                    disabled_id,
+                    crate::i18n::boolean_option_label(self.ui_language, false),
+                    !enabled,
+                    disabled_action,
+                ),
+                (
+                    enabled_id,
+                    crate::i18n::boolean_option_label(self.ui_language, true),
+                    enabled,
+                    enabled_action,
+                ),
+            ],
+            cx,
+        )
+    }
+
+    fn render_settings_segmented_control<I>(
+        &self,
+        options: Vec<(I, &'static str, bool, SettingsOptionAction)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement
+    where
+        I: Into<gpui::ElementId>,
+    {
         let styles = &self.styles.settings_panel;
-        let bg = if active {
-            styles.settings_option_button_active_bg
-        } else {
-            styles.settings_option_button_bg
-        };
-        let text_color = if active {
-            styles.settings_option_button_active_text_color
-        } else {
-            styles.settings_option_button_text_color
-        };
-        let border_color = if active {
-            styles.settings_option_button_active_border_color
-        } else {
-            styles.settings_option_button_border_color
-        };
-        let hover_bg = styles.settings_option_button_hover_bg;
+        let height = self.scaled(styles.settings_theme_option_height_px);
+        let padding_x = self.scaled(styles.settings_theme_option_padding_x_px);
+        let radius = self.scaled(styles.settings_theme_option_radius_px);
+        let border_width = self.scaled(styles.settings_theme_option_border_width_px);
+        let border_color = styles.settings_theme_option_border_color;
+        let active_bg = styles.settings_theme_option_active_bg;
+        let active_text = styles.settings_theme_option_active_text_color;
+        let text = styles.settings_theme_option_text_color;
+        let hover_bg = styles.settings_theme_option_hover_bg;
 
         div()
-            .id(id)
-            .h(px(self.scaled(styles.settings_option_button_height_px)))
-            .px(px(self.scaled(styles.settings_option_button_padding_x_px)))
+            .w_full()
             .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(self.scaled(styles.settings_option_button_radius_px)))
-            .border(px(
-                self.scaled(styles.settings_option_button_border_width_px)
-            ))
+            .rounded(px(radius))
+            .border(px(border_width))
             .border_color(border_color)
-            .bg(bg)
-            .text_color(text_color)
-            .text_size(px(self.scaled(styles.settings_option_button_font_size_px)))
-            .cursor(CursorStyle::Arrow)
-            .when(!active, move |this| {
-                this.hover(move |style| style.bg(hover_bg))
-            })
-            .child(label)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    on_click(this, cx);
-                }),
-            )
+            .overflow_hidden()
+            .children(options.into_iter().enumerate().map(
+                |(index, (id, label, active, on_click))| {
+                    div()
+                        .id(id)
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .h(px(height))
+                        .px(px(padding_x))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(self.scaled(styles.settings_theme_option_font_size_px)))
+                        .text_color(if active { active_text } else { text })
+                        .bg(if active {
+                            active_bg
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .cursor(CursorStyle::Arrow)
+                        .when(!active, |this| this.hover(move |style| style.bg(hover_bg)))
+                        .when(index > 0, |this| {
+                            this.border_l(px(border_width)).border_color(border_color)
+                        })
+                        .child(div().min_w(px(0.0)).truncate().child(label))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.apply_settings_option_action(on_click, cx);
+                            }),
+                        )
+                },
+            ))
             .into_any_element()
+    }
+
+    fn apply_settings_option_action(
+        &mut self,
+        action: SettingsOptionAction,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            SettingsOptionAction::AttachmentLocation(value) => {
+                self.app_settings.attachment_location = value.to_string();
+            }
+            SettingsOptionAction::AttachmentSyntax(value) => {
+                self.app_settings.attachment_link_syntax = value.to_string();
+            }
+            SettingsOptionAction::AttachmentPath(value) => {
+                self.app_settings.attachment_path_style = value.to_string();
+            }
+            SettingsOptionAction::AutomaticallyUpdateLinks(value) => {
+                self.app_settings.automatically_update_links = value;
+            }
+            SettingsOptionAction::ShowWhitespace(value) => {
+                self.app_settings.show_whitespace = value;
+            }
+            SettingsOptionAction::HighlightLine(value) => {
+                self.app_settings.highlight_line_background = value;
+            }
+        }
+        self.finalize_settings_change(cx);
     }
 
     fn date_time_format_options(&self) -> Vec<PickerOption> {
@@ -415,7 +653,7 @@ impl EditorView {
                 div()
                     .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(self.theme.text_secondary)
+                    .text_color(self.styles.settings_panel.settings_secondary_text_color)
                     .child(heading_label),
             )
             .child(div().w_full().h(px(1.0)).bg(border_color))
@@ -479,7 +717,7 @@ impl EditorView {
         } else {
             ThemeKind::light_themes()
         };
-        let text_secondary = self.theme.text_secondary;
+        let text_secondary = settings_styles.settings_secondary_text_color;
         let hover_bg = self.theme.bg_hover;
         let toggle_active_bg = settings_styles.settings_option_button_active_bg;
         let toggle_active_text = settings_styles.settings_option_button_active_text_color;
@@ -869,8 +1107,8 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let hover_bg = self.theme.bg_hover;
-        let text_primary = self.theme.text_primary;
-        let text_secondary = self.theme.text_secondary;
+        let text_primary = self.styles.settings_panel.settings_primary_text_color;
+        let text_secondary = self.styles.settings_panel.settings_secondary_text_color;
         let border_color = self.theme.border_primary;
         let current_value = current_value.to_string();
 
@@ -973,9 +1211,7 @@ impl EditorView {
     }
 
     fn render_ui_font_size_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let text_primary = self.theme.text_primary;
-        let text_secondary = self.theme.text_secondary;
-        let hover_bg = self.theme.bg_hover;
+        let text_secondary = self.styles.settings_panel.settings_secondary_text_color;
         let border_color = self.theme.border_primary;
 
         div()
@@ -996,30 +1232,16 @@ impl EditorView {
                     .flex_row()
                     .items_center()
                     .gap(px(0.0))
-                    .child(
-                        div()
-                            .id("ui-scale-dec")
-                            .w(px(self.scaled(30.0)))
-                            .h(px(self.scaled(30.0)))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_l(px(self.scaled(6.0)))
-                            .border(px(1.0))
-                            .border_color(border_color)
-                            .text_size(px(self.scaled(14.0)))
-                            .text_color(text_primary)
-                            .cursor(CursorStyle::Arrow)
-                            .hover(move |s| s.bg(hover_bg))
-                            .child("−")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    let current = this.ui_scale;
-                                    this.apply_ui_scale(current - 0.1, cx);
-                                }),
-                            ),
-                    )
+                    .child(self.render_settings_stepper_button(
+                        "ui-scale-dec",
+                        "−",
+                        false,
+                        cx,
+                        |this, cx| {
+                            let current = this.ui_scale;
+                            this.apply_ui_scale(current - 0.1, cx);
+                        },
+                    ))
                     .child(
                         div()
                             .w(px(self.scaled(50.0)))
@@ -1034,32 +1256,55 @@ impl EditorView {
                                 |this, editor| this.child(editor),
                             ),
                     )
-                    .child(
-                        div()
-                            .id("ui-scale-inc")
-                            .w(px(self.scaled(30.0)))
-                            .h(px(self.scaled(30.0)))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_r(px(self.scaled(6.0)))
-                            .border(px(1.0))
-                            .border_color(border_color)
-                            .text_size(px(self.scaled(14.0)))
-                            .text_color(text_primary)
-                            .cursor(CursorStyle::Arrow)
-                            .hover(move |s| s.bg(hover_bg))
-                            .child("+")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    let current = this.ui_scale;
-                                    this.apply_ui_scale(current + 0.1, cx);
-                                }),
-                            ),
-                    ),
+                    .child(self.render_settings_stepper_button(
+                        "ui-scale-inc",
+                        "+",
+                        true,
+                        cx,
+                        |this, cx| {
+                            let current = this.ui_scale;
+                            this.apply_ui_scale(current + 0.1, cx);
+                        },
+                    )),
             )
             .into_any_element()
+    }
+
+    fn render_settings_stepper_button(
+        &self,
+        id: &'static str,
+        symbol: &'static str,
+        increase: bool,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let hover_bg = self.theme.bg_hover;
+        let button = div()
+            .id(id)
+            .w(px(self.scaled(30.0)))
+            .h(px(self.scaled(30.0)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(increase, |this| this.rounded_r(px(self.scaled(6.0))))
+            .when(!increase, |this| this.rounded_l(px(self.scaled(6.0))))
+            .border(px(1.0))
+            .border_color(self.theme.border_primary)
+            .text_size(px(self.scaled(14.0)))
+            .text_color(self.styles.settings_panel.settings_primary_text_color)
+            .cursor(CursorStyle::Arrow)
+            .hover(move |style| style.bg(hover_bg))
+            .child(symbol)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| on_click(this, cx)),
+            );
+        tooltip::with_tooltip(
+            button,
+            cx.entity().clone(),
+            crate::i18n::adjustment_label(self.ui_language, increase),
+            None::<&'static str>,
+        )
     }
 
     pub(crate) fn apply_ui_scale(&mut self, scale: f32, cx: &mut Context<Self>) {
@@ -1102,9 +1347,7 @@ impl EditorView {
 
     fn render_line_height_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_line_height_editor(cx);
-        let text_primary = self.theme.text_primary;
-        let text_secondary = self.theme.text_secondary;
-        let hover_bg = self.theme.bg_hover;
+        let text_secondary = self.styles.settings_panel.settings_secondary_text_color;
         let border_color = self.theme.border_primary;
 
         div()
@@ -1125,30 +1368,16 @@ impl EditorView {
                     .flex_row()
                     .items_center()
                     .gap(px(0.0))
-                    .child(
-                        div()
-                            .id("line-height-dec")
-                            .w(px(self.scaled(30.0)))
-                            .h(px(self.scaled(30.0)))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_l(px(self.scaled(6.0)))
-                            .border(px(1.0))
-                            .border_color(border_color)
-                            .text_size(px(self.scaled(14.0)))
-                            .text_color(text_primary)
-                            .cursor(CursorStyle::Arrow)
-                            .hover(move |s| s.bg(hover_bg))
-                            .child("−")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    let current = this.app_settings.line_height;
-                                    this.apply_line_height(current - 0.1, cx);
-                                }),
-                            ),
-                    )
+                    .child(self.render_settings_stepper_button(
+                        "line-height-dec",
+                        "−",
+                        false,
+                        cx,
+                        |this, cx| {
+                            let current = this.app_settings.line_height;
+                            this.apply_line_height(current - 0.1, cx);
+                        },
+                    ))
                     .child(
                         div()
                             .w(px(self.scaled(50.0)))
@@ -1162,30 +1391,16 @@ impl EditorView {
                                 this.child(editor)
                             }),
                     )
-                    .child(
-                        div()
-                            .id("line-height-inc")
-                            .w(px(self.scaled(30.0)))
-                            .h(px(self.scaled(30.0)))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_r(px(self.scaled(6.0)))
-                            .border(px(1.0))
-                            .border_color(border_color)
-                            .text_size(px(self.scaled(14.0)))
-                            .text_color(text_primary)
-                            .cursor(CursorStyle::Arrow)
-                            .hover(move |s| s.bg(hover_bg))
-                            .child("+")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    let current = this.app_settings.line_height;
-                                    this.apply_line_height(current + 0.1, cx);
-                                }),
-                            ),
-                    ),
+                    .child(self.render_settings_stepper_button(
+                        "line-height-inc",
+                        "+",
+                        true,
+                        cx,
+                        |this, cx| {
+                            let current = this.app_settings.line_height;
+                            this.apply_line_height(current + 0.1, cx);
+                        },
+                    )),
             )
             .into_any_element()
     }
@@ -1231,9 +1446,7 @@ impl EditorView {
 
     fn render_letter_spacing_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_letter_spacing_editor(cx);
-        let text_primary = self.theme.text_primary;
-        let text_secondary = self.theme.text_secondary;
-        let hover_bg = self.theme.bg_hover;
+        let text_secondary = self.styles.settings_panel.settings_secondary_text_color;
         let border_color = self.theme.border_primary;
 
         div()
@@ -1254,30 +1467,16 @@ impl EditorView {
                     .flex_row()
                     .items_center()
                     .gap(px(0.0))
-                    .child(
-                        div()
-                            .id("letter-spacing-dec")
-                            .w(px(self.scaled(30.0)))
-                            .h(px(self.scaled(30.0)))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_l(px(self.scaled(6.0)))
-                            .border(px(1.0))
-                            .border_color(border_color)
-                            .text_size(px(self.scaled(14.0)))
-                            .text_color(text_primary)
-                            .cursor(CursorStyle::Arrow)
-                            .hover(move |s| s.bg(hover_bg))
-                            .child("−")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    let current = this.app_settings.letter_spacing;
-                                    this.apply_letter_spacing(current - 0.5, cx);
-                                }),
-                            ),
-                    )
+                    .child(self.render_settings_stepper_button(
+                        "letter-spacing-dec",
+                        "−",
+                        false,
+                        cx,
+                        |this, cx| {
+                            let current = this.app_settings.letter_spacing;
+                            this.apply_letter_spacing(current - 0.5, cx);
+                        },
+                    ))
                     .child(
                         div()
                             .w(px(self.scaled(50.0)))
@@ -1292,30 +1491,16 @@ impl EditorView {
                                 |this, editor| this.child(editor),
                             ),
                     )
-                    .child(
-                        div()
-                            .id("letter-spacing-inc")
-                            .w(px(self.scaled(30.0)))
-                            .h(px(self.scaled(30.0)))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_r(px(self.scaled(6.0)))
-                            .border(px(1.0))
-                            .border_color(border_color)
-                            .text_size(px(self.scaled(14.0)))
-                            .text_color(text_primary)
-                            .cursor(CursorStyle::Arrow)
-                            .hover(move |s| s.bg(hover_bg))
-                            .child("+")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    let current = this.app_settings.letter_spacing;
-                                    this.apply_letter_spacing(current + 0.5, cx);
-                                }),
-                            ),
-                    ),
+                    .child(self.render_settings_stepper_button(
+                        "letter-spacing-inc",
+                        "+",
+                        true,
+                        cx,
+                        |this, cx| {
+                            let current = this.app_settings.letter_spacing;
+                            this.apply_letter_spacing(current + 0.5, cx);
+                        },
+                    )),
             )
             .into_any_element()
     }
@@ -1507,7 +1692,7 @@ impl EditorView {
             self.theme.bg_elevated
         };
         let border_color = self.theme.border_primary;
-        let text_primary = self.theme.text_primary;
+        let text_primary = self.styles.settings_panel.settings_primary_text_color;
         let hover_bg = self.theme.bg_hover;
         let selected_bg = self.theme.bg_selected;
 
@@ -1557,14 +1742,14 @@ impl EditorView {
         let sidebar_w = self.sidebar_width();
         let right_panel_w = self.right_panel_width();
         let pane_w = self.last_window_width - sidebar_w - right_panel_w - 2.0 * border_w;
-        let settings_content_max_w = self.scaled(560.0);
+        let settings_content_max_w = self.scaled(640.0);
         let settings_px = self.scaled(40.0);
         let settings_content_w = settings_content_max_w.min(pane_w);
         // mx_auto centers the content within the pane
         let settings_left = sidebar_w + border_w + (pane_w - settings_content_w) / 2.0;
-        let button_left = settings_left + settings_px + self.scaled(120.0) + self.scaled(12.0);
+        let button_left = settings_left + settings_px + self.scaled(140.0) + self.scaled(12.0);
         let button_w =
-            settings_content_w - 2.0 * settings_px - self.scaled(120.0) - self.scaled(12.0);
+            settings_content_w - 2.0 * settings_px - self.scaled(140.0) - self.scaled(12.0);
 
         // Use captured button bounds for precise positioning
         let button_bounds = self
@@ -1627,7 +1812,6 @@ impl EditorView {
             .border(px(1.0))
             .border_color(border_color)
             .rounded(px(self.scaled(8.0)))
-            .shadow_md()
             .flex()
             .flex_col()
             .overflow_hidden()

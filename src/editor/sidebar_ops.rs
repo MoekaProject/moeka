@@ -105,6 +105,8 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let mut first_revealed_path = None;
+        let rewrite_context = self.capture_workspace_rewrite_context();
+        let mut successful_mappings = Vec::new();
         let target_dir = Self::normalize_sidebar_path(&target_dir);
         for src in paths.iter().map(|path| Self::normalize_sidebar_path(path)) {
             let Some(dst) = Self::sidebar_drop_destination(&src, &target_dir) else {
@@ -114,6 +116,7 @@ impl EditorView {
                 eprintln!("Move {:?} -> {:?} failed: {error}", src, dst);
                 continue;
             }
+            successful_mappings.push(attachments::PathMapping::new(src.clone(), dst.clone()));
             if first_revealed_path.is_none() {
                 first_revealed_path = Some(dst.clone());
             }
@@ -173,6 +176,7 @@ impl EditorView {
                 self.sidebar_selection_anchor = Some(dst.join(relative));
             }
         }
+        self.apply_workspace_link_rewrites(rewrite_context, &successful_mappings, cx);
         self.context_menu = None;
         self.invalidate_sidebar_items_cache();
         self.clear_sidebar_drag_state(cx);

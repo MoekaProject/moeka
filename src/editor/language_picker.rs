@@ -428,7 +428,6 @@ impl EditorView {
                     .border(px(1.0))
                     .border_color(border)
                     .rounded(px(self.scaled(8.0)))
-                    .shadow_md()
                     .overflow_hidden()
                     .on_mouse_down(
                         MouseButton::Left,

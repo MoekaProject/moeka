@@ -29,24 +29,24 @@ description: 介紹小語文稿的使用
 - [ ] 追加記錄一些已完成事項。
 ***
 ### 表格互動
-| 功能                   | 快捷鍵     |
-| ---------------------- | ---------- |
-| `Command + B`          | 粗體       |
-| `Command + I`          | 斜體       |
-| `Command + Shift + S`  | 刪除線     |
-| `Command + E`          | 行內程式碼 |
-| `Command + Option + C` | 程式碼區塊 |
-| `Command + Option + Q` | 引用       |
-| `Command + Option + U` | 無序列表   |
-| `Command + Option + O` | 有序列表   |
-| `Command + Option + T` | 待辦事項   |
-| `Command + K`          | 連結       |
-| `Command + Shift + I`  | 圖片       |
+| 功能                       | 快捷鍵     |
+| -------------------------- | ---------- |
+| `Command + B`              | 粗體       |
+| `Command + I`              | 斜體       |
+| `Command + Shift + X`      | 刪除線     |
+| `Command + E`              | 行內程式碼 |
+| `Command + Option + C`     | 程式碼區塊 |
+| `Command + Option + Q`     | 引用       |
+| `Command + Option + U`     | 無序列表   |
+| `Command + Option + O`     | 有序列表   |
+| `Command + Option + Enter` | 待辦事項   |
+| `Command + K`              | 連結       |
+| `/ image`                  | 圖片       |
 
 | --------------------- | -------- |
 | --------------------- | -------- |
 | `[[`                  | 雙向連結 |
-| `Command + Shift + I` | 圖片     |
+| `/ image`             | 圖片     |
 ## 程式碼區塊語法
 ```rust
 fn greet(name: &str) {

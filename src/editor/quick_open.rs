@@ -28,7 +28,7 @@ impl EditorView {
         .detach();
     }
 
-    fn quick_open_text_input_styles(&self) -> crate::style::TextInputStyles {
+    pub(crate) fn quick_open_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
         styles.text_input_padding_left_px =
             self.styles.quick_open.quick_open_input_text_padding_left_px;
@@ -318,10 +318,16 @@ impl EditorView {
                                 .flex_1()
                                 .min_w(px(0.0))
                                 .flex()
-                                .flex_col()
-                                .gap(px(self.scaled(styles.quick_open_result_gap_y_px)))
-                                .child(file_name_el)
-                                .child(path_el),
+                                .items_center()
+                                .gap(px(self.scaled(8.0)))
+                                .child(div().flex_none().child(file_name_el))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .overflow_hidden()
+                                        .child(path_el),
+                                ),
                         )
                         .on_mouse_down(
                             MouseButton::Left,

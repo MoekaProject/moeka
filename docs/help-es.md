@@ -29,24 +29,24 @@ Moeka usa `Markdown` como formato de texto. Markdown es ideal para escribir porq
 - [ ] Agrega más elementos completados después.
 ***
 ### Interacción con tablas
-| Función                | Atajo            |
-| ---------------------- | ---------------- |
-| `Command + B`          | Negrita          |
-| `Command + I`          | Cursiva          |
-| `Command + Shift + S`  | Tachado          |
-| `Command + E`          | Código en línea  |
-| `Command + Option + C` | Bloque de código |
-| `Command + Option + Q` | Cita             |
-| `Command + Option + U` | Lista sin orden  |
-| `Command + Option + O` | Lista ordenada   |
-| `Command + Option + T` | Tarea            |
-| `Command + K`          | Enlace           |
-| `Command + Shift + I`  | Imagen           |
+| Función                    | Atajo            |
+| -------------------------- | ---------------- |
+| `Command + B`              | Negrita          |
+| `Command + I`              | Cursiva          |
+| `Command + Shift + X`      | Tachado          |
+| `Command + E`              | Código en línea  |
+| `Command + Option + C`     | Bloque de código |
+| `Command + Option + Q`     | Cita             |
+| `Command + Option + U`     | Lista sin orden  |
+| `Command + Option + O`     | Lista ordenada   |
+| `Command + Option + Enter` | Tarea            |
+| `Command + K`              | Enlace           |
+| `/ image`                  | Imagen           |
 
 | --------------------- | --------    |
 | --------------------- | ----------- |
 | `[[`                  | Enlace wiki |
-| `Command + Shift + I` | Imagen      |
+| `/ image`             | Imagen      |
 ## Sintaxis de bloques de código
 ```rust
 fn greet(name: &str) {

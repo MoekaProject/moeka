@@ -264,6 +264,7 @@ impl EditorView {
                             .unwrap_or("")
                 {
                     let new_path = path.with_file_name(trimmed);
+                    let rewrite_context = self.capture_workspace_rewrite_context();
                     if let Err(error) = std::fs::rename(path, &new_path) {
                         eprintln!("Rename failed: {error}");
                     } else {
@@ -274,18 +275,31 @@ impl EditorView {
                         }
                         self.invalidate_sidebar_items_cache();
                         for tab in &mut self.tabs {
-                            if tab.path.as_deref() == Some(path.as_path()) {
-                                tab.path = Some(new_path.clone());
-                                tab.title = Self::title_for_path(&new_path);
+                            if let Some(tab_path) = tab.path.as_ref()
+                                && tab_path.starts_with(path)
+                            {
+                                let relative = tab_path
+                                    .strip_prefix(path)
+                                    .unwrap_or_else(|_| Path::new(""));
+                                let renamed_tab_path = new_path.join(relative);
+                                tab.title = Self::title_for_path(&renamed_tab_path);
+                                tab.path = Some(renamed_tab_path);
                             }
                         }
                         if self.selected_sidebar_paths.contains(path) {
                             self.selected_sidebar_paths.remove(path);
                             self.selected_sidebar_paths.insert(new_path.clone());
                         }
-                        if self.current_file_path.as_deref() == Some(path.as_path()) {
-                            self.current_file_path = Some(new_path);
+                        if let Some(current_path) = self.current_file_path.as_ref()
+                            && current_path.starts_with(path)
+                        {
+                            let relative = current_path
+                                .strip_prefix(path)
+                                .unwrap_or_else(|_| Path::new(""));
+                            self.current_file_path = Some(new_path.join(relative));
                         }
+                        let mapping = attachments::PathMapping::new(path.clone(), new_path.clone());
+                        self.apply_workspace_link_rewrites(rewrite_context, &[mapping], cx);
                     }
                 }
             }

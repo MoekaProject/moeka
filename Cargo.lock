@@ -3780,6 +3780,7 @@ dependencies = [
  "mermaid-svg",
  "notify",
  "objc",
+ "percent-encoding",
  "pinyin",
  "portable-pty",
  "pprof",

@@ -29,24 +29,24 @@ Moeka は `Markdown` をテキスト形式として使います。Markdown は�
 - [ ] 完了した項目をあとで追加できます。
 ***
 ### テーブル操作
-| 機能                   | ショートカット   |
-| ---------------------- | ---------------- |
-| `Command + B`          | 太字             |
-| `Command + I`          | 斜体             |
-| `Command + Shift + S`  | 取り消し線       |
-| `Command + E`          | インラインコード |
-| `Command + Option + C` | コードブロック   |
-| `Command + Option + Q` | 引用             |
-| `Command + Option + U` | 箇条書き         |
-| `Command + Option + O` | 番号付きリスト   |
-| `Command + Option + T` | Todo             |
-| `Command + K`          | リンク           |
-| `Command + Shift + I`  | 画像             |
+| 機能                       | ショートカット   |
+| -------------------------- | ---------------- |
+| `Command + B`              | 太字             |
+| `Command + I`              | 斜体             |
+| `Command + Shift + X`      | 取り消し線       |
+| `Command + E`              | インラインコード |
+| `Command + Option + C`     | コードブロック   |
+| `Command + Option + Q`     | 引用             |
+| `Command + Option + U`     | 箇条書き         |
+| `Command + Option + O`     | 番号付きリスト   |
+| `Command + Option + Enter` | Todo             |
+| `Command + K`              | リンク           |
+| `/ image`                  | 画像             |
 
 | --------------------- | --------    |
 | --------------------- | ----------- |
 | `[[`                  | Wiki リンク |
-| `Command + Shift + I` | 画像        |
+| `/ image`             | 画像        |
 ## コードブロック構文
 ```rust
 fn greet(name: &str) {

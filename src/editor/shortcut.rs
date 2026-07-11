@@ -1,4 +1,443 @@
-use gpui::{AnyElement, Hsla, SharedString, div, prelude::*, px};
+use gpui::{Action, AnyElement, Hsla, SharedString, div, prelude::*, px};
+
+use crate::{
+    actions::*,
+    i18n::{TextKey, UiLanguage},
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum CommandId {
+    NewDocument,
+    NewTab,
+    OpenFile,
+    QuickOpen,
+    Save,
+    SaveAs,
+    OpenSettings,
+    CloseTab,
+    Find,
+    FindInFiles,
+    ToggleSidebar,
+    ToggleOutline,
+    ToggleChat,
+    ToggleInfo,
+    ToggleGitHistory,
+    ToggleTheme,
+    Bold,
+    Italic,
+    Underline,
+    Strikethrough,
+    InlineCode,
+    Link,
+    Image,
+    Quote,
+    Todo,
+    UnorderedList,
+    OrderedList,
+    Table,
+    CodeBlock,
+    Paragraph,
+    Fold,
+    Unfold,
+    FoldAll,
+    UnfoldAll,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CommandSpec {
+    pub id: CommandId,
+    pub title: TextKey,
+    pub category: &'static str,
+    pub shortcut: Option<&'static str>,
+    pub alternate_shortcuts: &'static [&'static str],
+    pub markdown_only: bool,
+    pub title_override: Option<fn(UiLanguage) -> &'static str>,
+}
+
+impl CommandId {
+    pub(crate) fn action(self) -> Box<dyn Action> {
+        match self {
+            Self::NewDocument => Box::new(NewDocument),
+            Self::NewTab => Box::new(NewTab),
+            Self::OpenFile => Box::new(OpenFileDialog),
+            Self::QuickOpen => Box::new(QuickOpen),
+            Self::Save => Box::new(Save),
+            Self::SaveAs => Box::new(SaveAs),
+            Self::OpenSettings => Box::new(OpenSettings),
+            Self::CloseTab => Box::new(CloseActiveTab),
+            Self::Find => Box::new(Find),
+            Self::FindInFiles => Box::new(FindInFiles),
+            Self::ToggleSidebar => Box::new(ToggleSidebar),
+            Self::ToggleOutline => Box::new(ToggleOutline),
+            Self::ToggleChat => Box::new(ToggleChatPanel),
+            Self::ToggleInfo => Box::new(ToggleInfoPanel),
+            Self::ToggleGitHistory => Box::new(ToggleGitHistory),
+            Self::ToggleTheme => Box::new(ToggleTheme),
+            Self::Bold => Box::new(ToggleBold),
+            Self::Italic => Box::new(ToggleItalic),
+            Self::Underline => Box::new(ToggleUnderline),
+            Self::Strikethrough => Box::new(ToggleStrikethrough),
+            Self::InlineCode => Box::new(ToggleInlineCode),
+            Self::Link => Box::new(ToggleLink),
+            Self::Image => Box::new(ToggleImage),
+            Self::Quote => Box::new(ToggleQuote),
+            Self::Todo => Box::new(ToggleTodo),
+            Self::UnorderedList => Box::new(ToggleUnorderedList),
+            Self::OrderedList => Box::new(ToggleOrderedList),
+            Self::Table => Box::new(InsertTable),
+            Self::CodeBlock => Box::new(InsertCodeBlock),
+            Self::Paragraph => Box::new(SetParagraph),
+            Self::Fold => Box::new(Fold),
+            Self::Unfold => Box::new(Unfold),
+            Self::FoldAll => Box::new(FoldAll),
+            Self::UnfoldAll => Box::new(UnfoldAll),
+            Self::ZoomIn => Box::new(ZoomIn),
+            Self::ZoomOut => Box::new(ZoomOut),
+            Self::ZoomReset => Box::new(ZoomReset),
+        }
+    }
+
+    pub(crate) fn english_description(self) -> &'static str {
+        match self {
+            Self::NewDocument => "Create a new document",
+            Self::NewTab => "Open a new editor tab",
+            Self::OpenFile => "Open a file from disk",
+            Self::QuickOpen => "Quickly open a workspace file",
+            Self::Save => "Save the current document",
+            Self::SaveAs => "Save the document with a new name",
+            Self::OpenSettings => "Open application settings",
+            Self::CloseTab => "Close the active tab",
+            Self::Find => "Find text in the current document",
+            Self::FindInFiles => "Search across workspace files",
+            Self::ToggleSidebar => "Show or hide the sidebar",
+            Self::ToggleOutline => "Show or hide the document outline",
+            Self::ToggleChat => "Show or hide Chat",
+            Self::ToggleInfo => "Show or hide file information",
+            Self::ToggleGitHistory => "Show or hide Git history",
+            Self::ToggleTheme => "Switch between light and dark themes",
+            Self::Bold => "Toggle bold formatting",
+            Self::Italic => "Toggle italic formatting",
+            Self::Underline => "Toggle underline formatting",
+            Self::Strikethrough => "Toggle strikethrough formatting",
+            Self::InlineCode => "Toggle inline code formatting",
+            Self::Link => "Insert or edit a link",
+            Self::Image => "Insert an image",
+            Self::Quote => "Toggle block quote formatting",
+            Self::Todo => "Toggle task list formatting",
+            Self::UnorderedList => "Toggle bulleted list formatting",
+            Self::OrderedList => "Toggle numbered list formatting",
+            Self::Table => "Insert a table",
+            Self::CodeBlock => "Insert a fenced code block",
+            Self::Paragraph => "Convert the block to a paragraph",
+            Self::Fold => "Fold the current section",
+            Self::Unfold => "Unfold the current section",
+            Self::FoldAll => "Fold all sections",
+            Self::UnfoldAll => "Unfold all sections",
+            Self::ZoomIn => "Increase editor zoom",
+            Self::ZoomOut => "Decrease editor zoom",
+            Self::ZoomReset => "Reset editor zoom",
+        }
+    }
+}
+
+pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
+    command(
+        CommandId::NewDocument,
+        TextKey::NewFile,
+        "File",
+        "⌘N",
+        false,
+    ),
+    command(CommandId::NewTab, TextKey::NewFile, "File", "⌘T", false),
+    command(CommandId::OpenFile, TextKey::OpenFile, "File", "⌘O", false),
+    command(
+        CommandId::QuickOpen,
+        TextKey::QuickOpenPlaceholder,
+        "File",
+        "⌘P",
+        false,
+    ),
+    command(CommandId::Save, TextKey::Save, "File", "⌘S", false),
+    command(
+        CommandId::SaveAs,
+        TextKey::SaveFileDialog,
+        "File",
+        "⌘⇧S",
+        false,
+    ),
+    command(
+        CommandId::OpenSettings,
+        TextKey::SettingsTitle,
+        "Application",
+        "⌘,",
+        false,
+    ),
+    command(CommandId::CloseTab, TextKey::Close, "Tab", "⌘W", false),
+    command(
+        CommandId::Find,
+        TextKey::SearchPlaceholder,
+        "Search",
+        "⌘F",
+        false,
+    ),
+    command(
+        CommandId::FindInFiles,
+        TextKey::WorkspaceSearchPlaceholder,
+        "Search",
+        "⌘⇧F",
+        false,
+    ),
+    command(
+        CommandId::ToggleSidebar,
+        TextKey::ToolbarSidebarTooltip,
+        "View",
+        "⌘⌥S",
+        false,
+    ),
+    command(
+        CommandId::ToggleOutline,
+        TextKey::ToolbarOutlineTooltip,
+        "View",
+        "⌃⌘1",
+        false,
+    ),
+    command_with_title(
+        CommandId::ToggleChat,
+        TextKey::AddFileToChat,
+        "View",
+        Some("⌃⌘I"),
+        false,
+        crate::i18n::chat_label,
+    ),
+    command(
+        CommandId::ToggleInfo,
+        TextKey::FileInfo,
+        "View",
+        "⌘⌥I",
+        false,
+    ),
+    command(
+        CommandId::ToggleGitHistory,
+        TextKey::GitHistory,
+        "View",
+        "⌃⇧G",
+        false,
+    ),
+    command_without_shortcut(
+        CommandId::ToggleTheme,
+        TextKey::ToolbarThemeTooltip,
+        "View",
+        false,
+    ),
+    command(CommandId::Bold, TextKey::Bold, "Format", "⌘B", true),
+    command(CommandId::Italic, TextKey::Italic, "Format", "⌘I", true),
+    command_with_title(
+        CommandId::Underline,
+        TextKey::Italic,
+        "Format",
+        Some("⌘U"),
+        true,
+        underline_title,
+    ),
+    command(
+        CommandId::Strikethrough,
+        TextKey::Strikethrough,
+        "Format",
+        "⌘⇧X",
+        true,
+    ),
+    command(
+        CommandId::InlineCode,
+        TextKey::InlineCode,
+        "Format",
+        "⌘E",
+        true,
+    ),
+    command(CommandId::Link, TextKey::Link, "Format", "⌘K", true),
+    command_without_shortcut(CommandId::Image, TextKey::Image, "Format", true),
+    command(CommandId::Quote, TextKey::Quote, "Format", "⌘⌥Q", true),
+    command(CommandId::Todo, TextKey::Todo, "Format", "⌘⌥↩", true),
+    command(
+        CommandId::UnorderedList,
+        TextKey::UnorderedList,
+        "Format",
+        "⌘⌥U",
+        true,
+    ),
+    command(
+        CommandId::OrderedList,
+        TextKey::OrderedList,
+        "Format",
+        "⌘⌥O",
+        true,
+    ),
+    command(CommandId::Table, TextKey::Table, "Format", "⌘⌥T", true),
+    command(
+        CommandId::CodeBlock,
+        TextKey::CodeBlock,
+        "Format",
+        "⌘⌥C",
+        true,
+    ),
+    command(
+        CommandId::Paragraph,
+        TextKey::Paragraph,
+        "Format",
+        "⌘0",
+        true,
+    ),
+    command_with_title(
+        CommandId::Fold,
+        TextKey::CollapseAllDirectories,
+        "Fold",
+        Some("⌘⌥["),
+        false,
+        collapse_title,
+    ),
+    command_with_title(
+        CommandId::Unfold,
+        TextKey::ExpandAllDirectories,
+        "Fold",
+        Some("⌘⌥]"),
+        false,
+        expand_title,
+    ),
+    command_without_shortcut(
+        CommandId::FoldAll,
+        TextKey::CollapseAllDirectories,
+        "Fold",
+        false,
+    ),
+    command_without_shortcut(
+        CommandId::UnfoldAll,
+        TextKey::ExpandAllDirectories,
+        "Fold",
+        false,
+    ),
+    command_with_title(
+        CommandId::ZoomIn,
+        TextKey::Reset,
+        "View",
+        Some("⌘="),
+        false,
+        zoom_in_title,
+    ),
+    command_with_title(
+        CommandId::ZoomOut,
+        TextKey::Reset,
+        "View",
+        Some("⌘-"),
+        false,
+        zoom_out_title,
+    ),
+    command(CommandId::ZoomReset, TextKey::Reset, "View", "⌘⌥0", false),
+];
+
+const fn command(
+    id: CommandId,
+    title: TextKey,
+    category: &'static str,
+    shortcut: &'static str,
+    markdown_only: bool,
+) -> CommandSpec {
+    CommandSpec {
+        id,
+        title,
+        category,
+        shortcut: Some(shortcut),
+        alternate_shortcuts: &[],
+        markdown_only,
+        title_override: None,
+    }
+}
+
+const fn command_without_shortcut(
+    id: CommandId,
+    title: TextKey,
+    category: &'static str,
+    markdown_only: bool,
+) -> CommandSpec {
+    CommandSpec {
+        id,
+        title,
+        category,
+        shortcut: None,
+        alternate_shortcuts: &[],
+        markdown_only,
+        title_override: None,
+    }
+}
+
+const fn command_with_title(
+    id: CommandId,
+    title: TextKey,
+    category: &'static str,
+    shortcut: Option<&'static str>,
+    markdown_only: bool,
+    title_override: fn(UiLanguage) -> &'static str,
+) -> CommandSpec {
+    CommandSpec {
+        id,
+        title,
+        category,
+        shortcut,
+        alternate_shortcuts: &[],
+        markdown_only,
+        title_override: Some(title_override),
+    }
+}
+
+fn underline_title(language: UiLanguage) -> &'static str {
+    crate::i18n::format_extra_label(language, "underline")
+}
+
+fn collapse_title(language: UiLanguage) -> &'static str {
+    crate::i18n::fold_action_label(language, false)
+}
+
+fn expand_title(language: UiLanguage) -> &'static str {
+    crate::i18n::fold_action_label(language, true)
+}
+
+fn zoom_in_title(language: UiLanguage) -> &'static str {
+    crate::i18n::preview_action_label(language, "zoom_in")
+}
+
+fn zoom_out_title(language: UiLanguage) -> &'static str {
+    crate::i18n::preview_action_label(language, "zoom_out")
+}
+
+#[cfg(test)]
+mod command_tests {
+    use std::collections::HashSet;
+
+    use super::{COMMAND_SPECS, estimate_text_width};
+
+    #[test]
+    fn command_shortcuts_are_unique() {
+        let mut shortcuts = HashSet::new();
+        for spec in COMMAND_SPECS {
+            for shortcut in spec
+                .shortcut
+                .into_iter()
+                .chain(spec.alternate_shortcuts.iter().copied())
+            {
+                assert!(
+                    shortcuts.insert(shortcut),
+                    "duplicate command shortcut: {shortcut}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cjk_text_width_uses_full_em_glyphs() {
+        assert_eq!(estimate_text_width("内容大纲", 13.0), 52.0);
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct ShortcutRenderStyle {
@@ -60,7 +499,7 @@ pub(crate) fn estimate_text_width(text: &str, font_size_px: f32) -> f32 {
             _ if ch.is_ascii_uppercase() => font_size_px * 0.62,
             _ if ch.is_ascii_lowercase() || ch.is_ascii_digit() => font_size_px * 0.56,
             _ if ch.is_ascii_punctuation() => font_size_px * 0.45,
-            _ => font_size_px * 0.92,
+            _ => font_size_px,
         })
         .sum()
 }

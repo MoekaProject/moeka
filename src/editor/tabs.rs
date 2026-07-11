@@ -1772,7 +1772,7 @@ impl EditorView {
                             )
                         })
                         .child(self.render_tab_title_label(tab, is_active, is_preview, is_deleted))
-                        .child(
+                        .child(tooltip::with_tooltip(
                             div()
                                 .id(SharedString::from(format!("close-{}", tab.id)))
                                 .w(px(self.scaled(ts.tab_item_close_size_px)))
@@ -1812,7 +1812,10 @@ impl EditorView {
                                         this.request_close_tab(&close_id, cx);
                                     }),
                                 ),
-                        )
+                            cx.entity().clone(),
+                            self.t(crate::i18n::TextKey::Close),
+                            Some("⌘W"),
+                        ))
                     })
                     .child(
                         div()
@@ -1926,6 +1929,8 @@ impl EditorView {
         is_active: bool,
         is_enabled: bool,
         on_right_click: Option<fn(&mut Self, &mut Context<Self>)>,
+        tooltip_title: &'static str,
+        shortcut: Option<&'static str>,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
@@ -1953,7 +1958,7 @@ impl EditorView {
                 ts.tab_item_icon_color
             }
         };
-        div()
+        let button = div()
             .id(id)
             .w(px(icon_size + button_padding_x * 2.0))
             .h(px(button_height))
@@ -1989,8 +1994,8 @@ impl EditorView {
                         handler(this, cx);
                     }),
                 )
-            })
-            .into_any_element()
+            });
+        tooltip::with_tooltip(button, cx.entity().clone(), tooltip_title, shortcut)
     }
 
     fn render_update_ready_button(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2004,8 +2009,8 @@ impl EditorView {
         let text_color = ts.tab_update_button_text_color;
         let hover_text_color = ts.tab_update_button_hover_text_color;
         let icon_color = ts.tab_update_button_icon_color;
-        let bg = ts.tab_update_button_bg;
-        let hover_bg = ts.tab_update_button_hover_bg;
+        let opacity = ts.tab_update_button_opacity;
+        let hover_opacity = ts.tab_update_button_hover_opacity;
 
         div()
             .id("tab-bar-update-ready")
@@ -2016,11 +2021,11 @@ impl EditorView {
             .items_center()
             .gap(px(gap))
             .rounded(px(self.scaled(ts.tab_update_button_radius_px)))
-            .bg(bg)
+            .opacity(opacity)
             .text_size(px(self.scaled(ts.tab_update_button_font_size_px)))
             .text_color(text_color)
             .cursor(CursorStyle::Arrow)
-            .hover(move |style| style.text_color(hover_text_color).bg(hover_bg))
+            .hover(move |style| style.opacity(hover_opacity).text_color(hover_text_color))
             .child(
                 svg()
                     .path(SITE_SVG_PATH)
@@ -2064,7 +2069,7 @@ impl EditorView {
         let new_hover_color = ts.tab_new_hover_text_color;
         let new_hover_bg = ts.tab_item_hover_bg;
         let end_drop_target_width = self.scaled(ts.tab_end_drop_target_width_px);
-        tab_items.push(
+        tab_items.push(tooltip::with_tooltip(
             div()
                 .h(px(inner_height))
                 .w(px(self.scaled(ts.tab_new_width_px)))
@@ -2089,9 +2094,11 @@ impl EditorView {
                         cx.stop_propagation();
                         this.create_scratch_tab(cx);
                     }),
-                )
-                .into_any_element(),
-        );
+                ),
+            cx.entity().clone(),
+            self.t(crate::i18n::TextKey::NewFile),
+            Some("⌘T"),
+        ));
         tab_items.push(
             div()
                 .id("tab-bar-end-drop-target")
@@ -2238,6 +2245,8 @@ impl EditorView {
                 chat_active,
                 true,
                 Some(Self::show_chat_panel_bottom),
+                crate::i18n::chat_label(self.ui_language),
+                Some("⌃⌘I"),
                 cx,
                 |this, cx| {
                     this.toggle_chat_panel(cx);
@@ -2249,6 +2258,8 @@ impl EditorView {
                 info_active,
                 true,
                 None,
+                self.t(crate::i18n::TextKey::FileInfo),
+                Some("⌘⌥I"),
                 cx,
                 |this, cx| {
                     this.toggle_info_panel(cx);
@@ -2260,6 +2271,8 @@ impl EditorView {
                 git_active,
                 true,
                 None,
+                self.t(crate::i18n::TextKey::GitHistory),
+                Some("⌃⇧G"),
                 cx,
                 |this, cx| {
                     this.toggle_git_history_panel(cx);
@@ -2368,6 +2381,8 @@ impl EditorView {
                 self.is_utility_panel_active(RightUtilityPanel::Chat),
                 true,
                 Some(Self::show_chat_panel_bottom),
+                crate::i18n::chat_label(self.ui_language),
+                Some("⌃⌘I"),
                 cx,
                 |this, cx| this.toggle_chat_panel(cx),
             ))
@@ -2377,6 +2392,8 @@ impl EditorView {
                 self.is_utility_panel_active(RightUtilityPanel::Info),
                 true,
                 None,
+                self.t(crate::i18n::TextKey::FileInfo),
+                Some("⌘⌥I"),
                 cx,
                 |this, cx| this.toggle_info_panel(cx),
             ))
@@ -2386,6 +2403,8 @@ impl EditorView {
                 self.is_utility_panel_active(RightUtilityPanel::GitHistory),
                 true,
                 None,
+                self.t(crate::i18n::TextKey::GitHistory),
+                Some("⌃⇧G"),
                 cx,
                 |this, cx| this.toggle_git_history_panel(cx),
             ))

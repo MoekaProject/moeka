@@ -29,24 +29,24 @@ Moeka هو تطبيق **لتحرير Markdown** أنيق وسلس ويعمل م�
 - [ ] أضف عناصر مكتملة أخرى لاحقًا.
 ***
 ### التعامل مع الجداول
-| الميزة                 | الاختصار        |
-| ---------------------- | --------------- |
-| `Command + B`          | عريض            |
-| `Command + I`          | مائل            |
-| `Command + Shift + S`  | يتوسطه خط       |
-| `Command + E`          | كود داخل السطر  |
-| `Command + Option + C` | كتلة كود        |
-| `Command + Option + Q` | اقتباس          |
-| `Command + Option + U` | قائمة غير مرتبة |
-| `Command + Option + O` | قائمة مرتبة     |
-| `Command + Option + T` | مهمة            |
-| `Command + K`          | رابط            |
-| `Command + Shift + I`  | صورة            |
+| الميزة                     | الاختصار        |
+| -------------------------- | --------------- |
+| `Command + B`              | عريض            |
+| `Command + I`              | مائل            |
+| `Command + Shift + X`      | يتوسطه خط       |
+| `Command + E`              | كود داخل السطر  |
+| `Command + Option + C`     | كتلة كود        |
+| `Command + Option + Q`     | اقتباس          |
+| `Command + Option + U`     | قائمة غير مرتبة |
+| `Command + Option + O`     | قائمة مرتبة     |
+| `Command + Option + Enter` | مهمة            |
+| `Command + K`              | رابط            |
+| `/ image`                  | صورة            |
 
 | --------------------- | --------  |
 | --------------------- | --------- |
 | `[[`                  | رابط wiki |
-| `Command + Shift + I` | صورة      |
+| `/ image`             | صورة      |
 ## صيغة كتل الكود
 ```rust
 fn greet(name: &str) {

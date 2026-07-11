@@ -29,24 +29,24 @@ Moeka uses `Markdown` as its text format. Markdown is ideal for writers because 
 - [ ] Add more completed items later.
 ***
 ### Table Interaction
-| Feature                | Shortcut       |
-| ---------------------- | -------------- |
-| `Command + B`          | Bold           |
-| `Command + I`          | Italic         |
-| `Command + Shift + S`  | Strikethrough  |
-| `Command + E`          | Inline code    |
-| `Command + Option + C` | Code block     |
-| `Command + Option + Q` | Quote          |
-| `Command + Option + U` | Unordered list |
-| `Command + Option + O` | Ordered list   |
-| `Command + Option + T` | Todo           |
-| `Command + K`          | Link           |
-| `Command + Shift + I`  | Image          |
+| Feature                    | Shortcut       |
+| -------------------------- | -------------- |
+| `Command + B`              | Bold           |
+| `Command + I`              | Italic         |
+| `Command + Shift + X`      | Strikethrough  |
+| `Command + E`              | Inline code    |
+| `Command + Option + C`     | Code block     |
+| `Command + Option + Q`     | Quote          |
+| `Command + Option + U`     | Unordered list |
+| `Command + Option + O`     | Ordered list   |
+| `Command + Option + Enter` | Todo           |
+| `Command + K`              | Link           |
+| `/ image`                  | Image          |
 
 | --------------------- | --------  |
 | --------------------- | --------- |
 | `[[`                  | Wiki link |
-| `Command + Shift + I` | Image     |
+| `/ image`             | Image     |
 ## Code Block Syntax
 ```rust
 fn greet(name: &str) {
@@ -109,6 +109,12 @@ pie title Pets adopted by volunteers
 - Use footnote syntax[^note] to jump to a reference line.
 - Use a [file link](Feature Plan.md) to jump to a file or heading.
 - Hold `Command` and click any of the above links to open them.
+## Local Attachments
+- Pasting an image or file, or dropping one from Finder into a Markdown document, copies it to the attachment location selected in Settings. Dropping a file from Moeka's sidebar inserts a link without copying the file.
+- Attachment locations can be the document folder, workspace root, a workspace folder, or a subfolder beside the current document. Custom folders must be relative paths inside the workspace.
+- Moeka can generate standard Markdown links or Obsidian-style WikiLinks. Path formats include document-relative, workspace-relative, and the shortest unique workspace path.
+- Obsidian image embeds such as `![[assets/image.png]]` are displayed inline. Standard Markdown such as `![](assets/image.png)` remains the best choice when the same files are also edited in Typora or other Markdown tools.
+- When automatic link updates are enabled, files and folders moved or renamed inside Moeka update local Markdown and WikiLink targets across the workspace. Renames made directly in Finder are not tracked automatically.
 ## Extended Inline Syntax
 - Subscript example: H~2~O. Superscript example: E=mc^2^. English text also works: Foo~zoo~ or Bar^baz^.
 - ==Highlight== is supported for stronger emphasis.

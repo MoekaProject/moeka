@@ -3248,7 +3248,7 @@ impl EditorView {
                                 }),
                         )
                     })
-                    .child(
+                    .child(tooltip::with_tooltip(
                         div()
                             .w(px(self.scaled(ts.tab_item_close_size_px)))
                             .h(px(self.scaled(ts.tab_item_close_size_px)))
@@ -3276,7 +3276,10 @@ impl EditorView {
                                     this.close_chat_tab(&close_id, cx);
                                 }),
                             ),
-                    )
+                        cx.entity().clone(),
+                        self.t(crate::i18n::TextKey::Close),
+                        None::<&'static str>,
+                    ))
                     .child(
                         div()
                             .absolute()
@@ -3380,41 +3383,45 @@ impl EditorView {
         let new_hover_color = ts.tab_new_hover_text_color;
         let new_hover_bg = ts.tab_item_hover_bg;
         let end_drop_target_width = self.scaled(ts.tab_end_drop_target_width_px);
-        let new_tab_button = div()
-            .id("chat-tab-bar-new")
-            .h(px(inner_height))
-            .w(px(self.scaled(ts.tab_new_width_px)))
-            .flex_none()
-            .flex()
-            .justify_center()
-            .items_center()
-            .border_r(px(ts.tab_item_border_width_px))
-            .border_color(gpui::transparent_black())
-            .text_size(px(self.scaled(ts.tab_new_font_size_px)))
-            .text_color(ts.tab_new_text_color)
-            .hover(move |style| {
-                style
-                    .text_color(new_hover_color)
-                    .bg(new_hover_bg)
-                    .border_color(ts.tab_item_border_color)
-            })
-            .child("+")
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.create_chat_tab(cx);
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.open_chat_tab_create_context_menu(event.position, cx);
-                }),
-            )
-            .into_any_element();
+        let new_tab_button = tooltip::with_tooltip(
+            div()
+                .id("chat-tab-bar-new")
+                .h(px(inner_height))
+                .w(px(self.scaled(ts.tab_new_width_px)))
+                .flex_none()
+                .flex()
+                .justify_center()
+                .items_center()
+                .border_r(px(ts.tab_item_border_width_px))
+                .border_color(gpui::transparent_black())
+                .text_size(px(self.scaled(ts.tab_new_font_size_px)))
+                .text_color(ts.tab_new_text_color)
+                .hover(move |style| {
+                    style
+                        .text_color(new_hover_color)
+                        .bg(new_hover_bg)
+                        .border_color(ts.tab_item_border_color)
+                })
+                .child("+")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.create_chat_tab(cx);
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.open_chat_tab_create_context_menu(event.position, cx);
+                    }),
+                ),
+            cx.entity().clone(),
+            crate::i18n::new_chat_label(self.ui_language),
+            None::<&'static str>,
+        );
         let end_drop_target = div()
             .h(px(inner_height))
             .w(px(end_drop_target_width))

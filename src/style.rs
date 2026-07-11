@@ -491,8 +491,8 @@ pub struct TabBarStyles {
     pub tab_update_button_padding_x_px: f32,
     pub tab_update_button_gap_px: f32,
     pub tab_update_button_radius_px: f32,
-    pub tab_update_button_bg: Hsla,
-    pub tab_update_button_hover_bg: Hsla,
+    pub tab_update_button_opacity: f32,
+    pub tab_update_button_hover_opacity: f32,
     pub tab_update_button_icon_size_px: f32,
     pub tab_update_button_font_size_px: f32,
     pub tab_update_button_text_color: Hsla,
@@ -1161,6 +1161,7 @@ pub struct QuickOpenStyles {
     pub quick_open_result_selected_bg: Hsla,
     pub quick_open_result_text_color: Hsla,
     pub quick_open_result_secondary_text_color: Hsla,
+    pub quick_open_result_shortcut_bg: Hsla,
     pub quick_open_result_match_text_color: Hsla,
     pub quick_open_empty_height_px: f32,
     pub quick_open_empty_font_size_px: f32,
@@ -1173,6 +1174,9 @@ pub struct SettingsPanelStyles {
     pub settings_title_version_gap_px: f32,
     pub settings_title_version_font_size_px: f32,
     pub settings_title_version_text_color: Hsla,
+    pub settings_title_version_margin_bottom_px: f32,
+    pub settings_primary_text_color: Hsla,
+    pub settings_secondary_text_color: Hsla,
     pub settings_header_gap_px: f32,
     pub settings_header_actions_gap_px: f32,
     pub settings_header_button_max_width_px: f32,
@@ -1275,6 +1279,16 @@ impl Styles {
             theme.text_bright
         } else {
             ui_theme.bg_primary
+        };
+        let settings_primary_text_color = if is_light {
+            theme.text_bright
+        } else {
+            theme.text_primary
+        };
+        let settings_secondary_text_color = if is_light {
+            with_alpha(theme.text_primary, 0.82)
+        } else {
+            theme.text_secondary
         };
         let settings_update_color = if is_light {
             hex_to_hsla("#8a6400")
@@ -1693,8 +1707,8 @@ impl Styles {
                 tab_update_button_padding_x_px: 10.0,
                 tab_update_button_gap_px: 6.0,
                 tab_update_button_radius_px: 8.0,
-                tab_update_button_bg: with_alpha(hex_to_hsla("#d6a100"), 0.08),
-                tab_update_button_hover_bg: with_alpha(hex_to_hsla("#d6a100"), 0.2),
+                tab_update_button_opacity: 0.8,
+                tab_update_button_hover_opacity: 1.0,
                 tab_update_button_icon_size_px: 16.0,
                 tab_update_button_font_size_px: ui_font_size_sm_px,
                 tab_update_button_text_color: hex_to_hsla("#d6a100"),
@@ -1779,28 +1793,28 @@ impl Styles {
                 whiteboard_fill_opacity_levels: [0.2, 0.4, 0.6, 0.8, 1.0],
             },
             tooltip: TooltipStyles {
-                tooltip_delay_ms: 1000,
+                tooltip_delay_ms: 0,
                 tooltip_viewport_padding_px: 8.0,
                 tooltip_offset_px: 5.0,
-                tooltip_max_width_px: 240.0,
+                tooltip_max_width_px: 320.0,
                 tooltip_padding_x_px: 10.0,
                 tooltip_padding_y_px: 5.0,
                 tooltip_gap_px: 5.0,
-                tooltip_radius_px: 5.0,
-                tooltip_border_width_px: 0.0,
-                tooltip_bg: with_alpha(theme.bg_elevated, 0.96),
-                tooltip_border_color: gpui::transparent_black(),
+                tooltip_radius_px: 8.0,
+                tooltip_border_width_px: 1.0,
+                tooltip_bg: crate::hex_hsla!("#252A31F5"),
+                tooltip_border_color: crate::hex_hsla!("#677186B8"),
                 tooltip_title_font_size_px: ui_font_size_sm_px,
-                tooltip_title_text_color: theme.text_primary,
+                tooltip_title_text_color: crate::hex_hsla!("#ABB2BF"),
                 tooltip_subtitle_font_size_px: ui_font_size_xs_px,
-                tooltip_subtitle_text_color: theme.text_secondary,
+                tooltip_subtitle_text_color: crate::hex_hsla!("#ABB2BF"),
                 tooltip_subtitle_opacity: 0.72,
                 tooltip_shortcut_gap_px: 4.0,
                 tooltip_shortcut_key_min_width_px: 16.0,
                 tooltip_shortcut_key_height_px: 18.0,
                 tooltip_shortcut_key_padding_x_px: 5.0,
-                tooltip_shortcut_key_radius_px: 5.0,
-                tooltip_shortcut_key_bg: with_alpha(theme.bg_hover, 0.95),
+                tooltip_shortcut_key_radius_px: 6.0,
+                tooltip_shortcut_key_bg: crate::hex_hsla!("#171B20FA"),
             },
             cursor: CursorStyles {
                 cursor_color: theme.cursor,
@@ -2075,9 +2089,9 @@ impl Styles {
                 menu_item_height_px: 28.0,
                 menu_item_padding_x_px: 12.0,
                 menu_item_font_size_px: ui_font_size_px,
-                menu_item_text_color: with_alpha(ui_theme.text_primary, 0.9),
-                menu_item_primary_text_color: ui_theme.text_bright,
-                menu_item_danger_text_color: ui_theme.text_danger,
+                menu_item_text_color: with_alpha(ui_theme.text_primary, 0.68),
+                menu_item_primary_text_color: with_alpha(ui_theme.text_primary, 0.82),
+                menu_item_danger_text_color: with_alpha(ui_theme.text_danger, 0.84),
                 menu_item_hover_bg: ui_theme.bg_hover,
                 menu_item_selected_bg: ui_theme.bg_hover,
                 menu_shortcut_font_size_px: ui_font_size_sm_px - 0.5,
@@ -2086,7 +2100,7 @@ impl Styles {
                 } else {
                     ".SystemUIFont"
                 },
-                menu_shortcut_text_color: ui_theme.text_secondary,
+                menu_shortcut_text_color: with_alpha(ui_theme.text_secondary, 0.78),
                 menu_shortcut_gap_px: 4.0,
                 menu_shortcut_key_min_width_px: 16.0,
                 menu_shortcut_key_height_px: 18.0,
@@ -2095,8 +2109,8 @@ impl Styles {
                 menu_shortcut_key_bg: with_alpha(ui_theme.bg_hover, 0.95),
                 menu_format_icon_size_px: 14.0,
                 menu_format_icon_gap_px: 8.0,
-                menu_format_icon_color: ui_theme.text_secondary,
-                menu_format_active_text_color: ui_theme.text_bright,
+                menu_format_icon_color: with_alpha(ui_theme.text_secondary, 0.8),
+                menu_format_active_text_color: with_alpha(ui_theme.text_primary, 0.92),
                 menu_separator_height_px: 1.0,
                 menu_separator_margin_y_px: 0.0,
                 menu_separator_color: ui_theme.border_primary,
@@ -2309,7 +2323,7 @@ impl Styles {
                 quick_open_input_cursor_height_ratio: 0.64,
                 quick_open_input_cursor_height_adjust_px: 2.0,
                 quick_open_results_max_height_px: 360.0,
-                quick_open_result_row_height_px: 44.0,
+                quick_open_result_row_height_px: 34.0,
                 quick_open_result_padding_x_px: 12.0,
                 quick_open_result_gap_y_px: 2.0,
                 quick_open_result_name_font_size_px: 13.0,
@@ -2318,6 +2332,10 @@ impl Styles {
                 quick_open_result_selected_bg: ui_theme.bg_selected,
                 quick_open_result_text_color: ui_theme.text_primary,
                 quick_open_result_secondary_text_color: with_alpha(ui_theme.text_secondary, 0.5),
+                quick_open_result_shortcut_bg: with_alpha(
+                    Hsla::black(),
+                    if is_light { 0.12 } else { 0.28 },
+                ),
                 quick_open_result_match_text_color: ui_theme.text_bright,
                 quick_open_empty_height_px: 64.0,
                 quick_open_empty_font_size_px: ui_font_size_sm_px,
@@ -2326,7 +2344,10 @@ impl Styles {
             settings_panel: SettingsPanelStyles {
                 settings_title_version_gap_px: 10.0,
                 settings_title_version_font_size_px: ui_font_size_sm_px,
-                settings_title_version_text_color: with_alpha(settings_theme.text_secondary, 0.62),
+                settings_title_version_text_color: settings_secondary_text_color,
+                settings_title_version_margin_bottom_px: 5.0,
+                settings_primary_text_color,
+                settings_secondary_text_color,
                 settings_header_gap_px: 12.0,
                 settings_header_actions_gap_px: 8.0,
                 settings_header_button_max_width_px: 150.0,
