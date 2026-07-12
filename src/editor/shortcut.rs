@@ -57,6 +57,14 @@ pub(crate) struct CommandSpec {
     pub title_override: Option<fn(UiLanguage) -> &'static str>,
 }
 
+impl CommandSpec {
+    pub(crate) fn localized_title(self, language: UiLanguage) -> &'static str {
+        self.title_override
+            .map(|title| title(language))
+            .unwrap_or_else(|| crate::i18n::translate(language, self.title))
+    }
+}
+
 impl CommandId {
     pub(crate) fn action(self) -> Box<dyn Action> {
         match self {
@@ -144,30 +152,33 @@ impl CommandId {
 }
 
 pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
-    command(
+    command_with_title(
         CommandId::NewDocument,
         TextKey::NewFile,
         "File",
-        "⌘N",
+        Some("⌘N"),
         false,
+        new_document_title,
     ),
-    command(CommandId::NewTab, TextKey::NewFile, "File", "⌘T", false),
+    command_with_title(
+        CommandId::NewTab,
+        TextKey::NewFile,
+        "File",
+        Some("⌘T"),
+        false,
+        new_tab_title,
+    ),
     command(CommandId::OpenFile, TextKey::OpenFile, "File", "⌘O", false),
-    command(
+    command_with_title(
         CommandId::QuickOpen,
         TextKey::QuickOpenPlaceholder,
         "File",
-        "⌘P",
+        Some("⌘P"),
         false,
+        quick_open_title,
     ),
     command(CommandId::Save, TextKey::Save, "File", "⌘S", false),
-    command(
-        CommandId::SaveAs,
-        TextKey::SaveFileDialog,
-        "File",
-        "⌘⇧S",
-        false,
-    ),
+    command_without_shortcut(CommandId::SaveAs, TextKey::SaveFileDialog, "File", false),
     command(
         CommandId::OpenSettings,
         TextKey::SettingsTitle,
@@ -176,25 +187,27 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         false,
     ),
     command(CommandId::CloseTab, TextKey::Close, "Tab", "⌘W", false),
-    command(
+    command_with_title(
         CommandId::Find,
         TextKey::SearchPlaceholder,
         "Search",
-        "⌘F",
+        Some("⌘F"),
         false,
+        find_document_title,
     ),
-    command(
+    command_with_title(
         CommandId::FindInFiles,
         TextKey::WorkspaceSearchPlaceholder,
         "Search",
-        "⌘⇧F",
+        Some("⌘⇧F"),
         false,
+        find_files_title,
     ),
     command(
         CommandId::ToggleSidebar,
         TextKey::ToolbarSidebarTooltip,
         "View",
-        "⌘⌥S",
+        "⌘⇧S",
         false,
     ),
     command(
@@ -295,7 +308,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         "Fold",
         Some("⌘⌥["),
         false,
-        collapse_title,
+        fold_section_title,
     ),
     command_with_title(
         CommandId::Unfold,
@@ -303,19 +316,23 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         "Fold",
         Some("⌘⌥]"),
         false,
-        expand_title,
+        unfold_section_title,
     ),
-    command_without_shortcut(
+    command_with_title(
         CommandId::FoldAll,
         TextKey::CollapseAllDirectories,
         "Fold",
+        None,
         false,
+        fold_all_title,
     ),
-    command_without_shortcut(
+    command_with_title(
         CommandId::UnfoldAll,
         TextKey::ExpandAllDirectories,
         "Fold",
+        None,
         false,
+        unfold_all_title,
     ),
     command_with_title(
         CommandId::ZoomIn,
@@ -333,7 +350,14 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         false,
         zoom_out_title,
     ),
-    command(CommandId::ZoomReset, TextKey::Reset, "View", "⌘⌥0", false),
+    command_with_title(
+        CommandId::ZoomReset,
+        TextKey::Reset,
+        "View",
+        Some("⌘⌥0"),
+        false,
+        zoom_reset_title,
+    ),
 ];
 
 const fn command(
@@ -394,12 +418,40 @@ fn underline_title(language: UiLanguage) -> &'static str {
     crate::i18n::format_extra_label(language, "underline")
 }
 
-fn collapse_title(language: UiLanguage) -> &'static str {
-    crate::i18n::fold_action_label(language, false)
+fn new_document_title(language: UiLanguage) -> &'static str {
+    crate::i18n::command_action_label(language, "new_document")
 }
 
-fn expand_title(language: UiLanguage) -> &'static str {
-    crate::i18n::fold_action_label(language, true)
+fn new_tab_title(language: UiLanguage) -> &'static str {
+    crate::i18n::command_action_label(language, "new_tab")
+}
+
+fn quick_open_title(language: UiLanguage) -> &'static str {
+    crate::i18n::command_action_label(language, "quick_open")
+}
+
+fn find_document_title(language: UiLanguage) -> &'static str {
+    crate::i18n::command_action_label(language, "find_document")
+}
+
+fn find_files_title(language: UiLanguage) -> &'static str {
+    crate::i18n::command_action_label(language, "find_files")
+}
+
+fn fold_section_title(language: UiLanguage) -> &'static str {
+    crate::i18n::command_action_label(language, "fold_section")
+}
+
+fn unfold_section_title(language: UiLanguage) -> &'static str {
+    crate::i18n::command_action_label(language, "unfold_section")
+}
+
+fn fold_all_title(language: UiLanguage) -> &'static str {
+    crate::i18n::command_action_label(language, "fold_all")
+}
+
+fn unfold_all_title(language: UiLanguage) -> &'static str {
+    crate::i18n::command_action_label(language, "unfold_all")
 }
 
 fn zoom_in_title(language: UiLanguage) -> &'static str {
@@ -410,11 +462,16 @@ fn zoom_out_title(language: UiLanguage) -> &'static str {
     crate::i18n::preview_action_label(language, "zoom_out")
 }
 
+fn zoom_reset_title(language: UiLanguage) -> &'static str {
+    crate::i18n::command_action_label(language, "reset_zoom")
+}
+
 #[cfg(test)]
 mod command_tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
-    use super::{COMMAND_SPECS, estimate_text_width};
+    use super::{COMMAND_SPECS, CommandId, estimate_text_width};
+    use crate::i18n::UiLanguage;
 
     #[test]
     fn command_shortcuts_are_unique() {
@@ -436,6 +493,48 @@ mod command_tests {
     #[test]
     fn cjk_text_width_uses_full_em_glyphs() {
         assert_eq!(estimate_text_width("内容大纲", 13.0), 52.0);
+    }
+
+    #[test]
+    fn sidebar_owns_cmd_shift_s_and_save_as_has_no_default_shortcut() {
+        let sidebar = COMMAND_SPECS
+            .iter()
+            .find(|spec| spec.id == CommandId::ToggleSidebar)
+            .unwrap();
+        let save_as = COMMAND_SPECS
+            .iter()
+            .find(|spec| spec.id == CommandId::SaveAs)
+            .unwrap();
+
+        assert_eq!(sidebar.shortcut, Some("⌘⇧S"));
+        assert_eq!(save_as.shortcut, None);
+    }
+
+    #[test]
+    fn command_titles_are_unique_in_every_language() {
+        let mut duplicates = Vec::new();
+        for &language in UiLanguage::supported() {
+            let mut titles = HashMap::new();
+            for spec in COMMAND_SPECS {
+                let title = spec.localized_title(language);
+                assert!(
+                    !title.trim().is_empty(),
+                    "empty command title for {language:?}: {:?}",
+                    spec.id
+                );
+                if let Some(previous) = titles.insert(title, spec.id) {
+                    duplicates.push(format!(
+                        "{language:?}: {title:?} ({previous:?}, {:?})",
+                        spec.id
+                    ));
+                }
+            }
+        }
+        assert!(
+            duplicates.is_empty(),
+            "duplicate command titles:\n{}",
+            duplicates.join("\n")
+        );
     }
 }
 

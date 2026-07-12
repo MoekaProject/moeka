@@ -119,11 +119,7 @@ impl EditorView {
     }
 
     fn command_title(&self, spec: &CommandSpec) -> &'static str {
-        if let Some(title_override) = spec.title_override {
-            title_override(self.ui_language)
-        } else {
-            self.t(spec.title)
-        }
+        spec.localized_title(self.ui_language)
     }
 
     fn move_command_palette_selection(&mut self, delta: isize, cx: &mut Context<Self>) {

@@ -95,7 +95,6 @@ const UNDO_GROUP_INTERVAL: Duration = Duration::from_millis(300);
 const SIDEBAR_GIT_STATUS_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 const GIT_HISTORY_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 const GENERATED_PREVIEW_RENDER_BUDGET: usize = 24;
-const GENERATED_PREVIEW_VISIBLE_MARGIN_LINES: usize = 80;
 const GENERATED_PREVIEW_CACHE_RETAIN: usize = 96;
 const LINE_DISPLAY_CACHE_TRIM_MIN_LINES: usize = 20_000;
 const LINE_DISPLAY_CACHE_MAX_CACHED_LINES: usize = 2_000;
@@ -103,6 +102,15 @@ const LINE_DISPLAY_CACHE_VISIBLE_MARGIN_LINES: usize = 600;
 const LINE_DISPLAY_CACHE_CURSOR_MARGIN_LINES: usize = 200;
 const LINE_DISPLAY_CACHE_TRIM_UPDATE_INTERVAL: usize = 64;
 pub(super) const WELCOME_TAB_ID: &str = "welcome-1";
+
+fn generated_preview_intersects_range(
+    preview_start: usize,
+    preview_end: usize,
+    visible_start: usize,
+    visible_end: usize,
+) -> bool {
+    preview_start <= visible_end && preview_end >= visible_start
+}
 
 #[derive(Clone, Copy, Default)]
 struct GitMetadataImpact {
@@ -609,6 +617,8 @@ pub(crate) struct DraggedSidebarItemsView {
     pub label: String,
     pub count: usize,
     pub font_size_px: f32,
+    pub background_color: gpui::Hsla,
+    pub text_color: gpui::Hsla,
     pub cursor_offset: gpui::Point<gpui::Pixels>,
 }
 
@@ -631,8 +641,8 @@ impl Render for DraggedSidebarItemsView {
                 div()
                     .px(px(8.0))
                     .py(px(4.0))
-                    .bg(gpui::rgb(0x2d2d2d))
-                    .text_color(gpui::rgb(0xcccccc))
+                    .bg(self.background_color)
+                    .text_color(self.text_color)
                     .text_size(px(self.font_size_px))
                     .rounded(px(4.0))
                     .shadow_md()
@@ -692,6 +702,8 @@ pub(crate) struct DraggedChatTab {
 pub(crate) struct DraggedTabView {
     pub title: String,
     pub font_size_px: f32,
+    pub background_color: gpui::Hsla,
+    pub text_color: gpui::Hsla,
     pub cursor_offset: gpui::Point<gpui::Pixels>,
 }
 
@@ -709,8 +721,8 @@ impl Render for DraggedTabView {
                 div()
                     .px(px(10.0))
                     .py(px(4.0))
-                    .bg(gpui::rgb(0x2d2d2d))
-                    .text_color(gpui::rgb(0xcccccc))
+                    .bg(self.background_color)
+                    .text_color(self.text_color)
                     .text_size(px(self.font_size_px))
                     .rounded(px(4.0))
                     .shadow_md()
@@ -4755,6 +4767,14 @@ impl EditorView {
         self.refresh_generated_block_previews_with_mode(true);
     }
 
+    pub(crate) fn invalidate_generated_block_preview_render_caches(&mut self) {
+        for cache_key in self.generated_preview_keys.clone() {
+            self.image_cache.remove(&cache_key);
+            self.generated_preview_svg_cache.remove(&cache_key);
+            self.generated_preview_overlay_cache.remove(&cache_key);
+        }
+    }
+
     pub(crate) fn ensure_visible_generated_block_previews(&mut self, cx: &mut Context<Self>) {
         if self.decorations.is_empty() {
             return;
@@ -4856,8 +4876,12 @@ impl EditorView {
 
         let (priority_start, priority_end) = self.generated_preview_priority_line_range();
         preview_entries.sort_by_key(|preview| {
-            let in_priority_range =
-                preview.start_line <= priority_end && preview.end_line >= priority_start;
+            let in_priority_range = generated_preview_intersects_range(
+                preview.start_line,
+                preview.end_line,
+                priority_start,
+                priority_end,
+            );
             let cursor_distance = preview.start_line.abs_diff(
                 self.cursor_line()
                     .min(self.buffer.line_count().saturating_sub(1)),
@@ -4867,6 +4891,14 @@ impl EditorView {
 
         let mut rendered_count = 0usize;
         for preview in preview_entries {
+            if !generated_preview_intersects_range(
+                preview.start_line,
+                preview.end_line,
+                priority_start,
+                priority_end,
+            ) {
+                continue;
+            }
             let has_cached_image = self.image_cache.contains_key(&preview.cache_key);
             if !force
                 && has_cached_image
@@ -4947,16 +4979,7 @@ impl EditorView {
         let viewport_end = self
             .line_at_y(self.scroll_offset + self.editor_visible_height() + self.padding_bottom())
             .min(line_count.saturating_sub(1));
-        let cursor_line = self.cursor_line().min(line_count.saturating_sub(1));
-
-        let start = viewport_start
-            .min(cursor_line)
-            .saturating_sub(GENERATED_PREVIEW_VISIBLE_MARGIN_LINES);
-        let end = viewport_end
-            .max(cursor_line)
-            .saturating_add(GENERATED_PREVIEW_VISIBLE_MARGIN_LINES)
-            .min(line_count.saturating_sub(1));
-        (start, end)
+        (viewport_start, viewport_end)
     }
 
     fn prune_generated_preview_caches(&mut self, next_generated_keys: HashSet<String>) {
@@ -8844,12 +8867,22 @@ pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_incremental_markdown_decorations, heading_matches_anchor,
-        line_display_transfer_line_bounds, normalize_ordered_list_numbers_in_buffer,
-        resolve_markdown_target_path, split_markdown_target, text_tab_is_dirty, unique_import_path,
+        compute_incremental_markdown_decorations, generated_preview_intersects_range,
+        heading_matches_anchor, line_display_transfer_line_bounds,
+        normalize_ordered_list_numbers_in_buffer, resolve_markdown_target_path,
+        split_markdown_target, text_tab_is_dirty, unique_import_path,
     };
     use crate::buffer::Buffer;
     use crate::markdown::parse_decorations;
+
+    #[test]
+    fn generated_previews_render_only_when_they_intersect_the_viewport() {
+        assert!(generated_preview_intersects_range(10, 14, 12, 20));
+        assert!(generated_preview_intersects_range(12, 20, 10, 14));
+        assert!(generated_preview_intersects_range(10, 20, 10, 20));
+        assert!(!generated_preview_intersects_range(1, 9, 10, 20));
+        assert!(!generated_preview_intersects_range(21, 30, 10, 20));
+    }
 
     /// Drives `compute_incremental_markdown_decorations` for an `old -> new`
     /// edit derived from the byte-level diff of the two texts, then asserts the

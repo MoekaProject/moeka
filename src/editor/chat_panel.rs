@@ -3278,7 +3278,7 @@ impl EditorView {
                             ),
                         cx.entity().clone(),
                         self.t(crate::i18n::TextKey::Close),
-                        None::<&'static str>,
+                        is_active.then_some("⌘W"),
                     ))
                     .child(
                         div()
@@ -3302,10 +3302,14 @@ impl EditorView {
                 },
                 {
                     let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
+                    let ghost_background_color = self.styles.tooltip.tooltip_bg;
+                    let ghost_text_color = self.styles.tooltip.tooltip_title_text_color;
                     move |dragged, offset, _window, cx| {
                         cx.new(|_cx| DraggedTabView {
                             title: dragged.title.clone(),
                             font_size_px: ghost_font_size_px,
+                            background_color: ghost_background_color,
+                            text_color: ghost_text_color,
                             cursor_offset: offset,
                         })
                     }
@@ -3420,7 +3424,7 @@ impl EditorView {
                 ),
             cx.entity().clone(),
             crate::i18n::new_chat_label(self.ui_language),
-            None::<&'static str>,
+            Some("⌘N"),
         );
         let end_drop_target = div()
             .h(px(inner_height))
@@ -3597,6 +3601,27 @@ impl EditorView {
             .flex()
             .flex_col()
             .on_key_down(cx.listener(Self::on_chat_terminal_key_down))
+            .on_action(cx.listener(|this, _: &ToggleChatPanel, window, cx| {
+                cx.stop_propagation();
+                this.hide_chat_panel(cx);
+                window.focus(&this.focus_handle(cx));
+            }))
+            .on_action(cx.listener(|this, _: &NewChatTab, window, cx| {
+                cx.stop_propagation();
+                this.create_chat_tab(cx);
+                this.focus_chat_terminal_panel(window);
+            }))
+            .on_action(cx.listener(|this, _: &CloseActiveChatTab, window, cx| {
+                cx.stop_propagation();
+                if let Some(tab_id) = this.active_chat_tab_id.clone() {
+                    this.close_chat_tab(&tab_id, cx);
+                }
+                if this.chat_panel_visible {
+                    this.focus_chat_terminal_panel(window);
+                } else {
+                    window.focus(&this.focus_handle(cx));
+                }
+            }))
             .on_scroll_wheel(cx.listener(Self::on_chat_terminal_scroll))
             .on_action(cx.listener(|this, _: &Undo, window, cx| {
                 this.swallow_chat_terminal_editor_action(window, cx);

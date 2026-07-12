@@ -425,6 +425,196 @@ pub(crate) fn outline_action_label(language: UiLanguage, visible: bool) -> &'sta
     }
 }
 
+pub(crate) fn theme_action_label(language: UiLanguage, current_is_dark: bool) -> &'static str {
+    match (language, current_is_dark) {
+        (UiLanguage::ChineseSimplified, false) => "切换深色",
+        (UiLanguage::ChineseSimplified, true) => "切换浅色",
+        (UiLanguage::ChineseTraditional, false) => "切換深色",
+        (UiLanguage::ChineseTraditional, true) => "切換淺色",
+        (UiLanguage::Japanese, false) => "ダークに切り替え",
+        (UiLanguage::Japanese, true) => "ライトに切り替え",
+        (UiLanguage::Korean, false) => "다크 모드로 전환",
+        (UiLanguage::Korean, true) => "라이트 모드로 전환",
+        (UiLanguage::French, false) => "Passer au thème sombre",
+        (UiLanguage::French, true) => "Passer au thème clair",
+        (UiLanguage::German, false) => "Zum dunklen Design wechseln",
+        (UiLanguage::German, true) => "Zum hellen Design wechseln",
+        (UiLanguage::Spanish, false) => "Cambiar al tema oscuro",
+        (UiLanguage::Spanish, true) => "Cambiar al tema claro",
+        (UiLanguage::Portuguese, false) => "Mudar para o tema escuro",
+        (UiLanguage::Portuguese, true) => "Mudar para o tema claro",
+        (UiLanguage::Russian, false) => "Переключить на тёмную тему",
+        (UiLanguage::Russian, true) => "Переключить на светлую тему",
+        (UiLanguage::Arabic, false) => "التبديل إلى المظهر الداكن",
+        (UiLanguage::Arabic, true) => "التبديل إلى المظهر الفاتح",
+        (UiLanguage::Hindi, false) => "गहरे थीम पर जाएँ",
+        (UiLanguage::Hindi, true) => "हल्के थीम पर जाएँ",
+        (UiLanguage::English, false) => "Switch to Dark Theme",
+        (UiLanguage::English, true) => "Switch to Light Theme",
+    }
+}
+
+pub(crate) fn command_action_label(language: UiLanguage, key: &str) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => match key {
+            "new_document" => "新建文档",
+            "new_tab" => "新建编辑器标签页",
+            "quick_open" => "快速打开",
+            "find_document" => "在文档中查找",
+            "find_files" => "在文件中查找",
+            "fold_section" => "折叠当前章节",
+            "unfold_section" => "展开当前章节",
+            "fold_all" => "折叠所有章节",
+            "unfold_all" => "展开所有章节",
+            "reset_zoom" => "重置缩放",
+            _ => "",
+        },
+        UiLanguage::ChineseTraditional => match key {
+            "new_document" => "新增文件",
+            "new_tab" => "新增編輯器分頁",
+            "quick_open" => "快速開啟",
+            "find_document" => "在文件中尋找",
+            "find_files" => "在檔案中尋找",
+            "fold_section" => "摺疊目前章節",
+            "unfold_section" => "展開目前章節",
+            "fold_all" => "摺疊所有章節",
+            "unfold_all" => "展開所有章節",
+            "reset_zoom" => "重設縮放",
+            _ => "",
+        },
+        UiLanguage::Japanese => match key {
+            "new_document" => "新規ドキュメント",
+            "new_tab" => "新しいエディタタブ",
+            "quick_open" => "クイックオープン",
+            "find_document" => "ドキュメント内を検索",
+            "find_files" => "ファイル内を検索",
+            "fold_section" => "セクションを折りたたむ",
+            "unfold_section" => "セクションを展開",
+            "fold_all" => "すべてのセクションを折りたたむ",
+            "unfold_all" => "すべてのセクションを展開",
+            "reset_zoom" => "ズームをリセット",
+            _ => "",
+        },
+        UiLanguage::Korean => match key {
+            "new_document" => "새 문서",
+            "new_tab" => "새 편집기 탭",
+            "quick_open" => "빠른 열기",
+            "find_document" => "문서에서 찾기",
+            "find_files" => "파일에서 찾기",
+            "fold_section" => "현재 섹션 접기",
+            "unfold_section" => "현재 섹션 펼치기",
+            "fold_all" => "모든 섹션 접기",
+            "unfold_all" => "모든 섹션 펼치기",
+            "reset_zoom" => "확대/축소 재설정",
+            _ => "",
+        },
+        UiLanguage::French => match key {
+            "new_document" => "Nouveau document",
+            "new_tab" => "Nouvel onglet éditeur",
+            "quick_open" => "Ouverture rapide",
+            "find_document" => "Rechercher dans le document",
+            "find_files" => "Rechercher dans les fichiers",
+            "fold_section" => "Replier la section",
+            "unfold_section" => "Déplier la section",
+            "fold_all" => "Replier toutes les sections",
+            "unfold_all" => "Déplier toutes les sections",
+            "reset_zoom" => "Réinitialiser le zoom",
+            _ => "",
+        },
+        UiLanguage::German => match key {
+            "new_document" => "Neues Dokument",
+            "new_tab" => "Neuer Editor-Tab",
+            "quick_open" => "Schnell öffnen",
+            "find_document" => "Im Dokument suchen",
+            "find_files" => "In Dateien suchen",
+            "fold_section" => "Abschnitt einklappen",
+            "unfold_section" => "Abschnitt ausklappen",
+            "fold_all" => "Alle Abschnitte einklappen",
+            "unfold_all" => "Alle Abschnitte ausklappen",
+            "reset_zoom" => "Zoom zurücksetzen",
+            _ => "",
+        },
+        UiLanguage::Spanish => match key {
+            "new_document" => "Nuevo documento",
+            "new_tab" => "Nueva pestaña del editor",
+            "quick_open" => "Apertura rápida",
+            "find_document" => "Buscar en el documento",
+            "find_files" => "Buscar en archivos",
+            "fold_section" => "Contraer sección",
+            "unfold_section" => "Expandir sección",
+            "fold_all" => "Contraer todas las secciones",
+            "unfold_all" => "Expandir todas las secciones",
+            "reset_zoom" => "Restablecer zoom",
+            _ => "",
+        },
+        UiLanguage::Portuguese => match key {
+            "new_document" => "Novo documento",
+            "new_tab" => "Nova aba do editor",
+            "quick_open" => "Abertura rápida",
+            "find_document" => "Buscar no documento",
+            "find_files" => "Buscar em arquivos",
+            "fold_section" => "Recolher seção",
+            "unfold_section" => "Expandir seção",
+            "fold_all" => "Recolher todas as seções",
+            "unfold_all" => "Expandir todas as seções",
+            "reset_zoom" => "Redefinir zoom",
+            _ => "",
+        },
+        UiLanguage::Russian => match key {
+            "new_document" => "Новый документ",
+            "new_tab" => "Новая вкладка редактора",
+            "quick_open" => "Быстрое открытие",
+            "find_document" => "Найти в документе",
+            "find_files" => "Найти в файлах",
+            "fold_section" => "Свернуть раздел",
+            "unfold_section" => "Развернуть раздел",
+            "fold_all" => "Свернуть все разделы",
+            "unfold_all" => "Развернуть все разделы",
+            "reset_zoom" => "Сбросить масштаб",
+            _ => "",
+        },
+        UiLanguage::Arabic => match key {
+            "new_document" => "مستند جديد",
+            "new_tab" => "علامة تبويب محرر جديدة",
+            "quick_open" => "فتح سريع",
+            "find_document" => "بحث في المستند",
+            "find_files" => "بحث في الملفات",
+            "fold_section" => "طي القسم",
+            "unfold_section" => "توسيع القسم",
+            "fold_all" => "طي جميع الأقسام",
+            "unfold_all" => "توسيع جميع الأقسام",
+            "reset_zoom" => "إعادة تعيين التكبير",
+            _ => "",
+        },
+        UiLanguage::Hindi => match key {
+            "new_document" => "नया दस्तावेज़",
+            "new_tab" => "नया संपादक टैब",
+            "quick_open" => "त्वरित खोलें",
+            "find_document" => "दस्तावेज़ में खोजें",
+            "find_files" => "फ़ाइलों में खोजें",
+            "fold_section" => "अनुभाग समेटें",
+            "unfold_section" => "अनुभाग फैलाएँ",
+            "fold_all" => "सभी अनुभाग समेटें",
+            "unfold_all" => "सभी अनुभाग फैलाएँ",
+            "reset_zoom" => "ज़ूम रीसेट करें",
+            _ => "",
+        },
+        UiLanguage::English => match key {
+            "new_document" => "New Document",
+            "new_tab" => "New Editor Tab",
+            "quick_open" => "Quick Open",
+            "find_document" => "Find in Document",
+            "find_files" => "Find in Files",
+            "fold_section" => "Fold Current Section",
+            "unfold_section" => "Unfold Current Section",
+            "fold_all" => "Fold All Sections",
+            "unfold_all" => "Unfold All Sections",
+            "reset_zoom" => "Reset Zoom",
+            _ => "",
+        },
+    }
+}
+
 pub(crate) fn close_tab_unsaved_message(language: UiLanguage, title: &str) -> String {
     match language {
         UiLanguage::English => format!("Save changes to \"{title}\"?"),
@@ -4113,7 +4303,9 @@ fn translate_hindi(key: TextKey) -> &'static str {
 
 #[cfg(test)]
 mod action_label_tests {
-    use super::{UiLanguage, outline_action_label, sidebar_visibility_action_label};
+    use super::{
+        UiLanguage, outline_action_label, sidebar_visibility_action_label, theme_action_label,
+    };
 
     #[test]
     fn simplified_chinese_visibility_labels_are_explicit_actions() {
@@ -4132,6 +4324,18 @@ mod action_label_tests {
         assert_eq!(
             sidebar_visibility_action_label(UiLanguage::ChineseSimplified, true),
             "隐藏边栏"
+        );
+    }
+
+    #[test]
+    fn simplified_chinese_theme_label_describes_the_target_appearance() {
+        assert_eq!(
+            theme_action_label(UiLanguage::ChineseSimplified, false),
+            "切换深色"
+        );
+        assert_eq!(
+            theme_action_label(UiLanguage::ChineseSimplified, true),
+            "切换浅色"
         );
     }
 }

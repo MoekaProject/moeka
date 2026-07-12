@@ -4,6 +4,21 @@ use crate::markdown::BlockType;
 
 use super::*;
 
+fn caret_vertical_overflow(
+    cursor_top: f32,
+    cursor_bottom: f32,
+    viewport_top: f32,
+    viewport_bottom: f32,
+) -> std::cmp::Ordering {
+    if cursor_top < viewport_top {
+        std::cmp::Ordering::Less
+    } else if cursor_bottom > viewport_bottom {
+        std::cmp::Ordering::Greater
+    } else {
+        std::cmp::Ordering::Equal
+    }
+}
+
 impl EditorView {
     fn actual_visual_line_count(info: &LineDisplayInfo) -> usize {
         info.wrapped_line.wrap_boundaries().len() + 1
@@ -514,14 +529,6 @@ impl EditorView {
         let viewport_height = self.editor_visible_height();
         let viewport_top = self.scroll_offset + self.padding_top();
         let viewport_bottom = self.scroll_offset + viewport_height - self.padding_bottom();
-        let usable_height = (viewport_bottom - viewport_top).max(cursor_line_height.max(1.0));
-        // Follow common editor behavior: keep a small scroll margin around the
-        // caret, not a large 1/3-zone that makes the viewport follow too early.
-        // Three visual rows feels stable while the 12% cap keeps tiny windows
-        // from reserving too much space.
-        let scroll_margin = (cursor_line_height * 3.0).min(usable_height * 0.12);
-        let upper_threshold = viewport_top + scroll_margin;
-        let lower_threshold = viewport_bottom - scroll_margin;
         let cursor_top = cursor_y;
         let cursor_bottom = cursor_y + cursor_line_height;
         let is_visible = cursor_top >= viewport_top && cursor_bottom <= viewport_bottom;
@@ -534,15 +541,19 @@ impl EditorView {
             return;
         }
 
-        if cursor_top < upper_threshold {
-            self.scroll_offset = (cursor_y - self.padding_top() - scroll_margin).max(0.0);
-            self.clamp_scroll();
-            self.last_scroll_cursor_visual_x = Some(cursor_visual_x);
-        } else if cursor_bottom > lower_threshold {
-            self.scroll_offset = cursor_y + cursor_line_height + scroll_margin - viewport_height
-                + self.padding_bottom();
-            self.clamp_scroll();
-            self.last_scroll_cursor_visual_x = Some(cursor_visual_x);
+        match caret_vertical_overflow(cursor_top, cursor_bottom, viewport_top, viewport_bottom) {
+            std::cmp::Ordering::Less => {
+                self.scroll_offset = (cursor_y - self.padding_top()).max(0.0);
+                self.clamp_scroll();
+                self.last_scroll_cursor_visual_x = Some(cursor_visual_x);
+            }
+            std::cmp::Ordering::Greater => {
+                self.scroll_offset =
+                    cursor_y + cursor_line_height - viewport_height + self.padding_bottom();
+                self.clamp_scroll();
+                self.last_scroll_cursor_visual_x = Some(cursor_visual_x);
+            }
+            std::cmp::Ordering::Equal => {}
         }
     }
 
@@ -847,5 +858,20 @@ impl EditorView {
 
         self.chat_panel_visible = false;
         self.set_visible_utility_panel(Some(panel), cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::caret_vertical_overflow;
+
+    #[test]
+    fn caret_scrolls_only_after_leaving_the_viewport() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+
+        assert_eq!(caret_vertical_overflow(100.0, 120.0, 100.0, 200.0), Equal);
+        assert_eq!(caret_vertical_overflow(180.0, 200.0, 100.0, 200.0), Equal);
+        assert_eq!(caret_vertical_overflow(99.9, 119.9, 100.0, 200.0), Less);
+        assert_eq!(caret_vertical_overflow(180.1, 200.1, 100.0, 200.0), Greater);
     }
 }

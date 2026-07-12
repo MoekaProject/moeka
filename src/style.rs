@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use gpui::{FontWeight, Hsla};
 
-use crate::theme::{Theme, hex_to_hsla, with_alpha};
+use crate::theme::{Theme, with_alpha};
 
 /// Per-component style configuration, derived from the active theme.
 ///
@@ -1230,11 +1230,6 @@ pub struct SettingsPanelStyles {
 // Construction
 // ═════════════════════════════════════════════════════════════════════
 
-fn deepen_block_background(mut color: Hsla, is_light: bool) -> Hsla {
-    color.l = (color.l * if is_light { 0.98 } else { 0.9 }).clamp(0.0, 1.0);
-    color
-}
-
 impl Styles {
     /// `theme` drives editor content colors and follows the user's light/dark
     /// selection. `ui_theme` is the dark chrome palette (the user's selected
@@ -1266,7 +1261,6 @@ impl Styles {
         } else {
             theme.checkbox_checked
         };
-        let code_block_bg = deepen_block_background(theme.bg_code, is_light);
         let text_input_theme = if is_light { theme } else { ui_theme };
         let text_input_shadow = !is_light;
         let settings_theme = if is_light { theme } else { ui_theme };
@@ -1290,11 +1284,7 @@ impl Styles {
         } else {
             theme.text_secondary
         };
-        let settings_update_color = if is_light {
-            hex_to_hsla("#8a6400")
-        } else {
-            hex_to_hsla("#d6a100")
-        };
+        let settings_update_color = settings_theme.text_warning;
         Self {
             ui_font_family: ".SystemUIFont",
             ui_font_size_px,
@@ -1529,11 +1519,7 @@ impl Styles {
                 file_list_width_px: 240.0,
                 // Slightly lighter than the file tree background so the two
                 // panes read as separate layers (chrome palette is always dark).
-                file_list_bg: {
-                    let mut color = sidebar_theme.bg_secondary;
-                    color.l = (color.l + 0.025).min(1.0);
-                    color
-                },
+                file_list_bg: sidebar_theme.bg_tertiary,
                 file_list_header_height_px: 30.0,
                 file_list_header_padding_left_px: 12.0,
                 file_list_header_padding_right_px: 4.0,
@@ -1711,9 +1697,9 @@ impl Styles {
                 tab_update_button_hover_opacity: 1.0,
                 tab_update_button_icon_size_px: 16.0,
                 tab_update_button_font_size_px: ui_font_size_sm_px,
-                tab_update_button_text_color: hex_to_hsla("#d6a100"),
-                tab_update_button_hover_text_color: hex_to_hsla("#ffd24d"),
-                tab_update_button_icon_color: hex_to_hsla("#d6a100"),
+                tab_update_button_text_color: ui_theme.text_warning,
+                tab_update_button_hover_text_color: ui_theme.text_warning_hover,
+                tab_update_button_icon_color: ui_theme.text_warning,
                 tab_drag_ghost_opacity: 0.7,
                 tab_drag_source_opacity: 0.3,
                 tab_drop_indicator_width_px: 2.0,
@@ -1781,11 +1767,7 @@ impl Styles {
                 whiteboard_swatch_ring_gap_px: 1.0,
                 whiteboard_swatch_checker_cell_px: 4.0,
                 whiteboard_swatch_grid_gap_y_px: 6.0,
-                whiteboard_swatch_ring_color: if theme.bg_primary.l < 0.5 {
-                    crate::hex_hsla!("#f8f9fa")
-                } else {
-                    Hsla::black()
-                },
+                whiteboard_swatch_ring_color: theme.text_bright,
                 whiteboard_swatch_ring_idle_color: gpui::transparent_black(),
                 whiteboard_swatch_checker_light_color: crate::hex_hsla!("#ffffff"),
                 whiteboard_swatch_checker_dark_color: crate::hex_hsla!("#d9dee3"),
@@ -1802,19 +1784,19 @@ impl Styles {
                 tooltip_gap_px: 5.0,
                 tooltip_radius_px: 8.0,
                 tooltip_border_width_px: 1.0,
-                tooltip_bg: crate::hex_hsla!("#252A31F5"),
-                tooltip_border_color: crate::hex_hsla!("#677186B8"),
+                tooltip_bg: with_alpha(ui_theme.bg_elevated, 0.96),
+                tooltip_border_color: with_alpha(ui_theme.border_primary, 0.7),
                 tooltip_title_font_size_px: ui_font_size_sm_px,
-                tooltip_title_text_color: crate::hex_hsla!("#ABB2BF"),
+                tooltip_title_text_color: ui_theme.text_primary,
                 tooltip_subtitle_font_size_px: ui_font_size_xs_px,
-                tooltip_subtitle_text_color: crate::hex_hsla!("#ABB2BF"),
+                tooltip_subtitle_text_color: ui_theme.text_primary,
                 tooltip_subtitle_opacity: 0.72,
                 tooltip_shortcut_gap_px: 4.0,
                 tooltip_shortcut_key_min_width_px: 16.0,
                 tooltip_shortcut_key_height_px: 18.0,
                 tooltip_shortcut_key_padding_x_px: 5.0,
                 tooltip_shortcut_key_radius_px: 6.0,
-                tooltip_shortcut_key_bg: crate::hex_hsla!("#171B20FA"),
+                tooltip_shortcut_key_bg: with_alpha(ui_theme.bg_code, 0.98),
             },
             cursor: CursorStyles {
                 cursor_color: theme.cursor,
@@ -1829,7 +1811,7 @@ impl Styles {
                 cursor_opacity_step: 0.03,
             },
             code_block: CodeBlockStyles {
-                code_block_bg,
+                code_block_bg: theme.bg_code,
                 code_block_border_width_px: 1.0,
                 code_block_border_color: if is_light {
                     with_alpha(theme.border_primary, 0.58)
@@ -1895,51 +1877,43 @@ impl Styles {
                     theme.text_secondary,
                     if is_light { 0.72 } else { 0.3 },
                 ),
-                quote_block_note_bg: with_alpha(
-                    crate::hex_hsla!("#0969DA"),
-                    if is_light { 0.10 } else { 0.08 },
+                quote_block_note_bg: with_alpha(theme.link, if is_light { 0.10 } else { 0.08 }),
+                quote_block_note_border_color: with_alpha(
+                    theme.link,
+                    if is_light { 1.0 } else { 0.6 },
                 ),
-                quote_block_note_border_color: if is_light {
-                    crate::hex_hsla!("#0969DA")
-                } else {
-                    with_alpha(crate::hex_hsla!("#58A6FF"), 0.6)
-                },
                 quote_block_tip_bg: with_alpha(
-                    crate::hex_hsla!("#2DA44E"),
+                    theme.git_status_added,
                     if is_light { 0.12 } else { 0.08 },
                 ),
-                quote_block_tip_border_color: if is_light {
-                    crate::hex_hsla!("#116329")
-                } else {
-                    with_alpha(crate::hex_hsla!("#3FB950"), 0.58)
-                },
+                quote_block_tip_border_color: with_alpha(
+                    theme.git_status_added,
+                    if is_light { 1.0 } else { 0.58 },
+                ),
                 quote_block_important_bg: with_alpha(
-                    crate::hex_hsla!("#8250DF"),
+                    theme.italic,
                     if is_light { 0.12 } else { 0.08 },
                 ),
-                quote_block_important_border_color: if is_light {
-                    crate::hex_hsla!("#8250DF")
-                } else {
-                    with_alpha(crate::hex_hsla!("#A371F7"), 0.58)
-                },
+                quote_block_important_border_color: with_alpha(
+                    theme.italic,
+                    if is_light { 1.0 } else { 0.58 },
+                ),
                 quote_block_warning_bg: with_alpha(
-                    crate::hex_hsla!("#D29922"),
+                    theme.text_warning,
                     if is_light { 0.14 } else { 0.09 },
                 ),
-                quote_block_warning_border_color: if is_light {
-                    crate::hex_hsla!("#9A6700")
-                } else {
-                    with_alpha(crate::hex_hsla!("#D29922"), 0.58)
-                },
+                quote_block_warning_border_color: with_alpha(
+                    theme.text_warning,
+                    if is_light { 1.0 } else { 0.58 },
+                ),
                 quote_block_caution_bg: with_alpha(
-                    crate::hex_hsla!("#CF222E"),
+                    theme.text_danger,
                     if is_light { 0.10 } else { 0.08 },
                 ),
-                quote_block_caution_border_color: if is_light {
-                    crate::hex_hsla!("#CF222E")
-                } else {
-                    with_alpha(crate::hex_hsla!("#F85149"), 0.58)
-                },
+                quote_block_caution_border_color: with_alpha(
+                    theme.text_danger,
+                    if is_light { 1.0 } else { 0.58 },
+                ),
             },
             wiki_link: WikiLinkStyles {
                 wiki_link_text_color: theme.inline_code,
@@ -2006,7 +1980,7 @@ impl Styles {
                 checkbox_border_color,
                 checkbox_checked_bg,
                 checkbox_check_icon_scale: 0.52,
-                checkbox_check_icon_color: gpui::white(),
+                checkbox_check_icon_color: theme.text_on_accent,
                 checkbox_default_opacity: 0.9,
                 checkbox_hover_opacity: 1.0,
                 checkbox_hit_padding_px: 2.0,
@@ -2119,7 +2093,7 @@ impl Styles {
                 menu_tab_width_px: 180.0,
             },
             dialog: DialogStyles {
-                dialog_backdrop_color: gpui::hsla(0.0, 0.0, 0.0, 0.3),
+                dialog_backdrop_color: with_alpha(ui_theme.bg_primary, 0.3),
                 dialog_bg: ui_theme.bg_elevated,
                 dialog_border_width_px: 1.0,
                 dialog_border_color: ui_theme.border_primary,
@@ -2139,13 +2113,13 @@ impl Styles {
                 dialog_btn_gap_px: 8.0,
                 dialog_btn_hover_opacity: 0.9,
                 dialog_btn_primary_bg: ui_theme.text_accent,
-                dialog_btn_primary_text_color: gpui::white(),
+                dialog_btn_primary_text_color: ui_theme.text_on_accent,
                 dialog_btn_primary_hover_bg: ui_theme.text_accent,
                 dialog_btn_secondary_bg: ui_theme.bg_hover,
                 dialog_btn_secondary_text_color: ui_theme.text_primary,
                 dialog_btn_secondary_hover_bg: ui_theme.bg_selected,
                 dialog_btn_danger_bg: ui_theme.text_danger,
-                dialog_btn_danger_text_color: gpui::white(),
+                dialog_btn_danger_text_color: ui_theme.text_on_accent,
                 dialog_btn_danger_hover_bg: ui_theme.text_danger,
             },
             workspace_switcher: WorkspaceSwitcherStyles {
@@ -2236,15 +2210,15 @@ impl Styles {
                 search_nav_btn_icon_size_px: 14.0,
                 search_nav_btn_icon_color: ui_theme.text_secondary,
                 search_nav_btn_hover_bg: ui_theme.bg_hover,
-                search_match_bg: gpui::hsla(0.14, 0.9, 0.46, 0.18),
-                search_match_active_bg: gpui::hsla(0.08, 0.92, 0.58, 0.62),
+                search_match_bg: with_alpha(theme.highlight_bg, 0.18),
+                search_match_active_bg: with_alpha(theme.bold, 0.62),
                 search_match_text_color: ui_theme.text_bright,
                 search_match_active_text_color: ui_theme.text_bright,
                 search_match_border_width_px: 1.0,
-                search_match_border_color: gpui::hsla(0.14, 0.9, 0.5, 0.5),
+                search_match_border_color: with_alpha(theme.highlight_bg, 0.5),
                 search_scrollbar_marker_width_px: 3.0,
                 search_scrollbar_marker_height_px: 2.0,
-                search_scrollbar_marker_color: gpui::hsla(0.14, 0.9, 0.5, 0.6),
+                search_scrollbar_marker_color: with_alpha(theme.highlight_bg, 0.6),
                 search_replace_btn_height_px: 22.0,
                 search_replace_btn_padding_x_px: 8.0,
                 search_replace_btn_font_size_px: ui_font_size_xs_px,
@@ -2291,7 +2265,7 @@ impl Styles {
                 ws_search_match_padding_x_px: 14.0,
                 ws_search_match_font_size_px: ui_font_size_sm_px,
                 ws_search_match_text_color: sidebar_theme.text_primary,
-                ws_search_match_highlight_bg: gpui::hsla(0.14, 0.9, 0.5, 0.3),
+                ws_search_match_highlight_bg: with_alpha(theme.highlight_bg, 0.3),
                 ws_search_match_highlight_text_color: sidebar_theme.text_bright,
                 ws_search_match_line_number_color: sidebar_theme.text_secondary,
                 ws_search_match_hover_bg: sidebar_theme.bg_hover,
@@ -2308,7 +2282,7 @@ impl Styles {
                 ws_search_btn_active_bg: sidebar_theme.bg_selected,
             },
             quick_open: QuickOpenStyles {
-                quick_open_backdrop_bg: with_alpha(Hsla::black(), 0.5),
+                quick_open_backdrop_bg: with_alpha(ui_theme.bg_primary, 0.5),
                 quick_open_panel_width_px: 640.0,
                 quick_open_panel_top_offset_px: 48.0,
                 quick_open_panel_radius_px: 10.0,
@@ -2333,7 +2307,7 @@ impl Styles {
                 quick_open_result_text_color: ui_theme.text_primary,
                 quick_open_result_secondary_text_color: with_alpha(ui_theme.text_secondary, 0.5),
                 quick_open_result_shortcut_bg: with_alpha(
-                    Hsla::black(),
+                    ui_theme.bg_code,
                     if is_light { 0.12 } else { 0.28 },
                 ),
                 quick_open_result_match_text_color: ui_theme.text_bright,
@@ -2427,5 +2401,29 @@ mod tests {
             styles.quote_block.quote_block_padding_right_px,
             styles.code_block.code_block_text_padding_left_px
         );
+    }
+
+    #[test]
+    fn visible_component_colors_come_from_theme_tokens() {
+        let source = include_str!("style.rs")
+            .replace(concat!("crate::hex_", "hsla!(\"#ffffff\")"), "")
+            .replace(concat!("crate::hex_", "hsla!(\"#d9dee3\")"), "");
+        let forbidden = [
+            concat!("hex_", "hsla!"),
+            concat!("hex_to_", "hsla("),
+            concat!("gpui::", "hsla("),
+            concat!("gpui::", "rgb("),
+            concat!("Hsla::", "black("),
+            concat!("Hsla::", "white("),
+            concat!("gpui::", "white("),
+            concat!("color.", "l ="),
+        ];
+
+        for pattern in forbidden {
+            assert!(
+                !source.contains(pattern),
+                "visible component color must use a Theme token: {pattern}"
+            );
+        }
     }
 }

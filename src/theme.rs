@@ -74,8 +74,12 @@ pub enum ThemeColorField {
     TextBright,
     TextAccent,
     TextDanger,
+    TextOnAccent,
+    TextWarning,
+    TextWarningHover,
     BgPrimary,
     BgSecondary,
+    BgTertiary,
     BgElevated,
     BgHover,
     BgSelected,
@@ -113,14 +117,18 @@ pub enum ThemeColorField {
 }
 
 impl ThemeColorField {
-    pub const UI_FIELDS: [Self; 19] = [
+    pub const UI_FIELDS: [Self; 23] = [
         Self::TextPrimary,
         Self::TextSecondary,
         Self::TextBright,
         Self::TextAccent,
         Self::TextDanger,
+        Self::TextOnAccent,
+        Self::TextWarning,
+        Self::TextWarningHover,
         Self::BgPrimary,
         Self::BgSecondary,
+        Self::BgTertiary,
         Self::BgElevated,
         Self::BgHover,
         Self::BgSelected,
@@ -167,8 +175,12 @@ impl ThemeColorField {
             Self::TextBright => "text_bright",
             Self::TextAccent => "text_accent",
             Self::TextDanger => "text_danger",
+            Self::TextOnAccent => "text_on_accent",
+            Self::TextWarning => "text_warning",
+            Self::TextWarningHover => "text_warning_hover",
             Self::BgPrimary => "bg_primary",
             Self::BgSecondary => "bg_secondary",
+            Self::BgTertiary => "bg_tertiary",
             Self::BgElevated => "bg_elevated",
             Self::BgHover => "bg_hover",
             Self::BgSelected => "bg_selected",
@@ -237,10 +249,14 @@ pub struct Theme {
     pub text_bright: Hsla,
     pub text_accent: Hsla,
     pub text_danger: Hsla,
+    pub text_on_accent: Hsla,
+    pub text_warning: Hsla,
+    pub text_warning_hover: Hsla,
 
     // ── Background colors ───────────────────────────────────────
     pub bg_primary: Hsla,
     pub bg_secondary: Hsla,
+    pub bg_tertiary: Hsla,
     pub bg_elevated: Hsla,
     pub bg_hover: Hsla,
     pub bg_selected: Hsla,
@@ -291,8 +307,12 @@ impl Theme {
             ThemeColorField::TextBright => self.text_bright,
             ThemeColorField::TextAccent => self.text_accent,
             ThemeColorField::TextDanger => self.text_danger,
+            ThemeColorField::TextOnAccent => self.text_on_accent,
+            ThemeColorField::TextWarning => self.text_warning,
+            ThemeColorField::TextWarningHover => self.text_warning_hover,
             ThemeColorField::BgPrimary => self.bg_primary,
             ThemeColorField::BgSecondary => self.bg_secondary,
+            ThemeColorField::BgTertiary => self.bg_tertiary,
             ThemeColorField::BgElevated => self.bg_elevated,
             ThemeColorField::BgHover => self.bg_hover,
             ThemeColorField::BgSelected => self.bg_selected,
@@ -337,8 +357,12 @@ impl Theme {
             ThemeColorField::TextBright => self.text_bright = color,
             ThemeColorField::TextAccent => self.text_accent = color,
             ThemeColorField::TextDanger => self.text_danger = color,
+            ThemeColorField::TextOnAccent => self.text_on_accent = color,
+            ThemeColorField::TextWarning => self.text_warning = color,
+            ThemeColorField::TextWarningHover => self.text_warning_hover = color,
             ThemeColorField::BgPrimary => self.bg_primary = color,
             ThemeColorField::BgSecondary => self.bg_secondary = color,
+            ThemeColorField::BgTertiary => self.bg_tertiary = color,
             ThemeColorField::BgElevated => self.bg_elevated = color,
             ThemeColorField::BgHover => self.bg_hover = color,
             ThemeColorField::BgSelected => self.bg_selected = color,
@@ -418,9 +442,13 @@ impl Theme {
             text_bright: crate::hex_hsla!("#FFFFFF"),
             text_accent: crate::hex_hsla!("#61AFEF"),
             text_danger: crate::hex_hsla!("#E06C75"),
+            text_on_accent: crate::hex_hsla!("#FFFFFF"),
+            text_warning: crate::hex_hsla!("#D6A100"),
+            text_warning_hover: crate::hex_hsla!("#FFD24D"),
             // Background
             bg_primary: crate::hex_hsla!("#21252B"),
             bg_secondary: crate::hex_hsla!("#282C34"),
+            bg_tertiary: crate::hex_hsla!("#2E323B"),
             bg_elevated: crate::hex_hsla!("#252A31"),
             bg_hover: crate::hex_hsla!("#313842"),
             bg_selected: crate::hex_hsla!("#2F3742"),
@@ -468,9 +496,13 @@ impl Theme {
             text_bright: crate::hex_hsla!("#1A1A1A"),
             text_accent: crate::hex_hsla!("#2383E2"),
             text_danger: crate::hex_hsla!("#EB5757"),
+            text_on_accent: crate::hex_hsla!("#FFFFFF"),
+            text_warning: crate::hex_hsla!("#8A6400"),
+            text_warning_hover: crate::hex_hsla!("#A87900"),
             // Background
             bg_primary: crate::hex_hsla!("#FFF9F0"),
             bg_secondary: crate::hex_hsla!("#F6EEE2"),
+            bg_tertiary: crate::hex_hsla!("#F9F4EC"),
             bg_elevated: crate::hex_hsla!("#F4E8D3"),
             bg_hover: crate::hex_hsla!("#E9E2D7"),
             bg_selected: crate::hex_hsla!("#E2DCD0"),
@@ -518,9 +550,13 @@ impl Theme {
             text_bright: crate::hex_hsla!("#34363E"),
             text_accent: crate::hex_hsla!("#5C78E2"),
             text_danger: crate::hex_hsla!("#D3604F"),
+            text_on_accent: crate::hex_hsla!("#FFFFFF"),
+            text_warning: crate::hex_hsla!("#8A6400"),
+            text_warning_hover: crate::hex_hsla!("#A87900"),
             // Background
             bg_primary: crate::hex_hsla!("#FFFFFF"),
             bg_secondary: crate::hex_hsla!("#F6F6F6"),
+            bg_tertiary: crate::hex_hsla!("#FCFCFC"),
             bg_elevated: crate::hex_hsla!("#F3F3F3"),
             bg_hover: crate::hex_hsla!("#F1F1F1"),
             bg_selected: crate::hex_hsla!("#F1F0F0"),
@@ -568,9 +604,13 @@ impl Theme {
             text_bright: crate::hex_hsla!("#e6e1cf"),
             text_accent: crate::hex_hsla!("#5ac1fe"),
             text_danger: crate::hex_hsla!("#f07178"),
+            text_on_accent: crate::hex_hsla!("#FFFFFF"),
+            text_warning: crate::hex_hsla!("#D6A100"),
+            text_warning_hover: crate::hex_hsla!("#FFD24D"),
             // Background
             bg_primary: crate::hex_hsla!("#1e212b"),
             bg_secondary: crate::hex_hsla!("#242835"),
+            bg_tertiary: crate::hex_hsla!("#292E3D"),
             bg_elevated: crate::hex_hsla!("#252936"),
             bg_hover: crate::hex_hsla!("#323849"),
             bg_selected: crate::hex_hsla!("#2C3141FF"),
@@ -798,7 +838,44 @@ fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditorThemeMode, Theme, apply_editor_theme_mode, with_alpha};
+    use super::{EditorThemeMode, Theme, ThemeColorField, apply_editor_theme_mode, with_alpha};
+
+    #[test]
+    fn interface_semantic_colors_round_trip_for_all_builtin_themes() {
+        let fields = [
+            ThemeColorField::TextOnAccent,
+            ThemeColorField::TextWarning,
+            ThemeColorField::TextWarningHover,
+            ThemeColorField::BgTertiary,
+        ];
+        let themes = [
+            Theme::one_dark(),
+            Theme::one_light(),
+            Theme::milky(),
+            Theme::ayu_dark(),
+        ];
+
+        for mut theme in themes {
+            for field in fields {
+                let original = theme.color(field);
+                theme.set_color(field, theme.text_accent);
+                assert_eq!(theme.color(field), theme.text_accent);
+                theme.set_color(field, original);
+                assert_eq!(theme.color(field), original);
+            }
+        }
+    }
+
+    #[test]
+    fn monochrome_mode_preserves_interface_semantic_colors() {
+        let base = Theme::one_dark();
+        let themed = apply_editor_theme_mode(&base, EditorThemeMode::Monochrome, true);
+
+        assert_eq!(themed.text_on_accent, base.text_on_accent);
+        assert_eq!(themed.text_warning, base.text_warning);
+        assert_eq!(themed.text_warning_hover, base.text_warning_hover);
+        assert_eq!(themed.bg_tertiary, base.bg_tertiary);
+    }
 
     #[test]
     fn monochrome_mode_keeps_code_block_colors() {

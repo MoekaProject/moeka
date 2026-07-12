@@ -1774,7 +1774,20 @@ impl EditorView {
                     .child(label.to_string()),
             )
             .when_some(shortcut, |this, shortcut| {
-                this.child(div().child(render_shortcut(shortcut, shortcut_style)))
+                if shortcut
+                    .chars()
+                    .any(|ch| matches!(ch, '⌘' | '⌥' | '⌃' | '⇧'))
+                {
+                    this.child(div().child(render_shortcut(shortcut, shortcut_style)))
+                } else {
+                    this.child(
+                        div()
+                            .font_family(self.styles.editor.editor_monospace_font_family)
+                            .text_size(px(self.scaled(ms.menu_shortcut_font_size_px)))
+                            .text_color(ms.menu_shortcut_text_color)
+                            .child(shortcut.to_string()),
+                    )
+                }
             })
             .when(
                 !matches!(hover_behavior, FormatMenuHoverBehavior::None),

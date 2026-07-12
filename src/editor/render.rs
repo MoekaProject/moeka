@@ -1336,7 +1336,8 @@ impl Render for EditorView {
                                                         };
                                                         let align_shortcut = self
                                                             .active_tab_is_non_markdown_text()
-                                                            .then_some("⌥Z");
+                                                            .then_some("⌥Z")
+                                                            .or(Some("⌘⌥L"));
                                                         let sidebar_tooltip = if self.workspaces.is_empty() {
                                                             self.t(crate::i18n::TextKey::OpenFolder)
                                                         } else {
@@ -1345,7 +1346,7 @@ impl Render for EditorView {
                                                                 self.sidebar_visible,
                                                             )
                                                         };
-                                                        let sidebar_shortcut = (!self.workspaces.is_empty()).then_some("⌘⌥S");
+                                                        let sidebar_shortcut = Some("⌘⇧S");
                                                         div()
                                                             .absolute()
                                                             .left(px(toolbar_left))
@@ -1439,6 +1440,10 @@ impl Render for EditorView {
                                                             toolbar_top,
                                                             secondary_btn_width,
                                                         );
+                                                        let theme_tooltip = crate::i18n::theme_action_label(
+                                                            self.ui_language,
+                                                            self.theme_kind.is_dark(),
+                                                        );
                                                         div()
                                                             .absolute()
                                                             .right(px(toolbar_right))
@@ -1476,7 +1481,7 @@ impl Render for EditorView {
                                                                     THEME_LIGHT_SVG_PATH
                                                                 },
                                                                 theme_anchor,
-                                                                self.t(crate::i18n::TextKey::ToolbarThemeTooltip),
+                                                                theme_tooltip,
                                                                 None,
                                                                 cx,
                                                                 |this, cx| {

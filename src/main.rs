@@ -245,7 +245,8 @@ fn main() {
             KeyBinding::new("cmd-minus", ZoomOut, Some("MarkdownEditor")),
             KeyBinding::new("cmd--", ZoomOut, Some("MarkdownEditor")),
             KeyBinding::new("cmd-alt-0", ZoomReset, Some("MarkdownEditor")),
-            KeyBinding::new("cmd-alt-s", ToggleSidebar, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-shift-s", ToggleSidebar, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-alt-l", ToggleEditorLeftAlign, Some("MarkdownEditor")),
             KeyBinding::new("cmd-l", SelectLine, Some("MarkdownEditor")),
             KeyBinding::new("cmd-enter", InsertLineBelow, Some("MarkdownEditor")),
             KeyBinding::new("cmd-shift-enter", InsertLineAbove, Some("MarkdownEditor")),
@@ -257,7 +258,6 @@ fn main() {
             KeyBinding::new("alt-up", MoveLineUp, Some("MarkdownEditor")),
             KeyBinding::new("alt-down", MoveLineDown, Some("MarkdownEditor")),
             KeyBinding::new("cmd-s", Save, Some("MarkdownEditor")),
-            KeyBinding::new("cmd-shift-s", SaveAs, Some("MarkdownEditor")),
             KeyBinding::new("cmd-n", NewDocument, Some("MarkdownEditor && !Sidebar")),
             KeyBinding::new("cmd-t", NewTab, Some("MarkdownEditor")),
             KeyBinding::new("cmd-,", OpenSettings, Some("MarkdownEditor")),
@@ -303,6 +303,12 @@ fn main() {
             KeyBinding::new("cmd-alt-c", ToggleSearchCaseSensitive, Some("SearchBar")),
             KeyBinding::new("cmd-alt-w", ToggleSearchWholeWord, Some("SearchBar")),
             KeyBinding::new("cmd-alt-r", ToggleSearchRegex, Some("SearchBar")),
+        ]);
+
+        cx.bind_keys([
+            KeyBinding::new("cmd-ctrl-i", ToggleChatPanel, Some("ChatTerminal")),
+            KeyBinding::new("cmd-n", NewChatTab, Some("ChatTerminal")),
+            KeyBinding::new("cmd-w", CloseActiveChatTab, Some("ChatTerminal")),
         ]);
 
         cx.bind_keys([

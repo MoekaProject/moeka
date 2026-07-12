@@ -84,6 +84,7 @@ impl EditorView {
         self.styles.editor.editor_monospace_font_family =
             Box::leak(self.app_settings.code_font.clone().into_boxed_str());
         self.clear_all_tab_layout_caches();
+        self.invalidate_generated_block_preview_render_caches();
         self.rerender_generated_block_previews();
         self.sync_overlay_text_input_styles(cx);
 
@@ -1062,6 +1063,9 @@ fn format_theme_debugger_export(theme: &crate::theme::Theme) -> String {
             ThemeColorField::TextBright,
             ThemeColorField::TextAccent,
             ThemeColorField::TextDanger,
+            ThemeColorField::TextOnAccent,
+            ThemeColorField::TextWarning,
+            ThemeColorField::TextWarningHover,
         ],
         theme,
     );
@@ -1071,6 +1075,7 @@ fn format_theme_debugger_export(theme: &crate::theme::Theme) -> String {
         &[
             ThemeColorField::BgPrimary,
             ThemeColorField::BgSecondary,
+            ThemeColorField::BgTertiary,
             ThemeColorField::BgElevated,
             ThemeColorField::BgHover,
             ThemeColorField::BgSelected,
@@ -1336,4 +1341,26 @@ fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
         return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
     }
     p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_theme_debugger_export;
+
+    #[test]
+    fn export_includes_interface_semantic_colors() {
+        let export = format_theme_debugger_export(&crate::theme::Theme::one_dark());
+
+        for field in [
+            "text_on_accent:",
+            "text_warning:",
+            "text_warning_hover:",
+            "bg_tertiary:",
+        ] {
+            assert!(
+                export.contains(field),
+                "missing exported theme field: {field}"
+            );
+        }
+    }
 }

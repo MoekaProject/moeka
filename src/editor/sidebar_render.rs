@@ -920,11 +920,15 @@ impl EditorView {
                     let label = drag_label;
                     let count = drag_count;
                     let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
+                    let ghost_background_color = self.styles.tooltip.tooltip_bg;
+                    let ghost_text_color = self.styles.tooltip.tooltip_title_text_color;
                     move |_dragged, offset, _window, cx| {
                         cx.new(|_cx| DraggedSidebarItemsView {
                             label: label.clone(),
                             count,
                             font_size_px: ghost_font_size_px,
+                            background_color: ghost_background_color,
+                            text_color: ghost_text_color,
                             cursor_offset: offset,
                         })
                     }

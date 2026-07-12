@@ -1723,16 +1723,24 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toggle_sidebar_visibility(cx);
+        if self.workspaces.is_empty() {
+            self.pick_workspace_folder(cx);
+        } else {
+            self.toggle_sidebar_visibility(cx);
+        }
     }
 
     pub(crate) fn on_toggle_chat_panel(
         &mut self,
         _: &ToggleChatPanel,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let was_visible = self.chat_panel_visible;
         self.toggle_chat_panel(cx);
+        if was_visible {
+            window.focus(&self.focus_handle(cx));
+        }
     }
 
     pub(crate) fn on_open_settings(

@@ -74,6 +74,8 @@ actions!(
         ZoomReset,
         ToggleSidebar,
         ToggleChatPanel,
+        NewChatTab,
+        CloseActiveChatTab,
         ToggleTheme,
         ToggleEditorLeftAlign,
         SelectLine,
