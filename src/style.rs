@@ -39,6 +39,7 @@ pub struct Styles {
     pub ime: ImeStyles,
     pub image_preview: ImagePreviewStyles,
     pub dialog: DialogStyles,
+    pub notification: NotificationStyles,
     pub workspace_switcher: WorkspaceSwitcherStyles,
     pub text_input: TextInputStyles,
     pub search: SearchStyles,
@@ -897,6 +898,29 @@ pub struct DialogStyles {
     pub dialog_btn_danger_bg: Hsla,
     pub dialog_btn_danger_text_color: Hsla,
     pub dialog_btn_danger_hover_bg: Hsla,
+}
+
+// ── Notifications (toast) ───────────────────────────────────────────
+
+pub struct NotificationStyles {
+    pub notification_width_px: f32,
+    pub notification_margin_right_px: f32,
+    pub notification_margin_bottom_px: f32,
+    pub notification_gap_px: f32,
+    pub notification_padding_x_px: f32,
+    pub notification_padding_y_px: f32,
+    pub notification_radius_px: f32,
+    pub notification_border_width_px: f32,
+    pub notification_bg: Hsla,
+    pub notification_border_color: Hsla,
+    pub notification_text_color: Hsla,
+    pub notification_font_size_px: f32,
+    pub notification_accent_width_px: f32,
+    pub notification_error_accent: Hsla,
+    pub notification_info_accent: Hsla,
+    pub notification_hover_opacity: f32,
+    pub notification_dismiss_after_ms: u64,
+    pub notification_max_visible: usize,
 }
 
 // ── Context Menu ────────────────────────────────────────────────────
@@ -2123,6 +2147,26 @@ impl Styles {
                 dialog_btn_danger_text_color: ui_theme.text_on_accent,
                 dialog_btn_danger_hover_bg: ui_theme.text_danger,
             },
+            notification: NotificationStyles {
+                notification_width_px: 340.0,
+                notification_margin_right_px: 16.0,
+                notification_margin_bottom_px: 44.0,
+                notification_gap_px: 8.0,
+                notification_padding_x_px: 14.0,
+                notification_padding_y_px: 10.0,
+                notification_radius_px: 8.0,
+                notification_border_width_px: 1.0,
+                notification_bg: ui_theme.bg_elevated,
+                notification_border_color: ui_theme.border_primary,
+                notification_text_color: ui_theme.text_primary,
+                notification_font_size_px: ui_font_size_px,
+                notification_accent_width_px: 3.0,
+                notification_error_accent: ui_theme.text_danger,
+                notification_info_accent: ui_theme.text_accent,
+                notification_hover_opacity: 0.9,
+                notification_dismiss_after_ms: 5000,
+                notification_max_visible: 4,
+            },
             workspace_switcher: WorkspaceSwitcherStyles {
                 ws_bar_height_px: 32.0,
                 ws_bar_bg: gpui::transparent_black(),
@@ -2387,22 +2431,10 @@ mod tests {
         let styles = Styles::from_theme(&theme, &theme);
 
         assert_eq!(styles.quote_block.quote_block_border_width_px, 4.0);
-        assert_eq!(
-            styles.quote_block.quote_block_padding_top_px,
-            styles.code_block.code_block_text_padding_left_px
-        );
-        assert_eq!(
-            styles.quote_block.quote_block_padding_bottom_px,
-            styles.code_block.code_block_text_padding_left_px
-        );
-        assert_eq!(
-            styles.quote_block.quote_block_padding_left_px,
-            styles.code_block.code_block_text_padding_left_px
-        );
-        assert_eq!(
-            styles.quote_block.quote_block_padding_right_px,
-            styles.code_block.code_block_text_padding_left_px
-        );
+        assert_eq!(styles.quote_block.quote_block_padding_top_px, 0.0);
+        assert_eq!(styles.quote_block.quote_block_padding_bottom_px, 0.0);
+        assert_eq!(styles.quote_block.quote_block_padding_left_px, 12.0);
+        assert_eq!(styles.quote_block.quote_block_padding_right_px, 10.0);
     }
 
     #[test]

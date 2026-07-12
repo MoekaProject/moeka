@@ -33,6 +33,7 @@ Moeka هو تطبيق **لتحرير Markdown** أنيق وسلس ويعمل م�
 | -------------------------- | --------------- |
 | `Command + B`              | عريض            |
 | `Command + I`              | مائل            |
+| `Command + U`              | تسطير |
 | `Command + Shift + X`      | يتوسطه خط       |
 | `Command + E`              | كود داخل السطر  |
 | `Command + Option + C`     | كتلة كود        |
@@ -41,6 +42,8 @@ Moeka هو تطبيق **لتحرير Markdown** أنيق وسلس ويعمل م�
 | `Command + Option + O`     | قائمة مرتبة     |
 | `Command + Option + Enter` | مهمة            |
 | `Command + K`              | رابط            |
+| `Command + Option + T`     | جدول |
+| `Command + 0`              | فقرة |
 | `/ image`                  | صورة            |
 
 | --------------------- | --------  |

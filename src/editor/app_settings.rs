@@ -63,6 +63,10 @@ pub(crate) struct AppSettings {
     pub attachment_path_style: String,
     #[serde(default = "default_automatically_update_links")]
     pub automatically_update_links: bool,
+    /// User keybinding overrides: command id (see `CommandId::config_key`) to
+    /// gpui keystroke string, e.g. `save: cmd-shift-s`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub keybindings: std::collections::BTreeMap<String, String>,
 }
 
 fn default_theme() -> String {
@@ -204,6 +208,7 @@ impl Default for AppSettings {
             attachment_link_syntax: default_attachment_link_syntax(),
             attachment_path_style: default_attachment_path_style(),
             automatically_update_links: default_automatically_update_links(),
+            keybindings: std::collections::BTreeMap::new(),
         }
     }
 }

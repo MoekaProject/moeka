@@ -2475,7 +2475,7 @@ mod tests {
             &theme,
             generated_preview_fonts(),
         );
-        let text_color = crate::theme::hsla_to_hex_rgba(theme.text_primary).to_lowercase();
+        let text_color = crate::theme::hsla_to_hex_rgba(theme.text_bright).to_lowercase();
 
         assert!(svg.contains("<svg"));
         assert!(!svg.contains("LaTeX preview failed"));

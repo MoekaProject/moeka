@@ -2208,21 +2208,27 @@ impl EditorView {
         }
         let text = self.normalize_text_for_save();
         if let Some(ref path) = self.tabs[index].path.clone() {
-            if file_ops::atomic_write(path, text.as_bytes()).is_ok() {
-                self.tabs[index].is_dirty = false;
-                let tab_id = self.tabs[index].id.clone();
-                self.clear_temp_file_for_tab(&tab_id);
-                self.tabs[index].snapshot = self.current_snapshot();
-                let snapshot = self.tabs[index].snapshot.clone();
-                let source_path = self.tabs[index].path.clone();
-                let _ = history_store::persist_tab_history(
-                    &tab_id,
-                    source_path.as_deref(),
-                    &mut self.tabs[index].history,
-                    &snapshot,
-                );
-                session_store::persist_session(self);
-                cx.notify();
+            match file_ops::atomic_write(path, text.as_bytes()) {
+                Ok(()) => {
+                    self.tabs[index].is_dirty = false;
+                    let tab_id = self.tabs[index].id.clone();
+                    self.clear_temp_file_for_tab(&tab_id);
+                    self.tabs[index].snapshot = self.current_snapshot();
+                    let snapshot = self.tabs[index].snapshot.clone();
+                    let source_path = self.tabs[index].path.clone();
+                    let _ = history_store::persist_tab_history(
+                        &tab_id,
+                        source_path.as_deref(),
+                        &mut self.tabs[index].history,
+                        &snapshot,
+                    );
+                    session_store::persist_session(self);
+                    cx.notify();
+                }
+                Err(error) => {
+                    let message = format!("{}: {error}", self.t(crate::i18n::TextKey::SaveFailed));
+                    self.notify_error(message, cx);
+                }
             }
         } else {
             // No file path — open native save dialog in background
@@ -2233,32 +2239,40 @@ impl EditorView {
                     .background_executor()
                     .spawn(async move { helpers::save_file_blocking(&default_name, &title) })
                     .await;
-                if let Some(path) = maybe_path
-                    && file_ops::atomic_write(&path, text.as_bytes()).is_ok()
-                {
+                let Some(path) = maybe_path else {
+                    return;
+                };
+                if let Err(error) = file_ops::atomic_write(&path, text.as_bytes()) {
                     this.update(cx, |editor, cx| {
-                        if let Some(idx) = editor.active_tab_index() {
-                            let tab_id = editor.tabs[idx].id.clone();
-                            editor.tabs[idx].path = Some(path.clone());
-                            editor.tabs[idx].title = EditorView::title_for_path(&path);
-                            editor.tabs[idx].is_dirty = false;
-                            editor.tabs[idx].snapshot = editor.current_snapshot();
-                            let snapshot = editor.tabs[idx].snapshot.clone();
-                            let source_path = editor.tabs[idx].path.clone();
-                            editor.clear_temp_file_for_tab(&tab_id);
-                            let _ = history_store::persist_tab_history(
-                                &tab_id,
-                                source_path.as_deref(),
-                                &mut editor.tabs[idx].history,
-                                &snapshot,
-                            );
-                            editor.current_file_path = Some(path);
-                            session_store::persist_session(editor);
-                            cx.notify();
-                        }
+                        let message =
+                            format!("{}: {error}", editor.t(crate::i18n::TextKey::SaveFailed));
+                        editor.notify_error(message, cx);
                     })
                     .ok();
+                    return;
                 }
+                this.update(cx, |editor, cx| {
+                    if let Some(idx) = editor.active_tab_index() {
+                        let tab_id = editor.tabs[idx].id.clone();
+                        editor.tabs[idx].path = Some(path.clone());
+                        editor.tabs[idx].title = EditorView::title_for_path(&path);
+                        editor.tabs[idx].is_dirty = false;
+                        editor.tabs[idx].snapshot = editor.current_snapshot();
+                        let snapshot = editor.tabs[idx].snapshot.clone();
+                        let source_path = editor.tabs[idx].path.clone();
+                        editor.clear_temp_file_for_tab(&tab_id);
+                        let _ = history_store::persist_tab_history(
+                            &tab_id,
+                            source_path.as_deref(),
+                            &mut editor.tabs[idx].history,
+                            &snapshot,
+                        );
+                        editor.current_file_path = Some(path);
+                        session_store::persist_session(editor);
+                        cx.notify();
+                    }
+                })
+                .ok();
             })
             .detach();
         }
@@ -2311,7 +2325,13 @@ impl EditorView {
                 return;
             };
             let contents_for_kind = contents.clone();
-            if std::fs::write(&path, contents).is_err() {
+            if let Err(error) = std::fs::write(&path, contents) {
+                this.update(cx, |editor, cx| {
+                    let message =
+                        format!("{}: {error}", editor.t(crate::i18n::TextKey::SaveFailed));
+                    editor.notify_error(message, cx);
+                })
+                .ok();
                 return;
             }
 
@@ -2364,10 +2384,16 @@ impl EditorView {
             return;
         };
         if let Some(path) = self.tabs[index].path.clone() {
-            if file_ops::atomic_write(&path, json.as_bytes()).is_ok() {
-                self.tabs[index].is_dirty = false;
-                session_store::persist_session(self);
-                cx.notify();
+            match file_ops::atomic_write(&path, json.as_bytes()) {
+                Ok(()) => {
+                    self.tabs[index].is_dirty = false;
+                    session_store::persist_session(self);
+                    cx.notify();
+                }
+                Err(error) => {
+                    let message = format!("{}: {error}", self.t(crate::i18n::TextKey::SaveFailed));
+                    self.notify_error(message, cx);
+                }
             }
         } else {
             let default_name = format!("{}.{}", self.tabs[index].title, WHITEBOARD_EXTENSION);
@@ -2377,21 +2403,29 @@ impl EditorView {
                     .background_executor()
                     .spawn(async move { helpers::save_file_blocking(&default_name, &title) })
                     .await;
-                if let Some(path) = maybe_path
-                    && file_ops::atomic_write(&path, json.as_bytes()).is_ok()
-                {
+                let Some(path) = maybe_path else {
+                    return;
+                };
+                if let Err(error) = file_ops::atomic_write(&path, json.as_bytes()) {
                     this.update(cx, |editor, cx| {
-                        if let Some(idx) = editor.active_tab_index() {
-                            editor.tabs[idx].path = Some(path.clone());
-                            editor.tabs[idx].title = EditorView::title_for_path(&path);
-                            editor.tabs[idx].is_dirty = false;
-                            editor.current_file_path = Some(path);
-                            session_store::persist_session(editor);
-                            cx.notify();
-                        }
+                        let message =
+                            format!("{}: {error}", editor.t(crate::i18n::TextKey::SaveFailed));
+                        editor.notify_error(message, cx);
                     })
                     .ok();
+                    return;
                 }
+                this.update(cx, |editor, cx| {
+                    if let Some(idx) = editor.active_tab_index() {
+                        editor.tabs[idx].path = Some(path.clone());
+                        editor.tabs[idx].title = EditorView::title_for_path(&path);
+                        editor.tabs[idx].is_dirty = false;
+                        editor.current_file_path = Some(path);
+                        session_store::persist_session(editor);
+                        cx.notify();
+                    }
+                })
+                .ok();
             })
             .detach();
         }

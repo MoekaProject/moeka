@@ -175,6 +175,18 @@ impl EditorView {
         let rows = specs.into_iter().enumerate().map(|(index, spec)| {
             let selected = index == self.command_palette_selected_index;
             let command = spec.id;
+            let shortcuts: Vec<String> =
+                match self.app_settings.keybindings.get(spec.id.config_key()) {
+                    Some(keystroke) => {
+                        vec![super::shortcut::display_shortcut_from_keystroke(keystroke)]
+                    }
+                    None => spec
+                        .shortcut
+                        .into_iter()
+                        .chain(spec.alternate_shortcuts.iter().copied())
+                        .map(str::to_string)
+                        .collect(),
+                };
             div()
                 .id(("command-palette", index))
                 .w_full()
@@ -216,22 +228,17 @@ impl EditorView {
                         .flex_none()
                         .items_center()
                         .gap(px(self.scaled(4.0)))
-                        .children(
-                            spec.shortcut
-                                .into_iter()
-                                .chain(spec.alternate_shortcuts.iter().copied())
-                                .map(|shortcut| {
-                                    div()
-                                        .h(px(self.scaled(22.0)))
-                                        .px(px(self.scaled(6.0)))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(self.scaled(5.0)))
-                                        .bg(shortcut_bg)
-                                        .child(render_shortcut(shortcut, shortcut_style))
-                                }),
-                        ),
+                        .children(shortcuts.into_iter().map(|shortcut| {
+                            div()
+                                .h(px(self.scaled(22.0)))
+                                .px(px(self.scaled(6.0)))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(self.scaled(5.0)))
+                                .bg(shortcut_bg)
+                                .child(render_shortcut(&shortcut, shortcut_style))
+                        })),
                 )
                 .on_mouse_down(
                     MouseButton::Left,

@@ -33,6 +33,7 @@ Moeka टेक्स्ट प्रारूप के रूप में `Ma
 | -------------------------- | ---------- |
 | `Command + B`              | बोल्ड        |
 | `Command + I`              | इटैलिक       |
+| `Command + U`              | रेखांकित |
 | `Command + Shift + X`      | स्ट्राइकथ्रू    |
 | `Command + E`              | इनलाइन कोड   |
 | `Command + Option + C`     | कोड ब्लॉक     |
@@ -41,6 +42,8 @@ Moeka टेक्स्ट प्रारूप के रूप में `Ma
 | `Command + Option + O`     | व्यवस्थित सूची  |
 | `Command + Option + Enter` | कार्य        |
 | `Command + K`              | लिंक         |
+| `Command + Option + T`     | तालिका |
+| `Command + 0`              | अनुच्छेद |
 | `/ image`                  | चित्र        |
 
 | --------------------- | -------- |

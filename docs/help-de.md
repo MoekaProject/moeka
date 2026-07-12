@@ -33,6 +33,7 @@ Moeka verwendet `Markdown` als Textformat. Markdown eignet sich gut für Autorin
 | -------------------------- | ----------------- |
 | `Command + B`              | Fett              |
 | `Command + I`              | Kursiv            |
+| `Command + U`              | Unterstreichen |
 | `Command + Shift + X`      | Durchgestrichen   |
 | `Command + E`              | Inline-Code       |
 | `Command + Option + C`     | Codeblock         |
@@ -41,6 +42,8 @@ Moeka verwendet `Markdown` als Textformat. Markdown eignet sich gut für Autorin
 | `Command + Option + O`     | Geordnete Liste   |
 | `Command + Option + Enter` | Aufgabe           |
 | `Command + K`              | Link              |
+| `Command + Option + T`     | Tabelle |
+| `Command + 0`              | Absatz |
 | `/ image`                  | Bild              |
 
 | --------------------- | --------  |

@@ -33,6 +33,7 @@ Moeka usa `Markdown` como formato de texto. Markdown es ideal para escribir porq
 | -------------------------- | ---------------- |
 | `Command + B`              | Negrita          |
 | `Command + I`              | Cursiva          |
+| `Command + U`              | Subrayar |
 | `Command + Shift + X`      | Tachado          |
 | `Command + E`              | Código en línea  |
 | `Command + Option + C`     | Bloque de código |
@@ -41,6 +42,8 @@ Moeka usa `Markdown` como formato de texto. Markdown es ideal para escribir porq
 | `Command + Option + O`     | Lista ordenada   |
 | `Command + Option + Enter` | Tarea            |
 | `Command + K`              | Enlace           |
+| `Command + Option + T`     | Tabla |
+| `Command + 0`              | Párrafo |
 | `/ image`                  | Imagen           |
 
 | --------------------- | --------    |

@@ -24,8 +24,21 @@ ICON_SCRIPT := scripts/generate_app_icon.sh
 DMG_BACKGROUND := install-bg.jpg
 DMG_SCRIPT := scripts/create_dmg.sh
 VOLUME_NAME := $(APP_DISPLAY_NAME)
+TAG ?= $(firstword $(filter v%,$(MAKECMDGOALS)))
 
-.PHONY: dmg app build-release clean-dmg clean-app
+.PHONY: dmg app build-release clean-dmg clean-app tag
+
+tag:
+	@if [[ ! "$(TAG)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
+		echo "Usage: make tag vX.Y.Z"; \
+		exit 1; \
+	fi
+	@git tag --delete "$(TAG)" >/dev/null 2>&1 || true
+	@git tag "$(TAG)"
+	@git push -f origin "$(TAG)"
+
+v%:
+	@:
 
 dmg: $(DMG_PATH)
 

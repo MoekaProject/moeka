@@ -76,7 +76,13 @@ impl EditorView {
         for path in paths {
             match Self::move_path_to_trash(path) {
                 Ok(()) => deleted_any = true,
-                Err(error) => eprintln!("Delete failed for {:?}: {error}", path),
+                Err(error) => {
+                    let message = format!(
+                        "{}: {error}",
+                        self.t(crate::i18n::TextKey::FileOperationFailed)
+                    );
+                    self.notify_error(message, cx);
+                }
             }
         }
 
@@ -277,7 +283,11 @@ impl EditorView {
                     let new_path = path.with_file_name(trimmed);
                     let rewrite_context = self.capture_workspace_rewrite_context();
                     if let Err(error) = std::fs::rename(path, &new_path) {
-                        eprintln!("Rename failed: {error}");
+                        let message = format!(
+                            "{}: {error}",
+                            self.t(crate::i18n::TextKey::FileOperationFailed)
+                        );
+                        self.notify_error(message, cx);
                     } else {
                         let starred_changed =
                             self.app_settings.rename_starred_prefix(path, &new_path);
@@ -328,7 +338,11 @@ impl EditorView {
                     };
                     let new_path = parent.join(file_name);
                     if let Err(error) = std::fs::File::create(&new_path) {
-                        eprintln!("Create file failed: {error}");
+                        let message = format!(
+                            "{}: {error}",
+                            self.t(crate::i18n::TextKey::FileOperationFailed)
+                        );
+                        self.notify_error(message, cx);
                     } else {
                         self.schedule_sidebar_directory_refresh(parent.clone(), cx);
                         self.quick_open_index_root = None;
@@ -350,7 +364,11 @@ impl EditorView {
                 if !trimmed.is_empty() {
                     let new_path = parent.join(trimmed);
                     if let Err(error) = std::fs::create_dir(&new_path) {
-                        eprintln!("Create folder failed: {error}");
+                        let message = format!(
+                            "{}: {error}",
+                            self.t(crate::i18n::TextKey::FileOperationFailed)
+                        );
+                        self.notify_error(message, cx);
                     } else {
                         self.expanded_dirs.insert(new_path.clone());
                         self.invalidate_sidebar_items_cache();
@@ -445,7 +463,11 @@ impl EditorView {
             };
             if clipboard.is_cut {
                 if let Err(error) = std::fs::rename(&src, &dst) {
-                    eprintln!("Move {:?} -> {:?} failed: {error}", src, dst);
+                    let message = format!(
+                        "{}: {error}",
+                        self.t(crate::i18n::TextKey::FileOperationFailed)
+                    );
+                    self.notify_error(message, cx);
                 } else {
                     pasted_paths.push(dst.clone());
                     starred_changed |= self.app_settings.rename_starred_prefix(&src, &dst);
@@ -505,7 +527,11 @@ impl EditorView {
                     }
                 }
             } else if let Err(error) = Self::copy_path_recursively(&src, &dst) {
-                eprintln!("Copy {:?} -> {:?} failed: {error}", src, dst);
+                let message = format!(
+                    "{}: {error}",
+                    self.t(crate::i18n::TextKey::FileOperationFailed)
+                );
+                self.notify_error(message, cx);
             } else {
                 pasted_paths.push(dst);
             }

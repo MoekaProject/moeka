@@ -33,6 +33,7 @@ description: 介绍小语文稿的使用
 | -------------------------- | -------- |
 | `Command + B`              | 加粗     |
 | `Command + I`              | 斜体     |
+| `Command + U`              | 下划线 |
 | `Command + Shift + X`      | 删除线   |
 | `Command + E`              | 行内代码 |
 | `Command + Option + C`     | 代码块   |
@@ -41,6 +42,8 @@ description: 介绍小语文稿的使用
 | `Command + Option + O`     | 有序列表 |
 | `Command + Option + Enter` | 待办事项 |
 | `Command + K`              | 链接     |
+| `Command + Option + T`     | 表格 |
+| `Command + 0`              | 正文 |
 | `/ image`                  | 图片     |
 
 | --------------------- | -------- |

@@ -198,6 +198,7 @@ mod tests {
             automatically_update_links: true,
             date_time_format: "%Y-%m-%d %H:%M".to_string(),
             starred_files: Vec::new(),
+            keybindings: std::collections::BTreeMap::new(),
         }
     }
 

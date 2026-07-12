@@ -2617,7 +2617,7 @@ impl EditorView {
         let text = self.buffer.text().to_string();
         let ui_language = self.ui_language;
 
-        cx.spawn(async move |_this, cx| {
+        cx.spawn(async move |this, cx| {
             let maybe_path = cx
                 .background_executor()
                 .spawn(async move {
@@ -2625,10 +2625,30 @@ impl EditorView {
                     export_dialog_path(&default_name, &title)
                 })
                 .await;
-            if let Some(path) = maybe_path
-                && let Err(error) = fs::write(&path, text)
-            {
-                eprintln!("failed to export markdown to {:?}: {error}", path);
+            if let Some(path) = maybe_path {
+                match fs::write(&path, text) {
+                    Ok(()) => {
+                        this.update(cx, |editor, cx| {
+                            let message = format!(
+                                "{}: {}",
+                                editor.t(crate::i18n::TextKey::ExportCompleted),
+                                path.display()
+                            );
+                            editor.notify_info(message, cx);
+                        })
+                        .ok();
+                    }
+                    Err(error) => {
+                        this.update(cx, |editor, cx| {
+                            let message = format!(
+                                "{}: {error}",
+                                editor.t(crate::i18n::TextKey::ExportFailed)
+                            );
+                            editor.notify_error(message, cx);
+                        })
+                        .ok();
+                    }
+                }
             }
         })
         .detach();
@@ -2650,7 +2670,7 @@ impl EditorView {
         );
         let ui_language = self.ui_language;
 
-        cx.spawn(async move |_this, cx| {
+        cx.spawn(async move |this, cx| {
             let maybe_path = cx
                 .background_executor()
                 .spawn(async move {
@@ -2658,10 +2678,30 @@ impl EditorView {
                     export_dialog_path(&default_name, &title)
                 })
                 .await;
-            if let Some(path) = maybe_path
-                && let Err(error) = fs::write(&path, document)
-            {
-                eprintln!("failed to export html to {:?}: {error}", path);
+            if let Some(path) = maybe_path {
+                match fs::write(&path, document) {
+                    Ok(()) => {
+                        this.update(cx, |editor, cx| {
+                            let message = format!(
+                                "{}: {}",
+                                editor.t(crate::i18n::TextKey::ExportCompleted),
+                                path.display()
+                            );
+                            editor.notify_info(message, cx);
+                        })
+                        .ok();
+                    }
+                    Err(error) => {
+                        this.update(cx, |editor, cx| {
+                            let message = format!(
+                                "{}: {error}",
+                                editor.t(crate::i18n::TextKey::ExportFailed)
+                            );
+                            editor.notify_error(message, cx);
+                        })
+                        .ok();
+                    }
+                }
             }
         })
         .detach();
@@ -2680,7 +2720,7 @@ impl EditorView {
         let source_file_path = self.current_file_path.clone();
         let ui_language = self.ui_language;
 
-        cx.spawn(async move |_this, cx| {
+        cx.spawn(async move |this, cx| {
             let maybe_path = cx
                 .background_executor()
                 .spawn(async move {
@@ -2706,14 +2746,29 @@ impl EditorView {
                     })
                     .await;
 
-            match export_result {
-                Ok(bytes) => {
-                    if let Err(error) = fs::write(&path, bytes) {
-                        eprintln!("failed to export pdf to {:?}: {error}", path);
-                    }
+            let export_error = match export_result {
+                Ok(bytes) => fs::write(&path, bytes).err().map(|error| error.to_string()),
+                Err(error) => Some(error.to_string()),
+            };
+            match export_error {
+                Some(error) => {
+                    this.update(cx, |editor, cx| {
+                        let message =
+                            format!("{}: {error}", editor.t(crate::i18n::TextKey::ExportFailed));
+                        editor.notify_error(message, cx);
+                    })
+                    .ok();
                 }
-                Err(error) => {
-                    eprintln!("failed to render pdf document: {error}");
+                None => {
+                    this.update(cx, |editor, cx| {
+                        let message = format!(
+                            "{}: {}",
+                            editor.t(crate::i18n::TextKey::ExportCompleted),
+                            path.display()
+                        );
+                        editor.notify_info(message, cx);
+                    })
+                    .ok();
                 }
             }
         })
@@ -3888,7 +3943,13 @@ mod tests {
             None,
         );
 
-        let removed_preview = rows[0]
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(rows[0].kind, GitDiffRowKind::Context));
+        assert!(matches!(rows[1].kind, GitDiffRowKind::Removed));
+        assert!(matches!(rows[2].kind, GitDiffRowKind::Added));
+        assert!(matches!(rows[3].kind, GitDiffRowKind::Context));
+
+        let removed_preview = rows[1]
             .decoration
             .block_preview
             .as_ref()
@@ -3899,25 +3960,13 @@ mod tests {
             .as_ref()
             .expect("added math preview");
 
-        assert!(matches!(rows[0].kind, GitDiffRowKind::Removed));
         assert!(removed_preview.is_anchor);
-        assert_eq!(removed_preview.start_line, 0);
+        assert_eq!(removed_preview.start_line, 1);
         assert_eq!(removed_preview.end_line, 1);
 
-        assert!(matches!(rows[1].kind, GitDiffRowKind::Removed));
-        assert!(
-            !rows[1]
-                .decoration
-                .block_preview
-                .as_ref()
-                .expect("removed math continuation")
-                .is_anchor
-        );
-
-        assert!(matches!(rows[2].kind, GitDiffRowKind::Added));
         assert!(added_preview.is_anchor);
         assert_eq!(added_preview.start_line, 2);
-        assert_eq!(added_preview.end_line, 3);
+        assert_eq!(added_preview.end_line, 2);
     }
 
     #[test]
@@ -3930,7 +3979,16 @@ mod tests {
             None,
         );
 
-        let removed_preview = rows[0]
+        assert_eq!(rows.len(), 5);
+        assert!(matches!(rows[2].kind, GitDiffRowKind::Removed));
+        assert!(matches!(rows[3].kind, GitDiffRowKind::Added));
+
+        let context_preview = rows[0]
+            .decoration
+            .block_preview
+            .as_ref()
+            .expect("context mermaid preview");
+        let removed_preview = rows[2]
             .decoration
             .block_preview
             .as_ref()
@@ -3941,12 +3999,24 @@ mod tests {
             .as_ref()
             .expect("added mermaid preview");
 
+        assert!(context_preview.is_anchor);
+        assert_eq!(context_preview.start_line, 0);
+        assert_eq!(context_preview.end_line, 1);
+        assert!(
+            !rows[1]
+                .decoration
+                .block_preview
+                .as_ref()
+                .expect("context mermaid continuation")
+                .is_anchor
+        );
+
         assert!(removed_preview.is_anchor);
-        assert_eq!(removed_preview.start_line, 0);
+        assert_eq!(removed_preview.start_line, 2);
         assert_eq!(removed_preview.end_line, 2);
 
         assert!(added_preview.is_anchor);
         assert_eq!(added_preview.start_line, 3);
-        assert_eq!(added_preview.end_line, 5);
+        assert_eq!(added_preview.end_line, 3);
     }
 }

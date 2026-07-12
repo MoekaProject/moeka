@@ -12,10 +12,174 @@ pub(crate) const MAX_HISTORY_ENTRIES: usize = 10_000;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TabHistory {
-    pub undo_stack: Vec<EditorSnapshot>,
-    pub redo_stack: Vec<EditorSnapshot>,
+    pub undo_stack: Vec<HistoryEntry>,
+    pub redo_stack: Vec<HistoryEntry>,
     pub journal_path: Option<PathBuf>,
     pub source_identity: Option<String>,
+}
+
+/// In-memory history entry. Only the top of each stack keeps a full snapshot;
+/// entries below it store a delta relative to the state of the entry directly
+/// above them (which is the live editor state by the time they are popped).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum HistoryEntry {
+    Full(EditorSnapshot),
+    Delta {
+        start: usize,
+        /// Text present in this entry's state (restored on pop).
+        deleted_text: String,
+        /// Text present in the successor state (removed on pop).
+        inserted_text: String,
+        view: SnapshotViewState,
+    },
+}
+
+fn snapshot_from_view(text: String, view: &SnapshotViewState) -> EditorSnapshot {
+    EditorSnapshot {
+        text,
+        cursor_offset: view.cursor_offset,
+        cursor_anchor: view.cursor_anchor,
+        scroll_offset: view.scroll_offset,
+        extra_cursors: view.extra_cursors.clone(),
+    }
+}
+
+/// Push a full snapshot, converting the previous full top into a delta
+/// relative to the new snapshot's text.
+fn push_entry(stack: &mut Vec<HistoryEntry>, snapshot: EditorSnapshot) {
+    if let Some(HistoryEntry::Full(previous)) = stack.last() {
+        let (start, deleted_text, inserted_text) = compute_text_diff(previous, &snapshot);
+        let view = SnapshotViewState::from(previous);
+        let entry = HistoryEntry::Delta {
+            start,
+            deleted_text,
+            inserted_text,
+            view,
+        };
+        let last_index = stack.len() - 1;
+        stack[last_index] = entry;
+    }
+    stack.push(HistoryEntry::Full(snapshot));
+}
+
+/// Pop the top entry, reconstructing its snapshot. Delta entries are applied
+/// to `live`, which must be the state the delta was encoded against.
+fn pop_entry(stack: &mut Vec<HistoryEntry>, live: &EditorSnapshot) -> Option<EditorSnapshot> {
+    match stack.last()? {
+        HistoryEntry::Full(_) => {
+            let Some(HistoryEntry::Full(snapshot)) = stack.pop() else {
+                unreachable!()
+            };
+            Some(snapshot)
+        }
+        HistoryEntry::Delta {
+            start,
+            deleted_text,
+            inserted_text,
+            view,
+        } => {
+            let end = start + inserted_text.len();
+            if end > live.text.len()
+                || !live.text.is_char_boundary(*start)
+                || live.text.get(*start..end) != Some(inserted_text.as_str())
+            {
+                debug_assert!(false, "history delta out of sync with live buffer");
+                return None;
+            }
+            let mut text = live.text.clone();
+            text.replace_range(*start..end, deleted_text);
+            let snapshot = snapshot_from_view(text, view);
+            stack.pop();
+            Some(snapshot)
+        }
+    }
+}
+
+/// Decode a delta stack back into full snapshots (bottom..top order).
+fn decode_stack(entries: &[HistoryEntry]) -> io::Result<Vec<EditorSnapshot>> {
+    let mut snapshots: Vec<EditorSnapshot> = Vec::with_capacity(entries.len());
+    let mut successor: Option<EditorSnapshot> = None;
+    for entry in entries.iter().rev() {
+        let snapshot = match entry {
+            HistoryEntry::Full(snapshot) => snapshot.clone(),
+            HistoryEntry::Delta {
+                start,
+                deleted_text,
+                inserted_text,
+                view,
+            } => {
+                let base = successor.as_ref().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "delta entry without successor")
+                })?;
+                let end = start + inserted_text.len();
+                if end > base.text.len()
+                    || !base.text.is_char_boundary(*start)
+                    || base.text.get(*start..end) != Some(inserted_text.as_str())
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid history delta",
+                    ));
+                }
+                let mut text = base.text.clone();
+                text.replace_range(*start..end, deleted_text);
+                snapshot_from_view(text, view)
+            }
+        };
+        successor = Some(snapshot.clone());
+        snapshots.push(snapshot);
+    }
+    snapshots.reverse();
+    Ok(snapshots)
+}
+
+/// Encode full snapshots (bottom..top order) into a delta stack.
+fn encode_stack(snapshots: &[EditorSnapshot]) -> Vec<HistoryEntry> {
+    let mut stack = Vec::with_capacity(snapshots.len());
+    for snapshot in snapshots {
+        push_entry(&mut stack, snapshot.clone());
+    }
+    stack
+}
+
+impl TabHistory {
+    pub(crate) fn new(source_identity: Option<String>, journal_path: Option<PathBuf>) -> Self {
+        Self {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            journal_path,
+            source_identity,
+        }
+    }
+
+    pub(crate) fn push_undo_snapshot(&mut self, snapshot: EditorSnapshot) {
+        push_entry(&mut self.undo_stack, snapshot);
+        self.redo_stack.clear();
+        if self.undo_stack.len() > MAX_HISTORY_ENTRIES {
+            let overflow = self.undo_stack.len() - MAX_HISTORY_ENTRIES;
+            self.undo_stack.drain(0..overflow);
+        }
+    }
+
+    pub(crate) fn take_undo(&mut self, current: &EditorSnapshot) -> Option<EditorSnapshot> {
+        let snapshot = pop_entry(&mut self.undo_stack, current)?;
+        push_entry(&mut self.redo_stack, current.clone());
+        Some(snapshot)
+    }
+
+    pub(crate) fn take_redo(&mut self, current: &EditorSnapshot) -> Option<EditorSnapshot> {
+        let snapshot = pop_entry(&mut self.redo_stack, current)?;
+        push_entry(&mut self.undo_stack, current.clone());
+        Some(snapshot)
+    }
+
+    pub(crate) fn current_index(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    pub(crate) fn entry_count(&self) -> usize {
+        self.undo_stack.len() + self.redo_stack.len() + 1
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -48,46 +212,6 @@ pub(crate) struct SnapshotViewState {
     pub scroll_offset: f32,
     #[serde(default)]
     pub extra_cursors: Vec<(usize, usize)>,
-}
-
-impl TabHistory {
-    pub(crate) fn new(source_identity: Option<String>, journal_path: Option<PathBuf>) -> Self {
-        Self {
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            journal_path,
-            source_identity,
-        }
-    }
-
-    pub(crate) fn push_undo_snapshot(&mut self, snapshot: EditorSnapshot) {
-        self.undo_stack.push(snapshot);
-        self.redo_stack.clear();
-        if self.undo_stack.len() > MAX_HISTORY_ENTRIES {
-            let overflow = self.undo_stack.len() - MAX_HISTORY_ENTRIES;
-            self.undo_stack.drain(0..overflow);
-        }
-    }
-
-    pub(crate) fn take_undo(&mut self, current: &EditorSnapshot) -> Option<EditorSnapshot> {
-        let snapshot = self.undo_stack.pop()?;
-        self.redo_stack.push(current.clone());
-        Some(snapshot)
-    }
-
-    pub(crate) fn take_redo(&mut self, current: &EditorSnapshot) -> Option<EditorSnapshot> {
-        let snapshot = self.redo_stack.pop()?;
-        self.undo_stack.push(current.clone());
-        Some(snapshot)
-    }
-
-    pub(crate) fn current_index(&self) -> usize {
-        self.undo_stack.len()
-    }
-
-    pub(crate) fn entry_count(&self) -> usize {
-        self.undo_stack.len() + self.redo_stack.len() + 1
-    }
 }
 
 pub(crate) fn default_source_identity(tab_id: &str, source_path: Option<&Path>) -> String {
@@ -157,7 +281,7 @@ pub(crate) fn persist_tab_history(
         .source_identity
         .clone()
         .unwrap_or_else(|| default_source_identity(tab_id, source_path));
-    let journal = build_journal(history, current_snapshot, source_identity.clone());
+    let journal = build_journal(history, current_snapshot, source_identity.clone())?;
     let content = serde_json::to_vec_pretty(&journal)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     write_atomic(&path, &content)?;
@@ -170,10 +294,12 @@ fn build_journal(
     history: &TabHistory,
     current_snapshot: &EditorSnapshot,
     source_identity: String,
-) -> UndoJournal {
-    let mut timeline = history.undo_stack.clone();
+) -> io::Result<UndoJournal> {
+    let mut timeline = decode_stack(&history.undo_stack)?;
     timeline.push(current_snapshot.clone());
-    timeline.extend(history.redo_stack.iter().rev().cloned());
+    let mut redo_snapshots = decode_stack(&history.redo_stack)?;
+    redo_snapshots.reverse();
+    timeline.extend(redo_snapshots);
 
     let entries = timeline
         .iter()
@@ -197,12 +323,12 @@ fn build_journal(
         })
         .collect();
 
-    UndoJournal {
+    Ok(UndoJournal {
         schema_version: HISTORY_SCHEMA_VERSION,
         source_identity,
         current_index: history.current_index(),
         entries,
-    }
+    })
 }
 
 fn history_from_journal(journal: &UndoJournal) -> io::Result<(TabHistory, EditorSnapshot)> {
@@ -214,12 +340,13 @@ fn history_from_journal(journal: &UndoJournal) -> io::Result<(TabHistory, Editor
         ));
     }
     let current = timeline[journal.current_index].clone();
-    let undo_stack = timeline[..journal.current_index].to_vec();
-    let redo_stack = timeline[journal.current_index + 1..]
+    let undo_stack = encode_stack(&timeline[..journal.current_index]);
+    let redo_snapshots: Vec<EditorSnapshot> = timeline[journal.current_index + 1..]
         .iter()
         .rev()
         .cloned()
         .collect();
+    let redo_stack = encode_stack(&redo_snapshots);
     Ok((
         TabHistory {
             undo_stack,
@@ -374,13 +501,13 @@ mod tests {
         let mut history = TabHistory::default();
         history.push_undo_snapshot(snapshot("hello", 5));
         history.push_undo_snapshot(snapshot("hello world", 11));
-        history.redo_stack = vec![
+        history.redo_stack = encode_stack(&[
             snapshot("hello world!!!", 14),
             snapshot("hello world!!", 13),
-        ];
+        ]);
         let current = snapshot("hello world!", 12);
 
-        let journal = build_journal(&history, &current, "/tmp/note.md".to_string());
+        let journal = build_journal(&history, &current, "/tmp/note.md".to_string()).unwrap();
         let (rebuilt, rebuilt_current) = history_from_journal(&journal).unwrap();
 
         assert_eq!(rebuilt.undo_stack, history.undo_stack);
@@ -395,7 +522,7 @@ mod tests {
             history.push_undo_snapshot(snapshot(&format!("v{index}"), index));
         }
         let current = snapshot("current", 7);
-        let journal = build_journal(&history, &current, "source".to_string());
+        let journal = build_journal(&history, &current, "source".to_string()).unwrap();
 
         assert!(matches!(
             journal.entries[0],
@@ -419,7 +546,8 @@ mod tests {
         }
 
         assert_eq!(history.undo_stack.len(), MAX_HISTORY_ENTRIES);
-        assert_eq!(history.undo_stack[0].text, "v4");
+        let decoded = decode_stack(&history.undo_stack).unwrap();
+        assert_eq!(decoded[0].text, "v4");
     }
 
     #[test]
@@ -431,5 +559,46 @@ mod tests {
         assert_eq!(start, "你好 ".len());
         assert_eq!(deleted, "world");
         assert_eq!(inserted, "rust");
+    }
+
+    #[test]
+    fn undo_and_redo_roundtrip_through_delta_entries() {
+        let states = [
+            snapshot("", 0),
+            snapshot("hello", 5),
+            snapshot("hello 世界", 12),
+            snapshot("hello 世界!", 13),
+        ];
+        let mut history = TabHistory::default();
+        for state in &states[..3] {
+            history.push_undo_snapshot(state.clone());
+        }
+        // Only the top of the stack keeps a full snapshot.
+        assert_eq!(
+            history
+                .undo_stack
+                .iter()
+                .filter(|entry| matches!(entry, HistoryEntry::Full(_)))
+                .count(),
+            1
+        );
+
+        let mut current = states[3].clone();
+        // Undo all the way back.
+        for expected in states[..3].iter().rev() {
+            let restored = history.take_undo(&current).expect("undo entry");
+            assert_eq!(&restored, expected);
+            current = restored;
+        }
+        assert!(history.undo_stack.is_empty());
+
+        // Redo all the way forward.
+        for expected in &states[1..] {
+            let restored = history.take_redo(&current).expect("redo entry");
+            assert_eq!(&restored, expected);
+            current = restored;
+        }
+        assert!(history.redo_stack.is_empty());
+        assert_eq!(current, states[3]);
     }
 }

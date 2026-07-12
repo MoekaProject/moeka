@@ -33,6 +33,7 @@ description: 介紹小語文稿的使用
 | -------------------------- | ---------- |
 | `Command + B`              | 粗體       |
 | `Command + I`              | 斜體       |
+| `Command + U`              | 底線 |
 | `Command + Shift + X`      | 刪除線     |
 | `Command + E`              | 行內程式碼 |
 | `Command + Option + C`     | 程式碼區塊 |
@@ -41,6 +42,8 @@ description: 介紹小語文稿的使用
 | `Command + Option + O`     | 有序列表   |
 | `Command + Option + Enter` | 待辦事項   |
 | `Command + K`              | 連結       |
+| `Command + Option + T`     | 表格 |
+| `Command + 0`              | 正文 |
 | `/ image`                  | 圖片       |
 
 | --------------------- | -------- |

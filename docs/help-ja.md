@@ -33,6 +33,7 @@ Moeka は `Markdown` をテキスト形式として使います。Markdown は�
 | -------------------------- | ---------------- |
 | `Command + B`              | 太字             |
 | `Command + I`              | 斜体             |
+| `Command + U`              | 下線 |
 | `Command + Shift + X`      | 取り消し線       |
 | `Command + E`              | インラインコード |
 | `Command + Option + C`     | コードブロック   |
@@ -41,6 +42,8 @@ Moeka は `Markdown` をテキスト形式として使います。Markdown は�
 | `Command + Option + O`     | 番号付きリスト   |
 | `Command + Option + Enter` | Todo             |
 | `Command + K`              | リンク           |
+| `Command + Option + T`     | 表 |
+| `Command + 0`              | 本文 |
 | `/ image`                  | 画像             |
 
 | --------------------- | --------    |

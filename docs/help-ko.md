@@ -33,6 +33,7 @@ Moeka는 `Markdown`을 텍스트 편집 형식으로 사용합니다. Markdown�
 | -------------------------- | -------------- |
 | `Command + B`              | 굵게           |
 | `Command + I`              | 기울임         |
+| `Command + U`              | 밑줄 |
 | `Command + Shift + X`      | 취소선         |
 | `Command + E`              | 인라인 코드    |
 | `Command + Option + C`     | 코드 블록      |
@@ -41,6 +42,8 @@ Moeka는 `Markdown`을 텍스트 편집 형식으로 사용합니다. Markdown�
 | `Command + Option + O`     | 순서 있는 목록 |
 | `Command + Option + Enter` | 할 일          |
 | `Command + K`              | 링크           |
+| `Command + Option + T`     | 표 |
+| `Command + 0`              | 본문 |
 | `/ image`                  | 이미지         |
 
 | --------------------- | --------  |

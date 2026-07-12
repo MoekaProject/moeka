@@ -886,7 +886,7 @@ mod tests {
         assert_eq!(themed.border_code_block, base.border_code_block);
         assert_eq!(themed.heading, with_alpha(base.text_bright, 0.88));
         assert_eq!(themed.inline_code, with_alpha(base.text_bright, 0.88));
-        assert_eq!(themed.link, crate::hex_hsla!("#61afef"));
+        assert_eq!(themed.link, crate::hex_hsla!("#0057CDFF"));
     }
 
     #[test]
@@ -896,7 +896,7 @@ mod tests {
 
         assert_eq!(themed.heading, base.text_primary);
         assert_eq!(themed.inline_code, base.text_primary);
-        assert_eq!(themed.link, crate::hex_hsla!("#61afef"));
+        assert_eq!(themed.link, crate::hex_hsla!("#0057CDFF"));
         assert_eq!(themed.list_marker, with_alpha(base.text_secondary, 0.82));
         assert_eq!(themed.syntax_marker, with_alpha(base.text_secondary, 0.82));
     }

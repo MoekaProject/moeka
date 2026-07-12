@@ -113,7 +113,11 @@ impl EditorView {
                 continue;
             };
             if let Err(error) = std::fs::rename(&src, &dst) {
-                eprintln!("Move {:?} -> {:?} failed: {error}", src, dst);
+                let message = format!(
+                    "{}: {error}",
+                    self.t(crate::i18n::TextKey::FileOperationFailed)
+                );
+                self.notify_error(message, cx);
                 continue;
             }
             successful_mappings.push(attachments::PathMapping::new(src.clone(), dst.clone()));

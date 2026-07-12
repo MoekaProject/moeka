@@ -2038,6 +2038,9 @@ impl Render for EditorView {
             .when(self.dialog.is_some(), |this| {
                 this.child(self.render_dialog(cx))
             })
+            .when(!self.notifications.is_empty(), |this| {
+                this.child(deferred(self.render_notifications(cx)))
+            })
     }
 }
 

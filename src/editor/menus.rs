@@ -503,11 +503,15 @@ impl EditorView {
         };
 
         let destination_path = document_dir.join(file_name);
-        if source_path != destination_path {
-            if let Err(error) = std::fs::copy(source_path, &destination_path) {
-                eprintln!("failed to copy image into document directory: {error}");
-                return;
-            }
+        if source_path != destination_path
+            && let Err(error) = std::fs::copy(source_path, &destination_path)
+        {
+            let message = format!(
+                "{}: {error}",
+                self.t(crate::i18n::TextKey::FileOperationFailed)
+            );
+            self.notify_error(message, cx);
+            return;
         }
 
         let relative_path = file_name.to_string_lossy().to_string();
@@ -888,7 +892,8 @@ impl EditorView {
             let query_end = self
                 .wiki_link_query_end(start)
                 .unwrap_or(self.cursor.offset)
-                .min(self.buffer.len());
+                .min(self.buffer.len())
+                .max(query_start);
             let end = self.cursor.offset.clamp(query_start, query_end);
             if query_start <= end && end <= self.buffer.len() {
                 let text = self.buffer.text();
@@ -942,14 +947,16 @@ impl EditorView {
     }
 
     pub(crate) fn run_wiki_link_search(&mut self, cx: &mut Context<Self>) {
+        // Keep the previous query's results visible while the new search runs;
+        // replacing `wiki_link_search_task` cancels the stale task, so results
+        // can only be written by the latest query. This avoids the per-keystroke
+        // results -> "Searching" -> results flicker.
         self.wiki_link_search_task = None;
-        // Clear stale results immediately so the menu shows a "searching" state
-        // instead of flashing the previous query's matches.
-        self.wiki_link_search_results.clear();
 
         let root = self.sidebar_root.clone();
         let query = self.wiki_link_query.clone();
         if !root.exists() || query.trim().is_empty() {
+            self.wiki_link_search_results.clear();
             cx.notify();
             return;
         }

@@ -1031,6 +1031,31 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
     detect_subscript_spans(&mut decorations, text, &line_starts);
     detect_emoji_shortcodes(&mut decorations, text, &line_starts);
 
+    // CommonMark: an ordered-list marker can only interrupt a paragraph when
+    // pulldown-cmark itself recognizes it as a list item. Lines that pulldown
+    // left as plain paragraph text (lazy continuations such as
+    // "windows is\n14. doors") must not be force-decorated as ordered lists.
+    let line_count = decorations.len();
+    let lazy_paragraph_continuation: Vec<bool> = (0..line_count)
+        .map(|line| {
+            if line == 0 {
+                return false;
+            }
+            let current = &decorations[line];
+            let previous = &decorations[line - 1];
+            let current_plain = current.block_type == BlockType::Normal
+                && current.table_info.is_none()
+                && !current.block_contexts.contains(&BlockContext::ListItem);
+            if !current_plain {
+                return false;
+            }
+            let previous_content = get_line_content(text, &line_starts, line - 1, line_count);
+            previous.block_type == BlockType::Normal
+                && previous.table_info.is_none()
+                && !previous_content.trim().is_empty()
+        })
+        .collect();
+
     for (line, decoration) in decorations.iter_mut().enumerate() {
         if decoration.table_info.is_some() {
             continue;
@@ -1051,6 +1076,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
         let trimmed = &line_len[leading_ws..];
         let prefix_len = ordered_list_prefix_len(trimmed);
         if prefix_len > 0
+            && !lazy_paragraph_continuation[line]
             && (leading_ws <= 3
                 || matches!(
                     decoration.block_type,
@@ -3036,7 +3062,9 @@ mod tests {
                 .display_replacements
                 .iter()
                 .any(|replacement| {
-                    replacement.source_range == (2..9) && replacement.display_text == "💡 "
+                    replacement.source_range == (2..9)
+                        && replacement.display_text
+                            == super::callout_replacement_text(CalloutKind::Tip)
                 })
         );
         assert!(

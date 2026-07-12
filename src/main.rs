@@ -429,6 +429,11 @@ fn main() {
 
         cx.on_action(|_: &Quit, cx| cx.quit());
 
+        // User keybinding overrides from config.yaml are registered last so
+        // they take precedence over the default bindings above.
+        editor::register_keybinding_overrides(cx);
+        editor::set_application_menus(cx);
+
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(

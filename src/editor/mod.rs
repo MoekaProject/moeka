@@ -25,6 +25,7 @@ mod language_detection;
 mod language_picker;
 mod list_viewport;
 mod menus;
+mod notifications;
 mod outline;
 mod profiler;
 mod quick_open;
@@ -63,6 +64,7 @@ pub(crate) use attachments::AttachmentPolicy;
 pub(crate) use file_list::FileListItem;
 use language_detection::classify_pasted_text_kind;
 pub(crate) use scrollbar::{PanelScrollbarKind, PanelScrollbarState};
+pub(crate) use shortcut::{register_keybinding_overrides, set_application_menus};
 pub(crate) use status_bar::IndentSettings;
 pub(crate) use types::*;
 pub(crate) use updater::{APP_VERSION, PreparedUpdate, UpdateState};
@@ -1530,6 +1532,8 @@ pub struct EditorView {
     pub(crate) tab_navigation_index: usize,
     pub(crate) tab_navigation_suspended: bool,
     pub(crate) dialog: Option<Dialog>,
+    pub(crate) notifications: Vec<notifications::Notification>,
+    pub(crate) next_notification_id: usize,
     pub(crate) pending_close_tab_ids: Vec<String>,
     /// 多选：最后一个选中的 focus 路径
     pub(crate) focused_sidebar_path: Option<PathBuf>,
@@ -2062,6 +2066,8 @@ impl EditorView {
             tab_navigation_index: 0,
             tab_navigation_suspended: false,
             dialog: None,
+            notifications: Vec::new(),
+            next_notification_id: 0,
             pending_close_tab_ids: Vec::new(),
             focused_sidebar_path: None,
             suppress_next_sidebar_sync_path: None,
@@ -2310,6 +2316,19 @@ impl EditorView {
         this.ensure_ui_font_size_editor(cx);
         this.toolbar_opacity = this.desired_toolbar_opacity();
         this.toolbar_opacity_target = this.toolbar_opacity;
+        // Warm up the syntect syntax set off the UI thread so the first code
+        // block render doesn't pay the grammar-loading cost.
+        cx.background_executor()
+            .spawn(async {
+                let _ = helpers::syntax_set();
+            })
+            .detach();
+        let (_, keybinding_warnings) =
+            shortcut::keybinding_overrides(&this.app_settings.keybindings);
+        for warning in keybinding_warnings {
+            let message = format!("{}: {warning}", this.t(TextKey::OperationFailed));
+            this.notify_error(message, cx);
+        }
 
         this
     }
@@ -2369,6 +2388,7 @@ impl EditorView {
         self.app_settings.language = language.code().to_string();
         self.refresh_builtin_tab_titles();
         self.refresh_welcome_tab_content(cx);
+        cx.set_menus(shortcut::app_menus(language));
         self.finalize_settings_change(cx);
     }
 
@@ -3231,8 +3251,8 @@ impl EditorView {
         let right = (left + self.last_viewport_width.max(1.0)).max(left + 1.0);
         let bottom = (top + self.last_viewport_height.max(1.0)).max(top + 1.0);
         let content_left = self.last_content_left.max(left);
-        let content_right =
-            (self.last_content_left + self.last_text_width).clamp(content_left, right);
+        let content_right = (self.last_content_left + self.last_text_width)
+            .clamp(content_left, right.max(content_left));
         let x = f32::from(position.x);
         let y = f32::from(position.y);
         let toolbar_left = left + self.scaled(self.styles.toolbar.toolbar_offset_left_px);
@@ -4077,7 +4097,10 @@ impl EditorView {
         match result {
             Ok(insertion) if !insertion.is_empty() => self.insert_pasted_text(&insertion, cx),
             Ok(_) => {}
-            Err(error) => eprintln!("failed to import dropped attachments: {error}"),
+            Err(error) => {
+                let message = format!("{}: {error}", self.t(TextKey::OperationFailed));
+                self.notify_error(message, cx);
+            }
         }
     }
 
@@ -4132,10 +4155,8 @@ impl EditorView {
                 && let Err(error) =
                     attachments::write_text_atomically(&rewrite.new_path, &rewrite.text)
             {
-                eprintln!(
-                    "failed to update links in {}: {error}",
-                    rewrite.new_path.display()
-                );
+                let message = format!("{}: {error}", self.t(TextKey::FileOperationFailed));
+                self.notify_error(message, cx);
                 continue;
             }
 
@@ -6658,7 +6679,8 @@ impl EditorView {
             }
             Ok(ClipboardPasteOutcome::NotHandled) => {}
             Err(error) => {
-                eprintln!("failed to import clipboard resources: {error}");
+                let message = format!("{}: {error}", self.t(TextKey::OperationFailed));
+                self.notify_error(message, cx);
                 return;
             }
         }

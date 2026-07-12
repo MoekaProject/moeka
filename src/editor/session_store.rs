@@ -533,7 +533,10 @@ mod tests {
         let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
 
         assert_eq!(restored.history.journal_path, Some(custom_journal_path));
-        assert_eq!(restored.history.undo_stack, vec![snapshot("before", 6)]);
+        assert_eq!(
+            restored.history.undo_stack,
+            vec![history_store::HistoryEntry::Full(snapshot("before", 6))]
+        );
         assert!(restored.history.redo_stack.is_empty());
     }
 

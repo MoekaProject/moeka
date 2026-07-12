@@ -149,6 +149,267 @@ impl CommandId {
             Self::ZoomReset => "Reset editor zoom",
         }
     }
+
+    /// Stable identifier used for keybinding overrides in config.yaml.
+    pub(crate) fn config_key(self) -> &'static str {
+        match self {
+            Self::NewDocument => "new_document",
+            Self::NewTab => "new_tab",
+            Self::OpenFile => "open_file",
+            Self::QuickOpen => "quick_open",
+            Self::Save => "save",
+            Self::SaveAs => "save_as",
+            Self::OpenSettings => "open_settings",
+            Self::CloseTab => "close_tab",
+            Self::Find => "find",
+            Self::FindInFiles => "find_in_files",
+            Self::ToggleSidebar => "toggle_sidebar",
+            Self::ToggleOutline => "toggle_outline",
+            Self::ToggleChat => "toggle_chat",
+            Self::ToggleInfo => "toggle_info",
+            Self::ToggleGitHistory => "toggle_git_history",
+            Self::ToggleTheme => "toggle_theme",
+            Self::Bold => "bold",
+            Self::Italic => "italic",
+            Self::Underline => "underline",
+            Self::Strikethrough => "strikethrough",
+            Self::InlineCode => "inline_code",
+            Self::Link => "link",
+            Self::Image => "image",
+            Self::Quote => "quote",
+            Self::Todo => "todo",
+            Self::UnorderedList => "unordered_list",
+            Self::OrderedList => "ordered_list",
+            Self::Table => "table",
+            Self::CodeBlock => "code_block",
+            Self::Paragraph => "paragraph",
+            Self::Fold => "fold",
+            Self::Unfold => "unfold",
+            Self::FoldAll => "fold_all",
+            Self::UnfoldAll => "unfold_all",
+            Self::ZoomIn => "zoom_in",
+            Self::ZoomOut => "zoom_out",
+            Self::ZoomReset => "zoom_reset",
+        }
+    }
+
+    pub(crate) fn from_config_key(key: &str) -> Option<Self> {
+        COMMAND_SPECS
+            .iter()
+            .map(|spec| spec.id)
+            .find(|id| id.config_key() == key)
+    }
+}
+
+/// Convert a gpui keystroke string (e.g. "cmd-shift-s") to the display form
+/// used in menus and the command palette (e.g. "⌘⇧S").
+pub(crate) fn display_shortcut_from_keystroke(keystroke: &str) -> String {
+    let mut tokens: Vec<&str> = keystroke.split('-').collect();
+    // A trailing empty token means the key itself is "-" (e.g. "cmd--").
+    let key = match tokens.pop() {
+        Some("") => "-",
+        Some(key) => key,
+        None => return String::new(),
+    };
+    let mut display = String::new();
+    // Match the modifier order used by COMMAND_SPECS display strings (⌃⌘⌥⇧).
+    for modifier in ["ctrl", "cmd", "alt", "shift"] {
+        if tokens.iter().any(|token| *token == modifier) {
+            display.push(match modifier {
+                "ctrl" => '⌃',
+                "cmd" => '⌘',
+                "alt" => '⌥',
+                _ => '⇧',
+            });
+        }
+    }
+    let key_display = match key {
+        "enter" => "↩".to_string(),
+        "backspace" => "⌫".to_string(),
+        "delete" => "⌦".to_string(),
+        "escape" => "⎋".to_string(),
+        "tab" => "⇥".to_string(),
+        "space" => "Space".to_string(),
+        "up" => "↑".to_string(),
+        "down" => "↓".to_string(),
+        "left" => "←".to_string(),
+        "right" => "→".to_string(),
+        "minus" => "-".to_string(),
+        other => other.to_uppercase(),
+    };
+    display.push_str(&key_display);
+    display
+}
+
+/// Validated keybinding overrides from settings: `(command, keystroke)` pairs
+/// plus human-readable warnings for entries that could not be applied.
+pub(crate) fn keybinding_overrides(
+    keybindings: &std::collections::BTreeMap<String, String>,
+) -> (Vec<(CommandId, String)>, Vec<String>) {
+    let mut overrides = Vec::new();
+    let mut warnings = Vec::new();
+    let mut used_keystrokes: std::collections::HashMap<&str, CommandId> =
+        std::collections::HashMap::new();
+    for (config_key, keystroke) in keybindings {
+        let Some(command) = CommandId::from_config_key(config_key) else {
+            warnings.push(format!("unknown command \"{config_key}\""));
+            continue;
+        };
+        let keystroke = keystroke.trim();
+        if keystroke.is_empty()
+            || keystroke
+                .split_whitespace()
+                .any(|stroke| gpui::Keystroke::parse(stroke).is_err())
+        {
+            warnings.push(format!(
+                "invalid keystroke \"{keystroke}\" for \"{config_key}\""
+            ));
+            continue;
+        }
+        if let Some(existing) = used_keystrokes.insert(keystroke, command) {
+            warnings.push(format!(
+                "\"{keystroke}\" is bound to both \"{}\" and \"{config_key}\"",
+                existing.config_key()
+            ));
+        }
+        overrides.push((command, keystroke.to_string()));
+    }
+    (overrides, warnings)
+}
+
+/// Register user keybinding overrides on top of the default bindings. Later
+/// bindings take precedence in GPUI, so overrides win over the defaults
+/// registered in `main.rs`.
+pub(crate) fn register_keybinding_overrides(cx: &mut gpui::App) {
+    let settings = super::AppSettings::load();
+    let (overrides, _warnings) = keybinding_overrides(&settings.keybindings);
+    let context = gpui::KeyBindingContextPredicate::parse("MarkdownEditor")
+        .ok()
+        .map(std::rc::Rc::new);
+    let bindings: Vec<gpui::KeyBinding> = overrides
+        .into_iter()
+        .filter_map(|(command, keystroke)| {
+            gpui::KeyBinding::load(
+                &keystroke,
+                command.action(),
+                context.clone(),
+                false,
+                None,
+                &gpui::DummyKeyboardMapper,
+            )
+            .ok()
+        })
+        .collect();
+    if !bindings.is_empty() {
+        cx.bind_keys(bindings);
+    }
+}
+
+/// Build the native macOS menu bar for the given UI language.
+pub(crate) fn app_menus(language: UiLanguage) -> Vec<gpui::Menu> {
+    use gpui::{Menu, MenuItem};
+
+    let t = |key: TextKey| crate::i18n::translate(language, key);
+    let command_item = |id: CommandId| -> MenuItem {
+        let spec = COMMAND_SPECS
+            .iter()
+            .find(|spec| spec.id == id)
+            .expect("command spec exists for menu command");
+        MenuItem::Action {
+            name: spec.localized_title(language).into(),
+            action: id.action(),
+            os_action: None,
+        }
+    };
+
+    vec![
+        Menu {
+            name: crate::i18n::application_display_name(language).into(),
+            items: vec![
+                command_item(CommandId::OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action(
+                    format!(
+                        "{} {}",
+                        t(TextKey::QuitApp),
+                        crate::i18n::application_display_name(language)
+                    ),
+                    crate::actions::Quit,
+                ),
+            ],
+        },
+        Menu {
+            name: t(TextKey::MenuFile).into(),
+            items: vec![
+                command_item(CommandId::NewDocument),
+                command_item(CommandId::NewTab),
+                MenuItem::separator(),
+                command_item(CommandId::OpenFile),
+                command_item(CommandId::QuickOpen),
+                MenuItem::separator(),
+                command_item(CommandId::Save),
+                command_item(CommandId::SaveAs),
+                MenuItem::separator(),
+                command_item(CommandId::CloseTab),
+            ],
+        },
+        Menu {
+            name: t(TextKey::MenuEdit).into(),
+            items: vec![
+                MenuItem::action(t(TextKey::Undo), crate::actions::Undo),
+                MenuItem::action(t(TextKey::Redo), crate::actions::Redo),
+                MenuItem::separator(),
+                MenuItem::action(t(TextKey::Cut), crate::actions::Cut),
+                MenuItem::action(t(TextKey::Copy), crate::actions::Copy),
+                MenuItem::action(t(TextKey::Paste), crate::actions::Paste),
+                MenuItem::action(t(TextKey::SelectAll), crate::actions::SelectAll),
+                MenuItem::separator(),
+                command_item(CommandId::Find),
+                command_item(CommandId::FindInFiles),
+            ],
+        },
+        Menu {
+            name: t(TextKey::MenuFormat).into(),
+            items: vec![
+                command_item(CommandId::Bold),
+                command_item(CommandId::Italic),
+                command_item(CommandId::Underline),
+                command_item(CommandId::Strikethrough),
+                command_item(CommandId::InlineCode),
+                MenuItem::separator(),
+                command_item(CommandId::Link),
+                command_item(CommandId::Quote),
+                command_item(CommandId::Todo),
+                command_item(CommandId::UnorderedList),
+                command_item(CommandId::OrderedList),
+                command_item(CommandId::Table),
+                command_item(CommandId::CodeBlock),
+                command_item(CommandId::Paragraph),
+            ],
+        },
+        Menu {
+            name: t(TextKey::MenuView).into(),
+            items: vec![
+                command_item(CommandId::ToggleSidebar),
+                command_item(CommandId::ToggleOutline),
+                command_item(CommandId::ToggleChat),
+                command_item(CommandId::ToggleInfo),
+                command_item(CommandId::ToggleGitHistory),
+                MenuItem::separator(),
+                command_item(CommandId::ZoomIn),
+                command_item(CommandId::ZoomOut),
+                command_item(CommandId::ZoomReset),
+                MenuItem::separator(),
+                command_item(CommandId::ToggleTheme),
+            ],
+        },
+    ]
+}
+
+/// Install the native menu bar using the persisted UI language.
+pub(crate) fn set_application_menus(cx: &mut gpui::App) {
+    let language = super::AppSettings::load().ui_language();
+    cx.set_menus(app_menus(language));
 }
 
 pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
@@ -534,6 +795,110 @@ mod command_tests {
             duplicates.is_empty(),
             "duplicate command titles:\n{}",
             duplicates.join("\n")
+        );
+    }
+
+    #[test]
+    fn config_keys_are_unique_and_roundtrip() {
+        let mut seen = HashMap::new();
+        for spec in COMMAND_SPECS {
+            let key = spec.id.config_key();
+            assert!(
+                seen.insert(key, spec.id).is_none(),
+                "duplicate config key {key:?}"
+            );
+            assert_eq!(super::CommandId::from_config_key(key), Some(spec.id));
+        }
+        assert_eq!(super::CommandId::from_config_key("unknown"), None);
+    }
+
+    #[test]
+    fn keystroke_display_conversion() {
+        assert_eq!(super::display_shortcut_from_keystroke("cmd-shift-s"), "⌘⇧S");
+        assert_eq!(super::display_shortcut_from_keystroke("cmd-,"), "⌘,");
+        assert_eq!(super::display_shortcut_from_keystroke("cmd--"), "⌘-");
+        assert_eq!(
+            super::display_shortcut_from_keystroke("cmd-alt-enter"),
+            "⌘⌥↩"
+        );
+        assert_eq!(
+            super::display_shortcut_from_keystroke("ctrl-shift-g"),
+            "⌃⇧G"
+        );
+    }
+
+    #[test]
+    fn keybinding_overrides_validate_entries() {
+        let mut keybindings = std::collections::BTreeMap::new();
+        keybindings.insert("save".to_string(), "cmd-shift-s".to_string());
+        keybindings.insert("bold".to_string(), "cmd-shift-s".to_string());
+        keybindings.insert("nonexistent".to_string(), "cmd-x".to_string());
+        keybindings.insert("italic".to_string(), "".to_string());
+
+        let (overrides, warnings) = super::keybinding_overrides(&keybindings);
+        assert_eq!(overrides.len(), 2);
+        assert!(
+            overrides
+                .iter()
+                .any(|(id, keys)| *id == CommandId::Save && keys == "cmd-shift-s")
+        );
+        assert!(
+            overrides
+                .iter()
+                .any(|(id, keys)| *id == CommandId::Bold && keys == "cmd-shift-s")
+        );
+        // Unknown command, invalid keystroke, and the duplicate binding each warn.
+        assert_eq!(warnings.len(), 3);
+    }
+
+    /// Convert a COMMAND_SPECS display shortcut ("⌘⇧X") to the long form used
+    /// by the help documents ("Command + Shift + X").
+    fn docs_shortcut(display: &str) -> String {
+        display
+            .chars()
+            .map(|ch| match ch {
+                '⌃' => "Control".to_string(),
+                '⌥' => "Option".to_string(),
+                '⇧' => "Shift".to_string(),
+                '⌘' => "Command".to_string(),
+                '↩' => "Enter".to_string(),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(" + ")
+    }
+
+    #[test]
+    fn help_docs_list_format_command_shortcuts_for_every_language() {
+        let docs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+        let mut problems = Vec::new();
+        for &language in UiLanguage::supported() {
+            let file = docs_dir.join(format!("help-{}.md", language.code().to_lowercase()));
+            let Ok(content) = std::fs::read_to_string(&file) else {
+                problems.push(format!("missing help doc {}", file.display()));
+                continue;
+            };
+            for spec in COMMAND_SPECS {
+                if spec.category != "Format" {
+                    continue;
+                }
+                let Some(display) = spec.shortcut else {
+                    continue;
+                };
+                let expected = docs_shortcut(display);
+                if !content.contains(&expected) {
+                    problems.push(format!(
+                        "{}: missing \"{expected}\" for {:?}",
+                        file.display(),
+                        spec.id
+                    ));
+                }
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "help docs out of sync with COMMAND_SPECS:\n{}",
+            problems.join("\n")
         );
     }
 }
