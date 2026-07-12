@@ -1002,6 +1002,13 @@ impl EditorView {
         let has_root = self.sidebar_root.exists() && self.sidebar_error.is_none();
         if has_root {
             self.refresh_sidebar_git_statuses_if_needed(cx);
+            if self.expanded_dirs.contains(&self.sidebar_root)
+                && !self
+                    .sidebar_directory_children
+                    .contains_key(&self.sidebar_root)
+            {
+                self.schedule_sidebar_directory_load(self.sidebar_root.clone(), cx);
+            }
         }
         let starred_files = if has_root {
             self.visible_starred_sidebar_files()
@@ -1230,35 +1237,44 @@ impl EditorView {
                             .set_offset(gpui::point(offset.x, px(-max_scroll)));
                     }
                 }
-                let (visible_start, visible_end, top_spacer_height, bottom_spacer_height) = self
-                    .visible_uniform_list_range(
-                        &self.sidebar_scroll_handle,
-                        prefix_height,
-                        item_height,
-                        items.len(),
-                        12,
-                    );
-                if top_spacer_height > 0.0 {
+                let list_window = super::list_viewport::fixed_list_window(
+                    &self.sidebar_scroll_handle,
+                    self.last_window_height,
+                    prefix_height,
+                    item_height,
+                    items.len(),
+                    12,
+                    24,
+                );
+                let preload_directories = items[list_window.preload.clone()]
+                    .iter()
+                    .filter(|item| item.is_dir && item.is_expanded)
+                    .map(|item| item.path.clone())
+                    .collect::<Vec<_>>();
+                for path in preload_directories {
+                    self.schedule_sidebar_directory_load(path, cx);
+                }
+                if list_window.top_spacer_px > 0.0 {
                     tree_items.push(
                         div()
                             .w_full()
-                            .h(px(top_spacer_height))
+                            .h(px(list_window.top_spacer_px))
                             .flex_none()
                             .into_any_element(),
                     );
                 }
-                for idx in visible_start..visible_end {
+                for idx in list_window.render {
                     tree_items.push(self.render_sidebar_item(
                         items[idx].clone(),
                         &item_guide_levels[idx],
                         cx,
                     ));
                 }
-                if bottom_spacer_height > 0.0 {
+                if list_window.bottom_spacer_px > 0.0 {
                     tree_items.push(
                         div()
                             .w_full()
-                            .h(px(bottom_spacer_height))
+                            .h(px(list_window.bottom_spacer_px))
                             .flex_none()
                             .into_any_element(),
                     );
@@ -1347,8 +1363,6 @@ impl EditorView {
                             .track_scroll(&self.sidebar_scroll_handle)
                             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
                                 this.reveal_panel_scrollbar(PanelScrollbarKind::Sidebar, cx);
-                                let total_items = this.sidebar_items().len();
-                                this.maybe_extend_sidebar_items(total_items, cx);
                             }))
                             .on_mouse_down(
                                 MouseButton::Left,

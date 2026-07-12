@@ -100,7 +100,7 @@ impl EditorView {
         }
 
         self.quick_open_selected_index = 0;
-        self.quick_open_render_limit = 100;
+        self.quick_open_render_limit = super::list_viewport::SEARCH_LIST_POLICY.initial_count;
         self.run_quick_open_search(cx);
 
         if let Some(editor) = &self.quick_open_editor {
@@ -133,8 +133,11 @@ impl EditorView {
         let current = self.quick_open_selected_index as isize;
         self.quick_open_selected_index = (current + delta).clamp(0, len - 1) as usize;
         if self.quick_open_selected_index + 1 > self.quick_open_render_limit {
-            self.quick_open_render_limit =
-                (self.quick_open_selected_index + 100).min(self.quick_open_results.len());
+            self.quick_open_render_limit = super::list_viewport::SEARCH_LIST_POLICY.ensure_index(
+                self.quick_open_render_limit,
+                self.quick_open_results.len(),
+                self.quick_open_selected_index,
+            );
         }
         self.quick_open_scroll_handle
             .scroll_to_item(self.quick_open_selected_index);
@@ -148,8 +151,13 @@ impl EditorView {
         }
 
         let bottom_item = self.quick_open_scroll_handle.bottom_item();
-        if bottom_item + 12 >= self.quick_open_render_limit.saturating_sub(1) {
-            self.quick_open_render_limit = (self.quick_open_render_limit + 100).min(total);
+        let next = super::list_viewport::SEARCH_LIST_POLICY.extend_near_end(
+            self.quick_open_render_limit,
+            total,
+            bottom_item,
+        );
+        if next != self.quick_open_render_limit {
+            self.quick_open_render_limit = next;
             cx.notify();
         }
     }
@@ -177,23 +185,47 @@ impl EditorView {
             self.quick_open_results.clear();
             self.quick_open_selected_index = 0;
             self.quick_open_task = None;
-            self.quick_open_render_limit = 100;
+            self.quick_open_render_limit = super::list_viewport::SEARCH_LIST_POLICY.initial_count;
             cx.notify();
             return;
         }
 
         let query = self.quick_open_query.clone();
+        self.quick_open_epoch = self.quick_open_epoch.wrapping_add(1);
+        let epoch = self.quick_open_epoch;
+        let cached_paths = (self.quick_open_index_root.as_deref() == Some(root.as_path()))
+            .then(|| self.quick_open_file_index.clone());
         let task = cx.spawn(async move |this, cx| {
-            let results = cx
+            let background_root = root.clone();
+            let background_query = query.clone();
+            let (paths, results) = cx
                 .background_executor()
-                .spawn(async move { collect_quick_open_results(&root, &query) })
+                .spawn(async move {
+                    let paths = cached_paths.unwrap_or_else(|| {
+                        let mut paths = Vec::new();
+                        collect_openable_files(&background_root, &mut paths);
+                        paths
+                    });
+                    let results = collect_quick_open_results_from_paths(
+                        &background_root,
+                        &background_query,
+                        &paths,
+                    );
+                    (paths, results)
+                })
                 .await;
 
             this.update(cx, |this, cx| {
+                if this.quick_open_epoch != epoch || this.quick_open_query != query {
+                    return;
+                }
+                this.quick_open_file_index = paths;
+                this.quick_open_index_root = Some(root);
                 this.quick_open_results = results;
                 this.quick_open_selected_index = 0;
                 this.quick_open_task = None;
-                this.quick_open_render_limit = 100;
+                this.quick_open_render_limit =
+                    super::list_viewport::SEARCH_LIST_POLICY.initial_count;
                 this.quick_open_scroll_handle.scroll_to_item(0);
                 cx.notify();
             })
@@ -429,9 +461,16 @@ impl EditorView {
 fn collect_quick_open_results(root: &Path, query: &str) -> Vec<QuickOpenResult> {
     let mut paths = Vec::new();
     collect_openable_files(root, &mut paths);
+    collect_quick_open_results_from_paths(root, query, &paths)
+}
 
+fn collect_quick_open_results_from_paths(
+    root: &Path,
+    query: &str,
+    paths: &[PathBuf],
+) -> Vec<QuickOpenResult> {
     let mut results = Vec::new();
-    for path in paths {
+    for path in paths.iter().cloned() {
         let file_name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())

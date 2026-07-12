@@ -21,15 +21,20 @@ const FILE_LIST_PREVIEW_CHARS: usize = 120;
 pub(crate) struct FileListItem {
     pub path: PathBuf,
     pub name: String,
+    pub modified: SystemTime,
+    pub details: Option<FileListDetails>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FileListDetails {
     /// Text of the first ATX heading in the document, if any.
     pub title: Option<String>,
     /// Plain-text preview with markdown syntax removed.
     pub preview: String,
-    pub modified: SystemTime,
 }
 
-/// Collects the markdown files directly inside `dir` (non-recursive), sorted
-/// with the shared sidebar sort mode. Runs on a background thread.
+/// Builds a lightweight index of the markdown files directly inside `dir`.
+/// File contents are loaded separately when rows approach the viewport.
 pub(crate) fn load_file_list_items(dir: &Path, sort_mode: SidebarSortMode) -> Vec<FileListItem> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -53,15 +58,25 @@ pub(crate) fn load_file_list_items(dir: &Path, sort_mode: SidebarSortMode) -> Ve
                 .metadata()
                 .and_then(|meta| meta.modified())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
-            let text = read_file_head(&path);
-            let (title, preview) = extract_title_and_preview(&text);
             FileListItem {
                 path,
                 name,
-                title,
-                preview,
                 modified,
+                details: None,
             }
+        })
+        .collect()
+}
+
+fn load_file_list_details(
+    items: Vec<(PathBuf, SystemTime)>,
+) -> Vec<(PathBuf, SystemTime, FileListDetails)> {
+    items
+        .into_iter()
+        .map(|(path, modified)| {
+            let text = read_file_head(&path);
+            let (title, preview) = extract_title_and_preview(&text);
+            (path, modified, FileListDetails { title, preview })
         })
         .collect()
 }
@@ -282,7 +297,7 @@ impl EditorView {
         self.file_list_resizing = false;
         self.app_settings.file_list_visible = self.file_list_visible;
         self.app_settings.save();
-        self.invalidate_sidebar_items_cache();
+        self.invalidate_sidebar_flattened_items();
         self.reveal_file_list_dir_in_sidebar(&reveal_dir, cx);
         if self.file_list_visible {
             self.file_list_dirty = true;
@@ -457,6 +472,7 @@ impl EditorView {
         }
         self.file_list_dirty = false;
         self.file_list_epoch = self.file_list_epoch.wrapping_add(1);
+        self.file_list_detail_task = None;
         let epoch = self.file_list_epoch;
         let sort_mode = self.sidebar_sort_mode;
         let loaded_dir = dir.clone();
@@ -478,6 +494,49 @@ impl EditorView {
             .ok();
         });
         self.file_list_task = Some(task);
+    }
+
+    fn load_file_list_details_for_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.file_list_detail_task.is_some() || range.is_empty() {
+            return;
+        }
+        let pending = self.file_list_items[range]
+            .iter()
+            .filter(|item| item.details.is_none())
+            .map(|item| (item.path.clone(), item.modified))
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return;
+        }
+
+        let epoch = self.file_list_epoch;
+        self.file_list_detail_task = Some(cx.spawn(async move |this, cx| {
+            let details = cx
+                .background_executor()
+                .spawn(async move { load_file_list_details(pending) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.file_list_epoch != epoch {
+                    return;
+                }
+                for (path, modified, detail) in details {
+                    if let Some(item) = this
+                        .file_list_items
+                        .iter_mut()
+                        .find(|item| item.path == path && item.modified == modified)
+                    {
+                        item.details = Some(detail);
+                    }
+                }
+                this.file_list_detail_task = None;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     // ── Rendering ───────────────────────────────────────────────────
@@ -601,7 +660,9 @@ impl EditorView {
             ss.file_list_item_title_color
         };
         let title = item
-            .title
+            .details
+            .as_ref()
+            .and_then(|details| details.title.clone())
             .clone()
             .unwrap_or_else(|| split_file_name_for_display(&item.name).0.to_string());
         let time_label = crate::i18n::format_relative_time(self.ui_language, item.modified);
@@ -657,17 +718,20 @@ impl EditorView {
                             .child(time_label),
                     ),
             )
-            .when(!item.preview.is_empty(), |this| {
-                this.child(
-                    div()
-                        .w_full()
-                        .max_h(px(preview_max_height))
-                        .overflow_hidden()
-                        .text_size(px(self.scaled(ss.file_list_item_preview_font_size_px)))
-                        .line_height(px(self.scaled(ss.file_list_item_preview_line_height_px)))
-                        .text_color(ss.file_list_item_preview_color)
-                        .child(item.preview.clone()),
-                )
+            .child({
+                let preview = item
+                    .details
+                    .as_ref()
+                    .map(|details| details.preview.clone())
+                    .unwrap_or_default();
+                div()
+                    .w_full()
+                    .h(px(preview_max_height))
+                    .overflow_hidden()
+                    .text_size(px(self.scaled(ss.file_list_item_preview_font_size_px)))
+                    .line_height(px(self.scaled(ss.file_list_item_preview_line_height_px)))
+                    .text_color(ss.file_list_item_preview_color)
+                    .child(preview)
             })
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
@@ -737,32 +801,34 @@ impl EditorView {
         } else {
             0.0
         };
-        let (visible_start, visible_end, top_spacer_height, bottom_spacer_height) = self
-            .visible_uniform_list_range(
-                &self.file_list_scroll_handle,
-                prefix_height,
-                item_height,
-                self.file_list_items.len(),
-                8,
-            );
-        if top_spacer_height > 0.0 {
+        let list_window = super::list_viewport::fixed_list_window(
+            &self.file_list_scroll_handle,
+            self.last_window_height,
+            prefix_height,
+            item_height,
+            self.file_list_items.len(),
+            8,
+            16,
+        );
+        self.load_file_list_details_for_range(list_window.preload.clone(), cx);
+        if list_window.top_spacer_px > 0.0 {
             list_children.push(
                 div()
                     .w_full()
-                    .h(px(top_spacer_height))
+                    .h(px(list_window.top_spacer_px))
                     .flex_none()
                     .into_any_element(),
             );
         }
-        for idx in visible_start..visible_end {
+        for idx in list_window.render.clone() {
             let item = self.file_list_items[idx].clone();
             list_children.push(self.render_file_list_item(&item, cx));
         }
-        if bottom_spacer_height > 0.0 {
+        if list_window.bottom_spacer_px > 0.0 {
             list_children.push(
                 div()
                     .w_full()
-                    .h(px(bottom_spacer_height))
+                    .h(px(list_window.bottom_spacer_px))
                     .flex_none()
                     .into_any_element(),
             );
@@ -875,7 +941,36 @@ impl EditorView {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_title_and_preview;
+    use std::{fs, time::SystemTime};
+
+    use super::{extract_title_and_preview, load_file_list_items};
+    use crate::editor::SidebarSortMode;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "moeka-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn file_list_index_does_not_read_document_details() {
+        let dir = temp_dir("file-list-index");
+        fs::write(dir.join("note.md"), "# Expensive title\n\nPreview body").unwrap();
+
+        let items = load_file_list_items(&dir, SidebarSortMode::NameAsc);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "note.md");
+        assert!(items[0].details.is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn extracts_first_heading_and_strips_syntax() {

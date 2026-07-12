@@ -307,8 +307,6 @@ impl EditorView {
                         editor
                             .sidebar_scroll_handle
                             .set_offset(gpui::point(offset.x, next_y));
-                        let total_items = editor.sidebar_items().len();
-                        editor.maybe_extend_sidebar_items(total_items, cx);
                         cx.notify();
                         Some(())
                     })

@@ -23,6 +23,7 @@ mod input_table;
 mod input_wrap;
 mod language_detection;
 mod language_picker;
+mod list_viewport;
 mod menus;
 mod outline;
 mod profiler;
@@ -1554,9 +1555,12 @@ pub struct EditorView {
     pub(crate) sidebar_drag_auto_expanded_dirs: HashSet<PathBuf>,
     pub(crate) sidebar_items_cache: Vec<SidebarItem>,
     pub(crate) sidebar_items_dirty: bool,
+    pub(crate) sidebar_directory_children:
+        HashMap<PathBuf, Vec<sidebar_tree::SidebarDirectoryChild>>,
+    pub(crate) sidebar_directory_loading: HashSet<PathBuf>,
+    pub(crate) sidebar_directory_epoch: usize,
     pub(crate) sidebar_scroll_handle: ScrollHandle,
     pub(crate) tab_bar_scroll_handle: ScrollHandle,
-    pub(crate) sidebar_render_limit: usize,
     /// FileList pane (right of the file tree): current directory and cached items.
     pub(crate) file_list_dir: PathBuf,
     pub(crate) file_list_items: Vec<FileListItem>,
@@ -1564,6 +1568,7 @@ pub struct EditorView {
     pub(crate) file_list_loaded_dir: Option<PathBuf>,
     pub(crate) file_list_epoch: usize,
     pub(crate) file_list_task: Option<Task<()>>,
+    pub(crate) file_list_detail_task: Option<Task<()>>,
     pub(crate) file_list_scroll_handle: ScrollHandle,
     pub(crate) file_list_custom_width: Option<f32>,
     pub(crate) file_list_visible: bool,
@@ -1614,6 +1619,7 @@ pub struct EditorView {
     pub(crate) git_history_cache_path: Option<PathBuf>,
     pub(crate) git_history_cache_result: Option<Option<Vec<info_panel::GitHistoryItem>>>,
     pub(crate) git_history_cache_dirty: bool,
+    pub(crate) git_history_has_more: bool,
     pub(crate) git_history_cache_scanned_at: Option<SystemTime>,
     pub(crate) git_history_refresh_epoch: usize,
     pub(crate) git_history_refresh_task: Option<Task<()>>,
@@ -1730,6 +1736,9 @@ pub struct EditorView {
     pub(crate) workspace_search_blur_sub: Option<gpui::Subscription>,
     pub(crate) workspace_search_input_focused: bool,
     pub(crate) workspace_search_task: Option<Task<()>>,
+    pub(crate) workspace_search_epoch: usize,
+    pub(crate) workspace_search_pending_paths: Vec<PathBuf>,
+    pub(crate) workspace_search_has_more: bool,
     pub(crate) workspace_search_scroll_handle: ScrollHandle,
     pub(crate) workspace_search_render_limit: usize,
 
@@ -1740,6 +1749,9 @@ pub struct EditorView {
     pub(crate) quick_open_selected_index: usize,
     pub(crate) quick_open_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) quick_open_task: Option<Task<()>>,
+    pub(crate) quick_open_epoch: usize,
+    pub(crate) quick_open_index_root: Option<PathBuf>,
+    pub(crate) quick_open_file_index: Vec<PathBuf>,
     pub(crate) quick_open_scroll_handle: ScrollHandle,
     pub(crate) quick_open_render_limit: usize,
     pub(crate) command_palette_visible: bool,
@@ -2067,15 +2079,18 @@ impl EditorView {
             sidebar_drag_auto_expanded_dirs: HashSet::new(),
             sidebar_items_cache: Vec::new(),
             sidebar_items_dirty: true,
+            sidebar_directory_children: HashMap::new(),
+            sidebar_directory_loading: HashSet::new(),
+            sidebar_directory_epoch: 0,
             sidebar_scroll_handle: ScrollHandle::new(),
             tab_bar_scroll_handle: ScrollHandle::new(),
-            sidebar_render_limit: 200,
             file_list_dir: PathBuf::new(),
             file_list_items: Vec::new(),
             file_list_dirty: true,
             file_list_loaded_dir: None,
             file_list_epoch: 0,
             file_list_task: None,
+            file_list_detail_task: None,
             file_list_scroll_handle: ScrollHandle::new(),
             file_list_custom_width: app_settings.file_list_width,
             file_list_visible: app_settings.file_list_visible,
@@ -2117,6 +2132,7 @@ impl EditorView {
             git_history_cache_path: None,
             git_history_cache_result: None,
             git_history_cache_dirty: true,
+            git_history_has_more: false,
             git_history_cache_scanned_at: None,
             git_history_refresh_epoch: 0,
             git_history_refresh_task: None,
@@ -2209,8 +2225,11 @@ impl EditorView {
             workspace_search_blur_sub: None,
             workspace_search_input_focused: false,
             workspace_search_task: None,
+            workspace_search_epoch: 0,
+            workspace_search_pending_paths: Vec::new(),
+            workspace_search_has_more: false,
             workspace_search_scroll_handle: ScrollHandle::new(),
-            workspace_search_render_limit: 100,
+            workspace_search_render_limit: list_viewport::SEARCH_LIST_POLICY.initial_count,
 
             quick_open_visible: false,
             quick_open_query: String::new(),
@@ -2218,8 +2237,11 @@ impl EditorView {
             quick_open_selected_index: 0,
             quick_open_editor: None,
             quick_open_task: None,
+            quick_open_epoch: 0,
+            quick_open_index_root: None,
+            quick_open_file_index: Vec::new(),
             quick_open_scroll_handle: ScrollHandle::new(),
-            quick_open_render_limit: 100,
+            quick_open_render_limit: list_viewport::SEARCH_LIST_POLICY.initial_count,
             command_palette_visible: false,
             command_palette_query: String::new(),
             command_palette_selected_index: 0,
@@ -5177,39 +5199,6 @@ impl EditorView {
     pub(crate) fn active_tab_supports_text_search(&self) -> bool {
         self.active_file_kind()
             .is_some_and(FileKind::supports_text_search)
-    }
-
-    pub(crate) fn visible_uniform_list_range(
-        &self,
-        scroll_handle: &ScrollHandle,
-        prefix_height: f32,
-        item_height: f32,
-        item_count: usize,
-        overscan: usize,
-    ) -> (usize, usize, f32, f32) {
-        if item_count == 0 || item_height <= 0.0 {
-            return (0, 0, 0.0, 0.0);
-        }
-
-        let viewport_height: f32 = scroll_handle.bounds().size.height.into();
-        let viewport_height = if viewport_height > 0.0 {
-            viewport_height
-        } else {
-            self.last_window_height.max(item_height)
-        };
-        let scroll_y = (-f32::from(scroll_handle.offset().y)).max(0.0);
-        let content_start = (scroll_y - prefix_height).max(0.0);
-        let content_end = (scroll_y + viewport_height - prefix_height).max(0.0);
-        let start = ((content_start / item_height).floor() as usize)
-            .saturating_sub(overscan)
-            .min(item_count);
-        let end = ((content_end / item_height).ceil() as usize)
-            .saturating_add(overscan)
-            .min(item_count)
-            .max(start);
-        let top_spacer_height = start as f32 * item_height;
-        let bottom_spacer_height = item_count.saturating_sub(end) as f32 * item_height;
-        (start, end, top_spacer_height, bottom_spacer_height)
     }
 
     pub(crate) fn active_tab_supports_persistent_save(&self) -> bool {

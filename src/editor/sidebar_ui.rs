@@ -3,14 +3,6 @@ use gpui::Context;
 use super::*;
 
 impl EditorView {
-    pub(super) fn maybe_extend_sidebar_items(
-        &mut self,
-        total_items: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let _ = (total_items, cx);
-    }
-
     pub(super) fn sidebar_edit_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
         let sidebar_styles = &self.styles.sidebar;

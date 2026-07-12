@@ -50,7 +50,7 @@ impl EditorView {
         };
         if path.is_dir() && self.expanded_dirs.contains(&path) {
             self.expanded_dirs.remove(&path);
-            self.invalidate_sidebar_items_cache();
+            self.invalidate_sidebar_flattened_items();
             cx.notify();
         } else if let Some(parent) = path.parent()
             && parent != self.sidebar_root
@@ -69,7 +69,8 @@ impl EditorView {
         if path.is_dir() {
             if !self.expanded_dirs.contains(&path) {
                 self.expanded_dirs.insert(path.clone());
-                self.invalidate_sidebar_items_cache();
+                self.schedule_sidebar_directory_load(path, cx);
+                self.invalidate_sidebar_flattened_items();
                 cx.notify();
             } else {
                 let items = self.sidebar_items();

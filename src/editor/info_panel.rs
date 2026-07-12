@@ -125,46 +125,59 @@ pub(super) fn git_repo_context_for_file(file_path: &Path) -> Option<GitRepoConte
     })
 }
 
+const GIT_HISTORY_PAGE_SIZE: usize = 100;
+
 fn collect_git_history_items_for_context(
     language: crate::i18n::UiLanguage,
     context: &GitRepoContext,
-) -> Option<Vec<GitHistoryItem>> {
+    skip: usize,
+    limit: usize,
+    include_working_tree: bool,
+) -> Option<(Vec<GitHistoryItem>, bool)> {
     let mut items = Vec::new();
-    let status_output = run_git_command(
-        &context.repo_root,
-        &[
-            "status",
-            "--porcelain=v1",
-            "--",
-            context.relative_path.as_str(),
-        ],
-    )
-    .unwrap_or_default();
+    if include_working_tree {
+        let status_output = run_git_command(
+            &context.repo_root,
+            &[
+                "status",
+                "--porcelain=v1",
+                "--",
+                context.relative_path.as_str(),
+            ],
+        )
+        .unwrap_or_default();
 
-    if !status_output.trim().is_empty() {
-        items.push(GitHistoryItem {
-            commit_hash: None,
-            short_hash: crate::i18n::translate(language, crate::i18n::TextKey::WorkingTree)
-                .to_string(),
-            message: crate::i18n::translate(language, crate::i18n::TextKey::UncommittedChanges)
-                .to_string(),
-            time_label: crate::i18n::translate(language, crate::i18n::TextKey::Current).to_string(),
-            is_working_tree: true,
-        });
+        if !status_output.trim().is_empty() {
+            items.push(GitHistoryItem {
+                commit_hash: None,
+                short_hash: crate::i18n::translate(language, crate::i18n::TextKey::WorkingTree)
+                    .to_string(),
+                message: crate::i18n::translate(language, crate::i18n::TextKey::UncommittedChanges)
+                    .to_string(),
+                time_label: crate::i18n::translate(language, crate::i18n::TextKey::Current)
+                    .to_string(),
+                is_working_tree: true,
+            });
+        }
     }
 
+    let max_count = format!("--max-count={}", limit.saturating_add(1));
+    let skip_arg = format!("--skip={skip}");
     let log_output = run_git_command(
         &context.repo_root,
         &[
             "log",
             "--follow",
             "--format=%H%x1f%s%x1f%ct",
+            max_count.as_str(),
+            skip_arg.as_str(),
             "--",
             context.relative_path.as_str(),
         ],
     )
     .unwrap_or_default();
 
+    let mut commit_count = 0usize;
     for line in log_output.lines() {
         let mut parts = line.split('\x1f');
         let Some(commit_hash) = parts.next() else {
@@ -188,17 +201,33 @@ fn collect_git_history_items_for_context(
             time_label,
             is_working_tree: false,
         });
+        commit_count += 1;
     }
 
-    Some(items)
+    let has_more = commit_count > limit;
+    if has_more {
+        if let Some(index) = items.iter().rposition(|item| item.commit_hash.is_some()) {
+            items.remove(index);
+        }
+    }
+    Some((items, has_more))
 }
 
 fn collect_git_history_items_for_file(
     language: crate::i18n::UiLanguage,
     file_path: &Path,
-) -> Option<Vec<GitHistoryItem>> {
+) -> Option<(Vec<GitHistoryItem>, bool)> {
     let context = git_repo_context_for_file(file_path)?;
-    collect_git_history_items_for_context(language, &context)
+    collect_git_history_items_for_context(language, &context, 0, GIT_HISTORY_PAGE_SIZE, true)
+}
+
+fn collect_next_git_history_page(
+    language: crate::i18n::UiLanguage,
+    file_path: &Path,
+    skip: usize,
+) -> Option<(Vec<GitHistoryItem>, bool)> {
+    let context = git_repo_context_for_file(file_path)?;
+    collect_git_history_items_for_context(language, &context, skip, GIT_HISTORY_PAGE_SIZE, false)
 }
 
 fn format_file_size(size: u64) -> String {
@@ -1681,6 +1710,7 @@ impl EditorView {
 
     pub(crate) fn invalidate_git_history_cache(&mut self) {
         self.git_history_cache_dirty = true;
+        self.git_history_has_more = false;
         self.git_history_cache_scanned_at = None;
         self.git_history_refresh_epoch = self.git_history_refresh_epoch.wrapping_add(1);
     }
@@ -1726,7 +1756,7 @@ impl EditorView {
                 cx.background_executor().timer(delay).await;
             }
 
-            let items = cx
+            let result = cx
                 .background_executor()
                 .spawn(async move {
                     collect_git_history_items_for_file(language, &background_file_path)
@@ -1745,7 +1775,9 @@ impl EditorView {
                     return;
                 }
 
+                let (items, has_more) = result.unzip();
                 this.git_history_cache_result = Some(items);
+                this.git_history_has_more = has_more.unwrap_or(false);
                 this.git_history_cache_scanned_at = Some(SystemTime::now());
                 this.git_history_cache_dirty = false;
                 cx.notify();
@@ -1755,6 +1787,55 @@ impl EditorView {
         self.git_history_refresh_task = Some(task);
     }
 
+    fn schedule_next_git_history_page(&mut self, cx: &mut Context<Self>) {
+        if !self.git_history_has_more || self.git_history_refresh_task.is_some() {
+            return;
+        }
+        let Some(requested_file_path) = self.git_history_cache_path.clone() else {
+            return;
+        };
+        let skip = self
+            .git_history_cache_result
+            .as_ref()
+            .and_then(|items| items.as_ref())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| item.commit_hash.is_some())
+                    .count()
+            })
+            .unwrap_or(0);
+        let epoch = self.git_history_refresh_epoch;
+        let language = self.ui_language;
+        let background_file_path = requested_file_path.clone();
+        self.git_history_refresh_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    collect_next_git_history_page(language, &background_file_path, skip)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.git_history_refresh_task = None;
+                if this.git_history_cache_path.as_ref() != Some(&requested_file_path)
+                    || this.git_history_refresh_epoch != epoch
+                {
+                    return;
+                }
+                let Some((next_items, has_more)) = result else {
+                    this.git_history_has_more = false;
+                    return;
+                };
+                if let Some(Some(items)) = this.git_history_cache_result.as_mut() {
+                    items.extend(next_items);
+                }
+                this.git_history_has_more = has_more;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     fn cached_git_history_items(&mut self, cx: &mut Context<Self>) -> Option<Vec<GitHistoryItem>> {
         let current_path = self.current_file_path.clone();
         if self.git_history_cache_path != current_path {
@@ -1762,6 +1843,7 @@ impl EditorView {
             self.git_history_cache_result = None;
             self.git_history_cache_scanned_at = None;
             self.git_history_cache_dirty = true;
+            self.git_history_has_more = false;
             self.git_history_refresh_epoch = self.git_history_refresh_epoch.wrapping_add(1);
             self.git_history_refresh_task = None;
         }
@@ -2925,21 +3007,33 @@ impl EditorView {
             return;
         }
 
-        let (visible_start, visible_end, top_gap, bottom_gap) = self.visible_uniform_list_range(
+        let list_window = super::list_viewport::fixed_list_window(
             &self.info_panel_scroll_handle,
+            self.last_window_height,
             *content_y,
             item_height,
             items.len(),
             10,
+            20,
         );
-        if top_gap > 0.0 {
-            children.push(div().h(px(top_gap)).flex_shrink_0().into_any_element());
+        if list_window.top_spacer_px > 0.0 {
+            children.push(
+                div()
+                    .h(px(list_window.top_spacer_px))
+                    .flex_shrink_0()
+                    .into_any_element(),
+            );
         }
-        for item in &items[visible_start..visible_end] {
+        for item in &items[list_window.render] {
             children.push(self.render_reference_item(item, cx));
         }
-        if bottom_gap > 0.0 {
-            children.push(div().h(px(bottom_gap)).flex_shrink_0().into_any_element());
+        if list_window.bottom_spacer_px > 0.0 {
+            children.push(
+                div()
+                    .h(px(list_window.bottom_spacer_px))
+                    .flex_shrink_0()
+                    .into_any_element(),
+            );
         }
         *content_y += items.len() as f32 * item_height;
     }
@@ -3153,6 +3247,7 @@ impl EditorView {
         let section_gap = self.scaled(ups.utility_panel_section_gap_px);
         let section_padding_x = self.scaled(ups.utility_panel_section_padding_x_px);
         let empty_font_size = self.scaled(ups.utility_panel_empty_font_size_px);
+        let mut should_load_next_page = false;
         let mut children: Vec<AnyElement> = vec![
             div().h(px(top_spacer)).flex_shrink_0().into_any_element(),
             div()
@@ -3172,22 +3267,36 @@ impl EditorView {
                 children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
                 let item_height = self.scaled(ups.utility_panel_item_font_size_px * 3.4);
                 let prefix_height = top_spacer + header_height + section_gap;
-                let (visible_start, visible_end, top_gap, bottom_gap) = self
-                    .visible_uniform_list_range(
-                        &self.git_history_scroll_handle,
-                        prefix_height,
-                        item_height,
-                        items.len(),
-                        12,
-                    );
-                if top_gap > 0.0 {
-                    children.push(div().h(px(top_gap)).flex_shrink_0().into_any_element());
+                let list_window = super::list_viewport::fixed_list_window(
+                    &self.git_history_scroll_handle,
+                    self.last_window_height,
+                    prefix_height,
+                    item_height,
+                    items.len(),
+                    12,
+                    24,
+                );
+                if list_window.preload.end >= items.len().saturating_sub(1) {
+                    should_load_next_page = true;
                 }
-                for item in &items[visible_start..visible_end] {
+                if list_window.top_spacer_px > 0.0 {
+                    children.push(
+                        div()
+                            .h(px(list_window.top_spacer_px))
+                            .flex_shrink_0()
+                            .into_any_element(),
+                    );
+                }
+                for item in &items[list_window.render] {
                     children.push(self.render_git_history_item(item, cx));
                 }
-                if bottom_gap > 0.0 {
-                    children.push(div().h(px(bottom_gap)).flex_shrink_0().into_any_element());
+                if list_window.bottom_spacer_px > 0.0 {
+                    children.push(
+                        div()
+                            .h(px(list_window.bottom_spacer_px))
+                            .flex_shrink_0()
+                            .into_any_element(),
+                    );
                 }
             }
             Some(_) => {
@@ -3237,7 +3346,7 @@ impl EditorView {
             cx,
         );
 
-        div()
+        let panel = div()
             .id("git-history-panel")
             .h_full()
             .w_full()
@@ -3261,7 +3370,11 @@ impl EditorView {
                     .children(children),
             )
             .when_some(scrollbar, |this, scrollbar| this.child(scrollbar))
-            .into_any_element()
+            .into_any_element();
+        if should_load_next_page {
+            self.schedule_next_git_history_page(cx);
+        }
+        panel
     }
 }
 
@@ -3273,7 +3386,63 @@ mod tests {
         fallback_reference_label, path_reference_name, reference_scheme, visible_git_diff_rows,
     };
     use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf, process::Command, time::SystemTime};
+
+    #[test]
+    fn git_history_provider_pages_commits() {
+        let root = std::env::temp_dir().join(format!(
+            "moeka-git-page-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git command failed: {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Moeka Test"]);
+        for index in 0..3 {
+            fs::write(root.join("note.md"), format!("version {index}")).unwrap();
+            git(&["add", "note.md"]);
+            git(&["commit", "-q", "-m", &format!("commit {index}")]);
+        }
+        let context =
+            super::git_repo_context_for_file(&root.join("note.md").canonicalize().unwrap())
+                .unwrap();
+
+        let (first, has_more) = super::collect_git_history_items_for_context(
+            crate::i18n::UiLanguage::English,
+            &context,
+            0,
+            2,
+            false,
+        )
+        .unwrap();
+        let (second, second_has_more) = super::collect_git_history_items_for_context(
+            crate::i18n::UiLanguage::English,
+            &context,
+            2,
+            2,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(first.len(), 2);
+        assert!(has_more);
+        assert_eq!(second.len(), 1);
+        assert!(!second_has_more);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn export_highlights_code_blocks_and_styles_tables() {

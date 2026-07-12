@@ -559,8 +559,11 @@ impl EditorView {
         self.workspace_search_focus_sub = None;
         self.workspace_search_blur_sub = None;
         self.workspace_search_task = None;
+        self.workspace_search_epoch = self.workspace_search_epoch.wrapping_add(1);
+        self.workspace_search_pending_paths.clear();
+        self.workspace_search_has_more = false;
         self.workspace_search_input_focused = false;
-        self.workspace_search_render_limit = 100;
+        self.workspace_search_render_limit = super::list_viewport::SEARCH_LIST_POLICY.initial_count;
         self.workspace_search_selected_match = None;
         self.workspace_search_highlight_path = None;
         self.workspace_search_highlight_ranges.clear();
@@ -580,7 +583,6 @@ impl EditorView {
         self.sidebar_git_statuses.clear();
         self.sidebar_git_statuses_task = None;
         self.invalidate_sidebar_git_statuses();
-        self.reset_sidebar_render_limit();
         self.context_menu = None;
         self.start_watching(cx);
         self.sync_sidebar_width_animation(cx);

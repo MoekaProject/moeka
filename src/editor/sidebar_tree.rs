@@ -6,10 +6,79 @@ use gpui::Context;
 
 use super::*;
 
+#[derive(Clone)]
+pub(crate) struct SidebarDirectoryChild {
+    name: String,
+    path: PathBuf,
+    is_dir: bool,
+}
+
+fn load_sidebar_directory(path: &Path, sort_mode: SidebarSortMode) -> Vec<SidebarDirectoryChild> {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    entries.sort_by(|left, right| compare_dir_entries(sort_mode, left, right));
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let entry_path = entry.path();
+            let is_dir = entry.file_type().ok()?.is_dir();
+            (!should_skip_path(&entry_path, is_dir)).then(|| SidebarDirectoryChild {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path: entry_path,
+                is_dir,
+            })
+        })
+        .collect()
+}
+
 impl EditorView {
     pub(crate) fn invalidate_sidebar_items_cache(&mut self) {
         self.sidebar_items_dirty = true;
+        self.sidebar_directory_children.clear();
+        self.sidebar_directory_loading.clear();
+        self.sidebar_directory_epoch = self.sidebar_directory_epoch.wrapping_add(1);
+        self.quick_open_index_root = None;
+        self.quick_open_file_index.clear();
         self.file_list_dirty = true;
+    }
+
+    pub(super) fn invalidate_sidebar_flattened_items(&mut self) {
+        self.sidebar_items_dirty = true;
+    }
+
+    pub(crate) fn schedule_sidebar_directory_load(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_directory_children.contains_key(&path)
+            || !self.sidebar_directory_loading.insert(path.clone())
+        {
+            return;
+        }
+        let epoch = self.sidebar_directory_epoch;
+        let sort_mode = self.sidebar_sort_mode;
+        cx.spawn(async move |this, cx| {
+            let background_path = path.clone();
+            let children = cx
+                .background_executor()
+                .spawn(async move { load_sidebar_directory(&background_path, sort_mode) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.sidebar_directory_epoch != epoch {
+                    return;
+                }
+                this.sidebar_directory_loading.remove(&path);
+                this.sidebar_directory_children.insert(path, children);
+                this.invalidate_sidebar_flattened_items();
+                this.invalidate_sidebar_git_statuses();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn invalidate_sidebar_git_statuses(&mut self) {
@@ -19,24 +88,13 @@ impl EditorView {
             self.sidebar_git_statuses_refresh_epoch.wrapping_add(1);
     }
 
-    pub(super) fn reset_sidebar_render_limit(&mut self) {
-        self.sidebar_render_limit = 200;
-    }
-
-    fn compare_sidebar_entries(
-        &self,
-        left: &std::fs::DirEntry,
-        right: &std::fs::DirEntry,
-    ) -> std::cmp::Ordering {
-        compare_dir_entries(self.sidebar_sort_mode, left, right)
-    }
-
     pub(crate) fn toggle_sidebar_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !self.expanded_dirs.insert(path.clone()) {
             self.expanded_dirs.remove(&path);
+        } else {
+            self.schedule_sidebar_directory_load(path, cx);
         }
-        self.invalidate_sidebar_items_cache();
-        self.reset_sidebar_render_limit();
+        self.invalidate_sidebar_flattened_items();
         cx.notify();
     }
 
@@ -45,48 +103,43 @@ impl EditorView {
         if self.sidebar_root.exists() {
             self.expanded_dirs.insert(self.sidebar_root.clone());
         }
-        self.invalidate_sidebar_items_cache();
-        self.reset_sidebar_render_limit();
+        self.invalidate_sidebar_flattened_items();
         self.context_menu = None;
         cx.notify();
     }
 
     pub(crate) fn expand_all_dirs(&mut self, cx: &mut Context<Self>) {
-        fn collect_dirs(dir: &Path, out: &mut HashSet<PathBuf>) {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir()
-                        && !path
-                            .file_name()
-                            .is_some_and(|name| name.to_string_lossy().starts_with('.'))
-                    {
-                        out.insert(path.clone());
-                        collect_dirs(&path, out);
-                    }
-                }
-            }
-        }
-
         let root = self.sidebar_root.clone();
-        collect_dirs(&root, &mut self.expanded_dirs);
-        self.invalidate_sidebar_items_cache();
-        self.reset_sidebar_render_limit();
-        self.context_menu = None;
-        cx.notify();
+        let sort_mode = self.sidebar_sort_mode;
+        cx.spawn(async move |this, cx| {
+            let expanded_dirs = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut expanded = HashSet::from([root.clone()]);
+                    let mut pending = vec![root];
+                    while let Some(dir) = pending.pop() {
+                        for child in load_sidebar_directory(&dir, sort_mode) {
+                            if child.is_dir && expanded.insert(child.path.clone()) {
+                                pending.push(child.path);
+                            }
+                        }
+                    }
+                    expanded
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.expanded_dirs = expanded_dirs;
+                this.invalidate_sidebar_items_cache();
+                this.context_menu = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn open_sidebar_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.open_path_in_permanent_tab(path, true, cx);
-    }
-
-    pub(crate) fn sorted_dir_entries(
-        &self,
-        path: &Path,
-    ) -> std::io::Result<Vec<std::fs::DirEntry>> {
-        let mut entries: Vec<_> = std::fs::read_dir(path)?.filter_map(Result::ok).collect();
-        entries.sort_by(|left, right| self.compare_sidebar_entries(left, right));
-        Ok(entries)
     }
 
     pub(crate) fn collect_sidebar_items(
@@ -95,32 +148,24 @@ impl EditorView {
         depth: usize,
         items: &mut Vec<SidebarItem>,
     ) {
-        let Ok(entries) = self.sorted_dir_entries(path) else {
+        let Some(entries) = self.sidebar_directory_children.get(path).cloned() else {
             return;
         };
 
         for entry in entries {
-            let entry_path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            let is_dir = file_type.is_dir();
-            if should_skip_path(&entry_path, is_dir) {
+            if self.file_list_visible && !entry.is_dir {
                 continue;
             }
-            if self.file_list_visible && !is_dir {
-                continue;
-            }
-            let is_expanded = is_dir && self.expanded_dirs.contains(&entry_path);
+            let is_expanded = entry.is_dir && self.expanded_dirs.contains(&entry.path);
             items.push(SidebarItem {
-                name: entry.file_name().to_string_lossy().into_owned(),
-                path: entry_path.clone(),
+                name: entry.name,
+                path: entry.path.clone(),
                 depth,
-                is_dir,
+                is_dir: entry.is_dir,
                 is_expanded,
             });
             if is_expanded {
-                self.collect_sidebar_items(&entry_path, depth + 1, items);
+                self.collect_sidebar_items(&entry.path, depth + 1, items);
             }
         }
     }
@@ -206,4 +251,39 @@ pub(crate) fn compare_dir_entries(
                 })
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, time::SystemTime};
+
+    use super::{SidebarSortMode, load_sidebar_directory};
+
+    #[test]
+    fn directory_provider_loads_one_level_and_filters_hidden_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "moeka-sidebar-provider-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("folder/nested")).unwrap();
+        fs::write(root.join("visible.md"), "visible").unwrap();
+        fs::write(root.join(".hidden.md"), "hidden").unwrap();
+
+        let children = load_sidebar_directory(&root, SidebarSortMode::NameAsc);
+
+        assert_eq!(children.len(), 2);
+        assert!(children[0].is_dir);
+        assert_eq!(children[0].name, "folder");
+        assert_eq!(children[1].name, "visible.md");
+        assert!(
+            children
+                .iter()
+                .all(|child| child.path.parent() == Some(root.as_path()))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }

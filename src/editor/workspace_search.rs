@@ -225,7 +225,12 @@ impl EditorView {
         if let Some(child_index) = self.workspace_search_child_index_for_match(match_index) {
             let needed_rows = child_index.saturating_sub(1);
             if needed_rows > self.workspace_search_render_limit {
-                self.workspace_search_render_limit = needed_rows;
+                self.workspace_search_render_limit = super::list_viewport::SEARCH_LIST_POLICY
+                    .ensure_index(
+                        self.workspace_search_render_limit,
+                        self.workspace_search_total_row_count(),
+                        needed_rows,
+                    );
             }
             self.workspace_search_scroll_handle
                 .scroll_to_item(child_index);
@@ -236,6 +241,9 @@ impl EditorView {
     fn move_workspace_search_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
         let total = self.workspace_search_total_match_count();
         if total == 0 {
+            if self.workspace_search_has_more {
+                self.schedule_workspace_search_batch(cx);
+            }
             return;
         }
 
@@ -244,6 +252,9 @@ impl EditorView {
             None if delta >= 0 => 0,
             None => total - 1,
         };
+        if delta > 0 && next_index + 1 >= total && self.workspace_search_has_more {
+            self.schedule_workspace_search_batch(cx);
+        }
         self.preview_workspace_search_match_at(next_index, false, false, cx);
     }
 
@@ -280,15 +291,24 @@ impl EditorView {
 
     fn maybe_extend_workspace_search_results(&mut self, cx: &mut Context<Self>) {
         let total_rows = self.workspace_search_total_row_count();
+        let rendered_children = self.workspace_search_rendered_child_count();
+        let bottom_item = self.workspace_search_scroll_handle.bottom_item();
+        let near_loaded_end = bottom_item
+            .saturating_add(super::list_viewport::SEARCH_LIST_POLICY.preload_items)
+            >= rendered_children.saturating_sub(1);
+        if near_loaded_end && self.workspace_search_has_more {
+            self.schedule_workspace_search_batch(cx);
+        }
         if total_rows <= self.workspace_search_render_limit {
             return;
         }
-
-        let rendered_children = self.workspace_search_rendered_child_count();
-        let bottom_item = self.workspace_search_scroll_handle.bottom_item();
-        if bottom_item + 12 >= rendered_children.saturating_sub(1) {
-            self.workspace_search_render_limit =
-                (self.workspace_search_render_limit + 100).min(total_rows);
+        let next = super::list_viewport::SEARCH_LIST_POLICY.extend_near_end(
+            self.workspace_search_render_limit,
+            total_rows,
+            bottom_item.min(rendered_children),
+        );
+        if next != self.workspace_search_render_limit {
+            self.workspace_search_render_limit = next;
             cx.notify();
         }
     }
@@ -299,7 +319,11 @@ impl EditorView {
         if query.is_empty() {
             self.workspace_search_results.clear();
             self.workspace_search_task = None;
-            self.workspace_search_render_limit = 100;
+            self.workspace_search_render_limit =
+                super::list_viewport::SEARCH_LIST_POLICY.initial_count;
+            self.workspace_search_pending_paths.clear();
+            self.workspace_search_has_more = false;
+            self.workspace_search_epoch = self.workspace_search_epoch.wrapping_add(1);
             cx.notify();
             return;
         }
@@ -308,37 +332,67 @@ impl EditorView {
         if !root.exists() {
             self.workspace_search_results.clear();
             self.workspace_search_task = None;
-            self.workspace_search_render_limit = 100;
+            self.workspace_search_render_limit =
+                super::list_viewport::SEARCH_LIST_POLICY.initial_count;
+            self.workspace_search_pending_paths.clear();
+            self.workspace_search_has_more = false;
+            self.workspace_search_epoch = self.workspace_search_epoch.wrapping_add(1);
             cx.notify();
             return;
         }
 
+        self.workspace_search_epoch = self.workspace_search_epoch.wrapping_add(1);
+        self.workspace_search_task = None;
+        self.workspace_search_results.clear();
+        self.workspace_search_pending_paths = vec![root];
+        self.workspace_search_has_more = true;
+        self.workspace_search_render_limit = super::list_viewport::SEARCH_LIST_POLICY.initial_count;
+        self.workspace_search_scroll_handle.scroll_to_item(0);
+        self.schedule_workspace_search_batch(cx);
+    }
+
+    fn schedule_workspace_search_batch(&mut self, cx: &mut Context<Self>) {
+        if self.workspace_search_task.is_some() || !self.workspace_search_has_more {
+            return;
+        }
+        let query = self.workspace_search_query.trim().to_string();
+        if query.is_empty() {
+            return;
+        }
         let case_sensitive = self.workspace_search_case_sensitive;
         let whole_word = self.workspace_search_whole_word;
         let use_regex = self.workspace_search_use_regex;
+        let pending_paths = std::mem::take(&mut self.workspace_search_pending_paths);
+        let epoch = self.workspace_search_epoch;
         let task = cx.spawn(async move |this, cx| {
-            let results = cx
+            let batch = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut results = Vec::new();
-                    search_directory(
-                        &root,
+                    search_directory_batch(
+                        pending_paths,
                         &query,
                         case_sensitive,
                         whole_word,
                         use_regex,
-                        &mut results,
-                    );
-                    results
+                        super::list_viewport::SEARCH_LIST_POLICY.batch_size,
+                    )
                 })
                 .await;
 
             this.update(cx, |this, cx| {
-                this.workspace_search_results = results;
                 this.workspace_search_task = None;
-                this.workspace_search_render_limit = 100;
-                this.workspace_search_selected_match = None;
-                this.workspace_search_scroll_handle.scroll_to_item(0);
+                if this.workspace_search_epoch != epoch {
+                    return;
+                }
+                this.workspace_search_results.extend(batch.results);
+                this.workspace_search_pending_paths = batch.pending_paths;
+                this.workspace_search_has_more = !this.workspace_search_pending_paths.is_empty();
+                if this.workspace_search_has_more
+                    && this.workspace_search_total_row_count()
+                        < super::list_viewport::SEARCH_LIST_POLICY.initial_count
+                {
+                    this.schedule_workspace_search_batch(cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -650,7 +704,9 @@ impl EditorView {
                 .map(|result| result.matches.len())
                 .sum();
             let file_count = self.workspace_search_results.len();
-            let summary_text = if self.workspace_search_task.is_some() {
+            let summary_text = if self.workspace_search_task.is_some()
+                || self.workspace_search_has_more
+            {
                 crate::i18n::workspace_search_progress(self.ui_language, total_matches, file_count)
             } else {
                 crate::i18n::workspace_search_summary(self.ui_language, total_matches, file_count)
@@ -966,26 +1022,35 @@ fn byte_index_after(text: &str, start: usize, max_chars: usize) -> usize {
         .map_or(text.len(), |(idx, _)| start + idx)
 }
 
-fn search_directory(
-    dir: &std::path::Path,
+struct WorkspaceSearchBatch {
+    results: Vec<WorkspaceSearchResult>,
+    pending_paths: Vec<std::path::PathBuf>,
+}
+
+fn search_directory_batch(
+    mut pending_paths: Vec<std::path::PathBuf>,
     query: &str,
     case_sensitive: bool,
     whole_word: bool,
     use_regex: bool,
-    results: &mut Vec<WorkspaceSearchResult>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
+    row_budget: usize,
+) -> WorkspaceSearchBatch {
+    let mut results = Vec::new();
+    let mut loaded_rows = 0usize;
+    while let Some(path) = pending_paths.pop() {
         let is_dir = path.is_dir();
         if should_skip_path(&path, is_dir) {
             continue;
         }
         if is_dir {
-            search_directory(&path, query, case_sensitive, whole_word, use_regex, results);
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                let mut children = entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .collect::<Vec<_>>();
+                children.sort();
+                pending_paths.extend(children.into_iter().rev());
+            }
         } else if let Ok(bytes) = std::fs::read(&path) {
             let file_kind = classify_file_kind_for_bytes(&path, &bytes);
             if file_kind.supports_text_search() {
@@ -1022,8 +1087,47 @@ fn search_directory(
                     });
                 }
 
+                loaded_rows += 1 + matches.len().min(50);
                 results.push(WorkspaceSearchResult { path, matches });
+                if loaded_rows >= row_budget {
+                    break;
+                }
             }
         }
+    }
+    WorkspaceSearchBatch {
+        results,
+        pending_paths,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, time::SystemTime};
+
+    use super::search_directory_batch;
+
+    #[test]
+    fn workspace_search_batch_preserves_a_cursor_for_later_results() {
+        let root = std::env::temp_dir().join(format!(
+            "moeka-search-batch-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.md"), "needle").unwrap();
+        fs::write(root.join("b.md"), "needle").unwrap();
+
+        let first = search_directory_batch(vec![root.clone()], "needle", true, false, false, 1);
+        assert_eq!(first.results.len(), 1);
+        assert!(!first.pending_paths.is_empty());
+
+        let second = search_directory_batch(first.pending_paths, "needle", true, false, false, 100);
+        assert_eq!(second.results.len(), 1);
+        assert!(second.pending_paths.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 }

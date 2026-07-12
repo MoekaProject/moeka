@@ -45,6 +45,7 @@ pub(crate) struct FontPickerState {
     pub all_options: Vec<PickerOption>,
     pub filtered: Vec<PickerOption>,
     pub selected_index: usize,
+    pub render_limit: usize,
     pub scroll_handle: ScrollHandle,
     /// Locked direction: once decided, keep dropdown above or below.
     pub show_above: std::cell::Cell<Option<bool>>,
@@ -1572,6 +1573,7 @@ impl EditorView {
             filtered: all_options.clone(),
             all_options,
             selected_index: 0,
+            render_limit: super::list_viewport::PICKER_LIST_POLICY.initial_count,
             scroll_handle: ScrollHandle::new(),
             show_above: std::cell::Cell::new(None),
         });
@@ -1596,6 +1598,8 @@ impl EditorView {
                                 .collect();
                         }
                         picker.selected_index = 0;
+                        picker.render_limit =
+                            super::list_viewport::PICKER_LIST_POLICY.initial_count;
                         cx.notify();
                     }
                 }
@@ -1625,6 +1629,12 @@ impl EditorView {
                     if let Some(picker) = &mut this.settings_font_picker {
                         if picker.selected_index + 1 < picker.filtered.len() {
                             picker.selected_index += 1;
+                            picker.render_limit = super::list_viewport::PICKER_LIST_POLICY
+                                .ensure_index(
+                                    picker.render_limit,
+                                    picker.filtered.len(),
+                                    picker.selected_index,
+                                );
                             picker.scroll_handle.scroll_to_item(picker.selected_index);
                         }
                         cx.notify();
@@ -1668,7 +1678,7 @@ impl EditorView {
         let items: Vec<AnyElement> = picker
             .filtered
             .iter()
-            .take(200)
+            .take(picker.render_limit)
             .enumerate()
             .map(|(idx, option)| {
                 let value = option.value.clone();
@@ -1799,7 +1809,19 @@ impl EditorView {
                 }),
             )
             .on_mouse_move(cx.listener(|_, _, _, _| {}))
-            .on_scroll_wheel(cx.listener(|_, _, _, _| {}))
+            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                if let Some(picker) = &mut this.settings_font_picker {
+                    let next = super::list_viewport::PICKER_LIST_POLICY.extend_near_end(
+                        picker.render_limit,
+                        picker.filtered.len(),
+                        picker.scroll_handle.bottom_item(),
+                    );
+                    if next != picker.render_limit {
+                        picker.render_limit = next;
+                        cx.notify();
+                    }
+                }
+            }))
             // Search input using TextInput component
             .child(
                 div()

@@ -123,44 +123,6 @@ fn outline_soft_wrappable_text(text: &str, chars_per_line: usize) -> SharedStrin
     }
 }
 
-fn visible_variable_list_range(
-    scroll_handle: &gpui::ScrollHandle,
-    prefix_height: f32,
-    item_heights: &[f32],
-    overscan: usize,
-) -> (usize, usize, f32, f32) {
-    if item_heights.is_empty() {
-        return (0, 0, 0.0, 0.0);
-    }
-
-    let viewport_height: f32 = scroll_handle.bounds().size.height.into();
-    let scroll_y = (-f32::from(scroll_handle.offset().y)).max(0.0);
-    let content_start = (scroll_y - prefix_height).max(0.0);
-    let content_end = (scroll_y + viewport_height - prefix_height).max(0.0);
-
-    let mut offsets = Vec::with_capacity(item_heights.len() + 1);
-    offsets.push(0.0);
-    for height in item_heights {
-        let next = offsets.last().copied().unwrap_or(0.0) + height.max(0.0);
-        offsets.push(next);
-    }
-    let item_count = item_heights.len();
-    let start = offsets
-        .partition_point(|offset| *offset <= content_start)
-        .saturating_sub(1)
-        .min(item_count);
-    let end = offsets
-        .partition_point(|offset| *offset < content_end)
-        .min(item_count)
-        .max(start);
-    let start = start.saturating_sub(overscan);
-    let end = end.saturating_add(overscan).min(item_count);
-    let total_height = offsets.last().copied().unwrap_or(0.0);
-    let top_spacer_height = offsets[start];
-    let bottom_spacer_height = total_height - offsets[end];
-    (start, end, top_spacer_height, bottom_spacer_height)
-}
-
 fn normalized_outline_width_bounds(min_width: f32, max_width: f32) -> (f32, f32) {
     let min_width = if min_width.is_finite() {
         min_width.max(0.0)
@@ -990,19 +952,26 @@ impl EditorView {
                     outline_row_metrics(heading, *depth).0
                 })
                 .collect::<Vec<_>>();
-            let (visible_start, visible_end, top_gap, bottom_gap) = visible_variable_list_range(
+            let list_window = super::list_viewport::variable_list_window(
                 &self.outline_panel_scroll_handle,
                 prefix_height,
                 &item_heights,
                 12,
+                24,
             );
-            if top_gap > 0.0 {
-                children.push(div().h(px(top_gap)).flex_shrink_0().into_any_element());
+            if list_window.top_spacer_px > 0.0 {
+                children.push(
+                    div()
+                        .h(px(list_window.top_spacer_px))
+                        .flex_shrink_0()
+                        .into_any_element(),
+                );
             }
             let active_bg = ups.utility_panel_button_hover_bg;
             let fold_icon_hover_color = os.outline_rail_label_hover_color;
+            let render_start = list_window.render.start;
             for (visible_offset, (heading_index, depth)) in visible_heading_indices
-                [visible_start..visible_end]
+                [list_window.render]
                 .iter()
                 .copied()
                 .enumerate()
@@ -1022,10 +991,9 @@ impl EditorView {
                 };
                 let indent = depth as f32 * indent_step.max(0.0);
                 let inner_padding_left = section_padding_x + indent;
-                let (row_height, chars_per_line) =
-                    (item_heights[visible_start + visible_offset], {
-                        outline_row_metrics(heading, depth).1
-                    });
+                let (row_height, chars_per_line) = (item_heights[render_start + visible_offset], {
+                    outline_row_metrics(heading, depth).1
+                });
                 let icon_path = if is_collapsed {
                     FOLD_SVG_PATH
                 } else {
@@ -1097,8 +1065,13 @@ impl EditorView {
                         .into_any_element(),
                 );
             }
-            if bottom_gap > 0.0 {
-                children.push(div().h(px(bottom_gap)).flex_shrink_0().into_any_element());
+            if list_window.bottom_spacer_px > 0.0 {
+                children.push(
+                    div()
+                        .h(px(list_window.bottom_spacer_px))
+                        .flex_shrink_0()
+                        .into_any_element(),
+                );
             }
             children.push(
                 div()
