@@ -6,6 +6,7 @@ use gpui::{
     div, prelude::*, px, svg,
 };
 
+use crate::checkbox::{Checkbox, CheckboxColors};
 use crate::i18n::{TextKey, UiLanguage, attachment_settings_label, language_picker_options};
 use crate::theme::{EditorThemeMode, ThemeKind};
 
@@ -23,6 +24,8 @@ pub(crate) enum FontRole {
     CodeFont,
     InterfaceLanguage,
     DateTimeFormat,
+    AttachmentLocation,
+    AttachmentPath,
     /// Font family for selected whiteboard elements (whiteboard panel).
     WhiteboardFont,
 }
@@ -49,9 +52,7 @@ pub(crate) struct FontPickerState {
 
 #[derive(Clone, Copy)]
 enum SettingsOptionAction {
-    AttachmentLocation(&'static str),
     AttachmentSyntax(&'static str),
-    AttachmentPath(&'static str),
     AutomaticallyUpdateLinks(bool),
     ShowWhitespace(bool),
     HighlightLine(bool),
@@ -278,90 +279,28 @@ impl EditorView {
 
     fn render_attachment_settings_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_attachment_folder_editor(cx);
-        let label = |key| attachment_settings_label(self.ui_language, key);
-        let location = self.app_settings.attachment_location.as_str();
-        let syntax = self.app_settings.attachment_link_syntax.as_str();
-        let path_style = self.app_settings.attachment_path_style.as_str();
-        let location_controls = div()
-            .flex()
-            .flex_col()
-            .gap(px(self.scaled(6.0)))
-            .child(self.render_settings_segmented_control(
-                vec![
-                    (
-                        "attachment-location-current-file",
-                        label("current_file"),
-                        location == "current_file",
-                        SettingsOptionAction::AttachmentLocation("current_file"),
-                    ),
-                    (
-                        "attachment-location-workspace-root",
-                        label("workspace_root"),
-                        location == "workspace_root",
-                        SettingsOptionAction::AttachmentLocation("workspace_root"),
-                    ),
-                ],
-                cx,
-            ))
-            .child(self.render_settings_segmented_control(
-                vec![
-                    (
-                        "attachment-location-workspace-folder",
-                        label("workspace_folder"),
-                        location == "workspace_folder",
-                        SettingsOptionAction::AttachmentLocation("workspace_folder"),
-                    ),
-                    (
-                        "attachment-location-current-subfolder",
-                        label("current_file_subfolder"),
-                        location == "current_file_subfolder",
-                        SettingsOptionAction::AttachmentLocation("current_file_subfolder"),
-                    ),
-                ],
-                cx,
-            ))
-            .into_any_element();
-        let syntax_controls = self.render_settings_segmented_control(
-            vec![
-                (
-                    "attachment-syntax-markdown",
-                    label("markdown"),
-                    syntax == "markdown",
-                    SettingsOptionAction::AttachmentSyntax("markdown"),
-                ),
-                (
-                    "attachment-syntax-wikilink",
-                    label("wikilink"),
-                    syntax == "wikilink",
-                    SettingsOptionAction::AttachmentSyntax("wikilink"),
-                ),
-            ],
+        let ui_language = self.ui_language;
+        let label = |key| attachment_settings_label(ui_language, key);
+        let location = self.app_settings.attachment_location.clone();
+        let syntax = self.app_settings.attachment_link_syntax.clone();
+        let path_style = self.app_settings.attachment_path_style.clone();
+        let location_controls =
+            self.render_picker_control(label(&location), FontRole::AttachmentLocation, 0, cx);
+        let syntax_is_wikilink = syntax == "wikilink";
+        let syntax_controls = self.render_settings_checkbox(
+            "attachment-syntax",
+            syntax_is_wikilink,
+            label(&syntax),
+            if syntax_is_wikilink {
+                SettingsOptionAction::AttachmentSyntax("markdown")
+            } else {
+                SettingsOptionAction::AttachmentSyntax("wikilink")
+            },
             cx,
         );
-        let path_controls = self.render_settings_segmented_control(
-            vec![
-                (
-                    "attachment-path-relative",
-                    label("relative"),
-                    path_style == "relative",
-                    SettingsOptionAction::AttachmentPath("relative"),
-                ),
-                (
-                    "attachment-path-workspace",
-                    label("workspace_absolute"),
-                    path_style == "workspace_absolute",
-                    SettingsOptionAction::AttachmentPath("workspace_absolute"),
-                ),
-                (
-                    "attachment-path-shortest",
-                    label("shortest"),
-                    path_style == "shortest",
-                    SettingsOptionAction::AttachmentPath("shortest"),
-                ),
-            ],
-            cx,
-        );
-        let update_controls = self.render_boolean_settings_control(
+        let path_controls =
+            self.render_picker_control(label(&path_style), FontRole::AttachmentPath, 0, cx);
+        let update_controls = self.render_boolean_settings_checkbox(
             "attachment-update-links",
             self.app_settings.automatically_update_links,
             SettingsOptionAction::AutomaticallyUpdateLinks(false),
@@ -376,7 +315,10 @@ impl EditorView {
             .child(self.render_section_heading(label("section")))
             .child(self.render_attachment_settings_row(label("location"), location_controls))
             .when(
-                matches!(location, "workspace_folder" | "current_file_subfolder"),
+                matches!(
+                    location.as_str(),
+                    "workspace_folder" | "current_file_subfolder"
+                ),
                 |this| this.child(self.render_attachment_folder_row()),
             )
             .child(self.render_attachment_settings_row(label("syntax"), syntax_controls))
@@ -388,17 +330,23 @@ impl EditorView {
     fn render_attachment_settings_row(&self, label: &str, control: AnyElement) -> AnyElement {
         div()
             .flex()
-            .items_start()
+            .items_center()
             .gap(px(self.scaled(12.0)))
             .child(
                 div()
-                    .w(px(self.scaled(140.0)))
-                    .pt(px(self.scaled(6.0)))
+                    .w(px(self.scaled(120.0)))
                     .text_size(px(self.scaled(13.0)))
                     .text_color(self.styles.settings_panel.settings_secondary_text_color)
                     .child(label.to_string()),
             )
-            .child(div().flex_1().min_w(px(0.0)).child(control))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex()
+                    .items_center()
+                    .child(control),
+            )
             .into_any_element()
     }
 
@@ -425,8 +373,8 @@ impl EditorView {
         }
         let mut styles = self.inline_stepper_input_styles();
         styles.text_input_center = false;
-        styles.text_input_padding_left_px = 8.0;
-        styles.text_input_padding_right_px = 8.0;
+        styles.text_input_padding_left_px = self.scaled(8.0);
+        styles.text_input_padding_right_px = self.scaled(8.0);
         let initial = self.app_settings.attachment_folder.clone();
         let editor = cx.new(move |cx| {
             let mut input = crate::text_input::TextInput::new(styles, "attachments", cx);
@@ -464,7 +412,7 @@ impl EditorView {
             .gap(px(self.scaled(8.0)))
             .child(self.render_attachment_settings_row(
                 crate::i18n::settings_label(self.ui_language, "show_whitespace"),
-                self.render_boolean_settings_control(
+                self.render_boolean_settings_checkbox(
                     "settings-show-whitespace",
                     self.app_settings.show_whitespace,
                     SettingsOptionAction::ShowWhitespace(false),
@@ -474,7 +422,7 @@ impl EditorView {
             ))
             .child(self.render_attachment_settings_row(
                 crate::i18n::settings_label(self.ui_language, "highlight_line"),
-                self.render_boolean_settings_control(
+                self.render_boolean_settings_checkbox(
                     "settings-highlight-line-background",
                     self.app_settings.highlight_line_background,
                     SettingsOptionAction::HighlightLine(false),
@@ -485,7 +433,7 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn render_boolean_settings_control(
+    fn render_boolean_settings_checkbox(
         &self,
         id_prefix: &'static str,
         enabled: bool,
@@ -493,86 +441,51 @@ impl EditorView {
         enabled_action: SettingsOptionAction,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let disabled_id = SharedString::from(format!("{id_prefix}-off"));
-        let enabled_id = SharedString::from(format!("{id_prefix}-on"));
-        self.render_settings_segmented_control(
-            vec![
-                (
-                    disabled_id,
-                    crate::i18n::boolean_option_label(self.ui_language, false),
-                    !enabled,
-                    disabled_action,
-                ),
-                (
-                    enabled_id,
-                    crate::i18n::boolean_option_label(self.ui_language, true),
-                    enabled,
-                    enabled_action,
-                ),
-            ],
+        self.render_settings_checkbox(
+            id_prefix,
+            enabled,
+            crate::i18n::boolean_option_label(self.ui_language, enabled),
+            if enabled {
+                disabled_action
+            } else {
+                enabled_action
+            },
             cx,
         )
     }
 
-    fn render_settings_segmented_control<I>(
+    fn render_settings_checkbox(
         &self,
-        options: Vec<(I, &'static str, bool, SettingsOptionAction)>,
+        id: &'static str,
+        checked: bool,
+        value_label: &'static str,
+        action: SettingsOptionAction,
         cx: &mut Context<Self>,
-    ) -> AnyElement
-    where
-        I: Into<gpui::ElementId>,
-    {
+    ) -> AnyElement {
         let styles = &self.styles.settings_panel;
-        let height = self.scaled(styles.settings_theme_option_height_px);
-        let padding_x = self.scaled(styles.settings_theme_option_padding_x_px);
-        let radius = self.scaled(styles.settings_theme_option_radius_px);
-        let border_width = self.scaled(styles.settings_theme_option_border_width_px);
-        let border_color = styles.settings_theme_option_border_color;
-        let active_bg = styles.settings_theme_option_active_bg;
-        let active_text = styles.settings_theme_option_active_text_color;
-        let text = styles.settings_theme_option_text_color;
-        let hover_bg = styles.settings_theme_option_hover_bg;
-
-        div()
-            .w_full()
-            .flex()
-            .rounded(px(radius))
-            .border(px(border_width))
-            .border_color(border_color)
-            .overflow_hidden()
-            .children(options.into_iter().enumerate().map(
-                |(index, (id, label, active, on_click))| {
-                    div()
-                        .id(id)
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .h(px(height))
-                        .px(px(padding_x))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(self.scaled(styles.settings_theme_option_font_size_px)))
-                        .text_color(if active { active_text } else { text })
-                        .bg(if active {
-                            active_bg
-                        } else {
-                            gpui::transparent_black()
-                        })
-                        .cursor(CursorStyle::Arrow)
-                        .when(!active, |this| this.hover(move |style| style.bg(hover_bg)))
-                        .when(index > 0, |this| {
-                            this.border_l(px(border_width)).border_color(border_color)
-                        })
-                        .child(div().min_w(px(0.0)).truncate().child(label))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                this.apply_settings_option_action(on_click, cx);
-                            }),
-                        )
-                },
-            ))
-            .into_any_element()
+        Checkbox::new(
+            id,
+            checked,
+            value_label,
+            self.ui_scale,
+            CheckboxColors {
+                checked_background: self.theme.text_primary,
+                checked_hover_background: self.theme.text_bright,
+                unchecked_background: styles.settings_option_button_bg,
+                unchecked_hover_background: styles.settings_option_button_hover_bg,
+                unchecked_border: styles.settings_option_button_border_color,
+                thumb: self.theme.bg_primary,
+                description: styles.settings_theme_option_text_color,
+            },
+        )
+        .render()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                this.apply_settings_option_action(action, cx);
+            }),
+        )
+        .into_any_element()
     }
 
     fn apply_settings_option_action(
@@ -581,14 +494,8 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         match action {
-            SettingsOptionAction::AttachmentLocation(value) => {
-                self.app_settings.attachment_location = value.to_string();
-            }
             SettingsOptionAction::AttachmentSyntax(value) => {
                 self.app_settings.attachment_link_syntax = value.to_string();
-            }
-            SettingsOptionAction::AttachmentPath(value) => {
-                self.app_settings.attachment_path_style = value.to_string();
             }
             SettingsOptionAction::AutomaticallyUpdateLinks(value) => {
                 self.app_settings.automatically_update_links = value;
@@ -660,16 +567,37 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn inline_stepper_input_styles(&self) -> crate::style::TextInputStyles {
+    fn settings_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
-        styles.text_input_bg = gpui::Hsla::transparent_black();
-        styles.text_input_focus_bg = gpui::Hsla::transparent_black();
+        styles.text_input_bg = self.styles.settings_panel.settings_option_button_bg;
+        styles.text_input_hover_bg =
+            Some(self.styles.settings_panel.settings_option_button_hover_bg);
+        styles.text_input_focus_bg = self.theme.bg_selected;
         styles.text_input_border_width_px = 0.0;
-        styles.text_input_padding_left_px = 2.0;
-        styles.text_input_padding_right_px = 2.0;
-        styles.text_input_height_px = 28.0;
+        styles.text_input_height_px = self.scaled(28.0);
+        styles.text_input_padding_left_px = self.scaled(8.0);
+        styles.text_input_padding_right_px = self.scaled(8.0);
+        styles.text_input_font_size_px = self.scaled(self.styles.ui_font_size_px + 1.0);
+        styles.text_input_radius_px = self.scaled(4.0);
+        styles.text_input_cursor_width_px =
+            self.scaled(self.styles.text_input.text_input_cursor_width_px);
+        styles.text_input_cursor_height_ratio = self
+            .styles
+            .workspace_search
+            .ws_search_input_cursor_height_ratio;
+        styles.text_input_cursor_height_adjust_px = self.scaled(
+            self.styles
+                .workspace_search
+                .ws_search_input_cursor_height_adjust_px,
+        );
+        styles
+    }
+
+    fn inline_stepper_input_styles(&self) -> crate::style::TextInputStyles {
+        let mut styles = self.settings_text_input_styles();
+        styles.text_input_padding_left_px = self.scaled(2.0);
+        styles.text_input_padding_right_px = self.scaled(2.0);
         styles.text_input_center = true;
-        styles.text_input_cursor_height_ratio = 0.6;
         styles
     }
 
@@ -1106,11 +1034,8 @@ impl EditorView {
         option_index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let hover_bg = self.theme.bg_hover;
-        let text_primary = self.styles.settings_panel.settings_primary_text_color;
         let text_secondary = self.styles.settings_panel.settings_secondary_text_color;
-        let border_color = self.theme.border_primary;
-        let current_value = current_value.to_string();
+        let control = self.render_picker_control(current_value, role, option_index, cx);
 
         div()
             .flex()
@@ -1124,50 +1049,64 @@ impl EditorView {
                     .text_color(text_secondary)
                     .child(label.to_string()),
             )
-            .child({
-                let bounds_cell = self
-                    .font_picker_button_bounds
-                    .entry((role, option_index))
-                    .or_insert_with(|| Rc::new(Cell::new(None)))
-                    .clone();
-                div()
-                    .flex_1()
-                    .on_children_prepainted({
-                        let bounds_cell = bounds_cell.clone();
-                        move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
-                            if let Some(b) = bounds.first() {
-                                bounds_cell.set(Some(*b));
-                            }
-                        }
-                    })
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "font-picker-{:?}-{}",
-                                role as u8, option_index
-                            )))
-                            .w_full()
-                            .h(px(self.scaled(30.0)))
-                            .px(px(self.scaled(10.0)))
-                            .flex()
-                            .items_center()
-                            .rounded(px(self.scaled(6.0)))
-                            .border(px(1.0))
-                            .border_color(border_color)
-                            .text_size(px(self.scaled(13.0)))
-                            .text_color(text_primary)
-                            .cursor(CursorStyle::Arrow)
-                            .hover(move |s| s.bg(hover_bg))
-                            .child(current_value)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _: &gpui::MouseDownEvent, window, cx| {
-                                    window.prevent_default();
-                                    this.open_font_picker(role, option_index, window, cx);
-                                }),
-                            ),
-                    )
+            .child(control)
+            .into_any_element()
+    }
+
+    fn render_picker_control(
+        &mut self,
+        current_value: &str,
+        role: FontRole,
+        option_index: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let hover_bg = self.theme.bg_hover;
+        let text_primary = self.styles.settings_panel.settings_primary_text_color;
+        let border_color = self.theme.border_primary;
+        let current_value = current_value.to_string();
+        let bounds_cell = self
+            .font_picker_button_bounds
+            .entry((role, option_index))
+            .or_insert_with(|| Rc::new(Cell::new(None)))
+            .clone();
+
+        div()
+            .flex_1()
+            .on_children_prepainted({
+                let bounds_cell = bounds_cell.clone();
+                move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
+                    if let Some(bounds) = bounds.first() {
+                        bounds_cell.set(Some(*bounds));
+                    }
+                }
             })
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "font-picker-{:?}-{}",
+                        role as u8, option_index
+                    )))
+                    .w_full()
+                    .h(px(self.scaled(30.0)))
+                    .px(px(self.scaled(10.0)))
+                    .flex()
+                    .items_center()
+                    .rounded(px(self.scaled(6.0)))
+                    .border(px(1.0))
+                    .border_color(border_color)
+                    .text_size(px(self.scaled(13.0)))
+                    .text_color(text_primary)
+                    .cursor(CursorStyle::Arrow)
+                    .hover(move |style| style.bg(hover_bg))
+                    .child(current_value)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &gpui::MouseDownEvent, window, cx| {
+                            window.prevent_default();
+                            this.open_font_picker(role, option_index, window, cx);
+                        }),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -1555,6 +1494,41 @@ impl EditorView {
                 self.date_time_format_options(),
                 self.t(TextKey::SearchDateTimeFormats).to_string(),
             ),
+            FontRole::AttachmentLocation => (
+                [
+                    "current_file",
+                    "workspace_root",
+                    "workspace_folder",
+                    "current_file_subfolder",
+                ]
+                .into_iter()
+                .map(|value| {
+                    let label = attachment_settings_label(self.ui_language, value).to_string();
+                    PickerOption {
+                        value: value.to_string(),
+                        search_text: label.to_lowercase(),
+                        label,
+                        preview_font: None,
+                    }
+                })
+                .collect(),
+                attachment_settings_label(self.ui_language, "search").to_string(),
+            ),
+            FontRole::AttachmentPath => (
+                ["relative", "workspace_absolute", "shortest"]
+                    .into_iter()
+                    .map(|value| {
+                        let label = attachment_settings_label(self.ui_language, value).to_string();
+                        PickerOption {
+                            value: value.to_string(),
+                            search_text: label.to_lowercase(),
+                            label,
+                            preview_font: None,
+                        }
+                    })
+                    .collect(),
+                attachment_settings_label(self.ui_language, "search").to_string(),
+            ),
             FontRole::InterfaceLanguage => (
                 language_picker_options(self.ui_language)
                     .into_iter()
@@ -1603,14 +1577,7 @@ impl EditorView {
         });
 
         // Create TextInput for search
-        let mut styles = self.styles.text_input.clone();
-        styles.text_input_bg = gpui::Hsla::transparent_black();
-        styles.text_input_focus_bg = gpui::Hsla::transparent_black();
-        styles.text_input_border_width_px = 0.0;
-        styles.text_input_height_px = self.scaled(28.0);
-        styles.text_input_font_size_px = self.scaled(13.0);
-        styles.text_input_cursor_height_ratio = 1.0;
-        styles.text_input_cursor_height_adjust_px = -self.scaled(15.0);
+        let styles = self.settings_text_input_styles();
         let editor = cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
         cx.subscribe(
             &editor,
@@ -1747,9 +1714,9 @@ impl EditorView {
         let settings_content_w = settings_content_max_w.min(pane_w);
         // mx_auto centers the content within the pane
         let settings_left = sidebar_w + border_w + (pane_w - settings_content_w) / 2.0;
-        let button_left = settings_left + settings_px + self.scaled(140.0) + self.scaled(12.0);
+        let button_left = settings_left + settings_px + self.scaled(120.0) + self.scaled(12.0);
         let button_w =
-            settings_content_w - 2.0 * settings_px - self.scaled(140.0) - self.scaled(12.0);
+            settings_content_w - 2.0 * settings_px - self.scaled(120.0) - self.scaled(12.0);
 
         // Use captured button bounds for precise positioning
         let button_bounds = self
@@ -1914,6 +1881,12 @@ impl EditorView {
                 }
                 (FontRole::DateTimeFormat, _) => {
                     self.app_settings.set_date_time_format(font_name);
+                }
+                (FontRole::AttachmentLocation, _) => {
+                    self.app_settings.attachment_location = font_name;
+                }
+                (FontRole::AttachmentPath, _) => {
+                    self.app_settings.attachment_path_style = font_name;
                 }
                 (FontRole::WhiteboardFont, _) => {
                     self.whiteboard_apply_font_family(font_name, cx);

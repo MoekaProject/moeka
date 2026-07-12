@@ -869,6 +869,11 @@ impl Render for TextInput {
         } else {
             s.text_input_bg
         };
+        let hover_bg = if is_focused {
+            Some(s.text_input_focus_bg)
+        } else {
+            s.text_input_hover_bg
+        };
         let height = s.text_input_height_px;
         let line_count = if self.multiline {
             self.text.split('\n').count().max(1)
@@ -959,6 +964,9 @@ impl Render for TextInput {
             .pl(px(padding_left))
             .pr(px(padding_right))
             .bg(bg)
+            .when_some(hover_bg, |this, hover_bg| {
+                this.hover(move |style| style.bg(hover_bg))
+            })
             .rounded(px(s.text_input_radius_px))
             .flex()
             .items_center()

@@ -1341,6 +1341,7 @@ pub(crate) fn attachment_settings_label(language: UiLanguage, key: &str) -> &'st
             "workspace_absolute" => "工作区根相对",
             "shortest" => "最短唯一路径",
             "update_links" => "移动后自动更新链接",
+            "search" => "搜索...",
             _ => "",
         },
         UiLanguage::ChineseTraditional => match key {
@@ -1359,6 +1360,7 @@ pub(crate) fn attachment_settings_label(language: UiLanguage, key: &str) -> &'st
             "workspace_absolute" => "工作區根相對",
             "shortest" => "最短唯一路徑",
             "update_links" => "移動後自動更新連結",
+            "search" => "搜尋...",
             _ => "",
         },
         _ => match key {
@@ -1377,6 +1379,7 @@ pub(crate) fn attachment_settings_label(language: UiLanguage, key: &str) -> &'st
             "workspace_absolute" => "Workspace Relative",
             "shortest" => "Shortest Unique",
             "update_links" => "Update Links After Move",
+            "search" => "Search...",
             _ => "",
         },
     }

@@ -2,6 +2,7 @@
 
 mod actions;
 mod buffer;
+mod checkbox;
 mod cursor;
 mod editor;
 mod i18n;
