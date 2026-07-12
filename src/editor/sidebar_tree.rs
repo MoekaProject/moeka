@@ -53,7 +53,24 @@ impl EditorView {
         path: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        if self.sidebar_directory_children.contains_key(&path)
+        self.schedule_sidebar_directory_request(path, false, cx);
+    }
+
+    pub(crate) fn schedule_sidebar_directory_refresh(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        self.schedule_sidebar_directory_request(path, true, cx);
+    }
+
+    fn schedule_sidebar_directory_request(
+        &mut self,
+        path: PathBuf,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if (!force && self.sidebar_directory_children.contains_key(&path))
             || !self.sidebar_directory_loading.insert(path.clone())
         {
             return;

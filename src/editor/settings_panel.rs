@@ -1579,7 +1579,10 @@ impl EditorView {
         });
 
         // Create TextInput for search
-        let styles = self.settings_text_input_styles();
+        let mut styles = self.settings_text_input_styles();
+        styles.text_input_bg = gpui::transparent_black();
+        styles.text_input_hover_bg = None;
+        styles.text_input_focus_bg = gpui::transparent_black();
         let editor = cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
         cx.subscribe(
             &editor,
@@ -1743,13 +1746,7 @@ impl EditorView {
             None => (button_left, 200.0, button_w, self.scaled(30.0)),
         };
 
-        // The whiteboard panel's picker matches its trigger button exactly;
-        // the settings pickers keep a comfortable min/max width.
-        let dropdown_w = if picker.role == FontRole::WhiteboardFont {
-            button_w_val
-        } else {
-            button_w_val.min(self.scaled(400.0)).max(self.scaled(260.0))
-        };
+        let dropdown_w = button_w_val;
         let gap = self.scaled(4.0);
         let desired_visible = picker.filtered.len().min(200).min(max_visible).max(1);
         let desired_h = desired_visible as f32 * item_h + self.scaled(42.0);

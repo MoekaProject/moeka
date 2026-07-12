@@ -17,6 +17,27 @@ const FILE_LIST_READ_LIMIT: usize = 16 * 1024;
 /// Preview length in characters (markdown syntax stripped).
 const FILE_LIST_PREVIEW_CHARS: usize = 120;
 
+fn scroll_y_to_reveal_uniform_item(
+    current_scroll_y: f32,
+    viewport_height: f32,
+    prefix_height: f32,
+    item_height: f32,
+    index: usize,
+) -> Option<f32> {
+    if viewport_height <= 0.0 || item_height <= 0.0 {
+        return None;
+    }
+    let item_top = prefix_height + index as f32 * item_height;
+    let item_bottom = item_top + item_height;
+    if item_top < current_scroll_y {
+        Some(item_top.max(0.0))
+    } else if item_bottom > current_scroll_y + viewport_height {
+        Some((item_bottom - viewport_height).max(0.0))
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct FileListItem {
     pub path: PathBuf,
@@ -79,6 +100,17 @@ fn load_file_list_details(
             (path, modified, FileListDetails { title, preview })
         })
         .collect()
+}
+
+fn preserve_file_list_details(previous: &[FileListItem], items: &mut [FileListItem]) {
+    for item in items {
+        if let Some(previous) = previous
+            .iter()
+            .find(|previous| previous.path == item.path && previous.modified == item.modified)
+        {
+            item.details = previous.details.clone();
+        }
+    }
 }
 
 /// Reads up to `FILE_LIST_READ_LIMIT` bytes and converts them lossily; a
@@ -486,6 +518,8 @@ impl EditorView {
                 if this.file_list_epoch != epoch {
                     return;
                 }
+                let mut items = items;
+                preserve_file_list_details(&this.file_list_items, &mut items);
                 this.file_list_items = items;
                 this.file_list_loaded_dir = Some(loaded_dir);
                 this.file_list_task = None;
@@ -605,8 +639,8 @@ impl EditorView {
                         None,
                         cx,
                         move |this, _event, window, cx| {
+                            this.file_list_menu_origin = true;
                             this.start_create_file(create_parent.clone(), window, cx);
-                            this.sidebar_edit_in_file_list = true;
                         },
                     )),
             )
@@ -834,10 +868,8 @@ impl EditorView {
             );
         }
 
-        // Scroll the linked item (active tab / FileTree selection) into view
-        // once this directory's items are loaded. `scroll_to_item` records the
-        // target index and resolves it during this frame's prepaint, after the
-        // fresh child bounds have been captured.
+        // Virtualized children contain spacers, so their child index does not
+        // match the backing item index. Reveal by content geometry instead.
         if let Some(reveal_path) = self.file_list_pending_reveal_path.clone()
             && !self.file_list_dirty
             && self.file_list_task.is_none()
@@ -849,8 +881,20 @@ impl EditorView {
                 .iter()
                 .position(|item| item.path == reveal_path)
             {
-                let child_index = index + usize::from(create_editor.is_some());
-                self.file_list_scroll_handle.scroll_to_item(child_index);
+                let viewport_height = f32::from(self.file_list_scroll_handle.bounds().size.height);
+                let current_scroll_y =
+                    (-f32::from(self.file_list_scroll_handle.offset().y)).max(0.0);
+                if let Some(next_scroll_y) = scroll_y_to_reveal_uniform_item(
+                    current_scroll_y,
+                    viewport_height,
+                    prefix_height,
+                    item_height,
+                    index,
+                ) {
+                    let offset = self.file_list_scroll_handle.offset();
+                    self.file_list_scroll_handle
+                        .set_offset(gpui::point(offset.x, px(-next_scroll_y)));
+                }
             }
         }
 
@@ -943,7 +987,10 @@ impl EditorView {
 mod tests {
     use std::{fs, time::SystemTime};
 
-    use super::{extract_title_and_preview, load_file_list_items};
+    use super::{
+        FileListDetails, FileListItem, extract_title_and_preview, load_file_list_items,
+        preserve_file_list_details, scroll_y_to_reveal_uniform_item,
+    };
     use crate::editor::SidebarSortMode;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -970,6 +1017,43 @@ mod tests {
         assert_eq!(items[0].name, "note.md");
         assert!(items[0].details.is_none());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reveal_does_not_scroll_an_already_visible_item() {
+        assert_eq!(
+            scroll_y_to_reveal_uniform_item(100.0, 200.0, 0.0, 50.0, 3),
+            None
+        );
+        assert_eq!(
+            scroll_y_to_reveal_uniform_item(100.0, 200.0, 0.0, 50.0, 6),
+            Some(150.0)
+        );
+    }
+
+    #[test]
+    fn index_refresh_preserves_details_for_unchanged_files() {
+        let modified = SystemTime::now();
+        let path = std::path::PathBuf::from("note.md");
+        let previous = vec![FileListItem {
+            path: path.clone(),
+            name: "note.md".to_string(),
+            modified,
+            details: Some(FileListDetails {
+                title: Some("Title".to_string()),
+                preview: "Preview".to_string(),
+            }),
+        }];
+        let mut refreshed = vec![FileListItem {
+            path,
+            name: "note.md".to_string(),
+            modified,
+            details: None,
+        }];
+
+        preserve_file_list_details(&previous, &mut refreshed);
+
+        assert_eq!(refreshed[0].details.as_ref().unwrap().preview, "Preview");
     }
 
     #[test]

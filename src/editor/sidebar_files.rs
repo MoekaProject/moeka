@@ -183,8 +183,18 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.expanded_dirs.insert(parent.clone());
-        self.invalidate_sidebar_items_cache();
+        let create_in_file_list = self.file_list_menu_origin;
+        if create_in_file_list {
+            self.file_list_scroll_handle
+                .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+            self.file_list_pending_reveal_path = None;
+        } else {
+            let expanded_changed = self.expanded_dirs.insert(parent.clone());
+            self.schedule_sidebar_directory_load(parent.clone(), cx);
+            if expanded_changed {
+                self.invalidate_sidebar_flattened_items();
+            }
+        }
         let styles = self.sidebar_edit_text_input_styles();
         let placeholder = self
             .t(crate::i18n::TextKey::FileNamePlaceholder)
@@ -206,7 +216,8 @@ impl EditorView {
         });
         window.focus(&focus_handle);
         self.sidebar_edit = Some(SidebarEditMode::CreateFile { parent, editor });
-        self.sidebar_edit_in_file_list = self.file_list_menu_origin;
+        self.sidebar_edit_in_file_list = create_in_file_list;
+        self.file_list_menu_origin = false;
         self.sidebar_edit_blur_sub = Some(blur_sub);
         self.context_menu = None;
         cx.notify();
@@ -319,8 +330,16 @@ impl EditorView {
                     if let Err(error) = std::fs::File::create(&new_path) {
                         eprintln!("Create file failed: {error}");
                     } else {
-                        self.invalidate_sidebar_items_cache();
-                        self.reveal_path_in_sidebar(new_path.clone(), cx);
+                        self.schedule_sidebar_directory_refresh(parent.clone(), cx);
+                        self.quick_open_index_root = None;
+                        self.quick_open_file_index.clear();
+                        if self.file_list_effective_dir() == *parent {
+                            self.file_list_dirty = true;
+                        }
+                        self.set_file_list_dir_for_path(&new_path, cx);
+                        self.selected_sidebar_paths.clear();
+                        self.selected_sidebar_paths.insert(new_path.clone());
+                        self.sidebar_selection_anchor = Some(new_path.clone());
                         self.open_sidebar_file(new_path, cx);
                         return;
                     }

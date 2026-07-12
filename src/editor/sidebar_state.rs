@@ -563,13 +563,16 @@ impl EditorView {
         }
 
         let mut expanded_changed = switched_workspace;
+        let mut directories_to_load = Vec::new();
         expanded_changed |= self.expanded_dirs.insert(root.clone());
+        directories_to_load.push(root.clone());
         let mut ancestor = path.parent();
         while let Some(dir) = ancestor {
             if !dir.starts_with(&root) {
                 break;
             }
             expanded_changed |= self.expanded_dirs.insert(dir.to_path_buf());
+            directories_to_load.push(dir.to_path_buf());
             if dir == root {
                 break;
             }
@@ -580,7 +583,10 @@ impl EditorView {
         self.selected_sidebar_paths.clear();
         self.selected_sidebar_paths.insert(path.clone());
         self.sidebar_selection_anchor = Some(path.clone());
-        self.invalidate_sidebar_items_cache();
+        for directory in directories_to_load {
+            self.schedule_sidebar_directory_load(directory, cx);
+        }
+        self.invalidate_sidebar_flattened_items();
         let items = self.sidebar_items();
         let item_count = items.len();
         if let Some(index) = items.iter().position(|item| item.path == path) {
