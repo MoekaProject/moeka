@@ -33,6 +33,7 @@ mod render;
 mod scaling;
 mod scrollbar;
 mod search;
+mod search_index;
 mod session_store;
 pub(crate) mod settings_panel;
 mod shortcut;
@@ -1256,7 +1257,10 @@ impl PendingLineDisplayTransfer {
         self.cached_lines
     }
 
-    fn apply_non_markdown_decoration_transfer(
+    /// Splice default (plain) decorations over the edited line range. Shared
+    /// by code/text tabs and by markdown edits that provably stay plain text;
+    /// `code_language` tags the inserted lines for syntax highlighting.
+    fn apply_plain_decoration_transfer(
         &self,
         decorations: &mut Vec<LineDecoration>,
         code_language: Option<&str>,
@@ -1272,17 +1276,6 @@ impl PendingLineDisplayTransfer {
         decorations.splice(
             replace_start..replace_end,
             (0..inserted_line_count).map(move |_| default_decoration.clone()),
-        );
-    }
-
-    fn apply_markdown_plain_decoration_transfer(&self, decorations: &mut Vec<LineDecoration>) {
-        let replace_start = self.start_line.min(decorations.len());
-        let replace_end = self.old_end_line_exclusive.min(decorations.len());
-        let inserted_line_count = self.new_end_line_exclusive.saturating_sub(self.start_line);
-
-        decorations.splice(
-            replace_start..replace_end,
-            (0..inserted_line_count).map(|_| LineDecoration::default()),
         );
         if decorations.is_empty() {
             decorations.push(LineDecoration::default());
@@ -1745,6 +1738,14 @@ pub struct EditorView {
     pub(crate) workspace_search_has_more: bool,
     pub(crate) workspace_search_scroll_handle: ScrollHandle,
     pub(crate) workspace_search_render_limit: usize,
+    /// tantivy candidate index for workspace search; built lazily in the
+    /// background on first search and refreshed when the workspace changes.
+    pub(crate) workspace_search_index: Option<std::sync::Arc<search_index::WorkspaceSearchIndex>>,
+    pub(crate) workspace_search_index_task: Option<Task<()>>,
+    pub(crate) workspace_search_index_epoch: usize,
+    /// Workspace files changed since the index snapshot was built; always
+    /// appended to index candidates so results never go stale.
+    pub(crate) workspace_search_index_dirty_paths: HashSet<PathBuf>,
 
     // ── Quick open state ───────────────────────────────────────────
     pub(crate) quick_open_visible: bool,
@@ -2236,6 +2237,10 @@ impl EditorView {
             workspace_search_has_more: false,
             workspace_search_scroll_handle: ScrollHandle::new(),
             workspace_search_render_limit: list_viewport::SEARCH_LIST_POLICY.initial_count,
+            workspace_search_index: None,
+            workspace_search_index_task: None,
+            workspace_search_index_epoch: 0,
+            workspace_search_index_dirty_paths: HashSet::new(),
 
             quick_open_visible: false,
             quick_open_query: String::new(),
@@ -3641,6 +3646,7 @@ impl EditorView {
         let mut diff_tabs_to_refresh = Vec::new();
         if !changed_paths_in_workspace.is_empty() {
             self.invalidate_sidebar_items_cache();
+            self.mark_workspace_search_index_dirty(&changed_paths_in_workspace);
             needs_notify = true;
         }
         let git_status_changed = git_metadata_impact.affects_sidebar_status
@@ -4740,37 +4746,35 @@ impl EditorView {
             if self.decorations.is_empty() {
                 self.decorations.push(LineDecoration::default());
             }
-        } else if matches!(file_kind, FileKind::Code { .. } | FileKind::Text) {
-            if let Some(transfer) = pending_line_display_transfer.as_ref() {
-                let code_language = match &file_kind {
-                    FileKind::Code { language } => Some(language.as_str()),
-                    _ => None,
-                };
-                transfer
-                    .apply_non_markdown_decoration_transfer(&mut self.decorations, code_language);
-                self.invalidate_line_geometry_cache();
-            } else {
-                self.set_decorations(parse_decorations_for_file_kind(
-                    self.buffer.text(),
-                    &file_kind,
-                ));
-            }
-        } else if matches!(file_kind, FileKind::Markdown)
-            && pending_line_display_transfer
-                .as_ref()
-                .is_some_and(|transfer| transfer.markdown_plain_decoration_transfer)
-        {
-            if let Some(transfer) = pending_line_display_transfer.as_ref() {
-                transfer.apply_markdown_plain_decoration_transfer(&mut self.decorations);
-                self.invalidate_line_geometry_cache();
-            }
         } else {
-            let incremental_succeeded = pending_line_display_transfer
-                .as_ref()
-                .filter(|_| matches!(file_kind, FileKind::Markdown))
-                .map(|transfer| self.try_incremental_markdown_decorations(transfer))
-                .is_some_and(|result| result.is_ok());
-            if !incremental_succeeded {
+            // Unified decoration pipeline for markdown / text / code tabs:
+            // apply the cheapest sound incremental strategy for the queued
+            // edit, falling back to a full parse via
+            // `parse_decorations_for_file_kind` (the single full-parse entry
+            // point for every file kind).
+            let incremental_applied = match (&file_kind, pending_line_display_transfer.as_ref()) {
+                (FileKind::Code { .. } | FileKind::Text, Some(transfer)) => {
+                    let code_language = match &file_kind {
+                        FileKind::Code { language } => Some(language.as_str()),
+                        _ => None,
+                    };
+                    transfer.apply_plain_decoration_transfer(&mut self.decorations, code_language);
+                    self.invalidate_line_geometry_cache();
+                    true
+                }
+                (FileKind::Markdown, Some(transfer))
+                    if transfer.markdown_plain_decoration_transfer =>
+                {
+                    transfer.apply_plain_decoration_transfer(&mut self.decorations, None);
+                    self.invalidate_line_geometry_cache();
+                    true
+                }
+                (FileKind::Markdown, Some(transfer)) => {
+                    self.try_incremental_markdown_decorations(transfer).is_ok()
+                }
+                _ => false,
+            };
+            if !incremental_applied {
                 self.set_decorations(parse_decorations_for_file_kind(
                     self.buffer.text(),
                     &file_kind,

@@ -51,6 +51,7 @@ usvg = { version = "0.45.1", default-features = false, features = [
   "system-fonts",
   "memmap-fonts",
 ] }
+tantivy = "0.26.1"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 pprof = { version = "0.15", features = ["flamegraph"] }

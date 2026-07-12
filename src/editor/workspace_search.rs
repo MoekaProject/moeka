@@ -344,11 +344,128 @@ impl EditorView {
         self.workspace_search_epoch = self.workspace_search_epoch.wrapping_add(1);
         self.workspace_search_task = None;
         self.workspace_search_results.clear();
-        self.workspace_search_pending_paths = vec![root];
+        self.workspace_search_pending_paths.clear();
         self.workspace_search_has_more = true;
         self.workspace_search_render_limit = super::list_viewport::SEARCH_LIST_POLICY.initial_count;
         self.workspace_search_scroll_handle.scroll_to_item(0);
-        self.schedule_workspace_search_batch(cx);
+        self.ensure_workspace_search_index(cx);
+        self.seed_workspace_search_paths(root, cx);
+    }
+
+    /// Compute the initial `pending_paths` for a search: candidate files from
+    /// the tantivy index when it can answer the query, otherwise the workspace
+    /// root for a full scan. Runs the index query off the UI thread and then
+    /// starts the first scan batch.
+    fn seed_workspace_search_paths(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let query = self.workspace_search_query.trim().to_string();
+        let use_regex = self.workspace_search_use_regex;
+        let index = self
+            .workspace_search_index
+            .clone()
+            .filter(|index| index.root() == root);
+        let dirty_paths: Vec<PathBuf> = self
+            .workspace_search_index_dirty_paths
+            .iter()
+            .cloned()
+            .collect();
+        let epoch = self.workspace_search_epoch;
+        let fallback_root = root.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let seed = cx
+                .background_executor()
+                .spawn(async move {
+                    let index = index?;
+                    let mut candidates = index.candidate_paths(&query, use_regex)?;
+                    candidates.extend(dirty_paths);
+                    candidates.retain(|path| path.starts_with(&root));
+                    candidates.sort();
+                    candidates.dedup();
+                    // `search_directory_batch` pops from the end, so reverse to
+                    // keep alphabetical result order.
+                    candidates.reverse();
+                    Some(candidates)
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                if this.workspace_search_epoch != epoch {
+                    return;
+                }
+                this.workspace_search_task = None;
+                this.workspace_search_pending_paths = seed.unwrap_or_else(|| vec![fallback_root]);
+                this.workspace_search_has_more = !this.workspace_search_pending_paths.is_empty();
+                this.schedule_workspace_search_batch(cx);
+                cx.notify();
+            })
+            .ok();
+        });
+        self.workspace_search_task = Some(task);
+    }
+
+    /// Build (or rebuild) the workspace search index in the background. A
+    /// rebuild is triggered when there is no index for the current workspace
+    /// or when enough files changed since the last snapshot.
+    pub(crate) fn ensure_workspace_search_index(&mut self, cx: &mut Context<Self>) {
+        const REBUILD_DIRTY_THRESHOLD: usize = 256;
+
+        let root = self.sidebar_root.clone();
+        if root.as_os_str().is_empty() || !root.exists() {
+            return;
+        }
+        if self.workspace_search_index_task.is_some() {
+            return;
+        }
+        let stale_root = self
+            .workspace_search_index
+            .as_ref()
+            .is_some_and(|index| index.root() != root);
+        if stale_root {
+            self.workspace_search_index = None;
+            self.workspace_search_index_dirty_paths.clear();
+        }
+        let needs_rebuild = self.workspace_search_index.is_none()
+            || self.workspace_search_index_dirty_paths.len() > REBUILD_DIRTY_THRESHOLD;
+        if !needs_rebuild {
+            return;
+        }
+        self.workspace_search_index_epoch = self.workspace_search_index_epoch.wrapping_add(1);
+        let epoch = self.workspace_search_index_epoch;
+        let dirty_snapshot: Vec<PathBuf> = self
+            .workspace_search_index_dirty_paths
+            .iter()
+            .cloned()
+            .collect();
+        let task = cx.spawn(async move |this, cx| {
+            let built = cx
+                .background_executor()
+                .spawn(async move { super::search_index::WorkspaceSearchIndex::build(&root).ok() })
+                .await;
+            this.update(cx, |this, _cx| {
+                this.workspace_search_index_task = None;
+                if this.workspace_search_index_epoch != epoch {
+                    return;
+                }
+                if let Some(index) = built {
+                    this.workspace_search_index = Some(std::sync::Arc::new(index));
+                    for path in &dirty_snapshot {
+                        this.workspace_search_index_dirty_paths.remove(path);
+                    }
+                }
+            })
+            .ok();
+        });
+        self.workspace_search_index_task = Some(task);
+    }
+
+    /// Record workspace files changed since the index snapshot; they are
+    /// unioned into every candidate set so search results never go stale.
+    pub(crate) fn mark_workspace_search_index_dirty(&mut self, paths: &[PathBuf]) {
+        if self.workspace_search_index.is_none() && self.workspace_search_index_task.is_none() {
+            return;
+        }
+        for path in paths {
+            self.workspace_search_index_dirty_paths.insert(path.clone());
+        }
     }
 
     fn schedule_workspace_search_batch(&mut self, cx: &mut Context<Self>) {
