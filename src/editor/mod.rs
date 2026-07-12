@@ -8,6 +8,7 @@ mod config_paths;
 mod config_store;
 mod element;
 mod file_list;
+mod file_ops;
 mod fold;
 mod handlers;
 mod helpers;
@@ -1803,6 +1804,7 @@ pub struct EditorView {
 
 impl Drop for EditorView {
     fn drop(&mut self) {
+        self.flush_recovery_files();
         self.stop_chat_terminal();
         let diagnostics = self.runtime_profile_diagnostics();
         if let Some(profiler) = self.runtime_profiler.take()

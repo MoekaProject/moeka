@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::EditorSnapshot;
 use super::config_paths;
+use super::file_ops;
 
 const HISTORY_SCHEMA_VERSION: u32 = 1;
 pub(crate) const SNAPSHOT_INTERVAL: usize = 50;
@@ -340,16 +341,7 @@ fn snap_char_boundary(text: &str, mut offset: usize) -> usize {
 }
 
 fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
-    let file_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "history.json".to_string());
-    let temp_path = path.with_file_name(format!(".{file_name}.tmp"));
-    fs::write(&temp_path, content)?;
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(temp_path, path)
+    file_ops::atomic_write(path, content)
 }
 
 impl From<&EditorSnapshot> for SnapshotViewState {

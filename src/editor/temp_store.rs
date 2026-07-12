@@ -2,14 +2,16 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::time::UNIX_EPOCH;
 
 use gpui::Context;
 
 use super::config_paths;
+use super::file_ops;
 use super::*;
 
 const UNTITLED_TEMP_DIR: &str = ".moeka-cache/untitled";
-const TEMP_SAVE_DEBOUNCE: Duration = Duration::from_secs(5);
+const TEMP_SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 
 pub(crate) fn choose_temp_path_for_tab(
     tab_id: &str,
@@ -33,19 +35,7 @@ pub(crate) fn choose_temp_path_for_tab(
 }
 
 pub(crate) fn write_temp_file(path: &Path, text: &str) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let file_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "temp".to_string());
-    let temp_path = path.with_file_name(format!(".{file_name}.tmp"));
-    fs::write(&temp_path, text.as_bytes())?;
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(temp_path, path)
+    file_ops::atomic_write(path, text.as_bytes())
 }
 
 pub(crate) fn delete_temp_file(path: &Path) -> io::Result<()> {
@@ -60,6 +50,21 @@ fn untitled_temp_root(sidebar_root: &Path) -> PathBuf {
         return sidebar_root.join(UNTITLED_TEMP_DIR);
     }
     config_paths::cache_dir().join("untitled")
+}
+
+fn source_recovery_metadata(path: Option<&Path>) -> (Option<u64>, Option<String>) {
+    let Some(path) = path else {
+        return (None, None);
+    };
+    let mtime = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64);
+    let hash = fs::read(path)
+        .ok()
+        .map(|content| file_ops::content_hash(&content));
+    (mtime, hash)
 }
 
 impl EditorView {
@@ -123,11 +128,20 @@ impl EditorView {
             self.tabs[index].recovery.temp_path.as_deref(),
             &self.sidebar_root,
         );
-        write_temp_file(&temp_path, &snapshot.text)?;
+        let previous_recovery = self.tabs[index].recovery.clone();
+        let source_path = self.tabs[index].path.clone();
+        let (source_mtime, source_content_hash) = source_recovery_metadata(source_path.as_deref());
         self.tabs[index].recovery.temp_path = Some(temp_path.clone());
-        self.tabs[index].recovery.source_path = self.tabs[index].path.clone();
+        self.tabs[index].recovery.source_path = source_path;
+        self.tabs[index].recovery.source_mtime = source_mtime;
+        self.tabs[index].recovery.source_content_hash = source_content_hash;
         self.tabs[index].recovery.recovered_from_temp = true;
         session_store::persist_session(self);
+        if let Err(error) = write_temp_file(&temp_path, &snapshot.text) {
+            self.tabs[index].recovery = previous_recovery;
+            session_store::persist_session(self);
+            return Err(error);
+        }
         Ok(Some(temp_path))
     }
 
@@ -140,6 +154,20 @@ impl EditorView {
             }
             tab.recovery.recovered_from_temp = false;
         }
+    }
+
+    pub(crate) fn flush_recovery_files(&mut self) {
+        self.persist_active_tab_state();
+        let dirty_tab_ids = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind == TabKind::Editor && tab.is_dirty)
+            .map(|tab| tab.id.clone())
+            .collect::<Vec<_>>();
+        for tab_id in dirty_tab_ids {
+            let _ = self.write_temp_file_for_tab(&tab_id);
+        }
+        session_store::persist_session(self);
     }
 }
 
@@ -190,5 +218,30 @@ mod tests {
 
         delete_temp_file(&path).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn source_metadata_tracks_contents_and_modification_time() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, "hello").unwrap();
+
+        let (mtime, hash) = source_recovery_metadata(Some(&path));
+
+        assert!(mtime.is_some());
+        assert_eq!(hash, Some(file_ops::content_hash(b"hello")));
+        assert_eq!(source_recovery_metadata(None), (None, None));
+    }
+
+    #[test]
+    fn content_hash_is_stable_and_content_sensitive() {
+        assert_eq!(
+            file_ops::content_hash(b"hello"),
+            file_ops::content_hash(b"hello")
+        );
+        assert_ne!(
+            file_ops::content_hash(b"hello"),
+            file_ops::content_hash(b"world")
+        );
     }
 }

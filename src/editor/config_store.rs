@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::AppSettings;
 use super::config_paths;
+use super::file_ops;
 
 pub(crate) const CONFIG_SCHEMA_VERSION: u32 = 1;
 
@@ -158,26 +159,7 @@ fn save_config_to_path(path: &Path, config: &AppConfig) -> io::Result<()> {
 
     let yaml = serde_yaml::to_string(config)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    write_atomic(path, yaml.as_bytes())
-}
-
-fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
-    let temp_path = atomic_temp_path(path);
-    fs::write(&temp_path, content)?;
-
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-
-    fs::rename(temp_path, path)
-}
-
-fn atomic_temp_path(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "config.yaml".to_string());
-    path.with_file_name(format!(".{file_name}.tmp"))
+    file_ops::atomic_write(path, yaml.as_bytes())
 }
 
 #[cfg(test)]
@@ -310,6 +292,53 @@ mod tests {
 
         let loaded = load_config_from_path(&path).unwrap();
         assert_eq!(loaded.settings.theme, "MilkyLight");
-        assert!(!dir.path().join(".config.yaml.tmp").exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn session_roundtrip_preserves_recovery_and_view_state() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let source_path = dir.path().join("note.md");
+        let temp_path = dir.path().join(".note.md.temp");
+        let mut config = AppConfig::default();
+        config.session = SessionConfig {
+            active_tab_id: Some("tab-7".to_string()),
+            next_tab_id: Some(8),
+            tabs: vec![TabSessionRecord {
+                id: "tab-7".to_string(),
+                kind: "editor".to_string(),
+                title: "note.md".to_string(),
+                path: Some(source_path.clone()),
+                file_kind: Some("markdown".to_string()),
+                is_preview: false,
+                is_pinned: true,
+                view: TabViewState {
+                    cursor_offset: 12,
+                    cursor_anchor: 4,
+                    scroll_offset: 25.5,
+                    editor_left_aligned: true,
+                    extra_cursors: vec![(9, 3)],
+                },
+                recovery: TabRecoveryState {
+                    temp_path: Some(temp_path.clone()),
+                    source_path: Some(source_path),
+                    source_mtime: Some(123_456),
+                    source_content_hash: Some("abc123".to_string()),
+                    recovered_from_temp: true,
+                },
+                history: TabHistoryIndex {
+                    undo_log_path: Some(dir.path().join("history.json")),
+                    source_identity: Some("source".to_string()),
+                    current_index: Some(2),
+                    entry_count: 4,
+                },
+            }],
+        };
+
+        save_config_to_path(&path, &config).unwrap();
+        let loaded = load_config_from_path(&path).unwrap();
+
+        assert_eq!(loaded.session, config.session);
     }
 }

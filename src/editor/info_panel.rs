@@ -829,6 +829,7 @@ fn nsstring(text: &str) -> *mut objc::runtime::Object {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn nsurl_from_directory(path: &Path) -> *mut objc::runtime::Object {
     unsafe {
         msg_send![
