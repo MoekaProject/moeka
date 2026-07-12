@@ -613,6 +613,9 @@ impl EditorView {
             return;
         }
         self.persist_active_tab_state();
+        if let Some(tab_id) = self.active_tab_id.clone() {
+            let _ = self.write_temp_file_for_tab(&tab_id);
+        }
         self.stash_active_tab_layout_cache();
         self.activate_tab_by_index_without_persist(index, cx);
         session_store::persist_session(self);

@@ -1836,7 +1836,7 @@ impl EditorView {
         }
         let text = self.normalize_text_for_save();
         if let Some(ref path) = self.tabs[index].path.clone() {
-            if std::fs::write(path, &text).is_ok() {
+            if file_ops::atomic_write(path, text.as_bytes()).is_ok() {
                 self.tabs[index].is_dirty = false;
                 let tab_id = self.tabs[index].id.clone();
                 self.clear_temp_file_for_tab(&tab_id);
@@ -1862,7 +1862,7 @@ impl EditorView {
                     .spawn(async move { helpers::save_file_blocking(&default_name, &title) })
                     .await;
                 if let Some(path) = maybe_path
-                    && std::fs::write(&path, &text).is_ok()
+                    && file_ops::atomic_write(&path, text.as_bytes()).is_ok()
                 {
                     this.update(cx, |editor, cx| {
                         if let Some(idx) = editor.active_tab_index() {
@@ -1904,7 +1904,7 @@ impl EditorView {
             return;
         };
         if let Some(path) = self.tabs[index].path.clone() {
-            if std::fs::write(&path, &json).is_ok() {
+            if file_ops::atomic_write(&path, json.as_bytes()).is_ok() {
                 self.tabs[index].is_dirty = false;
                 session_store::persist_session(self);
                 cx.notify();
@@ -1918,7 +1918,7 @@ impl EditorView {
                     .spawn(async move { helpers::save_file_blocking(&default_name, &title) })
                     .await;
                 if let Some(path) = maybe_path
-                    && std::fs::write(&path, &json).is_ok()
+                    && file_ops::atomic_write(&path, json.as_bytes()).is_ok()
                 {
                     this.update(cx, |editor, cx| {
                         if let Some(idx) = editor.active_tab_index() {
