@@ -88,6 +88,7 @@ pub struct WikiLinkSpan {
     pub full_range: Range<usize>,
     pub collapsed_range: Range<usize>,
     pub target_path: String,
+    pub has_alias: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,8 +160,23 @@ fn merge_byte_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
     merged
 }
 
-fn wiki_link_excluded_ranges(decoration: &LineDecoration) -> Vec<Range<usize>> {
-    let mut excluded = Vec::new();
+fn inline_span_source_range(
+    decoration: &LineDecoration,
+    span: &InlineSpan,
+) -> Option<Range<usize>> {
+    decoration
+        .syntax_ranges
+        .iter()
+        .filter(|syntax_range| {
+            syntax_range.trigger_range.start <= span.range.start
+                && syntax_range.trigger_range.end >= span.range.end
+        })
+        .map(|syntax_range| syntax_range.trigger_range.clone())
+        .min_by_key(|range| (range.end.saturating_sub(range.start), range.start))
+}
+
+fn structural_excluded_ranges(decoration: &LineDecoration) -> Vec<Range<usize>> {
+    let mut excluded = decoration.protected_ranges.clone();
 
     for span in decoration.inline_spans.iter().filter(|span| {
         matches!(
@@ -168,15 +184,7 @@ fn wiki_link_excluded_ranges(decoration: &LineDecoration) -> Vec<Range<usize>> {
             InlineKind::InlineCode | InlineKind::Link | InlineKind::Image
         )
     }) {
-        let full_range = decoration
-            .syntax_ranges
-            .iter()
-            .filter(|syntax_range| {
-                syntax_range.trigger_range.start <= span.range.start
-                    && syntax_range.trigger_range.end >= span.range.end
-            })
-            .map(|syntax_range| syntax_range.trigger_range.clone())
-            .min_by_key(|range| (range.end.saturating_sub(range.start), range.start));
+        let full_range = inline_span_source_range(decoration, span);
 
         match full_range {
             Some(range) => excluded.push(range),
@@ -186,6 +194,54 @@ fn wiki_link_excluded_ranges(decoration: &LineDecoration) -> Vec<Range<usize>> {
             None => {}
         }
     }
+
+    merge_byte_ranges(excluded)
+}
+
+fn custom_inline_excluded_ranges(decoration: &LineDecoration) -> Vec<Range<usize>> {
+    // Presentation syntax may style visible link labels and Wiki aliases, but
+    // never structural targets or semantically opaque inline content.
+    let mut excluded = decoration.protected_ranges.clone();
+
+    for span in &decoration.inline_spans {
+        match span.kind {
+            InlineKind::InlineCode | InlineKind::Image => {
+                if let Some(range) = inline_span_source_range(decoration, span) {
+                    excluded.push(range);
+                }
+            }
+            InlineKind::Link => {
+                let source_range = inline_span_source_range(decoration, span);
+                excluded.extend(
+                    decoration
+                        .syntax_ranges
+                        .iter()
+                        .filter(|syntax_range| {
+                            source_range
+                                .as_ref()
+                                .is_some_and(|source| syntax_range.trigger_range == *source)
+                        })
+                        .map(|syntax_range| syntax_range.range.clone()),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    for wiki_link in &decoration.wiki_links {
+        if wiki_link.has_alias {
+            excluded.push(wiki_link.full_range.start..wiki_link.collapsed_range.start);
+            excluded.push(wiki_link.collapsed_range.end..wiki_link.full_range.end);
+        } else {
+            excluded.push(wiki_link.full_range.clone());
+        }
+    }
+    excluded.extend(
+        decoration
+            .footnote_references
+            .iter()
+            .map(|reference| reference.full_range.clone()),
+    );
 
     merge_byte_ranges(excluded)
 }
@@ -210,6 +266,27 @@ fn unordered_list_prefix_len(content: &str) -> usize {
         .count()
 }
 
+fn blockquote_prefix_len(content: &str) -> usize {
+    let leading_spaces = content.bytes().take_while(|&byte| byte == b' ').count();
+    if leading_spaces > 3 {
+        return 0;
+    }
+    let mut index = leading_spaces;
+    let mut found = false;
+    while content.as_bytes().get(index) == Some(&b'>') {
+        found = true;
+        index += 1;
+        if content
+            .as_bytes()
+            .get(index)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        {
+            index += 1;
+        }
+    }
+    usize::from(found) * index
+}
+
 fn setext_heading_underline_len(content: &str) -> Option<usize> {
     let trimmed_end = content.trim_end_matches([' ', '\t']);
     let leading_spaces = trimmed_end
@@ -230,6 +307,37 @@ fn setext_heading_underline_len(content: &str) -> Option<usize> {
         return None;
     }
     chars.all(|ch| ch == first).then_some(trimmed_end.len())
+}
+
+fn heading_attribute_range(content: &str) -> Option<Range<usize>> {
+    let trimmed_end = content.trim_end_matches([' ', '\t', '\r']);
+    if !trimmed_end.ends_with('}') {
+        return None;
+    }
+    let start = trimmed_end.rfind('{')?;
+    let attributes = &trimmed_end[start + 1..trimmed_end.len() - 1];
+    attributes
+        .split_whitespace()
+        .any(|token| token.starts_with(['#', '.']) || token.contains('='))
+        .then_some(start..trimmed_end.len())
+}
+
+pub(crate) fn protected_inline_html_tag(source: &str) -> Option<(String, bool, bool)> {
+    let trimmed = source.trim();
+    if trimmed.starts_with("<!--") {
+        return Some(("!--".to_string(), false, true));
+    }
+    let inner = trimmed.strip_prefix('<')?.strip_suffix('>')?.trim();
+    let closing = inner.starts_with('/');
+    let inner = inner.strip_prefix('/').unwrap_or(inner).trim_start();
+    let tag = inner
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, '/' | '>'))
+        .next()?
+        .to_ascii_lowercase();
+    if !matches!(tag.as_str(), "code" | "pre" | "script" | "style") {
+        return None;
+    }
+    Some((tag, closing, inner.ends_with('/')))
 }
 
 fn link_text_close_offset(source: &str, prefix_len: usize) -> Option<usize> {
@@ -306,12 +414,34 @@ fn next_char_boundary(text: &str, offset: usize) -> usize {
     next
 }
 
+pub(crate) fn is_escaped_at(text: &str, offset: usize) -> bool {
+    let mut backslashes = 0usize;
+    let mut index = offset;
+    while index > 0 && text.as_bytes().get(index - 1) == Some(&b'\\') {
+        backslashes += 1;
+        index -= 1;
+    }
+    backslashes % 2 == 1
+}
+
+fn delimiter_can_open(text: &str, token_end: usize) -> bool {
+    text.get(token_end..)
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|ch| !ch.is_whitespace())
+}
+
+fn delimiter_can_close(text: &str, token_start: usize) -> bool {
+    text.get(..token_start)
+        .and_then(|prefix| prefix.chars().next_back())
+        .is_some_and(|ch| !ch.is_whitespace())
+}
+
 pub(crate) fn raw_wiki_link_ranges(
     line_content: &str,
     decoration: Option<&LineDecoration>,
 ) -> Vec<Range<usize>> {
     let excluded_ranges = decoration
-        .map(wiki_link_excluded_ranges)
+        .map(structural_excluded_ranges)
         .unwrap_or_default();
     let mut open_stack = Vec::new();
     let mut pairs = Vec::new();
@@ -324,13 +454,17 @@ pub(crate) fn raw_wiki_link_ranges(
                 .iter()
                 .any(|range| range_intersects_byte(range, index, token_end))
         {
-            if line_content.get(index..token_end) == Some("[[") {
+            if line_content.get(index..token_end) == Some("[[")
+                && !is_escaped_at(line_content, index)
+            {
                 open_stack.push(index);
                 index += 2;
                 continue;
             }
 
-            if line_content.get(index..token_end) == Some("]]") {
+            if line_content.get(index..token_end) == Some("]]")
+                && !is_escaped_at(line_content, index)
+            {
                 if let Some(open) = open_stack.pop() {
                     pairs.push(open..token_end);
                 }
@@ -348,8 +482,18 @@ pub(crate) fn raw_wiki_link_ranges(
         index += ch.len_utf8();
     }
 
-    pairs.sort_by_key(|range| range.start);
-    pairs
+    pairs.sort_by_key(|range| range.end.saturating_sub(range.start));
+    let mut non_overlapping = Vec::new();
+    for range in pairs {
+        if non_overlapping
+            .iter()
+            .all(|kept: &Range<usize>| !range_intersects_byte(kept, range.start, range.end))
+        {
+            non_overlapping.push(range);
+        }
+    }
+    non_overlapping.sort_by_key(|range| range.start);
+    non_overlapping
 }
 
 #[derive(Debug, Clone)]
@@ -358,6 +502,8 @@ pub struct LineDecoration {
     pub block_contexts: Vec<BlockContext>,
     pub callout_kind: Option<CalloutKind>,
     pub inline_spans: Vec<InlineSpan>,
+    pub inline_math_spans: Vec<Range<usize>>,
+    pub protected_ranges: Vec<Range<usize>>,
     pub diff_added_spans: Vec<Range<usize>>,
     pub diff_removed_spans: Vec<Range<usize>>,
     pub syntax_ranges: Vec<SyntaxRange>,
@@ -401,6 +547,8 @@ impl Default for LineDecoration {
             block_contexts: Vec::new(),
             callout_kind: None,
             inline_spans: Vec::new(),
+            inline_math_spans: Vec::new(),
+            protected_ranges: Vec::new(),
             diff_added_spans: Vec::new(),
             diff_removed_spans: Vec::new(),
             syntax_ranges: Vec::new(),
@@ -459,8 +607,9 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
     let parser = Parser::new_ext(text, opts);
 
     let mut in_code_block = false;
+    let mut in_fenced_code_block = false;
     let mut current_code_language: Option<String> = None;
-    let mut in_blockquote = false;
+    let mut blockquote_depth = 0usize;
     enum OpenInline {
         Plain {
             kind: InlineKind,
@@ -483,6 +632,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
     }
 
     let mut inline_stack: Vec<OpenInline> = Vec::new();
+    let mut protected_html_stack: Vec<(String, usize)> = Vec::new();
     let mut list_stack: Vec<BlockContext> = Vec::new();
     let mut open_mermaid_block: Option<OpenMermaidBlock> = None;
 
@@ -564,13 +714,20 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                             decorations[line].block_type = BlockType::Heading(lvl);
                         }
                     }
+                    if let Some(attribute_range) = heading_attribute_range(line_content) {
+                        decorations[line].syntax_ranges.push(SyntaxRange {
+                            range: attribute_range.clone(),
+                            trigger_range: attribute_range,
+                        });
+                    }
                 }
             }
             Event::End(TagEnd::Heading(_)) => {}
             Event::Start(Tag::CodeBlock(kind)) => {
                 let line = offset_to_line(source_range.start);
                 in_code_block = true;
-                current_code_language = match kind {
+                in_fenced_code_block = matches!(kind, CodeBlockKind::Fenced(_));
+                current_code_language = match &kind {
                     CodeBlockKind::Fenced(info) => {
                         let first = info.split_whitespace().next().unwrap_or_default().trim();
                         if first.is_empty() {
@@ -589,15 +746,21 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                     });
                 }
                 if line < decorations.len() {
-                    decorations[line].block_type = BlockType::CodeBlockFence;
+                    decorations[line].block_type = if in_fenced_code_block {
+                        BlockType::CodeBlockFence
+                    } else {
+                        BlockType::CodeBlock
+                    };
                     decorations[line].code_language = current_code_language.clone();
-                    let line_content_len = text[source_range.start..]
-                        .find('\n')
-                        .unwrap_or(text.len() - source_range.start);
-                    decorations[line].syntax_ranges.push(SyntaxRange {
-                        range: 0..line_content_len,
-                        trigger_range: 0..line_content_len,
-                    });
+                    if in_fenced_code_block {
+                        let line_content_len = text[source_range.start..]
+                            .find('\n')
+                            .unwrap_or(text.len() - source_range.start);
+                        decorations[line].syntax_ranges.push(SyntaxRange {
+                            range: 0..line_content_len,
+                            trigger_range: 0..line_content_len,
+                        });
+                    }
                 }
             }
             Event::End(TagEnd::CodeBlock) => {
@@ -615,9 +778,13 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                 in_code_block = false;
                 current_code_language = None;
                 let line = offset_to_line(source_range.end.saturating_sub(1));
-                if line < decorations.len() && decorations[line].block_type == BlockType::Normal {
+                if in_fenced_code_block
+                    && line < decorations.len()
+                    && decorations[line].block_type == BlockType::Normal
+                {
                     decorations[line].block_type = BlockType::CodeBlockFence;
                 }
+                in_fenced_code_block = false;
             }
             Event::DisplayMath(content) => {
                 let start_line = offset_to_line(source_range.start);
@@ -631,8 +798,61 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                     content.trim().to_string(),
                 );
             }
+            Event::InlineMath(_) => {
+                add_inline_math_span(
+                    &mut decorations,
+                    &line_starts,
+                    &offset_to_line_col,
+                    source_range.start,
+                    source_range.end,
+                    text,
+                );
+            }
+            Event::Html(_) => {
+                add_protected_range_for_abs_range(
+                    &mut decorations,
+                    &line_starts,
+                    &offset_to_line_col,
+                    source_range.start,
+                    source_range.end,
+                    text,
+                );
+            }
+            Event::InlineHtml(source) => {
+                if let Some((tag, closing, self_closing)) =
+                    protected_inline_html_tag(source.as_ref())
+                {
+                    if self_closing {
+                        add_protected_range_for_abs_range(
+                            &mut decorations,
+                            &line_starts,
+                            &offset_to_line_col,
+                            source_range.start,
+                            source_range.end,
+                            text,
+                        );
+                    } else if closing {
+                        if let Some(position) = protected_html_stack
+                            .iter()
+                            .rposition(|(open_tag, _)| *open_tag == tag)
+                        {
+                            let (_, start) = protected_html_stack.remove(position);
+                            add_protected_range_for_abs_range(
+                                &mut decorations,
+                                &line_starts,
+                                &offset_to_line_col,
+                                start,
+                                source_range.end,
+                                text,
+                            );
+                        }
+                    } else {
+                        protected_html_stack.push((tag, source_range.start));
+                    }
+                }
+            }
             Event::Start(Tag::BlockQuote(_)) => {
-                in_blockquote = true;
+                blockquote_depth += 1;
                 push_block_context_for_range(
                     &mut decorations,
                     &line_starts,
@@ -642,7 +862,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                 );
             }
             Event::End(TagEnd::BlockQuote(_)) => {
-                in_blockquote = false;
+                blockquote_depth = blockquote_depth.saturating_sub(1);
             }
             Event::Start(Tag::List(start)) => {
                 let list_context = if start.is_some() {
@@ -939,7 +1159,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                         }
                         decorations[line].code_language = current_code_language.clone();
                     }
-                } else if in_blockquote {
+                } else if blockquote_depth > 0 {
                     let line = offset_to_line(source_range.start);
                     if line < decorations.len() && decorations[line].block_type == BlockType::Normal
                     {
@@ -949,13 +1169,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                         let line_end_offset =
                             line_starts.get(line + 1).copied().unwrap_or(text.len());
                         let line_content = &text[line_start..line_end_offset];
-                        let prefix_len = if line_content.starts_with("> ") {
-                            2
-                        } else if line_content.starts_with(">") {
-                            1
-                        } else {
-                            0
-                        };
+                        let prefix_len = blockquote_prefix_len(line_content);
                         if prefix_len > 0 {
                             decorations[line].syntax_ranges.push(SyntaxRange {
                                 range: 0..prefix_len,
@@ -1024,9 +1238,9 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
     detect_tables(&mut decorations, text, &line_starts);
 
     detect_raw_wiki_links(&mut decorations, text, &line_starts);
+    detect_raw_footnote_references(&mut decorations, text, &line_starts);
     detect_underlines(&mut decorations, text, &line_starts);
     detect_highlights(&mut decorations, text, &line_starts);
-    detect_raw_footnote_references(&mut decorations, text, &line_starts);
     detect_superscript_spans(&mut decorations, text, &line_starts);
     detect_subscript_spans(&mut decorations, text, &line_starts);
     detect_emoji_shortcodes(&mut decorations, text, &line_starts);
@@ -1291,22 +1505,32 @@ fn detect_front_matter(decorations: &mut [LineDecoration], text: &str, line_star
         return;
     }
 
-    let opening = get_line_content(text, line_starts, 0, line_count).trim();
+    let opening = get_line_content(text, line_starts, 0, line_count)
+        .trim_start_matches('\u{feff}')
+        .trim();
     if opening != "---" {
         return;
     }
 
-    let Some(closing_line) = (1..line_count)
-        .find(|&line| get_line_content(text, line_starts, line, line_count).trim() == "---")
-    else {
+    let Some(closing_line) = (1..line_count).find(|&line| {
+        matches!(
+            get_line_content(text, line_starts, line, line_count).trim(),
+            "---" | "..."
+        )
+    }) else {
         return;
     };
 
-    let has_metadata_entry = (1..closing_line).any(|line| {
-        let content = get_line_content(text, line_starts, line, line_count).trim();
-        !content.is_empty() && content.contains(':')
-    });
-    if !has_metadata_entry {
+    let metadata = (1..closing_line)
+        .map(|line| get_line_content(text, line_starts, line, line_count))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let Ok(serde_yaml::Value::Mapping(mapping)) =
+        serde_yaml::from_str::<serde_yaml::Value>(&metadata)
+    else {
+        return;
+    };
+    if mapping.is_empty() {
         return;
     }
 
@@ -1352,6 +1576,9 @@ fn detect_front_matter(decorations: &mut [LineDecoration], text: &str, line_star
             range: 0..content.len(),
             trigger_range: 0..content.len(),
         });
+        if !content.is_empty() {
+            decorations[line].protected_ranges.push(0..content.len());
+        }
     }
 }
 
@@ -1378,7 +1605,19 @@ fn callout_replacement_text(kind: CalloutKind) -> &'static str {
 
 fn detect_callouts(decorations: &mut [LineDecoration], text: &str, line_starts: &[usize]) {
     let line_count = decorations.len();
+    let quote_lines = decorations
+        .iter()
+        .map(|decoration| {
+            decoration.block_type == BlockType::Blockquote
+                || decoration
+                    .block_contexts
+                    .contains(&BlockContext::Blockquote)
+        })
+        .collect::<Vec<_>>();
     for (line, decoration) in decorations.iter_mut().enumerate() {
+        if line > 0 && quote_lines[line - 1] {
+            continue;
+        }
         if !decoration
             .block_contexts
             .contains(&BlockContext::Blockquote)
@@ -1540,7 +1779,7 @@ fn add_inline_span(
     let line_len = text[line_starts[start_line]..]
         .find('\n')
         .unwrap_or(text.len() - line_starts[start_line]);
-    let full_trigger = start_col.saturating_sub(1)..(end_col + 1).min(line_len + 1);
+    let full_trigger = start_col.saturating_sub(1)..(end_col + 1).min(line_len);
 
     match &kind {
         InlineKind::Bold | InlineKind::Italic | InlineKind::Strikethrough => {
@@ -1739,6 +1978,89 @@ fn add_syntax_range_for_abs_range(
     }
 }
 
+fn add_protected_range_for_abs_range(
+    decorations: &mut [LineDecoration],
+    line_starts: &[usize],
+    offset_to_line_col: &dyn Fn(usize) -> (usize, usize),
+    start: usize,
+    end: usize,
+    text: &str,
+) {
+    if start >= end {
+        return;
+    }
+    let (start_line, start_col) = offset_to_line_col(start);
+    let (end_line, end_col) = offset_to_line_col(end);
+    if start_line >= decorations.len() || end_line >= decorations.len() {
+        return;
+    }
+    for line in start_line..=end_line {
+        let line_len = get_line_content(text, line_starts, line, decorations.len()).len();
+        let range = if line == start_line && line == end_line {
+            start_col..end_col
+        } else if line == start_line {
+            start_col..line_len
+        } else if line == end_line {
+            0..end_col
+        } else {
+            0..line_len
+        };
+        if range.start < range.end {
+            decorations[line].protected_ranges.push(range);
+        }
+    }
+}
+
+fn add_inline_math_span(
+    decorations: &mut [LineDecoration],
+    line_starts: &[usize],
+    offset_to_line_col: &dyn Fn(usize) -> (usize, usize),
+    start: usize,
+    end: usize,
+    text: &str,
+) {
+    add_protected_range_for_abs_range(
+        decorations,
+        line_starts,
+        offset_to_line_col,
+        start,
+        end,
+        text,
+    );
+    let source = &text[start..end];
+    let marker_len = source.bytes().take_while(|&byte| byte == b'$').count().min(
+        source
+            .bytes()
+            .rev()
+            .take_while(|&byte| byte == b'$')
+            .count(),
+    );
+    if marker_len == 0 {
+        return;
+    }
+    let (start_line, start_col) = offset_to_line_col(start);
+    let (end_line, end_col) = offset_to_line_col(end);
+    if start_line >= decorations.len() || start_line != end_line {
+        return;
+    }
+    let content_start = start_col + marker_len;
+    let content_end = end_col.saturating_sub(marker_len);
+    if content_start < content_end {
+        decorations[start_line]
+            .inline_math_spans
+            .push(content_start..content_end);
+    }
+    let trigger_range = start_col..end_col;
+    decorations[start_line].syntax_ranges.push(SyntaxRange {
+        range: start_col..content_start,
+        trigger_range: trigger_range.clone(),
+    });
+    decorations[start_line].syntax_ranges.push(SyntaxRange {
+        range: content_end..end_col,
+        trigger_range,
+    });
+}
+
 fn code_span_delimiter_len(source: &str) -> usize {
     let leading = source.bytes().take_while(|&byte| byte == b'`').count();
     let trailing = source
@@ -1870,71 +2192,126 @@ fn get_line_content<'a>(
     &text[start..end]
 }
 
+fn table_row_source(content: &str) -> (&str, usize) {
+    let mut offset = content.len() - content.trim_start_matches([' ', '\t']).len();
+    let mut source = &content[offset..];
+    while let Some(after_quote) = source.strip_prefix('>') {
+        offset += 1;
+        source = after_quote;
+        if let Some(after_space) = source.strip_prefix(' ') {
+            offset += 1;
+            source = after_space;
+        }
+    }
+    (source.trim_end_matches([' ', '\t', '\r']), offset)
+}
+
+fn backtick_run_len(text: &str, start: usize) -> usize {
+    text.as_bytes()[start..]
+        .iter()
+        .take_while(|&&byte| byte == b'`')
+        .count()
+}
+
+fn has_closing_backtick_run(text: &str, mut start: usize, expected: usize) -> bool {
+    while start < text.len() {
+        let Some(relative) = text[start..].find('`') else {
+            return false;
+        };
+        let run_start = start + relative;
+        let run_len = backtick_run_len(text, run_start);
+        if run_len == expected {
+            return true;
+        }
+        start = run_start + run_len;
+    }
+    false
+}
+
+fn table_pipe_offsets(content: &str) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    let mut code_delimiter = None;
+    let mut index = 0usize;
+
+    while index < content.len() {
+        let Some(ch) = content[index..].chars().next() else {
+            break;
+        };
+        if ch == '\\' {
+            index += ch.len_utf8();
+            if let Some(escaped) = content[index..].chars().next() {
+                index += escaped.len_utf8();
+            }
+            continue;
+        }
+        if ch == '`' {
+            let run_len = backtick_run_len(content, index);
+            match code_delimiter {
+                Some(expected) if expected == run_len => code_delimiter = None,
+                None if has_closing_backtick_run(content, index + run_len, run_len) => {
+                    code_delimiter = Some(run_len)
+                }
+                _ => {}
+            }
+            index += run_len;
+            continue;
+        }
+        if ch == '|' && code_delimiter.is_none() {
+            offsets.push(index);
+        }
+        index += ch.len_utf8();
+    }
+
+    offsets
+}
+
 fn is_table_line(content: &str) -> bool {
-    let trimmed = content.trim();
-    trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() >= 3
+    let (source, _) = table_row_source(content);
+    !table_pipe_offsets(source).is_empty()
 }
 
 pub fn is_separator_row(cells: &[String]) -> bool {
     cells.iter().all(|c| {
         let t = c.trim();
-        !t.is_empty() && t.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ') && t.contains('-')
+        let marker = t.strip_prefix(':').unwrap_or(t);
+        let marker = marker.strip_suffix(':').unwrap_or(marker);
+        marker.len() >= 3 && marker.bytes().all(|byte| byte == b'-')
     })
 }
 
 pub fn parse_table_cells_with_ranges(content: &str) -> Vec<(String, Range<usize>)> {
-    let trimmed = content.trim();
-    let trimmed_offset = content.find(trimmed).unwrap_or(0);
-    let inner = if trimmed.starts_with('|') && trimmed.ends_with('|') {
-        &trimmed[1..trimmed.len() - 1]
-    } else {
-        trimmed
-    };
-    let inner_offset = trimmed_offset + usize::from(trimmed.starts_with('|'));
+    let (source, source_offset) = table_row_source(content);
+    let pipe_offsets = table_pipe_offsets(source);
+    let has_leading_pipe = pipe_offsets.first() == Some(&0);
+    let has_trailing_pipe = pipe_offsets.last().copied() == source.len().checked_sub(1);
+    let inner_start = usize::from(has_leading_pipe);
+    let inner_end = source.len().saturating_sub(usize::from(has_trailing_pipe));
+    let separators = pipe_offsets
+        .into_iter()
+        .filter(|offset| *offset >= inner_start && *offset < inner_end);
     let mut cells = Vec::new();
-    let mut segment_start = 0;
+    let mut segment_start = inner_start;
 
-    for (index, ch) in inner.char_indices() {
-        if ch != '|' {
-            continue;
-        }
-        let raw = &inner[segment_start..index];
+    for index in separators.chain(std::iter::once(inner_end)) {
+        let raw = &source[segment_start..index];
         let leading_ws = raw.len() - raw.trim_start_matches([' ', '\t']).len();
         let trailing_ws = raw.len() - raw.trim_end_matches([' ', '\t']).len();
         let trimmed_start = segment_start + leading_ws;
         let trimmed_end = index.saturating_sub(trailing_ws);
         let text = if trimmed_start <= trimmed_end {
-            inner[trimmed_start..trimmed_end].to_string()
+            source[trimmed_start..trimmed_end].to_string()
         } else {
             String::new()
         };
-        let anchor = inner_offset + segment_start + leading_ws.min(raw.len());
+        let anchor = source_offset + segment_start + leading_ws.min(raw.len());
         let range = if trimmed_start <= trimmed_end {
-            (inner_offset + trimmed_start)..(inner_offset + trimmed_end)
+            (source_offset + trimmed_start)..(source_offset + trimmed_end)
         } else {
             anchor..anchor
         };
         cells.push((text, range));
-        segment_start = index + ch.len_utf8();
+        segment_start = index.saturating_add(1);
     }
-
-    let raw = &inner[segment_start..];
-    let leading_ws = raw.len() - raw.trim_start_matches([' ', '\t']).len();
-    let trailing_ws = raw.len() - raw.trim_end_matches([' ', '\t']).len();
-    let trimmed_start = segment_start + leading_ws;
-    let trimmed_end = inner.len().saturating_sub(trailing_ws);
-    let text = if trimmed_start <= trimmed_end {
-        inner[trimmed_start..trimmed_end].to_string()
-    } else {
-        String::new()
-    };
-    let anchor = inner_offset + segment_start + leading_ws.min(raw.len());
-    let range = if trimmed_start <= trimmed_end {
-        (inner_offset + trimmed_start)..(inner_offset + trimmed_end)
-    } else {
-        anchor..anchor
-    };
-    cells.push((text, range));
 
     cells
 }
@@ -1944,14 +2321,46 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
     let mut line_idx = 0;
 
     while line_idx < line_count {
-        if decorations[line_idx].table_info.is_some() {
+        if decorations[line_idx].table_info.is_some()
+            || matches!(
+                decorations[line_idx].block_type,
+                BlockType::CodeBlock | BlockType::CodeBlockFence
+            )
+        {
             line_idx += 1;
             continue;
         }
         let content = get_line_content(text, line_starts, line_idx, line_count);
-        if is_table_line(content) {
+        let header_cells = parse_table_cells_with_ranges(content);
+        let separator_cells = (line_idx + 1 < line_count).then(|| {
+            parse_table_cells_with_ranges(get_line_content(
+                text,
+                line_starts,
+                line_idx + 1,
+                line_count,
+            ))
+        });
+        let starts_table = is_table_line(content)
+            && separator_cells.as_ref().is_some_and(|cells| {
+                cells.len() == header_cells.len()
+                    && !cells.is_empty()
+                    && is_separator_row(
+                        &cells
+                            .iter()
+                            .map(|(cell, _)| cell.clone())
+                            .collect::<Vec<_>>(),
+                    )
+            });
+        if starts_table {
             let table_start = line_idx;
+            line_idx += 2;
             while line_idx < line_count {
+                if matches!(
+                    decorations[line_idx].block_type,
+                    BlockType::CodeBlock | BlockType::CodeBlockFence
+                ) {
+                    break;
+                }
                 let c = get_line_content(text, line_starts, line_idx, line_count);
                 if !is_table_line(c) {
                     break;
@@ -1974,8 +2383,8 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
 
                 let max_cols = all_cells.iter().map(|r| r.len()).max().unwrap_or(0);
                 let mut col_widths = vec![0usize; max_cols];
-                for row in &all_cells {
-                    if is_separator_row(row) {
+                for (row_index, row) in all_cells.iter().enumerate() {
+                    if row_index == 1 {
                         continue;
                     }
                     for (ci, cell) in row.iter().enumerate() {
@@ -1990,7 +2399,7 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
                 }
 
                 for (ri, l) in (table_start..table_end).enumerate() {
-                    let is_sep = is_separator_row(&all_cells[ri]);
+                    let is_sep = ri == 1;
                     decorations[l].block_type = BlockType::Table;
                     decorations[l].table_info = Some(TableLineInfo {
                         cells: all_cells[ri].clone(),
@@ -2055,7 +2464,7 @@ fn parse_wiki_link_parts(source: &str) -> Option<(String, Range<usize>)> {
 }
 
 fn is_wiki_image_target(target: &str) -> bool {
-    let path = target.split_once('#').map_or(target, |(path, _)| path);
+    let path = target.split(['#', '?']).next().unwrap_or(target);
     Path::new(path)
         .extension()
         .and_then(|extension| extension.to_str())
@@ -2106,6 +2515,7 @@ fn add_wiki_link_span(
         full_range: full_trigger,
         collapsed_range: collapsed_start..collapsed_end,
         target_path,
+        has_alias: source[2..source.len().saturating_sub(2)].contains('|'),
     });
 }
 
@@ -2151,6 +2561,7 @@ fn detect_raw_wiki_links(decorations: &mut [LineDecoration], text: &str, line_st
                 full_range: full_range.clone(),
                 collapsed_range: collapsed_start..collapsed_end,
                 target_path: target_path.clone(),
+                has_alias: source[2..source.len().saturating_sub(2)].contains('|'),
             });
             if full_range.start > 0
                 && line_content.as_bytes().get(full_range.start - 1) == Some(&b'!')
@@ -2176,20 +2587,7 @@ fn detect_underlines(decorations: &mut [LineDecoration], text: &str, line_starts
             continue;
         }
         let line_content = get_line_content(text, line_starts, line, line_count);
-        let mut excluded_ranges = wiki_link_excluded_ranges(decoration);
-        excluded_ranges.extend(
-            decoration
-                .wiki_links
-                .iter()
-                .map(|span| span.full_range.clone()),
-        );
-        excluded_ranges.extend(
-            decoration
-                .footnote_references
-                .iter()
-                .map(|span| span.full_range.clone()),
-        );
-        excluded_ranges = merge_byte_ranges(excluded_ranges);
+        let excluded_ranges = custom_inline_excluded_ranges(decoration);
 
         let mut index = 0usize;
         let mut open: Option<usize> = None;
@@ -2202,9 +2600,11 @@ fn detect_underlines(decorations: &mut [LineDecoration], text: &str, line_starts
                 index = next_char_boundary(line_content, index);
                 continue;
             }
-            if line_content.get(index..token_end) == Some("++") {
-                match open.take() {
-                    Some(start) if start + 2 < index => {
+            if line_content.get(index..token_end) == Some("++")
+                && !is_escaped_at(line_content, index)
+            {
+                if let Some(start) = open {
+                    if delimiter_can_close(line_content, index) && start + 2 < index {
                         let visible_range = (start + 2)..index;
                         decoration.inline_spans.push(InlineSpan {
                             kind: InlineKind::Underline,
@@ -2220,9 +2620,10 @@ fn detect_underlines(decorations: &mut [LineDecoration], text: &str, line_starts
                             range: index..token_end,
                             trigger_range,
                         });
+                        open = None;
                     }
-                    Some(_) => {}
-                    None => open = Some(index),
+                } else if delimiter_can_open(line_content, token_end) {
+                    open = Some(index);
                 }
                 index = token_end;
                 continue;
@@ -2238,15 +2639,24 @@ fn detect_underlines(decorations: &mut [LineDecoration], text: &str, line_starts
 
         let lower = line_content.to_ascii_lowercase();
         let mut html_search_start = 0usize;
-        while let Some(open_relative) = lower[html_search_start..].find("<u>") {
+        while let Some(open_relative) = lower[html_search_start..].find("<u") {
             let open_start = html_search_start + open_relative;
-            let content_start = open_start + 3;
+            let tag_suffix = lower.as_bytes().get(open_start + 2).copied();
+            if !tag_suffix.is_some_and(|byte| byte == b'>' || byte.is_ascii_whitespace()) {
+                html_search_start = open_start + 2;
+                continue;
+            }
+            let Some(open_end_relative) = lower[open_start + 2..].find('>') else {
+                break;
+            };
+            let content_start = open_start + 2 + open_end_relative + 1;
             let Some(close_relative) = lower[content_start..].find("</u>") else {
                 break;
             };
             let close_start = content_start + close_relative;
             let close_end = close_start + 4;
             if content_start < close_start
+                && !is_escaped_at(line_content, open_start)
                 && !excluded_ranges
                     .iter()
                     .any(|range| range_intersects_byte(range, open_start, close_end))
@@ -2337,7 +2747,7 @@ fn detect_raw_footnote_references(
         }
 
         let line_content = get_line_content(text, line_starts, line, line_count);
-        let mut excluded_ranges = wiki_link_excluded_ranges(decoration);
+        let mut excluded_ranges = structural_excluded_ranges(decoration);
         excluded_ranges.extend(
             decoration
                 .wiki_links
@@ -2352,6 +2762,10 @@ fn detect_raw_footnote_references(
                 break;
             };
             let start = index + relative_start;
+            if is_escaped_at(line_content, start) {
+                index = start + 2;
+                continue;
+            }
             if excluded_ranges
                 .iter()
                 .any(|range| range_intersects_byte(range, start, start + 2))
@@ -2413,20 +2827,7 @@ fn detect_highlights(decorations: &mut [LineDecoration], text: &str, line_starts
         }
 
         let line_content = get_line_content(text, line_starts, line, line_count);
-        let mut excluded_ranges = wiki_link_excluded_ranges(decoration);
-        excluded_ranges.extend(
-            decoration
-                .wiki_links
-                .iter()
-                .map(|span| span.full_range.clone()),
-        );
-        excluded_ranges.extend(
-            decoration
-                .footnote_references
-                .iter()
-                .map(|span| span.full_range.clone()),
-        );
-        excluded_ranges = merge_byte_ranges(excluded_ranges);
+        let excluded_ranges = custom_inline_excluded_ranges(decoration);
 
         let mut index = 0usize;
         let mut open: Option<usize> = None;
@@ -2440,9 +2841,11 @@ fn detect_highlights(decorations: &mut [LineDecoration], text: &str, line_starts
                 continue;
             }
 
-            if line_content.get(index..token_end) == Some("==") {
-                match open.take() {
-                    Some(start) if start + 2 < index => {
+            if line_content.get(index..token_end) == Some("==")
+                && !is_escaped_at(line_content, index)
+            {
+                if let Some(start) = open {
+                    if delimiter_can_close(line_content, index) && start + 2 < index {
                         let full_trigger = start..token_end;
                         let collapsed_range = (start + 2)..index;
                         decoration.highlight_spans.push(collapsed_range.clone());
@@ -2454,9 +2857,10 @@ fn detect_highlights(decorations: &mut [LineDecoration], text: &str, line_starts
                             range: index..token_end,
                             trigger_range: full_trigger,
                         });
+                        open = None;
                     }
-                    Some(_) => {}
-                    None => open = Some(index),
+                } else if delimiter_can_open(line_content, token_end) {
+                    open = Some(index);
                 }
                 index = token_end;
                 continue;
@@ -2489,14 +2893,7 @@ fn detect_emoji_shortcodes(decorations: &mut [LineDecoration], text: &str, line_
         }
 
         let line_content = get_line_content(text, line_starts, line, line_count);
-        let mut excluded_ranges = wiki_link_excluded_ranges(decoration);
-        excluded_ranges.extend(
-            decoration
-                .wiki_links
-                .iter()
-                .map(|span| span.full_range.clone()),
-        );
-        excluded_ranges = merge_byte_ranges(excluded_ranges);
+        let excluded_ranges = custom_inline_excluded_ranges(decoration);
 
         let mut index = 0usize;
         while index < line_content.len() {
@@ -2513,7 +2910,7 @@ fn detect_emoji_shortcodes(decorations: &mut [LineDecoration], text: &str, line_
             else {
                 break;
             };
-            if ch != ':' {
+            if ch != ':' || is_escaped_at(line_content, index) {
                 index += ch.len_utf8();
                 continue;
             }
@@ -2594,14 +2991,7 @@ fn detect_single_char_delimited_spans(
         }
 
         let line_content = get_line_content(text, line_starts, line, line_count);
-        let mut excluded_ranges = wiki_link_excluded_ranges(decoration);
-        excluded_ranges.extend(
-            decoration
-                .wiki_links
-                .iter()
-                .map(|span| span.full_range.clone()),
-        );
-        excluded_ranges = merge_byte_ranges(excluded_ranges);
+        let excluded_ranges = custom_inline_excluded_ranges(decoration);
 
         let delimiter_len = delimiter.len_utf8();
         let mut index = 0usize;
@@ -2622,7 +3012,7 @@ fn detect_single_char_delimited_spans(
             else {
                 break;
             };
-            if ch != delimiter {
+            if ch != delimiter || is_escaped_at(line_content, index) {
                 index += ch.len_utf8();
                 continue;
             }
@@ -2638,8 +3028,8 @@ fn detect_single_char_delimited_spans(
                 }
             }
 
-            match open.take() {
-                Some(start) if start + delimiter_len < index => {
+            if let Some(start) = open {
+                if delimiter_can_close(line_content, index) && start + delimiter_len < index {
                     let visible_range = (start + delimiter_len)..index;
                     if line_content
                         .get(visible_range.clone())
@@ -2656,9 +3046,10 @@ fn detect_single_char_delimited_spans(
                             trigger_range: full_trigger,
                         });
                     }
+                    open = None;
                 }
-                Some(_) => {}
-                None => open = Some(index),
+            } else if delimiter_can_open(line_content, index + delimiter_len) {
+                open = Some(index);
             }
 
             index += delimiter_len;
@@ -2829,7 +3220,7 @@ pub(crate) fn parse_local_link_targets(text: &str) -> Vec<LocalLinkTarget> {
     links
 }
 
-fn markdown_inline_target_range(source: &str) -> Option<Range<usize>> {
+pub(crate) fn markdown_inline_target_range(source: &str) -> Option<Range<usize>> {
     let mut start = source.find("](")? + 2;
     while source
         .as_bytes()
@@ -2845,6 +3236,7 @@ fn markdown_inline_target_range(source: &str) -> Option<Range<usize>> {
     }
 
     let mut escaped = false;
+    let mut parenthesis_depth = 0usize;
     let mut end = start;
     for (offset, character) in source.get(start..)?.char_indices() {
         if escaped {
@@ -2857,8 +3249,12 @@ fn markdown_inline_target_range(source: &str) -> Option<Range<usize>> {
             end = start + offset + 1;
             continue;
         }
-        if character == ')' || character.is_whitespace() {
-            break;
+        match character {
+            '(' => parenthesis_depth += 1,
+            ')' if parenthesis_depth > 0 => parenthesis_depth -= 1,
+            ')' => break,
+            _ if character.is_whitespace() && parenthesis_depth == 0 => break,
+            _ => {}
         }
         end = start + offset + character.len_utf8();
     }
@@ -2867,6 +3263,8 @@ fn markdown_inline_target_range(source: &str) -> Option<Range<usize>> {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+
     use super::{
         BlockContext, BlockPreviewKind, BlockType, CalloutKind, InlineKind, LineDecoration,
         LocalLinkSyntax, parse_decorations, parse_local_link_targets, raw_wiki_link_ranges,
@@ -3007,6 +3405,24 @@ mod tests {
     }
 
     #[test]
+    fn nested_wiki_links_do_not_create_overlapping_ranges() {
+        let decorations = parse_decorations("[[outer [[inner]] tail]]");
+
+        assert_eq!(decorations[0].wiki_links.len(), 1);
+        assert_eq!(decorations[0].wiki_links[0].target_path, "inner");
+    }
+
+    #[test]
+    fn wiki_images_allow_query_and_fragment_suffixes() {
+        let decorations = parse_decorations("![[image.PNG?size=2#preview]]");
+
+        assert_eq!(
+            decorations[0].image_path.as_deref(),
+            Some("image.PNG?size=2#preview")
+        );
+    }
+
+    #[test]
     fn local_link_targets_preserve_standard_and_wiki_metadata() {
         let text = "![alt](../assets/a%20b.png \"title\") and ![[assets/图.png|320]]";
         let links = parse_local_link_targets(text);
@@ -3018,6 +3434,14 @@ mod tests {
         assert_eq!(links[1].target, "assets/图.png");
         assert_eq!(links[1].syntax, LocalLinkSyntax::WikiLink);
         assert!(links[1].is_embed);
+    }
+
+    #[test]
+    fn local_link_targets_support_balanced_parentheses() {
+        let links = parse_local_link_targets("[doc](docs/a(b).md)");
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "docs/a(b).md");
     }
 
     #[test]
@@ -3038,7 +3462,7 @@ mod tests {
 
     #[test]
     fn parse_decorations_distinguishes_subscript_and_underline() {
-        let text = "~U~ ++U++ <u>U</u>";
+        let text = "~U~ ++U++ <u>U</u> <u class=\"note\">A</u>";
         let decorations = parse_decorations(text);
 
         assert_eq!(decorations[0].subscript_spans, vec![1..2]);
@@ -3048,7 +3472,7 @@ mod tests {
             .filter(|span| span.kind == InlineKind::Underline)
             .map(|span| span.range.clone())
             .collect::<Vec<_>>();
-        assert_eq!(underline_ranges, vec![6..7, 13..14]);
+        assert_eq!(underline_ranges, vec![6..7, 13..14, 35..36]);
     }
 
     #[test]
@@ -3082,11 +3506,195 @@ mod tests {
     }
 
     #[test]
+    fn callout_marker_only_applies_at_quote_group_start() {
+        let decorations = parse_decorations("> ordinary\n> [!NOTE] not a callout\n");
+
+        assert!(
+            decorations
+                .iter()
+                .all(|decoration| decoration.callout_kind.is_none())
+        );
+    }
+
+    #[test]
+    fn nested_and_indented_blockquotes_keep_quote_context_and_prefix_ranges() {
+        let decorations = parse_decorations("  > outer\n  > > inner\n  > outer again\n");
+
+        assert!(decorations[..3].iter().all(|decoration| {
+            decoration
+                .block_contexts
+                .contains(&BlockContext::Blockquote)
+                && !decoration.syntax_ranges.is_empty()
+        }));
+    }
+
+    #[test]
     fn parse_decorations_detects_highlight() {
         let text = "Use ==important== text";
         let decorations = parse_decorations(text);
 
         assert_eq!(decorations[0].highlight_spans, vec![6..15]);
+    }
+
+    #[test]
+    fn custom_inline_syntax_respects_backslash_escapes() {
+        let text = r"\[[wiki]] \==mark== \++underline++ \[^note] \:rocket: \^sup^ \~sub~";
+        let decoration = &parse_decorations(text)[0];
+
+        assert!(decoration.wiki_links.is_empty());
+        assert!(decoration.highlight_spans.is_empty());
+        assert!(decoration.inline_spans.is_empty());
+        assert!(decoration.footnote_references.is_empty());
+        assert!(decoration.display_replacements.is_empty());
+        assert!(decoration.superscript_spans.is_empty());
+        assert!(decoration.subscript_spans.is_empty());
+    }
+
+    #[test]
+    fn custom_inline_escape_parity_allows_even_backslashes() {
+        let text = r"\==off== \\==on== \:rocket: \\:rocket:";
+        let decoration = &parse_decorations(text)[0];
+        let highlights = decoration
+            .highlight_spans
+            .iter()
+            .map(|range| &text[range.clone()])
+            .collect::<Vec<_>>();
+
+        assert_eq!(highlights, vec!["on"]);
+        assert_eq!(decoration.display_replacements.len(), 1);
+        assert_eq!(
+            &text[decoration.display_replacements[0].source_range.clone()],
+            ":rocket:"
+        );
+    }
+
+    #[test]
+    fn protected_contexts_suppress_all_custom_inline_syntax() {
+        for text in [
+            "`==mark== ++under++ :rocket: ^sup^ ~sub~`",
+            "$==mark== ++under++ :rocket: ^sup^ ~sub~$",
+            "<code>==mark== ++under++ :rocket: ^sup^ ~sub~</code>",
+            "![==mark== ++under++ :rocket: ^sup^ ~sub~](image.png)",
+            "[^==mark==]",
+        ] {
+            let decoration = &parse_decorations(text)[0];
+            assert!(decoration.highlight_spans.is_empty(), "highlight: {text}");
+            assert!(
+                decoration
+                    .inline_spans
+                    .iter()
+                    .all(|span| span.kind != InlineKind::Underline),
+                "underline: {text}"
+            );
+            assert!(
+                decoration.display_replacements.is_empty(),
+                "replacement: {text}"
+            );
+            assert!(
+                decoration.superscript_spans.is_empty(),
+                "superscript: {text}"
+            );
+            assert!(decoration.subscript_spans.is_empty(), "subscript: {text}");
+        }
+    }
+
+    #[test]
+    fn custom_inline_syntax_is_allowed_in_link_labels_and_wiki_aliases() {
+        let text = "[==label== ++under++ :rocket:](path==target==) [[target==literal==|==alias== ++wiki++ :rocket:]] [[plain==target==]]";
+        let decoration = &parse_decorations(text)[0];
+        let highlights = decoration
+            .highlight_spans
+            .iter()
+            .map(|range| &text[range.clone()])
+            .collect::<Vec<_>>();
+        let underlines = decoration
+            .inline_spans
+            .iter()
+            .filter(|span| span.kind == InlineKind::Underline)
+            .map(|span| &text[span.range.clone()])
+            .collect::<Vec<_>>();
+
+        assert_eq!(highlights, vec!["label", "alias"]);
+        assert_eq!(underlines, vec!["under", "wiki"]);
+        assert_eq!(decoration.display_replacements.len(), 2);
+        assert_eq!(decoration.wiki_links.len(), 2);
+        assert!(decoration.wiki_links[0].has_alias);
+        assert!(!decoration.wiki_links[1].has_alias);
+    }
+
+    #[test]
+    fn nested_presentation_syntaxes_are_composable() {
+        let text = "**==bold==** ==++both++== ~~H~2~O~~ *++italic++* ==`code`==";
+        let decoration = &parse_decorations(text)[0];
+
+        for kind in [
+            InlineKind::Bold,
+            InlineKind::Italic,
+            InlineKind::Strikethrough,
+            InlineKind::Underline,
+            InlineKind::InlineCode,
+        ] {
+            assert!(
+                decoration.inline_spans.iter().any(|span| span.kind == kind),
+                "missing {kind:?}"
+            );
+        }
+        assert_eq!(decoration.highlight_spans.len(), 3);
+        assert_eq!(decoration.subscript_spans.len(), 1);
+    }
+
+    #[test]
+    fn front_matter_is_opaque_but_table_cells_allow_inline_syntax() {
+        let text = "---\ntitle: ==literal==\nemoji: \":rocket:\"\n---\n\n| A | B |\n| --- | --- |\n| ==mark== | ++under++ :rocket: |\n";
+        let decorations = parse_decorations(text);
+
+        assert!(decorations[..4].iter().all(|decoration| {
+            decoration.highlight_spans.is_empty()
+                && decoration.display_replacements.is_empty()
+                && decoration
+                    .inline_spans
+                    .iter()
+                    .all(|span| span.kind != InlineKind::Underline)
+        }));
+        assert_eq!(decorations[7].highlight_spans.len(), 1);
+        assert!(
+            decorations[7]
+                .inline_spans
+                .iter()
+                .any(|span| span.kind == InlineKind::Underline)
+        );
+        assert_eq!(decorations[7].display_replacements.len(), 1);
+    }
+
+    #[test]
+    fn multiline_raw_html_blocks_are_opaque() {
+        let text = "<pre>\n==literal==\n++literal++ :rocket:\n</pre>\n";
+        let decorations = parse_decorations(text);
+
+        assert!(decorations[..4].iter().all(|decoration| {
+            decoration.highlight_spans.is_empty()
+                && decoration.display_replacements.is_empty()
+                && decoration
+                    .inline_spans
+                    .iter()
+                    .all(|span| span.kind != InlineKind::Underline)
+        }));
+    }
+
+    #[test]
+    fn inline_math_and_raw_html_code_are_protected_from_custom_syntax() {
+        let text = "$x^2^$ <code>==literal== ++literal++</code>";
+        let decoration = &parse_decorations(text)[0];
+
+        assert_eq!(decoration.inline_math_spans, vec![1..5]);
+        assert!(decoration.superscript_spans.is_empty());
+        assert!(decoration.highlight_spans.is_empty());
+        assert!(
+            decoration
+                .inline_spans
+                .iter()
+                .all(|span| span.kind != InlineKind::Underline)
+        );
     }
 
     #[test]
@@ -3328,6 +3936,37 @@ mod tests {
     }
 
     #[test]
+    fn heading_attributes_are_foldable_syntax() {
+        let decorations = parse_decorations("# Title {#custom .wide}\n");
+
+        assert!(
+            decorations[0]
+                .syntax_ranges
+                .iter()
+                .any(|range| range.range == (8..23))
+        );
+    }
+
+    #[test]
+    fn front_matter_requires_yaml_mapping_and_supports_bom_and_document_end() {
+        let scalar = parse_decorations("---\nhttps://example.com\n---\n");
+        assert!(scalar.iter().all(|decoration| {
+            decoration
+                .table_info
+                .as_ref()
+                .is_none_or(|table| !table.is_front_matter)
+        }));
+
+        let mapping = parse_decorations("\u{feff}---\ntitle: Example\ntags:\n  - one\n...\n");
+        assert!(mapping[..5].iter().all(|decoration| {
+            decoration
+                .table_info
+                .as_ref()
+                .is_some_and(|table| table.is_front_matter)
+        }));
+    }
+
+    #[test]
     fn unordered_nested_list_marker_is_not_setext_heading() {
         let text = "- parent\n  - child\n";
         let decorations = parse_decorations(text);
@@ -3358,6 +3997,70 @@ mod tests {
         assert_eq!(decorations[0].block_type, BlockType::CodeBlockFence);
         assert_eq!(decorations[1].block_type, BlockType::CodeBlock);
         assert_eq!(decorations[2].block_type, BlockType::CodeBlockFence);
+    }
+
+    #[test]
+    fn indented_code_has_no_synthetic_fence_lines() {
+        let text = "    first line\n    second line\n";
+        let decorations = parse_decorations(text);
+
+        for decoration in &decorations[..2] {
+            assert_eq!(decoration.block_type, BlockType::CodeBlock);
+            assert!(decoration.syntax_ranges.is_empty());
+        }
+    }
+
+    #[test]
+    fn table_shaped_lines_inside_fenced_code_stay_code() {
+        let text = "```text\n<hex>.blob.data\n+---+---+\n| a | b |\n| c | d |\n+---+---+\n\n<hex>.blob.meta\n+---+---+\n| e | f |\n| g | h |\n+---+---+\n```\n";
+        let decorations = parse_decorations(text);
+        let closing_fence = decorations.len() - 2;
+
+        assert_eq!(decorations[0].block_type, BlockType::CodeBlockFence);
+        assert_eq!(
+            decorations[closing_fence].block_type,
+            BlockType::CodeBlockFence
+        );
+        for decoration in &decorations[1..closing_fence] {
+            assert_eq!(decoration.block_type, BlockType::CodeBlock);
+            assert!(decoration.table_info.is_none());
+        }
+    }
+
+    #[test]
+    fn tables_require_a_separator_and_allow_optional_outer_pipes() {
+        let prose = parse_decorations("| one | two |\n| three | four |\n");
+        assert!(
+            prose
+                .iter()
+                .all(|decoration| decoration.table_info.is_none())
+        );
+
+        let table = parse_decorations("one | two\n--- | ---\nthree | four\n");
+        assert!(table[..3].iter().all(|decoration| {
+            decoration.block_type == BlockType::Table && decoration.table_info.is_some()
+        }));
+    }
+
+    #[test]
+    fn tables_inside_blockquotes_preserve_quote_context() {
+        let table = parse_decorations("> A | B\n> --- | ---\n> 1 | 2\n");
+
+        assert!(table[..3].iter().all(|decoration| {
+            decoration.block_type == BlockType::Table
+                && decoration
+                    .block_contexts
+                    .contains(&BlockContext::Blockquote)
+        }));
+    }
+
+    #[test]
+    fn table_cells_ignore_escaped_and_code_span_pipes() {
+        let text = "| A | B |\n| --- | --- |\n| left \\| right | `a|b` |\n";
+        let decorations = parse_decorations(text);
+        let cells = &decorations[2].table_info.as_ref().expect("table row").cells;
+
+        assert_eq!(cells, &["left \\| right", "`a|b`"]);
     }
 
     #[test]
@@ -3440,6 +4143,76 @@ mod tests {
         assert_eq!(decorations.len(), 1);
         assert_eq!(decorations[0].highlight_spans.len(), 1);
         assert_eq!(decorations[0].subscript_spans.len(), 1);
+    }
+
+    #[test]
+    fn nested_syntax_ranges_stay_within_utf8_line_boundaries() {
+        fn assert_range(line: &str, range: &Range<usize>, context: &str) {
+            assert!(range.start <= range.end, "reversed {context}: {range:?}");
+            assert!(
+                range.end <= line.len(),
+                "out of bounds {context}: {range:?}, line len {}, line {line:?}",
+                line.len()
+            );
+            assert!(
+                line.is_char_boundary(range.start),
+                "start boundary {context}: {range:?}"
+            );
+            assert!(
+                line.is_char_boundary(range.end),
+                "end boundary {context}: {range:?}"
+            );
+        }
+
+        let documents = [
+            "**==粗体 `代码`==** ++下划线 :rocket:++ H~2~O",
+            "[==标签==](路径(一).md) [[目录/文档.md|++别名++ :rocket:]]",
+            "$x^2^ + 中文$ <code>==字面量==</code>",
+            "| 列一 | 列二 |\n| --- | --- |\n| **粗体** | ==高亮== ++线++ |",
+            "> [!NOTE] **标题**\n> 正文 ==高亮==",
+            "---\ntitle: \"==字面量==\"\n---",
+            r"\==escaped== ==open ++broken ^x ~y [[nested [[inner]] tail]]",
+        ];
+
+        for document in documents {
+            let decorations = parse_decorations(document);
+            for (line, decoration) in document.split('\n').zip(&decorations) {
+                for span in &decoration.inline_spans {
+                    assert_range(line, &span.range, "inline span");
+                }
+                for range in decoration
+                    .inline_math_spans
+                    .iter()
+                    .chain(&decoration.protected_ranges)
+                    .chain(&decoration.highlight_spans)
+                    .chain(&decoration.superscript_spans)
+                    .chain(&decoration.subscript_spans)
+                {
+                    assert_range(line, range, "decoration");
+                }
+                for syntax in &decoration.syntax_ranges {
+                    assert_range(line, &syntax.range, "syntax");
+                    assert_range(line, &syntax.trigger_range, "syntax trigger");
+                }
+                for replacement in &decoration.display_replacements {
+                    assert_range(line, &replacement.source_range, "replacement");
+                    assert_range(line, &replacement.trigger_range, "replacement trigger");
+                }
+                for wiki_link in &decoration.wiki_links {
+                    assert_range(line, &wiki_link.full_range, "wiki link");
+                    assert_range(line, &wiki_link.collapsed_range, "wiki label");
+                }
+                for footnote in &decoration.footnote_references {
+                    assert_range(line, &footnote.full_range, "footnote");
+                    assert_range(line, &footnote.collapsed_range, "footnote label");
+                }
+                if let Some(table) = &decoration.table_info {
+                    for range in &table.cell_ranges {
+                        assert_range(line, range, "table cell");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

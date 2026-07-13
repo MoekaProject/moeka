@@ -713,13 +713,15 @@ fn push_inline_code_background_quads(
     letter_spacing: f32,
     window: &mut Window,
 ) {
-    for span in decoration
+    for range in decoration
         .inline_spans
         .iter()
         .filter(|span| span.kind == crate::markdown::InlineKind::InlineCode)
+        .map(|span| &span.range)
+        .chain(decoration.inline_math_spans.iter())
     {
-        let start = span.range.start.min(line_content_len);
-        let end = span.range.end.min(line_content_len);
+        let start = range.start.min(line_content_len);
+        let end = range.end.min(line_content_len);
         if start >= end {
             continue;
         }
@@ -3712,19 +3714,20 @@ impl Element for EditorElement {
                 continue;
             }
 
-            let segments = if indent_px > 0.0 && wrapped.wrap_boundaries().len() > 0 {
+            let segments = if !wrapped.wrap_boundaries().is_empty() {
                 let byte_indices = helpers::wrap_boundary_byte_indices(wrapped);
                 let mut shaped_segments: Vec<(WrappedLine, Point<Pixels>)> = Vec::new();
-                let mut seg_start = 0;
-                let seg_count = byte_indices.len() + 1;
-                for seg_idx in 0..seg_count {
-                    let seg_end = if seg_idx < byte_indices.len() {
-                        byte_indices[seg_idx]
-                    } else {
-                        display_text.len()
-                    };
-                    let seg_text = &display_text[seg_start..seg_end];
-                    let seg_runs = helpers::extract_runs_for_range(&runs, seg_start, seg_end);
+                for (seg_idx, segment_range) in
+                    helpers::wrap_segment_byte_ranges(display_text.len(), &byte_indices)
+                        .into_iter()
+                        .enumerate()
+                {
+                    let seg_text = &display_text[segment_range.clone()];
+                    let seg_runs = helpers::extract_runs_for_range(
+                        &runs,
+                        segment_range.start,
+                        segment_range.end,
+                    );
                     let seg_shared: SharedString = if seg_text.is_empty() {
                         " ".into()
                     } else {
@@ -3750,7 +3753,6 @@ impl Element for EditorElement {
                             shaped_segments.push((seg_wrapped, point(px(seg_x), px(seg_y))));
                         }
                     }
-                    seg_start = seg_end;
                 }
                 Some(shaped_segments)
             } else {

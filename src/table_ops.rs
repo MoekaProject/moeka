@@ -1,4 +1,4 @@
-use crate::markdown::TableAlign;
+use crate::markdown::{TableAlign, parse_table_cells_with_ranges};
 
 #[derive(Debug, Clone)]
 pub struct TableModel {
@@ -32,13 +32,10 @@ fn set_all_rows(model: &mut TableModel, mut rows: Vec<Vec<String>>) {
 }
 
 fn parse_row(text: &str) -> Vec<String> {
-    let trimmed = text.trim();
-    let inner = if trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() >= 2 {
-        &trimmed[1..trimmed.len() - 1]
-    } else {
-        trimmed
-    };
-    inner.split('|').map(|s| s.trim().to_string()).collect()
+    parse_table_cells_with_ranges(text)
+        .into_iter()
+        .map(|(cell, _)| cell)
+        .collect()
 }
 
 fn parse_align_cell(cell: &str) -> TableAlign {

@@ -1416,6 +1416,22 @@ pub(crate) fn wrap_boundary_byte_indices(wrapped: &WrappedLine) -> Vec<usize> {
         .collect()
 }
 
+pub(crate) fn wrap_segment_byte_ranges(text_len: usize, boundaries: &[usize]) -> Vec<Range<usize>> {
+    let mut ranges = Vec::with_capacity(boundaries.len() + 1);
+    let mut start = 0usize;
+    for end in boundaries.iter().copied() {
+        let end = end.min(text_len);
+        if end > start {
+            ranges.push(start..end);
+            start = end;
+        }
+    }
+    if start < text_len || ranges.is_empty() {
+        ranges.push(start..text_len);
+    }
+    ranges
+}
+
 /// Return indent_px if the position y indicates a continuation line (y > 0).
 pub(crate) fn indent_for_y(indent_px: f32, y: Pixels, line_height: f32) -> f32 {
     if indent_px > 0.0 && f32::from(y) > line_height * 0.5 {
@@ -2010,6 +2026,7 @@ mod tests {
         GeneratedPreviewFontFamilies, build_display_text, build_generated_block_preview_svg,
         build_text_runs_for_display, compute_display_prefix_bytes, compute_generated_preview_size,
         normalize_mermaid_svg_source, prefix_is_folded, task_prefix_is_folded,
+        wrap_segment_byte_ranges,
     };
 
     fn generated_preview_fonts() -> GeneratedPreviewFontFamilies<'static> {
@@ -2050,7 +2067,7 @@ mod tests {
             prefix_collapsed,
             &font(".SystemUIFont"),
             &font(".SystemUIFont"),
-            &font(".SystemUIFont"),
+            &font("Test Mono"),
             &font(".SystemUIFont"),
             &font(".SystemUIFont"),
             &font("Menlo"),
@@ -2071,9 +2088,36 @@ mod tests {
         (display_text, runs)
     }
 
+    fn run_at_byte(runs: &[TextRun], byte_offset: usize) -> &TextRun {
+        let mut start = 0usize;
+        runs.iter()
+            .find(|run| {
+                let contains = byte_offset >= start && byte_offset < start + run.len;
+                start += run.len;
+                contains
+            })
+            .expect("text run at byte offset")
+    }
+
     #[test]
     fn regular_prefix_hides_at_trailing_edge() {
         assert!(prefix_is_folded(0, 2, &[Range { start: 2, end: 2 }]));
+    }
+
+    #[test]
+    fn wrap_segments_keep_url_slash_at_continuation_start() {
+        let text = "http://example.com/path";
+        let boundary = text.find('/').expect("first slash");
+
+        let ranges = wrap_segment_byte_ranges(text.len(), &[boundary]);
+
+        assert_eq!(ranges, vec![0..5, 5..text.len()]);
+        assert_eq!(&text[ranges[1].clone()][..1], "/");
+    }
+
+    #[test]
+    fn wrap_segments_ignore_duplicate_and_out_of_bounds_boundaries() {
+        assert_eq!(wrap_segment_byte_ranges(8, &[3, 3, 99]), vec![0..3, 3..8]);
     }
 
     #[test]
@@ -2897,6 +2941,63 @@ mod tests {
             runs.iter()
                 .any(|run| run.background_color == Some(theme.inline_code_bg))
         );
+    }
+
+    #[test]
+    fn nested_code_and_math_keep_semantic_style_priority() {
+        let theme = Theme::one_dark();
+        for (line, expected) in [("**==`code`==**", "code"), ("**==$x$==**", "x")] {
+            let (display_text, runs) = folded_display_and_runs(line, &theme);
+            let offset = display_text.find(expected).expect("nested content");
+            let run = run_at_byte(&runs, offset);
+
+            assert_eq!(display_text, expected);
+            assert_eq!(run.color, theme.inline_code, "color: {line}");
+            assert_eq!(
+                run.background_color,
+                Some(theme.inline_code_bg),
+                "background: {line}"
+            );
+            assert_eq!(run.font.family.as_ref(), "Test Mono", "font: {line}");
+            assert_eq!(run.font.weight, FontWeight::BOLD, "weight: {line}");
+        }
+    }
+
+    #[test]
+    fn link_label_custom_syntax_folds_and_combines_styles() {
+        let theme = Theme::one_dark();
+        let line = "[==label== ++under++ :rocket:](target)";
+        let (display_text, runs) = folded_display_and_runs(line, &theme);
+        let label = run_at_byte(&runs, display_text.find("label").expect("label"));
+        let under = run_at_byte(&runs, display_text.find("under").expect("underline"));
+
+        assert_eq!(display_text, "label under 🚀");
+        assert_eq!(label.background_color, Some(theme.highlight_bg));
+        assert_eq!(under.color, theme.link);
+        assert!(under.underline.is_some());
+    }
+
+    #[test]
+    fn nested_folded_display_and_text_runs_remain_consistent() {
+        let theme = Theme::one_dark();
+        let cases = [
+            ("**==`code`==**", "code"),
+            ("[==label== ++under++ :rocket:](target)", "label under 🚀"),
+            ("[[target|==别名== ++线++ :rocket:]]", "别名 线 🚀"),
+            ("~~H~2~O~~", "H O"),
+            ("$x^2^$", "x^2^"),
+            (r"\==literal== ++open", r"\==literal== ++open"),
+        ];
+
+        for (line, expected) in cases {
+            let (display_text, runs) = folded_display_and_runs(line, &theme);
+            assert_eq!(display_text, expected, "display: {line}");
+            assert_eq!(
+                runs.iter().map(|run| run.len).sum::<usize>(),
+                display_text.len(),
+                "run length: {line}"
+            );
+        }
     }
 
     #[test]
@@ -5059,6 +5160,24 @@ pub(crate) fn build_text_runs_for_display(
             buf_colors[index] = theme.bold;
             buf_weights[index] = FontWeight::BOLD;
         }
+    }
+
+    for range in decoration
+        .inline_spans
+        .iter()
+        .filter(|span| span.kind == InlineKind::InlineCode)
+        .map(|span| &span.range)
+        .chain(decoration.inline_math_spans.iter())
+    {
+        // Opaque semantic spans own color, background, and font after all
+        // presentation layers; orthogonal weight/style/decoration still stack.
+        let start = range.start.min(buf_len);
+        let end = range.end.min(buf_len);
+        for index in start..end {
+            buf_colors[index] = theme.inline_code;
+            buf_bg_colors[index] = Some(theme.inline_code_bg);
+        }
+        assign_font_roles(start..end, FontRole::Monospace, FontRole::BodyCjk);
     }
 
     for superscript_range in &decoration.superscript_spans {

@@ -401,6 +401,13 @@ fn try_export_paired_syntax(
     if inner.contains('\n') {
         return None;
     }
+    if matches!(tag, "sup" | "sub")
+        && inner
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '[' | ']'))
+    {
+        return None;
+    }
     out.push('<');
     out.push_str(tag);
     out.push('>');
@@ -512,6 +519,146 @@ fn convert_inline_custom_syntax(text: &str) -> Option<String> {
     }
 
     changed.then_some(out)
+}
+
+fn protected_export_source_ranges(markdown: &str, options: Options) -> Vec<Range<usize>> {
+    enum OpenSource {
+        CodeBlock(usize),
+        Link(usize, bool),
+        Image(usize),
+        Html(String, usize),
+    }
+
+    let mut ranges = Vec::new();
+    let mut open = Vec::new();
+    for (event, source_range) in Parser::new_ext(markdown, options).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => open.push(OpenSource::CodeBlock(source_range.start)),
+            Event::Start(Tag::Link { link_type, .. }) => open.push(OpenSource::Link(
+                source_range.start,
+                matches!(link_type, LinkType::WikiLink { .. }),
+            )),
+            Event::Start(Tag::Image { .. }) => open.push(OpenSource::Image(source_range.start)),
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(position) = open
+                    .iter()
+                    .rposition(|item| matches!(item, OpenSource::CodeBlock(_)))
+                    && let OpenSource::CodeBlock(start) = open.remove(position)
+                {
+                    ranges.push(start..source_range.end);
+                }
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some(position) = open
+                    .iter()
+                    .rposition(|item| matches!(item, OpenSource::Link(_, _)))
+                    && let OpenSource::Link(start, is_wiki) = open.remove(position)
+                {
+                    let end = source_range.end.min(markdown.len());
+                    if let Some(source) = markdown.get(start..end) {
+                        let target_range = if is_wiki {
+                            let inner_end = source.len().saturating_sub(2);
+                            (source.starts_with("[[") && source.ends_with("]]")).then(|| {
+                                let target_end = source[2..inner_end]
+                                    .find('|')
+                                    .map_or(inner_end, |separator| 2 + separator);
+                                2..target_end
+                            })
+                        } else {
+                            crate::markdown::markdown_inline_target_range(source)
+                        };
+                        if let Some(target_range) = target_range {
+                            ranges.push(start + target_range.start..start + target_range.end);
+                        }
+                    }
+                }
+            }
+            Event::End(TagEnd::Image) => {
+                if let Some(position) = open
+                    .iter()
+                    .rposition(|item| matches!(item, OpenSource::Image(_)))
+                    && let OpenSource::Image(start) = open.remove(position)
+                {
+                    ranges.push(start..source_range.end);
+                }
+            }
+            Event::Code(_) | Event::InlineMath(_) | Event::Html(_) => ranges.push(source_range),
+            Event::InlineHtml(source) => {
+                if let Some((tag, closing, self_closing)) =
+                    crate::markdown::protected_inline_html_tag(source.as_ref())
+                {
+                    if self_closing {
+                        ranges.push(source_range);
+                    } else if closing {
+                        if let Some(position) = open.iter().rposition(
+                            |item| matches!(item, OpenSource::Html(open_tag, _) if *open_tag == tag),
+                        ) && let OpenSource::Html(_, start) = open.remove(position)
+                        {
+                            ranges.push(start..source_range.end);
+                        }
+                    } else {
+                        open.push(OpenSource::Html(tag, source_range.start));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    ranges.sort_by_key(|range| range.start);
+    ranges
+}
+
+fn escaped_custom_syntax_placeholder(ch: char) -> Option<char> {
+    match ch {
+        '=' => Some('\u{e000}'),
+        '+' => Some('\u{e001}'),
+        '^' => Some('\u{e002}'),
+        '~' => Some('\u{e003}'),
+        ':' => Some('\u{e004}'),
+        _ => None,
+    }
+}
+
+fn restore_escaped_custom_syntax(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            '\u{e000}' => '=',
+            '\u{e001}' => '+',
+            '\u{e002}' => '^',
+            '\u{e003}' => '~',
+            '\u{e004}' => ':',
+            _ => ch,
+        })
+        .collect()
+}
+
+fn mask_escaped_custom_syntax(markdown: &str, options: Options) -> String {
+    let protected = protected_export_source_ranges(markdown, options);
+    let mut masked = String::with_capacity(markdown.len());
+    let mut index = 0usize;
+    while index < markdown.len() {
+        let Some(ch) = markdown[index..].chars().next() else {
+            break;
+        };
+        if ch == '\\'
+            && !crate::markdown::is_escaped_at(markdown, index)
+            && !protected
+                .iter()
+                .any(|range| range.start <= index && range.end > index)
+        {
+            let next_index = index + ch.len_utf8();
+            if let Some(next) = markdown[next_index..].chars().next()
+                && let Some(placeholder) = escaped_custom_syntax_placeholder(next)
+            {
+                masked.push(placeholder);
+                index = next_index + next.len_utf8();
+                continue;
+            }
+        }
+        masked.push(ch);
+        index += ch.len_utf8();
+    }
+    masked
 }
 
 const CALLOUT_NOTE_SVG: &str = include_str!("../../assets/icons/format/callout-note.svg");
@@ -636,6 +783,7 @@ fn transform_export_events<'a>(parser: impl Iterator<Item = Event<'a>>) -> Vec<E
     let mut events: Vec<Event<'a>> = Vec::new();
     let mut pending_code_block: Option<(CodeBlockKind<'a>, Vec<Event<'a>>, String)> = None;
     let mut pending_blockquote: Option<(usize, Option<BlockQuoteKind>, Vec<Event<'a>>)> = None;
+    let mut custom_syntax_suppression_depth = 0usize;
 
     for event in parser {
         if let Some((depth, kind, mut buffer)) = pending_blockquote.take() {
@@ -702,6 +850,14 @@ fn transform_export_events<'a>(parser: impl Iterator<Item = Event<'a>>) -> Vec<E
                     String::new(),
                 ));
             }
+            Event::Start(Tag::Image { .. }) => {
+                custom_syntax_suppression_depth += 1;
+                events.push(event);
+            }
+            Event::End(TagEnd::Image) => {
+                custom_syntax_suppression_depth = custom_syntax_suppression_depth.saturating_sub(1);
+                events.push(event);
+            }
             Event::DisplayMath(content) => {
                 let svg =
                     render_export_preview_svg(crate::markdown::BlockPreviewKind::Math, &content);
@@ -717,15 +873,34 @@ fn transform_export_events<'a>(parser: impl Iterator<Item = Event<'a>>) -> Vec<E
                     format!("<span class=\"export-math-inline\">{svg}</span>").into_boxed_str(),
                 )));
             }
+            Event::InlineHtml(ref source) => {
+                if let Some((_tag, closing, self_closing)) =
+                    crate::markdown::protected_inline_html_tag(source.as_ref())
+                {
+                    if closing {
+                        custom_syntax_suppression_depth =
+                            custom_syntax_suppression_depth.saturating_sub(1);
+                    } else if !self_closing {
+                        custom_syntax_suppression_depth += 1;
+                    }
+                }
+                events.push(event);
+            }
             Event::Text(content) => {
                 // pulldown emits the editor's custom inline syntaxes (highlight,
                 // underline, super/subscript, strikethrough, emoji shortcodes)
                 // as plain text; convert them to inline HTML so the export
                 // matches the editor.
-                if let Some(html) = convert_inline_custom_syntax(&content) {
-                    events.push(Event::Html(CowStr::Boxed(html.into_boxed_str())));
+                if custom_syntax_suppression_depth == 0
+                    && let Some(html) = convert_inline_custom_syntax(content.as_ref())
+                {
+                    events.push(Event::Html(CowStr::Boxed(
+                        restore_escaped_custom_syntax(&html).into_boxed_str(),
+                    )));
                 } else {
-                    events.push(Event::Text(content));
+                    events.push(Event::Text(CowStr::Boxed(
+                        restore_escaped_custom_syntax(content.as_ref()).into_boxed_str(),
+                    )));
                 }
             }
             _ => events.push(event),
@@ -756,7 +931,8 @@ fn render_markdown_for_export(markdown: &str) -> String {
     options.remove(Options::ENABLE_SUBSCRIPT);
     options.remove(Options::ENABLE_SUPERSCRIPT);
     options.remove(Options::ENABLE_STRIKETHROUGH);
-    let parser = Parser::new_ext(markdown, options);
+    let masked = mask_escaped_custom_syntax(markdown, options);
+    let parser = Parser::new_ext(&masked, options);
     let mut html = String::new();
     push_html(&mut html, transform_export_events(parser).into_iter());
     html
@@ -3554,6 +3730,52 @@ mod tests {
     }
 
     #[test]
+    fn export_custom_inline_syntax_respects_escapes_and_protected_contexts() {
+        let md = r"\==literal== \++literal++ \^literal^ \~literal~ \:rocket: `==code==` [\==escaped==](one) <code>++html++</code>";
+        let html = super::render_markdown_for_export(md);
+
+        assert!(!html.contains("<mark>"), "highlight: {html}");
+        assert!(!html.contains("<u>"), "underline: {html}");
+        assert!(!html.contains("<sup>"), "superscript: {html}");
+        assert!(!html.contains("<sub>"), "subscript: {html}");
+        assert!(!html.contains('\u{1F680}'), "emoji: {html}");
+        assert!(html.contains("==literal=="), "escaped literal: {html}");
+        assert!(html.contains("++html++"), "html code literal: {html}");
+    }
+
+    #[test]
+    fn export_link_labels_allow_custom_syntax_but_targets_and_image_alt_are_opaque() {
+        let md = "[==link== ++under++ :rocket:](target==literal==) [[wiki==target==|==wiki== ++alias++ :rocket:]] ![==alt==](image.png)";
+        let html = super::render_markdown_for_export(md);
+
+        assert_eq!(html.matches("<mark>").count(), 2, "highlight: {html}");
+        assert_eq!(html.matches("<u>").count(), 2, "underline: {html}");
+        assert_eq!(html.matches('\u{1F680}').count(), 2, "emoji: {html}");
+        assert!(
+            html.contains("href=\"target==literal==\""),
+            "target: {html}"
+        );
+        assert!(
+            html.contains("href=\"wiki==target==\""),
+            "wiki target: {html}"
+        );
+        assert!(html.contains("alt=\"==alt==\""), "image alt: {html}");
+    }
+
+    #[test]
+    fn export_super_and_subscript_match_editor_compact_rules() {
+        let html = super::render_markdown_for_export("^two words^ ~two words~ ^ok^ ~ok~");
+
+        assert!(
+            !html.contains("<sup>two words</sup>"),
+            "superscript: {html}"
+        );
+        assert!(!html.contains("<sub>two words</sub>"), "subscript: {html}");
+        assert!(html.contains("<sup>ok</sup>"), "superscript: {html}");
+        assert!(html.contains("<sub>ok</sub>"), "subscript: {html}");
+    }
+
+    #[test]
     fn export_renders_callout_with_title_and_body() {
         let md = "> [!TIP] Handy tip\n> body line";
         let html = super::render_markdown_for_export(md);
@@ -3579,6 +3801,14 @@ mod tests {
         assert!(html.contains("Warning"), "default title label: {html}");
         assert!(html.contains("watch out"), "callout body: {html}");
         assert!(!html.contains("[!WARNING]"), "marker removed: {html}");
+    }
+
+    #[test]
+    fn export_does_not_promote_late_callout_markers() {
+        let html = super::render_markdown_for_export("> ordinary\n> [!NOTE] literal");
+
+        assert!(!html.contains("class=\"callout"), "callout: {html}");
+        assert!(html.contains("[!NOTE] literal"), "literal marker: {html}");
     }
 
     #[test]

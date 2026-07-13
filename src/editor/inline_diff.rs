@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn removed_table_rows_match_diff_editor_source_rendering() {
-        let base = "| A | B |\n| - | - |\n| 1 | 2 |\n";
+        let base = "| A | B |\n| --- | --- |\n| 1 | 2 |\n";
         let state = compute_inline_diff_state(base, "", &FileKind::Markdown);
         let removed_lines = state
             .hunks
