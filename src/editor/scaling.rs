@@ -809,7 +809,6 @@ impl EditorView {
             return;
         }
 
-        self.chat_panel_placement = ChatPanelPlacement::Right;
         self.reveal_chat_panel(cx);
     }
 

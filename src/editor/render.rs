@@ -1721,8 +1721,7 @@ impl Render for EditorView {
                                                             this.child(self.render_search_bar(cx))
                                                         },
                                                             ),
-                                                        )
-                                                        .child(self.render_status_bar(cx)),
+                                                        ),
                                             ),
                                     )
                                     .when(self.should_render_bottom_chat_panel(), |this| {
@@ -1839,6 +1838,7 @@ impl Render for EditorView {
                                                 ),
                                         )
                                     })
+                                    .child(self.render_status_bar(cx))
                             )
                         },
                     )

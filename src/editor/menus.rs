@@ -3443,8 +3443,25 @@ impl EditorView {
         let submenu_gap = self.scaled(ms.menu_submenu_gap_px);
         let main_layout =
             self.context_menu_panel_layout(menu.position, main_menu_width, main_menu_height);
-        let main_menu_top = self.context_menu_layout_top(main_layout, main_menu_height);
-        let main_menu_bottom = main_menu_top + main_menu_height;
+        let main_visible_height = main_menu_height.min(main_layout.max_height);
+        let submenu_visible_height = submenu_height
+            .min((main_layout.overlay_height - 2.0 * main_layout.margin).max(self.scaled(100.0)));
+        let main_menu_top = self.context_menu_layout_top(main_layout, main_visible_height);
+        let main_menu_bottom = main_menu_top + main_visible_height;
+        let item_height = self.scaled(ms.menu_item_height_px);
+        let padding_y = self.scaled(ms.menu_padding_y_px);
+        let separator_height = self.context_menu_separator_block_height();
+        let heading_trigger_top = main_menu_top
+            + padding_y
+            + item_height * 4.0
+            + separator_height
+            + if self.current_file_path.is_some() {
+                item_height * 2.0 + separator_height
+            } else {
+                0.0
+            }
+            + separator_height;
+        let more_trigger_bottom = main_menu_bottom - padding_y;
         let right_space = main_layout.overlay_width
             - (main_layout.left + main_menu_width)
             - submenu_gap
@@ -3454,15 +3471,23 @@ impl EditorView {
         } else {
             (main_layout.left - submenu_width - submenu_gap).max(main_layout.margin)
         };
-        let submenu_bottom_anchor = (main_layout.overlay_height - main_menu_bottom).max(0.0);
-        let submenu_top = (main_menu_bottom - submenu_height).max(main_layout.margin);
+        let desired_top = match submenu_kind {
+            ContextMenuKind::FormatHeading => heading_trigger_top,
+            ContextMenuKind::FormatMore => more_trigger_bottom - submenu_visible_height,
+            _ => main_menu_bottom - submenu_visible_height,
+        };
+        let submenu_top = desired_top.clamp(
+            main_layout.margin,
+            (main_layout.overlay_height - main_layout.margin - submenu_visible_height)
+                .max(main_layout.margin),
+        );
 
         Some(ContextMenuPanelLayout {
             left: submenu_left,
             estimated_top: submenu_top,
             max_height: (main_layout.overlay_height - 2.0 * main_layout.margin)
                 .max(self.scaled(100.0)),
-            bottom_anchor: Some(submenu_bottom_anchor),
+            bottom_anchor: None,
             overlay_width: main_layout.overlay_width,
             overlay_height: main_layout.overlay_height,
             margin: main_layout.margin,

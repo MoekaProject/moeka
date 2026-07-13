@@ -3,12 +3,15 @@
 //! per item (Bear-style note list).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use gpui::{
-    AnyElement, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent, SharedString, div,
-    prelude::*, px,
+    AnyElement, App, Bounds, ContentMask, Context, Corners, CursorStyle, Element, ElementId,
+    FontWeight, GlobalElementId, LayoutId, MouseButton, MouseDownEvent, Pixels, RenderImage,
+    SharedString, Style, Window, div, prelude::*, px, relative,
 };
+use image::{Frame, RgbaImage};
 
 use super::*;
 
@@ -52,6 +55,88 @@ pub(crate) struct FileListDetails {
     pub title: Option<String>,
     /// Plain-text preview with markdown syntax removed.
     pub preview: String,
+    /// Markdown image targets, in document order.
+    pub image_paths: Vec<String>,
+}
+
+struct FileListImageElement {
+    image: Arc<RenderImage>,
+    radius: Pixels,
+}
+
+impl IntoElement for FileListImageElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for FileListImageElement {
+    type RequestLayoutState = ();
+    type PrepaintState = Option<(Bounds<Pixels>, Arc<RenderImage>)>;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+        let box_width: f32 = bounds.size.width.into();
+        let box_height: f32 = bounds.size.height.into();
+        if box_width <= 0.0 || box_height <= 0.0 {
+            return None;
+        }
+        Some((bounds, self.image.clone()))
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        let Some((image_bounds, image)) = prepaint else {
+            return;
+        };
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            let _ = window.paint_image(
+                *image_bounds,
+                Corners::all(self.radius),
+                image.clone(),
+                0,
+                false,
+            );
+        });
+    }
 }
 
 /// Builds a lightweight index of the markdown files directly inside `dir`.
@@ -97,9 +182,121 @@ fn load_file_list_details(
         .map(|(path, modified)| {
             let text = read_file_head(&path);
             let (title, preview) = extract_title_and_preview(&text);
-            (path, modified, FileListDetails { title, preview })
+            let image_paths = extract_image_paths(&text);
+            (
+                path,
+                modified,
+                FileListDetails {
+                    title,
+                    preview,
+                    image_paths,
+                },
+            )
         })
         .collect()
+}
+
+fn extract_image_paths(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut paths = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars.get(i) == Some(&'!') && chars.get(i + 1) == Some(&'[') {
+            if chars.get(i + 2) == Some(&'[') {
+                i += 3;
+                let start = i;
+                while i + 1 < chars.len() && !(chars[i] == ']' && chars[i + 1] == ']') {
+                    i += 1;
+                }
+                if i + 1 < chars.len() {
+                    let target = chars[start..i].iter().collect::<String>();
+                    if let Some(target) = clean_image_target(&target) {
+                        paths.push(target);
+                    }
+                    i += 2;
+                    continue;
+                }
+            } else {
+                i += 2;
+                while i < chars.len() && chars[i] != ']' {
+                    i += 1;
+                }
+                if chars.get(i) == Some(&']') && chars.get(i + 1) == Some(&'(') {
+                    i += 2;
+                    let start = i;
+                    while i < chars.len() && chars[i] != ')' {
+                        i += 1;
+                    }
+                    if i < chars.len() {
+                        let target = chars[start..i].iter().collect::<String>();
+                        if let Some(target) = clean_image_target(&target) {
+                            paths.push(target);
+                        }
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    paths
+}
+
+fn clean_image_target(target: &str) -> Option<String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+    let target = target
+        .split_once('|')
+        .map(|(path, _)| path)
+        .unwrap_or(target)
+        .trim();
+    let target = target
+        .split_once(char::is_whitespace)
+        .map(|(path, _)| path)
+        .unwrap_or(target)
+        .trim_matches(['<', '>', '"', '\'']);
+    (!target.is_empty()).then(|| target.to_string())
+}
+
+fn file_list_image_cache_key(markdown_path: &Path, image_path: &str) -> String {
+    format!("file-list:{}\u{0}{}", markdown_path.display(), image_path)
+}
+
+fn square_crop_render_image(image: RenderImage) -> RenderImage {
+    let size = image.size(0);
+    let Ok(width) = u32::try_from(size.width.0) else {
+        return image;
+    };
+    let Ok(height) = u32::try_from(size.height.0) else {
+        return image;
+    };
+    let Some(bytes) = image.as_bytes(0) else {
+        return image;
+    };
+    if width == 0 || height == 0 || bytes.len() < (width as usize) * (height as usize) * 4 {
+        return image;
+    }
+
+    let side = width.min(height);
+    let x0 = (width - side) / 2;
+    let y0 = (height - side) / 2;
+    let mut cropped = vec![0; (side as usize) * (side as usize) * 4];
+    let source_stride = width as usize * 4;
+    let dest_stride = side as usize * 4;
+    for row in 0..side as usize {
+        let source_start = (y0 as usize + row) * source_stride + x0 as usize * 4;
+        let source_end = source_start + dest_stride;
+        let dest_start = row * dest_stride;
+        cropped[dest_start..dest_start + dest_stride]
+            .copy_from_slice(&bytes[source_start..source_end]);
+    }
+
+    RgbaImage::from_raw(side, side, cropped)
+        .map(|buffer| RenderImage::new([Frame::new(buffer)]))
+        .unwrap_or(image)
 }
 
 fn preserve_file_list_details(previous: &[FileListItem], items: &mut [FileListItem]) {
@@ -353,13 +550,27 @@ impl EditorView {
         let ss = &self.styles.sidebar;
         self.scaled(
             2.0 * ss.file_list_item_padding_y_px
-                + ss.file_list_item_title_font_size_px
-                    .max(ss.file_list_item_time_font_size_px)
-                + ss.file_list_item_gap_px
-                + ss.file_list_item_preview_line_height_px
-                    * ss.file_list_item_preview_max_lines as f32
+                + self.file_list_item_content_height_px()
                 + ss.file_list_item_separator_width_px,
         )
+    }
+
+    fn file_list_item_content_height_px(&self) -> f32 {
+        let ss = &self.styles.sidebar;
+        ss.file_list_item_title_line_height_px
+            + ss.file_list_item_gap_px
+            + ss.file_list_item_preview_line_height_px * ss.file_list_item_preview_max_lines as f32
+            + ss.file_list_item_gap_px
+            + ss.file_list_item_time_line_height_px
+    }
+
+    fn file_list_preview_line_count(&self, preview: &str) -> usize {
+        let max_lines = self.styles.sidebar.file_list_item_preview_max_lines;
+        if preview.trim().is_empty() {
+            0
+        } else {
+            max_lines
+        }
     }
 
     pub(crate) fn file_list_layout_width(&self) -> f32 {
@@ -667,7 +878,97 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn render_file_list_item(&self, item: &FileListItem, cx: &mut Context<Self>) -> AnyElement {
+    fn file_list_item_image(
+        &mut self,
+        item: &FileListItem,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let details = item.details.as_ref()?;
+        if details.image_paths.is_empty() {
+            return None;
+        }
+
+        for image_path in &details.image_paths {
+            let cache_key = file_list_image_cache_key(&item.path, image_path);
+            match self.image_cache.get(&cache_key) {
+                Some(Some(image)) => {
+                    let ss = &self.styles.sidebar;
+                    let image_size = self.scaled(self.file_list_item_content_height_px());
+                    let image_radius = self.scaled(ss.file_list_item_thumbnail_radius_px);
+                    return Some(
+                        div()
+                            .w(px(image_size))
+                            .h(px(image_size))
+                            .flex_none()
+                            .overflow_hidden()
+                            .rounded(px(image_radius))
+                            .child(FileListImageElement {
+                                image: image.clone(),
+                                radius: px(image_radius),
+                            })
+                            .into_any_element(),
+                    );
+                }
+                Some(None) => continue,
+                None => {
+                    self.queue_file_list_image_load(
+                        item.path.clone(),
+                        image_path.clone(),
+                        cache_key,
+                        cx,
+                    );
+                    return None;
+                }
+            }
+        }
+
+        None
+    }
+
+    fn queue_file_list_image_load(
+        &mut self,
+        markdown_path: PathBuf,
+        image_path: String,
+        cache_key: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.image_cache.contains_key(&cache_key) {
+            return;
+        }
+
+        self.image_cache.insert(cache_key.clone(), None);
+        let workspace_root = self.sidebar_root.clone();
+        let workspaces = self.workspaces.clone();
+        cx.spawn(async move |this, cx| {
+            let file_dir = markdown_path.parent().map(PathBuf::from);
+            let load_path = if helpers::is_remote_image_url(&image_path) {
+                image_path.clone()
+            } else {
+                attachments::WorkspaceLinkIndex::build(&workspace_root)
+                    .resolve(Some(&markdown_path), &image_path)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| image_path.clone())
+            };
+            let maybe_image = cx
+                .background_executor()
+                .spawn(async move {
+                    helpers::load_image(&load_path, file_dir.as_ref(), &workspaces)
+                        .ok()
+                        .map(square_crop_render_image)
+                        .map(Arc::new)
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.image_cache.insert(cache_key, maybe_image);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_file_list_item(&mut self, item: &FileListItem, cx: &mut Context<Self>) -> AnyElement {
         if let Some(SidebarEditMode::Rename {
             path: ref rename_path,
             ref editor,
@@ -678,6 +979,7 @@ impl EditorView {
             return self.render_file_list_edit_row(editor);
         }
 
+        let thumbnail = self.file_list_item_image(item, cx);
         let ss = &self.styles.sidebar;
         let path = item.path.clone();
         let is_selected = self.is_sidebar_item_selected(&path);
@@ -700,19 +1002,25 @@ impl EditorView {
             .clone()
             .unwrap_or_else(|| split_file_name_for_display(&item.name).0.to_string());
         let time_label = crate::i18n::format_relative_time(self.ui_language, item.modified);
-        let preview_max_height = self.scaled(
-            ss.file_list_item_preview_line_height_px * ss.file_list_item_preview_max_lines as f32,
-        );
+        let preview = item
+            .details
+            .as_ref()
+            .map(|details| details.preview.clone())
+            .unwrap_or_default();
+        let preview_line_count = self.file_list_preview_line_count(&preview);
+        let preview_height =
+            self.scaled(ss.file_list_item_preview_line_height_px * preview_line_count as f32);
         let click_path = path.clone();
         let context_menu_path = path.clone();
 
         div()
             .id(SharedString::from(format!("file-list-{}", path.display())))
             .w_full()
+            .h(px(self.file_list_item_height_px()))
             .flex_none()
             .flex()
-            .flex_col()
-            .gap(px(self.scaled(ss.file_list_item_gap_px)))
+            .items_start()
+            .gap(px(self.scaled(ss.file_list_item_thumbnail_gap_px)))
             .px(px(self.scaled(ss.file_list_item_padding_x_px)))
             .py(px(self.scaled(ss.file_list_item_padding_y_px)))
             // Uniform dashed separator on every row (selection never changes
@@ -727,46 +1035,63 @@ impl EditorView {
             })
             .child(
                 div()
-                    .w_full()
+                    .flex_1()
+                    .min_w(px(0.0))
                     .flex()
-                    .items_center()
-                    .gap(px(self.scaled(ss.file_list_item_title_gap_px)))
+                    .flex_col()
+                    .gap(px(self.scaled(ss.file_list_item_gap_px)))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .overflow_hidden()
-                            .truncate()
-                            .whitespace_nowrap()
-                            .text_size(px(self.scaled(ss.file_list_item_title_font_size_px)))
-                            .text_color(title_color)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(title),
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(self.scaled(ss.file_list_item_title_gap_px)))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .truncate()
+                                    .whitespace_nowrap()
+                                    .text_size(
+                                        px(self.scaled(ss.file_list_item_title_font_size_px)),
+                                    )
+                                    .line_height(px(
+                                        self.scaled(ss.file_list_item_title_line_height_px)
+                                    ))
+                                    .text_color(title_color)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(title),
+                            ),
                     )
+                    .when(preview_line_count > 0, |this| {
+                        this.child(
+                            div()
+                                .w_full()
+                                .h(px(preview_height))
+                                .overflow_hidden()
+                                .text_size(px(self.scaled(ss.file_list_item_preview_font_size_px)))
+                                .line_height(px(
+                                    self.scaled(ss.file_list_item_preview_line_height_px)
+                                ))
+                                .text_color(ss.file_list_item_preview_color)
+                                .whitespace_normal()
+                                .line_clamp(ss.file_list_item_preview_max_lines)
+                                .child(preview.clone()),
+                        )
+                    })
                     .child(
                         div()
-                            .flex_none()
+                            .w_full()
+                            .h(px(self.scaled(ss.file_list_item_time_line_height_px)))
                             .text_size(px(self.scaled(ss.file_list_item_time_font_size_px)))
+                            .line_height(px(self.scaled(ss.file_list_item_time_line_height_px)))
                             .text_color(ss.file_list_item_time_color)
                             .whitespace_nowrap()
                             .child(time_label),
                     ),
             )
-            .child({
-                let preview = item
-                    .details
-                    .as_ref()
-                    .map(|details| details.preview.clone())
-                    .unwrap_or_default();
-                div()
-                    .w_full()
-                    .h(px(preview_max_height))
-                    .overflow_hidden()
-                    .text_size(px(self.scaled(ss.file_list_item_preview_font_size_px)))
-                    .line_height(px(self.scaled(ss.file_list_item_preview_line_height_px)))
-                    .text_color(ss.file_list_item_preview_color)
-                    .child(preview)
-            })
+            .when_some(thumbnail, |this, thumbnail| this.child(thumbnail))
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     cx.stop_propagation();
@@ -988,8 +1313,8 @@ mod tests {
     use std::{fs, time::SystemTime};
 
     use super::{
-        FileListDetails, FileListItem, extract_title_and_preview, load_file_list_items,
-        preserve_file_list_details, scroll_y_to_reveal_uniform_item,
+        FileListDetails, FileListItem, extract_image_paths, extract_title_and_preview,
+        load_file_list_items, preserve_file_list_details, scroll_y_to_reveal_uniform_item,
     };
     use crate::editor::SidebarSortMode;
 
@@ -1042,6 +1367,7 @@ mod tests {
             details: Some(FileListDetails {
                 title: Some("Title".to_string()),
                 preview: "Preview".to_string(),
+                image_paths: Vec::new(),
             }),
         }];
         let mut refreshed = vec![FileListItem {
@@ -1078,6 +1404,15 @@ mod tests {
         let (title, preview) = extract_title_and_preview(text);
         assert_eq!(title, None);
         assert_eq!(preview, "任务一 引用文本 有序项");
+    }
+
+    #[test]
+    fn extracts_markdown_and_wiki_image_paths_in_order() {
+        let text = "正文 ![alt](assets/one.png)\n![[two.jpg|200]]\n![alt](<three.webp> \"title\")";
+        assert_eq!(
+            extract_image_paths(text),
+            vec!["assets/one.png", "two.jpg", "three.webp"]
+        );
     }
 
     #[test]

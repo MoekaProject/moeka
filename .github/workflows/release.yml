@@ -167,7 +167,7 @@ jobs:
             exit 1
           fi
 
-      - name: Create or update release
+      - name: Recreate release
         env:
           GH_TOKEN: ${{ secrets.MOEKA_PUBLIC_RELEASE_TOKEN }}
           RELEASE_TAG: ${{ needs.release_meta.outputs.tag }}
@@ -200,18 +200,17 @@ jobs:
           }
 
           if gh release view "${RELEASE_TAG}" --repo "${repo}" >/dev/null 2>&1; then
-            run_release_command gh release edit "${RELEASE_TAG}" \
+            run_release_command gh release delete "${RELEASE_TAG}" \
               --repo "${repo}" \
-              --title "${RELEASE_TAG}" \
-              --notes-file release/release-notes.md \
-              --latest
-          else
-            run_release_command gh release create "${RELEASE_TAG}" \
-              --repo "${repo}" \
-              --title "${RELEASE_TAG}" \
-              --notes-file release/release-notes.md \
-              --latest
+              --cleanup-tag \
+              --yes
           fi
+
+          run_release_command gh release create "${RELEASE_TAG}" \
+            --repo "${repo}" \
+            --title "${RELEASE_TAG}" \
+            --notes-file release/release-notes.md \
+            --latest
 
           run_release_command gh release upload "${RELEASE_TAG}" \
             --repo "${repo}" \
