@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use chrono::{Datelike, Timelike};
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Context, Corners, CursorStyle, Element, ElementId,
     FontWeight, GlobalElementId, LayoutId, MouseButton, MouseDownEvent, Pixels, RenderImage,
@@ -46,6 +47,7 @@ pub(crate) struct FileListItem {
     pub path: PathBuf,
     pub name: String,
     pub modified: SystemTime,
+    pub created: SystemTime,
     pub details: Option<FileListDetails>,
 }
 
@@ -160,14 +162,20 @@ pub(crate) fn load_file_list_items(dir: &Path, sort_mode: SidebarSortMode) -> Ve
         .map(|entry| {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            let modified = entry
-                .metadata()
-                .and_then(|meta| meta.modified())
+            let metadata = entry.metadata().ok();
+            let modified = metadata
+                .as_ref()
+                .and_then(|meta| meta.modified().ok())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
+            let created = metadata
+                .as_ref()
+                .and_then(|meta| meta.created().ok())
+                .unwrap_or(modified);
             FileListItem {
                 path,
                 name,
                 modified,
+                created,
                 details: None,
             }
         })
@@ -551,6 +559,8 @@ impl EditorView {
         self.scaled(
             2.0 * ss.file_list_item_padding_y_px
                 + self.file_list_item_content_height_px()
+                + ss.file_list_item_gap_px
+                + ss.file_list_item_time_line_height_px
                 + ss.file_list_item_separator_width_px,
         )
     }
@@ -560,8 +570,28 @@ impl EditorView {
         ss.file_list_item_title_line_height_px
             + ss.file_list_item_gap_px
             + ss.file_list_item_preview_line_height_px * ss.file_list_item_preview_max_lines as f32
-            + ss.file_list_item_gap_px
-            + ss.file_list_item_time_line_height_px
+    }
+
+    fn file_list_created_time_label(&self, created: SystemTime) -> String {
+        let datetime: chrono::DateTime<chrono::Local> = created.into();
+        let now = chrono::Local::now();
+        let formatted = if datetime.date_naive() == now.date_naive() {
+            format!("{:02}:{:02}", datetime.hour(), datetime.minute())
+        } else if datetime.year() == now.year() {
+            format!("{:02}-{:02}", datetime.month(), datetime.day())
+        } else {
+            format!(
+                "{:04}-{:02}-{:02}",
+                datetime.year(),
+                datetime.month(),
+                datetime.day()
+            )
+        };
+        format!(
+            "{} {}",
+            self.t(crate::i18n::TextKey::InfoCreated),
+            formatted
+        )
     }
 
     fn file_list_preview_line_count(&self, preview: &str) -> usize {
@@ -1001,7 +1031,9 @@ impl EditorView {
             .and_then(|details| details.title.clone())
             .clone()
             .unwrap_or_else(|| split_file_name_for_display(&item.name).0.to_string());
-        let time_label = crate::i18n::format_relative_time(self.ui_language, item.modified);
+        let modified_time_label =
+            crate::i18n::format_relative_time(self.ui_language, item.modified);
+        let created_time_label = self.file_list_created_time_label(item.created);
         let preview = item
             .details
             .as_ref()
@@ -1019,8 +1051,8 @@ impl EditorView {
             .h(px(self.file_list_item_height_px()))
             .flex_none()
             .flex()
-            .items_start()
-            .gap(px(self.scaled(ss.file_list_item_thumbnail_gap_px)))
+            .flex_col()
+            .gap(px(self.scaled(ss.file_list_item_gap_px)))
             .px(px(self.scaled(ss.file_list_item_padding_x_px)))
             .py(px(self.scaled(ss.file_list_item_padding_y_px)))
             // Uniform dashed separator on every row (selection never changes
@@ -1035,63 +1067,88 @@ impl EditorView {
             })
             .child(
                 div()
-                    .flex_1()
-                    .min_w(px(0.0))
+                    .w_full()
                     .flex()
-                    .flex_col()
-                    .gap(px(self.scaled(ss.file_list_item_gap_px)))
+                    .items_start()
+                    .gap(px(self.scaled(ss.file_list_item_thumbnail_gap_px)))
                     .child(
                         div()
-                            .w_full()
+                            .flex_1()
+                            .min_w(px(0.0))
                             .flex()
-                            .items_center()
-                            .gap(px(self.scaled(ss.file_list_item_title_gap_px)))
+                            .flex_col()
+                            .gap(px(self.scaled(ss.file_list_item_gap_px)))
                             .child(
                                 div()
-                                    .flex_1()
+                                    .w_full()
+                                    .h(px(self.scaled(ss.file_list_item_title_line_height_px)))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
                                     .min_w(px(0.0))
-                                    .overflow_hidden()
-                                    .truncate()
-                                    .whitespace_nowrap()
-                                    .text_size(
-                                        px(self.scaled(ss.file_list_item_title_font_size_px)),
-                                    )
-                                    .line_height(px(
-                                        self.scaled(ss.file_list_item_title_line_height_px)
-                                    ))
-                                    .text_color(title_color)
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title),
-                            ),
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .overflow_hidden()
+                                            .truncate()
+                                            .whitespace_nowrap()
+                                            .text_size(px(
+                                                self.scaled(ss.file_list_item_title_font_size_px)
+                                            ))
+                                            .line_height(px(
+                                                self.scaled(ss.file_list_item_title_line_height_px)
+                                            ))
+                                            .text_color(title_color)
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(title),
+                                    ),
+                            )
+                            .when(preview_line_count > 0, |this| {
+                                this.child(
+                                    div()
+                                        .w_full()
+                                        .h(px(preview_height))
+                                        .overflow_hidden()
+                                        .text_size(px(
+                                            self.scaled(ss.file_list_item_preview_font_size_px)
+                                        ))
+                                        .line_height(px(
+                                            self.scaled(ss.file_list_item_preview_line_height_px)
+                                        ))
+                                        .text_color(ss.file_list_item_preview_color)
+                                        .whitespace_normal()
+                                        .line_clamp(ss.file_list_item_preview_max_lines)
+                                        .child(preview.clone()),
+                                )
+                            }),
                     )
-                    .when(preview_line_count > 0, |this| {
-                        this.child(
-                            div()
-                                .w_full()
-                                .h(px(preview_height))
-                                .overflow_hidden()
-                                .text_size(px(self.scaled(ss.file_list_item_preview_font_size_px)))
-                                .line_height(px(
-                                    self.scaled(ss.file_list_item_preview_line_height_px)
-                                ))
-                                .text_color(ss.file_list_item_preview_color)
-                                .whitespace_normal()
-                                .line_clamp(ss.file_list_item_preview_max_lines)
-                                .child(preview.clone()),
-                        )
-                    })
+                    .when_some(thumbnail, |this, thumbnail| this.child(thumbnail)),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .h(px(self.scaled(ss.file_list_item_time_line_height_px)))
+                    .flex()
+                    .items_center()
+                    .text_size(px(self.scaled(ss.file_list_item_time_font_size_px)))
+                    .line_height(px(self.scaled(ss.file_list_item_time_line_height_px)))
+                    .text_color(ss.file_list_item_time_color)
+                    .whitespace_nowrap()
                     .child(
                         div()
-                            .w_full()
-                            .h(px(self.scaled(ss.file_list_item_time_line_height_px)))
-                            .text_size(px(self.scaled(ss.file_list_item_time_font_size_px)))
-                            .line_height(px(self.scaled(ss.file_list_item_time_line_height_px)))
-                            .text_color(ss.file_list_item_time_color)
+                            .flex_1()
+                            .min_w(px(0.0))
                             .whitespace_nowrap()
-                            .child(time_label),
+                            .child(modified_time_label),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .child(created_time_label),
                     ),
             )
-            .when_some(thumbnail, |this, thumbnail| this.child(thumbnail))
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     cx.stop_propagation();
@@ -1364,6 +1421,7 @@ mod tests {
             path: path.clone(),
             name: "note.md".to_string(),
             modified,
+            created: modified,
             details: Some(FileListDetails {
                 title: Some("Title".to_string()),
                 preview: "Preview".to_string(),
@@ -1374,6 +1432,7 @@ mod tests {
             path,
             name: "note.md".to_string(),
             modified,
+            created: modified,
             details: None,
         }];
 
