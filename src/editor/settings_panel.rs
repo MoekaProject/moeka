@@ -352,14 +352,16 @@ impl EditorView {
     }
 
     fn render_attachment_folder_row(&self) -> AnyElement {
-        let border_color = self.theme.border_primary;
+        let settings = &self.styles.settings_panel;
         let editor = self.settings_attachment_folder_editor.clone();
         let control = div()
             .w_full()
-            .h(px(self.scaled(30.0)))
-            .border(px(1.0))
-            .border_color(border_color)
-            .rounded(px(self.scaled(4.0)))
+            .h(px(self.scaled(settings.settings_input_height_px)))
+            .border(px(settings.settings_option_button_border_width_px))
+            .border_color(settings.settings_option_button_border_color)
+            .rounded(px(self.scaled(settings.settings_input_radius_px)))
+            .bg(settings.settings_option_button_bg)
+            .overflow_hidden()
             .when_some(editor, |this, editor| this.child(editor))
             .into_any_element();
         self.render_attachment_settings_row(
@@ -372,7 +374,7 @@ impl EditorView {
         if self.settings_attachment_folder_editor.is_some() {
             return;
         }
-        let mut styles = self.inline_stepper_input_styles();
+        let mut styles = self.settings_text_input_styles();
         styles.text_input_center = false;
         styles.text_input_padding_left_px = self.scaled(8.0);
         styles.text_input_padding_right_px = self.scaled(8.0);
@@ -570,16 +572,16 @@ impl EditorView {
 
     fn settings_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
-        styles.text_input_bg = self.styles.settings_panel.settings_option_button_bg;
-        styles.text_input_hover_bg =
-            Some(self.styles.settings_panel.settings_option_button_hover_bg);
-        styles.text_input_focus_bg = self.theme.bg_selected;
+        let settings = &self.styles.settings_panel;
+        styles.text_input_bg = settings.settings_option_button_bg;
+        styles.text_input_hover_bg = Some(settings.settings_option_button_hover_bg);
+        styles.text_input_focus_bg = settings.settings_option_button_hover_bg;
         styles.text_input_border_width_px = 0.0;
-        styles.text_input_height_px = self.scaled(28.0);
+        styles.text_input_height_px = self.scaled(settings.settings_input_height_px);
         styles.text_input_padding_left_px = self.scaled(8.0);
         styles.text_input_padding_right_px = self.scaled(8.0);
         styles.text_input_font_size_px = self.scaled(self.styles.ui_font_size_px + 1.0);
-        styles.text_input_radius_px = self.scaled(4.0);
+        styles.text_input_radius_px = self.scaled(settings.settings_input_radius_px);
         styles.text_input_cursor_width_px =
             self.scaled(self.styles.text_input.text_input_cursor_width_px);
         styles.text_input_cursor_height_ratio = self
@@ -598,8 +600,48 @@ impl EditorView {
         let mut styles = self.settings_text_input_styles();
         styles.text_input_padding_left_px = self.scaled(2.0);
         styles.text_input_padding_right_px = self.scaled(2.0);
+        styles.text_input_radius_px =
+            self.scaled(self.styles.settings_panel.settings_stepper_input_radius_px);
         styles.text_input_center = true;
         styles
+    }
+
+    fn settings_picker_text_input_styles(&self) -> crate::style::TextInputStyles {
+        let mut styles = self.settings_text_input_styles();
+        let menu = &self.styles.quick_open;
+        styles.text_input_bg = menu.quick_open_input_bg;
+        styles.text_input_hover_bg = Some(menu.quick_open_input_focus_bg);
+        styles.text_input_focus_bg = menu.quick_open_input_focus_bg;
+        styles.text_input_text_color = menu.quick_open_input_text_color;
+        styles.text_input_placeholder_color = menu.quick_open_result_secondary_text_color;
+        styles.text_input_cursor_color = menu.quick_open_input_text_color;
+        styles
+    }
+
+    pub(crate) fn sync_settings_text_input_styles(&mut self, cx: &mut Context<Self>) {
+        let stepper_styles = self.inline_stepper_input_styles();
+        for editor in [
+            self.settings_font_size_editor.as_ref(),
+            self.settings_ui_font_size_editor.as_ref(),
+            self.settings_line_height_editor.as_ref(),
+            self.settings_letter_spacing_editor.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let styles = stepper_styles.clone();
+            editor.update(cx, |input, cx| input.set_styles(styles, cx));
+        }
+
+        if let Some(editor) = &self.settings_attachment_folder_editor {
+            let mut styles = self.settings_text_input_styles();
+            styles.text_input_center = false;
+            editor.update(cx, |input, cx| input.set_styles(styles, cx));
+        }
+        if let Some(editor) = &self.settings_font_picker_editor {
+            let styles = self.settings_picker_text_input_styles();
+            editor.update(cx, |input, cx| input.set_styles(styles, cx));
+        }
     }
 
     fn build_inline_stepper_editor(
@@ -1061,9 +1103,11 @@ impl EditorView {
         option_index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let hover_bg = self.theme.bg_hover;
-        let text_primary = self.styles.settings_panel.settings_primary_text_color;
-        let border_color = self.theme.border_primary;
+        let settings = &self.styles.settings_panel;
+        let hover_bg = settings.settings_option_button_hover_bg;
+        let text_primary = settings.settings_primary_text_color;
+        let border_color = settings.settings_option_button_border_color;
+        let bg = settings.settings_option_button_bg;
         let current_value = current_value.to_string();
         let bounds_cell = self
             .font_picker_button_bounds
@@ -1088,13 +1132,14 @@ impl EditorView {
                         role as u8, option_index
                     )))
                     .w_full()
-                    .h(px(self.scaled(30.0)))
+                    .h(px(self.scaled(settings.settings_input_height_px)))
                     .px(px(self.scaled(10.0)))
                     .flex()
                     .items_center()
-                    .rounded(px(self.scaled(6.0)))
-                    .border(px(1.0))
+                    .rounded(px(self.scaled(settings.settings_input_radius_px)))
+                    .border(px(settings.settings_option_button_border_width_px))
                     .border_color(border_color)
+                    .bg(bg)
                     .text_size(px(self.scaled(13.0)))
                     .text_color(text_primary)
                     .cursor(CursorStyle::Arrow)
@@ -1176,6 +1221,7 @@ impl EditorView {
                         "ui-scale-dec",
                         "−",
                         false,
+                        Some("⌘-"),
                         cx,
                         |this, cx| {
                             let current = this.ui_scale;
@@ -1200,6 +1246,7 @@ impl EditorView {
                         "ui-scale-inc",
                         "+",
                         true,
+                        Some("⌘+"),
                         cx,
                         |this, cx| {
                             let current = this.ui_scale;
@@ -1215,6 +1262,7 @@ impl EditorView {
         id: &'static str,
         symbol: &'static str,
         increase: bool,
+        shortcut: Option<&'static str>,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
@@ -1243,7 +1291,7 @@ impl EditorView {
             button,
             cx.entity().clone(),
             crate::i18n::adjustment_label(self.ui_language, increase),
-            None::<&'static str>,
+            shortcut,
         )
     }
 
@@ -1312,6 +1360,7 @@ impl EditorView {
                         "line-height-dec",
                         "−",
                         false,
+                        None,
                         cx,
                         |this, cx| {
                             let current = this.app_settings.line_height;
@@ -1335,6 +1384,7 @@ impl EditorView {
                         "line-height-inc",
                         "+",
                         true,
+                        None,
                         cx,
                         |this, cx| {
                             let current = this.app_settings.line_height;
@@ -1411,6 +1461,7 @@ impl EditorView {
                         "letter-spacing-dec",
                         "−",
                         false,
+                        None,
                         cx,
                         |this, cx| {
                             let current = this.app_settings.letter_spacing;
@@ -1435,6 +1486,7 @@ impl EditorView {
                         "letter-spacing-inc",
                         "+",
                         true,
+                        None,
                         cx,
                         |this, cx| {
                             let current = this.app_settings.letter_spacing;
@@ -1579,10 +1631,7 @@ impl EditorView {
         });
 
         // Create TextInput for search
-        let mut styles = self.settings_text_input_styles();
-        styles.text_input_bg = gpui::transparent_black();
-        styles.text_input_hover_bg = None;
-        styles.text_input_focus_bg = gpui::transparent_black();
+        let styles = self.settings_picker_text_input_styles();
         let editor = cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
         cx.subscribe(
             &editor,
@@ -1665,16 +1714,12 @@ impl EditorView {
         picker: &FontPickerState,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let is_light = self.theme.bg_primary.l >= 0.5;
-        let bg = if is_light {
-            self.theme.bg_primary
-        } else {
-            self.theme.bg_elevated
-        };
-        let border_color = self.theme.border_primary;
-        let text_primary = self.styles.settings_panel.settings_primary_text_color;
-        let hover_bg = self.theme.bg_hover;
-        let selected_bg = self.theme.bg_selected;
+        let menu = &self.styles.quick_open;
+        let bg = menu.quick_open_panel_bg;
+        let border_color = menu.quick_open_panel_border_color;
+        let text_primary = menu.quick_open_result_text_color;
+        let hover_bg = menu.quick_open_result_hover_bg;
+        let selected_bg = menu.quick_open_result_selected_bg;
 
         let max_visible = 12;
         let item_h = self.scaled(28.0);

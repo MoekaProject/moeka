@@ -2462,10 +2462,9 @@ impl EditorView {
         }));
     }
 
-    /// Updates toolbar visibility in response to a scroll change. Showing (back
-    /// at the top) is immediate; hiding is throttled: the first scroll away from
-    /// the top schedules a hide ~2s later, and further scrolls within that
-    /// window neither re-trigger the hide nor reset the timer.
+    /// Updates toolbar visibility in response to a scroll change. Crossing away
+    /// from the top immediately starts the opacity animation; returning to the
+    /// top immediately starts the reveal animation.
     pub(crate) fn update_toolbar_visibility_for_scroll(&mut self, cx: &mut Context<Self>) {
         if self.scroll_offset <= 0.5 {
             self.toolbar_hide_task = None;
@@ -2476,26 +2475,14 @@ impl EditorView {
             return;
         }
 
-        // Already hidden, or a hide is already pending: do nothing so the 2s
-        // window is not restarted on every scroll event.
-        if self.toolbar_hidden_by_scroll || self.toolbar_hide_task.is_some() {
-            return;
+        self.toolbar_hide_task = None;
+        let visibility_changed = !self.toolbar_hidden_by_scroll || self.toolbar_corner_hovered;
+        self.toolbar_hidden_by_scroll = true;
+        self.toolbar_corner_hovered = false;
+        if visibility_changed {
+            self.sync_toolbar_opacity(cx);
+            cx.notify();
         }
-
-        self.toolbar_hide_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(2000))
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.toolbar_hide_task = None;
-                if this.scroll_offset > 0.5 {
-                    this.toolbar_hidden_by_scroll = true;
-                    this.toolbar_corner_hovered = false;
-                    this.sync_toolbar_opacity(cx);
-                    cx.notify();
-                }
-            });
-        }));
     }
 
     fn editor_scrollbar_can_show(&self) -> bool {
@@ -3389,12 +3376,25 @@ impl EditorView {
             let styles = self.workspace_search_text_input_styles();
             editor.update(cx, |input, cx| input.set_styles(styles, cx));
         }
+        if let Some(editor) = &self.quick_open_editor {
+            let styles = self.quick_open_text_input_styles();
+            editor.update(cx, |input, cx| input.set_styles(styles, cx));
+        }
+        if let Some(editor) = &self.command_palette_editor {
+            let styles = self.quick_open_text_input_styles();
+            editor.update(cx, |input, cx| input.set_styles(styles, cx));
+        }
+        if let Some(editor) = &self.language_picker_editor {
+            let styles = self.language_picker_text_input_styles();
+            editor.update(cx, |input, cx| input.set_styles(styles, cx));
+        }
         if let Some(sidebar_edit) = &self.sidebar_edit {
             let styles = self.sidebar_edit_text_input_styles();
             sidebar_edit
                 .editor()
                 .update(cx, |input, cx| input.set_styles(styles, cx));
         }
+        self.sync_settings_text_input_styles(cx);
         self.update_theme_debugger_input_styles(cx);
     }
 

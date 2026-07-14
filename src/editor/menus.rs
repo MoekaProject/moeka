@@ -49,6 +49,14 @@ enum FormatMenuHoverBehavior {
     ClearSubmenu,
 }
 
+struct SlashMenuItem {
+    label: String,
+    filter_text: &'static str,
+    icon: Option<&'static str>,
+    shortcut: Option<&'static str>,
+    action: FormatMenuAction,
+}
+
 fn image_markdown_ranges(line_content: &str) -> Option<(Range<usize>, Range<usize>, Range<usize>)> {
     let full_start = line_content.find("![")?;
     let desc_start = full_start + 2;
@@ -1358,59 +1366,84 @@ impl EditorView {
         self.close_context_menu(cx);
     }
 
-    pub(crate) fn slash_menu_matched_actions(&self) -> Vec<FormatMenuAction> {
-        let filter = self.slash_filter.to_lowercase();
-        let matches_filter = |label: &str, filter_text: &str| -> bool {
-            if filter.is_empty() {
-                return true;
-            }
-            label.to_lowercase().contains(&filter) || filter_text.to_lowercase().contains(&filter)
-        };
+    fn slash_menu_items(&self) -> Vec<SlashMenuItem> {
+        vec![
+            SlashMenuItem {
+                label: self.format_action_label(FormatMenuAction::Todo),
+                filter_text: "todo task checkbox",
+                icon: Some(FMT_TODO_SVG),
+                shortcut: Some("⌘⌥↩"),
+                action: FormatMenuAction::Todo,
+            },
+            SlashMenuItem {
+                label: self.format_action_label(FormatMenuAction::CodeBlock),
+                filter_text: "code block",
+                icon: Some(FMT_CODE_SVG),
+                shortcut: Some("⌘⌥C"),
+                action: FormatMenuAction::CodeBlock,
+            },
+            SlashMenuItem {
+                label: self.format_action_label(FormatMenuAction::Table),
+                filter_text: "table grid 2x2",
+                icon: Some(FMT_TABLE_SVG),
+                shortcut: Some("⌘⌥T"),
+                action: FormatMenuAction::Table,
+            },
+            SlashMenuItem {
+                label: self.format_action_label(FormatMenuAction::Link),
+                filter_text: "link url",
+                icon: Some(FMT_LINK_SVG),
+                shortcut: Some("⌘K"),
+                action: FormatMenuAction::Link,
+            },
+            SlashMenuItem {
+                label: self.format_action_label(FormatMenuAction::DateTime),
+                filter_text: "date time now today timestamp calendar",
+                icon: Some(FMT_DATE_TIME_SVG),
+                shortcut: Some("now"),
+                action: FormatMenuAction::DateTime,
+            },
+            SlashMenuItem {
+                label: self.format_action_label(FormatMenuAction::CalloutTip),
+                filter_text: "tip callout alert admonition quote",
+                icon: Some(FMT_CALLOUT_TIP_SVG),
+                shortcut: Some("> [!TIP]"),
+                action: FormatMenuAction::CalloutTip,
+            },
+            SlashMenuItem {
+                label: self.format_action_label(FormatMenuAction::WikiLink),
+                filter_text: "wiki link backlink bidirectional",
+                icon: Some(FMT_WIKI_LINK_SVG),
+                shortcut: Some("[["),
+                action: FormatMenuAction::WikiLink,
+            },
+            SlashMenuItem {
+                label: self.format_action_label(FormatMenuAction::Image),
+                filter_text: "image photo",
+                icon: Some(FMT_IMAGE_SVG),
+                shortcut: None,
+                action: FormatMenuAction::Image,
+            },
+        ]
+    }
 
-        let mut actions = Vec::new();
-        let all_items = [
-            (
-                self.format_action_label(FormatMenuAction::Todo),
-                "todo task checkbox",
-                FormatMenuAction::Todo,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::CodeBlock),
-                "code block",
-                FormatMenuAction::CodeBlock,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::Table),
-                "table grid 2x2",
-                FormatMenuAction::Table,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::Link),
-                "link url",
-                FormatMenuAction::Link,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::WikiLink),
-                "wiki link backlink bidirectional",
-                FormatMenuAction::WikiLink,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::Image),
-                "image photo",
-                FormatMenuAction::Image,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::DateTime),
-                "date time now today timestamp calendar",
-                FormatMenuAction::DateTime,
-            ),
-        ];
-        for (label, ft, action) in all_items {
-            if matches_filter(&label, ft) {
-                actions.push(action);
-            }
-        }
-        actions
+    fn slash_menu_matched_items(&self) -> Vec<SlashMenuItem> {
+        let filter = self.slash_filter.to_lowercase();
+        self.slash_menu_items()
+            .into_iter()
+            .filter(|item| {
+                filter.is_empty()
+                    || item.label.to_lowercase().contains(&filter)
+                    || item.filter_text.contains(&filter)
+            })
+            .collect()
+    }
+
+    pub(crate) fn slash_menu_matched_actions(&self) -> Vec<FormatMenuAction> {
+        self.slash_menu_matched_items()
+            .into_iter()
+            .map(|item| item.action)
+            .collect()
     }
 
     pub(crate) fn execute_slash_menu_selected(&mut self, cx: &mut Context<Self>) {
@@ -2679,17 +2712,9 @@ impl EditorView {
 
         let mut items: Vec<AnyElement> = Vec::new();
         let is_slash_menu = self.slash_menu_start.is_some();
-        let filter = self.slash_filter.to_lowercase();
         let selected_index = self.menu_selected_index;
         let mut actionable_index: usize = 0;
         let active_actions = self.active_format_actions();
-
-        let matches_filter = |label: &str, filter_text: &str| -> bool {
-            if filter.is_empty() {
-                return true;
-            }
-            label.to_lowercase().contains(&filter) || filter_text.to_lowercase().contains(&filter)
-        };
 
         if !is_slash_menu {
             for (label, shortcut, action) in [
@@ -2876,82 +2901,22 @@ impl EditorView {
             return items;
         }
 
-        let slash_items = [
-            (
-                self.format_action_label(FormatMenuAction::Todo),
-                "todo task checkbox",
-                Some(FMT_TODO_SVG),
-                Some("⌘⌥↩"),
-                FormatMenuAction::Todo,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::CodeBlock),
-                "code block",
-                Some(FMT_CODE_SVG),
-                Some("⌘⌥C"),
-                FormatMenuAction::CodeBlock,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::Table),
-                "table grid 2x2",
-                Some(FMT_TABLE_SVG),
-                Some("⌘⌥T"),
-                FormatMenuAction::Table,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::Link),
-                "link url",
-                Some(FMT_LINK_SVG),
-                Some("⌘K"),
-                FormatMenuAction::Link,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::DateTime),
-                "date time now today timestamp calendar",
-                Some(FMT_DATE_TIME_SVG),
-                Some("now"),
-                FormatMenuAction::DateTime,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::CalloutTip),
-                "tip callout alert admonition quote",
-                Some(FMT_CALLOUT_TIP_SVG),
-                Some("> [!TIP]"),
-                FormatMenuAction::CalloutTip,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::WikiLink),
-                "wiki link backlink bidirectional",
-                Some(FMT_WIKI_LINK_SVG),
-                Some("[["),
-                FormatMenuAction::WikiLink,
-            ),
-            (
-                self.format_action_label(FormatMenuAction::Image),
-                "image photo",
-                Some(FMT_IMAGE_SVG),
-                None,
-                FormatMenuAction::Image,
-            ),
-        ];
-
-        for (label, filter_text, icon, shortcut, action) in slash_items {
-            if matches_filter(&label, filter_text) {
-                let is_selected = actionable_index == selected_index;
-                let is_active = active_actions.contains(&action);
-                items.push(self.render_format_context_menu_item(
-                    &label,
-                    icon,
-                    shortcut,
-                    is_selected,
-                    is_active,
-                    cx,
-                    move |this, _, cx| {
-                        this.execute_format_menu_action(action, cx);
-                    },
-                ));
-                actionable_index += 1;
-            }
+        for slash_item in self.slash_menu_matched_items() {
+            let is_selected = actionable_index == selected_index;
+            let is_active = active_actions.contains(&slash_item.action);
+            let action = slash_item.action;
+            items.push(self.render_format_context_menu_item(
+                &slash_item.label,
+                slash_item.icon,
+                slash_item.shortcut,
+                is_selected,
+                is_active,
+                cx,
+                move |this, _, cx| {
+                    this.execute_format_menu_action(action, cx);
+                },
+            ));
+            actionable_index += 1;
         }
 
         items

@@ -116,10 +116,15 @@ fn language_item_matches(item: &LanguagePickerItem, query: &str) -> bool {
 }
 
 impl EditorView {
-    fn language_picker_text_input_styles(&self) -> crate::style::TextInputStyles {
+    pub(crate) fn language_picker_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
-        styles.text_input_bg = gpui::Hsla::transparent_black();
-        styles.text_input_focus_bg = gpui::Hsla::transparent_black();
+        let menu = &self.styles.quick_open;
+        styles.text_input_bg = menu.quick_open_input_bg;
+        styles.text_input_hover_bg = Some(menu.quick_open_input_focus_bg);
+        styles.text_input_focus_bg = menu.quick_open_input_focus_bg;
+        styles.text_input_text_color = menu.quick_open_input_text_color;
+        styles.text_input_placeholder_color = menu.quick_open_result_secondary_text_color;
+        styles.text_input_cursor_color = menu.quick_open_input_text_color;
         styles.text_input_border_width_px = 0.0;
         styles.text_input_cursor_height_ratio = 0.6;
         styles
@@ -289,17 +294,13 @@ impl EditorView {
     }
 
     pub(crate) fn render_language_picker_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
-        let is_light = self.theme.bg_primary.l >= 0.5;
-        let bg = if is_light {
-            self.theme.bg_primary
-        } else {
-            self.theme.bg_elevated
-        };
-        let border = self.theme.border_primary;
-        let selected_bg = self.theme.bg_selected;
-        let hover_bg = self.theme.bg_hover;
-        let text_primary = self.theme.text_primary;
-        let text_secondary = self.theme.text_secondary;
+        let styles = &self.styles.quick_open;
+        let bg = styles.quick_open_panel_bg;
+        let border = styles.quick_open_panel_border_color;
+        let selected_bg = styles.quick_open_result_selected_bg;
+        let hover_bg = styles.quick_open_result_hover_bg;
+        let text_primary = styles.quick_open_result_text_color;
+        let text_secondary = styles.quick_open_result_secondary_text_color;
         let row_h = self.scaled(24.0);
         let name_font = self.scaled(12.0);
         let input_h = self.scaled(42.0);

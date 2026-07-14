@@ -575,7 +575,7 @@ impl EditorView {
     fn file_list_created_time_label(&self, created: SystemTime) -> String {
         let datetime: chrono::DateTime<chrono::Local> = created.into();
         let now = chrono::Local::now();
-        let formatted = if datetime.date_naive() == now.date_naive() {
+        if datetime.date_naive() == now.date_naive() {
             format!("{:02}:{:02}", datetime.hour(), datetime.minute())
         } else if datetime.year() == now.year() {
             format!("{:02}-{:02}", datetime.month(), datetime.day())
@@ -586,12 +586,16 @@ impl EditorView {
                 datetime.month(),
                 datetime.day()
             )
-        };
-        format!(
-            "{} {}",
-            self.t(crate::i18n::TextKey::InfoCreated),
-            formatted
-        )
+        }
+    }
+
+    fn file_list_detailed_time_label(&self, key: crate::i18n::TextKey, time: SystemTime) -> String {
+        let datetime: chrono::DateTime<chrono::Local> = time.into();
+        let mut format = self.app_settings.date_time_format().to_string();
+        if !format.contains("%S") && !format.contains("%T") {
+            format.push_str(":%S");
+        }
+        format!("{} {}", self.t(key), datetime.format(&format))
     }
 
     fn file_list_preview_line_count(&self, preview: &str) -> usize {
@@ -1017,7 +1021,7 @@ impl EditorView {
         let row_bg = if is_selected || is_active {
             ss.file_list_item_selected_bg
         } else {
-            gpui::transparent_black()
+            ss.file_list_item_bg
         };
         let hover_bg = ss.file_list_item_hover_bg;
         let title_color = if is_selected || is_active {
@@ -1034,6 +1038,10 @@ impl EditorView {
         let modified_time_label =
             crate::i18n::format_relative_time(self.ui_language, item.modified);
         let created_time_label = self.file_list_created_time_label(item.created);
+        let modified_tooltip =
+            self.file_list_detailed_time_label(crate::i18n::TextKey::InfoModified, item.modified);
+        let created_tooltip =
+            self.file_list_detailed_time_label(crate::i18n::TextKey::InfoCreated, item.created);
         let preview = item
             .details
             .as_ref()
@@ -1135,19 +1143,25 @@ impl EditorView {
                     .line_height(px(self.scaled(ss.file_list_item_time_line_height_px)))
                     .text_color(ss.file_list_item_time_color)
                     .whitespace_nowrap()
-                    .child(
+                    .child(tooltip::with_tooltip(
                         div()
-                            .flex_1()
-                            .min_w(px(0.0))
+                            .flex_none()
                             .whitespace_nowrap()
                             .child(modified_time_label),
-                    )
-                    .child(
+                        cx.entity().clone(),
+                        modified_tooltip,
+                        None::<&'static str>,
+                    ))
+                    .child(div().flex_1().min_w(px(0.0)))
+                    .child(tooltip::with_tooltip(
                         div()
                             .flex_none()
                             .whitespace_nowrap()
                             .child(created_time_label),
-                    ),
+                        cx.entity().clone(),
+                        created_tooltip,
+                        None::<&'static str>,
+                    )),
             )
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
