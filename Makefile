@@ -25,8 +25,52 @@ DMG_BACKGROUND := install-bg.jpg
 DMG_SCRIPT := scripts/create_dmg.sh
 VOLUME_NAME := $(APP_DISPLAY_NAME)
 TAG ?= $(firstword $(filter v%,$(MAKECMDGOALS)))
+RELEASE_REPO ?= MoekaProject/release
+DIST_VARIANTS := arm64:aarch64-apple-darwin x86_64:x86_64-apple-darwin universal:universal-apple-darwin
 
-.PHONY: dmg app build-release clean-dmg clean-app tag
+.PHONY: dmg app build-release clean-dmg clean-app tag dist publish
+
+dist:
+	@set -euo pipefail; \
+	for entry in $(DIST_VARIANTS); do \
+		suffix="$${entry%%:*}"; target="$${entry##*:}"; \
+		$(MAKE) dmg \
+			TARGET="$$target" \
+			DMG_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-$$suffix.dmg" \
+			VOLUME_NAME="$(APP_DISPLAY_NAME)-$$suffix"; \
+		ditto -c -k --keepParent \
+			"target/macos/$$target/$(APP_DISPLAY_NAME).app" \
+			"$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-$$suffix.zip"; \
+	done
+	@ls -lh "$(DIST_DIR)"
+
+publish:
+	@if [[ ! "$(TAG)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
+		echo "Usage: make publish vX.Y.Z (run 'make dist' first)"; \
+		exit 1; \
+	fi
+	@command -v gh >/dev/null || { echo "gh CLI is required: brew install gh && gh auth login"; exit 1; }
+	@set -euo pipefail; \
+	assets=(); \
+	for entry in $(DIST_VARIANTS); do \
+		suffix="$${entry%%:*}"; \
+		for ext in dmg zip; do \
+			asset="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-$$suffix.$$ext"; \
+			[[ -f "$$asset" ]] || { echo "Missing $$asset — run 'make dist' first"; exit 1; }; \
+			assets+=("$$asset"); \
+		done; \
+	done; \
+	notes="$$(git for-each-ref "refs/tags/$(TAG)" --format='%(contents)')"; \
+	[[ -n "$$notes" ]] || notes="Release $(TAG)"; \
+	if gh release view "$(TAG)" --repo "$(RELEASE_REPO)" >/dev/null 2>&1; then \
+		gh release delete "$(TAG)" --repo "$(RELEASE_REPO)" --cleanup-tag --yes; \
+	fi; \
+	gh release create "$(TAG)" \
+		--repo "$(RELEASE_REPO)" \
+		--title "$(TAG)" \
+		--notes "$$notes" \
+		--latest; \
+	gh release upload "$(TAG)" --repo "$(RELEASE_REPO)" --clobber "$${assets[@]}"
 
 tag:
 	@if [[ ! "$(TAG)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
