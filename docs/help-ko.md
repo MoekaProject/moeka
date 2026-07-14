@@ -9,7 +9,7 @@ Moeka는 `Markdown`을 텍스트 편집 형식으로 사용합니다. Markdown�
 
 > Markdown 형식의 문서는 별도의 서식 스타일 없이 일반 텍스트로 게시할 수 있어야 합니다. 문법은 모두 구두점으로 이루어져 있으며, 그 자체가 의미처럼 보이도록 신중하게 선택되었습니다. 별표는 강조처럼 보이고, 목록 표시는 목록처럼 보입니다. -- John Gruber
 
-![이미지 설명](https://cdn.cnbj1.fds.api.mi-img.com/product-images/new-product-images/xiaomi-17-ultra-byleica_820/images/5673.png)
+![이미지 설명](https://moeka.app/images/website.png)
 ### 순서 없는 목록
 - 이것은 순서 없는 목록입니다.
   - 이것은 중첩된 순서 없는 목록입니다.
@@ -33,7 +33,7 @@ Moeka는 `Markdown`을 텍스트 편집 형식으로 사용합니다. Markdown�
 | -------------------------- | -------------- |
 | `Command + B`              | 굵게           |
 | `Command + I`              | 기울임         |
-| `Command + U`              | 밑줄 |
+| `Command + U`              | 밑줄           |
 | `Command + Shift + X`      | 취소선         |
 | `Command + E`              | 인라인 코드    |
 | `Command + Option + C`     | 코드 블록      |
@@ -42,8 +42,8 @@ Moeka는 `Markdown`을 텍스트 편집 형식으로 사용합니다. Markdown�
 | `Command + Option + O`     | 순서 있는 목록 |
 | `Command + Option + Enter` | 할 일          |
 | `Command + K`              | 링크           |
-| `Command + Option + T`     | 표 |
-| `Command + 0`              | 본문 |
+| `Command + Option + T`     | 표             |
+| `Command + 0`              | 본문           |
 | `/ image`                  | 이미지         |
 
 | --------------------- | --------  |

@@ -9,7 +9,7 @@ Moeka utilise `Markdown` comme format de texte. Markdown convient très bien à 
 
 > Un document Markdown devrait pouvoir être publié comme texte brut, sans styles de mise en forme. Sa syntaxe est entièrement composée de ponctuation, choisie pour ressembler à ce qu'elle signifie : les astérisques ressemblent à de l'emphase, et les marqueurs de liste ressemblent à des listes. -- John Gruber
 
-![Description de l'image](https://cdn.cnbj1.fds.api.mi-img.com/product-images/new-product-images/xiaomi-17-ultra-byleica_820/images/5673.png)
+![Description de l'image](https://moeka.app/images/website.png)
 ### Liste non ordonnée
 - Ceci est une liste non ordonnée.
   - Ceci est une liste imbriquée.
@@ -33,7 +33,7 @@ Moeka utilise `Markdown` comme format de texte. Markdown convient très bien à 
 | -------------------------- | ------------------ |
 | `Command + B`              | Gras               |
 | `Command + I`              | Italique           |
-| `Command + U`              | Souligner |
+| `Command + U`              | Souligner          |
 | `Command + Shift + X`      | Barré              |
 | `Command + E`              | Code en ligne      |
 | `Command + Option + C`     | Bloc de code       |
@@ -42,8 +42,8 @@ Moeka utilise `Markdown` comme format de texte. Markdown convient très bien à 
 | `Command + Option + O`     | Liste ordonnée     |
 | `Command + Option + Enter` | Tâche              |
 | `Command + K`              | Lien               |
-| `Command + Option + T`     | Tableau |
-| `Command + 0`              | Paragraphe |
+| `Command + Option + T`     | Tableau            |
+| `Command + 0`              | Paragraphe         |
 | `/ image`                  | Image              |
 
 | --------------------- | --------  |

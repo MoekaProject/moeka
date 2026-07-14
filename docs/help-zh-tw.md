@@ -9,7 +9,7 @@ description: 介紹小語文稿的使用
 
 > Markdown 格式的文件應該能以純文字發布，不帶格式化樣式。它的語法完全由標點符號組成，這些符號經過仔細挑選，讓它們本身就像字面上的意思，例如星號看起來像強調，列表標記看起來像列表。-- John Gruber
 
-![圖片描述](https://cdn.cnbj1.fds.api.mi-img.com/product-images/new-product-images/xiaomi-17-ultra-byleica_820/images/5673.png)
+![圖片描述](https://moeka.app/images/website.png)
 ### 無序列表
 - 這是一個無序列表；
   - 這是二級無序列表；
@@ -33,7 +33,7 @@ description: 介紹小語文稿的使用
 | -------------------------- | ---------- |
 | `Command + B`              | 粗體       |
 | `Command + I`              | 斜體       |
-| `Command + U`              | 底線 |
+| `Command + U`              | 底線       |
 | `Command + Shift + X`      | 刪除線     |
 | `Command + E`              | 行內程式碼 |
 | `Command + Option + C`     | 程式碼區塊 |
@@ -42,8 +42,8 @@ description: 介紹小語文稿的使用
 | `Command + Option + O`     | 有序列表   |
 | `Command + Option + Enter` | 待辦事項   |
 | `Command + K`              | 連結       |
-| `Command + Option + T`     | 表格 |
-| `Command + 0`              | 正文 |
+| `Command + Option + T`     | 表格       |
+| `Command + 0`              | 正文       |
 | `/ image`                  | 圖片       |
 
 | --------------------- | -------- |

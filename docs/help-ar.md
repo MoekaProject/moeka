@@ -9,7 +9,7 @@ Moeka هو تطبيق **لتحرير Markdown** أنيق وسلس ويعمل م�
 
 > يجب أن يكون مستند Markdown قابلًا للنشر كنص عادي من دون أن يبدو كأنه يحتوي على أوامر تنسيق. تتكوّن الصيغة كلها من علامات ترقيم اختيرت بعناية لتبدو مثل معناها: فالنجوم تبدو كالتأكيد، وعلامات القوائم تبدو كقوائم. -- John Gruber
 
-![وصف الصورة](https://cdn.cnbj1.fds.api.mi-img.com/product-images/new-product-images/xiaomi-17-ultra-byleica_820/images/5673.png)
+![وصف الصورة](https://moeka.app/images/website.png)
 ### قائمة غير مرتبة
 - هذه قائمة غير مرتبة.
   - هذه قائمة غير مرتبة متداخلة.
@@ -33,7 +33,7 @@ Moeka هو تطبيق **لتحرير Markdown** أنيق وسلس ويعمل م�
 | -------------------------- | --------------- |
 | `Command + B`              | عريض            |
 | `Command + I`              | مائل            |
-| `Command + U`              | تسطير |
+| `Command + U`              | تسطير           |
 | `Command + Shift + X`      | يتوسطه خط       |
 | `Command + E`              | كود داخل السطر  |
 | `Command + Option + C`     | كتلة كود        |
@@ -42,8 +42,8 @@ Moeka هو تطبيق **لتحرير Markdown** أنيق وسلس ويعمل م�
 | `Command + Option + O`     | قائمة مرتبة     |
 | `Command + Option + Enter` | مهمة            |
 | `Command + K`              | رابط            |
-| `Command + Option + T`     | جدول |
-| `Command + 0`              | فقرة |
+| `Command + Option + T`     | جدول            |
+| `Command + 0`              | فقرة            |
 | `/ image`                  | صورة            |
 
 | --------------------- | --------  |

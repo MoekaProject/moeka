@@ -9,7 +9,7 @@ Moeka verwendet `Markdown` als Textformat. Markdown eignet sich gut für Autorin
 
 > Ein Markdown-Dokument sollte als reiner Text veröffentlicht werden können, ohne Formatierungsstile. Seine Syntax besteht vollständig aus Satzzeichen, die so gewählt sind, dass sie wie ihre Bedeutung aussehen: Sternchen wirken wie Hervorhebung, Listenmarker wie Listen. -- John Gruber
 
-![Bildbeschreibung](https://cdn.cnbj1.fds.api.mi-img.com/product-images/new-product-images/xiaomi-17-ultra-byleica_820/images/5673.png)
+![Bildbeschreibung](https://moeka.app/images/website.png)
 ### Ungeordnete Liste
 - Dies ist eine ungeordnete Liste.
   - Dies ist eine verschachtelte ungeordnete Liste.
@@ -33,7 +33,7 @@ Moeka verwendet `Markdown` als Textformat. Markdown eignet sich gut für Autorin
 | -------------------------- | ----------------- |
 | `Command + B`              | Fett              |
 | `Command + I`              | Kursiv            |
-| `Command + U`              | Unterstreichen |
+| `Command + U`              | Unterstreichen    |
 | `Command + Shift + X`      | Durchgestrichen   |
 | `Command + E`              | Inline-Code       |
 | `Command + Option + C`     | Codeblock         |
@@ -42,8 +42,8 @@ Moeka verwendet `Markdown` als Textformat. Markdown eignet sich gut für Autorin
 | `Command + Option + O`     | Geordnete Liste   |
 | `Command + Option + Enter` | Aufgabe           |
 | `Command + K`              | Link              |
-| `Command + Option + T`     | Tabelle |
-| `Command + 0`              | Absatz |
+| `Command + Option + T`     | Tabelle           |
+| `Command + 0`              | Absatz            |
 | `/ image`                  | Bild              |
 
 | --------------------- | --------  |

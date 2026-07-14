@@ -9,7 +9,7 @@ Moeka は `Markdown` をテキスト形式として使います。Markdown は�
 
 > Markdown 形式の文書は、装飾されたスタイルなしにプレーンテキストとして公開できるべきです。構文は句読点だけで構成され、それぞれが意味に見えるよう慎重に選ばれています。たとえばアスタリスクは強調に見え、リスト記号はリストに見えます。-- John Gruber
 
-![画像の説明](https://cdn.cnbj1.fds.api.mi-img.com/product-images/new-product-images/xiaomi-17-ultra-byleica_820/images/5673.png)
+![画像の説明](https://moeka.app/images/website.png)
 ### 箇条書きリスト
 - これは箇条書きリストです。
   - これはネストした箇条書きです。
@@ -33,7 +33,7 @@ Moeka は `Markdown` をテキスト形式として使います。Markdown は�
 | -------------------------- | ---------------- |
 | `Command + B`              | 太字             |
 | `Command + I`              | 斜体             |
-| `Command + U`              | 下線 |
+| `Command + U`              | 下線             |
 | `Command + Shift + X`      | 取り消し線       |
 | `Command + E`              | インラインコード |
 | `Command + Option + C`     | コードブロック   |
@@ -42,8 +42,8 @@ Moeka は `Markdown` をテキスト形式として使います。Markdown は�
 | `Command + Option + O`     | 番号付きリスト   |
 | `Command + Option + Enter` | Todo             |
 | `Command + K`              | リンク           |
-| `Command + Option + T`     | 表 |
-| `Command + 0`              | 本文 |
+| `Command + Option + T`     | 表               |
+| `Command + 0`              | 本文             |
 | `/ image`                  | 画像             |
 
 | --------------------- | --------    |

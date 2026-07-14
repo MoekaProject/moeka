@@ -9,7 +9,7 @@ Moeka uses `Markdown` as its text format. Markdown is ideal for writers because 
 
 > A Markdown-formatted document should be publishable as plain text, without looking like it has been marked up with tags or formatting instructions. Its syntax is made entirely of punctuation characters, carefully chosen so they look like what they mean. Asterisks around a word actually look like emphasis, and list markers look like lists. -- John Gruber
 
-![Image description](https://cdn.cnbj1.fds.api.mi-img.com/product-images/new-product-images/xiaomi-17-ultra-byleica_820/images/5673.png)
+![Image description](https://moeka.app/images/website.png)
 ### Unordered List
 - This is an unordered list.
   - This is a nested unordered list.
@@ -33,7 +33,7 @@ Moeka uses `Markdown` as its text format. Markdown is ideal for writers because 
 | -------------------------- | -------------- |
 | `Command + B`              | Bold           |
 | `Command + I`              | Italic         |
-| `Command + U`              | Underline |
+| `Command + U`              | Underline      |
 | `Command + Shift + X`      | Strikethrough  |
 | `Command + E`              | Inline code    |
 | `Command + Option + C`     | Code block     |
@@ -42,8 +42,8 @@ Moeka uses `Markdown` as its text format. Markdown is ideal for writers because 
 | `Command + Option + O`     | Ordered list   |
 | `Command + Option + Enter` | Todo           |
 | `Command + K`              | Link           |
-| `Command + Option + T`     | Table |
-| `Command + 0`              | Paragraph |
+| `Command + Option + T`     | Table          |
+| `Command + 0`              | Paragraph      |
 | `/ image`                  | Image          |
 
 | --------------------- | --------  |
