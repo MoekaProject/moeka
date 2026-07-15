@@ -47,6 +47,17 @@ fn callout_icon_size(
         .min(available_width.max(0.0))
 }
 
+fn hide_front_matter_separator(
+    decoration: &crate::markdown::LineDecoration,
+    front_matter_active: bool,
+) -> bool {
+    !front_matter_active
+        && decoration
+            .table_info
+            .as_ref()
+            .is_some_and(|table_info| table_info.is_front_matter && table_info.is_separator)
+}
+
 #[cfg(test)]
 #[test]
 fn callout_icon_placeholder_excludes_default_title() {
@@ -65,6 +76,17 @@ fn callout_icon_minimum_size_overrides_line_height_limit() {
         callout_icon_size(60.0, 15.0, 22.5, 2.175, 28.0, 1.5),
         32.625
     );
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_separators_hide_only_while_group_is_inactive() {
+    let decorations = crate::markdown::parse_decorations("---\ntitle: Moeka\n---");
+
+    assert!(hide_front_matter_separator(&decorations[0], false));
+    assert!(hide_front_matter_separator(&decorations[2], false));
+    assert!(!hide_front_matter_separator(&decorations[0], true));
+    assert!(!hide_front_matter_separator(&decorations[1], false));
 }
 
 fn snap_to_device_pixel(value: f32, window: &Window) -> f32 {
@@ -1885,6 +1907,17 @@ impl Element for EditorElement {
                     }
                 }
             }
+            let front_matter_active = decorations
+                .get(cursor_line)
+                .and_then(|decoration| decoration.table_info.as_ref())
+                .is_some_and(|table_info| table_info.is_front_matter);
+            if !front_matter_active {
+                for (line, decoration) in decorations.iter().enumerate() {
+                    if hide_front_matter_separator(decoration, false) {
+                        set.insert(line);
+                    }
+                }
+            }
             set
         };
 
@@ -3436,9 +3469,7 @@ impl Element for EditorElement {
                     - editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
                     - editor.scaled(editor.styles.code_block.code_block_wrap_right_padding_px))
                 .max(editor.scaled(80.0))
-            } else if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence)
-                || is_front_matter_line
-            {
+            } else if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
                 (text_width
                     - quote_horizontal_padding
                     - editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
@@ -3661,9 +3692,7 @@ impl Element for EditorElement {
                 inline_diff_line_geometry.push((line_idx, line_top, total_line_height));
             }
             let base_content_x =
-                if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence)
-                    || is_front_matter_line
-                {
+                if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
                     editor_left
                         + editor.padding_left()
                         + quote_inner_left_padding
@@ -3885,7 +3914,6 @@ impl Element for EditorElement {
 
             // Code block-like background
             if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence)
-                || is_front_matter_line
                 || diff_table_syntax_line
                 || rendered_block_preview.is_some()
             {

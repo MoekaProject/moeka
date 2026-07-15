@@ -1499,6 +1499,18 @@ fn parse_front_matter_entry(content: &str) -> (Vec<String>, Vec<Range<usize>>) {
     }
 }
 
+fn looks_like_front_matter_mapping_entry(content: &str) -> bool {
+    let content = content.trim_start();
+    let Some(colon) = content.find(':') else {
+        return false;
+    };
+    !content[..colon].trim().is_empty()
+        && content[colon + 1..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+}
+
 fn detect_front_matter(decorations: &mut [LineDecoration], text: &str, line_starts: &[usize]) {
     let line_count = decorations.len();
     if line_count < 2 {
@@ -1508,29 +1520,38 @@ fn detect_front_matter(decorations: &mut [LineDecoration], text: &str, line_star
     let opening = get_line_content(text, line_starts, 0, line_count)
         .trim_start_matches('\u{feff}')
         .trim();
-    if opening != "---" {
-        return;
-    }
+    let compact_delimiter = match opening {
+        "---" => false,
+        "-" => true,
+        _ => return,
+    };
 
     let Some(closing_line) = (1..line_count).find(|&line| {
-        matches!(
-            get_line_content(text, line_starts, line, line_count).trim(),
-            "---" | "..."
-        )
+        let candidate = get_line_content(text, line_starts, line, line_count).trim();
+        if compact_delimiter {
+            candidate == "-"
+        } else {
+            matches!(candidate, "---" | "...")
+        }
     }) else {
         return;
     };
 
-    let metadata = (1..closing_line)
+    let metadata_lines = (1..closing_line)
         .map(|line| get_line_content(text, line_starts, line, line_count))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let Ok(serde_yaml::Value::Mapping(mapping)) =
-        serde_yaml::from_str::<serde_yaml::Value>(&metadata)
-    else {
-        return;
-    };
-    if mapping.is_empty() {
+        .collect::<Vec<_>>();
+    let metadata = metadata_lines.join("\n");
+    let valid_mapping = serde_yaml::from_str::<serde_yaml::Value>(&metadata)
+        .ok()
+        .and_then(|value| match value {
+            serde_yaml::Value::Mapping(mapping) => Some(!mapping.is_empty()),
+            _ => None,
+        })
+        .unwrap_or(false);
+    let has_mapping_entry = metadata_lines
+        .iter()
+        .any(|line| looks_like_front_matter_mapping_entry(line));
+    if !valid_mapping && !has_mapping_entry {
         return;
     }
 
@@ -4016,6 +4037,24 @@ mod tests {
                 .as_ref()
                 .is_some_and(|table| table.is_front_matter)
         }));
+    }
+
+    #[test]
+    fn compact_incomplete_front_matter_is_not_parsed_as_setext_heading() {
+        let text = "-\ncategory: 入门教程\ndescription: 介绍小语文稿的使用\nefefef\n-";
+        let decorations = parse_decorations(text);
+
+        assert!(decorations.iter().all(|decoration| {
+            decoration
+                .table_info
+                .as_ref()
+                .is_some_and(|table| table.is_front_matter)
+        }));
+        assert!(
+            decorations
+                .iter()
+                .all(|decoration| decoration.block_type == BlockType::Table)
+        );
     }
 
     #[test]

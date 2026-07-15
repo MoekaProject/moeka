@@ -2264,10 +2264,6 @@ impl EditorView {
             .is_some_and(|(start, end)| line_idx >= start && line_idx <= end)
             || active_front_matter_group
                 .is_some_and(|(start, end)| line_idx >= start && line_idx <= end);
-        let is_front_matter_line = decoration
-            .table_info
-            .as_ref()
-            .is_some_and(|ti| ti.is_front_matter);
         let (mut display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
             helpers::build_display_text(
                 line_content,
@@ -2344,8 +2340,7 @@ impl EditorView {
         let base_wrap_width = if matches!(
             decoration.block_type,
             BlockType::CodeBlock | BlockType::CodeBlockFence
-        ) || is_front_matter_line
-        {
+        ) {
             (text_width
                 - self.scaled(self.styles.code_block.code_block_text_padding_left_px)
                 - self.scaled(self.styles.code_block.code_block_wrap_right_padding_px))
@@ -2393,8 +2388,7 @@ impl EditorView {
         let base_content_x = if matches!(
             decoration.block_type,
             BlockType::CodeBlock | BlockType::CodeBlockFence
-        ) || is_front_matter_line
-        {
+        ) {
             editor_left
                 + self.padding_left()
                 + self.scaled(self.styles.code_block.code_block_text_padding_left_px)

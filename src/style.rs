@@ -2031,7 +2031,7 @@ impl Styles {
                 table_border_color: theme.border_decorative,
                 table_outer_radius_px: 5.0,
                 table_header_bg: theme.bg_code,
-                front_matter_key_text_color: theme.inline_code,
+                front_matter_key_text_color: with_alpha(theme.text_bright, 1.0),
                 front_matter_key_padding_right_px: 10.0,
                 table_handle_size_px: 6.0,
                 table_handle_color: theme.border_decorative,

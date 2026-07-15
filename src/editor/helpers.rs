@@ -319,6 +319,64 @@ pub(crate) fn build_display_text(
     if let Some(table_info) = decoration.table_info.as_ref()
         && table_info.is_front_matter
     {
+        if !table_info.is_separator
+            && let Some(colon) = line_content.find(':')
+        {
+            let value_start = table_info
+                .cell_ranges
+                .get(1)
+                .map(|range| range.start)
+                .unwrap_or(line_content.len())
+                .max(colon + 1)
+                .min(line_content.len());
+            let key_width = table_info
+                .cells
+                .first()
+                .map(|key| display_width(key.trim()))
+                .unwrap_or(0);
+            let max_key_width = table_info
+                .column_widths
+                .first()
+                .copied()
+                .unwrap_or(key_width);
+            let padding = " ".repeat(
+                max_key_width
+                    .saturating_sub(key_width)
+                    .saturating_add(front_matter_key_padding_chars.max(1)),
+            );
+            let mut display_text = String::with_capacity(line_content.len() + padding.len());
+            let mut display_to_buffer = Vec::with_capacity(line_content.len() + padding.len());
+            let mut buffer_to_display = vec![0; len + 1];
+            let mut display_pos = 0;
+
+            append_mapped_replacement(
+                &mut display_text,
+                &mut display_to_buffer,
+                &mut buffer_to_display,
+                &mut display_pos,
+                0..colon + 1,
+                &line_content[..colon + 1],
+            );
+            append_mapped_replacement(
+                &mut display_text,
+                &mut display_to_buffer,
+                &mut buffer_to_display,
+                &mut display_pos,
+                colon + 1..value_start,
+                &padding,
+            );
+            append_mapped_replacement(
+                &mut display_text,
+                &mut display_to_buffer,
+                &mut buffer_to_display,
+                &mut display_pos,
+                value_start..len,
+                &line_content[value_start..],
+            );
+            buffer_to_display[len] = display_text.len();
+            return (display_text, display_to_buffer, buffer_to_display, false);
+        }
+
         let display_to_buffer: Vec<usize> = (0..len).collect();
         let mut buffer_to_display: Vec<usize> = (0..len).collect();
         buffer_to_display.push(len);
@@ -3257,6 +3315,117 @@ mod tests {
     }
 
     #[test]
+    fn front_matter_values_align_after_longest_key() {
+        let source = "---\ntitle: Moeka\ndescription: Markdown editor\n---";
+        let decorations = markdown::parse_decorations(source);
+        let displays = [1, 2].map(|line| {
+            build_display_text(
+                source.lines().nth(line).unwrap(),
+                &decorations[line],
+                &[],
+                false,
+                None,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1.0,
+                1.0,
+                1.0,
+            )
+            .0
+        });
+
+        assert_eq!(displays[0], "title:       Moeka");
+        assert_eq!(displays[1], "description: Markdown editor");
+        assert_eq!(displays[0].find("Moeka"), displays[1].find("Markdown"));
+    }
+
+    #[test]
+    fn front_matter_keys_are_brighter_and_bold_while_values_use_body_color() {
+        let source = "---\nfirst: one\nsecond: two\nthird: three\n---";
+        let decorations = markdown::parse_decorations(source);
+        let theme = Theme::one_dark();
+        let key_color = crate::theme::with_alpha(theme.text_bright, 1.0);
+        let build_runs = |line_index, active| {
+            let line = source.lines().nth(line_index).unwrap();
+            let decoration = &decorations[line_index];
+            let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+                line,
+                decoration,
+                &[],
+                false,
+                None,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1.0,
+                1.0,
+                1.0,
+            );
+            build_text_runs_for_display(
+                &display_text,
+                line,
+                &display_to_buffer,
+                decoration,
+                &[],
+                active,
+                prefix_collapsed,
+                &font(".SystemUIFont"),
+                &font(".SystemUIFont"),
+                &font("Menlo"),
+                &font(".SystemUIFont"),
+                &font(".SystemUIFont"),
+                &font(".SystemUIFont"),
+                &font("Kaiti SC"),
+                0,
+                16.0,
+                &theme,
+                theme.git_status_added,
+                theme.text_danger,
+                theme.link,
+                FontWeight::NORMAL,
+                theme.list_marker,
+                FontWeight::BOLD,
+                theme.syntax_marker,
+                Some(key_color),
+                false,
+            )
+        };
+        let style_at = |runs: &[TextRun], display_index: usize| {
+            let mut start = 0;
+            runs.iter()
+                .find_map(|run| {
+                    let end = start + run.len;
+                    let contains = display_index >= start && display_index < end;
+                    start = end;
+                    contains.then_some((run.color, run.font.weight, run.font.style))
+                })
+                .expect("display index has a text run")
+        };
+
+        for line_index in 1..=3 {
+            for active in [false, true] {
+                let runs = build_runs(line_index, active);
+                let line = source.lines().nth(line_index).unwrap();
+                let value = line.split_once(':').unwrap().1.trim();
+                let value_index = line.find(value).unwrap();
+                assert_eq!(
+                    style_at(&runs, 0),
+                    (key_color, FontWeight::BOLD, FontStyle::Normal)
+                );
+                assert_eq!(
+                    style_at(&runs, value_index),
+                    (theme.text_primary, FontWeight::NORMAL, FontStyle::Normal)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn folded_quote_text_uses_normal_text_color() {
         let line = "> plain quote";
         let decoration = markdown::parse_decorations(line)
@@ -5052,18 +5221,6 @@ pub(crate) fn build_text_runs_for_display(
                 for w in buf_weights.iter_mut() {
                     *w = FontWeight::BOLD;
                 }
-            } else if let Some(table_info) = decoration.table_info.as_ref()
-                && table_info.is_front_matter
-                && !table_info.is_separator
-                && let Some(key_range) = table_info.cell_ranges.first()
-            {
-                let key_color = front_matter_key_text_color.unwrap_or(theme.inline_code);
-                let start = key_range.start.min(buf_len);
-                let end = key_range.end.min(buf_len);
-                for index in start..end {
-                    buf_colors[index] = key_color;
-                    buf_weights[index] = FontWeight::BOLD;
-                }
             }
         }
         _ => {}
@@ -5218,6 +5375,29 @@ pub(crate) fn build_text_runs_for_display(
         for index in target_start..target_end {
             buf_colors[index] = wiki_link_text_color;
             buf_weights[index] = wiki_link_text_weight;
+        }
+    }
+
+    if is_front_matter_line && !is_front_matter_separator {
+        buf_colors.fill(theme.text_primary);
+        buf_weights.fill(FontWeight::NORMAL);
+        buf_font_styles.fill(FontStyle::Normal);
+        buf_bg_colors.fill(None);
+        buf_strikethroughs.fill(false);
+        buf_underlines.fill(false);
+        if let Some(key_range) = decoration
+            .table_info
+            .as_ref()
+            .and_then(|table_info| table_info.cell_ranges.first())
+        {
+            let key_color = front_matter_key_text_color
+                .unwrap_or_else(|| crate::theme::with_alpha(theme.text_bright, 1.0));
+            let start = key_range.start.min(buf_len);
+            let end = key_range.end.min(buf_len);
+            for index in start..end {
+                buf_colors[index] = key_color;
+                buf_weights[index] = FontWeight::BOLD;
+            }
         }
     }
 
