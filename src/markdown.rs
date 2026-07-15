@@ -1594,12 +1594,23 @@ fn parse_callout_kind(label: &str) -> Option<CalloutKind> {
 }
 
 fn callout_replacement_text(kind: CalloutKind) -> &'static str {
+    // Four em-spaces reserve enough shaped width for the enlarged icon and label gap.
     match kind {
-        CalloutKind::Note => "  ",
-        CalloutKind::Tip => "  ",
-        CalloutKind::Important => "  ",
-        CalloutKind::Warning => "  ",
-        CalloutKind::Caution => "  ",
+        CalloutKind::Note => "\u{2003}\u{2003}\u{2003}\u{2003}",
+        CalloutKind::Tip => "\u{2003}\u{2003}\u{2003}\u{2003}",
+        CalloutKind::Important => "\u{2003}\u{2003}\u{2003}\u{2003}",
+        CalloutKind::Warning => "\u{2003}\u{2003}\u{2003}\u{2003}",
+        CalloutKind::Caution => "\u{2003}\u{2003}\u{2003}\u{2003}",
+    }
+}
+
+fn default_callout_title(kind: CalloutKind) -> &'static str {
+    match kind {
+        CalloutKind::Note => "NOTE",
+        CalloutKind::Tip => "TIP",
+        CalloutKind::Important => "IMPORTANT",
+        CalloutKind::Warning => "WARNING",
+        CalloutKind::Caution => "CAUTION",
     }
 }
 
@@ -1657,16 +1668,26 @@ fn detect_callouts(decorations: &mut [LineDecoration], text: &str, line_starts: 
             .count()
             + marker_end;
         decoration.callout_kind = Some(kind);
+        let title_end = line_content.trim_end_matches([' ', '\t']).len();
+        let mut display_text = callout_replacement_text(kind).to_string();
+        let title_range = if replacement_end >= title_end {
+            marker_start..replacement_end
+        } else {
+            replacement_end..title_end
+        };
+        if replacement_end >= title_end {
+            // No title text after `[!KIND]`: show the default kind label.
+            display_text.push_str(default_callout_title(kind));
+        }
         decoration.display_replacements.push(DisplayReplacement {
             source_range: marker_start..replacement_end,
-            display_text: callout_replacement_text(kind).to_string(),
+            display_text,
             trigger_range: marker_start..replacement_end,
         });
-        let title_end = line_content.trim_end_matches([' ', '\t']).len();
-        if replacement_end < title_end {
+        if title_range.start < title_range.end {
             decoration.inline_spans.push(InlineSpan {
                 kind: InlineKind::Bold,
-                range: replacement_end..title_end,
+                range: title_range,
                 target: None,
             });
         }
@@ -3513,6 +3534,37 @@ mod tests {
             decorations
                 .iter()
                 .all(|decoration| decoration.callout_kind.is_none())
+        );
+    }
+
+    #[test]
+    fn callout_without_title_shows_default_kind_label() {
+        let decorations = parse_decorations("> [!WARNING]\n> body text");
+
+        assert_eq!(decorations[0].callout_kind, Some(CalloutKind::Warning));
+        let replacement = decorations[0]
+            .display_replacements
+            .first()
+            .expect("callout display replacement");
+        assert_eq!(
+            replacement.display_text,
+            "\u{2003}\u{2003}\u{2003}\u{2003}WARNING"
+        );
+        assert!(
+            decorations[0]
+                .inline_spans
+                .iter()
+                .any(|span| span.kind == InlineKind::Bold && span.range == (2..12))
+        );
+
+        let titled = parse_decorations("> [!WARNING] Custom title");
+        let titled_replacement = titled[0]
+            .display_replacements
+            .first()
+            .expect("titled callout display replacement");
+        assert_eq!(
+            titled_replacement.display_text,
+            "\u{2003}\u{2003}\u{2003}\u{2003}"
         );
     }
 

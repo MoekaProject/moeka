@@ -25,6 +25,48 @@ fn callout_icon_path(kind: CalloutKind) -> &'static str {
     }
 }
 
+fn callout_icon_placeholder_len(display_text: &str) -> usize {
+    display_text
+        .char_indices()
+        .find_map(|(index, character)| (!character.is_whitespace()).then_some(index))
+        .unwrap_or(display_text.len())
+}
+
+fn callout_icon_size(
+    available_width: f32,
+    font_size: f32,
+    line_height: f32,
+    size_factor: f32,
+    min_size: f32,
+    max_line_height_factor: f32,
+) -> f32 {
+    let desired_size = (font_size * size_factor).max(min_size);
+    let line_height_limit = (line_height * max_line_height_factor).max(min_size);
+    desired_size
+        .min(line_height_limit)
+        .min(available_width.max(0.0))
+}
+
+#[cfg(test)]
+#[test]
+fn callout_icon_placeholder_excludes_default_title() {
+    let placeholder = "\u{2003}\u{2003}\u{2003}\u{2003}";
+    assert_eq!(callout_icon_placeholder_len(placeholder), placeholder.len());
+    assert_eq!(
+        callout_icon_placeholder_len(&format!("{placeholder}WARNING")),
+        placeholder.len()
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn callout_icon_minimum_size_overrides_line_height_limit() {
+    assert_eq!(
+        callout_icon_size(60.0, 15.0, 22.5, 2.175, 28.0, 1.5),
+        32.625
+    );
+}
+
 fn snap_to_device_pixel(value: f32, window: &Window) -> f32 {
     let scale_factor = window.scale_factor().max(1.0);
     (value * scale_factor).round() / scale_factor
@@ -1332,7 +1374,8 @@ fn push_rendered_inline_overlays(
     {
         let disp_start =
             helpers::buffer_to_display_offset(buffer_to_display, replacement.source_range.start);
-        let disp_end = (disp_start + replacement.display_text.len()).min(display_text.len());
+        let disp_end = (disp_start + callout_icon_placeholder_len(&replacement.display_text))
+            .min(display_text.len());
         if let (Some(pos_start), Some(pos_end)) = (
             wrapped.position_for_index(disp_start, px(line_height)),
             wrapped.position_for_index(disp_end, px(line_height)),
@@ -1349,15 +1392,15 @@ fn push_rendered_inline_overlays(
                     .quote_block_callout_icon_label_gap_px,
             );
             let display_width = f32::from(pos_end.x - pos_start.x);
-            let icon_size = (display_width - callout_gap)
-                .min(
-                    font_size
-                        * editor
-                            .styles
-                            .quote_block
-                            .quote_block_callout_icon_size_factor,
-                )
-                .clamp(10.0, line_height * 0.95);
+            let quote_styles = &editor.styles.quote_block;
+            let icon_size = callout_icon_size(
+                display_width - callout_gap,
+                font_size,
+                line_height,
+                quote_styles.quote_block_callout_icon_size_factor,
+                editor.scaled(quote_styles.quote_block_callout_icon_min_px),
+                quote_styles.quote_block_callout_icon_max_line_height_factor,
+            );
             let icon_x = content_x + indent_start + f32::from(pos_start.x);
             let icon_y = text_line_top + f32::from(pos_start.y) + (line_height - icon_size) / 2.0;
             inline_svgs.push((
@@ -4782,33 +4825,33 @@ impl Element for EditorElement {
                     &buffer_to_display,
                     replacement.source_range.start,
                 );
-                let disp_end =
-                    (disp_start + replacement.display_text.len()).min(display_text.len());
+                let disp_end = (disp_start
+                    + callout_icon_placeholder_len(&replacement.display_text))
+                .min(display_text.len());
                 if let (Some(pos_start), Some(pos_end)) = (
                     wrapped.position_for_index(disp_start, px(line_height)),
                     wrapped.position_for_index(disp_end, px(line_height)),
                 ) && pos_start.y == pos_end.y
                 {
                     let indent_start = helpers::indent_for_y(indent_px, pos_start.y, line_height);
-                    // Left-align the callout icon (no left gap) and size it to
-                    // fill the placeholder minus a small style-defined gap to the
-                    // label, so the icon→label spacing comes from style.rs.
-                    let callout_gap = editor.scaled(
-                        editor
-                            .styles
-                            .quote_block
-                            .quote_block_callout_icon_label_gap_px,
-                    );
+                    // Left-align the callout icon (no left gap) and size it from
+                    // quote block style tokens only.
+                    let quote_block_styles = &editor.styles.quote_block;
+                    let callout_gap =
+                        editor.scaled(quote_block_styles.quote_block_callout_icon_label_gap_px);
                     let display_width = f32::from(pos_end.x - pos_start.x);
-                    let icon_size = (display_width - callout_gap)
-                        .min(
-                            font_size
-                                * editor
-                                    .styles
-                                    .quote_block
-                                    .quote_block_callout_icon_size_factor,
-                        )
-                        .clamp(10.0, line_height * 0.95);
+                    let available_icon_width = (display_width - callout_gap).max(0.0);
+                    if available_icon_width <= 0.0 {
+                        continue;
+                    }
+                    let icon_size = callout_icon_size(
+                        available_icon_width,
+                        font_size,
+                        line_height,
+                        quote_block_styles.quote_block_callout_icon_size_factor,
+                        editor.scaled(quote_block_styles.quote_block_callout_icon_min_px),
+                        quote_block_styles.quote_block_callout_icon_max_line_height_factor,
+                    );
                     let icon_x = content_x + indent_start + f32::from(pos_start.x);
                     let icon_y =
                         text_line_top + f32::from(pos_start.y) + (line_height - icon_size) / 2.0;

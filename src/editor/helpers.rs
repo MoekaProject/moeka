@@ -3207,7 +3207,7 @@ mod tests {
             1.0,
         );
 
-        assert_eq!(display_text, "  Use it");
+        assert_eq!(display_text, "\u{2003}\u{2003}\u{2003}\u{2003}Use it");
 
         let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
             line,

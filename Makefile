@@ -26,23 +26,26 @@ DMG_SCRIPT := scripts/create_dmg.sh
 VOLUME_NAME := $(APP_DISPLAY_NAME)
 TAG ?= $(firstword $(filter v%,$(MAKECMDGOALS)))
 RELEASE_REPO ?= MoekaProject/release
-DIST_VARIANTS := arm64:aarch64-apple-darwin x86_64:x86_64-apple-darwin universal:universal-apple-darwin
+DIST_SUFFIXES := arm64 universal
 
-.PHONY: dmg app build-release clean-dmg clean-app tag dist publish
+.PHONY: dmg app build-release clean-dmg clean-app tag dist dist-arm64 dist-universal publish
 
-dist:
-	@set -euo pipefail; \
-	for entry in $(DIST_VARIANTS); do \
-		suffix="$${entry%%:*}"; target="$${entry##*:}"; \
-		$(MAKE) dmg \
-			TARGET="$$target" \
-			DMG_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-$$suffix.dmg" \
-			VOLUME_NAME="$(APP_DISPLAY_NAME)-$$suffix"; \
-		ditto -c -k --keepParent \
-			"target/macos/$$target/$(APP_DISPLAY_NAME).app" \
-			"$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-$$suffix.zip"; \
-	done
+dist: $(ICON_FILE)
+	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
+	@$(MAKE) -j2 dist-arm64 dist-universal
 	@ls -lh "$(DIST_DIR)"
+
+dist-arm64:
+	@$(MAKE) dmg \
+		TARGET=aarch64-apple-darwin \
+		DMG_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-arm64.dmg" \
+		VOLUME_NAME="$(APP_DISPLAY_NAME)-arm64"
+
+dist-universal:
+	@$(MAKE) dmg \
+		TARGET=universal-apple-darwin \
+		DMG_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-universal.dmg" \
+		VOLUME_NAME="$(APP_DISPLAY_NAME)-universal"
 
 publish:
 	@if [[ ! "$(TAG)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
@@ -52,13 +55,10 @@ publish:
 	@command -v gh >/dev/null || { echo "gh CLI is required: brew install gh && gh auth login"; exit 1; }
 	@set -euo pipefail; \
 	assets=(); \
-	for entry in $(DIST_VARIANTS); do \
-		suffix="$${entry%%:*}"; \
-		for ext in dmg zip; do \
-			asset="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-$$suffix.$$ext"; \
-			[[ -f "$$asset" ]] || { echo "Missing $$asset — run 'make dist' first"; exit 1; }; \
-			assets+=("$$asset"); \
-		done; \
+	for suffix in $(DIST_SUFFIXES); do \
+		asset="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-$$suffix.dmg"; \
+		[[ -f "$$asset" ]] || { echo "Missing $$asset — run 'make dist' first"; exit 1; }; \
+		assets+=("$$asset"); \
 	done; \
 	notes="$$(git for-each-ref "refs/tags/$(TAG)" --format='%(contents)')"; \
 	[[ -n "$$notes" ]] || notes="Release $(TAG)"; \

@@ -79,10 +79,6 @@ jobs:
             target: aarch64-apple-darwin
             asset_suffix: arm64
             rust_targets: aarch64-apple-darwin
-          - name: macOS x86_64
-            target: x86_64-apple-darwin
-            asset_suffix: x86_64
-            rust_targets: x86_64-apple-darwin
           - name: macOS universal
             target: universal-apple-darwin
             asset_suffix: universal
@@ -112,15 +108,12 @@ jobs:
             TARGET=${{ matrix.target }} \
             DMG_PATH=dist/Moeka-macos-${{ matrix.asset_suffix }}.dmg \
             VOLUME_NAME=Moeka-${{ matrix.asset_suffix }}
-          ditto -c -k --keepParent target/macos/${{ matrix.target }}/Moeka.app dist/Moeka-macos-${{ matrix.asset_suffix }}.zip
 
       - name: Upload release assets
         uses: actions/upload-artifact@v4
         with:
           name: release-assets-${{ matrix.asset_suffix }}
-          path: |
-            dist/Moeka-macos-${{ matrix.asset_suffix }}.dmg
-            dist/Moeka-macos-${{ matrix.asset_suffix }}.zip
+          path: dist/Moeka-macos-${{ matrix.asset_suffix }}.dmg
           if-no-files-found: error
 
   publish:
@@ -176,11 +169,7 @@ jobs:
           repo="MoekaProject/community"
           assets=(
             dist/Moeka-macos-arm64.dmg
-            dist/Moeka-macos-arm64.zip
-            dist/Moeka-macos-x86_64.dmg
-            dist/Moeka-macos-x86_64.zip
             dist/Moeka-macos-universal.dmg
-            dist/Moeka-macos-universal.zip
           )
 
           run_release_command() {
