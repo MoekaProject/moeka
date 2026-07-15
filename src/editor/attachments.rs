@@ -246,27 +246,6 @@ impl PathMapping {
 }
 
 impl WorkspaceRewriteContext {
-    pub(crate) fn capture(root: &Path, open_documents: &HashMap<PathBuf, String>) -> Self {
-        let index = WorkspaceLinkIndex::build(root);
-        let documents = index
-            .files
-            .iter()
-            .filter(|path| is_markdown_path(path))
-            .filter_map(|path| {
-                open_documents
-                    .get(path)
-                    .cloned()
-                    .or_else(|| std::fs::read_to_string(path).ok())
-                    .map(|text| (path.clone(), text))
-            })
-            .collect();
-        Self {
-            root: root.to_path_buf(),
-            index,
-            documents,
-        }
-    }
-
     pub(crate) fn plan(
         &self,
         mappings: &[PathMapping],
@@ -584,14 +563,6 @@ fn collect_workspace_files(directory: &Path, files: &mut Vec<PathBuf>) {
             files.push(path);
         }
     }
-}
-
-fn is_markdown_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown")
-        })
 }
 
 fn relative_path(from_directory: &Path, to: &Path) -> Option<PathBuf> {

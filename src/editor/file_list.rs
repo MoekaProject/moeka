@@ -775,6 +775,54 @@ impl EditorView {
         self.file_list_task = Some(task);
     }
 
+    pub(crate) fn refresh_file_list_content_paths(
+        &mut self,
+        changed_paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        let mut pending = Vec::new();
+        for item in &mut self.file_list_items {
+            if !changed_paths.iter().any(|path| path == &item.path) {
+                continue;
+            }
+            let Ok(modified) =
+                std::fs::metadata(&item.path).and_then(|metadata| metadata.modified())
+            else {
+                continue;
+            };
+            item.modified = modified;
+            pending.push((item.path.clone(), modified));
+        }
+        if pending.is_empty() {
+            return;
+        }
+
+        let epoch = self.file_list_epoch;
+        self.file_list_detail_task = Some(cx.spawn(async move |this, cx| {
+            let details = cx
+                .background_executor()
+                .spawn(async move { load_file_list_details(pending) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.file_list_epoch != epoch {
+                    return;
+                }
+                for (path, modified, detail) in details {
+                    if let Some(item) = this
+                        .file_list_items
+                        .iter_mut()
+                        .find(|item| item.path == path && item.modified == modified)
+                    {
+                        item.details = Some(detail);
+                    }
+                }
+                this.file_list_detail_task = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     fn load_file_list_details_for_range(
         &mut self,
         range: std::ops::Range<usize>,

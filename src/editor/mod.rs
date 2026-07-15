@@ -1771,6 +1771,7 @@ pub struct EditorView {
     pub(crate) language_picker_query: String,
     pub(crate) language_picker_items: Vec<language_picker::LanguagePickerItem>,
     pub(crate) language_picker_selected_index: usize,
+    pub(crate) language_picker_scroll_handle: ScrollHandle,
     pub(crate) language_picker_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
 
     // ── Chat panel state ───────────────────────────────────────────
@@ -2265,6 +2266,7 @@ impl EditorView {
             language_picker_query: String::new(),
             language_picker_items: Vec::new(),
             language_picker_selected_index: 0,
+            language_picker_scroll_handle: ScrollHandle::new(),
             language_picker_editor: None,
             chat_tabs: Vec::new(),
             active_chat_tab_id: None,
@@ -3511,6 +3513,10 @@ impl EditorView {
     }
 
     fn is_internal_temp_change_path(&self, path: &Path) -> bool {
+        if file_ops::is_atomic_write_temp_path(path) {
+            return true;
+        }
+
         if path
             .components()
             .any(|component| component.as_os_str().to_str() == Some(".moeka-cache"))
@@ -3650,7 +3656,11 @@ impl EditorView {
         let mut active_tab_needs_reload = false;
         let mut diff_tabs_to_refresh = Vec::new();
         if !changed_paths_in_workspace.is_empty() {
-            self.invalidate_sidebar_items_cache();
+            if self.sidebar_paths_require_structure_refresh(&changed_paths_in_workspace) {
+                self.invalidate_sidebar_items_cache();
+            } else {
+                self.refresh_file_list_content_paths(&changed_paths_in_workspace, cx);
+            }
             self.mark_workspace_search_index_dirty(&changed_paths_in_workspace);
             needs_notify = true;
         }
@@ -4118,30 +4128,7 @@ impl EditorView {
     pub(crate) fn capture_workspace_rewrite_context(
         &self,
     ) -> Option<attachments::WorkspaceRewriteContext> {
-        if !self.app_settings.automatically_update_links {
-            return None;
-        }
-        let mut open_documents = HashMap::new();
-        for tab in &self.tabs {
-            if tab.kind != TabKind::Editor
-                || !tab.file_kind.as_ref().is_some_and(FileKind::is_markdown)
-            {
-                continue;
-            }
-            let Some(path) = tab.path.as_ref() else {
-                continue;
-            };
-            let text = if self.active_tab_id.as_deref() == Some(tab.id.as_str()) {
-                self.buffer.text().to_string()
-            } else {
-                tab.snapshot.text.clone()
-            };
-            open_documents.insert(path.clone(), text);
-        }
-        Some(attachments::WorkspaceRewriteContext::capture(
-            &self.sidebar_root,
-            &open_documents,
-        ))
+        None
     }
 
     pub(crate) fn apply_workspace_link_rewrites(
@@ -8248,6 +8235,15 @@ impl EditorView {
     pub(crate) fn clear_all_tab_layout_caches(&mut self) {
         self.clear_line_display_info();
         self.tab_layout_cache.clear();
+    }
+
+    pub(crate) fn clear_active_tab_layout_cache(&mut self) {
+        self.clear_line_display_info();
+        if let Some(tab_id) = self.active_tab_id.as_ref() {
+            self.tab_layout_cache.remove(tab_id);
+        }
+        self.invalidate_indent_guide_step_cache();
+        self.layout_dirty = true;
     }
 
     fn set_line_display_info(&mut self, line_display_info: LineDisplayCache) {

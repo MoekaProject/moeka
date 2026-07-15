@@ -229,9 +229,32 @@ impl EditorView {
                 .filter(|item| language_item_matches(item, &self.language_picker_query))
                 .take(240)
                 .collect();
-        self.language_picker_selected_index = self
-            .language_picker_selected_index
-            .min(self.language_picker_items.len().saturating_sub(1));
+        self.language_picker_selected_index = if self.language_picker_query.trim().is_empty() {
+            self.language_picker_items
+                .iter()
+                .position(|item| match (&self.language_picker_mode, &item.kind) {
+                    (
+                        LanguagePickerMode::Indentation,
+                        LanguagePickerKind::Indentation(settings),
+                    ) => *settings == self.indent_settings,
+                    (LanguagePickerMode::Language, LanguagePickerKind::Markdown) => {
+                        self.active_file_kind().is_some_and(FileKind::is_markdown)
+                    }
+                    (LanguagePickerMode::Language, LanguagePickerKind::PlainText) => {
+                        matches!(self.active_file_kind(), Some(FileKind::Text))
+                    }
+                    (LanguagePickerMode::Language, LanguagePickerKind::Code(language)) => matches!(
+                        self.active_file_kind(),
+                        Some(FileKind::Code { language: active }) if active == language
+                    ),
+                    _ => false,
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        self.language_picker_scroll_handle
+            .scroll_to_item(self.language_picker_selected_index);
         cx.notify();
     }
 
@@ -244,6 +267,8 @@ impl EditorView {
         let len = self.language_picker_items.len() as isize;
         let current = self.language_picker_selected_index as isize;
         self.language_picker_selected_index = (current + delta).clamp(0, len - 1) as usize;
+        self.language_picker_scroll_handle
+            .scroll_to_item(self.language_picker_selected_index);
         cx.notify();
     }
 
@@ -287,7 +312,7 @@ impl EditorView {
         self.editor_left_aligned = is_code_or_text;
         self.language_picker_visible = false;
         self.language_picker_anchor = None;
-        self.layout_dirty = true;
+        self.clear_active_tab_layout_cache();
         self.reparse();
         session_store::persist_session(self);
         cx.notify();
@@ -366,7 +391,7 @@ impl EditorView {
                 rows.push(
                     div()
                         .id(SharedString::from(format!("language-picker-{index}")))
-                        .w_full()
+                        .mx(px(1.0))
                         .h(px(row_h))
                         .px(px(self.scaled(10.0)))
                         .flex()
@@ -454,6 +479,8 @@ impl EditorView {
                             .w_full()
                             .max_h(px(max_results_h))
                             .overflow_y_scroll()
+                            .pb(px(self.scaled(8.0)))
+                            .track_scroll(&self.language_picker_scroll_handle)
                             .children(rows),
                     ),
             )

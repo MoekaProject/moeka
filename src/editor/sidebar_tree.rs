@@ -34,6 +34,24 @@ fn load_sidebar_directory(path: &Path, sort_mode: SidebarSortMode) -> Vec<Sideba
 }
 
 impl EditorView {
+    pub(crate) fn sidebar_paths_require_structure_refresh(&self, paths: &[PathBuf]) -> bool {
+        paths.iter().any(|path| {
+            let Ok(metadata) = std::fs::metadata(path) else {
+                return true;
+            };
+            if metadata.is_dir() {
+                return true;
+            }
+            let Some(parent) = path.parent() else {
+                return true;
+            };
+            !self
+                .sidebar_directory_children
+                .get(parent)
+                .is_some_and(|children| children.iter().any(|child| child.path == *path))
+        })
+    }
+
     pub(crate) fn invalidate_sidebar_items_cache(&mut self) {
         self.sidebar_items_dirty = true;
         self.sidebar_directory_children.clear();

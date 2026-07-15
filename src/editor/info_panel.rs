@@ -2986,14 +2986,24 @@ impl EditorView {
             .text_size(px(self.scaled(ups.utility_panel_item_font_size_px)))
             .child(
                 div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .truncate()
+                    .whitespace_nowrap()
                     .text_color(ups.utility_panel_item_label_text_color)
                     .child(SharedString::from(row.label.clone())),
             )
             .child(
                 div()
+                    .flex_none()
+                    .ml_auto()
                     .text_color(ups.utility_panel_item_value_text_color)
                     .text_right()
                     .max_w(px(self.utility_panel_layout_width() * 0.6))
+                    .overflow_hidden()
+                    .truncate()
+                    .whitespace_nowrap()
                     .child(SharedString::from(row.value.clone())),
             )
             .into_any_element()

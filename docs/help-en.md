@@ -114,10 +114,10 @@ pie title Pets adopted by volunteers
 - Hold `Command` and click any of the above links to open them.
 ## Local Attachments
 - Pasting an image or file, or dropping one from Finder into a Markdown document, copies it to the attachment location selected in Settings. Dropping a file from Moeka's sidebar inserts a link without copying the file.
-- Attachment locations can be the document folder, workspace root, a workspace folder, or a subfolder beside the current document. Custom folders must be relative paths inside the workspace.
-- Moeka can generate standard Markdown links or Obsidian-style WikiLinks. Path formats include document-relative, workspace-relative, and the shortest unique workspace path.
-- Obsidian image embeds such as `![[assets/image.png]]` are displayed inline. Standard Markdown such as `![](assets/image.png)` remains the best choice when the same files are also edited in Typora or other Markdown tools.
-- When automatic link updates are enabled, files and folders moved or renamed inside Moeka update local Markdown and WikiLink targets across the workspace. Renames made directly in Finder are not tracked automatically.
+- Attachment locations can be the document folder, a workspace folder, or a subfolder beside the current document. Custom folders must be relative paths inside the workspace.
+- Newly inserted attachments use document-relative paths and standard Markdown links, such as `![](../assets/image.png)`.
+- Existing Markdown links and WikiLinks such as `![[assets/image.png]]` are both parsed and displayed.
+- Existing links are not updated automatically after files or folders are moved or renamed.
 ## Extended Inline Syntax
 - Subscript example: H~2~O. Superscript example: E=mc^2^. English text also works: Foo~zoo~ or Bar^baz^.
 - ==Highlight== is supported for stronger emphasis.

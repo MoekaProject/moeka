@@ -997,7 +997,7 @@ impl EditorView {
 
     /// The style shown in the panel: the single selected element's style, or
     /// the default style when nothing (or multiple) is selected.
-    fn whiteboard_current_style(&self) -> WhiteboardStyle {
+    pub(crate) fn whiteboard_current_style(&self) -> WhiteboardStyle {
         if let Some(state) = self.active_whiteboard() {
             if let Some(first) = state.selected_ids.first()
                 && let Some(element) = state.document.element(first)

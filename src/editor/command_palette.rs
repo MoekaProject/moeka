@@ -189,7 +189,7 @@ impl EditorView {
                 };
             div()
                 .id(("command-palette", index))
-                .w_full()
+                .mx(px(1.0))
                 .h(px(row_height))
                 .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
                 .flex()
@@ -308,6 +308,7 @@ impl EditorView {
                             .w_full()
                             .max_h(px(self.scaled(styles.quick_open_results_max_height_px)))
                             .overflow_y_scroll()
+                            .pb(px(self.scaled(styles.quick_open_panel_radius_px)))
                             .track_scroll(&self.command_palette_scroll_handle)
                             .children(rows),
                     ),

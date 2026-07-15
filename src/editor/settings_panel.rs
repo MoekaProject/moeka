@@ -25,7 +25,6 @@ pub(crate) enum FontRole {
     InterfaceLanguage,
     DateTimeFormat,
     AttachmentLocation,
-    AttachmentPath,
     /// Font family for selected whiteboard elements (whiteboard panel).
     WhiteboardFont,
 }
@@ -53,8 +52,6 @@ pub(crate) struct FontPickerState {
 
 #[derive(Clone, Copy)]
 enum SettingsOptionAction {
-    AttachmentSyntax(&'static str),
-    AutomaticallyUpdateLinks(bool),
     ShowWhitespace(bool),
     HighlightLine(bool),
 }
@@ -283,31 +280,8 @@ impl EditorView {
         let ui_language = self.ui_language;
         let label = |key| attachment_settings_label(ui_language, key);
         let location = self.app_settings.attachment_location.clone();
-        let syntax = self.app_settings.attachment_link_syntax.clone();
-        let path_style = self.app_settings.attachment_path_style.clone();
         let location_controls =
             self.render_picker_control(label(&location), FontRole::AttachmentLocation, 0, cx);
-        let syntax_is_wikilink = syntax == "wikilink";
-        let syntax_controls = self.render_settings_checkbox(
-            "attachment-syntax",
-            syntax_is_wikilink,
-            label(&syntax),
-            if syntax_is_wikilink {
-                SettingsOptionAction::AttachmentSyntax("markdown")
-            } else {
-                SettingsOptionAction::AttachmentSyntax("wikilink")
-            },
-            cx,
-        );
-        let path_controls =
-            self.render_picker_control(label(&path_style), FontRole::AttachmentPath, 0, cx);
-        let update_controls = self.render_boolean_settings_checkbox(
-            "attachment-update-links",
-            self.app_settings.automatically_update_links,
-            SettingsOptionAction::AutomaticallyUpdateLinks(false),
-            SettingsOptionAction::AutomaticallyUpdateLinks(true),
-            cx,
-        );
 
         div()
             .flex()
@@ -322,9 +296,6 @@ impl EditorView {
                 ),
                 |this| this.child(self.render_attachment_folder_row()),
             )
-            .child(self.render_attachment_settings_row(label("syntax"), syntax_controls))
-            .child(self.render_attachment_settings_row(label("path_style"), path_controls))
-            .child(self.render_attachment_settings_row(label("update_links"), update_controls))
             .into_any_element()
     }
 
@@ -497,12 +468,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         match action {
-            SettingsOptionAction::AttachmentSyntax(value) => {
-                self.app_settings.attachment_link_syntax = value.to_string();
-            }
-            SettingsOptionAction::AutomaticallyUpdateLinks(value) => {
-                self.app_settings.automatically_update_links = value;
-            }
             SettingsOptionAction::ShowWhitespace(value) => {
                 self.app_settings.show_whitespace = value;
             }
@@ -729,14 +694,12 @@ impl EditorView {
                             .flex()
                             .flex_row()
                             .gap(px(0.0))
-                            .rounded(px(toggle_radius))
-                            .border(px(toggle_border_width))
-                            .border_color(self.theme.border_primary)
-                            .overflow_hidden()
                             .child(
                                 div()
                                     .id("theme-toggle-light")
                                     .rounded_l(px(toggle_radius))
+                                    .border(px(toggle_border_width))
+                                    .border_color(self.theme.border_primary)
                                     .h(px(toggle_height))
                                     .px(px(toggle_padding_x))
                                     .flex()
@@ -777,6 +740,10 @@ impl EditorView {
                                 div()
                                     .id("theme-toggle-dark")
                                     .rounded_r(px(toggle_radius))
+                                    .border_t(px(toggle_border_width))
+                                    .border_r(px(toggle_border_width))
+                                    .border_b(px(toggle_border_width))
+                                    .border_color(self.theme.border_primary)
                                     .h(px(toggle_height))
                                     .px(px(toggle_padding_x))
                                     .flex()
@@ -815,16 +782,11 @@ impl EditorView {
                             ),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(0.0))
-                            .rounded(px(option_radius))
-                            .border(px(option_border_width))
-                            .border_color(option_border_color)
-                            .overflow_hidden()
-                            .children(EditorThemeMode::all().iter().enumerate().map(
-                                |(index, mode)| {
+                        div().flex().flex_row().gap(px(0.0)).children(
+                            EditorThemeMode::all()
+                                .iter()
+                                .enumerate()
+                                .map(|(index, mode)| {
                                     let is_active = *mode == editor_theme_mode;
                                     let mode = *mode;
                                     div()
@@ -833,6 +795,9 @@ impl EditorView {
                                             mode.as_str()
                                         )))
                                         .h(px(option_height))
+                                        .border_t(px(option_border_width))
+                                        .border_b(px(option_border_width))
+                                        .border_color(option_border_color)
                                         .px(px(option_padding_x))
                                         .flex()
                                         .items_center()
@@ -856,6 +821,14 @@ impl EditorView {
                                         .when(index > 0, |this| {
                                             this.border_l(px(option_border_width))
                                                 .border_color(option_border_color)
+                                        })
+                                        .when(index == 0, |this| {
+                                            this.rounded_l(px(option_radius))
+                                                .border_l(px(option_border_width))
+                                        })
+                                        .when(index + 1 == EditorThemeMode::all().len(), |this| {
+                                            this.rounded_r(px(option_radius))
+                                                .border_r(px(option_border_width))
                                         })
                                         .child(
                                             svg()
@@ -887,8 +860,8 @@ impl EditorView {
                                             }),
                                         )
                                         .into_any_element()
-                                },
-                            )),
+                                }),
+                        ),
                     ),
             )
             .child(
@@ -1554,27 +1527,7 @@ impl EditorView {
                 self.t(TextKey::SearchDateTimeFormats).to_string(),
             ),
             FontRole::AttachmentLocation => (
-                [
-                    "current_file",
-                    "workspace_root",
-                    "workspace_folder",
-                    "current_file_subfolder",
-                ]
-                .into_iter()
-                .map(|value| {
-                    let label = attachment_settings_label(self.ui_language, value).to_string();
-                    PickerOption {
-                        value: value.to_string(),
-                        search_text: label.to_lowercase(),
-                        label,
-                        preview_font: None,
-                    }
-                })
-                .collect(),
-                attachment_settings_label(self.ui_language, "search").to_string(),
-            ),
-            FontRole::AttachmentPath => (
-                ["relative", "workspace_absolute", "shortest"]
+                ["current_file", "workspace_folder", "current_file_subfolder"]
                     .into_iter()
                     .map(|value| {
                         let label = attachment_settings_label(self.ui_language, value).to_string();
@@ -1625,14 +1578,39 @@ impl EditorView {
             }
         };
 
+        let current_value = match (role, option_index) {
+            (FontRole::UiFont, _) => self.app_settings.ui_font.clone(),
+            (FontRole::BodyFont, 0) => self.app_settings.body_latin_font.clone(),
+            (FontRole::BodyFont, _) => self.app_settings.body_cjk_font.clone(),
+            (FontRole::CodeFont, _) => self.app_settings.code_font.clone(),
+            (FontRole::InterfaceLanguage, _) => self.ui_language.code().to_string(),
+            (FontRole::DateTimeFormat, _) => self.app_settings.date_time_format().to_string(),
+            (FontRole::AttachmentLocation, _) => self.app_settings.attachment_location.clone(),
+            (FontRole::WhiteboardFont, _) => self
+                .whiteboard_current_style()
+                .font
+                .family
+                .unwrap_or_default(),
+        };
+        let selected_index = all_options
+            .iter()
+            .position(|option| option.value == current_value)
+            .unwrap_or(0);
+        let render_limit = super::list_viewport::PICKER_LIST_POLICY.ensure_index(
+            super::list_viewport::PICKER_LIST_POLICY.initial_count,
+            all_options.len(),
+            selected_index,
+        );
+        let scroll_handle = ScrollHandle::new();
+        scroll_handle.scroll_to_item(selected_index);
         self.settings_font_picker = Some(FontPickerState {
             role,
             option_index,
             filtered: all_options.clone(),
             all_options,
-            selected_index: 0,
-            render_limit: super::list_viewport::PICKER_LIST_POLICY.initial_count,
-            scroll_handle: ScrollHandle::new(),
+            selected_index,
+            render_limit,
+            scroll_handle,
             show_above: std::cell::Cell::new(None),
         });
 
@@ -1741,7 +1719,7 @@ impl EditorView {
                 let is_selected = idx == picker.selected_index;
                 div()
                     .id(SharedString::from(format!("fp-item-{idx}")))
-                    .w_full()
+                    .mx(px(1.0))
                     .h(px(item_h))
                     .px(px(self.scaled(10.0)))
                     .flex()
@@ -1888,6 +1866,7 @@ impl EditorView {
                     .id("font-picker-list")
                     .flex_1()
                     .overflow_y_scroll()
+                    .pb(px(self.scaled(8.0)))
                     .track_scroll(&picker.scroll_handle)
                     .children(items),
             );
@@ -1954,9 +1933,6 @@ impl EditorView {
                 }
                 (FontRole::AttachmentLocation, _) => {
                     self.app_settings.attachment_location = font_name;
-                }
-                (FontRole::AttachmentPath, _) => {
-                    self.app_settings.attachment_path_style = font_name;
                 }
                 (FontRole::WhiteboardFont, _) => {
                     self.whiteboard_apply_font_family(font_name, cx);

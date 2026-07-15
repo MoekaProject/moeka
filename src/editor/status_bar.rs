@@ -153,8 +153,9 @@ impl EditorView {
             return;
         }
 
+        let old_settings = self.indent_settings;
+        let mut text_changed = false;
         if self.active_tab_supports_text_buffer() {
-            let old_settings = self.indent_settings;
             let converted = convert_text_indentation(self.buffer.text(), old_settings, settings);
             if converted != self.buffer.text() {
                 self.checkpoint();
@@ -165,12 +166,16 @@ impl EditorView {
                     cursor.offset = cursor.offset.min(self.buffer.len());
                     cursor.anchor = cursor.anchor.min(self.buffer.len());
                 }
-                self.reparse();
-                self.scroll_to_cursor();
+                text_changed = true;
             }
         }
 
         self.indent_settings = settings;
+        self.clear_active_tab_layout_cache();
+        self.reparse();
+        if text_changed {
+            self.scroll_to_cursor();
+        }
         self.pause_blinking(cx);
         self.close_context_menu(cx);
     }

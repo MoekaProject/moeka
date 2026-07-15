@@ -5,6 +5,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) fn is_atomic_write_temp_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(stem) = name
+        .strip_prefix('.')
+        .and_then(|name| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let mut parts = stem.rsplitn(3, '.');
+    let Some(id) = parts.next() else {
+        return false;
+    };
+    let Some(process_id) = parts.next() else {
+        return false;
+    };
+    parts.next().is_some() && id.parse::<u64>().is_ok() && process_id.parse::<u32>().is_ok()
+}
+
 pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
     if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return atomic_write(&fs::canonicalize(path)?, content);
@@ -67,6 +87,17 @@ fn unique_temp_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_only_atomic_write_temp_paths() {
+        assert!(is_atomic_write_temp_path(Path::new(
+            "/vault/.note.md.123.4.tmp"
+        )));
+        assert!(!is_atomic_write_temp_path(Path::new("/vault/.note.md.tmp")));
+        assert!(!is_atomic_write_temp_path(Path::new(
+            "/vault/note.md.123.4.tmp"
+        )));
+    }
 
     use tempfile::tempdir;
 

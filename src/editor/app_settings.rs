@@ -57,12 +57,6 @@ pub(crate) struct AppSettings {
     pub attachment_location: String,
     #[serde(default = "default_attachment_folder")]
     pub attachment_folder: String,
-    #[serde(default = "default_attachment_link_syntax")]
-    pub attachment_link_syntax: String,
-    #[serde(default = "default_attachment_path_style")]
-    pub attachment_path_style: String,
-    #[serde(default = "default_automatically_update_links")]
-    pub automatically_update_links: bool,
     /// User keybinding overrides: command id (see `CommandId::config_key`) to
     /// gpui keystroke string, e.g. `save: cmd-shift-s`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -165,18 +159,6 @@ fn default_attachment_folder() -> String {
     "attachments".to_string()
 }
 
-fn default_attachment_link_syntax() -> String {
-    "markdown".to_string()
-}
-
-fn default_attachment_path_style() -> String {
-    "relative".to_string()
-}
-
-fn default_automatically_update_links() -> bool {
-    true
-}
-
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -205,9 +187,6 @@ impl Default for AppSettings {
             highlight_line_background: default_highlight_line_background(),
             attachment_location: default_attachment_location(),
             attachment_folder: default_attachment_folder(),
-            attachment_link_syntax: default_attachment_link_syntax(),
-            attachment_path_style: default_attachment_path_style(),
-            automatically_update_links: default_automatically_update_links(),
             keybindings: std::collections::BTreeMap::new(),
         }
     }
@@ -218,9 +197,9 @@ impl AppSettings {
         super::AttachmentPolicy::from_settings(
             &self.attachment_location,
             &self.attachment_folder,
-            &self.attachment_link_syntax,
-            &self.attachment_path_style,
-            self.automatically_update_links,
+            "markdown",
+            "relative",
+            false,
         )
     }
 
@@ -460,6 +439,7 @@ pub(crate) fn theme_kind_to_string(kind: ThemeKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::AppSettings;
+    use crate::editor::attachments::{AttachmentLinkSyntax, AttachmentPathStyle};
     use crate::theme::EditorThemeMode;
 
     #[test]
@@ -470,6 +450,15 @@ mod tests {
         assert_eq!(settings.body_latin_font, "Menlo");
         assert_eq!(settings.body_cjk_font, "Menlo");
         assert_eq!(settings.code_font, "Menlo");
+    }
+
+    #[test]
+    fn attachment_policy_uses_fixed_markdown_relative_behavior() {
+        let policy = AppSettings::default().attachment_policy();
+
+        assert_eq!(policy.link_syntax, AttachmentLinkSyntax::Markdown);
+        assert_eq!(policy.path_style, AttachmentPathStyle::Relative);
+        assert!(!policy.automatically_update_links);
     }
 
     #[test]

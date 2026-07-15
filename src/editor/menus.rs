@@ -3135,7 +3135,7 @@ impl EditorView {
             items.push(
                 div()
                     .id(SharedString::from(format!("wiki-link-item-{}", index)))
-                    .w_full()
+                    .mx(px(ms.menu_border_width_px))
                     .h(px(self.scaled(ms.menu_item_height_px)))
                     .px(px(self.scaled(ms.menu_item_padding_x_px)))
                     .flex()

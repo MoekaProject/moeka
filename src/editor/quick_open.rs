@@ -337,7 +337,7 @@ impl EditorView {
                 result_children.push(
                     div()
                         .id(SharedString::from(format!("quick-open-{}", index)))
-                        .w_full()
+                        .mx(px(1.0))
                         .h(px(row_h))
                         .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
                         .flex()
