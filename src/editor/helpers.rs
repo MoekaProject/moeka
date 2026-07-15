@@ -24,7 +24,7 @@ use crate::markdown::{
     self, BlockPreview, BlockPreviewKind, BlockType, DisplayReplacement, InlineKind,
     LineDecoration, TableLineInfo,
 };
-use crate::theme::Theme;
+use crate::theme::{CodeSyntaxPalette, Theme};
 
 use super::*;
 
@@ -34,7 +34,7 @@ const CODE_HIGHLIGHT_CACHE_MAX_ENTRIES: usize = 8192;
 struct CodeHighlightCacheKey {
     language: String,
     line_content: String,
-    light_theme: bool,
+    palette: CodeSyntaxPalette,
 }
 
 #[derive(Clone)]
@@ -1750,16 +1750,9 @@ fn syntax_lookup_candidates(language: &str) -> Vec<String> {
     candidates
 }
 
-fn mermaid_highlight_color(theme: &Theme, red: u8, green: u8, blue: u8) -> Hsla {
-    adjust_code_block_highlight_color_for_theme(
-        syntect_color_to_hsla(SyntectColor {
-            r: red,
-            g: green,
-            b: blue,
-            a: 0xFF,
-        }),
-        theme,
-    )
+/// Convert a packed `0xRRGGBB` palette color to `Hsla`.
+fn code_palette_hsla(rgb: u32) -> Hsla {
+    syntect_color_to_hsla(code_palette_syntect_color(rgb))
 }
 
 fn apply_highlight_range(
@@ -1809,12 +1802,13 @@ fn apply_mermaid_block_highlighting(
         return;
     }
 
-    let comment_color = mermaid_highlight_color(theme, 127, 132, 142);
-    let keyword_color = mermaid_highlight_color(theme, 198, 120, 221);
-    let direction_color = mermaid_highlight_color(theme, 209, 154, 102);
-    let string_color = mermaid_highlight_color(theme, 152, 195, 121);
-    let operator_color = mermaid_highlight_color(theme, 86, 182, 194);
-    let number_color = mermaid_highlight_color(theme, 209, 154, 102);
+    let palette = theme.code_palette;
+    let comment_color = code_palette_hsla(palette.comment);
+    let keyword_color = code_palette_hsla(palette.keyword);
+    let direction_color = code_palette_hsla(palette.number);
+    let string_color = code_palette_hsla(palette.string);
+    let operator_color = code_palette_hsla(palette.operator);
+    let number_color = code_palette_hsla(palette.number);
 
     let trimmed = line_content.trim_start();
     if trimmed.starts_with("%%") && !trimmed.starts_with("%%{") {
@@ -3691,75 +3685,44 @@ pub(crate) fn find_syntax_for_path(path: &Path) -> Option<&'static SyntaxReferen
         .and_then(find_syntax_for_language)
 }
 
-pub(crate) fn syntect_theme() -> &'static SyntectTheme {
-    static THEME: OnceLock<SyntectTheme> = OnceLock::new();
-    THEME.get_or_init(|| build_one_dark_pro_theme())
+fn code_palette_syntect_color(rgb: u32) -> SyntectColor {
+    SyntectColor {
+        r: ((rgb >> 16) & 0xFF) as u8,
+        g: ((rgb >> 8) & 0xFF) as u8,
+        b: (rgb & 0xFF) as u8,
+        a: 0xFF,
+    }
 }
 
-/// Build a One Dark Pro style syntect theme with comprehensive scope coverage.
-fn build_one_dark_pro_theme() -> SyntectTheme {
-    // One Dark Pro palette
-    let chalky = SyntectColor {
-        r: 0xe5,
-        g: 0xc0,
-        b: 0x7b,
-        a: 0xff,
-    }; // #e5c07b — yellow
-    let coral = SyntectColor {
-        r: 0xe0,
-        g: 0x6c,
-        b: 0x75,
-        a: 0xff,
-    }; // #e06c75 — red
-    let cyan = SyntectColor {
-        r: 0x56,
-        g: 0xb6,
-        b: 0xc2,
-        a: 0xff,
-    }; // #56b6c2 — cyan
-    let fountain_blue = SyntectColor {
-        r: 0x61,
-        g: 0xaf,
-        b: 0xef,
-        a: 0xff,
-    }; // #61afef — blue
-    let green = SyntectColor {
-        r: 0x98,
-        g: 0xc3,
-        b: 0x79,
-        a: 0xff,
-    }; // #98c379 — green
-    let ivory = SyntectColor {
-        r: 0xab,
-        g: 0xb2,
-        b: 0xbf,
-        a: 0xff,
-    }; // #abb2bf — text
-    let stone = SyntectColor {
-        r: 0x7f,
-        g: 0x84,
-        b: 0x8e,
-        a: 0xff,
-    }; // #7f848e — comment
-    let violet = SyntectColor {
-        r: 0xc6,
-        g: 0x78,
-        b: 0xdd,
-        a: 0xff,
-    }; // #c678dd — purple
-    let whiskey = SyntectColor {
-        r: 0xd1,
-        g: 0x9a,
-        b: 0x66,
-        a: 0xff,
-    }; // #d19a66 — orange
+/// Return the (lazily built) syntect theme for a code syntax palette.
+///
+/// Built themes are leaked and cached; the number of distinct palettes is
+/// bounded by the built-in theme list, so the leak is bounded too.
+pub(crate) fn syntect_theme_for_palette(palette: CodeSyntaxPalette) -> &'static SyntectTheme {
+    static CACHE: OnceLock<Mutex<HashMap<CodeSyntaxPalette, &'static SyntectTheme>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache
+        .entry(palette)
+        .or_insert_with(|| Box::leak(Box::new(build_syntect_theme(palette))))
+}
 
-    let bg = SyntectColor {
-        r: 0x28,
-        g: 0x2c,
-        b: 0x34,
-        a: 0xff,
-    };
+/// Build a syntect theme with comprehensive scope coverage from a per-theme
+/// token palette. Scope rules follow the One Dark Pro structure; the palette
+/// supplies the actual colors.
+fn build_syntect_theme(palette: CodeSyntaxPalette) -> SyntectTheme {
+    let chalky = code_palette_syntect_color(palette.type_name);
+    let coral = code_palette_syntect_color(palette.variable);
+    let cyan = code_palette_syntect_color(palette.operator);
+    let fountain_blue = code_palette_syntect_color(palette.function);
+    let green = code_palette_syntect_color(palette.string);
+    let ivory = code_palette_syntect_color(palette.foreground);
+    let stone = code_palette_syntect_color(palette.comment);
+    let violet = code_palette_syntect_color(palette.keyword);
+    let whiskey = code_palette_syntect_color(palette.number);
 
     fn rule(scope: &str, fg: SyntectColor) -> ThemeItem {
         ThemeItem {
@@ -3801,11 +3764,11 @@ fn build_one_dark_pro_theme() -> SyntectTheme {
     }
 
     SyntectTheme {
-        name: Some("One Dark Pro".to_string()),
+        name: Some("Moeka Code".to_string()),
         author: None,
         settings: ThemeSettings {
             foreground: Some(ivory),
-            background: Some(bg),
+            background: None,
             ..ThemeSettings::default()
         },
         scopes: vec![
@@ -4137,7 +4100,7 @@ pub(crate) fn apply_code_block_highlighting(
     let cache_key = CodeHighlightCacheKey {
         language: language.to_string(),
         line_content: line_content.to_string(),
-        light_theme: theme.bg_primary.l >= 0.65,
+        palette: theme.code_palette,
     };
     if let Ok(cache) = code_highlight_cache().lock()
         && let Some(segments) = cache.get(&cache_key).cloned()
@@ -4149,16 +4112,14 @@ pub(crate) fn apply_code_block_highlighting(
     let syntax_set = syntax_set();
     let syntax =
         find_syntax_for_language(language).unwrap_or_else(|| syntax_set.find_syntax_plain_text());
-    let mut highlighter = HighlightLines::new(syntax, syntect_theme());
+    let mut highlighter =
+        HighlightLines::new(syntax, syntect_theme_for_palette(theme.code_palette));
     if let Ok(ranges) = highlighter.highlight_line(line_content, syntax_set) {
         let mut byte_pos = 0usize;
         let mut segments = Vec::with_capacity(ranges.len());
         for (style, piece) in &ranges {
             let end = (byte_pos + piece.len()).min(colors.len());
-            let color = adjust_code_block_highlight_color_for_theme(
-                syntect_color_to_hsla(style.foreground),
-                theme,
-            );
+            let color = syntect_color_to_hsla(style.foreground);
             let weight = if style
                 .font_style
                 .contains(syntect::highlighting::FontStyle::BOLD)
@@ -4195,14 +4156,6 @@ pub(crate) fn apply_code_block_highlighting(
             cache.insert(cache_key, segments);
         }
     }
-}
-
-fn adjust_code_block_highlight_color_for_theme(mut color: Hsla, theme: &Theme) -> Hsla {
-    if theme.bg_primary.l >= 0.65 {
-        color.l = (color.l * 0.5).clamp(0.0, 1.0);
-        color.s = (color.s * 1.5).clamp(0.0, 1.0);
-    }
-    color
 }
 
 pub(crate) fn resolve_asset_image_path(path: &str) -> PathBuf {

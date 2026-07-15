@@ -3413,7 +3413,11 @@ impl EditorView {
             self.editor_theme_mode,
             self.theme_kind.is_dark(),
         );
-        self.refresh_theme_styles(true, cx);
+        // Persist the selection into settings BEFORE rebuilding styles:
+        // refresh_theme_styles derives chrome (sidebar / utility panel /
+        // settings) styles from app_settings.dark_theme_kind(), so a stale
+        // value would leave those components rendered with the previous
+        // theme until the next refresh.
         self.app_settings.theme = theme_kind_to_string(kind);
         if kind.is_dark() {
             self.app_settings.dark_theme = theme_kind_to_string(kind);
@@ -3422,6 +3426,7 @@ impl EditorView {
         }
         self.app_settings
             .set_editor_theme_mode_for_appearance(kind.is_dark(), self.editor_theme_mode);
+        self.refresh_theme_styles(true, cx);
         self.app_settings.save();
         cx.notify();
     }

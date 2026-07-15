@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, Context, CursorStyle, Focusable, MouseButton, ScrollHandle, SharedString, Window,
-    div, prelude::*, px, svg,
+    div, prelude::*, px, relative, svg,
 };
 
 use crate::checkbox::{Checkbox, CheckboxColors};
@@ -895,8 +895,9 @@ impl EditorView {
                 div()
                     .flex()
                     .flex_row()
-                    .justify_around()
-                    .gap(px(self.scaled(10.0)))
+                    .flex_wrap()
+                    .justify_between()
+                    .gap_y(px(self.scaled(8.0)))
                     .children(
                         themes
                             .iter()
@@ -923,16 +924,17 @@ impl EditorView {
         let inactive_border = preview.border_secondary;
         let inactive_hover_border = preview.border_tertiary;
 
-        let swatch_size = self.scaled(12.0);
+        let swatch_size = self.scaled(10.0);
 
         div()
             .id(SharedString::from(format!("theme-{}", kind.label())))
-            .flex_1()
-            .py(px(self.scaled(10.0)))
-            .px(px(self.scaled(10.0)))
+            // Four cards per row; space-between distributes the remaining 6%.
+            .w(relative(0.235))
+            .py(px(self.scaled(8.0)))
+            .px(px(self.scaled(8.0)))
             .flex()
             .flex_col()
-            .gap(px(self.scaled(8.0)))
+            .gap(px(self.scaled(6.0)))
             .rounded(px(self.scaled(8.0)))
             .border(px(2.0))
             .border_color(if is_active {
@@ -1000,6 +1002,10 @@ impl EditorView {
             // Theme name
             .child(
                 div()
+                    .w_full()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .text_size(px(self.scaled(11.0)))
                     .text_color(swatch_text)
                     .child(kind.label()),
