@@ -5,10 +5,27 @@ use gpui::{
     UTF16Selection, Window, WrappedLine, point, px, size,
 };
 
-use crate::markdown::BlockType;
+use crate::markdown::{BlockType, TableLineInfo};
 
 use super::input::{InlineLineDisplayInfo, ime_debug_enabled, ime_debug_log};
 use super::*;
+
+fn uses_table_ime_geometry(active_tab_is_diff: bool, table_info: &TableLineInfo) -> bool {
+    !active_tab_is_diff && !table_info.is_separator && !table_info.is_front_matter
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_uses_inline_ime_geometry() {
+    let front_matter = crate::markdown::parse_decorations("---\ntitle: Moeka\n---");
+    let front_matter_info = front_matter[1].table_info.as_ref().unwrap();
+    let table = crate::markdown::parse_decorations("| Key | Value |\n| --- | --- |\n| A | B |");
+    let table_info = table[0].table_info.as_ref().unwrap();
+
+    assert!(!uses_table_ime_geometry(false, front_matter_info));
+    assert!(uses_table_ime_geometry(false, table_info));
+    assert!(!uses_table_ime_geometry(true, table_info));
+}
 
 impl EditorView {
     fn input_bounds_for_display_line(
@@ -572,12 +589,11 @@ impl EntityInputHandler for EditorView {
         let origin_y: f32 = editor_bounds.origin.y.into();
         let text_top_y = origin_y + self.text_y_offset_for_line(line) - self.scroll_offset;
 
-        if !self.active_tab_is_diff()
-            && let Some(table_info) = self
-                .decorations
-                .get(line)
-                .and_then(|decoration| decoration.table_info.as_ref())
-            && !table_info.is_separator
+        if let Some(table_info) = self
+            .decorations
+            .get(line)
+            .and_then(|decoration| decoration.table_info.as_ref())
+            && uses_table_ime_geometry(self.active_tab_is_diff(), table_info)
         {
             let table_start_line = table_info.table_start_line;
             let visual_row = self.table_visual_row_for_source_line(table_start_line, line)?;
