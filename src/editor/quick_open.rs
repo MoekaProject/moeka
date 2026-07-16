@@ -121,8 +121,13 @@ impl EditorView {
             let placeholder = self
                 .t(crate::i18n::TextKey::QuickOpenPlaceholder)
                 .to_string();
-            let editor =
-                cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
+            let editor = cx.new(move |cx| {
+                let mut input = crate::text_input::TextInput::new(styles, &placeholder, cx);
+                // Hosted inside a deferred overlay; a deferred context menu
+                // would nest defer_draw and panic.
+                input.context_menu_enabled = false;
+                input
+            });
             cx.subscribe(
                 &editor,
                 |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {

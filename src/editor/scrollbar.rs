@@ -12,16 +12,18 @@ pub(crate) enum PanelScrollbarKind {
     Info,
     Outline,
     GitHistory,
+    GitChanges,
     ChatTerminal,
 }
 
 impl PanelScrollbarKind {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Sidebar,
         Self::FileList,
         Self::Info,
         Self::Outline,
         Self::GitHistory,
+        Self::GitChanges,
         Self::ChatTerminal,
     ];
 
@@ -32,6 +34,7 @@ impl PanelScrollbarKind {
             Self::Info => "info-scrollbar",
             Self::Outline => "outline-panel-scrollbar",
             Self::GitHistory => "git-history-scrollbar",
+            Self::GitChanges => "git-changes-scrollbar",
             Self::ChatTerminal => "chat-terminal-scrollbar",
         }
     }
@@ -259,6 +262,13 @@ impl EditorView {
                     f32::from(self.git_history_scroll_handle.bounds().size.height);
                 (metrics, track_height_px, 0.0)
             }
+            PanelScrollbarKind::GitChanges => {
+                let metrics =
+                    VerticalScrollbarMetrics::from_scroll_handle(&self.git_changes_scroll_handle)?;
+                let track_height_px =
+                    f32::from(self.git_changes_scroll_handle.bounds().size.height);
+                (metrics, track_height_px, 0.0)
+            }
             PanelScrollbarKind::ChatTerminal => {
                 let (viewport_height, max_scroll, scroll_top) =
                     self.active_chat_terminal_scrollbar_metrics()?;
@@ -329,6 +339,7 @@ impl EditorView {
             PanelScrollbarKind::Info => Some(&self.info_panel_scroll_handle),
             PanelScrollbarKind::Outline => Some(&self.outline_panel_scroll_handle),
             PanelScrollbarKind::GitHistory => Some(&self.git_history_scroll_handle),
+            PanelScrollbarKind::GitChanges => Some(&self.git_changes_scroll_handle),
             PanelScrollbarKind::ChatTerminal => None,
         }
     }
@@ -705,7 +716,8 @@ impl EditorView {
             | PanelScrollbarKind::FileList
             | PanelScrollbarKind::Info
             | PanelScrollbarKind::Outline
-            | PanelScrollbarKind::GitHistory => {
+            | PanelScrollbarKind::GitHistory
+            | PanelScrollbarKind::GitChanges => {
                 if let Some(handle) = self.panel_scrollbar_handle(kind) {
                     let max_scroll = f32::from(handle.max_offset().height);
                     let scroll_top = scroll_top.clamp(0.0, max_scroll);

@@ -125,7 +125,7 @@ impl EditorView {
                 first_revealed_path = Some(dst.clone());
             }
 
-            for tab in &mut self.tabs {
+            for tab in self.all_tabs_mut() {
                 if let Some(ref tab_path) = tab.path {
                     let normalized_tab_path = Self::normalize_sidebar_path(tab_path);
                     if normalized_tab_path.starts_with(&src) {

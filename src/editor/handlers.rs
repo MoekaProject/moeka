@@ -73,6 +73,14 @@ impl EditorView {
             self.close_language_picker(window, cx);
             return;
         }
+        if self.branch_picker_visible {
+            self.close_branch_picker(window, cx);
+            return;
+        }
+        if self.git_remote_input_visible {
+            self.close_git_remote_input(cx);
+            return;
+        }
         if self.workspace_search_visible {
             self.close_workspace_search(window, cx);
             return;
@@ -2336,36 +2344,41 @@ impl EditorView {
             }
 
             this.update(cx, |editor, cx| {
-                let Some(index) = editor.tabs.iter().position(|tab| tab.id == tab_id) else {
+                let Some(owner) = editor.pane_id_for_tab(&tab_id) else {
                     return;
                 };
-                editor.clear_temp_file_for_tab(&tab_id);
-                editor.tabs[index].path = Some(path.clone());
-                editor.tabs[index].title = EditorView::title_for_path(&path);
-                editor.tabs[index].file_kind = Some(classify_file_kind_for_bytes(
-                    &path,
-                    contents_for_kind.as_bytes(),
-                ));
-                editor.tabs[index].is_dirty = false;
-                editor.tabs[index].snapshot = snapshot.clone();
-                editor.tabs[index].history.source_identity = Some(
-                    history_store::default_source_identity(&tab_id, Some(path.as_path())),
-                );
-                editor.tabs[index].history.journal_path = Some(
-                    history_store::default_journal_path(&tab_id, Some(path.as_path())),
-                );
-                let _ = history_store::persist_tab_history(
-                    &tab_id,
-                    Some(path.as_path()),
-                    &mut editor.tabs[index].history,
-                    &snapshot,
-                );
-                if editor.active_tab_index() == Some(index) {
-                    editor.current_file_path = Some(path);
-                }
-                editor.invalidate_sidebar_items_cache();
-                session_store::persist_session(editor);
-                cx.notify();
+                editor.with_pane(owner, |editor| {
+                    let Some(index) = editor.tabs.iter().position(|tab| tab.id == tab_id) else {
+                        return;
+                    };
+                    editor.clear_temp_file_for_tab(&tab_id);
+                    editor.tabs[index].path = Some(path.clone());
+                    editor.tabs[index].title = EditorView::title_for_path(&path);
+                    editor.tabs[index].file_kind = Some(classify_file_kind_for_bytes(
+                        &path,
+                        contents_for_kind.as_bytes(),
+                    ));
+                    editor.tabs[index].is_dirty = false;
+                    editor.tabs[index].snapshot = snapshot.clone();
+                    editor.tabs[index].history.source_identity = Some(
+                        history_store::default_source_identity(&tab_id, Some(path.as_path())),
+                    );
+                    editor.tabs[index].history.journal_path = Some(
+                        history_store::default_journal_path(&tab_id, Some(path.as_path())),
+                    );
+                    let _ = history_store::persist_tab_history(
+                        &tab_id,
+                        Some(path.as_path()),
+                        &mut editor.tabs[index].history,
+                        &snapshot,
+                    );
+                    if editor.active_tab_index() == Some(index) {
+                        editor.current_file_path = Some(path);
+                    }
+                    editor.invalidate_sidebar_items_cache();
+                    session_store::persist_session(editor);
+                    cx.notify();
+                });
             })
             .ok();
         })

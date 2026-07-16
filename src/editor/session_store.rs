@@ -2,7 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::config_store::{
-    self, SessionConfig, TabHistoryIndex, TabRecoveryState, TabSessionRecord, TabViewState,
+    self, PaneLayoutRecord, SessionConfig, TabHistoryIndex, TabRecoveryState, TabSessionRecord,
+    TabViewState,
 };
 use super::history_store;
 use super::*;
@@ -15,17 +16,62 @@ pub(crate) fn persist_session(editor: &EditorView) {
     } else {
         Some(editor.sidebar_root.clone())
     };
+    let leaf_ids = editor.pane_layout.leaf_ids();
+    let focused_pane_leaf = leaf_ids.iter().position(|id| *id == editor.focused_pane_id);
     config.session = SessionConfig {
         active_tab_id: editor.active_tab_id.clone(),
         next_tab_id: Some(editor.next_tab_id),
+        // Legacy flat list: the currently focused pane's tabs.
         tabs: editor
             .tabs
             .iter()
             .filter(|tab| tab.kind != TabKind::Diff)
             .map(tab_to_record)
             .collect(),
+        pane_layout: Some(pane_layout_to_record(editor, &editor.pane_layout)),
+        focused_pane_leaf,
     };
     config_store::save_config(&config);
+}
+
+fn pane_layout_to_record(editor: &EditorView, layout: &PaneLayout) -> PaneLayoutRecord {
+    match layout {
+        PaneLayout::Leaf(pane_id) => {
+            let (tabs, active_tab_id) = if *pane_id == editor.current_pane_id() {
+                (&editor.tabs, &editor.active_tab_id)
+            } else if let Some(index) = editor.pane_index(*pane_id) {
+                (
+                    &editor.panes[index].state.tabs,
+                    &editor.panes[index].state.active_tab_id,
+                )
+            } else {
+                (&editor.tabs, &editor.active_tab_id)
+            };
+            PaneLayoutRecord::Leaf {
+                tabs: tabs
+                    .iter()
+                    .filter(|tab| tab.kind != TabKind::Diff)
+                    .map(tab_to_record)
+                    .collect(),
+                active_tab_id: active_tab_id.clone(),
+            }
+        }
+        PaneLayout::Split {
+            axis,
+            children,
+            flexes,
+        } => PaneLayoutRecord::Split {
+            axis: match axis {
+                SplitAxis::Horizontal => "horizontal".to_string(),
+                SplitAxis::Vertical => "vertical".to_string(),
+            },
+            flexes: flexes.clone(),
+            children: children
+                .iter()
+                .map(|child| pane_layout_to_record(editor, child))
+                .collect(),
+        },
+    }
 }
 
 pub(crate) fn restore_session(editor: &mut EditorView) {
@@ -36,6 +82,18 @@ pub(crate) fn restore_session(editor: &mut EditorView) {
         editor.sidebar_visible = true;
         editor.expanded_dirs.clear();
         editor.expanded_dirs.insert(active_root);
+    }
+
+    // Split-pane layout (new format) supersedes the legacy flat tab list.
+    if let Some(layout_record) = config.session.pane_layout.as_ref()
+        && restore_pane_layout(
+            editor,
+            layout_record,
+            config.session.focused_pane_leaf,
+            config.session.next_tab_id,
+        )
+    {
+        return;
     }
 
     if config.session.tabs.is_empty() {
@@ -64,6 +122,170 @@ pub(crate) fn restore_session(editor: &mut EditorView) {
         .next_tab_id
         .unwrap_or_else(|| infer_next_tab_id(&editor.tabs, editor.next_tab_id));
 
+    let Some(index) = editor.active_tab_index() else {
+        return;
+    };
+    let active_tab = editor.tabs[index].clone();
+    editor.current_file_path = active_tab.path.clone();
+    editor.editor_left_aligned = active_tab.editor_left_aligned;
+    if active_tab.kind == TabKind::Editor {
+        if active_tab
+            .file_kind
+            .as_ref()
+            .is_some_and(FileKind::supports_text_buffer)
+        {
+            editor.buffer = Buffer::from_text(&active_tab.snapshot.text);
+            editor.cursor.offset = active_tab.snapshot.cursor_offset.min(editor.buffer.len());
+            editor.cursor.anchor = active_tab.snapshot.cursor_anchor.min(editor.buffer.len());
+            editor.extra_cursors = active_tab
+                .snapshot
+                .extra_cursors
+                .iter()
+                .map(|(offset, anchor)| Cursor {
+                    offset: (*offset).min(editor.buffer.len()),
+                    anchor: (*anchor).min(editor.buffer.len()),
+                })
+                .collect();
+        } else {
+            editor.buffer = Buffer::from_text("");
+            editor.cursor.offset = 0;
+            editor.cursor.anchor = 0;
+            editor.extra_cursors.clear();
+        }
+        editor.scroll_offset = active_tab.snapshot.scroll_offset;
+        editor.extra_marked_ranges.clear();
+        editor.reparse();
+    }
+}
+
+/// Rebuilds the pane tree from a session record. Returns false when nothing
+/// usable was restored (caller falls back to the legacy flat list).
+fn restore_pane_layout(
+    editor: &mut EditorView,
+    record: &PaneLayoutRecord,
+    focused_pane_leaf: Option<usize>,
+    next_tab_id: Option<usize>,
+) -> bool {
+    let mut panes: Vec<Pane> = Vec::new();
+    let Some(layout) = build_pane_layout(editor.ui_language, record, &mut panes) else {
+        return false;
+    };
+    if panes.is_empty() {
+        return false;
+    }
+
+    let leaf_ids = layout.leaf_ids();
+    let focused_id = focused_pane_leaf
+        .and_then(|index| leaf_ids.get(index).copied())
+        .unwrap_or_else(|| layout.first_leaf());
+
+    editor.next_pane_id = panes.iter().map(|pane| pane.id).max().unwrap_or(0) + 1;
+    editor.pane_layout = layout;
+    editor.panes = panes;
+    editor.pane_bounds.clear();
+
+    // Move the focused pane's restored tab state into the root fields
+    // (discarding the default welcome state EditorView::new installed).
+    let focused_index = editor
+        .pane_index(focused_id)
+        .expect("focused pane exists in freshly-built layout");
+    let mut state = std::mem::replace(
+        &mut editor.panes[focused_index].state,
+        PaneState::detached(),
+    );
+    editor.swap_pane_state(&mut state);
+    editor.panes[focused_index].state = PaneState::detached();
+    editor.focused_pane_id = focused_id;
+    editor.swapped_pane_id = None;
+
+    editor.next_tab_id = next_tab_id.unwrap_or_else(|| {
+        let inferred = editor
+            .all_tabs()
+            .filter_map(|tab| {
+                tab.id
+                    .strip_prefix("tab-")
+                    .and_then(|raw| raw.parse::<usize>().ok())
+            })
+            .max()
+            .map(|max| max + 1)
+            .unwrap_or(editor.next_tab_id);
+        inferred
+    });
+
+    // Hydrate every pane's live document state from its active tab snapshot.
+    for pane_id in editor.pane_ids() {
+        editor.with_pane(pane_id, hydrate_active_tab_state);
+    }
+    true
+}
+
+fn build_pane_layout(
+    ui_language: UiLanguage,
+    record: &PaneLayoutRecord,
+    panes: &mut Vec<Pane>,
+) -> Option<PaneLayout> {
+    match record {
+        PaneLayoutRecord::Leaf {
+            tabs,
+            active_tab_id,
+        } => {
+            let mut restored_tabs = Vec::new();
+            for tab_record in tabs {
+                if let Some(tab) = restore_tab_from_record(tab_record, ui_language) {
+                    restored_tabs.push(tab);
+                }
+            }
+            if restored_tabs.is_empty() {
+                return None;
+            }
+            let pane_id = panes.iter().map(|pane| pane.id + 1).max().unwrap_or(0);
+            let mut pane = Pane::new(pane_id);
+            pane.state.active_tab_id = active_tab_id
+                .clone()
+                .filter(|id| restored_tabs.iter().any(|tab| &tab.id == id))
+                .or_else(|| restored_tabs.first().map(|tab| tab.id.clone()));
+            pane.state.tabs = restored_tabs;
+            panes.push(pane);
+            Some(PaneLayout::Leaf(pane_id))
+        }
+        PaneLayoutRecord::Split {
+            axis,
+            flexes,
+            children,
+        } => {
+            let axis = match axis.as_str() {
+                "vertical" => SplitAxis::Vertical,
+                _ => SplitAxis::Horizontal,
+            };
+            let mut built = Vec::new();
+            for child in children {
+                if let Some(child_layout) = build_pane_layout(ui_language, child, panes) {
+                    built.push(child_layout);
+                }
+            }
+            match built.len() {
+                0 => None,
+                1 => Some(built.pop().expect("one child")),
+                _ => {
+                    let flexes = if flexes.len() == built.len() {
+                        flexes.clone()
+                    } else {
+                        vec![1.0; built.len()]
+                    };
+                    Some(PaneLayout::Split {
+                        axis,
+                        children: built,
+                        flexes,
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// Loads the (root-swapped-in) pane's active tab snapshot into the live
+/// document fields; mirrors the legacy restore tail.
+fn hydrate_active_tab_state(editor: &mut EditorView) {
     let Some(index) = editor.active_tab_index() else {
         return;
     };

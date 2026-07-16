@@ -34,8 +34,33 @@ pub(crate) struct SessionConfig {
     pub active_tab_id: Option<String>,
     #[serde(default)]
     pub next_tab_id: Option<usize>,
+    /// Legacy flat tab list (the focused pane's tabs); kept for forward/
+    /// backward compatibility with configs from before split panes.
     #[serde(default)]
     pub tabs: Vec<TabSessionRecord>,
+    /// Recursive split-pane layout. When present it supersedes `tabs`.
+    #[serde(default)]
+    pub pane_layout: Option<PaneLayoutRecord>,
+    /// Index of the focused pane within the layout's leaf order.
+    #[serde(default)]
+    pub focused_pane_leaf: Option<usize>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub(crate) enum PaneLayoutRecord {
+    Leaf {
+        #[serde(default)]
+        tabs: Vec<TabSessionRecord>,
+        #[serde(default)]
+        active_tab_id: Option<String>,
+    },
+    Split {
+        /// "horizontal" (row) or "vertical" (column).
+        axis: String,
+        #[serde(default)]
+        flexes: Vec<f32>,
+        children: Vec<PaneLayoutRecord>,
+    },
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
@@ -304,6 +329,8 @@ mod tests {
         config.session = SessionConfig {
             active_tab_id: Some("tab-7".to_string()),
             next_tab_id: Some(8),
+            pane_layout: None,
+            focused_pane_leaf: None,
             tabs: vec![TabSessionRecord {
                 id: "tab-7".to_string(),
                 kind: "editor".to_string(),

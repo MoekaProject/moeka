@@ -170,7 +170,15 @@ impl EditorView {
             let styles = self.language_picker_text_input_styles();
             let ui_language = self.ui_language;
             let editor = cx.new(move |cx| {
-                crate::text_input::TextInput::new(styles, picker_placeholder(mode, ui_language), cx)
+                let mut input = crate::text_input::TextInput::new(
+                    styles,
+                    picker_placeholder(mode, ui_language),
+                    cx,
+                );
+                // Hosted inside a deferred overlay; a deferred context menu
+                // would nest defer_draw and panic.
+                input.context_menu_enabled = false;
+                input
             });
             cx.subscribe(
                 &editor,

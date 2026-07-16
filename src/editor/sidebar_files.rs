@@ -54,7 +54,7 @@ impl EditorView {
         cx.notify();
     }
 
-    fn move_path_to_trash(path: &Path) -> anyhow::Result<()> {
+    pub(super) fn move_path_to_trash(path: &Path) -> anyhow::Result<()> {
         #[cfg(target_os = "macos")]
         {
             use trash::TrashContext;
@@ -101,11 +101,28 @@ impl EditorView {
         }
 
         self.invalidate_sidebar_items_cache();
-        self.tabs.retain(|tab| {
-            tab.path
-                .as_ref()
-                .is_none_or(|candidate| !paths.iter().any(|path| candidate.starts_with(path)))
-        });
+        for pane_id in self.pane_ids() {
+            self.with_pane(pane_id, |this| {
+                this.tabs.retain(|tab| {
+                    tab.path.as_ref().is_none_or(|candidate| {
+                        !paths.iter().any(|path| candidate.starts_with(path))
+                    })
+                });
+                this.active_tab_index_cache.set(None);
+                if !this.tabs.is_empty() {
+                    let active_still_exists = this
+                        .active_tab_id
+                        .as_ref()
+                        .is_some_and(|id| this.tabs.iter().any(|tab| &tab.id == id));
+                    if !active_still_exists {
+                        this.activate_tab_by_index_without_persist(0, cx);
+                    }
+                }
+            });
+        }
+        for pane_id in self.pane_ids() {
+            self.remove_pane_if_empty(pane_id, cx);
+        }
         self.selected_sidebar_paths
             .retain(|selected| !paths.iter().any(|path| selected.starts_with(path)));
 
@@ -127,14 +144,6 @@ impl EditorView {
         if self.tabs.is_empty() {
             self.create_scratch_tab(cx);
             return;
-        }
-
-        let active_still_exists = self
-            .active_tab_id
-            .as_ref()
-            .is_some_and(|id| self.tabs.iter().any(|tab| &tab.id == id));
-        if !active_still_exists {
-            self.activate_tab_by_index(0, cx);
         }
 
         self.context_menu = None;
@@ -295,7 +304,7 @@ impl EditorView {
                             self.app_settings.save();
                         }
                         self.invalidate_sidebar_items_cache();
-                        for tab in &mut self.tabs {
+                        for tab in self.all_tabs_mut() {
                             if let Some(tab_path) = tab.path.as_ref()
                                 && tab_path.starts_with(path)
                             {
@@ -471,7 +480,7 @@ impl EditorView {
                 } else {
                     pasted_paths.push(dst.clone());
                     starred_changed |= self.app_settings.rename_starred_prefix(&src, &dst);
-                    for tab in &mut self.tabs {
+                    for tab in self.all_tabs_mut() {
                         if let Some(ref tab_path) = tab.path {
                             let normalized_tab_path = Self::normalize_sidebar_path(tab_path);
                             if normalized_tab_path.starts_with(&src) {

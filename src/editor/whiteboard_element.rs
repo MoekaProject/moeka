@@ -27,6 +27,7 @@ use crate::theme::{Theme, with_alpha};
 
 pub(crate) struct WhiteboardElement {
     pub editor: Entity<EditorView>,
+    pub pane_id: super::PaneId,
 }
 
 pub(crate) struct WhiteboardPrepaintState {
@@ -91,6 +92,9 @@ impl Element for WhiteboardElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let pane_swapped = self
+            .editor
+            .update(cx, |editor, _| editor.begin_pane_swap(self.pane_id));
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         let viewport_width: f32 = bounds.size.width.into();
         let viewport_height: f32 = bounds.size.height.into();
@@ -214,6 +218,11 @@ impl Element for WhiteboardElement {
             editor.last_viewport_height = viewport_height;
             editor.whiteboard_canvas_bounds = Some(bounds);
         });
+
+        if pane_swapped {
+            self.editor
+                .update(cx, |editor, _| editor.end_pane_swap(self.pane_id));
+        }
 
         WhiteboardPrepaintState {
             hitbox,

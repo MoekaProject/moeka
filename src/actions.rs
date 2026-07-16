@@ -108,6 +108,12 @@ actions!(
         ActivatePreviousTab,
         ActivateNextTab,
         PinTab,
+        // Split panes
+        SplitPaneRight,
+        SplitPaneLeft,
+        SplitPaneUp,
+        SplitPaneDown,
+        FocusNextPane,
         // Search
         Find,
         FindNext,

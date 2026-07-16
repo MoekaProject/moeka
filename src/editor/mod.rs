@@ -1,6 +1,7 @@
 mod app_settings;
 mod assets;
 mod attachments;
+mod branch_picker;
 mod chat_panel;
 mod code_commands;
 mod command_palette;
@@ -10,6 +11,8 @@ mod element;
 mod file_list;
 mod file_ops;
 mod fold;
+mod git_ops;
+mod git_panel;
 mod handlers;
 mod helpers;
 mod history_store;
@@ -27,9 +30,11 @@ mod list_viewport;
 mod menus;
 mod notifications;
 mod outline;
+mod pane;
 mod profiler;
 mod quick_open;
 mod render;
+mod render_pane;
 mod scaling;
 mod scrollbar;
 mod search;
@@ -62,8 +67,13 @@ mod workspace_search;
 pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
 pub(crate) use assets::*;
 pub(crate) use attachments::AttachmentPolicy;
+pub(crate) use branch_picker::BranchPickerItem;
 pub(crate) use file_list::FileListItem;
+pub(crate) use git_ops::*;
 use language_detection::classify_pasted_text_kind;
+pub(crate) use pane::{
+    Pane, PaneId, PaneLayout, PaneResizeDrag, PaneState, SplitAxis, SplitDirection,
+};
 pub(crate) use scrollbar::{PanelScrollbarKind, PanelScrollbarState};
 pub(crate) use shortcut::{register_keybinding_overrides, set_application_menus};
 pub(crate) use status_bar::IndentSettings;
@@ -695,6 +705,7 @@ pub(crate) struct DraggedTab {
     pub title: String,
     pub path: Option<PathBuf>,
     pub source_index: usize,
+    pub source_pane_id: PaneId,
 }
 
 #[derive(Clone)]
@@ -740,11 +751,25 @@ impl Render for DraggedTabView {
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) enum DialogAction {
-    CloseTabUnsaved { tab_id: String },
-    SaveAndCloseTab { tab_id: String },
-    DeletePath { path: PathBuf },
-    DeletePaths { paths: Vec<PathBuf> },
-    InstallUpdate { update: PreparedUpdate },
+    CloseTabUnsaved {
+        tab_id: String,
+    },
+    SaveAndCloseTab {
+        tab_id: String,
+    },
+    DeletePath {
+        path: PathBuf,
+    },
+    DeletePaths {
+        paths: Vec<PathBuf>,
+    },
+    InstallUpdate {
+        update: PreparedUpdate,
+    },
+    GitDiscardEntries {
+        tracked: Vec<String>,
+        untracked: Vec<String>,
+    },
     DismissOnly,
 }
 
@@ -1213,7 +1238,7 @@ pub(crate) struct ClickScrollAnchor {
     pub(crate) scroll_before: f32,
 }
 
-struct PendingLineDisplayTransfer {
+pub(crate) struct PendingLineDisplayTransfer {
     cached_lines: LineDisplayCache,
     start_line: usize,
     old_end_line_exclusive: usize,
@@ -1311,7 +1336,7 @@ fn line_display_transfer_line_bounds(
 }
 
 #[derive(Default)]
-struct LineGeometryCacheState {
+pub(crate) struct LineGeometryCacheState {
     prefix_y_offsets: Vec<f32>,
 }
 
@@ -1437,6 +1462,27 @@ pub struct EditorView {
     pub(crate) active_tab_index_cache: Cell<Option<usize>>,
     pub(crate) active_file_kind_cache: Option<FileKind>,
     pub(crate) next_tab_id: usize,
+    // ── Split panes ─────────────────────────────────────────────────
+    // NOTE: every per-document field of this struct must be listed in
+    // `pane_state!` (src/editor/pane.rs) or its value will leak between panes.
+    /// All panes, including the focused one (whose state slot is detached; its
+    /// real state lives in this struct's root fields).
+    pub(crate) panes: Vec<Pane>,
+    /// Recursive split layout over `panes` (leaves are pane ids).
+    pub(crate) pane_layout: PaneLayout,
+    /// The pane that owns keyboard focus and the root document fields.
+    pub(crate) focused_pane_id: PaneId,
+    /// Set while `with_pane` has temporarily swapped a non-focused pane's
+    /// state into the root fields.
+    pub(crate) swapped_pane_id: Option<PaneId>,
+    pub(crate) next_pane_id: PaneId,
+    /// Screen bounds of each pane's editor content area from the last paint.
+    pub(crate) pane_bounds: HashMap<PaneId, Bounds<Pixels>>,
+    /// While a tab drag hovers a pane's content area: the hovered pane and the
+    /// split direction (None = merge into that pane).
+    pub(crate) tab_drag_split_target: Option<(PaneId, Option<SplitDirection>)>,
+    /// An in-progress drag on a divider between two split children.
+    pub(crate) pane_resize_drag: Option<PaneResizeDrag>,
     pub(crate) last_editor_left: f32,
     pub(crate) last_editor_width: f32,
     pub(crate) last_content_left: f32,
@@ -1615,12 +1661,38 @@ pub struct EditorView {
     pub(crate) info_panel_cache_tab_id: Option<String>,
     pub(crate) info_panel_cache_result: Option<Option<Arc<info_panel::InfoPanelData>>>,
     pub(crate) git_history_cache_path: Option<PathBuf>,
-    pub(crate) git_history_cache_result: Option<Option<Vec<info_panel::GitHistoryItem>>>,
+    pub(crate) git_history_cache_result: Option<Option<Vec<GitHistoryItem>>>,
     pub(crate) git_history_cache_dirty: bool,
     pub(crate) git_history_has_more: bool,
     pub(crate) git_history_cache_scanned_at: Option<SystemTime>,
     pub(crate) git_history_refresh_epoch: usize,
     pub(crate) git_history_refresh_task: Option<Task<()>>,
+    pub(crate) git_panel_tab: GitPanelTab,
+    pub(crate) git_panel_snapshot: Option<GitPanelSnapshot>,
+    pub(crate) git_panel_status_dirty: bool,
+    pub(crate) git_panel_status_scanned_at: Option<SystemTime>,
+    pub(crate) git_panel_status_epoch: usize,
+    pub(crate) git_panel_status_task: Option<Task<()>>,
+    pub(crate) git_operation_in_flight: Option<GitOperation>,
+    pub(crate) git_commit_message: String,
+    pub(crate) git_commit_message_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) git_changes_scroll_handle: ScrollHandle,
+    pub(crate) git_history_scope: GitHistoryScope,
+    pub(crate) git_history_expanded_commit: Option<String>,
+    pub(crate) git_commit_files: Option<(String, Vec<GitCommitFileEntry>)>,
+    pub(crate) git_commit_files_task: Option<Task<()>>,
+    pub(crate) git_remote_input_visible: bool,
+    pub(crate) git_remote_input_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) branch_picker_visible: bool,
+    pub(crate) branch_picker_anchor: Option<Point<Pixels>>,
+    pub(crate) branch_picker_query: String,
+    pub(crate) branch_picker_all: Vec<String>,
+    pub(crate) branch_picker_current: Option<String>,
+    pub(crate) branch_picker_items: Vec<BranchPickerItem>,
+    pub(crate) branch_picker_selected_index: usize,
+    pub(crate) branch_picker_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) branch_picker_scroll_handle: ScrollHandle,
+    pub(crate) branch_picker_task: Option<Task<()>>,
     pub(crate) utility_panel: Option<RightUtilityPanel>,
     pub(crate) displayed_utility_panel: Option<RightUtilityPanel>,
     pub(crate) chat_panel_visible: bool,
@@ -1977,6 +2049,14 @@ impl EditorView {
             active_tab_index_cache: Cell::new(Some(0)),
             active_file_kind_cache: welcome_file_kind,
             next_tab_id: 1,
+            panes: vec![Pane::new(0)],
+            pane_layout: PaneLayout::Leaf(0),
+            focused_pane_id: 0,
+            swapped_pane_id: None,
+            next_pane_id: 1,
+            pane_bounds: HashMap::new(),
+            tab_drag_split_target: None,
+            pane_resize_drag: None,
             last_editor_left: 0.0,
             last_editor_width: init_max_width,
             last_content_left: init_padding_left,
@@ -2146,6 +2226,32 @@ impl EditorView {
             git_history_cache_scanned_at: None,
             git_history_refresh_epoch: 0,
             git_history_refresh_task: None,
+            git_panel_tab: GitPanelTab::Changes,
+            git_panel_snapshot: None,
+            git_panel_status_dirty: true,
+            git_panel_status_scanned_at: None,
+            git_panel_status_epoch: 0,
+            git_panel_status_task: None,
+            git_operation_in_flight: None,
+            git_commit_message: String::new(),
+            git_commit_message_editor: None,
+            git_changes_scroll_handle: ScrollHandle::new(),
+            git_history_scope: GitHistoryScope::Repository,
+            git_history_expanded_commit: None,
+            git_commit_files: None,
+            git_commit_files_task: None,
+            git_remote_input_visible: false,
+            git_remote_input_editor: None,
+            branch_picker_visible: false,
+            branch_picker_anchor: None,
+            branch_picker_query: String::new(),
+            branch_picker_all: Vec::new(),
+            branch_picker_current: None,
+            branch_picker_items: Vec::new(),
+            branch_picker_selected_index: 0,
+            branch_picker_editor: None,
+            branch_picker_scroll_handle: ScrollHandle::new(),
+            branch_picker_task: None,
             utility_panel: None,
             displayed_utility_panel: None,
             chat_panel_visible: false,
@@ -2349,7 +2455,7 @@ impl EditorView {
     pub(crate) fn refresh_builtin_tab_titles(&mut self) {
         let welcome_title = self.t(TextKey::WelcomeTitle).to_string();
         let settings_title = self.t(TextKey::SettingsTitle).to_string();
-        for tab in &mut self.tabs {
+        for tab in self.all_tabs_mut() {
             if tab.kind == TabKind::Settings {
                 tab.title = settings_title.clone();
             } else if tab.id == WELCOME_TAB_ID && tab.path.is_none() {
@@ -2366,7 +2472,7 @@ impl EditorView {
             .and_then(|index| self.tabs.get(index))
             .is_some_and(|tab| tab.id == WELCOME_TAB_ID && tab.path.is_none());
 
-        for tab in &mut self.tabs {
+        for tab in self.all_tabs_mut() {
             if tab.id == WELCOME_TAB_ID && tab.path.is_none() {
                 tab.snapshot.text = text.clone();
                 tab.snapshot.cursor_offset = first_line_end;
@@ -2613,26 +2719,31 @@ impl EditorView {
             .max(1);
         let step = (frame_ms as f32 / duration_ms as f32).clamp(0.08, 1.0);
 
+        let pane_id = self.current_pane_id();
         self.editor_scrollbar_opacity_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 let done = this
                     .update(cx, |this, cx| {
-                        if this.editor_scrollbar_opacity_epoch != epoch {
-                            return true;
-                        }
+                        this.with_pane_if_alive(pane_id, |this| {
+                            if this.editor_scrollbar_opacity_epoch != epoch {
+                                return true;
+                            }
 
-                        let diff =
-                            this.editor_scrollbar_opacity_target - this.editor_scrollbar_opacity;
-                        if diff.abs() <= 0.01 {
-                            this.editor_scrollbar_opacity = this.editor_scrollbar_opacity_target;
-                            this.editor_scrollbar_opacity_task = None;
+                            let diff = this.editor_scrollbar_opacity_target
+                                - this.editor_scrollbar_opacity;
+                            if diff.abs() <= 0.01 {
+                                this.editor_scrollbar_opacity =
+                                    this.editor_scrollbar_opacity_target;
+                                this.editor_scrollbar_opacity_task = None;
+                                cx.notify();
+                                return true;
+                            }
+
+                            this.editor_scrollbar_opacity += diff * step;
                             cx.notify();
-                            return true;
-                        }
-
-                        this.editor_scrollbar_opacity += diff * step;
-                        cx.notify();
-                        false
+                            false
+                        })
+                        .unwrap_or(true)
                     })
                     .unwrap_or(true);
 
@@ -2672,25 +2783,30 @@ impl EditorView {
             .max(1);
         let step = (frame_ms as f32 / duration_ms as f32).clamp(0.08, 1.0);
 
+        let pane_id = self.current_pane_id();
         self.editor_scrollbar_width_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 let done = this
                     .update(cx, |this, cx| {
-                        if this.editor_scrollbar_width_epoch != epoch {
-                            return true;
-                        }
+                        this.with_pane_if_alive(pane_id, |this| {
+                            if this.editor_scrollbar_width_epoch != epoch {
+                                return true;
+                            }
 
-                        let diff = this.editor_scrollbar_width_target - this.editor_scrollbar_width;
-                        if diff.abs() <= 0.01 {
-                            this.editor_scrollbar_width = this.editor_scrollbar_width_target;
-                            this.editor_scrollbar_width_task = None;
+                            let diff =
+                                this.editor_scrollbar_width_target - this.editor_scrollbar_width;
+                            if diff.abs() <= 0.01 {
+                                this.editor_scrollbar_width = this.editor_scrollbar_width_target;
+                                this.editor_scrollbar_width_task = None;
+                                cx.notify();
+                                return true;
+                            }
+
+                            this.editor_scrollbar_width += diff * step;
                             cx.notify();
-                            return true;
-                        }
-
-                        this.editor_scrollbar_width += diff * step;
-                        cx.notify();
-                        false
+                            false
+                        })
+                        .unwrap_or(true)
                     })
                     .unwrap_or(true);
 
@@ -2721,22 +2837,25 @@ impl EditorView {
         self.editor_scrollbar_idle_epoch += 1;
         let epoch = self.editor_scrollbar_idle_epoch;
         let delay_ms = self.styles.editor.editor_scrollbar_idle_delay_ms;
+        let pane_id = self.current_pane_id();
         self.editor_scrollbar_idle_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(delay_ms))
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.editor_scrollbar_idle_epoch != epoch {
-                    return;
-                }
+                this.with_pane_if_alive(pane_id, |this| {
+                    if this.editor_scrollbar_idle_epoch != epoch {
+                        return;
+                    }
 
-                this.editor_scrollbar_idle_task = None;
-                if this.editor_scrollbar_hovered || this.editor_scrollbar_drag.is_some() {
-                    return;
-                }
+                    this.editor_scrollbar_idle_task = None;
+                    if this.editor_scrollbar_hovered || this.editor_scrollbar_drag.is_some() {
+                        return;
+                    }
 
-                this.editor_scrollbar_revealed = false;
-                this.sync_editor_scrollbar_opacity(cx);
+                    this.editor_scrollbar_revealed = false;
+                    this.sync_editor_scrollbar_opacity(cx);
+                });
             });
         }));
     }
@@ -3648,15 +3767,12 @@ impl EditorView {
             return;
         }
 
-        let active_tab_id = self.active_tab_id.clone();
         let current_file_hit = self.current_file_path.as_ref().is_some_and(|current_path| {
             changed_paths_in_workspace
                 .iter()
                 .any(|path| path == current_path || current_path.starts_with(path))
         });
         let mut needs_notify = false;
-        let mut active_tab_needs_reload = false;
-        let mut diff_tabs_to_refresh = Vec::new();
         if !changed_paths_in_workspace.is_empty() {
             if self.sidebar_paths_require_structure_refresh(&changed_paths_in_workspace) {
                 self.invalidate_sidebar_items_cache();
@@ -3672,10 +3788,12 @@ impl EditorView {
                 .any(|path| self.fs_change_affects_git_status(path));
         if git_status_changed {
             self.invalidate_sidebar_git_statuses();
+            self.invalidate_git_panel_status();
             needs_notify = true;
         }
         if git_metadata_impact.affects_history {
             self.invalidate_git_history_cache();
+            self.invalidate_git_panel_status();
             needs_notify = true;
         }
         if current_file_hit {
@@ -3684,93 +3802,109 @@ impl EditorView {
             needs_notify = true;
         }
 
-        for (tab_index, tab) in self.tabs.iter_mut().enumerate() {
-            if let Some(ref tab_path) = tab.path {
-                let path_changed = changed_paths_in_workspace
-                    .iter()
-                    .any(|path| path == tab_path || tab_path.starts_with(path));
-                let should_refresh_diff = tab.git_diff.as_ref().is_some_and(|diff| {
-                    diff.source == GitDiffSource::WorkingTree
-                        && (path_changed || git_metadata_impact.affects_working_tree_diff)
-                });
-                if path_changed || should_refresh_diff {
-                    if tab.kind == TabKind::Diff {
-                        if !should_refresh_diff {
-                            continue;
-                        }
-                        let exists = tab_path.exists();
-                        if tab.is_deleted == exists {
-                            tab.is_deleted = !exists;
-                            needs_notify = true;
-                        }
-                        diff_tabs_to_refresh.push(tab_index);
-                        continue;
-                    }
+        // Apply external file changes to every pane's tabs (marking deleted
+        // files, reloading clean buffers, refreshing diff tabs).
+        for pane_id in self.pane_ids() {
+            let pane_notified = self.with_pane(pane_id, |this| {
+                let mut needs_notify = false;
+                let mut active_tab_needs_reload = false;
+                let mut diff_tabs_to_refresh = Vec::new();
+                let active_tab_id = this.active_tab_id.clone();
 
-                    if !tab_path.exists() {
-                        if !tab.is_deleted {
-                            tab.is_deleted = true;
-                            needs_notify = true;
-                            active_tab_needs_reload |=
-                                active_tab_id.as_deref() == Some(tab.id.as_str());
-                        }
-                    } else {
-                        if tab.is_deleted {
-                            tab.is_deleted = false;
-                            needs_notify = true;
-                            active_tab_needs_reload |=
-                                active_tab_id.as_deref() == Some(tab.id.as_str());
-                        }
-                        if !tab.is_dirty {
-                            if let Ok(bytes) = std::fs::read(tab_path) {
-                                let new_text = String::from_utf8_lossy(&bytes).into_owned();
-                                if new_text != tab.snapshot.text {
-                                    tab.snapshot.text = new_text.clone();
-                                    tab.snapshot.cursor_offset =
-                                        tab.snapshot.cursor_offset.min(new_text.len());
-                                    tab.snapshot.cursor_anchor =
-                                        tab.snapshot.cursor_anchor.min(new_text.len());
+                for (tab_index, tab) in this.tabs.iter_mut().enumerate() {
+                    if let Some(ref tab_path) = tab.path {
+                        let path_changed = changed_paths_in_workspace
+                            .iter()
+                            .any(|path| path == tab_path || tab_path.starts_with(path));
+                        let should_refresh_diff = tab.git_diff.as_ref().is_some_and(|diff| {
+                            diff.source.tracks_local_state()
+                                && (path_changed || git_metadata_impact.affects_working_tree_diff)
+                        });
+                        if path_changed || should_refresh_diff {
+                            if tab.kind == TabKind::Diff {
+                                if !should_refresh_diff {
+                                    continue;
+                                }
+                                let exists = tab_path.exists();
+                                if tab.is_deleted == exists {
+                                    tab.is_deleted = !exists;
+                                    needs_notify = true;
+                                }
+                                diff_tabs_to_refresh.push(tab_index);
+                                continue;
+                            }
+
+                            if !tab_path.exists() {
+                                if !tab.is_deleted {
+                                    tab.is_deleted = true;
                                     needs_notify = true;
                                     active_tab_needs_reload |=
                                         active_tab_id.as_deref() == Some(tab.id.as_str());
+                                }
+                            } else {
+                                if tab.is_deleted {
+                                    tab.is_deleted = false;
+                                    needs_notify = true;
+                                    active_tab_needs_reload |=
+                                        active_tab_id.as_deref() == Some(tab.id.as_str());
+                                }
+                                if !tab.is_dirty {
+                                    if let Ok(bytes) = std::fs::read(tab_path) {
+                                        let new_text = String::from_utf8_lossy(&bytes).into_owned();
+                                        if new_text != tab.snapshot.text {
+                                            tab.snapshot.text = new_text.clone();
+                                            tab.snapshot.cursor_offset =
+                                                tab.snapshot.cursor_offset.min(new_text.len());
+                                            tab.snapshot.cursor_anchor =
+                                                tab.snapshot.cursor_anchor.min(new_text.len());
+                                            needs_notify = true;
+                                            active_tab_needs_reload |=
+                                                active_tab_id.as_deref() == Some(tab.id.as_str());
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-        }
 
-        for tab_index in diff_tabs_to_refresh {
-            if self.refresh_git_diff_tab(tab_index) {
-                needs_notify = true;
-                if let Some(tab) = self.tabs.get(tab_index) {
-                    active_tab_needs_reload |= active_tab_id.as_deref() == Some(tab.id.as_str());
-                }
-            }
-        }
-
-        // A HEAD move (commit, checkout, reset) changes the inline-diff baseline
-        // for the active editable tab, so re-read it from git on the next render.
-        if git_metadata_impact.affects_working_tree_diff {
-            self.mark_inline_diff_dirty(true);
-            needs_notify = true;
-        }
-
-        // Reload the active tab's buffer if it was externally modified
-        if active_tab_needs_reload {
-            if let Some(ref active_id) = self.active_tab_id {
-                if let Some(tab) = self.tabs.iter().find(|t| &t.id == active_id) {
-                    if !tab.is_dirty && !tab.is_deleted {
-                        let snapshot = tab.snapshot.clone();
-                        self.buffer = crate::buffer::Buffer::from_text(&snapshot.text);
-                        self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
-                        self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());
-                        self.reset_cursor_visual_targeting();
-                        self.reparse();
+                for tab_index in diff_tabs_to_refresh {
+                    if this.refresh_git_diff_tab(tab_index) {
+                        needs_notify = true;
+                        if let Some(tab) = this.tabs.get(tab_index) {
+                            active_tab_needs_reload |=
+                                active_tab_id.as_deref() == Some(tab.id.as_str());
+                        }
                     }
                 }
-            }
+
+                // A HEAD move (commit, checkout, reset) changes the inline-diff
+                // baseline for the active editable tab, so re-read it from git
+                // on the next render.
+                if git_metadata_impact.affects_working_tree_diff {
+                    this.mark_inline_diff_dirty(true);
+                    needs_notify = true;
+                }
+
+                // Reload the active tab's buffer if it was externally modified
+                if active_tab_needs_reload {
+                    if let Some(ref active_id) = this.active_tab_id {
+                        if let Some(tab) = this.tabs.iter().find(|t| &t.id == active_id) {
+                            if !tab.is_dirty && !tab.is_deleted {
+                                let snapshot = tab.snapshot.clone();
+                                this.buffer = crate::buffer::Buffer::from_text(&snapshot.text);
+                                this.cursor.offset = snapshot.cursor_offset.min(this.buffer.len());
+                                this.cursor.anchor = snapshot.cursor_anchor.min(this.buffer.len());
+                                this.reset_cursor_visual_targeting();
+                                this.reparse();
+                            }
+                        }
+                    }
+                }
+
+                needs_notify
+            });
+            needs_notify |= pane_notified;
         }
 
         if needs_notify {
@@ -3798,8 +3932,12 @@ impl EditorView {
         };
         match dialog.action {
             DialogAction::CloseTabUnsaved { tab_id } => {
-                if let Some(index) = self.tabs.iter().position(|t| t.id == tab_id) {
-                    self.tabs[index].is_dirty = false;
+                let found = self
+                    .all_tabs_mut()
+                    .find(|t| t.id == tab_id)
+                    .map(|tab| tab.is_dirty = false)
+                    .is_some();
+                if found {
                     self.close_tab(&tab_id, cx);
                 }
             }
@@ -3815,6 +3953,9 @@ impl EditorView {
             DialogAction::InstallUpdate { update } => {
                 self.install_update(update);
             }
+            DialogAction::GitDiscardEntries { tracked, untracked } => {
+                self.run_git_operation(GitOperation::DiscardPaths { tracked, untracked }, cx);
+            }
             DialogAction::DismissOnly => {}
         }
         cx.notify();
@@ -3828,24 +3969,43 @@ impl EditorView {
             DialogAction::CloseTabUnsaved { ref tab_id }
             | DialogAction::SaveAndCloseTab { ref tab_id } => {
                 let tab_id = tab_id.clone();
-                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
-                    if let Some(ref path) = tab.path {
-                        if std::fs::write(path, &tab.snapshot.text).is_ok() {
-                            tab.is_dirty = false;
+                // Phase 1 (bounded borrow): write the file / collect what the
+                // save dialog needs. Phase 2 acts with `self` free again.
+                enum SaveAndClose {
+                    Missing,
+                    Saved,
+                    NeedsDialog { text: String, default_name: String },
+                }
+                let outcome = match self.all_tabs_mut().find(|t| t.id == tab_id) {
+                    None => SaveAndClose::Missing,
+                    Some(tab) => {
+                        if let Some(ref path) = tab.path {
+                            if std::fs::write(path, &tab.snapshot.text).is_ok() {
+                                tab.is_dirty = false;
+                            }
+                            let snapshot = tab.snapshot.clone();
+                            let _ = history_store::persist_tab_history(
+                                &tab_id,
+                                tab.path.as_deref(),
+                                &mut tab.history,
+                                &snapshot,
+                            );
+                            SaveAndClose::Saved
+                        } else {
+                            SaveAndClose::NeedsDialog {
+                                text: tab.snapshot.text.clone(),
+                                default_name: format!("{}.md", tab.title),
+                            }
                         }
-                        let snapshot = tab.snapshot.clone();
-                        let _ = history_store::persist_tab_history(
-                            &tab_id,
-                            tab.path.as_deref(),
-                            &mut tab.history,
-                            &snapshot,
-                        );
+                    }
+                };
+                match outcome {
+                    SaveAndClose::Saved => {
                         self.clear_temp_file_for_tab(&tab_id);
                         session_store::persist_session(self);
                         self.close_tab(&tab_id, cx);
-                    } else {
-                        let text = tab.snapshot.text.clone();
-                        let default_name = format!("{}.md", tab.title);
+                    }
+                    SaveAndClose::NeedsDialog { text, default_name } => {
                         let tab_id_clone = tab_id.clone();
                         let title = self.t(crate::i18n::TextKey::SaveFileDialog).to_string();
                         cx.spawn(async move |this, cx| {
@@ -3859,7 +4019,7 @@ impl EditorView {
                                 if std::fs::write(&path, &text).is_ok() {
                                     this.update(cx, |editor, cx| {
                                         if let Some(tab) =
-                                            editor.tabs.iter_mut().find(|t| t.id == tab_id_clone)
+                                            editor.all_tabs_mut().find(|t| t.id == tab_id_clone)
                                         {
                                             tab.path = Some(path.clone());
                                             tab.title = Self::title_for_path(&path);
@@ -3882,13 +4042,15 @@ impl EditorView {
                         })
                         .detach();
                     }
-                } else {
-                    self.close_tab(&tab_id, cx);
+                    SaveAndClose::Missing => {
+                        self.close_tab(&tab_id, cx);
+                    }
                 }
             }
             DialogAction::DeletePath { .. }
             | DialogAction::DeletePaths { .. }
-            | DialogAction::InstallUpdate { .. } => {
+            | DialogAction::InstallUpdate { .. }
+            | DialogAction::GitDiscardEntries { .. } => {
                 // No save action for delete
             }
             DialogAction::DismissOnly => {
@@ -4846,14 +5008,17 @@ impl EditorView {
     /// typing settles so the render updates live yet stays steady while typing.
     /// Each call resets the timer.
     pub(crate) fn schedule_generated_preview_rerender(&mut self, cx: &mut Context<Self>) {
+        let pane_id = self.current_pane_id();
         self.generated_preview_rerender_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(350))
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.generated_preview_rerender_task = None;
-                this.rerender_generated_block_previews();
-                cx.notify();
+                this.with_pane_if_alive(pane_id, |this| {
+                    this.generated_preview_rerender_task = None;
+                    this.rerender_generated_block_previews();
+                    cx.notify();
+                });
             });
         }));
     }
@@ -5430,28 +5595,32 @@ impl EditorView {
         self.generated_preview_actions_opacity_target = target;
         self.generated_preview_actions_opacity_epoch += 1;
         let epoch = self.generated_preview_actions_opacity_epoch;
+        let pane_id = self.current_pane_id();
         self.generated_preview_actions_opacity_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 let done = this
                     .update(cx, |this, cx| {
-                        if this.generated_preview_actions_opacity_epoch != epoch {
-                            return true;
-                        }
-                        let diff = this.generated_preview_actions_opacity_target
-                            - this.generated_preview_actions_opacity;
-                        if diff.abs() <= 0.01 {
-                            this.generated_preview_actions_opacity =
-                                this.generated_preview_actions_opacity_target;
-                            if this.generated_preview_actions_opacity <= 0.01 {
-                                this.generated_preview_actions_visible_line = None;
+                        this.with_pane_if_alive(pane_id, |this| {
+                            if this.generated_preview_actions_opacity_epoch != epoch {
+                                return true;
                             }
-                            this.generated_preview_actions_opacity_task = None;
+                            let diff = this.generated_preview_actions_opacity_target
+                                - this.generated_preview_actions_opacity;
+                            if diff.abs() <= 0.01 {
+                                this.generated_preview_actions_opacity =
+                                    this.generated_preview_actions_opacity_target;
+                                if this.generated_preview_actions_opacity <= 0.01 {
+                                    this.generated_preview_actions_visible_line = None;
+                                }
+                                this.generated_preview_actions_opacity_task = None;
+                                cx.notify();
+                                return true;
+                            }
+                            this.generated_preview_actions_opacity += diff * 0.22;
                             cx.notify();
-                            return true;
-                        }
-                        this.generated_preview_actions_opacity += diff * 0.22;
-                        cx.notify();
-                        false
+                            false
+                        })
+                        .unwrap_or(true)
                     })
                     .unwrap_or(true);
                 if done {
@@ -6198,25 +6367,29 @@ impl EditorView {
         let duration_ms = self.styles.gutter.gutter_fold_animation_ms.max(1);
         let step = (16.0 / duration_ms as f32).clamp(0.08, 1.0);
 
+        let pane_id = self.current_pane_id();
         self.gutter_fold_reveal_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 let done = this
                     .update(cx, |this, cx| {
-                        if this.gutter_fold_reveal_epoch != epoch {
-                            return true;
-                        }
+                        this.with_pane_if_alive(pane_id, |this| {
+                            if this.gutter_fold_reveal_epoch != epoch {
+                                return true;
+                            }
 
-                        let diff = this.gutter_fold_reveal_target - this.gutter_fold_reveal;
-                        if diff.abs() <= 0.01 {
-                            this.gutter_fold_reveal = this.gutter_fold_reveal_target;
-                            this.gutter_fold_reveal_task = None;
+                            let diff = this.gutter_fold_reveal_target - this.gutter_fold_reveal;
+                            if diff.abs() <= 0.01 {
+                                this.gutter_fold_reveal = this.gutter_fold_reveal_target;
+                                this.gutter_fold_reveal_task = None;
+                                cx.notify();
+                                return true;
+                            }
+
+                            this.gutter_fold_reveal += diff * step;
                             cx.notify();
-                            return true;
-                        }
-
-                        this.gutter_fold_reveal += diff * step;
-                        cx.notify();
-                        false
+                            false
+                        })
+                        .unwrap_or(true)
                     })
                     .unwrap_or(true);
 

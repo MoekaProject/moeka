@@ -185,15 +185,40 @@ pub(crate) struct GitDiffState {
     pub all_rows: Vec<GitDiffRow>,
     pub rows: Vec<GitDiffRow>,
     pub show_only_changes: bool,
+    /// Hunks in base/target line coordinates, for per-hunk revert.
+    pub hunks: Vec<GitDiffHunk>,
+    /// The base side's full text (index or parent revision).
+    pub base_text: String,
+    /// The target side's full text (worktree, index, or commit).
+    pub target_text: String,
+}
+
+/// One contiguous changed region of a git diff, as end-exclusive 0-based line
+/// ranges into the base and target texts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GitDiffHunk {
+    pub base_range: Range<usize>,
+    pub target_range: Range<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GitDiffSource {
-    WorkingTree,
+    /// Index vs worktree (unstaged changes).
+    IndexToWorktree,
+    /// HEAD vs index (staged changes).
+    HeadToIndex,
     Commit {
         commit_hash: String,
         short_hash: String,
     },
+}
+
+impl GitDiffSource {
+    /// True when the diff depends on the worktree or index and must refresh
+    /// after local file/staging changes (not only on new commits).
+    pub(crate) fn tracks_local_state(&self) -> bool {
+        matches!(self, Self::IndexToWorktree | Self::HeadToIndex)
+    }
 }
 
 #[derive(Clone, Debug)]

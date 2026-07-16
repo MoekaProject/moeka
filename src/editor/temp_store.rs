@@ -111,6 +111,13 @@ impl EditorView {
     }
 
     pub(crate) fn write_temp_file_for_tab(&mut self, tab_id: &str) -> io::Result<Option<PathBuf>> {
+        let Some(owner) = self.pane_id_for_tab(tab_id) else {
+            return Ok(None);
+        };
+        if owner != self.current_pane_id() {
+            let tab_id = tab_id.to_string();
+            return self.with_pane(owner, |this| this.write_temp_file_for_tab(&tab_id));
+        }
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return Ok(None);
         };
@@ -148,7 +155,7 @@ impl EditorView {
     pub(crate) fn clear_temp_file_for_tab(&mut self, tab_id: &str) {
         self.temp_save_tasks.remove(tab_id);
         self.temp_save_epochs.remove(tab_id);
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+        if let Some(tab) = self.all_tabs_mut().find(|tab| tab.id == tab_id) {
             if let Some(path) = tab.recovery.temp_path.take() {
                 let _ = delete_temp_file(&path);
             }
@@ -159,8 +166,7 @@ impl EditorView {
     pub(crate) fn flush_recovery_files(&mut self) {
         self.persist_active_tab_state();
         let dirty_tab_ids = self
-            .tabs
-            .iter()
+            .all_tabs()
             .filter(|tab| tab.kind == TabKind::Editor && tab.is_dirty)
             .map(|tab| tab.id.clone())
             .collect::<Vec<_>>();

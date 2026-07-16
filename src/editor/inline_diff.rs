@@ -13,9 +13,7 @@ use std::time::Duration;
 use gpui::{Context, Pixels, Point, point, px};
 use similar::{Algorithm, DiffOp, TextDiff};
 
-use super::info_panel::{
-    build_inline_change_text_and_highlights, git_repo_context_for_file, git_show_file_at_revision,
-};
+use super::info_panel::{build_inline_change_text_and_highlights, git_show_file_at_revision};
 use super::*;
 
 /// Accumulates the rows of one contiguous run of changed diff ops into a hunk.
@@ -655,7 +653,7 @@ impl EditorView {
                 if this.inline_diff_epoch != epoch {
                     return;
                 }
-                let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                let Some(tab) = this.all_tabs_mut().find(|tab| tab.id == tab_id) else {
                     return;
                 };
                 match computed {

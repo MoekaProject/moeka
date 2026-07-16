@@ -89,6 +89,12 @@ pub struct TextInput {
     blink_epoch: usize,
     // Context menu
     context_menu_position: Option<Point<Pixels>>,
+    /// Whether right-click opens the copy/paste context menu. Must be disabled
+    /// for inputs hosted inside `deferred(...)` overlays (quick open, pickers,
+    /// modals): the menu itself is a deferred element, and gpui panics with
+    /// "cannot call defer_draw during deferred drawing" when deferred draws
+    /// nest.
+    pub(crate) context_menu_enabled: bool,
     // Undo
     undo_stack: Vec<(String, usize)>, // (text, cursor_offset)
 }
@@ -118,6 +124,7 @@ impl TextInput {
             cursor_opacity_direction: -1.0,
             blink_epoch: 0,
             context_menu_position: None,
+            context_menu_enabled: true,
             undo_stack: Vec::new(),
         };
         this.start_blinking(cx);
@@ -444,6 +451,9 @@ impl TextInput {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.context_menu_enabled {
+            return;
+        }
         self.context_menu_position = Some(event.position);
         cx.notify();
     }

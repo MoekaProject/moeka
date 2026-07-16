@@ -206,6 +206,10 @@ impl EditorView {
         let cursor_label = self.cursor_status_label();
         let (indent_title, indent_value) = self.indent_settings.status_parts(self.ui_language);
         let language_value = self.language_status_label();
+        let branch_label = self
+            .git_panel_repo_status()
+            .map(|status| status.branch_label())
+            .filter(|label| !label.is_empty());
 
         div()
             .id("editor-status-bar")
@@ -221,6 +225,12 @@ impl EditorView {
             .border_color(border)
             .bg(bg)
             .text_size(px(self.scaled(12.0)))
+            .when_some(branch_label, |this, branch| {
+                this.child(self.render_status_bar_branch_button(
+                    branch, title_color, hover_bg, cx,
+                ))
+            })
+            .child(div().flex_1())
             .child(self.render_status_bar_label(cursor_label, value_color))
             .child(self.render_status_bar_button(
                 indent_title,
@@ -251,6 +261,50 @@ impl EditorView {
             .items_center()
             .text_color(color)
             .child(label)
+            .into_any_element()
+    }
+
+    fn render_status_bar_branch_button(
+        &self,
+        branch: String,
+        title_color: gpui::Hsla,
+        hover_bg: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let font_size = self.scaled(11.0);
+        div()
+            .id("status-bar-branch")
+            .px(px(self.scaled(6.0)))
+            .h_full()
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(4.0)))
+            .max_w(px(self.scaled(220.0)))
+            .cursor(CursorStyle::Arrow)
+            .hover(move |style| style.bg(hover_bg))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_branch_picker(event.position, window, cx);
+                }),
+            )
+            .child(
+                gpui::svg()
+                    .path(GIT_BRANCH_SVG_PATH)
+                    .size(px(font_size))
+                    .flex_none()
+                    .text_color(title_color),
+            )
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .truncate()
+                    .whitespace_nowrap()
+                    .text_color(title_color)
+                    .child(branch),
+            )
             .into_any_element()
     }
 

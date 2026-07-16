@@ -1,22 +1,19 @@
-use std::sync::Arc;
-
 use gpui::{
-    AnyElement, App, Bounds, ContentMask, Corners, CursorStyle, ExternalPaths, HitboxBehavior,
+    AnyElement, App, Bounds, Corners, CursorStyle, ExternalPaths, HitboxBehavior,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Window,
-    canvas, deferred, div, fill, img, prelude::*, px, quad,
+    canvas, deferred, div, img, prelude::*, px, quad,
 };
 
-use super::tooltip::toolbar_anchor_bounds;
 use super::*;
 
-fn clamp_resize_dimension(value: f32, minimum: f32, maximum: f32) -> f32 {
+pub(super) fn clamp_resize_dimension(value: f32, minimum: f32, maximum: f32) -> f32 {
     let lower_bound = minimum.min(maximum);
     let upper_bound = minimum.max(maximum);
     value.clamp(lower_bound, upper_bound)
 }
 
 impl EditorView {
-    fn render_chat_panel_drop_targets(
+    pub(super) fn render_chat_panel_drop_targets(
         &self,
         editor_pane_width: f32,
         cx: &mut Context<Self>,
@@ -310,7 +307,7 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn render_toolbar_button(
+    pub(super) fn render_toolbar_button(
         &self,
         id: &'static str,
         button_width: f32,
@@ -373,7 +370,7 @@ impl EditorView {
         tooltip::with_tooltip(button, cx.entity().clone(), title, subtitle)
     }
 
-    fn render_preview_overlay_actions(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_preview_overlay_actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let editor_handle = cx.entity().clone();
         let action_size = self.scaled(
             self.styles
@@ -531,6 +528,9 @@ impl Render for EditorView {
         self.execute_pending_command(window, cx);
         self.refresh_chat_terminal_metrics(window, cx);
         self.process_pending_inline_diff(cx);
+        // Keeps the status-bar branch label and panel badges fresh; only
+        // schedules background work when the snapshot is dirty.
+        self.refresh_git_panel_status_if_needed(cx);
         if self.pending_editor_focus {
             window.focus(&self.focus_handle(cx));
             self.pending_editor_focus = false;
@@ -549,15 +549,11 @@ impl Render for EditorView {
             window.invalidate_character_coordinates();
         }
         let chat_panel_focused = self.chat_panel_focus_handle.is_focused(window);
-        let resizing =
-            self.sidebar_resizing || self.file_list_resizing || self.utility_panel_resizing;
-        let toolbar_base_visible =
-            self.tabs.len() > 0 && !self.active_tab_is_settings() && !self.active_tab_is_binary();
-        let show_editor_toolbar = self.should_show_editor_toolbar(toolbar_base_visible);
-        let render_editor_toolbar = toolbar_base_visible
-            && (show_editor_toolbar
-                || self.toolbar_opacity_task.is_some()
-                || self.toolbar_opacity > self.styles.toolbar.toolbar_hidden_opacity + 0.01);
+        let resizing = self.sidebar_resizing
+            || self.file_list_resizing
+            || self.utility_panel_resizing
+            || self.pane_resize_drag.is_some();
+        let show_empty_workspace = self.panes.len() == 1 && self.tabs.is_empty();
         let ws = &self.styles.window;
         let editor = cx.entity().clone();
         window.on_mouse_event({
@@ -631,6 +627,68 @@ impl Render for EditorView {
                 if handled {
                     cx.stop_propagation();
                 }
+            }
+        });
+        // Focus the pane under the cursor before any bubble-phase handler
+        // runs, so subsequent listeners operate on the right pane's state.
+        window.on_mouse_event({
+            let editor = editor.clone();
+            move |event: &MouseDownEvent, phase, _window, cx| {
+                if !phase.capture() {
+                    return;
+                }
+                editor.update(cx, |this, cx| {
+                    if this.panes.len() < 2 {
+                        return;
+                    }
+                    let target = this
+                        .panes
+                        .iter()
+                        .map(|pane| pane.id)
+                        .find(|pane_id| {
+                            this.pane_bounds
+                                .get(pane_id)
+                                .is_some_and(|bounds| bounds.contains(&event.position))
+                        });
+                    if let Some(pane_id) = target {
+                        this.focus_pane(pane_id, cx);
+                    }
+                });
+            }
+        });
+        // Completes a tab drag over a pane's content area (split or merge).
+        // Handled in the capture phase from our own tracked drag state instead
+        // of gpui's drop dispatch, which is raced by the drag source's
+        // capture-phase stop_propagation and other bubble listeners.
+        window.on_mouse_event({
+            let editor = editor.clone();
+            move |event: &MouseUpEvent, phase, _window, cx| {
+                if !phase.capture() || event.button != MouseButton::Left {
+                    return;
+                }
+                editor.update(cx, |this, cx| {
+                    let Some((pane_id, direction)) = this.tab_drag_split_target.take() else {
+                        return;
+                    };
+                    let Some(tab_id) = this.tab_dragging_id.take() else {
+                        return;
+                    };
+                    this.tab_drag_candidate_id = None;
+                    match direction {
+                        Some(direction) => {
+                            this.split_pane_with_tab(pane_id, direction, &tab_id, cx);
+                        }
+                        None => {
+                            if this.pane_id_for_tab(&tab_id) != Some(pane_id) {
+                                this.move_tab_to_pane(&tab_id, pane_id, None, cx);
+                            } else {
+                                this.focus_pane(pane_id, cx);
+                                this.switch_to_tab(&tab_id, cx);
+                            }
+                        }
+                    }
+                    cx.notify();
+                });
             }
         });
         // Store window bounds for menu positioning
@@ -774,6 +832,11 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_reopen_closed_tab))
             .on_action(cx.listener(Self::on_activate_previous_tab))
             .on_action(cx.listener(Self::on_activate_next_tab))
+            .on_action(cx.listener(Self::on_split_pane_right))
+            .on_action(cx.listener(Self::on_split_pane_left))
+            .on_action(cx.listener(Self::on_split_pane_up))
+            .on_action(cx.listener(Self::on_split_pane_down))
+            .on_action(cx.listener(Self::on_focus_next_pane))
             .on_action(cx.listener(Self::on_find))
             .on_action(cx.listener(Self::on_find_next))
             .on_action(cx.listener(Self::on_find_previous))
@@ -991,10 +1054,7 @@ impl Render for EditorView {
                             .overflow_hidden()
                             .flex()
                             .flex_col()
-                            .when(!self.tabs.is_empty(), |this| {
-                                this.child(self.render_tab_bar(cx))
-                            })
-                    .when(self.tabs.is_empty(), |this| {
+                    .when(show_empty_workspace, |this| {
                         // Empty state: no tabs open
                         let bg_hover = self.styles.sidebar.sidebar_item_hover_bg;
                         let btn_color = self.styles.sidebar.sidebar_empty_btn_text_color;
@@ -1041,807 +1101,15 @@ impl Render for EditorView {
                                 )
                         )
                     })
-                    .when(
-                        !self.tabs.is_empty() && self.active_tab_is_settings(),
-                        |this| this.child(self.render_settings_panel(window, cx)),
-                    )
-                    .when(
-                        !self.tabs.is_empty() && !self.active_tab_is_settings(),
-                        |this| {
-                            let sidebar_width = self.sidebar_width();
-                            let trailing_width = if !self.tabs.is_empty() {
-                                self.right_panel_width()
-                            } else {
-                                0.0
-                            };
-                            let editor_pane_width =
-                                (self.last_window_width - sidebar_width - trailing_width).max(1.0);
-                            this.child(
-                                div()
-                                    .id("workspace-content-column")
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .id("workspace-content-row")
-                                            .flex_1()
-                                            .min_h(px(0.0))
-                                            .flex()
-                                            .flex_row()
-                                            .overflow_hidden()
-                                            .child(
-                                                div()
-                                                    .id("editor-pane")
-                                                    .flex_1()
-                                                    .overflow_hidden()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .when(self.active_tab_is_diff(), |this| {
-                                                        this.child(self.render_active_tab_path_bar(cx))
-                                                    })
-                                                    .child(
-                                                        div()
-                                                            .id("editor-pane-content")
-                                                            .relative()
-                                                            .flex_1()
-                                                            .overflow_hidden()
-                                                            .cursor(
-                                                                if self.active_tab_is_image()
-                                                                    || self.active_tab_is_binary()
-                                                                    || self.hovering_checkbox
-                                                                    || self.hovering_fold_line.is_some()
-                                                                    || self.hovering_image_edit_line.is_some()
-                                                                {
-                                                                    CursorStyle::Arrow
-                                                                } else {
-                                                                    CursorStyle::IBeam
-                                                                },
-                                                            )
-                                                            .on_mouse_down(
-                                                                MouseButton::Left,
-                                                                cx.listener(|this, event, window, cx| {
-                                                                    this.focused_sidebar_path = None;
-                                                                    this.on_mouse_down(event, window, cx);
-                                                                }),
-                                                            )
-                                                            .on_mouse_down(
-                                                                MouseButton::Right,
-                                                                cx.listener(Self::on_editor_context_menu),
-                                                            )
-                                                            .on_mouse_up(
-                                                                MouseButton::Left,
-                                                                cx.listener(Self::on_mouse_up),
-                                                            )
-                                                            .on_mouse_up_out(
-                                                                MouseButton::Left,
-                                                                cx.listener(Self::on_mouse_up),
-                                                            )
-                                                            .on_hover(cx.listener(
-                                                                |this, hovering: &bool, _window, cx| {
-                                                                    if !*hovering {
-                                                                        let had_hover = this
-                                                                            .hovered_editor_position
-                                                                            .take()
-                                                                            .is_some();
-                                                                        if this.editor_scrollbar_drag.is_none() {
-                                                                            this.set_editor_scrollbar_hovered(false, cx);
-                                                                        }
-                                                                        let toolbar_changed = if this
-                                                                            .toolbar_corner_hovered
-                                                                        {
-                                                                            this.toolbar_corner_hovered =
-                                                                                false;
-                                                                            this.sync_toolbar_opacity(cx);
-                                                                            true
-                                                                        } else {
-                                                                            false
-                                                                        };
-                                                                        this.clear_gutter_fold_hover(cx);
-                                                                        if had_hover || toolbar_changed {
-                                                                            cx.notify();
-                                                                        }
-                                                                    }
-                                                                },
-                                                            ))
-                                                            .on_mouse_move(cx.listener(Self::on_mouse_move))
-                                                            .on_scroll_wheel(cx.listener(Self::on_scroll))
-                                                            .drag_over::<DraggedSidebarItems>(
-                                                                move |style, _, _, _| style,
-                                                            )
-                                                            .drag_over::<ExternalPaths>({
-                                                                let file_drop_bg =
-                                                                    self.styles.editor.editor_file_drop_bg;
-                                                                move |style, _, _, _| style.bg(file_drop_bg)
-                                                            })
-                                                            .on_drop(cx.listener(
-                                                                |this, dragged: &DraggedSidebarItems, _, cx| {
-                                                                    this.clear_sidebar_drag_state(cx);
-                                                                    this.focused_sidebar_path = None;
-                                                                    this.insert_sidebar_items_as_wiki_links(
-                                                                        &dragged.paths,
-                                                                        cx,
-                                                                    );
-                                                                },
-                                                            ))
-                                                            .on_drop(cx.listener(
-                                                                |this, paths: &ExternalPaths, _, cx| {
-                                                                    this.import_external_paths_as_attachments(
-                                                                        paths.paths(),
-                                                                        cx,
-                                                                    );
-                                                                },
-                                                            ))
-                                                            .child(if self.active_tab_is_whiteboard() {
-                                                                whiteboard_element::WhiteboardElement {
-                                                                    editor: cx.entity().clone(),
-                                                                }
-                                                                .into_any_element()
-                                                            } else if self.active_tab_is_image() {
-                                                                image_view::ImageViewElement {
-                                                                    editor: cx.entity().clone(),
-                                                                }
-                                                                .into_any_element()
-                                                            } else if self.active_tab_is_binary() {
-                                                                self.render_binary_placeholder(cx)
-                                                            } else {
-                                                                element::EditorElement {
-                                                                    editor: cx.entity().clone(),
-                                                                }
-                                                                .into_any_element()
-                                                            })
-                                                            .when(self.active_tab_is_whiteboard(), |this| {
-                                                                this.child(
-                                                                    self.render_whiteboard_toolbar(cx),
-                                                                )
-                                                                .when_some(
-                                                                    self.whiteboard_text_overlay_rect(),
-                                                                    |this, rect| {
-                                                                        let input = self
-                                                                            .whiteboard_text_editor
-                                                                            .as_ref()
-                                                                            .map(|editor| {
-                                                                                editor.input.clone()
-                                                                            });
-                                                                        this.when_some(
-                                                                            input,
-                                                                            |this, input| {
-                                                                                this.child(
-                                                                                    div()
-                                                                                        .id("wb-text-overlay")
-                                                                                        .occlude()
-                                                                                        .absolute()
-                                                                                        .left(px(rect.0))
-                                                                                        .top(px(rect.1))
-                                                                                        .w(px(rect.2))
-                                                                                        .h(px(rect.3))
-                                                                                        .on_mouse_down(
-                                                                                            MouseButton::Left,
-                                                                                            cx.listener(|_, _: &MouseDownEvent, _, cx| {
-                                                                                                cx.stop_propagation();
-                                                                                            }),
-                                                                                        )
-                                                                                        .child(input),
-                                                                                )
-                                                                            },
-                                                                        )
-                                                                    },
-                                                                )
-                                                            })
-                                                            .when_some(
-                                                                self.editor_scrollbar_thumb_geometry(),
-                                                                |this, (thumb_top, thumb_height)| {
-                                                                    let thumb_width = self.scaled(self.editor_scrollbar_width);
-                                                                    let hit_width = self.editor_scrollbar_hit_width();
-                                                                    let right_margin = self.scaled(
-                                                                        self.styles
-                                                                            .editor
-                                                                            .editor_scrollbar_right_margin_px,
-                                                                    );
-                                                                    let thumb_radius = self.scaled(
-                                                                        self.styles
-                                                                            .editor
-                                                                            .editor_scrollbar_radius_px,
-                                                                    );
-                                                                    let mut thumb_color = self
-                                                                        .styles
-                                                                        .editor
-                                                                        .editor_scrollbar_thumb_color;
-                                                                    thumb_color.a *= self
-                                                                        .editor_scrollbar_opacity
-                                                                        .clamp(0.0, 1.0);
-                                                                    this.child(
-                                                                        div()
-                                                                            .absolute()
-                                                                            .top_0()
-                                                                            .right(px(0.0))
-                                                                            .h_full()
-                                                                            .w(px(hit_width + right_margin))
-                                                                            .child(
-                                                                                div()
-                                                                                    .absolute()
-                                                                                    .top(px(thumb_top))
-                                                                                    .right(px(right_margin))
-                                                                                    .w(px(thumb_width))
-                                                                                    .h(px(thumb_height))
-                                                                                    .cursor(CursorStyle::Arrow)
-                                                                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                                                                                        cx.stop_propagation();
-                                                                                        this.start_editor_scrollbar_drag(event.position, cx);
-                                                                                    }))
-                                                                                    .rounded(px(thumb_radius))
-                                                                                    .bg(thumb_color),
-                                                                            ),
-                                                                    )
-                                                                },
-                                                            )
-                                                            .when(self.chat_tab_dragging_id.is_some(), |this| {
-                                                                this.child(self.render_chat_panel_drop_targets(
-                                                                    editor_pane_width,
-                                                                    cx,
-                                                                ))
-                                                            })
-                                                            .when(render_editor_toolbar, |this| this.child({
-                                                        let primary_hover = self
-                                                            .styles
-                                                            .toolbar
-                                                            .toolbar_primary_hover_opacity;
-                                                        let secondary_hover = self
-                                                            .styles
-                                                            .toolbar
-                                                            .toolbar_secondary_hover_opacity;
-                                                                let toolbar_min_top = self.scaled(
-                                                            self.styles.toolbar.toolbar_offset_top_px,
-                                                        );
-                                                                let toolbar_min_left = self.scaled(
-                                                            self.styles.toolbar.toolbar_offset_left_px,
-                                                        );
-                                                        let primary_btn_size = self.scaled(
-                                                            self.styles.toolbar.toolbar_primary_btn_size_px,
-                                                        );
-                                                        let secondary_btn_size = self.scaled(
-                                                            self.styles
-                                                                .toolbar
-                                                                .toolbar_secondary_btn_size_px,
-                                                        );
-                                                        let toolbar_gap =
-                                                            self.scaled(self.styles.toolbar.toolbar_gap_px);
-                                                        let primary_icon_size = self.scaled(
-                                                            self.styles
-                                                                .toolbar
-                                                                .toolbar_primary_icon_size_px,
-                                                        );
-                                                        let secondary_icon_size = self.scaled(
-                                                            self.styles
-                                                                .toolbar
-                                                                .toolbar_secondary_icon_size_px,
-                                                        );
-                                                        let toolbar_left = toolbar_min_left.round();
-                                                        let toolbar_top = toolbar_min_top.round();
-                                                        let sidebar_anchor = toolbar_anchor_bounds(
-                                                            toolbar_left,
-                                                            toolbar_top,
-                                                            primary_btn_size,
-                                                        );
-                                                        let align_anchor = toolbar_anchor_bounds(
-                                                            toolbar_left + primary_btn_size + toolbar_gap,
-                                                            toolbar_top,
-                                                            secondary_btn_size,
-                                                        );
-                                                        let align_tooltip = if self.active_tab_is_non_markdown_text() {
-                                                            self.t(crate::i18n::TextKey::ToolbarWrapTooltip)
-                                                        } else {
-                                                            self.t(crate::i18n::TextKey::ToolbarAlignTooltip)
-                                                        };
-                                                        let align_shortcut = self
-                                                            .active_tab_is_non_markdown_text()
-                                                            .then_some("⌥Z")
-                                                            .or(Some("⌘⌥L"));
-                                                        let sidebar_tooltip = if self.workspaces.is_empty() {
-                                                            self.t(crate::i18n::TextKey::OpenFolder)
-                                                        } else {
-                                                            crate::i18n::sidebar_visibility_action_label(
-                                                                self.ui_language,
-                                                                self.sidebar_visible,
-                                                            )
-                                                        };
-                                                        let sidebar_shortcut = Some("⌘⇧S");
-                                                        div()
-                                                            .absolute()
-                                                            .left(px(toolbar_left))
-                                                            .top(px(toolbar_top))
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap(px(toolbar_gap))
-                                                            .opacity(self.toolbar_opacity)
-                                                            .child(self.render_toolbar_button(
-                                                                "toolbar-sidebar-toggle",
-                                                                primary_btn_size,
-                                                                primary_btn_size,
-                                                                primary_icon_size,
-                                                                1.0,
-                                                                primary_hover,
-                                                                SIDEBAR_TOGGLE_SVG_PATH,
-                                                                sidebar_anchor,
-                                                                sidebar_tooltip,
-                                                                sidebar_shortcut,
-                                                                cx,
-                                                                |this, cx| {
-                                                                    if this.workspaces.is_empty() {
-                                                                        this.pick_workspace_folder(cx);
-                                                                    } else {
-                                                                        this.toggle_sidebar_visibility(cx);
-                                                                    }
-                                                                },
-                                                            ))
-                                                            .when(self.active_tab_supports_text_buffer(), |this| this.child(self.render_toolbar_button(
-                                                                "toolbar-align-toggle",
-                                                                secondary_btn_size,
-                                                                secondary_btn_size,
-                                                                secondary_icon_size,
-                                                                if self.editor_left_aligned { 1.0 } else { 0.55 },
-                                                                secondary_hover,
-                                                                EDITOR_ALIGN_LEFT_SVG_PATH,
-                                                                align_anchor,
-                                                                align_tooltip,
-                                                                align_shortcut,
-                                                                cx,
-                                                                |this, cx| {
-                                                                    this.toggle_editor_alignment(cx);
-                                                                },
-                                                            )))
-                                                    }))
-                                                    .when(render_editor_toolbar, |this| this.child({
-                                                        let secondary_hover = self
-                                                            .styles
-                                                            .toolbar
-                                                            .toolbar_secondary_hover_opacity;
-                                                        let toolbar_gap =
-                                                            self.scaled(self.styles.toolbar.toolbar_gap_px);
-                                                        let toolbar_min_top = self.scaled(
-                                                            self.styles.toolbar.toolbar_offset_top_px,
-                                                        );
-                                                        let toolbar_min_right = self.scaled(
-                                                            self.styles.toolbar.toolbar_offset_left_px,
-                                                        );
-                                                        let secondary_btn_size = self.scaled(
-                                                            self.styles
-                                                                .toolbar
-                                                                .toolbar_secondary_btn_size_px,
-                                                        );
-                                                        let secondary_icon_size = self.scaled(
-                                                            self.styles
-                                                                .toolbar
-                                                                .toolbar_secondary_icon_size_px,
-                                                        );
-                                                        let secondary_btn_width = secondary_btn_size;
-                                                        let toolbar_right = toolbar_min_right.round();
-                                                        let toolbar_top = toolbar_min_top.round();
-                                                        let outline_active = self.utility_panel == Some(RightUtilityPanel::Outline);
-                                                        let outline_tooltip = crate::i18n::outline_action_label(
-                                                            self.ui_language,
-                                                            outline_active,
-                                                        );
-                                                        let outline_x = editor_pane_width
-                                                            - toolbar_right
-                                                            - secondary_btn_width * 2.0
-                                                            - toolbar_gap;
-                                                        let outline_anchor = toolbar_anchor_bounds(
-                                                            outline_x,
-                                                            toolbar_top,
-                                                            secondary_btn_width,
-                                                        );
-                                                        let theme_x = editor_pane_width
-                                                            - toolbar_right
-                                                            - secondary_btn_width;
-                                                        let theme_anchor = toolbar_anchor_bounds(
-                                                            theme_x,
-                                                            toolbar_top,
-                                                            secondary_btn_width,
-                                                        );
-                                                        let theme_tooltip = crate::i18n::theme_action_label(
-                                                            self.ui_language,
-                                                            self.theme_kind.is_dark(),
-                                                        );
-                                                        div()
-                                                            .absolute()
-                                                            .right(px(toolbar_right))
-                                                            .top(px(toolbar_top))
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap(px(toolbar_gap))
-                                                            .opacity(self.toolbar_opacity)
-                                                            .when(self.active_tab_is_markdown(), |this| this.child(self.render_toolbar_button(
-                                                                "toolbar-outline-toggle",
-                                                                secondary_btn_width,
-                                                                secondary_btn_size,
-                                                                secondary_icon_size,
-                                                                if outline_active { 1.0 } else { 0.55 },
-                                                                secondary_hover,
-                                                                OUTLINE_TOGGLE_SVG_PATH,
-                                                                outline_anchor,
-                                                                outline_tooltip,
-                                                                Some("⌃⌘1"),
-                                                                cx,
-                                                                |this, cx| {
-                                                                    this.toggle_outline_visibility(cx);
-                                                                },
-                                                            )))
-                                                            .child(self.render_toolbar_button(
-                                                                "toolbar-theme-toggle",
-                                                                secondary_btn_width,
-                                                                secondary_btn_size,
-                                                                secondary_icon_size,
-                                                                1.0,
-                                                                secondary_hover,
-                                                                if self.theme_kind.is_dark() {
-                                                                    THEME_DARK_SVG_PATH
-                                                                } else {
-                                                                    THEME_LIGHT_SVG_PATH
-                                                                },
-                                                                theme_anchor,
-                                                                theme_tooltip,
-                                                                None,
-                                                                cx,
-                                                                |this, cx| {
-                                                                    this.toggle_theme(cx);
-                                                                },
-                                                            ))
-                                                    }))
-                                                    .when_some(
-                                                        self.render_outline_rail(cx),
-                                                        |this, rail| this.child(rail),
-                                                    )
-                                                    .when(self.preview_overlay_state().is_some(), |this| {
-                                                        let editor_handle = cx.entity().clone();
-                                                        this.child(deferred(
-                                                            canvas(
-                                                                move |bounds, window, cx| {
-                                                                    editor_handle.update(cx, |editor, _| {
-                                                                        let Some(overlay) = editor.preview_overlay_state().cloned() else {
-                                                                            editor.preview_overlay_bounds = None;
-                                                                            editor.preview_overlay_image_bounds = None;
-                                                                            return None;
-                                                                        };
-                                                                        let Some(base_image) = editor
-                                                                            .image_cache
-                                                                            .get(&overlay.cache_key)
-                                                                            .and_then(|image| image.as_ref())
-                                                                            .cloned()
-                                                                        else {
-                                                                            editor.preview_overlay_bounds = None;
-                                                                            editor.preview_overlay_image_bounds = None;
-                                                                            return None;
-                                                                        };
+                    .when(!show_empty_workspace, |this| {
+                        this.child(self.render_workspace_content_column(
+                            chat_panel_focused,
+                            window,
+                            cx,
+                        ))
+                    })
 
-                                                                        let base_size = base_image.size(0);
-                                                                        let base_width = base_size.width.0 as f32;
-                                                                        let base_height = base_size.height.0 as f32;
-                                                                        let preview_kind = editor
-                                                                            .decorations
-                                                                            .get(overlay.line_idx)
-                                                                            .and_then(|decoration| decoration.block_preview.as_ref())
-                                                                            .map(|preview| preview.kind);
-                                                                        let (intrinsic_width, intrinsic_height) =
-                                                                            if let Some(preview_kind) = preview_kind {
-                                                                                helpers::intrinsic_generated_preview_size_for_kind(
-                                                                                    base_width,
-                                                                                    base_height,
-                                                                                    preview_kind,
-                                                                                )
-                                                                            } else {
-                                                                                (base_width, base_height)
-                                                                            };
-                                                                        if intrinsic_width <= 0.0 || intrinsic_height <= 0.0 {
-                                                                            editor.preview_overlay_bounds = None;
-                                                                            editor.preview_overlay_image_bounds = None;
-                                                                            return None;
-                                                                        }
 
-                                                                        let overlay_bounds = bounds;
-                                                                        let overlay_width = f32::from(bounds.size.width).max(1.0);
-                                                                        let overlay_height = f32::from(bounds.size.height).max(1.0);
-                                                                        let fit_scale = if preview_kind.is_some() {
-                                                                            1.0
-                                                                        } else {
-                                                                            (overlay_width / intrinsic_width.max(1.0))
-                                                                                .min(overlay_height / intrinsic_height.max(1.0))
-                                                                                .min(1.0)
-                                                                        };
-                                                                        let base_display_width = intrinsic_width * fit_scale;
-                                                                        let base_display_height = intrinsic_height * fit_scale;
-                                                                        let display_width =
-                                                                            base_display_width * overlay.view.zoom_factor;
-                                                                        let display_height =
-                                                                            base_display_height * overlay.view.zoom_factor;
-                                                                        let image_left = f32::from(bounds.origin.x)
-                                                                            + (overlay_width - display_width) * 0.5
-                                                                            + overlay.view.pan_x;
-                                                                        let image_top = f32::from(bounds.origin.y)
-                                                                            + (overlay_height - display_height) * 0.5
-                                                                            + overlay.view.pan_y;
-                                                                        let overlay_image_bounds = Bounds::new(
-                                                                            gpui::point(px(image_left), px(image_top)),
-                                                                            gpui::size(px(display_width), px(display_height)),
-                                                                        );
-
-                                                                        let image = if let Some(preview_kind) = preview_kind {
-                                                                            let minimum_raster_scale = helpers::generated_preview_raster_scale(preview_kind);
-                                                                            // Keep overlay zoom responsive by scaling an already-rasterized
-                                                                            // image instead of regenerating Mermaid/Math SVG on every wheel tick.
-                                                                            let overlay_raster_scale =
-                                                                                window.scale_factor().max(minimum_raster_scale);
-                                                                            let scale_key = ((overlay_raster_scale * 100.0)
-                                                                                .round()
-                                                                                .clamp(
-                                                                                    minimum_raster_scale * 100.0,
-                                                                                    1600.0,
-                                                                                )) as u16;
-
-                                                                            let cached_overlay_image = editor
-                                                                                .generated_preview_overlay_cache
-                                                                                .get(&overlay.cache_key)
-                                                                                .and_then(|(cached_scale_key, cached_image)| {
-                                                                                    (*cached_scale_key == scale_key)
-                                                                                        .then(|| cached_image.clone())
-                                                                                });
-                                                                            let svg = editor
-                                                                                .generated_preview_svg_cache
-                                                                                .get(&overlay.cache_key)
-                                                                                .cloned();
-                                                                            if let Some(cached_overlay_image) = cached_overlay_image {
-                                                                                cached_overlay_image
-                                                                            } else if let Some(svg) = svg {
-                                                                                match helpers::load_render_image_from_svg_with_scale(
-                                                                                    svg.as_ref(),
-                                                                                    scale_key as f32 / 100.0,
-                                                                                )
-                                                                                .map(Arc::new)
-                                                                                {
-                                                                                    Ok(image) => {
-                                                                                        editor.generated_preview_overlay_cache.insert(
-                                                                                            overlay.cache_key.clone(),
-                                                                                            (scale_key, image.clone()),
-                                                                                        );
-                                                                                        image
-                                                                                    }
-                                                                                    Err(_) => base_image.clone(),
-                                                                                }
-                                                                            } else {
-                                                                                base_image.clone()
-                                                                            }
-                                                                        } else {
-                                                                            base_image.clone()
-                                                                        };
-
-                                                                        editor.preview_overlay_bounds = Some(overlay_bounds);
-                                                                        editor.preview_overlay_image_bounds =
-                                                                            Some(overlay_image_bounds);
-
-                                                                        Some((
-                                                                            overlay_bounds,
-                                                                            overlay_image_bounds,
-                                                                            image,
-                                                                            editor.styles.editor.editor_bg,
-                                                                            // Generated math/Mermaid previews are cropped tightly
-                                                                            // to glyph ink, so a rounded-corner clip cuts into real
-                                                                            // glyphs (e.g. E=mc²). Keep square corners for them.
-                                                                            px(0.0),
-                                                                        ))
-                                                                    })
-                                                                },
-                                                                move |_bounds, overlay_paint, window, _cx| {
-                                                                    if let Some((overlay_bounds, overlay_image_bounds, img_data, background, corner_radius)) = overlay_paint {
-                                                                        window.paint_quad(fill(overlay_bounds, background));
-                                                                        window.with_content_mask(
-                                                                            Some(ContentMask {
-                                                                                bounds: overlay_bounds,
-                                                                            }),
-                                                                            |window| {
-                                                                                window
-                                                                                    .paint_image(
-                                                                                        overlay_image_bounds,
-                                                                                        Corners::all(corner_radius),
-                                                                                        img_data,
-                                                                                        0,
-                                                                                        false,
-                                                                                    )
-                                                                                    .ok();
-                                                                            },
-                                                                        );
-                                                                    }
-                                                                },
-                                                            )
-                                                            .absolute()
-                                                            .left(px(0.0))
-                                                            .top(px(0.0))
-                                                            .right(px(0.0))
-                                                            .bottom(px(0.0)),
-                                                        ))
-                                                        .child(
-                                                            div()
-                                                                .absolute()
-                                                                .left(px(0.0))
-                                                                .top(px(0.0))
-                                                                .right(px(0.0))
-                                                                .bottom(px(0.0))
-                                                                .bg(gpui::transparent_black())
-                                                                .cursor(CursorStyle::OpenHand)
-                                                                .on_mouse_down(
-                                                                    MouseButton::Left,
-                                                                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                                                                        let should_capture = this
-                                                                            .preview_overlay_bounds
-                                                                            .is_some_and(|bounds| bounds.contains(&event.position));
-                                                                        if should_capture {
-                                                                            cx.stop_propagation();
-                                                                            this.on_mouse_down(event, window, cx);
-                                                                        }
-                                                                    }),
-                                                                )
-                                                                .on_mouse_up(
-                                                                    MouseButton::Left,
-                                                                    cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                                                                        let should_capture = this.image_drag_state.is_some()
-                                                                            || this
-                                                                                .preview_overlay_bounds
-                                                                                .is_some_and(|bounds| bounds.contains(&event.position));
-                                                                        if should_capture {
-                                                                            cx.stop_propagation();
-                                                                            this.on_mouse_up(event, window, cx);
-                                                                        }
-                                                                    }),
-                                                                )
-                                                                .on_mouse_up_out(
-                                                                    MouseButton::Left,
-                                                                    cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                                                                        if this.image_drag_state.is_some() {
-                                                                            cx.stop_propagation();
-                                                                            this.on_mouse_up(event, window, cx);
-                                                                        }
-                                                                    }),
-                                                                )
-                                                                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                                                                    let should_capture = this.image_drag_state.is_some()
-                                                                        || this
-                                                                            .preview_overlay_bounds
-                                                                            .is_some_and(|bounds| bounds.contains(&event.position));
-                                                                    if should_capture {
-                                                                        this.on_mouse_move(event, window, cx);
-                                                                    }
-                                                                })),
-                                                        )
-                                                        .child(self.render_preview_overlay_actions(cx))
-                                                    })
-                                                    .when(
-                                                        self.search_visible
-                                                            && self.active_tab_supports_text_search(),
-                                                        |this: gpui::Stateful<gpui::Div>| {
-                                                            this.child(self.render_search_bar(cx))
-                                                        },
-                                                            ),
-                                                        ),
-                                            ),
-                                    )
-                                    .when(self.should_render_bottom_chat_panel(), |this| {
-                                        let panel_h = self.utility_panel_width();
-                                        let panel_layout_h = self.utility_panel_layout_width();
-                                        let ups = &self.styles.utility_panel;
-                                        let hover_indicator_color =
-                                            ups.utility_panel_resize_active_indicator_color;
-                                        let hover_indicator_width = self.scaled(
-                                            ups.utility_panel_resize_active_indicator_width_px,
-                                        );
-                                        let handle_width =
-                                            self.scaled(ups.utility_panel_resize_handle_width_px);
-                                        this.child(
-                                            div()
-                                                .id("bottom-chat-panel-wrap")
-                                                .relative()
-                                                .w_full()
-                                                .h(px(panel_h))
-                                                .overflow_hidden()
-                                                .flex_none()
-                                                .child(
-                                                    div()
-                                                        .w_full()
-                                                        .h(px(panel_layout_h))
-                                                        .child(self.render_utility_panel(
-                                                            chat_panel_focused,
-                                                            cx,
-                                                        )),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id("bottom-chat-panel-resize-handle")
-                                                        .absolute()
-                                                        .left_0()
-                                                        .top_0()
-                                                        .w_full()
-                                                        .h(px(handle_width))
-                                                        .cursor(CursorStyle::ResizeUpDown)
-                                                        .hover(move |style| {
-                                                            style
-                                                                .border_t(px(hover_indicator_width))
-                                                                .border_color(hover_indicator_color)
-                                                        })
-                                                        .on_mouse_move(cx.listener(
-                                                            |this,
-                                                             event: &MouseMoveEvent,
-                                                             window,
-                                                             cx| {
-                                                                if this.utility_panel_resizing {
-                                                                    let window_height =
-                                                                        f32::from(window.bounds().size.height);
-                                                                    let min_h = this.scaled(
-                                                                        this.styles
-                                                                            .utility_panel
-                                                                            .utility_panel_resize_min_width_px,
-                                                                    );
-                                                                    let max_h = this.scaled(
-                                                                        this.styles
-                                                                            .utility_panel
-                                                                            .utility_panel_resize_max_width_px,
-                                                                    );
-                                                                    let new_height =
-                                                                        window_height - f32::from(event.position.y);
-                                                                    let new_height =
-                                                                        clamp_resize_dimension(new_height, min_h, max_h);
-                                                                    if let Some(panel) =
-                                                                        this.active_resizable_utility_panel()
-                                                                    {
-                                                                        this.set_utility_panel_custom_width_for(
-                                                                            panel,
-                                                                            Some(new_height),
-                                                                        );
-                                                                    }
-                                                                    this.set_utility_panel_width_immediately(
-                                                                        new_height,
-                                                                    );
-                                                                    cx.notify();
-                                                                }
-                                                            },
-                                                        ))
-                                                        .on_mouse_down(
-                                                            MouseButton::Left,
-                                                            cx.listener(
-                                                                |this: &mut Self,
-                                                                 _: &MouseDownEvent,
-                                                                 window,
-                                                                 cx| {
-                                                                    window.prevent_default();
-                                                                    cx.stop_propagation();
-                                                                    this.tab_drag_candidate_id = None;
-                                                                    this.tab_dragging_id = None;
-                                                                    this.chat_tab_drag_candidate_id = None;
-                                                                    this.chat_tab_dragging_id = None;
-                                                                    this.utility_panel_resizing = true;
-                                                                    cx.notify();
-                                                                },
-                                                            ),
-                                                        )
-                                                        .on_mouse_up(
-                                                            MouseButton::Left,
-                                                            cx.listener(|this, _, _, cx| {
-                                                                this.utility_panel_resizing = false;
-                                                                cx.notify();
-                                                            }),
-                                                        )
-                                                        .on_mouse_up_out(
-                                                            MouseButton::Left,
-                                                            cx.listener(|this, _, _, cx| {
-                                                                this.utility_panel_resizing = false;
-                                                                cx.notify();
-                                                            }),
-                                                        ),
-                                                ),
-                                        )
-                                    })
-                                    .child(self.render_status_bar(cx))
-                            )
-                        },
-                    )
                     )
                     .when(self.should_render_right_panels(), |this| {
                         this.child(self.render_right_panels(chat_panel_focused, cx))
@@ -1928,7 +1196,12 @@ impl Render for EditorView {
                 } else {
                     None
                 };
-                let resize_cursor = if self.utility_panel_resizing
+                let resize_cursor = if self.pane_resize_drag.is_some() {
+                    match self.pane_resize_drag.as_ref().map(|drag| drag.axis) {
+                        Some(SplitAxis::Vertical) => CursorStyle::ResizeUpDown,
+                        _ => CursorStyle::ResizeLeftRight,
+                    }
+                } else if self.utility_panel_resizing
                     && self.should_render_bottom_chat_panel()
                 {
                     CursorStyle::ResizeUpDown
@@ -1946,7 +1219,10 @@ impl Render for EditorView {
                         .cursor(resize_cursor)
                         .children(indicator_line)
                         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                            if this.sidebar_resizing {
+                            if this.pane_resize_drag.is_some() {
+                                this.update_pane_resize_drag(event.position);
+                                cx.notify();
+                            } else if this.sidebar_resizing {
                                 let new_width = f32::from(event.position.x);
                                 let min_w =
                                     this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
@@ -2009,6 +1285,7 @@ impl Render for EditorView {
                             cx.listener(|this, _, _, cx| {
                                 this.sidebar_resizing = false;
                                 this.utility_panel_resizing = false;
+                                this.pane_resize_drag = None;
                                 this.finish_file_list_resize(cx);
                                 cx.notify();
                             }),
@@ -2035,6 +1312,12 @@ impl Render for EditorView {
             .when(self.language_picker_visible, |this| {
                 this.child(deferred(self.render_language_picker_overlay(cx)))
             })
+            .when(self.branch_picker_visible, |this| {
+                this.child(deferred(self.render_branch_picker_overlay(cx)))
+            })
+            .when(self.git_remote_input_visible, |this| {
+                this.child(deferred(self.render_git_remote_input_overlay(window, cx)))
+            })
             .when(self.dialog.is_some(), |this| {
                 this.child(self.render_dialog(cx))
             })
@@ -2045,7 +1328,7 @@ impl Render for EditorView {
 }
 
 impl EditorView {
-    fn render_binary_placeholder(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn render_binary_placeholder(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let path = self
             .active_tab_index()
             .and_then(|index| self.tabs.get(index))

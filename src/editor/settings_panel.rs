@@ -1630,7 +1630,13 @@ impl EditorView {
 
         // Create TextInput for search
         let styles = self.settings_picker_text_input_styles();
-        let editor = cx.new(move |cx| crate::text_input::TextInput::new(styles, &placeholder, cx));
+        let editor = cx.new(move |cx| {
+            let mut input = crate::text_input::TextInput::new(styles, &placeholder, cx);
+            // The font picker overlay is deferred; a deferred context menu
+            // would nest defer_draw and panic.
+            input.context_menu_enabled = false;
+            input
+        });
         cx.subscribe(
             &editor,
             |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {

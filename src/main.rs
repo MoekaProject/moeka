@@ -352,6 +352,9 @@ fn main() {
             KeyBinding::new("cmd-shift-t", ReopenClosedTab, Some("MarkdownEditor")),
             KeyBinding::new("cmd-shift-[", ActivatePreviousTab, Some("MarkdownEditor")),
             KeyBinding::new("cmd-shift-]", ActivateNextTab, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-\\", SplitPaneRight, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-shift-\\", SplitPaneDown, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-alt-\\", FocusNextPane, Some("MarkdownEditor")),
             // Search
             KeyBinding::new("cmd-f", Find, Some("MarkdownEditor")),
             KeyBinding::new("cmd-g", FindNext, Some("MarkdownEditor")),

@@ -4045,6 +4045,33 @@ impl EditorView {
                         },
                     ));
                 }
+                items.push(self.render_context_menu_separator());
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::SplitTabRight),
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            let pane_id = this.focused_pane_id;
+                            this.split_pane_with_tab(pane_id, SplitDirection::Right, &id, cx);
+                        },
+                    ));
+                }
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::SplitTabDown),
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            let pane_id = this.focused_pane_id;
+                            this.split_pane_with_tab(pane_id, SplitDirection::Down, &id, cx);
+                        },
+                    ));
+                }
                 if let Some(tab) = self.tabs.iter().find(|t| t.id == *tab_id) {
                     if let Some(path) = &tab.path {
                         let chat_path = path.clone();

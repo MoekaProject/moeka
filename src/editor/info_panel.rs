@@ -95,151 +95,6 @@ struct PendingPanelReference {
     source_line: usize,
 }
 
-#[derive(Clone)]
-pub(crate) struct GitHistoryItem {
-    commit_hash: Option<String>,
-    short_hash: String,
-    message: String,
-    time_label: String,
-    is_working_tree: bool,
-}
-
-pub(super) struct GitRepoContext {
-    pub(super) repo_root: PathBuf,
-    pub(super) file_path: PathBuf,
-    pub(super) relative_path: String,
-}
-
-pub(super) fn git_repo_context_for_file(file_path: &Path) -> Option<GitRepoContext> {
-    let file_dir = file_path.parent()?;
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(file_dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let repo_root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
-    let relative_path = file_path
-        .strip_prefix(&repo_root)
-        .ok()?
-        .to_string_lossy()
-        .replace('\\', "/");
-    Some(GitRepoContext {
-        repo_root,
-        file_path: file_path.to_path_buf(),
-        relative_path,
-    })
-}
-
-const GIT_HISTORY_PAGE_SIZE: usize = 100;
-
-fn collect_git_history_items_for_context(
-    language: crate::i18n::UiLanguage,
-    context: &GitRepoContext,
-    skip: usize,
-    limit: usize,
-    include_working_tree: bool,
-) -> Option<(Vec<GitHistoryItem>, bool)> {
-    let mut items = Vec::new();
-    if include_working_tree {
-        let status_output = run_git_command(
-            &context.repo_root,
-            &[
-                "status",
-                "--porcelain=v1",
-                "--",
-                context.relative_path.as_str(),
-            ],
-        )
-        .unwrap_or_default();
-
-        if !status_output.trim().is_empty() {
-            items.push(GitHistoryItem {
-                commit_hash: None,
-                short_hash: crate::i18n::translate(language, crate::i18n::TextKey::WorkingTree)
-                    .to_string(),
-                message: crate::i18n::translate(language, crate::i18n::TextKey::UncommittedChanges)
-                    .to_string(),
-                time_label: crate::i18n::translate(language, crate::i18n::TextKey::Current)
-                    .to_string(),
-                is_working_tree: true,
-            });
-        }
-    }
-
-    let max_count = format!("--max-count={}", limit.saturating_add(1));
-    let skip_arg = format!("--skip={skip}");
-    let log_output = run_git_command(
-        &context.repo_root,
-        &[
-            "log",
-            "--follow",
-            "--format=%H%x1f%s%x1f%ct",
-            max_count.as_str(),
-            skip_arg.as_str(),
-            "--",
-            context.relative_path.as_str(),
-        ],
-    )
-    .unwrap_or_default();
-
-    let mut commit_count = 0usize;
-    for line in log_output.lines() {
-        let mut parts = line.split('\x1f');
-        let Some(commit_hash) = parts.next() else {
-            continue;
-        };
-        let Some(message) = parts.next() else {
-            continue;
-        };
-        let Some(timestamp) = parts.next() else {
-            continue;
-        };
-        let short_hash = commit_hash.chars().take(8).collect::<String>();
-        let time_label = timestamp
-            .parse::<i64>()
-            .map(|value| crate::i18n::format_unix_timestamp_relative(language, value))
-            .unwrap_or_else(|_| crate::i18n::format_relative_time(language, SystemTime::now()));
-        items.push(GitHistoryItem {
-            commit_hash: Some(commit_hash.to_string()),
-            short_hash,
-            message: message.to_string(),
-            time_label,
-            is_working_tree: false,
-        });
-        commit_count += 1;
-    }
-
-    let has_more = commit_count > limit;
-    if has_more {
-        if let Some(index) = items.iter().rposition(|item| item.commit_hash.is_some()) {
-            items.remove(index);
-        }
-    }
-    Some((items, has_more))
-}
-
-fn collect_git_history_items_for_file(
-    language: crate::i18n::UiLanguage,
-    file_path: &Path,
-) -> Option<(Vec<GitHistoryItem>, bool)> {
-    let context = git_repo_context_for_file(file_path)?;
-    collect_git_history_items_for_context(language, &context, 0, GIT_HISTORY_PAGE_SIZE, true)
-}
-
-fn collect_next_git_history_page(
-    language: crate::i18n::UiLanguage,
-    file_path: &Path,
-    skip: usize,
-) -> Option<(Vec<GitHistoryItem>, bool)> {
-    let context = git_repo_context_for_file(file_path)?;
-    collect_git_history_items_for_context(language, &context, skip, GIT_HISTORY_PAGE_SIZE, false)
-}
-
 fn format_file_size(size: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
@@ -1452,24 +1307,6 @@ fn build_pdf_document(
     build_pdf_document_with_printpdf(title, markdown)
 }
 
-fn run_git_command(repo_root: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(args)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string(),
-    )
-}
-
 pub(super) fn git_show_file_at_revision(
     repo_root: &Path,
     revision: &str,
@@ -1620,6 +1457,44 @@ fn build_git_diff_line_label_row(line_number: usize) -> GitDiffRow {
         source_line_number: Some(line_number),
         is_hunk_label: true,
     }
+}
+
+/// Line-range hunks of the diff between `base_text` and `target_text`, using
+/// the same algorithm as [`build_git_diff_rows`] so rows and hunks agree.
+fn compute_git_diff_hunks(base_text: &str, target_text: &str) -> Vec<GitDiffHunk> {
+    let diff = TextDiff::configure()
+        .algorithm(Algorithm::Patience)
+        .diff_lines(base_text, target_text);
+    let mut hunks: Vec<GitDiffHunk> = Vec::new();
+    let mut current: Option<GitDiffHunk> = None;
+    for op in diff.ops() {
+        if matches!(op.tag(), similar::DiffTag::Equal) {
+            if let Some(hunk) = current.take() {
+                hunks.push(hunk);
+            }
+            continue;
+        }
+        let old = op.old_range();
+        let new = op.new_range();
+        match current.as_mut() {
+            Some(hunk) => {
+                hunk.base_range.start = hunk.base_range.start.min(old.start);
+                hunk.base_range.end = hunk.base_range.end.max(old.end);
+                hunk.target_range.start = hunk.target_range.start.min(new.start);
+                hunk.target_range.end = hunk.target_range.end.max(new.end);
+            }
+            None => {
+                current = Some(GitDiffHunk {
+                    base_range: old,
+                    target_range: new,
+                });
+            }
+        }
+    }
+    if let Some(hunk) = current.take() {
+        hunks.push(hunk);
+    }
+    hunks
 }
 
 fn normalize_diff_table_metadata(rows: &mut [GitDiffRow]) {
@@ -1885,7 +1760,7 @@ impl EditorView {
             info_panel_reference_items,
             sidebar_items: self.sidebar_items_cache.len(),
             file_list_items: self.file_list_items.len(),
-            open_tabs: self.tabs.len(),
+            open_tabs: self.all_tabs().count(),
         }
     }
 
@@ -1932,6 +1807,7 @@ impl EditorView {
 
         let epoch = self.git_history_refresh_epoch;
         let language = self.ui_language;
+        let scope = self.git_history_scope;
         let delay = remaining_refresh_delay(
             self.git_history_cache_scanned_at,
             GIT_HISTORY_REFRESH_MIN_INTERVAL_MS,
@@ -1945,7 +1821,7 @@ impl EditorView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    collect_git_history_items_for_file(language, &background_file_path)
+                    collect_git_history_items(language, &background_file_path, scope, 0)
                 })
                 .await;
 
@@ -1973,7 +1849,8 @@ impl EditorView {
         self.git_history_refresh_task = Some(task);
     }
 
-    fn schedule_next_git_history_page(&mut self, cx: &mut Context<Self>) {
+    /// Loads the next page of history when the list scrolls near its end.
+    pub(super) fn schedule_next_git_history_page(&mut self, cx: &mut Context<Self>) {
         if !self.git_history_has_more || self.git_history_refresh_task.is_some() {
             return;
         }
@@ -1993,12 +1870,13 @@ impl EditorView {
             .unwrap_or(0);
         let epoch = self.git_history_refresh_epoch;
         let language = self.ui_language;
+        let scope = self.git_history_scope;
         let background_file_path = requested_file_path.clone();
         self.git_history_refresh_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    collect_next_git_history_page(language, &background_file_path, skip)
+                    collect_git_history_items(language, &background_file_path, scope, skip)
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -2013,6 +1891,8 @@ impl EditorView {
                     return;
                 };
                 if let Some(Some(items)) = this.git_history_cache_result.as_mut() {
+                    let mut next_items = next_items;
+                    next_items.retain(|item| item.commit_hash.is_some());
                     items.extend(next_items);
                 }
                 this.git_history_has_more = has_more;
@@ -2022,8 +1902,20 @@ impl EditorView {
         }));
     }
 
-    fn cached_git_history_items(&mut self, cx: &mut Context<Self>) -> Option<Vec<GitHistoryItem>> {
-        let current_path = self.current_file_path.clone();
+    /// Path key for the history cache: the active file in per-file scope, or
+    /// the workspace base directory in repository scope.
+    fn git_history_request_path(&self) -> Option<PathBuf> {
+        match self.git_history_scope {
+            GitHistoryScope::CurrentFile => self.current_file_path.clone(),
+            GitHistoryScope::Repository => self.git_panel_base_dir(),
+        }
+    }
+
+    pub(super) fn cached_git_history_items(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<GitHistoryItem>> {
+        let current_path = self.git_history_request_path();
         if self.git_history_cache_path != current_path {
             self.git_history_cache_path = current_path.clone();
             self.git_history_cache_result = None;
@@ -2045,29 +1937,45 @@ impl EditorView {
         git_repo_context_for_file(file_path)
     }
 
-    fn git_repo_context(&self) -> Option<GitRepoContext> {
+    pub(super) fn git_repo_context(&self) -> Option<GitRepoContext> {
         let file_path = self.current_file_path.clone()?;
         self.git_repo_context_for_path(&file_path)
     }
 
-    fn build_git_diff_state_for_source(
+    pub(super) fn build_git_diff_state_for_source(
         &self,
         path: &Path,
         source: GitDiffSource,
     ) -> Option<GitDiffState> {
         let context = self.git_repo_context_for_path(path)?;
         let (source_label, target_label, base_text, target_text) = match &source {
-            GitDiffSource::WorkingTree => {
+            GitDiffSource::IndexToWorktree => {
+                let base_text =
+                    git_show_file_at_revision(&context.repo_root, ":0", &context.relative_path);
+                let target_text = self.current_file_text_for_git_diff(&context.file_path);
+                (
+                    if base_text.is_empty() {
+                        self.t(crate::i18n::TextKey::EmptyFile).to_string()
+                    } else {
+                        self.t(crate::i18n::TextKey::GitStagedLabel).to_string()
+                    },
+                    self.t(crate::i18n::TextKey::WorkingTree).to_string(),
+                    base_text,
+                    target_text,
+                )
+            }
+            GitDiffSource::HeadToIndex => {
                 let base_text =
                     git_show_file_at_revision(&context.repo_root, "HEAD", &context.relative_path);
-                let target_text = self.current_file_text_for_git_diff(&context.file_path);
+                let target_text =
+                    git_show_file_at_revision(&context.repo_root, ":0", &context.relative_path);
                 (
                     if base_text.is_empty() {
                         self.t(crate::i18n::TextKey::EmptyFile).to_string()
                     } else {
                         "HEAD".to_string()
                     },
-                    self.t(crate::i18n::TextKey::WorkingTree).to_string(),
+                    self.t(crate::i18n::TextKey::GitStagedLabel).to_string(),
                     base_text,
                     target_text,
                 )
@@ -2116,6 +2024,9 @@ impl EditorView {
             ),
             rows: Vec::new(),
             show_only_changes: false,
+            hunks: compute_git_diff_hunks(&base_text, &target_text),
+            base_text,
+            target_text,
         })
         .map(|mut diff| {
             diff.rows = visible_git_diff_rows(&diff.all_rows, diff.show_only_changes);
@@ -2175,7 +2086,7 @@ impl EditorView {
         tab.snapshot.cursor_anchor = tab.snapshot.cursor_anchor.min(tab.snapshot.text.len());
     }
 
-    fn reload_active_git_diff_snapshot(&mut self) {
+    pub(super) fn reload_active_git_diff_snapshot(&mut self) {
         let Some(tab_index) = self.active_git_diff_tab_index() else {
             return;
         };
@@ -2362,6 +2273,129 @@ impl EditorView {
         self.request_editor_focus(cx);
     }
 
+    /// True when the active diff tab shows unstaged changes and the cursor sits
+    /// inside a hunk that can be restored to its index version.
+    pub(crate) fn can_revert_current_git_diff_hunk(&self) -> bool {
+        if self.git_operation_running() {
+            return false;
+        }
+        let Some(diff) = self.active_git_diff_state() else {
+            return false;
+        };
+        if diff.source != GitDiffSource::IndexToWorktree {
+            return false;
+        }
+        self.current_git_diff_hunk(diff).is_some()
+    }
+
+    /// Whether the active diff tab supports per-hunk revert at all (used to
+    /// show/hide the path-bar button).
+    pub(crate) fn active_git_diff_supports_hunk_revert(&self) -> bool {
+        self.active_git_diff_state()
+            .is_some_and(|diff| diff.source == GitDiffSource::IndexToWorktree)
+    }
+
+    /// The hunk containing the cursor's diff block, resolved through the
+    /// visible rows' source line numbers so it works in both full and
+    /// changes-only views.
+    fn current_git_diff_hunk(&self, diff: &GitDiffState) -> Option<GitDiffHunk> {
+        let line = self.cursor_line();
+        let blocks = Self::diff_blocks(&diff.rows);
+        let block = blocks.into_iter().find(|block| block.contains(&line))?;
+        for row in &diff.rows[block] {
+            let Some(line_number) = row.source_line_number else {
+                continue;
+            };
+            let line_index = line_number.saturating_sub(1);
+            let hunk = match row.kind {
+                GitDiffRowKind::Added => diff
+                    .hunks
+                    .iter()
+                    .find(|hunk| hunk.target_range.contains(&line_index)),
+                GitDiffRowKind::Removed => diff
+                    .hunks
+                    .iter()
+                    .find(|hunk| hunk.base_range.contains(&line_index)),
+                GitDiffRowKind::Context => None,
+            };
+            if let Some(hunk) = hunk {
+                return Some(hunk.clone());
+            }
+        }
+        None
+    }
+
+    /// Restores the hunk under the cursor to its index (staged) version by
+    /// splicing the base lines into the worktree file.
+    pub(crate) fn revert_current_git_diff_hunk(&mut self, cx: &mut Context<Self>) {
+        let Some(tab_index) = self.active_git_diff_tab_index() else {
+            return;
+        };
+        let Some((path, hunk, base_text, target_text)) = self.tabs.get(tab_index).and_then(|tab| {
+            let path = tab.path.clone()?;
+            let diff = tab.git_diff.as_ref()?;
+            if diff.source != GitDiffSource::IndexToWorktree {
+                return None;
+            }
+            let hunk = self.current_git_diff_hunk(diff)?;
+            Some((path, hunk, diff.base_text.clone(), diff.target_text.clone()))
+        }) else {
+            return;
+        };
+
+        // The stored target must match the file on disk; otherwise the diff is
+        // stale (external edit) and splicing would corrupt the file.
+        let on_disk = fs::read_to_string(&path).unwrap_or_default();
+        if on_disk != target_text {
+            self.refresh_git_diff_tab(tab_index);
+            self.reload_active_git_diff_snapshot();
+            cx.notify();
+            return;
+        }
+
+        let base_lines: Vec<&str> = base_text.split_inclusive('\n').collect();
+        let mut target_lines: Vec<String> = target_text
+            .split_inclusive('\n')
+            .map(str::to_string)
+            .collect();
+        let base_start = hunk.base_range.start.min(base_lines.len());
+        let base_end = hunk.base_range.end.clamp(base_start, base_lines.len());
+        let target_start = hunk.target_range.start.min(target_lines.len());
+        let target_end = hunk
+            .target_range
+            .end
+            .clamp(target_start, target_lines.len());
+        let replacement: Vec<String> = base_lines[base_start..base_end]
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        target_lines.splice(target_start..target_end, replacement);
+        let new_text = target_lines.concat();
+
+        if let Err(error) = fs::write(&path, &new_text) {
+            let message = format!(
+                "{}: {error}",
+                self.t(crate::i18n::TextKey::GitOperationFailed)
+            );
+            self.notify_error(message, cx);
+            return;
+        }
+
+        // Reuse the git mutation invalidation chain: it refreshes diff tabs,
+        // reloads clean buffers from disk, and updates all git status caches.
+        let rel_path = self
+            .git_repo_context_for_path(&path)
+            .map(|context| context.relative_path)
+            .unwrap_or_default();
+        self.invalidate_after_git_mutation(
+            &GitOperation::DiscardPaths {
+                tracked: vec![rel_path],
+                untracked: Vec::new(),
+            },
+            cx,
+        );
+    }
+
     fn current_file_text_for_git_diff(&self, path: &Path) -> String {
         if self.current_file_path.as_deref() == Some(path) && !self.active_tab_is_diff() {
             return self.buffer.text().to_string();
@@ -2370,7 +2404,7 @@ impl EditorView {
         fs::read_to_string(path).unwrap_or_default()
     }
 
-    fn open_git_diff_tab(
+    pub(super) fn open_git_diff_tab(
         &mut self,
         diff_title: String,
         path: PathBuf,
@@ -2427,7 +2461,11 @@ impl EditorView {
         self.activate_tab_by_index(insert_index, cx);
     }
 
-    fn open_git_history_item_diff(&mut self, item: GitHistoryItem, cx: &mut Context<Self>) {
+    pub(super) fn open_git_history_item_diff(
+        &mut self,
+        item: GitHistoryItem,
+        cx: &mut Context<Self>,
+    ) {
         let Some(context) = self.git_repo_context() else {
             return;
         };
@@ -3168,88 +3206,6 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn render_git_history_item(&self, item: &GitHistoryItem, cx: &mut Context<Self>) -> AnyElement {
-        let ups = &self.styles.utility_panel;
-        let history_item = item.clone();
-        let font_size = self.scaled(ups.utility_panel_item_font_size_px);
-        let row_padding_y = self.scaled(ups.utility_panel_item_gap_px * 0.5);
-        let row_gap = self.scaled(ups.utility_panel_item_gap_px * 0.4);
-        let row_height = font_size * 2.0 + row_gap + row_padding_y * 2.0;
-        let is_active = self.active_git_diff_state().is_some_and(|diff| {
-            match (
-                &diff.source,
-                item.is_working_tree,
-                item.commit_hash.as_deref(),
-            ) {
-                (GitDiffSource::WorkingTree, true, _) => true,
-                (GitDiffSource::Commit { commit_hash, .. }, false, Some(item_hash)) => {
-                    commit_hash == item_hash
-                }
-                _ => false,
-            }
-        });
-        let row_bg = if is_active {
-            ups.utility_panel_button_hover_bg
-        } else {
-            gpui::transparent_black()
-        };
-        div()
-            .px(px(self.scaled(ups.utility_panel_section_padding_x_px)))
-            .py(px(row_padding_y))
-            .w_full()
-            .min_h(px(row_height))
-            .flex()
-            .flex_col()
-            .gap(px(row_gap))
-            .bg(row_bg)
-            .overflow_hidden()
-            .cursor(CursorStyle::Arrow)
-            .hover(move |style| style.bg(ups.utility_panel_button_hover_bg))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.open_git_history_item_diff(history_item.clone(), cx);
-                }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(self.scaled(ups.utility_panel_item_gap_px)))
-                    .text_size(px(font_size))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_color(ups.utility_panel_item_value_text_color)
-                            .whitespace_nowrap()
-                            .truncate()
-                            .child(SharedString::from(item.short_hash.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(ups.utility_panel_item_label_text_color)
-                            .whitespace_nowrap()
-                            .child(SharedString::from(item.time_label.clone())),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .w_full()
-                    .text_size(px(font_size))
-                    .text_color(ups.utility_panel_item_value_text_color)
-                    .whitespace_nowrap()
-                    .truncate()
-                    .child(SharedString::from(item.message.clone())),
-            )
-            .into_any_element()
-    }
-
     fn push_info_reference_section(
         &self,
         children: &mut Vec<AnyElement>,
@@ -3317,7 +3273,7 @@ impl EditorView {
         match self.displayed_utility_panel {
             Some(RightUtilityPanel::Chat) => self.render_chat_panel(is_chat_focused, cx),
             Some(RightUtilityPanel::Info) => self.render_info_panel(cx),
-            Some(RightUtilityPanel::GitHistory) => self.render_git_history_panel(cx),
+            Some(RightUtilityPanel::GitHistory) => self.render_git_panel(cx),
             Some(RightUtilityPanel::Outline) => self.render_outline_panel(cx),
             None => div().into_any_element(),
         }
@@ -3506,147 +3462,6 @@ impl EditorView {
             .when_some(scrollbar, |this, scrollbar| this.child(scrollbar))
             .into_any_element()
     }
-
-    pub(crate) fn render_git_history_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let history_items = self.cached_git_history_items(cx);
-        let ups = &self.styles.utility_panel;
-        let top_spacer = self.scaled(ups.utility_panel_top_spacer_height_px);
-        let bottom_spacer = self.scaled(ups.utility_panel_bottom_spacer_height_px);
-        let header_height = self.scaled(ups.utility_panel_header_height_px);
-        let header_padding_x = self.scaled(ups.utility_panel_header_padding_x_px);
-        let header_font_size = self.scaled(ups.utility_panel_header_font_size_px);
-        let section_gap = self.scaled(ups.utility_panel_section_gap_px);
-        let section_padding_x = self.scaled(ups.utility_panel_section_padding_x_px);
-        let empty_font_size = self.scaled(ups.utility_panel_empty_font_size_px);
-        let mut should_load_next_page = false;
-        let mut children: Vec<AnyElement> = vec![
-            div().h(px(top_spacer)).flex_shrink_0().into_any_element(),
-            div()
-                .h(px(header_height))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .px(px(header_padding_x))
-                .text_size(px(header_font_size))
-                .text_color(ups.utility_panel_header_text_color)
-                .child(self.t(crate::i18n::TextKey::GitHistory))
-                .into_any_element(),
-        ];
-
-        match history_items {
-            Some(items) if !items.is_empty() => {
-                children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-                let item_height = self.scaled(ups.utility_panel_item_font_size_px * 3.4);
-                let prefix_height = top_spacer + header_height + section_gap;
-                let list_window = super::list_viewport::fixed_list_window(
-                    &self.git_history_scroll_handle,
-                    self.last_window_height,
-                    prefix_height,
-                    item_height,
-                    items.len(),
-                    12,
-                    24,
-                );
-                if list_window.preload.end >= items.len().saturating_sub(1) {
-                    should_load_next_page = true;
-                }
-                if list_window.top_spacer_px > 0.0 {
-                    children.push(
-                        div()
-                            .h(px(list_window.top_spacer_px))
-                            .flex_shrink_0()
-                            .into_any_element(),
-                    );
-                }
-                for item in &items[list_window.render] {
-                    children.push(self.render_git_history_item(item, cx));
-                }
-                if list_window.bottom_spacer_px > 0.0 {
-                    children.push(
-                        div()
-                            .h(px(list_window.bottom_spacer_px))
-                            .flex_shrink_0()
-                            .into_any_element(),
-                    );
-                }
-            }
-            Some(_) => {
-                children.push(
-                    div()
-                        .px(px(section_padding_x))
-                        .pt(px(section_gap))
-                        .text_size(px(empty_font_size))
-                        .text_color(ups.utility_panel_empty_text_color)
-                        .child(SharedString::from(
-                            self.t(crate::i18n::TextKey::NoGitHistory).to_string(),
-                        ))
-                        .into_any_element(),
-                );
-            }
-            None if self.git_history_refresh_task.is_some() => {
-                children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
-            }
-            None => {
-                children.push(
-                    div()
-                        .px(px(section_padding_x))
-                        .pt(px(section_gap))
-                        .text_size(px(empty_font_size))
-                        .text_color(ups.utility_panel_empty_text_color)
-                        .child(SharedString::from(
-                            self.t(crate::i18n::TextKey::NotInGitRepo).to_string(),
-                        ))
-                        .into_any_element(),
-                );
-            }
-        }
-
-        children.push(
-            div()
-                .h(px(bottom_spacer))
-                .flex_shrink_0()
-                .into_any_element(),
-        );
-
-        let scrollbar = self.render_scrollbar_for_handle(
-            PanelScrollbarKind::GitHistory,
-            &self.git_history_scroll_handle,
-            f32::from(self.git_history_scroll_handle.bounds().size.height),
-            0.0,
-            self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
-            cx,
-        );
-
-        let panel = div()
-            .id("git-history-panel")
-            .h_full()
-            .w_full()
-            .bg(ups.utility_panel_bg)
-            .relative()
-            .overflow_hidden()
-            .border_l(px(ups.utility_panel_border_width_px))
-            .border_color(ups.utility_panel_border_color)
-            .child(
-                div()
-                    .id("git-history-panel-scroll")
-                    .h_full()
-                    .w_full()
-                    .overflow_y_scroll()
-                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                        this.reveal_panel_scrollbar(PanelScrollbarKind::GitHistory, cx);
-                    }))
-                    .track_scroll(&self.git_history_scroll_handle)
-                    .flex()
-                    .flex_col()
-                    .children(children),
-            )
-            .when_some(scrollbar, |this, scrollbar| this.child(scrollbar))
-            .into_any_element();
-        if should_load_next_page {
-            self.schedule_next_git_history_page(cx);
-        }
-        panel
-    }
 }
 
 #[cfg(test)]
@@ -3658,63 +3473,7 @@ mod tests {
         visible_git_diff_rows,
     };
     use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
-    use std::{fs, path::PathBuf, process::Command, time::SystemTime};
-
-    #[test]
-    fn git_history_provider_pages_commits() {
-        let root = std::env::temp_dir().join(format!(
-            "moeka-git-page-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let git = |args: &[&str]| {
-            let status = Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args(args)
-                .status()
-                .unwrap();
-            assert!(status.success(), "git command failed: {args:?}");
-        };
-        git(&["init", "-q"]);
-        git(&["config", "user.email", "test@example.com"]);
-        git(&["config", "user.name", "Moeka Test"]);
-        for index in 0..3 {
-            fs::write(root.join("note.md"), format!("version {index}")).unwrap();
-            git(&["add", "note.md"]);
-            git(&["commit", "-q", "-m", &format!("commit {index}")]);
-        }
-        let context =
-            super::git_repo_context_for_file(&root.join("note.md").canonicalize().unwrap())
-                .unwrap();
-
-        let (first, has_more) = super::collect_git_history_items_for_context(
-            crate::i18n::UiLanguage::English,
-            &context,
-            0,
-            2,
-            false,
-        )
-        .unwrap();
-        let (second, second_has_more) = super::collect_git_history_items_for_context(
-            crate::i18n::UiLanguage::English,
-            &context,
-            2,
-            2,
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(first.len(), 2);
-        assert!(has_more);
-        assert_eq!(second.len(), 1);
-        assert!(!second_has_more);
-        fs::remove_dir_all(root).unwrap();
-    }
+    use std::path::PathBuf;
 
     #[test]
     fn export_highlights_code_blocks_and_styles_tables() {
@@ -3850,6 +3609,44 @@ mod tests {
 
         assert!(!html.contains("class=\"callout"), "callout: {html}");
         assert!(html.contains("[!NOTE] literal"), "literal marker: {html}");
+    }
+
+    #[test]
+    fn git_diff_hunks_cover_modifications_additions_and_deletions() {
+        let base = "a\nb\nc\nd\ne\n";
+        let target = "a\nB\nc\ne\nf\n";
+        let hunks = super::compute_git_diff_hunks(base, target);
+
+        assert_eq!(hunks.len(), 3, "hunks: {hunks:?}");
+        // b -> B
+        assert_eq!(hunks[0].base_range, 1..2);
+        assert_eq!(hunks[0].target_range, 1..2);
+        // d deleted
+        assert_eq!(hunks[1].base_range, 3..4);
+        assert_eq!(hunks[1].target_range, 3..3);
+        // f added at the end
+        assert_eq!(hunks[2].base_range, 5..5);
+        assert_eq!(hunks[2].target_range, 4..5);
+    }
+
+    #[test]
+    fn git_diff_hunk_splice_restores_base_lines() {
+        let base = "a\nb\nc\nd\ne\n";
+        let target = "a\nB\nc\ne\nf\n";
+        let hunks = super::compute_git_diff_hunks(base, target);
+
+        // Reverting every hunk in reverse order must reproduce the base text.
+        let base_lines: Vec<&str> = base.split_inclusive('\n').collect();
+        let mut target_lines: Vec<String> =
+            target.split_inclusive('\n').map(str::to_string).collect();
+        for hunk in hunks.iter().rev() {
+            let replacement: Vec<String> = base_lines[hunk.base_range.clone()]
+                .iter()
+                .map(|line| line.to_string())
+                .collect();
+            target_lines.splice(hunk.target_range.clone(), replacement);
+        }
+        assert_eq!(target_lines.concat(), base);
     }
 
     #[test]

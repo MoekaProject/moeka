@@ -18,7 +18,7 @@ enum TabDropTarget<'a> {
 }
 
 impl EditorView {
-    fn stash_active_tab_layout_cache(&mut self) {
+    pub(super) fn stash_active_tab_layout_cache(&mut self) {
         let Some(active_tab_id) = self.active_tab_id.clone() else {
             return;
         };
@@ -42,7 +42,7 @@ impl EditorView {
         }
     }
 
-    fn ensure_settings_tab_first(&mut self) {
+    pub(super) fn ensure_settings_tab_first(&mut self) {
         if let Some(index) = self
             .tabs
             .iter()
@@ -433,6 +433,7 @@ impl EditorView {
         focus_editor: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.focus_pane_containing_editor_path(path, cx);
         let Some(index) = self.editor_tab_index_for_path(path) else {
             return false;
         };
@@ -499,12 +500,23 @@ impl EditorView {
         })
     }
 
+    /// When `path` is already open in another pane, moves focus there so the
+    /// existing tab is reused instead of opening a duplicate.
+    fn focus_pane_containing_editor_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if let Some(owner) = self.pane_id_for_editor_path(path)
+            && owner != self.focused_pane_id
+        {
+            self.focus_pane(owner, cx);
+        }
+    }
+
     pub(crate) fn open_path_in_preview_tab(
         &mut self,
         path: PathBuf,
         focus_editor: bool,
         cx: &mut Context<Self>,
     ) {
+        self.focus_pane_containing_editor_path(&path, cx);
         if let Some(index) = self.editor_tab_index_for_path(&path) {
             self.activate_tab_by_index(index, cx);
             if focus_editor {
@@ -547,6 +559,7 @@ impl EditorView {
         focus_editor: bool,
         cx: &mut Context<Self>,
     ) {
+        self.focus_pane_containing_editor_path(&path, cx);
         if let Some(index) = self.editor_tab_index_for_path(&path) {
             self.tabs[index].is_preview = false;
             self.activate_tab_by_index(index, cx);
@@ -697,6 +710,14 @@ impl EditorView {
     }
 
     pub(crate) fn close_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        // The tab may live in another pane (e.g. queued closes after a pane
+        // was refocused); move focus there first so the close logic below
+        // operates on the owning pane's tab list.
+        if let Some(owner) = self.pane_id_for_tab(tab_id)
+            && owner != self.focused_pane_id
+        {
+            self.focus_pane(owner, cx);
+        }
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             self.process_pending_close_queue(cx);
             return;
@@ -715,6 +736,9 @@ impl EditorView {
             self.active_tab_index_cache.set(None);
             self.active_file_kind_cache = None;
             self.pending_close_tab_ids.clear();
+            // Closing the last tab of a split pane collapses the pane.
+            let pane_id = self.current_pane_id();
+            self.remove_pane_if_empty(pane_id, cx);
             cx.notify();
             session_store::persist_session(self);
             return;
@@ -745,6 +769,11 @@ impl EditorView {
     }
 
     pub(crate) fn request_close_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        if let Some(owner) = self.pane_id_for_tab(tab_id)
+            && owner != self.focused_pane_id
+        {
+            self.focus_pane(owner, cx);
+        }
         if let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) {
             if tab.is_dirty {
                 self.show_dialog(
@@ -1063,8 +1092,16 @@ impl EditorView {
     }
 
     pub(crate) fn open_settings_tab(&mut self, cx: &mut Context<Self>) {
-        // Singleton: if a settings tab already exists, switch to it
-        if self.tabs.iter().any(|t| t.kind == TabKind::Settings) {
+        // Singleton: if a settings tab already exists (in any pane), switch to it
+        let existing_owner = self
+            .all_tabs()
+            .find(|tab| tab.kind == TabKind::Settings)
+            .map(|tab| tab.id.clone())
+            .and_then(|id| self.pane_id_for_tab(&id));
+        if let Some(owner) = existing_owner {
+            if owner != self.focused_pane_id {
+                self.focus_pane(owner, cx);
+            }
             self.ensure_settings_tab_first();
             self.activate_tab_by_index(0, cx);
             return;
@@ -1459,7 +1496,15 @@ impl EditorView {
                                     next_label,
                                     self.can_navigate_next_git_diff_row(),
                                     Self::navigate_next_git_diff_row,
-                                )),
+                                ))
+                                .when(self.active_git_diff_supports_hunk_revert(), |this| {
+                                    this.child(diff_button(
+                                        BACK_SVG_PATH,
+                                        self.t(crate::i18n::TextKey::InlineDiffRevert),
+                                        self.can_revert_current_git_diff_hunk(),
+                                        Self::revert_current_git_diff_hunk,
+                                    ))
+                                }),
                         )
                         .child(
                             div()
@@ -1611,7 +1656,12 @@ impl EditorView {
             .into_any_element()
     }
 
-    pub(crate) fn render_tab(&self, tab: &OpenTab, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_tab(
+        &self,
+        pane_id: PaneId,
+        tab: &OpenTab,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let is_active = self.active_tab_id.as_deref() == Some(tab.id.as_str());
         let is_dirty = tab.is_dirty;
         let is_deleted = tab.is_deleted;
@@ -1670,6 +1720,13 @@ impl EditorView {
             .drag_over::<DraggedTab>({
                 let drop_tab_id = drop_tab_id.clone();
                 move |style, dragged, _, _| {
+                    if dragged.source_pane_id != pane_id {
+                        // Cross-pane: the dragged tab is inserted before this tab.
+                        return style
+                            .border_l(px(drop_indicator_width))
+                            .border_r(px(0.0))
+                            .border_color(drop_indicator_color);
+                    }
                     let drop_target = if tab_index <= dragged.source_index {
                         TabDropTarget::Before(drop_tab_id.as_str())
                     } else {
@@ -1698,48 +1755,68 @@ impl EditorView {
             })
             // Handle drop: reorder on the indicated side of the hovered tab.
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
-                let place_after = this
-                    .tabs
-                    .iter()
-                    .position(|candidate| candidate.id == dragged.tab_id)
-                    .zip(
+                this.tab_drag_split_target = None;
+                if dragged.source_pane_id != pane_id
+                    || this.pane_id_for_tab(&dragged.tab_id) != Some(pane_id)
+                {
+                    // Cross-pane drop: move the tab into this pane before the
+                    // hovered tab.
+                    let insert_index = this.with_pane(pane_id, |this| {
                         this.tabs
                             .iter()
-                            .position(|candidate| candidate.id == drop_tab_id),
-                    )
-                    .is_some_and(|(from_idx, to_idx)| from_idx < to_idx);
-                let current_tab_ids: Vec<String> = this
-                    .tabs
-                    .iter()
-                    .map(|candidate| candidate.id.clone())
-                    .collect();
-                let settings_tab_id = this
-                    .tabs
-                    .iter()
-                    .find(|candidate| candidate.kind == TabKind::Settings)
-                    .map(|candidate| candidate.id.clone());
-                let drop_target = if place_after {
-                    TabDropTarget::After(drop_tab_id.as_str())
-                } else {
-                    TabDropTarget::Before(drop_tab_id.as_str())
-                };
-                if !Self::tab_drop_changes_order_for(
-                    &current_tab_ids,
-                    settings_tab_id.as_deref(),
-                    &dragged.tab_id,
-                    drop_target,
-                ) {
+                            .position(|candidate| candidate.id == drop_tab_id)
+                    });
+                    this.move_tab_to_pane(&dragged.tab_id, pane_id, insert_index, cx);
                     this.tab_drag_candidate_id = None;
                     this.tab_dragging_id = None;
                     return;
                 }
-                if place_after {
-                    this.reorder_tab_after(&dragged.tab_id, &drop_tab_id, cx);
-                } else {
-                    this.reorder_tab_before(&dragged.tab_id, &drop_tab_id, cx);
-                }
-                this.tab_drag_candidate_id = None;
-                this.tab_dragging_id = None;
+                let dragged_tab_id = dragged.tab_id.clone();
+                let drop_tab_id = drop_tab_id.clone();
+                this.with_pane(pane_id, move |this| {
+                    let place_after = this
+                        .tabs
+                        .iter()
+                        .position(|candidate| candidate.id == dragged_tab_id)
+                        .zip(
+                            this.tabs
+                                .iter()
+                                .position(|candidate| candidate.id == drop_tab_id),
+                        )
+                        .is_some_and(|(from_idx, to_idx)| from_idx < to_idx);
+                    let current_tab_ids: Vec<String> = this
+                        .tabs
+                        .iter()
+                        .map(|candidate| candidate.id.clone())
+                        .collect();
+                    let settings_tab_id = this
+                        .tabs
+                        .iter()
+                        .find(|candidate| candidate.kind == TabKind::Settings)
+                        .map(|candidate| candidate.id.clone());
+                    let drop_target = if place_after {
+                        TabDropTarget::After(drop_tab_id.as_str())
+                    } else {
+                        TabDropTarget::Before(drop_tab_id.as_str())
+                    };
+                    if !Self::tab_drop_changes_order_for(
+                        &current_tab_ids,
+                        settings_tab_id.as_deref(),
+                        &dragged_tab_id,
+                        drop_target,
+                    ) {
+                        this.tab_drag_candidate_id = None;
+                        this.tab_dragging_id = None;
+                        return;
+                    }
+                    if place_after {
+                        this.reorder_tab_after(&dragged_tab_id, &drop_tab_id, cx);
+                    } else {
+                        this.reorder_tab_before(&dragged_tab_id, &drop_tab_id, cx);
+                    }
+                    this.tab_drag_candidate_id = None;
+                    this.tab_dragging_id = None;
+                });
             }))
             .child(
                 div()
@@ -1841,6 +1918,7 @@ impl EditorView {
                     title: drag_title,
                     path: tab.path.clone(),
                     source_index: tab_index,
+                    source_pane_id: pane_id,
                 },
                 {
                     let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
@@ -1859,6 +1937,14 @@ impl EditorView {
             )
             .on_drag_move(cx.listener(
                 move |this, event: &DragMoveEvent<DraggedTab>, window, cx| {
+                    // Every tab's on_drag_move fires for every DraggedTab drag
+                    // in the window (no hover/ownership check in gpui), and the
+                    // first tab in paint order would otherwise hijack the drag
+                    // and stop propagation. Only the drag's source tab handles
+                    // it.
+                    if event.drag(cx).tab_id != drag_tab_id {
+                        return;
+                    }
                     window.prevent_default();
                     cx.stop_propagation();
                     this.tab_drag_candidate_id = Some(drag_tab_id.clone());
@@ -1872,6 +1958,26 @@ impl EditorView {
                         .unwrap_or(true);
                     if moved_enough {
                         this.tab_dragging_id = Some(drag_tab_id.clone());
+                    }
+                    // This handler is the only drag listener guaranteed to see
+                    // every move (capture propagation stops here), so it also
+                    // resolves the split-drop target for the pane under the
+                    // cursor.
+                    let new_target = if this.tab_dragging_id.is_some() {
+                        this.split_drop_target_at(event.event.position).filter(
+                            |(pane, direction)| {
+                                // Merging into the tab's own pane is a no-op;
+                                // don't show the full-pane highlight for it.
+                                direction.is_some()
+                                    || this.pane_id_for_tab(&drag_tab_id) != Some(*pane)
+                            },
+                        )
+                    } else {
+                        None
+                    };
+                    if this.tab_drag_split_target != new_target {
+                        this.tab_drag_split_target = new_target;
+                        cx.notify();
                     }
                 },
             ))
@@ -2056,7 +2162,9 @@ impl EditorView {
             .into_any_element()
     }
 
-    pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_tab_bar(&self, pane_id: PaneId, cx: &mut Context<Self>) -> AnyElement {
+        let is_top_left_pane = pane_id == self.top_left_pane_id();
+        let is_top_right_pane = pane_id == self.top_right_pane_id();
         let ts = &self.styles.tab_bar;
         let inner_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
         let end_drop_indicator_color = ts.tab_drop_indicator_color;
@@ -2070,7 +2178,7 @@ impl EditorView {
         let mut tab_items: Vec<AnyElement> = self
             .tabs
             .iter()
-            .map(|tab| self.render_tab(tab, cx))
+            .map(|tab| self.render_tab(pane_id, tab, cx))
             .collect();
 
         let new_hover_color = ts.tab_new_hover_text_color;
@@ -2113,12 +2221,14 @@ impl EditorView {
                 .w(px(end_drop_target_width))
                 .flex_none()
                 .drag_over::<DraggedTab>(move |style, dragged, _, _| {
-                    if Self::tab_drop_changes_order_for(
-                        &current_tab_ids,
-                        settings_tab_id.as_deref(),
-                        &dragged.tab_id,
-                        TabDropTarget::End,
-                    ) {
+                    if dragged.source_pane_id != pane_id
+                        || Self::tab_drop_changes_order_for(
+                            &current_tab_ids,
+                            settings_tab_id.as_deref(),
+                            &dragged.tab_id,
+                            TabDropTarget::End,
+                        )
+                    {
                         style
                             .border_l(px(end_drop_indicator_width))
                             .border_color(end_drop_indicator_color)
@@ -2127,23 +2237,35 @@ impl EditorView {
                     }
                 })
                 .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
-                    let current_tab_ids: Vec<String> =
-                        this.tabs.iter().map(|tab| tab.id.clone()).collect();
-                    let settings_tab_id = this
-                        .tabs
-                        .iter()
-                        .find(|tab| tab.kind == TabKind::Settings)
-                        .map(|tab| tab.id.clone());
-                    if Self::tab_drop_changes_order_for(
-                        &current_tab_ids,
-                        settings_tab_id.as_deref(),
-                        &dragged.tab_id,
-                        TabDropTarget::End,
-                    ) {
-                        this.reorder_tab_to_end(&dragged.tab_id, cx);
+                    this.tab_drag_split_target = None;
+                    if dragged.source_pane_id != pane_id
+                        || this.pane_id_for_tab(&dragged.tab_id) != Some(pane_id)
+                    {
+                        this.move_tab_to_pane(&dragged.tab_id, pane_id, None, cx);
+                        this.tab_drag_candidate_id = None;
+                        this.tab_dragging_id = None;
+                        return;
                     }
-                    this.tab_drag_candidate_id = None;
-                    this.tab_dragging_id = None;
+                    let dragged_tab_id = dragged.tab_id.clone();
+                    this.with_pane(pane_id, move |this| {
+                        let current_tab_ids: Vec<String> =
+                            this.tabs.iter().map(|tab| tab.id.clone()).collect();
+                        let settings_tab_id = this
+                            .tabs
+                            .iter()
+                            .find(|tab| tab.kind == TabKind::Settings)
+                            .map(|tab| tab.id.clone());
+                        if Self::tab_drop_changes_order_for(
+                            &current_tab_ids,
+                            settings_tab_id.as_deref(),
+                            &dragged_tab_id,
+                            TabDropTarget::End,
+                        ) {
+                            this.reorder_tab_to_end(&dragged_tab_id, cx);
+                        }
+                        this.tab_drag_candidate_id = None;
+                        this.tab_dragging_id = None;
+                    });
                 }))
                 .on_mouse_down(
                     MouseButton::Left,
@@ -2222,7 +2344,7 @@ impl EditorView {
                 Self::navigate_tab_history_forward,
             ))
             .into_any_element();
-        let leading_left_margin = if self.sidebar_visible {
+        let leading_left_margin = if self.sidebar_visible || !is_top_left_pane {
             0.0
         } else {
             self.scaled(ts.tab_history_hidden_sidebar_margin_px)
@@ -2278,7 +2400,7 @@ impl EditorView {
                 git_active,
                 true,
                 None,
-                self.t(crate::i18n::TextKey::GitHistory),
+                self.t(crate::i18n::TextKey::GitPanelTitle),
                 Some("⌃⇧G"),
                 cx,
                 |this, cx| {
@@ -2292,9 +2414,10 @@ impl EditorView {
             .flex()
             .items_center()
             .justify_end()
-            .when(!self.should_render_utility_panel_on_right(), |this| {
-                this.child(action_buttons)
-            });
+            .when(
+                is_top_right_pane && !self.should_render_utility_panel_on_right(),
+                |this| this.child(action_buttons),
+            );
 
         div()
             .id("tab-bar")
@@ -2325,6 +2448,7 @@ impl EditorView {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.tab_drag_candidate_id = None;
+                    this.tab_drag_split_target = None;
                     if this.tab_dragging_id.take().is_some() {
                         cx.notify();
                     }
@@ -2334,6 +2458,7 @@ impl EditorView {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.tab_drag_candidate_id = None;
+                    this.tab_drag_split_target = None;
                     if this.tab_dragging_id.take().is_some() {
                         cx.notify();
                     }
@@ -2348,7 +2473,7 @@ impl EditorView {
                     .h(px(ts.tab_bar_border_width_px))
                     .bg(ts.tab_bar_border_color),
             )
-            .child(left_controls_group)
+            .when(is_top_left_pane, |this| this.child(left_controls_group))
             .child(
                 div()
                     .id("tab-bar-scroll")
@@ -2410,7 +2535,7 @@ impl EditorView {
                 self.is_utility_panel_active(RightUtilityPanel::GitHistory),
                 true,
                 None,
-                self.t(crate::i18n::TextKey::GitHistory),
+                self.t(crate::i18n::TextKey::GitPanelTitle),
                 Some("⌃⇧G"),
                 cx,
                 |this, cx| this.toggle_git_history_panel(cx),

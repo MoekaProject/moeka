@@ -9,6 +9,7 @@ use super::*;
 
 pub(crate) struct ImageViewElement {
     pub editor: Entity<EditorView>,
+    pub pane_id: super::PaneId,
 }
 
 pub(crate) struct ImageViewPrepaintState {
@@ -25,40 +26,13 @@ impl gpui::IntoElement for ImageViewElement {
     }
 }
 
-impl Element for ImageViewElement {
-    type RequestLayoutState = ();
-    type PrepaintState = ImageViewPrepaintState;
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
+impl ImageViewElement {
+    fn prepaint_impl(
         &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&gpui::InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
-    ) -> Self::PrepaintState {
+    ) -> ImageViewPrepaintState {
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         let viewport_width: f32 = bounds.size.width.into();
         let viewport_height: f32 = bounds.size.height.into();
@@ -132,6 +106,52 @@ impl Element for ImageViewElement {
             image,
             dragging,
         }
+    }
+}
+
+impl Element for ImageViewElement {
+    type RequestLayoutState = ();
+    type PrepaintState = ImageViewPrepaintState;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let pane_swapped = self
+            .editor
+            .update(cx, |editor, _| editor.begin_pane_swap(self.pane_id));
+        let state = self.prepaint_impl(bounds, window, cx);
+        if pane_swapped {
+            self.editor
+                .update(cx, |editor, _| editor.end_pane_swap(self.pane_id));
+        }
+        state
     }
 
     fn paint(

@@ -121,6 +121,9 @@ fn snap_bounds_to_device_pixels(
 
 pub(crate) struct EditorElement {
     pub editor: Entity<EditorView>,
+    /// Which pane's document this element renders; its state is swapped into
+    /// the root fields for the duration of prepaint/paint.
+    pub pane_id: super::PaneId,
 }
 
 pub(crate) struct EditorPrepaintState {
@@ -1561,7 +1564,9 @@ impl Element for EditorElement {
     type PrepaintState = EditorPrepaintState;
 
     fn id(&self) -> Option<ElementId> {
-        Some("editor-element".into())
+        Some(ElementId::Name(
+            format!("editor-element-{}", self.pane_id).into(),
+        ))
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
@@ -1590,6 +1595,11 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        // Bring this pane's document state into the root fields for the whole
+        // layout pass (no-op for the focused pane).
+        let pane_swapped = self
+            .editor
+            .update(cx, |editor, _| editor.begin_pane_swap(self.pane_id));
         // Resolve a deferred scroll-to-cursor before reading layout state, when
         // the per-line geometry cache is already valid (the common case after an
         // edit like pasting long text). Otherwise the layout loop below positions
@@ -7607,7 +7617,7 @@ impl Element for EditorElement {
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
 
-        EditorPrepaintState {
+        let mut prepaint_state = EditorPrepaintState {
             hitbox,
             link_hitboxes,
             lines,
@@ -7644,7 +7654,17 @@ impl Element for EditorElement {
             image_edit_icons,
             link_underlines,
             inline_overlays,
+        };
+
+        // Only the focused pane paints a caret.
+        if self.editor.read(cx).focused_pane_id != self.pane_id {
+            prepaint_state.cursor_quads.clear();
         }
+        if pane_swapped {
+            self.editor
+                .update(cx, |editor, _| editor.end_pane_swap(self.pane_id));
+        }
+        prepaint_state
     }
 
     fn paint(
@@ -7657,6 +7677,10 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let pane_swapped = self
+            .editor
+            .update(cx, |editor, _| editor.begin_pane_swap(self.pane_id));
+        let is_focused_pane = self.editor.read(cx).focused_pane_id == self.pane_id;
         let editor = self.editor.read(cx);
         let focus_handle = editor.focus_handle.clone();
         let cursor_style = match editor.hovering_handle {
@@ -7689,11 +7713,14 @@ impl Element for EditorElement {
         for link_hitbox in &prepaint.link_hitboxes {
             window.set_cursor_style(CursorStyle::PointingHand, link_hitbox);
         }
-        window.handle_input(
-            &focus_handle,
-            ElementInputHandler::new(bounds, self.editor.clone()),
-            cx,
-        );
+        // IME/text input is routed to the focused pane only.
+        if is_focused_pane {
+            window.handle_input(
+                &focus_handle,
+                ElementInputHandler::new(bounds, self.editor.clone()),
+                cx,
+            );
+        }
 
         {
             let editor = self.editor.clone();
@@ -7982,6 +8009,11 @@ impl Element for EditorElement {
 
         for quad in prepaint.link_underlines.drain(..) {
             window.paint_quad(quad);
+        }
+
+        if pane_swapped {
+            self.editor
+                .update(cx, |editor, _| editor.end_pane_swap(self.pane_id));
         }
     }
 }
