@@ -181,9 +181,14 @@ impl EditorView {
 
     pub(super) fn sidebar_scroll_prefix_height(&self, has_root: bool) -> f32 {
         let sidebar_styles = &self.styles.sidebar;
-        let logo_height = self.scaled(
-            sidebar_styles.sidebar_logo_size_px + 2.0 * sidebar_styles.sidebar_logo_padding_y_px,
-        );
+        let logo_height = if self.app_settings.simple_mode {
+            0.0
+        } else {
+            self.scaled(
+                sidebar_styles.sidebar_logo_size_px
+                    + 2.0 * sidebar_styles.sidebar_logo_padding_y_px,
+            )
+        };
         if has_root {
             logo_height
                 + self.sidebar_starred_section_height(has_root)

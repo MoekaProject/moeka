@@ -1282,26 +1282,32 @@ impl EditorView {
             }
         }
 
-        tree_items.insert(
-            0,
-            div()
-                .w_full()
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .py(px(self.scaled(ss.sidebar_logo_padding_y_px)))
-                .child(
-                    img(helpers::resolve_asset_image_path(LOGO_SVG_PATH))
-                        .w(px(self.scaled(ss.sidebar_logo_size_px)))
-                        .h(px(self.scaled(ss.sidebar_logo_size_px))),
-                )
-                .into_any_element(),
-        );
+        if !self.app_settings.simple_mode {
+            tree_items.insert(
+                0,
+                div()
+                    .w_full()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .py(px(self.scaled(ss.sidebar_logo_padding_y_px)))
+                    .child(
+                        img(helpers::resolve_asset_image_path(LOGO_SVG_PATH))
+                            .w(px(self.scaled(ss.sidebar_logo_size_px)))
+                            .h(px(self.scaled(ss.sidebar_logo_size_px))),
+                    )
+                    .into_any_element(),
+            );
+        }
 
         if has_root {
-            tree_items.insert(1, self.render_starred_sidebar_section(&starred_files, cx));
-            tree_items.insert(2, header);
+            let header_index = usize::from(!self.app_settings.simple_mode);
+            tree_items.insert(
+                header_index,
+                self.render_starred_sidebar_section(&starred_files, cx),
+            );
+            tree_items.insert(header_index + 1, header);
         }
 
         tree_items.push(
@@ -1312,8 +1318,11 @@ impl EditorView {
                 .into_any_element(),
         );
 
-        let logo_area_height =
-            self.scaled(ss.sidebar_logo_size_px + 2.0 * ss.sidebar_logo_padding_y_px);
+        let logo_area_height = if self.app_settings.simple_mode {
+            0.0
+        } else {
+            self.scaled(ss.sidebar_logo_size_px + 2.0 * ss.sidebar_logo_padding_y_px)
+        };
         let scroll_y = -f32::from(self.sidebar_scroll_handle.offset().y);
         let sticky_headers_visible = has_root && scroll_y >= logo_area_height;
         let active_scroll_handle = if self.workspace_search_visible {

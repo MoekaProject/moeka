@@ -54,6 +54,7 @@ pub(crate) struct FontPickerState {
 enum SettingsOptionAction {
     ShowWhitespace(bool),
     HighlightLine(bool),
+    SimpleMode(bool),
 }
 
 // ── Settings panel rendering ────────────────────────────────────────
@@ -474,6 +475,9 @@ impl EditorView {
             SettingsOptionAction::HighlightLine(value) => {
                 self.app_settings.highlight_line_background = value;
             }
+            SettingsOptionAction::SimpleMode(value) => {
+                self.app_settings.simple_mode = value;
+            }
         }
         self.finalize_settings_change(cx);
     }
@@ -527,8 +531,8 @@ impl EditorView {
             .child(
                 div()
                     .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(self.styles.settings_panel.settings_secondary_text_color)
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(self.styles.settings_panel.settings_primary_text_color)
                     .child(heading_label),
             )
             .child(div().w_full().h(px(1.0)).bg(border_color))
@@ -681,6 +685,16 @@ impl EditorView {
             .flex_col()
             .gap(px(self.scaled(16.0)))
             .child(self.render_section_heading(self.t(TextKey::ThemeSection)))
+            .child(self.render_attachment_settings_row(
+                crate::i18n::settings_label(self.ui_language, "simple_mode"),
+                self.render_boolean_settings_checkbox(
+                    "settings-simple-mode",
+                    self.app_settings.simple_mode,
+                    SettingsOptionAction::SimpleMode(false),
+                    SettingsOptionAction::SimpleMode(true),
+                    cx,
+                ),
+            ))
             .child(
                 div()
                     .w_full()

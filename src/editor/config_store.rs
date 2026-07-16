@@ -191,6 +191,7 @@ mod tests {
             outline_rail_visible: true,
             show_whitespace: false,
             highlight_line_background: true,
+            simple_mode: false,
             attachment_location: "current_file".to_string(),
             attachment_folder: "attachments".to_string(),
             date_time_format: "%Y-%m-%d %H:%M".to_string(),

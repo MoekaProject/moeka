@@ -53,6 +53,8 @@ pub(crate) struct AppSettings {
     pub show_whitespace: bool,
     #[serde(default = "default_highlight_line_background")]
     pub highlight_line_background: bool,
+    #[serde(default)]
+    pub simple_mode: bool,
     #[serde(default = "default_attachment_location")]
     pub attachment_location: String,
     #[serde(default = "default_attachment_folder")]
@@ -185,6 +187,7 @@ impl Default for AppSettings {
             outline_rail_visible: default_outline_rail_visible(),
             show_whitespace: default_show_whitespace(),
             highlight_line_background: default_highlight_line_background(),
+            simple_mode: false,
             attachment_location: default_attachment_location(),
             attachment_folder: default_attachment_folder(),
             keybindings: std::collections::BTreeMap::new(),
