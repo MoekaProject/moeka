@@ -1894,7 +1894,7 @@ impl Styles {
                 generated_preview_action_icon_size_px: 11.0,
                 generated_preview_action_button_radius_px: 5.0,
                 generated_preview_action_border_width_px: 1.0,
-                generated_preview_action_border_color: with_alpha(theme.border_primary, 0.85),
+                generated_preview_action_border_color: with_alpha(theme.border_primary, 0.38),
                 generated_preview_min_height_px: 50.0,
                 generated_preview_max_height_px: 300.0,
                 generated_preview_padding_x_px: 16.0,
@@ -2073,7 +2073,7 @@ impl Styles {
             image_preview: ImagePreviewStyles {
                 image_border_radius_px: 0.0,
                 image_active_border_width_px: 2.0,
-                image_active_border_color: theme.cursor,
+                image_active_border_color: theme.border_primary,
                 image_gap_top_px: 4.0,
                 image_gap_bottom_px: 4.0,
                 image_edit_icon_size_px: 13.0,
@@ -2457,6 +2457,22 @@ mod tests {
         assert_eq!(styles.quote_block.quote_block_padding_bottom_px, 0.0);
         assert_eq!(styles.quote_block.quote_block_padding_left_px, 12.0);
         assert_eq!(styles.quote_block.quote_block_padding_right_px, 10.0);
+    }
+
+    #[test]
+    fn preview_borders_use_primary_theme_border_without_accent_glow() {
+        let theme = Theme::one_dark();
+        let styles = Styles::from_theme(&theme, &theme);
+
+        assert_eq!(
+            styles.image_preview.image_active_border_color,
+            theme.border_primary
+        );
+        assert_eq!(
+            styles.code_block.generated_preview_action_border_color,
+            crate::theme::with_alpha(theme.border_primary, 0.38)
+        );
+        assert!(styles.code_block.generated_preview_action_border_color.a < 0.5);
     }
 
     #[test]

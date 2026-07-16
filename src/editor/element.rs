@@ -6474,8 +6474,8 @@ impl Element for EditorElement {
                 continue;
             }
 
-            // Track hover and draw an image-style blue border for every block
-            // group (code blocks, front matter, charts, formulas) on hover.
+            // Track hover and draw the theme's primary border around block
+            // groups (code blocks, front matter, charts, formulas).
             code_block_hover_areas_local.push((group_bounds, *start_line));
             if editor.hovering_code_block_start == Some(*start_line) {
                 let image_styles = &editor.styles.image_preview;
