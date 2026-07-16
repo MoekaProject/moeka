@@ -589,7 +589,11 @@ impl EditorView {
         }
     }
 
-    fn file_list_detailed_time_label(&self, key: crate::i18n::TextKey, time: SystemTime) -> String {
+    pub(crate) fn detailed_time_label(
+        &self,
+        key: crate::i18n::TextKey,
+        time: SystemTime,
+    ) -> String {
         let datetime: chrono::DateTime<chrono::Local> = time.into();
         let mut format = self.app_settings.date_time_format().to_string();
         if !format.contains("%S") && !format.contains("%T") {
@@ -1087,9 +1091,9 @@ impl EditorView {
             crate::i18n::format_relative_time(self.ui_language, item.modified);
         let created_time_label = self.file_list_created_time_label(item.created);
         let modified_tooltip =
-            self.file_list_detailed_time_label(crate::i18n::TextKey::InfoModified, item.modified);
+            self.detailed_time_label(crate::i18n::TextKey::InfoModified, item.modified);
         let created_tooltip =
-            self.file_list_detailed_time_label(crate::i18n::TextKey::InfoCreated, item.created);
+            self.detailed_time_label(crate::i18n::TextKey::InfoCreated, item.created);
         let preview = item
             .details
             .as_ref()

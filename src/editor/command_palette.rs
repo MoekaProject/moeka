@@ -308,10 +308,12 @@ impl EditorView {
                             .w_full()
                             .max_h(px(self.scaled(styles.quick_open_results_max_height_px)))
                             .overflow_y_scroll()
-                            .pb(px(self.scaled(styles.quick_open_panel_radius_px)))
                             .track_scroll(&self.command_palette_scroll_handle)
                             .children(rows),
-                    ),
+                    )
+                    .child(self.render_search_shortcut_footer(
+                        crate::i18n::search_menu_footer_label(self.ui_language, "execute"),
+                    )),
             )
             .into_any_element()
     }

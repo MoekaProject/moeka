@@ -7,6 +7,59 @@ use pinyin::ToPinyin;
 use super::*;
 
 impl EditorView {
+    pub(crate) fn render_search_shortcut_footer(&self, primary_action: &str) -> AnyElement {
+        let styles = &self.styles.quick_open;
+        let key_bg = styles.quick_open_result_shortcut_bg;
+        let key_border = crate::theme::with_alpha(styles.quick_open_panel_border_color, 0.35);
+        let text_color = styles.quick_open_result_secondary_text_color;
+        let font_size = self.scaled(styles.quick_open_result_path_font_size_px);
+        let hint = |keys: &'static str, label: String| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(self.scaled(5.0)))
+                .child(
+                    div()
+                        .h(px(self.scaled(20.0)))
+                        .min_w(px(self.scaled(24.0)))
+                        .px(px(self.scaled(5.0)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(self.scaled(4.0)))
+                        .bg(key_bg)
+                        .border(px(self.scaled(1.0)))
+                        .border_color(key_border)
+                        .text_color(styles.quick_open_result_text_color)
+                        .child(keys),
+                )
+                .child(label)
+        };
+
+        div()
+            .w_full()
+            .h(px(self.scaled(34.0)))
+            .flex_none()
+            .px(px(self.scaled(10.0)))
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(16.0)))
+            .border_t(px(1.0))
+            .border_color(styles.quick_open_panel_border_color)
+            .text_size(px(font_size))
+            .text_color(text_color)
+            .child(hint(
+                "↑ ↓",
+                crate::i18n::search_menu_footer_label(self.ui_language, "select").to_string(),
+            ))
+            .child(hint("↵", primary_action.to_string()))
+            .child(hint(
+                "esc",
+                crate::i18n::search_menu_footer_label(self.ui_language, "close").to_string(),
+            ))
+            .into_any_element()
+    }
+
     pub(crate) fn on_open_file_dialog(
         &mut self,
         _: &OpenFileDialog,
@@ -86,7 +139,12 @@ impl EditorView {
                     | crate::text_input::TextInputEvent::SubmitBackward => {
                         this.confirm_quick_open(cx);
                     }
-                    crate::text_input::TextInputEvent::Escape => {}
+                    crate::text_input::TextInputEvent::Escape => {
+                        this.quick_open_visible = false;
+                        this.quick_open_task = None;
+                        this.pending_editor_focus = true;
+                        cx.notify();
+                    }
                     crate::text_input::TextInputEvent::MoveUp => {
                         this.move_quick_open_selection(-1, cx);
                     }
@@ -440,19 +498,15 @@ impl EditorView {
                             .flex_1()
                             .max_h(px(max_results_h))
                             .overflow_y_scroll()
-                            // GPUI content masks are rectangular, so a hovered
-                            // row's background cannot be clipped to the panel's
-                            // rounded corners. Inset the list from the bottom by
-                            // the corner radius so hovered rows never reach the
-                            // rounded bottom corners (mirrors the context menu's
-                            // vertical padding pattern).
-                            .pb(px(self.scaled(styles.quick_open_panel_radius_px)))
                             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
                                 this.maybe_extend_quick_open_results(cx);
                             }))
                             .track_scroll(&self.quick_open_scroll_handle)
                             .children(result_children),
-                    ),
+                    )
+                    .child(self.render_search_shortcut_footer(
+                        crate::i18n::search_menu_footer_label(self.ui_language, "open"),
+                    )),
             )
             .into_any_element()
     }

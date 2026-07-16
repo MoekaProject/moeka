@@ -7235,11 +7235,9 @@ impl Element for EditorElement {
 
                 let mut hunk_hover_top = region_top;
 
-                // The revert button only appears once a hunk is expanded, and
-                // then only while the hunk is hovered. It sits flush against the
-                // right edge of the editor content with no extra margin, and
-                // highlights while the pointer is over the button itself.
-                if hunk.expanded && editor.hovering_inline_diff_hunk == Some(hunk_index) {
+                // Expanded hunks always expose their revert action, aligned
+                // flush with the text column's left edge.
+                if hunk.expanded {
                     let is_revert_hovered =
                         editor.hovering_inline_diff_revert_hunk == Some(hunk_index);
                     let revert_button_font_size =
@@ -7348,10 +7346,7 @@ impl Element for EditorElement {
                             (revert_button_width + stat_leading_gap + stat_width).ceil();
                         let revert_button_height = revert_button_height.ceil();
                         let content_left = editor_left + editor.padding_left();
-                        let content_text_right = content_left + text_width;
-                        let revert_x = (content_text_right - revert_button_width)
-                            .max(content_left)
-                            .round();
+                        let revert_x = content_left.round();
                         let revert_y = (region_top - revert_button_height - revert_button_gap_y)
                             .max(origin_y)
                             .round();
@@ -7408,10 +7403,9 @@ impl Element for EditorElement {
                     }
                 }
 
-                // Full-width hover region that reveals the revert button. The
-                // button is drawn above the diff rows, so include the vertical
-                // gap between the rows and the button; otherwise crossing that
-                // gap clears the hunk hover state and hides the button.
+                // Keep a full-width hunk hover region for pointer feedback. The
+                // always-visible button is drawn above the rows, so include the
+                // vertical gap through the button.
                 inline_diff_hunk_areas_local.push((
                     Bounds::new(
                         point(px(editor_left), px(hunk_hover_top)),

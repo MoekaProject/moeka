@@ -10,6 +10,30 @@ use super::search::{
 };
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceSearchStatus {
+    Empty,
+    Searching,
+    NoResults,
+    Summary,
+}
+
+fn workspace_search_status(
+    query_is_empty: bool,
+    search_running: bool,
+    result_count: usize,
+) -> WorkspaceSearchStatus {
+    if query_is_empty {
+        WorkspaceSearchStatus::Empty
+    } else if search_running {
+        WorkspaceSearchStatus::Searching
+    } else if result_count == 0 {
+        WorkspaceSearchStatus::NoResults
+    } else {
+        WorkspaceSearchStatus::Summary
+    }
+}
+
 impl EditorView {
     pub(crate) fn on_find_in_files(
         &mut self,
@@ -580,268 +604,256 @@ impl EditorView {
         };
         let result_selected_bg = self.styles.sidebar.sidebar_item_selected_bg;
 
-        let mut children: Vec<AnyElement> = Vec::new();
-        children.push(
-            div()
-                .w_full()
-                .p(px(self.scaled(workspace_styles.ws_search_padding_px)))
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(input_height))
-                        .px(px(chrome_padding_x))
-                        .bg(search_bg)
-                        .hover(move |style| style.bg(search_hover_bg))
-                        .border(px(search_border_width))
-                        .border_color(search_border_color)
-                        .rounded(px(self.scaled(workspace_styles.ws_search_input_radius_px)))
-                        .flex()
-                        .items_center()
-                        .gap(px(input_gap))
-                        .child(
-                            div()
-                                .relative()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .h_full()
-                                .when_some(self.workspace_search_editor.clone(), |this, editor| {
-                                    this.child(editor)
-                                })
-                                .child(
+        let input = div()
+            .w_full()
+            .px(px(self.scaled(workspace_styles.ws_search_padding_px)))
+            .pt(px(self.scaled(workspace_styles.ws_search_padding_px)))
+            .pb(px(self.scaled(2.0)))
+            .child(
+                div()
+                    .w_full()
+                    .h(px(input_height))
+                    .px(px(chrome_padding_x))
+                    .bg(search_bg)
+                    .hover(move |style| style.bg(search_hover_bg))
+                    .border(px(search_border_width))
+                    .border_color(search_border_color)
+                    .rounded(px(self.scaled(workspace_styles.ws_search_input_radius_px)))
+                    .flex()
+                    .items_center()
+                    .gap(px(input_gap))
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .when_some(self.workspace_search_editor.clone(), |this, editor| {
+                                this.child(editor)
+                            })
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(input_left))
+                                    .top(px(icon_top))
+                                    .w(px(icon_size))
+                                    .h(px(icon_size))
+                                    .child(
+                                        svg()
+                                            .path(SEARCH_ICON_SVG_PATH)
+                                            .size(px(icon_size))
+                                            .text_color(input_icon_color),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(button_gap))
+                            .child(
+                                self.with_search_tooltip(
                                     div()
-                                        .absolute()
-                                        .left(px(input_left))
-                                        .top(px(icon_top))
-                                        .w(px(icon_size))
-                                        .h(px(icon_size))
+                                        .id("workspace-search-case-btn")
+                                        .w(px(button_size))
+                                        .h(px(button_size))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(button_radius))
+                                        .cursor(CursorStyle::Arrow)
+                                        .when(
+                                            self.workspace_search_case_sensitive,
+                                            |this: gpui::Stateful<gpui::Div>| {
+                                                this.bg(button_active_bg)
+                                            },
+                                        )
+                                        .hover(move |style| style.bg(button_hover_bg))
                                         .child(
                                             svg()
-                                                .path(SEARCH_ICON_SVG_PATH)
-                                                .size(px(icon_size))
-                                                .text_color(input_icon_color),
+                                                .path(SEARCH_CASE_ICON_SVG_PATH)
+                                                .size(px(button_icon_size))
+                                                .text_color(
+                                                    if self.workspace_search_case_sensitive {
+                                                        button_active_icon_color
+                                                    } else {
+                                                        button_icon_color
+                                                    },
+                                                ),
+                                        )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.workspace_search_case_sensitive =
+                                                    !this.workspace_search_case_sensitive;
+                                                this.run_workspace_search(cx);
+                                            }),
                                         ),
+                                    "case",
+                                    Some("⌘⌥C"),
+                                    cx,
                                 ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .gap(px(button_gap))
-                                .child(
-                                    self.with_search_tooltip(
-                                        div()
-                                            .id("workspace-search-case-btn")
-                                            .w(px(button_size))
-                                            .h(px(button_size))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(button_radius))
-                                            .cursor(CursorStyle::Arrow)
-                                            .when(
-                                                self.workspace_search_case_sensitive,
-                                                |this: gpui::Stateful<gpui::Div>| {
-                                                    this.bg(button_active_bg)
-                                                },
-                                            )
-                                            .hover(move |style| style.bg(button_hover_bg))
-                                            .child(
-                                                svg()
-                                                    .path(SEARCH_CASE_ICON_SVG_PATH)
-                                                    .size(px(button_icon_size))
-                                                    .text_color(
-                                                        if self.workspace_search_case_sensitive {
-                                                            button_active_icon_color
-                                                        } else {
-                                                            button_icon_color
-                                                        },
-                                                    ),
-                                            )
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, _, cx| {
-                                                    cx.stop_propagation();
-                                                    this.workspace_search_case_sensitive =
-                                                        !this.workspace_search_case_sensitive;
-                                                    this.run_workspace_search(cx);
+                            )
+                            .child(
+                                self.with_search_tooltip(
+                                    div()
+                                        .id("workspace-search-word-btn")
+                                        .w(px(button_size))
+                                        .h(px(button_size))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(button_radius))
+                                        .cursor(CursorStyle::Arrow)
+                                        .when(
+                                            self.workspace_search_whole_word,
+                                            |this: gpui::Stateful<gpui::Div>| {
+                                                this.bg(button_active_bg)
+                                            },
+                                        )
+                                        .hover(move |style| style.bg(button_hover_bg))
+                                        .child(
+                                            svg()
+                                                .path(SEARCH_WHOLE_WORD_ICON_SVG_PATH)
+                                                .size(px(button_icon_size))
+                                                .text_color(if self.workspace_search_whole_word {
+                                                    button_active_icon_color
+                                                } else {
+                                                    button_icon_color
                                                 }),
-                                            ),
-                                        "case",
-                                        Some("⌘⌥C"),
-                                        cx,
-                                    ),
-                                )
-                                .child(
-                                    self.with_search_tooltip(
-                                        div()
-                                            .id("workspace-search-word-btn")
-                                            .w(px(button_size))
-                                            .h(px(button_size))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(button_radius))
-                                            .cursor(CursorStyle::Arrow)
-                                            .when(
-                                                self.workspace_search_whole_word,
-                                                |this: gpui::Stateful<gpui::Div>| {
-                                                    this.bg(button_active_bg)
-                                                },
-                                            )
-                                            .hover(move |style| style.bg(button_hover_bg))
-                                            .child(
-                                                svg()
-                                                    .path(SEARCH_WHOLE_WORD_ICON_SVG_PATH)
-                                                    .size(px(button_icon_size))
-                                                    .text_color(
-                                                        if self.workspace_search_whole_word {
-                                                            button_active_icon_color
-                                                        } else {
-                                                            button_icon_color
-                                                        },
-                                                    ),
-                                            )
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, _, cx| {
-                                                    cx.stop_propagation();
-                                                    this.workspace_search_whole_word =
-                                                        !this.workspace_search_whole_word;
-                                                    this.run_workspace_search(cx);
-                                                }),
-                                            ),
-                                        "word",
-                                        Some("⌘⌥W"),
-                                        cx,
-                                    ),
-                                )
-                                .child(
-                                    self.with_search_tooltip(
-                                        div()
-                                            .id("workspace-search-regex-btn")
-                                            .w(px(button_size))
-                                            .h(px(button_size))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(button_radius))
-                                            .cursor(CursorStyle::Arrow)
-                                            .when(
-                                                self.workspace_search_use_regex,
-                                                |this: gpui::Stateful<gpui::Div>| {
-                                                    this.bg(button_active_bg)
-                                                },
-                                            )
-                                            .hover(move |style| style.bg(button_hover_bg))
-                                            .child(
-                                                svg()
-                                                    .path(SEARCH_REGEX_ICON_SVG_PATH)
-                                                    .size(px(button_icon_size))
-                                                    .text_color(
-                                                        if self.workspace_search_use_regex {
-                                                            button_active_icon_color
-                                                        } else {
-                                                            button_icon_color
-                                                        },
-                                                    ),
-                                            )
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, _, cx| {
-                                                    cx.stop_propagation();
-                                                    this.workspace_search_use_regex =
-                                                        !this.workspace_search_use_regex;
-                                                    this.run_workspace_search(cx);
-                                                }),
-                                            ),
-                                        "regex",
-                                        Some("⌘⌥R"),
-                                        cx,
-                                    ),
-                                )
-                                .child(
-                                    self.with_search_tooltip(
-                                        div()
-                                            .id("workspace-search-close-btn")
-                                            .w(px(button_size))
-                                            .h(px(button_size))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(button_radius))
-                                            .cursor(CursorStyle::Arrow)
-                                            .hover(move |style| style.bg(button_hover_bg))
-                                            .child(
-                                                svg()
-                                                    .path(SEARCH_CLOSE_ICON_SVG_PATH)
-                                                    .size(px(button_icon_size))
-                                                    .text_color(button_icon_color),
-                                            )
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, window, cx| {
-                                                    cx.stop_propagation();
-                                                    this.close_workspace_search(window, cx);
-                                                }),
-                                            ),
-                                        "close",
-                                        None,
-                                        cx,
-                                    ),
+                                        )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.workspace_search_whole_word =
+                                                    !this.workspace_search_whole_word;
+                                                this.run_workspace_search(cx);
+                                            }),
+                                        ),
+                                    "word",
+                                    Some("⌘⌥W"),
+                                    cx,
                                 ),
-                        ),
-                )
-                .into_any_element(),
-        );
+                            )
+                            .child(
+                                self.with_search_tooltip(
+                                    div()
+                                        .id("workspace-search-regex-btn")
+                                        .w(px(button_size))
+                                        .h(px(button_size))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(button_radius))
+                                        .cursor(CursorStyle::Arrow)
+                                        .when(
+                                            self.workspace_search_use_regex,
+                                            |this: gpui::Stateful<gpui::Div>| {
+                                                this.bg(button_active_bg)
+                                            },
+                                        )
+                                        .hover(move |style| style.bg(button_hover_bg))
+                                        .child(
+                                            svg()
+                                                .path(SEARCH_REGEX_ICON_SVG_PATH)
+                                                .size(px(button_icon_size))
+                                                .text_color(if self.workspace_search_use_regex {
+                                                    button_active_icon_color
+                                                } else {
+                                                    button_icon_color
+                                                }),
+                                        )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.workspace_search_use_regex =
+                                                    !this.workspace_search_use_regex;
+                                                this.run_workspace_search(cx);
+                                            }),
+                                        ),
+                                    "regex",
+                                    Some("⌘⌥R"),
+                                    cx,
+                                ),
+                            )
+                            .child(
+                                self.with_search_tooltip(
+                                    div()
+                                        .id("workspace-search-close-btn")
+                                        .w(px(button_size))
+                                        .h(px(button_size))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(button_radius))
+                                        .cursor(CursorStyle::Arrow)
+                                        .hover(move |style| style.bg(button_hover_bg))
+                                        .child(
+                                            svg()
+                                                .path(SEARCH_CLOSE_ICON_SVG_PATH)
+                                                .size(px(button_icon_size))
+                                                .text_color(button_icon_color),
+                                        )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.close_workspace_search(window, cx);
+                                            }),
+                                        ),
+                                    "close",
+                                    None,
+                                    cx,
+                                ),
+                            ),
+                    ),
+            )
+            .into_any_element();
 
-        if !trimmed_query.is_empty() && self.workspace_search_results.is_empty() {
-            let message = if self.workspace_search_task.is_some() {
-                self.t(crate::i18n::TextKey::Searching)
-            } else {
-                self.t(crate::i18n::TextKey::SearchNoResults)
-            };
-            children.push(
-                div()
-                    .w_full()
-                    .px(px(self.scaled(workspace_styles.ws_search_padding_px)))
-                    .py(px(self.scaled(8.0)))
-                    .text_size(px(
-                        self.scaled(workspace_styles.ws_search_summary_font_size_px)
-                    ))
-                    .opacity(0.6)
-                    .text_color(workspace_styles.ws_search_summary_text_color)
-                    .child(message)
-                    .into_any_element(),
-            );
-        } else if !trimmed_query.is_empty() {
-            let total_matches: usize = self
-                .workspace_search_results
-                .iter()
-                .map(|result| result.matches.len())
-                .sum();
-            let file_count = self.workspace_search_results.len();
-            let summary_text = if self.workspace_search_task.is_some()
-                || self.workspace_search_has_more
-            {
-                crate::i18n::workspace_search_progress(self.ui_language, total_matches, file_count)
-            } else {
+        let total_matches: usize = self
+            .workspace_search_results
+            .iter()
+            .map(|result| result.matches.len())
+            .sum();
+        let file_count = self.workspace_search_results.len();
+        let status_text = match workspace_search_status(
+            trimmed_query.is_empty(),
+            self.workspace_search_task.is_some(),
+            file_count,
+        ) {
+            WorkspaceSearchStatus::Empty => String::new(),
+            WorkspaceSearchStatus::Searching => self.t(crate::i18n::TextKey::Searching).to_string(),
+            WorkspaceSearchStatus::NoResults => {
+                self.t(crate::i18n::TextKey::SearchNoResults).to_string()
+            }
+            WorkspaceSearchStatus::Summary => {
                 crate::i18n::workspace_search_summary(self.ui_language, total_matches, file_count)
-            };
-            children.push(
-                div()
-                    .w_full()
-                    .px(px(self.scaled(workspace_styles.ws_search_padding_px)))
-                    .py(px(self.scaled(4.0)))
-                    .text_size(px(
-                        self.scaled(workspace_styles.ws_search_summary_font_size_px)
-                    ))
-                    .opacity(0.6)
-                    .text_color(workspace_styles.ws_search_summary_text_color)
-                    .child(summary_text)
-                    .into_any_element(),
-            );
+            }
+        };
+        let status = div()
+            .w_full()
+            .h(px(self.scaled(workspace_styles.ws_search_summary_height_px)))
+            .mb(px(self.scaled(
+                workspace_styles.ws_search_summary_margin_bottom_px,
+            )))
+            .flex_none()
+            .px(px(self.scaled(workspace_styles.ws_search_padding_px)))
+            .flex()
+            .items_center()
+            .text_size(px(
+                self.scaled(workspace_styles.ws_search_summary_font_size_px)
+            ))
+            .opacity(0.6)
+            .text_color(workspace_styles.ws_search_summary_text_color)
+            .child(status_text)
+            .into_any_element();
 
+        let mut result_children: Vec<AnyElement> = Vec::new();
+        if !trimmed_query.is_empty() && !self.workspace_search_results.is_empty() {
             let mut remaining_rows = self.workspace_search_render_limit;
             let mut match_index = 0usize;
             'files: for result in &self.workspace_search_results {
@@ -869,7 +881,7 @@ impl EditorView {
                     .filter(|parent| !parent.is_empty() && parent != ".");
                 let match_count = result.matches.len();
 
-                children.push(
+                result_children.push(
                     div()
                         .w_full()
                         .h(px(
@@ -961,7 +973,7 @@ impl EditorView {
                         workspace_styles.ws_search_match_font_size_px,
                     );
 
-                    children.push(
+                    result_children.push(
                         div()
                             .id(gpui::SharedString::from(format!(
                                 "ws-match-{}-{}-{}",
@@ -1050,13 +1062,24 @@ impl EditorView {
             .key_context("SearchBar")
             .id("workspace-search-panel")
             .flex_1()
-            .overflow_y_scroll()
-            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                this.reveal_panel_scrollbar(PanelScrollbarKind::Sidebar, cx);
-                this.maybe_extend_workspace_search_results(cx);
-            }))
-            .track_scroll(&self.workspace_search_scroll_handle)
-            .children(children)
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .child(input)
+            .child(status)
+            .child(
+                div()
+                    .id("workspace-search-results")
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                        this.reveal_panel_scrollbar(PanelScrollbarKind::Sidebar, cx);
+                        this.maybe_extend_workspace_search_results(cx);
+                    }))
+                    .track_scroll(&self.workspace_search_scroll_handle)
+                    .children(result_children),
+            )
             .into_any_element()
     }
 
@@ -1102,6 +1125,31 @@ impl EditorView {
             matched,
             format!("{}{}", &line_text[end..after_end], after_suffix),
         )
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::{WorkspaceSearchStatus, workspace_search_status};
+
+    #[test]
+    fn search_statuses_are_mutually_exclusive() {
+        assert_eq!(
+            workspace_search_status(true, false, 0),
+            WorkspaceSearchStatus::Empty
+        );
+        assert_eq!(
+            workspace_search_status(false, true, 4),
+            WorkspaceSearchStatus::Searching
+        );
+        assert_eq!(
+            workspace_search_status(false, false, 0),
+            WorkspaceSearchStatus::NoResults
+        );
+        assert_eq!(
+            workspace_search_status(false, false, 4),
+            WorkspaceSearchStatus::Summary
+        );
     }
 }
 

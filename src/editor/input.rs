@@ -743,6 +743,7 @@ impl EditorView {
         self.cursor.offset = target_offset;
         self.pending_scroll_to_cursor = false;
         self.pending_center_cursor_in_view = false;
+        self.pending_center_cursor_in_view_immediately = false;
         self.pending_preview_reveal = Some(PendingPreviewReveal {
             scroll_offset: preserve_scroll,
         });

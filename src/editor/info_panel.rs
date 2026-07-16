@@ -41,6 +41,7 @@ struct PendingGitDiffRow {
 struct InfoPanelRow {
     label: String,
     value: String,
+    tooltip: Option<String>,
 }
 
 #[derive(Clone)]
@@ -64,6 +65,15 @@ struct InfoPanelReferenceItem {
 enum InfoPanelShareAction {
     RevealPath(PathBuf),
     OpenUrl(String),
+}
+
+impl InfoPanelShareAction {
+    fn tooltip_key(&self) -> crate::i18n::TextKey {
+        match self {
+            Self::RevealPath(_) => crate::i18n::TextKey::RevealInFinder,
+            Self::OpenUrl(_) => crate::i18n::TextKey::OpenLink,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -2693,14 +2703,14 @@ impl EditorView {
             .or_else(|| path.map(|path| path.to_string_lossy().into_owned()))
             .unwrap_or_else(|| self.t(crate::i18n::TextKey::Unsaved).to_string());
         let metadata = path.and_then(|path| fs::metadata(path).ok());
-        let created_at = metadata
+        let created_time = metadata
             .as_ref()
-            .and_then(|meta| meta.created().or_else(|_| meta.modified()).ok())
+            .and_then(|meta| meta.created().or_else(|_| meta.modified()).ok());
+        let created_at = created_time
             .map(|time| crate::i18n::format_relative_time(self.ui_language, time))
             .unwrap_or_else(|| self.t(crate::i18n::TextKey::Unavailable).to_string());
-        let modified_at = metadata
-            .as_ref()
-            .and_then(|meta| meta.modified().ok())
+        let modified_time = metadata.as_ref().and_then(|meta| meta.modified().ok());
+        let modified_at = modified_time
             .map(|time| crate::i18n::format_relative_time(self.ui_language, time))
             .unwrap_or_else(|| self.t(crate::i18n::TextKey::Unavailable).to_string());
 
@@ -2747,26 +2757,36 @@ impl EditorView {
                         .filter(|name| !name.is_empty())
                         .map(ToString::to_string)
                         .unwrap_or(relative_path),
+                    tooltip: None,
                 },
                 InfoPanelRow {
                     label: self.t(crate::i18n::TextKey::InfoCreated).to_string(),
                     value: created_at,
+                    tooltip: created_time.map(|time| {
+                        self.detailed_time_label(crate::i18n::TextKey::InfoCreated, time)
+                    }),
                 },
                 InfoPanelRow {
                     label: self.t(crate::i18n::TextKey::InfoModified).to_string(),
                     value: modified_at,
+                    tooltip: modified_time.map(|time| {
+                        self.detailed_time_label(crate::i18n::TextKey::InfoModified, time)
+                    }),
                 },
                 InfoPanelRow {
                     label: self.t(crate::i18n::TextKey::InfoSize).to_string(),
                     value: format_file_size(file_size),
+                    tooltip: None,
                 },
                 InfoPanelRow {
                     label: self.t(crate::i18n::TextKey::InfoWords).to_string(),
                     value: word_count.to_string(),
+                    tooltip: None,
                 },
                 InfoPanelRow {
                     label: self.t(crate::i18n::TextKey::InfoLines).to_string(),
                     value: line_count.to_string(),
+                    tooltip: None,
                 },
             ],
             attachment_items,
@@ -2973,8 +2993,28 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn render_info_row(&self, row: &InfoPanelRow) -> AnyElement {
+    fn render_info_row(&self, row: &InfoPanelRow, cx: &mut Context<Self>) -> AnyElement {
         let ups = &self.styles.utility_panel;
+        let value = div()
+            .flex_none()
+            .ml_auto()
+            .text_color(ups.utility_panel_item_value_text_color)
+            .text_right()
+            .max_w(px(self.utility_panel_layout_width() * 0.6))
+            .overflow_hidden()
+            .truncate()
+            .whitespace_nowrap()
+            .child(SharedString::from(row.value.clone()));
+        let value = if let Some(tooltip) = row.tooltip.as_ref() {
+            tooltip::with_tooltip(
+                value,
+                cx.entity().clone(),
+                tooltip.clone(),
+                None::<&'static str>,
+            )
+        } else {
+            value.into_any_element()
+        };
         div()
             .px(px(self.scaled(ups.utility_panel_section_padding_x_px)))
             .min_h(px(self.scaled(ups.utility_panel_item_height_px)))
@@ -2994,18 +3034,7 @@ impl EditorView {
                     .text_color(ups.utility_panel_item_label_text_color)
                     .child(SharedString::from(row.label.clone())),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .ml_auto()
-                    .text_color(ups.utility_panel_item_value_text_color)
-                    .text_right()
-                    .max_w(px(self.utility_panel_layout_width() * 0.6))
-                    .overflow_hidden()
-                    .truncate()
-                    .whitespace_nowrap()
-                    .child(SharedString::from(row.value.clone())),
-            )
+            .child(value)
             .into_any_element()
     }
 
@@ -3069,6 +3098,7 @@ impl EditorView {
     ) -> AnyElement {
         let ups = &self.styles.utility_panel;
         let share_action = item.share_action.clone();
+        let share_tooltip = self.t(item.share_action.tooltip_key());
         let source_line = item.source_line;
         let icon_size = self.scaled(ups.utility_panel_item_font_size_px);
         let share_icon_color = if self.theme_kind.is_dark() {
@@ -3132,7 +3162,7 @@ impl EditorView {
                             .text_color(share_icon_color),
                     ),
                 cx.entity().clone(),
-                self.t(crate::i18n::TextKey::RevealInFinder),
+                share_tooltip,
                 None::<&'static str>,
             ))
             .into_any_element()
@@ -3341,7 +3371,7 @@ impl EditorView {
             ));
             content_y += section_title_height;
             for row in &data.primary_rows {
-                children.push(self.render_info_row(row));
+                children.push(self.render_info_row(row, cx));
             }
             content_y += data.primary_rows.len() as f32 * item_height;
 
@@ -3622,9 +3652,10 @@ impl EditorView {
 #[cfg(test)]
 mod tests {
     use super::{
-        GitDiffRow, GitDiffRowKind, InfoPanelReferenceTarget, build_git_diff_rows,
-        build_git_diff_snapshot_text, build_html_document, external_reference_host,
-        fallback_reference_label, path_reference_name, reference_scheme, visible_git_diff_rows,
+        GitDiffRow, GitDiffRowKind, InfoPanelReferenceTarget, InfoPanelShareAction,
+        build_git_diff_rows, build_git_diff_snapshot_text, build_html_document,
+        external_reference_host, fallback_reference_label, path_reference_name, reference_scheme,
+        visible_git_diff_rows,
     };
     use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
     use std::{fs, path::PathBuf, process::Command, time::SystemTime};
@@ -3840,6 +3871,18 @@ mod tests {
         assert_eq!(
             fallback_reference_label("", "/tmp/path/to/file.ext", &target),
             "file.ext"
+        );
+    }
+
+    #[test]
+    fn reference_action_tooltips_match_target_type() {
+        assert_eq!(
+            InfoPanelShareAction::RevealPath(PathBuf::from("/tmp/file.md")).tooltip_key(),
+            crate::i18n::TextKey::RevealInFinder
+        );
+        assert_eq!(
+            InfoPanelShareAction::OpenUrl("https://example.com".to_string()).tooltip_key(),
+            crate::i18n::TextKey::OpenLink
         );
     }
 

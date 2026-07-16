@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use gpui::{
@@ -4190,7 +4190,7 @@ pub(crate) fn is_remote_image_url(path: &str) -> bool {
 /// 3. Home-relative paths (~/...)
 /// 4. Relative paths resolved against the current file's parent directory
 /// 5. Relative paths resolved against each workspace root
-fn resolve_image_to_path(
+pub(crate) fn resolve_image_to_path(
     raw: &str,
     file_dir: Option<&PathBuf>,
     workspace_roots: &[PathBuf],
@@ -4199,7 +4199,7 @@ fn resolve_image_to_path(
     let path_str = if let Some(stripped) = raw.strip_prefix("file://") {
         percent_decode_path(stripped)
     } else {
-        raw.to_string()
+        percent_decode_path(raw)
     };
 
     let path_str = path_str.as_str();
@@ -4218,12 +4218,13 @@ fn resolve_image_to_path(
     // If the path happens to be absolute (e.g. from file:// or ~/ expansion),
     // just check existence.
     if expanded.is_absolute() {
+        let expanded = normalize_image_path(&expanded);
         return expanded.exists().then_some(expanded);
     }
 
     // Relative to current file's directory
     if let Some(dir) = file_dir {
-        let candidate = dir.join(&expanded);
+        let candidate = normalize_image_path(&dir.join(&expanded));
         if candidate.exists() {
             return Some(candidate);
         }
@@ -4231,7 +4232,7 @@ fn resolve_image_to_path(
 
     // Relative to workspace roots
     for root in workspace_roots {
-        let candidate = root.join(&expanded);
+        let candidate = normalize_image_path(&root.join(&expanded));
         if candidate.exists() {
             return Some(candidate);
         }
@@ -4240,10 +4241,49 @@ fn resolve_image_to_path(
     None
 }
 
+fn normalize_image_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
 fn percent_decode_path(s: &str) -> String {
     percent_encoding::percent_decode_str(s)
         .decode_utf8_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod image_path_tests {
+    use super::resolve_image_to_path;
+
+    #[test]
+    fn resolves_percent_encoded_markdown_image_path() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let notes = workspace.path().join("notes");
+        let images = workspace.path().join("images");
+        std::fs::create_dir_all(&notes).expect("notes");
+        std::fs::create_dir_all(&images).expect("images");
+        let image = images.join("示例 image.png");
+        std::fs::write(&image, b"image").expect("image");
+
+        assert_eq!(
+            resolve_image_to_path(
+                "../images/%E7%A4%BA%E4%BE%8B%20image.png",
+                Some(&notes),
+                &[workspace.path().to_path_buf()],
+            ),
+            Some(image),
+        );
+    }
 }
 
 /// Load an image from any supported path/URL format.

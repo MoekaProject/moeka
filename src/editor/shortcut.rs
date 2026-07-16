@@ -439,7 +439,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         quick_open_title,
     ),
     command(CommandId::Save, TextKey::Save, "File", "⌘S", false),
-    command_without_shortcut(CommandId::SaveAs, TextKey::SaveFileDialog, "File", false),
+    command_without_shortcut(CommandId::SaveAs, TextKey::SaveAs, "File", false),
     command(
         CommandId::OpenSettings,
         TextKey::SettingsTitle,

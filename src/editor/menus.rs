@@ -1,3 +1,4 @@
+use std::io::Cursor;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -293,6 +294,10 @@ impl EditorView {
             cx.notify();
             return;
         };
+        self.copy_image_path_to_clipboard(&path, cx);
+    }
+
+    fn copy_image_path_to_clipboard(&mut self, path: &Path, cx: &mut Context<Self>) {
         let ext = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -302,6 +307,9 @@ impl EditorView {
             Some("jpg" | "jpeg") => Some(ImageFormat::Jpeg),
             Some("webp") => Some(ImageFormat::Webp),
             Some("gif") => Some(ImageFormat::Gif),
+            Some("svg") => Some(ImageFormat::Svg),
+            Some("bmp") => Some(ImageFormat::Bmp),
+            Some("tif" | "tiff") => Some(ImageFormat::Tiff),
             _ => None,
         };
         if let Some(format) = format
@@ -312,13 +320,38 @@ impl EditorView {
             cx.notify();
             return;
         }
-        if ext.as_deref() == Some("svg")
-            && let Ok(svg) = std::fs::read_to_string(&path)
+        if let Ok(bytes) = std::fs::read(path)
+            && let Ok(decoded) = image::load_from_memory(&bytes)
         {
-            self.copy_text_to_clipboard(svg, cx);
-            return;
+            let mut png = Cursor::new(Vec::new());
+            if decoded.write_to(&mut png, image::ImageFormat::Png).is_ok() {
+                self.context_menu = None;
+                cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+                    ImageFormat::Png,
+                    png.into_inner(),
+                )));
+                cx.notify();
+                return;
+            }
         }
         self.copy_text_to_clipboard(path.to_string_lossy().into_owned(), cx);
+    }
+
+    fn current_markdown_image_path(&self) -> Option<PathBuf> {
+        let target = self.current_image_menu_target()?;
+        let raw_path = self.decorations.get(target.line)?.image_path.as_ref()?;
+        if helpers::is_remote_image_url(raw_path) {
+            return None;
+        }
+        let file_dir = self
+            .current_file_path
+            .as_ref()
+            .and_then(|path| path.parent().map(Path::to_path_buf));
+        let mut roots = self.workspaces.clone();
+        if !self.sidebar_root.as_os_str().is_empty() && !roots.contains(&self.sidebar_root) {
+            roots.push(self.sidebar_root.clone());
+        }
+        helpers::resolve_image_to_path(raw_path, file_dir.as_ref(), &roots)
     }
 
     fn context_menu_icon_path(&self, label: &str) -> Option<&'static str> {
@@ -2660,35 +2693,46 @@ impl EditorView {
         })
         .collect();
 
-        if let Some(target) = self.current_image_menu_target()
-            && let Some(raw_image_path) = self
-                .decorations
-                .get(target.line)
-                .and_then(|decoration| decoration.image_path.as_ref())
-            && !helpers::is_remote_image_url(raw_image_path)
-        {
-            let reveal_path = if let Some(stripped) = raw_image_path.strip_prefix("file://") {
-                PathBuf::from(stripped)
-            } else {
-                let image_path = PathBuf::from(raw_image_path);
-                if image_path.is_absolute() {
-                    image_path
-                } else if let Some(file_dir) = self
-                    .current_file_path
-                    .as_ref()
-                    .and_then(|path| path.parent().map(PathBuf::from))
-                {
-                    file_dir.join(image_path)
-                } else {
-                    self.sidebar_root.join(image_path)
-                }
-            };
+        if let Some(image_path) = self.current_markdown_image_path() {
+            if self.workspace_root_for_path(&image_path).is_some() {
+                let reveal_path = image_path.clone();
+                let label = self.t(crate::i18n::TextKey::RevealInFileTree).to_string();
+                items.push(self.render_format_context_menu_item(
+                    &label,
+                    Some(MENU_LOCATE_SVG_PATH),
+                    None,
+                    false,
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.reveal_path_in_sidebar(reveal_path.clone(), cx);
+                    },
+                ));
+            }
 
-            if reveal_path.exists() {
+            {
+                let copy_path = image_path.clone();
+                let label = self.t(crate::i18n::TextKey::CopyToClipboard).to_string();
+                items.push(self.render_format_context_menu_item(
+                    &label,
+                    Some(MENU_COPY_SVG_PATH),
+                    None,
+                    false,
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.copy_image_path_to_clipboard(&copy_path, cx);
+                    },
+                ));
+            }
+
+            {
+                let reveal_path = image_path;
                 let label = self.t(crate::i18n::TextKey::RevealInFinder).to_string();
                 items.push(self.render_format_context_menu_item(
                     &label,
-                    None,
+                    Some(MENU_LOCATE_SVG_PATH),
                     None,
                     false,
                     false,

@@ -1155,6 +1155,8 @@ pub struct WorkspaceSearchStyles {
     pub ws_search_progress_height_px: f32,
     pub ws_search_progress_color: Hsla,
     // Summary
+    pub ws_search_summary_height_px: f32,
+    pub ws_search_summary_margin_bottom_px: f32,
     pub ws_search_summary_font_size_px: f32,
     pub ws_search_summary_text_color: Hsla,
     // Sidebar search icon button
@@ -1823,7 +1825,7 @@ impl Styles {
                 tooltip_radius_px: 8.0,
                 tooltip_border_width_px: 1.0,
                 tooltip_bg: with_alpha(ui_theme.bg_elevated, 0.96),
-                tooltip_border_color: with_alpha(ui_theme.border_primary, 0.7),
+                tooltip_border_color: with_alpha(ui_theme.border_primary, 0.32),
                 tooltip_title_font_size_px: ui_font_size_sm_px,
                 tooltip_title_text_color: ui_theme.text_primary,
                 tooltip_subtitle_font_size_px: ui_font_size_xs_px,
@@ -2333,6 +2335,8 @@ impl Styles {
                 ws_search_match_active_bg: sidebar_theme.bg_selected,
                 ws_search_progress_height_px: 2.0,
                 ws_search_progress_color: sidebar_theme.text_accent,
+                ws_search_summary_height_px: 22.0,
+                ws_search_summary_margin_bottom_px: 4.0,
                 ws_search_summary_font_size_px: ui_font_size_xs_px,
                 ws_search_summary_text_color: sidebar_theme.text_secondary,
                 ws_search_btn_size_px: 22.0,
