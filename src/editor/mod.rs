@@ -7924,7 +7924,7 @@ fn normalize_ordered_list_numbers_in_buffer(buffer: &mut Buffer) -> Option<(usiz
 pub(crate) fn is_markdown_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown" | "mdx"))
 }
 
 pub(crate) fn is_image_file(path: &Path) -> bool {
@@ -8040,7 +8040,7 @@ pub(crate) fn file_kind_badge_text_for_name(name: &str) -> Option<String> {
         .extension()
         .and_then(|ext| ext.to_str())
         .filter(|ext| !ext.is_empty())?;
-    if matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown") {
+    if matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown" | "mdx") {
         None
     } else {
         Some(ext.to_ascii_uppercase())
@@ -8886,14 +8886,27 @@ pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
-        compute_incremental_markdown_decorations, generated_preview_intersects_range,
-        heading_matches_anchor, line_display_transfer_line_bounds,
-        normalize_ordered_list_numbers_in_buffer, resolve_markdown_target_path,
-        split_markdown_target, text_tab_is_dirty, unique_import_path,
+        classify_file_kind_for_bytes, compute_incremental_markdown_decorations,
+        generated_preview_intersects_range, heading_matches_anchor,
+        line_display_transfer_line_bounds, normalize_ordered_list_numbers_in_buffer,
+        resolve_markdown_target_path, split_markdown_target, text_tab_is_dirty, unique_import_path,
     };
     use crate::buffer::Buffer;
     use crate::markdown::parse_decorations;
+
+    #[test]
+    fn markdown_extensions_include_mdx() {
+        for path in ["note.md", "note.markdown", "note.mdx", "NOTE.MDX"] {
+            assert_eq!(
+                classify_file_kind_for_bytes(Path::new(path), b"# document"),
+                super::FileKind::Markdown,
+                "{path}",
+            );
+        }
+    }
 
     #[test]
     fn generated_previews_render_only_when_they_intersect_the_viewport() {

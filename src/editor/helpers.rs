@@ -1686,7 +1686,7 @@ fn syntax_lookup_candidates(language: &str) -> Vec<String> {
         "lua" => {
             push_syntax_candidate(&mut candidates, "Lua");
         }
-        "md" | "markdown" => {
+        "md" | "markdown" | "mdx" => {
             push_syntax_candidate(&mut candidates, "markdown");
             push_syntax_candidate(&mut candidates, "Markdown");
         }

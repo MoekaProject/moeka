@@ -15,8 +15,12 @@ mod theme;
 use crate::i18n::system_application_display_name;
 use std::borrow::Cow;
 #[cfg(target_os = "macos")]
+use std::cell::RefCell;
+#[cfg(target_os = "macos")]
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::rc::Rc;
 #[cfg(target_os = "macos")]
 use std::sync::Once;
 use std::sync::OnceLock;
@@ -100,6 +104,35 @@ fn build_runtime_search_roots() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
+fn macos_markdown_path_from_url(url: &str) -> Option<PathBuf> {
+    let encoded_path = url.strip_prefix("file://")?;
+    let encoded_path = encoded_path
+        .strip_prefix("localhost")
+        .unwrap_or(encoded_path);
+    if !encoded_path.starts_with('/') {
+        return None;
+    }
+    let decoded = percent_encoding::percent_decode_str(encoded_path)
+        .decode_utf8()
+        .ok()?;
+    let path = PathBuf::from(decoded.as_ref());
+    if !editor::is_markdown_file(&path) || !path.is_file() {
+        return None;
+    }
+    std::fs::canonicalize(&path).ok().or(Some(path))
+}
+
+#[cfg(target_os = "macos")]
+fn open_markdown_paths(editor: &Entity<EditorView>, paths: Vec<PathBuf>, cx: &mut App) {
+    let path_count = paths.len();
+    editor.update(cx, |editor, cx| {
+        for (index, path) in paths.into_iter().enumerate() {
+            editor.open_path_in_permanent_tab(path, index + 1 == path_count, cx);
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn class_replaceMethod(
         cls: *mut objc::runtime::Class,
@@ -163,7 +196,47 @@ fn disable_gpui_content_view_window_drag(ns_view: *mut objc::runtime::Object) {
 }
 
 fn main() {
-    Application::new().with_assets(FsAssets).run(|cx| {
+    #[cfg(target_os = "macos")]
+    let pending_open_paths = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+    #[cfg(target_os = "macos")]
+    let editor_for_open_urls = Rc::new(RefCell::new(None::<Entity<EditorView>>));
+    #[cfg(target_os = "macos")]
+    let async_app_for_open_urls = Rc::new(RefCell::new(None::<AsyncApp>));
+
+    let application = Application::new().with_assets(FsAssets);
+    #[cfg(target_os = "macos")]
+    {
+        let pending_open_paths = pending_open_paths.clone();
+        let editor_for_open_urls = editor_for_open_urls.clone();
+        let async_app_for_open_urls = async_app_for_open_urls.clone();
+        application.on_open_urls(move |urls| {
+            let paths = urls
+                .into_iter()
+                .filter_map(|url| macos_markdown_path_from_url(&url))
+                .collect::<Vec<_>>();
+            if paths.is_empty() {
+                return;
+            }
+
+            let editor = editor_for_open_urls.borrow().clone();
+            let async_app = async_app_for_open_urls.borrow().clone();
+            if let (Some(editor), Some(async_app)) = (editor, async_app) {
+                async_app
+                    .spawn(async move |cx| {
+                        let _ = cx.update(|cx| open_markdown_paths(&editor, paths, cx));
+                    })
+                    .detach();
+            } else {
+                pending_open_paths.borrow_mut().extend(paths);
+            }
+        });
+    }
+
+    application.run(move |cx| {
+        #[cfg(target_os = "macos")]
+        {
+            *async_app_for_open_urls.borrow_mut() = Some(cx.to_async());
+        }
         cx.bind_keys([
             KeyBinding::new("cmd-z", Undo, Some("MarkdownEditor")),
             KeyBinding::new("cmd-shift-z", Redo, Some("MarkdownEditor")),
@@ -434,6 +507,11 @@ fn main() {
         editor::register_keybinding_overrides(cx);
         editor::set_application_menus(cx);
 
+        #[cfg(target_os = "macos")]
+        let editor_for_window = editor_for_open_urls.clone();
+        #[cfg(target_os = "macos")]
+        let pending_paths_for_window = pending_open_paths.clone();
+
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -484,13 +562,59 @@ fn main() {
                         }
                     }
                 }
-                cx.new(|cx| {
+                let view = cx.new(|cx| {
                     let view = EditorView::new(cx);
                     window.focus(&view.focus_handle(cx));
                     view
-                })
+                });
+                #[cfg(target_os = "macos")]
+                {
+                    *editor_for_window.borrow_mut() = Some(view.clone());
+                    let pending_paths = std::mem::take(&mut *pending_paths_for_window.borrow_mut());
+                    if !pending_paths.is_empty() {
+                        open_markdown_paths(&view, pending_paths, cx);
+                    }
+                }
+                view
             },
         )
         .expect("failed to open main window");
     });
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_file_open_tests {
+    use super::macos_markdown_path_from_url;
+
+    #[test]
+    fn decodes_markdown_file_urls_with_spaces_and_unicode() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("示例 note.mdx");
+        std::fs::write(&path, "# MDX").expect("write mdx");
+        let encoded_path = path
+            .to_string_lossy()
+            .replace(' ', "%20")
+            .replace("示例", "%E7%A4%BA%E4%BE%8B");
+
+        assert_eq!(
+            macos_markdown_path_from_url(&format!("file://{encoded_path}")),
+            std::fs::canonicalize(path).ok(),
+        );
+    }
+
+    #[test]
+    fn rejects_non_markdown_file_urls() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("notes.txt");
+        std::fs::write(&path, "notes").expect("write text");
+
+        assert_eq!(
+            macos_markdown_path_from_url(&format!("file://{}", path.display())),
+            None,
+        );
+        assert_eq!(
+            macos_markdown_path_from_url("https://example.com/a.md"),
+            None
+        );
+    }
 }
