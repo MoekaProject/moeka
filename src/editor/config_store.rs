@@ -223,6 +223,7 @@ mod tests {
             attachment_location: "current_file".to_string(),
             attachment_folder: "attachments".to_string(),
             terminal_cursor_shape: "bar".to_string(),
+            terminal_copy_on_select: false,
             date_time_format: "%Y-%m-%d %H:%M".to_string(),
             starred_files: Vec::new(),
             keybindings: std::collections::BTreeMap::new(),
@@ -293,6 +294,7 @@ mod tests {
             loaded.settings.terminal_cursor_shape,
             AppSettings::default().terminal_cursor_shape
         );
+        assert!(loaded.settings.terminal_copy_on_select);
         assert_eq!(loaded.workspaces.roots, vec![PathBuf::from("/tmp/demo")]);
         assert_eq!(loaded.schema_version, CONFIG_SCHEMA_VERSION);
     }

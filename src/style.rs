@@ -967,15 +967,10 @@ pub struct ContextMenuStyles {
 // ── Workspace Switcher ──────────────────────────────────────────────
 
 pub struct WorkspaceSwitcherStyles {
-    pub ws_bar_height_px: f32,
     pub ws_bar_bg: Hsla,
     pub ws_bar_border_color: Hsla,
     pub ws_bar_padding_x_px: f32,
     pub ws_bar_gap_px: f32,
-    pub ws_bar_icon_size_px: f32,
-    pub ws_bar_icon_color: Hsla,
-    pub ws_bar_font_size_px: f32,
-    pub ws_bar_text_color: Hsla,
     pub ws_bar_hover_bg: Hsla,
     // Workspace menu items
     pub ws_menu_width_px: f32,
@@ -1264,7 +1259,8 @@ impl Styles {
         let ui_font_size_sm_px = ui_font_size_px - 1.0;
         let ui_font_size_xs_px = ui_font_size_px - 2.0;
         let ui_font_size_lg_px = ui_font_size_px + 1.0;
-        let editor_body_font_size_px = 15.0;
+        let editor_body_font_size_px = 14.0;
+        let editor_heading_base_font_size_px = 15.0;
 
         let is_light = theme.bg_primary.l >= 0.5;
         let sidebar_theme = ui_theme;
@@ -1319,12 +1315,12 @@ impl Styles {
             },
             editor: EditorStyles {
                 editor_font_size_px: editor_body_font_size_px,
-                editor_h1_font_size_px: editor_body_font_size_px * 1.4,
-                editor_h2_font_size_px: editor_body_font_size_px * 1.3,
-                editor_h3_font_size_px: editor_body_font_size_px * 1.2,
-                editor_h4_font_size_px: editor_body_font_size_px * 1.1,
-                editor_h5_font_size_px: editor_body_font_size_px * 1.05,
-                editor_h6_font_size_px: editor_body_font_size_px * 1.0,
+                editor_h1_font_size_px: editor_heading_base_font_size_px * 1.4,
+                editor_h2_font_size_px: editor_heading_base_font_size_px * 1.3,
+                editor_h3_font_size_px: editor_heading_base_font_size_px * 1.2,
+                editor_h4_font_size_px: editor_heading_base_font_size_px * 1.1,
+                editor_h5_font_size_px: editor_heading_base_font_size_px * 1.05,
+                editor_h6_font_size_px: editor_heading_base_font_size_px,
                 editor_paragraph_line_height_factor: 1.5,
                 editor_heading_line_height_factor: 1.5,
                 editor_letter_spacing_px: 0.0,
@@ -2158,15 +2154,10 @@ impl Styles {
                 notification_max_visible: 4,
             },
             workspace_switcher: WorkspaceSwitcherStyles {
-                ws_bar_height_px: 32.0,
                 ws_bar_bg: gpui::transparent_black(),
                 ws_bar_border_color: sidebar_theme.border_secondary,
                 ws_bar_padding_x_px: 14.0,
                 ws_bar_gap_px: 6.0,
-                ws_bar_icon_size_px: 18.0,
-                ws_bar_icon_color: sidebar_theme.text_secondary,
-                ws_bar_font_size_px: ui_font_size_px,
-                ws_bar_text_color: sidebar_theme.text_secondary,
                 ws_bar_hover_bg: sidebar_theme.bg_hover,
                 ws_menu_width_px: 220.0,
                 ws_menu_item_check_size_px: 12.0,
@@ -2419,6 +2410,17 @@ impl Styles {
 mod tests {
     use super::Styles;
     use crate::theme::Theme;
+
+    #[test]
+    fn editor_body_is_one_point_smaller_without_changing_heading_sizes() {
+        let theme = Theme::one_dark();
+        let styles = Styles::from_theme(&theme, &theme);
+
+        assert_eq!(styles.editor.editor_font_size_px, 14.0);
+        assert_eq!(styles.editor.editor_h1_font_size_px, 21.0);
+        assert_eq!(styles.editor.editor_h2_font_size_px, 19.5);
+        assert_eq!(styles.editor.editor_h6_font_size_px, 15.0);
+    }
 
     #[test]
     fn quote_block_padding_matches_code_block_left_padding() {

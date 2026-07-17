@@ -1301,6 +1301,7 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         UiLanguage::ChineseSimplified => match key {
             "section" => "终端",
             "cursor_shape" => "光标样式",
+            "copy_on_select" => "选中文本以复制",
             "search_cursor_shapes" => "搜索光标样式",
             "block" => "块状",
             "underline" => "下划线",
@@ -1311,6 +1312,7 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         UiLanguage::ChineseTraditional => match key {
             "section" => "終端",
             "cursor_shape" => "游標樣式",
+            "copy_on_select" => "選取文字時複製",
             "search_cursor_shapes" => "搜尋游標樣式",
             "block" => "區塊",
             "underline" => "底線",
@@ -1321,6 +1323,7 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         UiLanguage::Japanese => match key {
             "section" => "ターミナル",
             "cursor_shape" => "カーソル形状",
+            "copy_on_select" => "選択したテキストをコピー",
             "search_cursor_shapes" => "カーソル形状を検索",
             "block" => "ブロック",
             "underline" => "下線",
@@ -1331,6 +1334,7 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         UiLanguage::Korean => match key {
             "section" => "터미널",
             "cursor_shape" => "커서 모양",
+            "copy_on_select" => "선택한 텍스트 복사",
             "search_cursor_shapes" => "커서 모양 검색",
             "block" => "블록",
             "underline" => "밑줄",
@@ -1341,6 +1345,7 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         UiLanguage::French => match key {
             "section" => "Terminal",
             "cursor_shape" => "Forme du curseur",
+            "copy_on_select" => "Copier le texte sélectionné",
             "search_cursor_shapes" => "Rechercher une forme de curseur",
             "block" => "Bloc",
             "underline" => "Souligné",
@@ -1351,6 +1356,7 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         UiLanguage::German => match key {
             "section" => "Terminal",
             "cursor_shape" => "Cursorform",
+            "copy_on_select" => "Ausgewählten Text kopieren",
             "search_cursor_shapes" => "Cursorform suchen",
             "block" => "Block",
             "underline" => "Unterstrich",
@@ -1361,6 +1367,7 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         UiLanguage::Spanish => match key {
             "section" => "Terminal",
             "cursor_shape" => "Forma del cursor",
+            "copy_on_select" => "Copiar texto seleccionado",
             "search_cursor_shapes" => "Buscar forma del cursor",
             "block" => "Bloque",
             "underline" => "Subrayado",
@@ -1371,6 +1378,7 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         UiLanguage::Portuguese => match key {
             "section" => "Terminal",
             "cursor_shape" => "Forma do cursor",
+            "copy_on_select" => "Copiar texto selecionado",
             "search_cursor_shapes" => "Buscar forma do cursor",
             "block" => "Bloco",
             "underline" => "Sublinhado",
@@ -1381,6 +1389,7 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         UiLanguage::Russian => match key {
             "section" => "Терминал",
             "cursor_shape" => "Форма курсора",
+            "copy_on_select" => "Копировать выделенный текст",
             "search_cursor_shapes" => "Поиск формы курсора",
             "block" => "Блок",
             "underline" => "Подчёркивание",
@@ -1391,6 +1400,7 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         UiLanguage::Arabic => match key {
             "section" => "الطرفية",
             "cursor_shape" => "شكل المؤشر",
+            "copy_on_select" => "نسخ النص المحدد",
             "search_cursor_shapes" => "البحث عن شكل المؤشر",
             "block" => "كتلة",
             "underline" => "تسطير",
@@ -1401,6 +1411,7 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         UiLanguage::Hindi => match key {
             "section" => "टर्मिनल",
             "cursor_shape" => "कर्सर का आकार",
+            "copy_on_select" => "चयनित टेक्स्ट कॉपी करें",
             "search_cursor_shapes" => "कर्सर आकार खोजें",
             "block" => "ब्लॉक",
             "underline" => "रेखांकन",
@@ -1411,6 +1422,7 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         UiLanguage::English => match key {
             "section" => "Terminal",
             "cursor_shape" => "Cursor Shape",
+            "copy_on_select" => "Copy Selected Text",
             "search_cursor_shapes" => "Search cursor shapes",
             "block" => "Block",
             "underline" => "Underline",
@@ -5358,6 +5370,7 @@ mod action_label_tests {
         let keys = [
             "section",
             "cursor_shape",
+            "copy_on_select",
             "search_cursor_shapes",
             "block",
             "underline",
@@ -5373,6 +5386,10 @@ mod action_label_tests {
         assert_eq!(
             terminal_settings_label(UiLanguage::ChineseSimplified, "cursor_shape"),
             "光标样式"
+        );
+        assert_eq!(
+            terminal_settings_label(UiLanguage::ChineseSimplified, "copy_on_select"),
+            "选中文本以复制"
         );
     }
 

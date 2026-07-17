@@ -1469,6 +1469,7 @@ impl EditorView {
 
     fn render_workspace_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let wss = &self.styles.workspace_switcher;
+        let ss = &self.styles.sidebar;
         let ws_name = self.sidebar_root_name().to_uppercase();
         let hover_bg = wss.ws_bar_hover_bg;
         let root_drag_over = self
@@ -1479,7 +1480,7 @@ impl EditorView {
         div()
             .id("workspace-bar")
             .w_full()
-            .h(px(self.scaled(wss.ws_bar_height_px)))
+            .h(px(self.status_bar_height()))
             .flex_none()
             .flex()
             .items_center()
@@ -1497,17 +1498,16 @@ impl EditorView {
             .child(
                 svg()
                     .path(WORKSPACE_EXPAND_SVG_PATH)
-                    .size(px(self.scaled(wss.ws_bar_icon_size_px)))
-                    .text_color(wss.ws_bar_icon_color),
+                    .size(px(self.scaled(ss.sidebar_header_root_icon_size_px)))
+                    .text_color(ss.sidebar_header_icon_color),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
                     .overflow_hidden()
-                    .text_size(px(self.scaled(wss.ws_bar_font_size_px)))
-                    .text_color(wss.ws_bar_text_color)
-                    .font_weight(FontWeight::BOLD)
+                    .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
+                    .text_color(ss.sidebar_header_text_color)
                     .truncate()
                     .child(ws_name),
             )

@@ -59,6 +59,7 @@ enum SettingsOptionAction {
     ShowWhitespace(bool),
     HighlightLine(bool),
     SimpleMode(bool),
+    TerminalCopyOnSelect(bool),
 }
 
 // ── Settings panel rendering ────────────────────────────────────────
@@ -299,6 +300,16 @@ impl EditorView {
                 0,
                 cx,
             ))
+            .child(self.render_attachment_settings_row(
+                terminal_settings_label(self.ui_language, "copy_on_select"),
+                self.render_boolean_settings_checkbox(
+                    "settings-terminal-copy-on-select",
+                    self.app_settings.terminal_copy_on_select,
+                    SettingsOptionAction::TerminalCopyOnSelect(false),
+                    SettingsOptionAction::TerminalCopyOnSelect(true),
+                    cx,
+                ),
+            ))
             .into_any_element()
     }
 
@@ -503,6 +514,9 @@ impl EditorView {
             }
             SettingsOptionAction::SimpleMode(value) => {
                 self.app_settings.simple_mode = value;
+            }
+            SettingsOptionAction::TerminalCopyOnSelect(value) => {
+                self.app_settings.terminal_copy_on_select = value;
             }
         }
         self.finalize_settings_change(cx);
@@ -1185,8 +1199,8 @@ impl EditorView {
 
     pub(crate) fn apply_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
         let size = size.clamp(10.0, 30.0);
-        self.styles.editor.editor_font_size_px = size;
         self.app_settings.font_size = size;
+        self.styles.editor.editor_font_size_px = self.app_settings.effective_editor_font_size();
         if let Some(editor) = &self.settings_font_size_editor {
             self.sync_inline_stepper_editor(editor, format!("{size:.0}"), cx);
         }
@@ -1197,10 +1211,8 @@ impl EditorView {
         if self.settings_font_size_editor.is_some() {
             return;
         }
-        let editor = self.build_inline_stepper_editor(
-            format!("{:.0}", self.styles.editor.editor_font_size_px),
-            cx,
-        );
+        let editor =
+            self.build_inline_stepper_editor(format!("{:.0}", self.app_settings.font_size), cx);
         cx.subscribe(
             &editor,
             |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
@@ -1211,7 +1223,7 @@ impl EditorView {
                     }
                 }
                 crate::text_input::TextInputEvent::Escape => {
-                    let current = this.styles.editor.editor_font_size_px;
+                    let current = this.app_settings.font_size;
                     this.sync_inline_stepper_editor(&editor, format!("{current:.0}"), cx);
                 }
                 crate::text_input::TextInputEvent::Changed => {}

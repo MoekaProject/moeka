@@ -61,6 +61,8 @@ pub(crate) struct AppSettings {
     pub attachment_folder: String,
     #[serde(default = "default_terminal_cursor_shape")]
     pub terminal_cursor_shape: String,
+    #[serde(default = "default_terminal_copy_on_select")]
+    pub terminal_copy_on_select: bool,
     /// User keybinding overrides: command id (see `CommandId::config_key`) to
     /// gpui keystroke string, e.g. `save: cmd-shift-s`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -167,6 +169,10 @@ fn default_terminal_cursor_shape() -> String {
     TerminalCursorShape::default().as_str().to_string()
 }
 
+fn default_terminal_copy_on_select() -> bool {
+    true
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -197,12 +203,17 @@ impl Default for AppSettings {
             attachment_location: default_attachment_location(),
             attachment_folder: default_attachment_folder(),
             terminal_cursor_shape: default_terminal_cursor_shape(),
+            terminal_copy_on_select: default_terminal_copy_on_select(),
             keybindings: std::collections::BTreeMap::new(),
         }
     }
 }
 
 impl AppSettings {
+    pub(crate) fn effective_editor_font_size(&self) -> f32 {
+        (self.font_size - 1.0).clamp(9.0, 29.0)
+    }
+
     pub(crate) fn terminal_cursor_shape(&self) -> TerminalCursorShape {
         TerminalCursorShape::from_str(&self.terminal_cursor_shape).unwrap_or_default()
     }
@@ -468,12 +479,23 @@ mod tests {
     }
 
     #[test]
+    fn editor_body_font_size_is_one_point_smaller_than_the_legacy_setting() {
+        let mut settings = AppSettings::default();
+        assert_eq!(settings.font_size, 15.0);
+        assert_eq!(settings.effective_editor_font_size(), 14.0);
+
+        settings.font_size = 20.0;
+        assert_eq!(settings.effective_editor_font_size(), 19.0);
+    }
+
+    #[test]
     fn terminal_cursor_shape_defaults_to_block_and_rejects_unknown_values() {
         let default_settings = AppSettings::default();
         assert_eq!(
             default_settings.terminal_cursor_shape(),
             TerminalCursorShape::Block
         );
+        assert!(default_settings.terminal_copy_on_select);
 
         for shape in TerminalCursorShape::ALL {
             let settings = AppSettings {

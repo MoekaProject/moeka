@@ -205,8 +205,11 @@ struct ChatTerminalSize {
     cols: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct ChatTerminalPalette {
+    foreground: Hsla,
+    bright_foreground: Hsla,
+    dim_foreground: Hsla,
     black: Hsla,
     red: Hsla,
     green: Hsla,
@@ -223,6 +226,14 @@ struct ChatTerminalPalette {
     bright_magenta: Hsla,
     bright_cyan: Hsla,
     bright_white: Hsla,
+    dim_black: Hsla,
+    dim_red: Hsla,
+    dim_green: Hsla,
+    dim_yellow: Hsla,
+    dim_blue: Hsla,
+    dim_magenta: Hsla,
+    dim_cyan: Hsla,
+    dim_white: Hsla,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -630,7 +641,7 @@ impl Element for ChatTerminalSurfaceElement {
                     std::mem::swap(&mut fg, &mut bg);
                 }
                 if cell.flags.contains(Flags::DIM) {
-                    fg = terminal_dim_color(fg, self.default_bg);
+                    fg = terminal_dimmed_color(cell.fg, &self.palette, fg);
                 }
 
                 if is_chat_terminal_spacer_cell(cell) {
@@ -1344,6 +1355,41 @@ impl ChatTerminalSession {
         self.refresh_snapshot();
     }
 
+    /// Expands a point using Alacritty's selection boundaries, matching Zed's
+    /// semantic (double-click) and line (triple-click) terminal selection.
+    fn expanded_selection_range(
+        &self,
+        point: AlacPoint,
+        line_selection: bool,
+    ) -> Option<(AlacPoint, AlacPoint)> {
+        let runtime = self.runtime.as_ref()?;
+        let term = runtime.term.lock();
+        let point = AlacPoint::new(
+            point
+                .line
+                .max(term.grid().topmost_line())
+                .min(term.grid().bottommost_line()),
+            point.column.min(term.grid().last_column()),
+        );
+
+        if line_selection {
+            return Some((term.line_search_left(point), term.line_search_right(point)));
+        }
+
+        if let Some(matching) = term.bracket_search(point) {
+            return Some(if matching < point {
+                (matching, point)
+            } else {
+                (point, matching)
+            });
+        }
+
+        Some((
+            term.semantic_search_left(point),
+            term.semantic_search_right(point),
+        ))
+    }
+
     /// Runs a regex search over the whole grid (scrollback included).
     fn search(&self, pattern: &str, max_matches: usize) -> Vec<TermSearchMatch> {
         let Some(runtime) = self.runtime.as_ref() else {
@@ -1604,69 +1650,99 @@ fn normalize_cell_char(cell: &Cell) -> String {
     text
 }
 
-fn terminal_emphasis_color(color: Hsla, is_dark: bool) -> Hsla {
-    Hsla {
-        h: color.h,
-        s: (color.s * if is_dark { 1.08 } else { 1.12 }).clamp(0.0, 1.0),
-        l: (color.l + if is_dark { 0.1 } else { -0.08 }).clamp(0.0, 1.0),
-        a: color.a,
+/// Terminal colors are intentionally independent from the editor theme. These
+/// are Zed's One Dark/Light terminal palettes; only the terminal background is
+/// supplied by the active Moeka theme.
+fn terminal_palette(panel_bg: Hsla) -> ChatTerminalPalette {
+    if panel_bg.l < 0.5 {
+        ChatTerminalPalette {
+            foreground: crate::hex_hsla!("#ABB2BF"),
+            bright_foreground: crate::hex_hsla!("#DCE0E5"),
+            dim_foreground: crate::hex_hsla!("#636D83"),
+            black: crate::hex_hsla!("#282C34"),
+            red: crate::hex_hsla!("#E06C75"),
+            green: crate::hex_hsla!("#98C379"),
+            yellow: crate::hex_hsla!("#E5C07B"),
+            blue: crate::hex_hsla!("#61AFEF"),
+            magenta: crate::hex_hsla!("#C678DD"),
+            cyan: crate::hex_hsla!("#56B6C2"),
+            white: crate::hex_hsla!("#ABB2BF"),
+            bright_black: crate::hex_hsla!("#636D83"),
+            bright_red: crate::hex_hsla!("#EA858B"),
+            bright_green: crate::hex_hsla!("#AAD581"),
+            bright_yellow: crate::hex_hsla!("#FFD885"),
+            bright_blue: crate::hex_hsla!("#85C1FF"),
+            bright_magenta: crate::hex_hsla!("#D398EB"),
+            bright_cyan: crate::hex_hsla!("#6ED5DE"),
+            bright_white: crate::hex_hsla!("#FAFAFA"),
+            dim_black: crate::hex_hsla!("#3B3F4A"),
+            dim_red: crate::hex_hsla!("#A7545A"),
+            dim_green: crate::hex_hsla!("#6D8F59"),
+            dim_yellow: crate::hex_hsla!("#B8985B"),
+            dim_blue: crate::hex_hsla!("#457CAD"),
+            dim_magenta: crate::hex_hsla!("#8D54A0"),
+            dim_cyan: crate::hex_hsla!("#3C818A"),
+            dim_white: crate::hex_hsla!("#8F969B"),
+        }
+    } else {
+        ChatTerminalPalette {
+            foreground: crate::hex_hsla!("#2A2C33"),
+            bright_foreground: crate::hex_hsla!("#2A2C33"),
+            dim_foreground: crate::hex_hsla!("#BBBBBB"),
+            black: crate::hex_hsla!("#000000"),
+            red: crate::hex_hsla!("#DE3E35"),
+            green: crate::hex_hsla!("#3F953A"),
+            yellow: crate::hex_hsla!("#D2B67C"),
+            blue: crate::hex_hsla!("#2F5AF3"),
+            magenta: crate::hex_hsla!("#950095"),
+            cyan: crate::hex_hsla!("#0997B3"),
+            white: crate::hex_hsla!("#BBBBBB"),
+            bright_black: crate::hex_hsla!("#000000"),
+            bright_red: crate::hex_hsla!("#DE3E35"),
+            bright_green: crate::hex_hsla!("#3F953A"),
+            bright_yellow: crate::hex_hsla!("#D2B67C"),
+            bright_blue: crate::hex_hsla!("#2F5AF3"),
+            bright_magenta: crate::hex_hsla!("#A00095"),
+            bright_cyan: crate::hex_hsla!("#0BBCD6"),
+            bright_white: crate::hex_hsla!("#FFFFFF"),
+            dim_black: crate::hex_hsla!("#555555"),
+            dim_red: crate::hex_hsla!("#9C2B26"),
+            dim_green: crate::hex_hsla!("#2B6927"),
+            dim_yellow: crate::hex_hsla!("#A48C5A"),
+            dim_blue: crate::hex_hsla!("#2140AB"),
+            dim_magenta: crate::hex_hsla!("#6A006A"),
+            dim_cyan: crate::hex_hsla!("#0A7B92"),
+            dim_white: crate::hex_hsla!("#888888"),
+        }
     }
 }
 
-/// Blend a color toward the background to produce a muted/dim (gray) variant.
-/// Works for both light and dark themes since it always moves toward `background`.
-fn terminal_dim_color(color: Hsla, background: Hsla) -> Hsla {
-    const DIM_BLEND: f32 = 0.45;
-    let mix = |a: f32, b: f32| a + (b - a) * DIM_BLEND;
-    Hsla {
-        h: color.h,
-        s: (color.s * (1.0 - DIM_BLEND * 0.5)).clamp(0.0, 1.0),
-        l: mix(color.l, background.l).clamp(0.0, 1.0),
-        a: color.a,
-    }
-}
-
-fn terminal_theme_palette(theme: &crate::theme::Theme, panel_bg: Hsla) -> ChatTerminalPalette {
-    let is_dark = panel_bg.l < 0.5;
-    let neutral_black = if is_dark {
-        theme.bg_primary
-    } else {
-        crate::theme::with_alpha(theme.text_primary, 0.92)
-    };
-    let neutral_white = if is_dark {
-        theme.text_primary
-    } else {
-        crate::theme::with_alpha(theme.text_primary, 0.78)
-    };
-
-    let base = ChatTerminalPalette {
-        black: neutral_black,
-        red: theme.text_danger,
-        green: theme.inline_code,
-        yellow: theme.bold,
-        blue: theme.link,
-        magenta: theme.italic,
-        cyan: theme.checkbox_checked,
-        white: neutral_white,
-        bright_black: theme.text_secondary,
-        bright_red: theme.text_danger,
-        bright_green: theme.inline_code,
-        bright_yellow: theme.bold,
-        bright_blue: theme.link,
-        bright_magenta: theme.italic,
-        bright_cyan: theme.checkbox_checked,
-        bright_white: theme.text_bright,
-    };
-
-    ChatTerminalPalette {
-        bright_black: terminal_emphasis_color(base.bright_black, is_dark),
-        bright_red: terminal_emphasis_color(base.bright_red, is_dark),
-        bright_green: terminal_emphasis_color(base.bright_green, is_dark),
-        bright_yellow: terminal_emphasis_color(base.bright_yellow, is_dark),
-        bright_blue: terminal_emphasis_color(base.bright_blue, is_dark),
-        bright_magenta: terminal_emphasis_color(base.bright_magenta, is_dark),
-        bright_cyan: terminal_emphasis_color(base.bright_cyan, is_dark),
-        ..base
+fn terminal_dimmed_color(color: AlacColor, palette: &ChatTerminalPalette, resolved: Hsla) -> Hsla {
+    match color {
+        AlacColor::Named(NamedColor::Foreground | NamedColor::BrightForeground) => {
+            palette.dim_foreground
+        }
+        AlacColor::Named(NamedColor::Black | NamedColor::BrightBlack) => palette.dim_black,
+        AlacColor::Named(NamedColor::Red | NamedColor::BrightRed) => palette.dim_red,
+        AlacColor::Named(NamedColor::Green | NamedColor::BrightGreen) => palette.dim_green,
+        AlacColor::Named(NamedColor::Yellow | NamedColor::BrightYellow) => palette.dim_yellow,
+        AlacColor::Named(NamedColor::Blue | NamedColor::BrightBlue) => palette.dim_blue,
+        AlacColor::Named(NamedColor::Magenta | NamedColor::BrightMagenta) => palette.dim_magenta,
+        AlacColor::Named(NamedColor::Cyan | NamedColor::BrightCyan) => palette.dim_cyan,
+        AlacColor::Named(NamedColor::White | NamedColor::BrightWhite) => palette.dim_white,
+        AlacColor::Named(NamedColor::DimForeground) => palette.dim_foreground,
+        AlacColor::Named(NamedColor::DimBlack) => palette.dim_black,
+        AlacColor::Named(NamedColor::DimRed) => palette.dim_red,
+        AlacColor::Named(NamedColor::DimGreen) => palette.dim_green,
+        AlacColor::Named(NamedColor::DimYellow) => palette.dim_yellow,
+        AlacColor::Named(NamedColor::DimBlue) => palette.dim_blue,
+        AlacColor::Named(NamedColor::DimMagenta) => palette.dim_magenta,
+        AlacColor::Named(NamedColor::DimCyan) => palette.dim_cyan,
+        AlacColor::Named(NamedColor::DimWhite) => palette.dim_white,
+        _ => Hsla {
+            l: resolved.l * 0.66,
+            ..resolved
+        },
     }
 }
 
@@ -1730,16 +1806,16 @@ fn terminal_named_color(
         NamedColor::BrightCyan => palette.bright_cyan,
         NamedColor::BrightWhite => palette.bright_white,
         NamedColor::Cursor => default_fg,
-        NamedColor::BrightForeground => default_fg,
-        NamedColor::DimForeground => terminal_dim_color(default_fg, default_bg),
-        NamedColor::DimBlack => terminal_dim_color(palette.black, default_bg),
-        NamedColor::DimRed => terminal_dim_color(palette.red, default_bg),
-        NamedColor::DimGreen => terminal_dim_color(palette.green, default_bg),
-        NamedColor::DimYellow => terminal_dim_color(palette.yellow, default_bg),
-        NamedColor::DimBlue => terminal_dim_color(palette.blue, default_bg),
-        NamedColor::DimMagenta => terminal_dim_color(palette.magenta, default_bg),
-        NamedColor::DimCyan => terminal_dim_color(palette.cyan, default_bg),
-        NamedColor::DimWhite => terminal_dim_color(palette.white, default_bg),
+        NamedColor::BrightForeground => palette.bright_foreground,
+        NamedColor::DimForeground => palette.dim_foreground,
+        NamedColor::DimBlack => palette.dim_black,
+        NamedColor::DimRed => palette.dim_red,
+        NamedColor::DimGreen => palette.dim_green,
+        NamedColor::DimYellow => palette.dim_yellow,
+        NamedColor::DimBlue => palette.dim_blue,
+        NamedColor::DimMagenta => palette.dim_magenta,
+        NamedColor::DimCyan => palette.dim_cyan,
+        NamedColor::DimWhite => palette.dim_white,
     }
 }
 
@@ -3015,7 +3091,7 @@ impl EditorView {
             .unwrap_or_default();
         let rows = Self::chat_terminal_rows(&snapshot);
         let selection = selection.normalized();
-        let mut lines = Vec::new();
+        let mut text = String::new();
 
         for row_index in selection.start_row..=selection.end_row {
             let Some(row) = rows.get(row_index) else {
@@ -3049,13 +3125,20 @@ impl EditorView {
                     }
                 }
             }
-            lines.push(line.trim_end_matches(' ').to_string());
+            text.push_str(line.trim_end_matches(' '));
+            if row_index < selection.end_row {
+                let wrapped = end_col + 1 >= row.cells.len()
+                    && row
+                        .cells
+                        .last()
+                        .is_some_and(|cell| cell.flags.contains(Flags::WRAPLINE));
+                if !wrapped {
+                    text.push('\n');
+                }
+            }
         }
 
-        if lines.is_empty() {
-            return None;
-        }
-        Some(lines.join("\n"))
+        (!text.is_empty()).then_some(text)
     }
 
     pub(crate) fn copy_chat_terminal_selection(
@@ -3124,45 +3207,78 @@ impl EditorView {
         row: usize,
         col: usize,
     ) -> Option<ChatTerminalSelection> {
-        let snapshot = self
-            .terminal_session(tab_id)
-            .map(|session| session.snapshot.clone())
-            .unwrap_or_default();
-        let rows = Self::chat_terminal_rows(&snapshot);
-        let row_cells = &rows.get(row)?.cells;
-        let (start, end) = chat_terminal_word_bounds(row_cells, col)?;
+        self.chat_terminal_expanded_selection(tab_id, row, col, false)
+            .or_else(|| {
+                let snapshot = self
+                    .terminal_session(tab_id)
+                    .map(|session| session.snapshot.clone())
+                    .unwrap_or_default();
+                let rows = Self::chat_terminal_rows(&snapshot);
+                let row_cells = &rows.get(row)?.cells;
+                let (start, end) = chat_terminal_word_bounds(row_cells, col)?;
+                Some(ChatTerminalSelection {
+                    start_row: row,
+                    start_col: start,
+                    end_row: row,
+                    end_col: end,
+                })
+            })
+    }
+
+    fn chat_terminal_expanded_selection(
+        &self,
+        tab_id: &str,
+        row: usize,
+        col: usize,
+        line_selection: bool,
+    ) -> Option<ChatTerminalSelection> {
+        let session = self.terminal_session(tab_id)?;
+        let rows = Self::chat_terminal_rows(&session.snapshot);
+        let source_line = rows.get(row)?.source_line;
+        let (start, end) = session.expanded_selection_range(
+            AlacPoint::new(Line(source_line), Column(col)),
+            line_selection,
+        )?;
+        let first_source_line = rows.first()?.source_line;
+        let last_source_line = rows.last()?.source_line;
+        if end.line.0 < first_source_line || start.line.0 > last_source_line {
+            return None;
+        }
+
+        let start_row = rows
+            .iter()
+            .position(|candidate| candidate.source_line == start.line.0)
+            .unwrap_or(0);
+        let end_row = rows
+            .iter()
+            .position(|candidate| candidate.source_line == end.line.0)
+            .unwrap_or_else(|| rows.len().saturating_sub(1));
+        let start_col = if start.line.0 < first_source_line {
+            0
+        } else {
+            start.column.0
+        };
+        let end_col = if end.line.0 > last_source_line {
+            rows[end_row].cells.len().saturating_sub(1)
+        } else {
+            end.column.0
+        };
 
         Some(ChatTerminalSelection {
-            start_row: row,
-            start_col: start,
-            end_row: row,
-            end_col: end,
+            start_row,
+            start_col,
+            end_row,
+            end_col,
         })
     }
 
-    /// Triple-click: selects the whole visual line (trailing blanks excluded).
+    /// Triple-click selects the complete logical line, including wrapped rows.
     fn chat_terminal_line_selection(
         &self,
         tab_id: &str,
         row: usize,
     ) -> Option<ChatTerminalSelection> {
-        let snapshot = self
-            .terminal_session(tab_id)
-            .map(|session| session.snapshot.clone())
-            .unwrap_or_default();
-        let rows = Self::chat_terminal_rows(&snapshot);
-        let row_cells = &rows.get(row)?.cells;
-        let end_col = row_cells
-            .iter()
-            .rposition(|cell| !is_chat_terminal_spacer_cell(cell) && cell.c != ' ')
-            .unwrap_or(0);
-
-        Some(ChatTerminalSelection {
-            start_row: row,
-            start_col: 0,
-            end_row: row,
-            end_col,
-        })
+        self.chat_terminal_expanded_selection(tab_id, row, 0, true)
     }
 
     fn send_chat_terminal_mouse_button_report(
@@ -3465,12 +3581,11 @@ impl EditorView {
                 cx.notify();
                 return;
             }
-            let selection = if event.click_count >= 3 {
-                self.chat_terminal_line_selection(tab_id, row)
-            } else if event.click_count == 2 {
-                self.chat_terminal_selection_for_click(tab_id, row, col)
-            } else {
-                Some(ChatTerminalSelection::single(row, col))
+            let selection = match event.click_count {
+                1 => Some(ChatTerminalSelection::single(row, col)),
+                2 => self.chat_terminal_selection_for_click(tab_id, row, col),
+                3 => self.chat_terminal_line_selection(tab_id, row),
+                _ => None,
             };
             if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
                 state.selection = selection;
@@ -3626,9 +3741,15 @@ impl EditorView {
                     .selection
                     .map(ChatTerminalSelection::normalized)
                     .is_some_and(|selection| !selection.is_empty() && selection.contains(row, col));
-                if !keep_selection {
-                    state.selection = Some(ChatTerminalSelection::single(row, col));
+                if keep_selection {
+                    self.open_terminal_context_menu(tab_id.to_string(), event.position, cx);
+                    return;
                 }
+            }
+            let selection = self.chat_terminal_selection_for_click(tab_id, row, col);
+            if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+                state.selection = selection;
+                state.selecting = false;
             }
         }
         self.open_terminal_context_menu(tab_id.to_string(), event.position, cx);
@@ -3656,6 +3777,9 @@ impl EditorView {
             if state.selection.is_some_and(ChatTerminalSelection::is_empty) {
                 state.selection = None;
             }
+        }
+        if self.app_settings.terminal_copy_on_select {
+            self.copy_chat_terminal_selection(tab_id, cx);
         }
         cx.notify();
     }
@@ -3707,10 +3831,10 @@ impl EditorView {
         let (body_font_size, cell_width, cell_height) = self.chat_terminal_metrics();
         let terminal_padding = self.scaled(ups.utility_panel_terminal_padding_px);
         let monospace = SharedString::from(self.styles.editor.editor_monospace_font_family);
-        let default_fg = self.styles.editor.editor_text_color;
         let default_bg = self.styles.editor.editor_bg;
+        let palette = terminal_palette(default_bg);
+        let default_fg = palette.foreground;
         let cursor_color = self.theme.cursor;
-        let palette = terminal_theme_palette(&self.theme, default_bg);
         let file_drop_bg = self.styles.editor.editor_file_drop_bg;
 
         let Some(focus_handle) = self
@@ -3989,7 +4113,7 @@ impl EditorView {
                 }
             }),
         )
-        .cursor(CursorStyle::Arrow)
+        .cursor(CursorStyle::IBeam)
         .h_full()
         .w_full()
         .bg(default_bg)
@@ -4157,6 +4281,31 @@ mod tests {
         assert_eq!(
             terminal_process_title(std::path::Path::new("/"), "zsh", &[]),
             "/ - zsh"
+        );
+    }
+
+    #[test]
+    fn terminal_palette_matches_zed_and_ignores_editor_theme_colors() {
+        let dark_palette = terminal_palette(crate::hex_hsla!("#111111"));
+        assert_eq!(dark_palette.foreground, crate::hex_hsla!("#ABB2BF"));
+        assert_eq!(dark_palette.yellow, crate::hex_hsla!("#E5C07B"));
+        assert_eq!(dark_palette.cyan, crate::hex_hsla!("#56B6C2"));
+        assert_eq!(dark_palette, terminal_palette(crate::hex_hsla!("#303030")));
+
+        let light_palette = terminal_palette(crate::hex_hsla!("#FAFAFA"));
+        assert_eq!(light_palette.foreground, crate::hex_hsla!("#2A2C33"));
+        assert_eq!(light_palette.blue, crate::hex_hsla!("#2F5AF3"));
+        assert_eq!(light_palette, terminal_palette(crate::hex_hsla!("#FFFFFF")));
+
+        let themed_background = crate::hex_hsla!("#123456");
+        assert_eq!(
+            terminal_named_color(
+                NamedColor::Background,
+                &dark_palette,
+                dark_palette.foreground,
+                themed_background,
+            ),
+            themed_background
         );
     }
 

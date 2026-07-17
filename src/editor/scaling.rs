@@ -61,9 +61,13 @@ impl EditorView {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn traffic_light_position_for_ui_scale(ui_scale: f32) -> gpui::Point<gpui::Pixels> {
-        const BASE_LEFT_PX: f32 = 10.0;
-        const BASE_TOP_PX: f32 = 10.0;
-        point(px(BASE_LEFT_PX * ui_scale), px(BASE_TOP_PX * ui_scale))
+        const TAB_BAR_HEIGHT_PX: f32 = 30.0;
+        const STANDARD_BUTTON_HEIGHT_PX: f32 = 14.0;
+        traffic_light_offsets_for_layout(
+            ui_scale,
+            TAB_BAR_HEIGHT_PX * ui_scale,
+            STANDARD_BUTTON_HEIGHT_PX,
+        )
     }
 
     #[cfg(target_os = "macos")]
@@ -74,8 +78,7 @@ impl EditorView {
         {
             return;
         }
-        let position = Self::traffic_light_position_for_ui_scale(self.ui_scale);
-        if apply_macos_traffic_light_position(window, position) {
+        if apply_macos_traffic_light_position(window, self.ui_scale, self.tab_bar_height()) {
             self.traffic_light_ui_scale = Some(self.ui_scale);
         }
     }
@@ -827,9 +830,23 @@ impl EditorView {
 }
 
 #[cfg(target_os = "macos")]
+fn traffic_light_offsets_for_layout(
+    ui_scale: f32,
+    tab_bar_height: f32,
+    button_height: f32,
+) -> gpui::Point<gpui::Pixels> {
+    const BASE_LEFT_PX: f32 = 10.0;
+    point(
+        px(BASE_LEFT_PX * ui_scale),
+        px(((tab_bar_height - button_height) * 0.5).max(0.0)),
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn apply_macos_traffic_light_position(
     window: &mut Window,
-    position: gpui::Point<gpui::Pixels>,
+    ui_scale: f32,
+    tab_bar_height: f32,
 ) -> bool {
     use core_graphics::geometry::{CGPoint, CGRect};
     use objc::{msg_send, sel, sel_impl};
@@ -869,8 +886,13 @@ fn apply_macos_traffic_light_position(
         let close_frame: CGRect = msg_send![close_button, frame];
         let minimize_frame: CGRect = msg_send![minimize_button, frame];
         let titlebar_height = window_frame.size.height - content_layout_rect.size.height;
-        let left = f32::from(position.x) as f64;
-        let top = f32::from(position.y) as f64;
+        let offsets = traffic_light_offsets_for_layout(
+            ui_scale,
+            tab_bar_height,
+            close_frame.size.height as f32,
+        );
+        let left = f32::from(offsets.x) as f64;
+        let top = f32::from(offsets.y) as f64;
         let y = titlebar_height - top - close_frame.size.height;
         let spacing = minimize_frame.origin.x - close_frame.origin.x;
 
@@ -883,20 +905,25 @@ fn apply_macos_traffic_light_position(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "macos")]
-    use super::EditorView;
     use super::caret_vertical_overflow;
+    #[cfg(target_os = "macos")]
+    use super::{EditorView, traffic_light_offsets_for_layout};
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn traffic_light_offset_tracks_ui_scale() {
-        let baseline = EditorView::traffic_light_position_for_ui_scale(1.0);
-        assert_eq!(f32::from(baseline.x), 10.0);
-        assert_eq!(f32::from(baseline.y), 10.0);
+    fn traffic_light_stays_centered_in_scaled_tab_bar() {
+        let button_height = 14.0;
+        for (ui_scale, tab_bar_height) in [(0.8, 24.0), (1.0, 30.0), (1.4, 42.0)] {
+            let offsets = traffic_light_offsets_for_layout(ui_scale, tab_bar_height, button_height);
+            assert_eq!(f32::from(offsets.x), 10.0 * ui_scale);
+            assert_eq!(
+                f32::from(offsets.y) + button_height * 0.5,
+                tab_bar_height * 0.5
+            );
 
-        let enlarged = EditorView::traffic_light_position_for_ui_scale(1.4);
-        assert_eq!(f32::from(enlarged.x), 14.0);
-        assert_eq!(f32::from(enlarged.y), 14.0);
+            let initial = EditorView::traffic_light_position_for_ui_scale(ui_scale);
+            assert_eq!(initial, offsets);
+        }
     }
 
     #[test]

@@ -1912,8 +1912,9 @@ impl EditorView {
         );
         let ui_theme = app_settings.dark_theme_kind().build();
         let mut styles = crate::style::Styles::from_theme(&theme, &ui_theme);
-        // Apply saved font settings
-        styles.editor.editor_font_size_px = app_settings.font_size;
+        // Keep Markdown headings at their original sizes while rendering body
+        // text one point smaller than the configured legacy size.
+        styles.editor.editor_font_size_px = app_settings.effective_editor_font_size();
         styles.editor.editor_paragraph_line_height_factor = app_settings.line_height;
         styles.editor.editor_heading_line_height_factor = app_settings.line_height;
         styles.editor.editor_letter_spacing_px = app_settings.letter_spacing;

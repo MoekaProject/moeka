@@ -320,8 +320,7 @@ impl EditorView {
     }
 
     pub(crate) fn sidebar_scrollbar_track_height(&self) -> f32 {
-        let workspace_bar_height = self.scaled(self.styles.workspace_switcher.ws_bar_height_px);
-        (self.last_window_height - workspace_bar_height).max(1.0)
+        (self.last_window_height - self.status_bar_height()).max(1.0)
     }
 
     pub(crate) fn chat_terminal_scrollbar_track_height(&self) -> f32 {

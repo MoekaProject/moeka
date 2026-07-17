@@ -68,7 +68,7 @@ impl EditorView {
     ) {
         let ui_theme = self.app_settings.dark_theme_kind().build();
         self.styles = crate::style::Styles::from_theme(&self.theme, &ui_theme);
-        self.styles.editor.editor_font_size_px = self.app_settings.font_size;
+        self.styles.editor.editor_font_size_px = self.app_settings.effective_editor_font_size();
         self.styles.editor.editor_paragraph_line_height_factor = self.app_settings.line_height;
         self.styles.editor.editor_heading_line_height_factor = self.app_settings.line_height;
         self.styles.editor.editor_letter_spacing_px = self.app_settings.letter_spacing;

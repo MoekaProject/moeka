@@ -531,8 +531,8 @@ fn main() {
                 titlebar: Some(TitlebarOptions {
                     title: Some(system_application_display_name().into()),
                     appears_transparent: true,
-                    // `(10, 10)` is the baseline at UI scale 1.0. Keep the
-                    // native controls aligned with the scaled application chrome.
+                    // Initialize against the scaled tab-bar center; the first
+                    // render refines this using the native button's actual height.
                     traffic_light_position: Some(traffic_light_position),
                 }),
                 window_background: WindowBackgroundAppearance::Transparent,
