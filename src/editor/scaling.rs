@@ -156,7 +156,12 @@ impl EditorView {
     }
 
     pub(crate) fn padding_top(&self) -> f32 {
-        self.scaled(self.styles.editor.editor_padding_top_px)
+        let padding = if self.app_settings.simple_mode {
+            self.styles.editor.editor_non_markdown_padding_top_px
+        } else {
+            self.styles.editor.editor_padding_top_px
+        };
+        self.scaled(padding)
     }
 
     pub(crate) fn padding_right(&self) -> f32 {

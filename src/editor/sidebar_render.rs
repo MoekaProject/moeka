@@ -1068,18 +1068,47 @@ impl EditorView {
                     )
             })
             .when(!self.workspace_search_visible, |this| {
+                let sidebar_tooltip = if self.workspaces.is_empty() {
+                    self.t(crate::i18n::TextKey::OpenFolder)
+                } else {
+                    crate::i18n::sidebar_visibility_action_label(
+                        self.ui_language,
+                        self.sidebar_visible,
+                    )
+                };
                 this.pr(px(self.scaled(ss.sidebar_top_button_padding_right_px)))
-                    .child(self.render_sidebar_top_button(
-                        "sidebar-top-file-list-toggle",
-                        "assets/icons/file-list-toggle.svg",
-                        self.file_list_visible,
-                        crate::i18n::sidebar_action_label(self.ui_language, "file_list"),
-                        None,
-                        cx,
-                        |this, _event, _window, cx| {
-                            this.toggle_file_list_visible(cx);
-                        },
-                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(self.scaled(ss.sidebar_top_button_gap_px)))
+                            .child(self.render_sidebar_top_button(
+                                "sidebar-top-file-tree-toggle",
+                                "assets/icons/file-tree-toggle.svg",
+                                self.sidebar_visible,
+                                sidebar_tooltip,
+                                Some("⌘⇧S"),
+                                cx,
+                                |this, _event, _window, cx| {
+                                    if this.workspaces.is_empty() {
+                                        this.pick_workspace_folder(cx);
+                                    } else {
+                                        this.toggle_sidebar_visibility(cx);
+                                    }
+                                },
+                            ))
+                            .child(self.render_sidebar_top_button(
+                                "sidebar-top-file-list-toggle",
+                                "assets/icons/file-list-toggle.svg",
+                                self.file_list_visible,
+                                crate::i18n::sidebar_action_label(self.ui_language, "file_list"),
+                                None,
+                                cx,
+                                |this, _event, _window, cx| {
+                                    this.toggle_file_list_visible(cx);
+                                },
+                            )),
+                    )
             })
             .on_mouse_down(
                 MouseButton::Left,

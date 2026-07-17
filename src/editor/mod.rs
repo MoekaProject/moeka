@@ -2478,7 +2478,11 @@ impl EditorView {
     }
 
     fn toolbar_base_visible(&self) -> bool {
-        !self.tabs.is_empty() && !self.active_tab_is_settings() && !self.active_tab_is_binary()
+        !self.app_settings.simple_mode
+            && !self.tabs.is_empty()
+            && !self.active_tab_is_settings()
+            && !self.active_tab_is_binary()
+            && !self.active_tab_is_terminal()
     }
 
     fn desired_toolbar_opacity(&self) -> f32 {

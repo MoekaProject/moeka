@@ -62,6 +62,7 @@ pub(crate) const FOLDER_CLOSED_SVG_PATH: &str = "assets/icons/filetree/folder-cl
 pub(crate) const MARKDOWN_SVG_PATH: &str = "assets/icons/filetree/markdown.svg";
 pub(crate) const WORKSPACE_EXPAND_SVG_PATH: &str = "assets/icons/filetree/workspace-expand.svg";
 pub(crate) const OUTLINE_TOGGLE_SVG_PATH: &str = "assets/icons/outline-toggle.svg";
+pub(crate) const OUTLINE_TOGGLE_MINI_SVG_PATH: &str = "assets/icons/outline-toggle-mini.svg";
 pub(crate) const INFO_PANEL_SVG_PATH: &str = "assets/icons/info.svg";
 pub(crate) const GIT_HISTORY_SVG_PATH: &str = "assets/icons/history.svg";
 pub(crate) const GIT_BRANCH_SVG_PATH: &str = "assets/icons/git/branch.svg";

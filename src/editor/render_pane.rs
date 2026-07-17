@@ -450,7 +450,8 @@ impl EditorView {
             .unwrap_or_else(|| {
                 (self.last_window_width - self.sidebar_width() - self.right_panel_width()).max(1.0)
             });
-        let toolbar_base_visible = !self.tabs.is_empty()
+        let toolbar_base_visible = !self.app_settings.simple_mode
+            && !self.tabs.is_empty()
             && !self.active_tab_is_settings()
             && !self.active_tab_is_binary()
             && !self.active_tab_is_terminal();

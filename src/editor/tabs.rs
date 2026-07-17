@@ -2185,6 +2185,42 @@ impl EditorView {
             .when(self.prepared_update().is_some(), |this| {
                 this.child(self.render_update_ready_button(cx))
             })
+            .when(
+                self.app_settings.simple_mode && self.active_tab_is_markdown(),
+                |this| {
+                    this.child(self.render_tab_bar_action_button(
+                        "tab-bar-outline-toggle",
+                        OUTLINE_TOGGLE_MINI_SVG_PATH,
+                        self.is_utility_panel_active(RightUtilityPanel::Outline),
+                        true,
+                        None,
+                        crate::i18n::outline_action_label(
+                            self.ui_language,
+                            self.is_utility_panel_active(RightUtilityPanel::Outline),
+                        ),
+                        Some("⌃⌘1"),
+                        cx,
+                        |this, cx| this.toggle_outline_visibility(cx),
+                    ))
+                },
+            )
+            .when(self.app_settings.simple_mode, |this| {
+                this.child(self.render_tab_bar_action_button(
+                    "tab-bar-theme-toggle",
+                    if self.theme_kind.is_dark() {
+                        THEME_DARK_MINI_SVG_PATH
+                    } else {
+                        THEME_LIGHT_MINI_SVG_PATH
+                    },
+                    true,
+                    true,
+                    None,
+                    crate::i18n::theme_action_label(self.ui_language, self.theme_kind.is_dark()),
+                    None,
+                    cx,
+                    |this, cx| this.toggle_theme(cx),
+                ))
+            })
             .child(self.render_tab_bar_action_button(
                 "tab-bar-chat-toggle",
                 CHAT_PANEL_SVG_PATH,
@@ -2386,6 +2422,44 @@ impl EditorView {
                             }),
                     )
             };
+        let sidebar_tooltip = if self.workspaces.is_empty() {
+            self.t(crate::i18n::TextKey::OpenFolder)
+        } else {
+            crate::i18n::sidebar_visibility_action_label(self.ui_language, self.sidebar_visible)
+        };
+        let sidebar_button = tooltip::with_tooltip(
+            div()
+                .id("tab-bar-file-tree-toggle")
+                .w(px(history_button_size))
+                .h(px(inner_height))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(ts.tab_history_btn_bg)
+                .cursor(CursorStyle::Arrow)
+                .hover(move |style| style.bg(ts.tab_history_btn_hover_bg))
+                .child(
+                    svg()
+                        .path("assets/icons/file-tree-toggle.svg")
+                        .size(px(self.scaled(ts.tab_item_icon_size_px)))
+                        .text_color(ts.tab_history_btn_icon_color),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        if this.workspaces.is_empty() {
+                            this.pick_workspace_folder(cx);
+                        } else {
+                            this.toggle_sidebar_visibility(cx);
+                        }
+                    }),
+                ),
+            cx.entity().clone(),
+            sidebar_tooltip,
+            Some("⌘⇧S"),
+        );
         let left_controls = div()
             .id("tab-bar-left-controls")
             .h(px(inner_height))
@@ -2395,6 +2469,7 @@ impl EditorView {
             .gap(px(0.0))
             .border_r(px(self.scaled(ts.tab_history_group_border_width_px)))
             .border_color(ts.tab_history_group_border_color)
+            .when(!self.sidebar_visible, |this| this.child(sidebar_button))
             .child(history_button(
                 "tab-bar-history-back",
                 "assets/icons/arrow-left.svg",
