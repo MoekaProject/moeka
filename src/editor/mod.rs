@@ -2466,6 +2466,7 @@ impl EditorView {
         self.refresh_builtin_tab_titles();
         self.refresh_welcome_tab_content(cx);
         cx.set_menus(shortcut::app_menus(language));
+        cx.set_dock_menu(shortcut::dock_menu(language));
         self.finalize_settings_change(cx);
     }
 

@@ -1822,6 +1822,23 @@ pub(crate) fn terminal_label(language: UiLanguage) -> &'static str {
     }
 }
 
+pub(crate) fn open_terminal_window_label(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "打开终端",
+        UiLanguage::ChineseTraditional => "開啟終端機",
+        UiLanguage::Japanese => "ターミナルを開く",
+        UiLanguage::Korean => "터미널 열기",
+        UiLanguage::French => "Ouvrir le terminal",
+        UiLanguage::German => "Terminal öffnen",
+        UiLanguage::Spanish => "Abrir terminal",
+        UiLanguage::Portuguese => "Abrir terminal",
+        UiLanguage::Russian => "Открыть терминал",
+        UiLanguage::Arabic => "فتح الطرفية",
+        UiLanguage::Hindi => "टर्मिनल खोलें",
+        UiLanguage::English => "Open Terminal",
+    }
+}
+
 pub(crate) fn preview_action_label(language: UiLanguage, key: &str) -> &'static str {
     match (language, key) {
         (UiLanguage::ChineseSimplified, "fullscreen") => "全屏预览",
@@ -5327,8 +5344,8 @@ pub(crate) fn git_create_branch_label(language: UiLanguage, name: &str) -> Strin
 #[cfg(test)]
 mod action_label_tests {
     use super::{
-        UiLanguage, outline_action_label, sidebar_visibility_action_label, terminal_settings_label,
-        theme_action_label,
+        UiLanguage, open_terminal_window_label, outline_action_label,
+        sidebar_visibility_action_label, terminal_settings_label, theme_action_label,
     };
 
     #[test]
@@ -5390,6 +5407,32 @@ mod action_label_tests {
         assert_eq!(
             terminal_settings_label(UiLanguage::ChineseSimplified, "copy_on_select"),
             "选中文本以复制"
+        );
+    }
+
+    #[test]
+    fn open_terminal_window_labels_cover_every_language() {
+        let languages = [
+            UiLanguage::English,
+            UiLanguage::ChineseSimplified,
+            UiLanguage::ChineseTraditional,
+            UiLanguage::Japanese,
+            UiLanguage::Korean,
+            UiLanguage::French,
+            UiLanguage::German,
+            UiLanguage::Spanish,
+            UiLanguage::Portuguese,
+            UiLanguage::Russian,
+            UiLanguage::Arabic,
+            UiLanguage::Hindi,
+        ];
+
+        for language in languages {
+            assert!(!open_terminal_window_label(language).is_empty());
+        }
+        assert_eq!(
+            open_terminal_window_label(UiLanguage::ChineseSimplified),
+            "打开终端"
         );
     }
 

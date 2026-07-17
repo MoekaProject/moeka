@@ -195,6 +195,78 @@ fn disable_gpui_content_view_window_drag(ns_view: *mut objc::runtime::Object) {
     }
 }
 
+fn editor_window_options(cx: &App) -> WindowOptions {
+    #[cfg(target_os = "macos")]
+    let traffic_light_position =
+        EditorView::traffic_light_position_for_ui_scale(editor::AppSettings::load().ui_scale);
+    #[cfg(not(target_os = "macos"))]
+    let traffic_light_position = point(px(10.0), px(10.0));
+
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(px(1024.0), px(768.0)),
+            cx,
+        ))),
+        titlebar: Some(TitlebarOptions {
+            title: Some(system_application_display_name().into()),
+            appears_transparent: true,
+            traffic_light_position: Some(traffic_light_position),
+        }),
+        window_background: WindowBackgroundAppearance::Transparent,
+        ..Default::default()
+    }
+}
+
+fn configure_editor_window(window: &mut Window) {
+    window.set_background_appearance(WindowBackgroundAppearance::Transparent);
+    #[cfg(target_os = "macos")]
+    {
+        use objc::{class, msg_send, sel, sel_impl};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        if let Ok(handle) = window.window_handle()
+            && let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw()
+        {
+            unsafe {
+                let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
+                disable_gpui_content_view_window_drag(ns_view);
+                let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
+                let () = msg_send![ns_window, setTitlebarSeparatorStyle: 0i64];
+                let clear_color: *mut objc::runtime::Object =
+                    msg_send![class!(NSColor), clearColor];
+                let () = msg_send![ns_window, setBackgroundColor: clear_color];
+                let () = msg_send![ns_window, setHasShadow: true];
+                let () = msg_send![ns_window, setMovableByWindowBackground: false];
+                let content_view: *mut objc::runtime::Object = msg_send![ns_window, contentView];
+                let () = msg_send![content_view, setWantsLayer: true];
+                let layer: *mut objc::runtime::Object = msg_send![content_view, layer];
+                let () = msg_send![layer, setCornerRadius: 15.0_f64];
+                let () = msg_send![layer, setMasksToBounds: true];
+            }
+        }
+    }
+}
+
+fn open_terminal_window(cx: &mut App) -> anyhow::Result<()> {
+    let options = editor_window_options(cx);
+    cx.open_window(options, |window, cx| {
+        configure_editor_window(window);
+        let view = cx.new(|cx| {
+            let mut view = EditorView::new(cx);
+            view.create_terminal_tab(editor::ChatAgentCli::Terminal, cx);
+            view.sidebar_visible = false;
+            view.sidebar_resizing = false;
+            view.set_sidebar_width_immediately(0.0);
+            view
+        });
+        window.focus(&view.focus_handle(cx));
+        view
+    })?;
+    cx.activate(true);
+    Ok(())
+}
+
 fn main() {
     #[cfg(target_os = "macos")]
     let pending_open_paths = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
@@ -505,6 +577,11 @@ fn main() {
         ]);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &OpenTerminalWindow, cx| {
+            if let Err(error) = open_terminal_window(cx) {
+                eprintln!("failed to open terminal window: {error:#}");
+            }
+        });
 
         // User keybinding overrides from config.yaml are registered last so
         // they take precedence over the default bindings above.
@@ -515,77 +592,22 @@ fn main() {
         let editor_for_window = editor_for_open_urls.clone();
         #[cfg(target_os = "macos")]
         let pending_paths_for_window = pending_open_paths.clone();
-        #[cfg(target_os = "macos")]
-        let traffic_light_position =
-            EditorView::traffic_light_position_for_ui_scale(editor::AppSettings::load().ui_scale);
-        #[cfg(not(target_os = "macos"))]
-        let traffic_light_position = point(px(10.0), px(10.0));
+        let options = editor_window_options(cx);
 
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    size(px(1024.0), px(768.0)),
-                    cx,
-                ))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(system_application_display_name().into()),
-                    appears_transparent: true,
-                    // Initialize against the scaled tab-bar center; the first
-                    // render refines this using the native button's actual height.
-                    traffic_light_position: Some(traffic_light_position),
-                }),
-                window_background: WindowBackgroundAppearance::Transparent,
-                ..Default::default()
-            },
-            |window, cx| {
-                window.set_background_appearance(WindowBackgroundAppearance::Transparent);
-                #[cfg(target_os = "macos")]
-                {
-                    use objc::{class, msg_send, sel, sel_impl};
-                    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-                    if let Ok(handle) = window.window_handle() {
-                        if let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
-                            unsafe {
-                                let ns_view =
-                                    appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
-                                disable_gpui_content_view_window_drag(ns_view);
-                                let ns_window: *mut objc::runtime::Object =
-                                    msg_send![ns_view, window];
-                                let () = msg_send![ns_window, setTitlebarSeparatorStyle: 0i64];
-                                let clear_color: *mut objc::runtime::Object =
-                                    msg_send![class!(NSColor), clearColor];
-                                let () = msg_send![ns_window, setBackgroundColor: clear_color];
-                                let () = msg_send![ns_window, setHasShadow: true];
-                                let () = msg_send![ns_window, setMovableByWindowBackground: false];
-                                let content_view: *mut objc::runtime::Object =
-                                    msg_send![ns_window, contentView];
-                                let () = msg_send![content_view, setWantsLayer: true];
-                                let layer: *mut objc::runtime::Object =
-                                    msg_send![content_view, layer];
-                                let () = msg_send![layer, setCornerRadius: 15.0_f64];
-                                let () = msg_send![layer, setMasksToBounds: true];
-                            }
-                        }
-                    }
+        cx.open_window(options, |window, cx| {
+            configure_editor_window(window);
+            let view = cx.new(|cx| EditorView::new(cx));
+            window.focus(&view.focus_handle(cx));
+            #[cfg(target_os = "macos")]
+            {
+                *editor_for_window.borrow_mut() = Some(view.clone());
+                let pending_paths = std::mem::take(&mut *pending_paths_for_window.borrow_mut());
+                if !pending_paths.is_empty() {
+                    open_markdown_paths(&view, pending_paths, cx);
                 }
-                let view = cx.new(|cx| {
-                    let view = EditorView::new(cx);
-                    window.focus(&view.focus_handle(cx));
-                    view
-                });
-                #[cfg(target_os = "macos")]
-                {
-                    *editor_for_window.borrow_mut() = Some(view.clone());
-                    let pending_paths = std::mem::take(&mut *pending_paths_for_window.borrow_mut());
-                    if !pending_paths.is_empty() {
-                        open_markdown_paths(&view, pending_paths, cx);
-                    }
-                }
-                view
-            },
-        )
+            }
+            view
+        })
         .expect("failed to open main window");
     });
 }

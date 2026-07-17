@@ -403,13 +403,28 @@ pub(crate) fn app_menus(language: UiLanguage) -> Vec<gpui::Menu> {
                 command_item(CommandId::ToggleTheme),
             ],
         },
+        // GPUI registers a menu named exactly "Window" as NSApplication's
+        // windows menu. AppKit then keeps every open window in this menu and
+        // mirrors the same list in the Dock context menu.
+        Menu {
+            name: "Window".into(),
+            items: Vec::new(),
+        },
     ]
 }
 
-/// Install the native menu bar using the persisted UI language.
+pub(crate) fn dock_menu(language: UiLanguage) -> Vec<gpui::MenuItem> {
+    vec![gpui::MenuItem::action(
+        crate::i18n::open_terminal_window_label(language),
+        crate::actions::OpenTerminalWindow,
+    )]
+}
+
+/// Install the native menu bar and Dock menu using the persisted UI language.
 pub(crate) fn set_application_menus(cx: &mut gpui::App) {
     let language = super::AppSettings::load().ui_language();
     cx.set_menus(app_menus(language));
+    cx.set_dock_menu(dock_menu(language));
 }
 
 pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
@@ -1051,4 +1066,22 @@ fn is_special_key_symbol(ch: char) -> bool {
         ch,
         '⌘' | '⌥' | '⌃' | '⇧' | '↩' | '⌫' | '⌦' | '⇥' | '⎋' | '↑' | '↓' | '←' | '→'
     )
+}
+
+#[cfg(test)]
+mod native_menu_tests {
+    use super::{app_menus, dock_menu};
+    use crate::i18n::UiLanguage;
+
+    #[test]
+    fn native_menus_register_window_list_and_localized_terminal_action() {
+        let menus = app_menus(UiLanguage::ChineseSimplified);
+        assert!(menus.iter().any(|menu| menu.name.as_ref() == "Window"));
+
+        let dock_items = dock_menu(UiLanguage::ChineseSimplified);
+        assert!(matches!(
+            dock_items.as_slice(),
+            [gpui::MenuItem::Action { name, .. }] if name.as_ref() == "打开终端"
+        ));
+    }
 }

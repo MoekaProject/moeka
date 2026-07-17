@@ -93,6 +93,7 @@ actions!(
         NewDocument,
         NewTab,
         NewWhiteboard,
+        OpenTerminalWindow,
         Quit,
         Escape,
         ToggleOutline,
