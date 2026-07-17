@@ -7,12 +7,15 @@ use gpui::{
 };
 
 use crate::checkbox::{Checkbox, CheckboxColors};
-use crate::i18n::{TextKey, UiLanguage, attachment_settings_label, language_picker_options};
+use crate::i18n::{
+    TextKey, UiLanguage, attachment_settings_label, language_picker_options,
+    terminal_settings_label,
+};
 use crate::theme::{EditorThemeMode, ThemeKind};
 
 use super::{
     APP_VERSION, DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, SITE_SVG_PATH,
-    THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH, attachments, tooltip,
+    THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape, attachments, tooltip,
 };
 
 // ── Font picker state ───────────────────────────────────────────────
@@ -25,6 +28,7 @@ pub(crate) enum FontRole {
     InterfaceLanguage,
     DateTimeFormat,
     AttachmentLocation,
+    TerminalCursorShape,
     /// Font family for selected whiteboard elements (whiteboard panel).
     WhiteboardFont,
 }
@@ -135,6 +139,7 @@ impl EditorView {
                     .child(self.render_theme_section(cx))
                     .child(self.render_font_section(window, cx))
                     .child(self.render_format_section(cx))
+                    .child(self.render_terminal_settings_section(cx))
                     .child(self.render_attachment_settings_section(cx)),
             )
             .into_any_element()
@@ -270,6 +275,27 @@ impl EditorView {
                 self.t(TextKey::DateTimeFormat),
                 &current,
                 FontRole::DateTimeFormat,
+                0,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn render_terminal_settings_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let cursor_shape = self.app_settings.terminal_cursor_shape();
+        let current = terminal_settings_label(self.ui_language, cursor_shape.as_str());
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(self.scaled(12.0)))
+            .child(
+                self.render_section_heading(terminal_settings_label(self.ui_language, "section")),
+            )
+            .child(self.render_picker_row(
+                terminal_settings_label(self.ui_language, "cursor_shape"),
+                current,
+                FontRole::TerminalCursorShape,
                 0,
                 cx,
             ))
@@ -584,6 +610,14 @@ impl EditorView {
         styles.text_input_text_color = menu.quick_open_input_text_color;
         styles.text_input_placeholder_color = menu.quick_open_result_secondary_text_color;
         styles.text_input_cursor_color = menu.quick_open_input_text_color;
+        styles.text_input_height_px = self.scaled(24.0);
+        styles.text_input_padding_left_px = self.scaled(menu.quick_open_input_text_padding_left_px);
+        styles.text_input_padding_right_px =
+            self.scaled(menu.quick_open_input_text_padding_left_px);
+        styles.text_input_font_size_px = self.scaled(menu.quick_open_result_name_font_size_px);
+        styles.text_input_cursor_height_ratio = menu.quick_open_input_cursor_height_ratio;
+        styles.text_input_cursor_height_adjust_px =
+            self.scaled(menu.quick_open_input_cursor_height_adjust_px);
         styles
     }
 
@@ -1540,6 +1574,22 @@ impl EditorView {
                 self.date_time_format_options(),
                 self.t(TextKey::SearchDateTimeFormats).to_string(),
             ),
+            FontRole::TerminalCursorShape => (
+                TerminalCursorShape::ALL
+                    .into_iter()
+                    .map(|shape| {
+                        let value = shape.as_str();
+                        let label = terminal_settings_label(self.ui_language, value).to_string();
+                        PickerOption {
+                            value: value.to_string(),
+                            search_text: format!("{label} {value}").to_lowercase(),
+                            label,
+                            preview_font: None,
+                        }
+                    })
+                    .collect(),
+                terminal_settings_label(self.ui_language, "search_cursor_shapes").to_string(),
+            ),
             FontRole::AttachmentLocation => (
                 ["current_file", "workspace_folder", "current_file_subfolder"]
                     .into_iter()
@@ -1600,6 +1650,11 @@ impl EditorView {
             (FontRole::InterfaceLanguage, _) => self.ui_language.code().to_string(),
             (FontRole::DateTimeFormat, _) => self.app_settings.date_time_format().to_string(),
             (FontRole::AttachmentLocation, _) => self.app_settings.attachment_location.clone(),
+            (FontRole::TerminalCursorShape, _) => self
+                .app_settings
+                .terminal_cursor_shape()
+                .as_str()
+                .to_string(),
             (FontRole::WhiteboardFont, _) => self
                 .whiteboard_current_style()
                 .font
@@ -1726,7 +1781,7 @@ impl EditorView {
         let selected_bg = menu.quick_open_result_selected_bg;
 
         let max_visible = 12;
-        let item_h = self.scaled(28.0);
+        let item_h = self.scaled(24.0);
         let items: Vec<AnyElement> = picker
             .filtered
             .iter()
@@ -1741,10 +1796,10 @@ impl EditorView {
                     .id(SharedString::from(format!("fp-item-{idx}")))
                     .mx(px(1.0))
                     .h(px(item_h))
-                    .px(px(self.scaled(10.0)))
+                    .px(px(self.scaled(menu.quick_open_result_padding_x_px)))
                     .flex()
                     .items_center()
-                    .text_size(px(self.scaled(13.0)))
+                    .text_size(px(self.scaled(menu.quick_open_result_name_font_size_px)))
                     .text_color(text_primary)
                     .when_some(preview_font, |this, preview_font| {
                         this.font_family(SharedString::from(preview_font))
@@ -1798,7 +1853,7 @@ impl EditorView {
         let dropdown_w = button_w_val;
         let gap = self.scaled(4.0);
         let desired_visible = picker.filtered.len().min(200).min(max_visible).max(1);
-        let desired_h = desired_visible as f32 * item_h + self.scaled(42.0);
+        let desired_h = desired_visible as f32 * item_h + self.scaled(33.0);
         let window_h = self.last_window_height - 2.0 * border_w;
         let final_x = button_x.max(8.0);
         let below_y = button_y + button_h + gap;
@@ -1872,8 +1927,8 @@ impl EditorView {
             .child(
                 div()
                     .w_full()
-                    .px(px(self.scaled(6.0)))
-                    .py(px(self.scaled(6.0)))
+                    .px(px(self.scaled(menu.quick_open_input_padding_x_px)))
+                    .py(px(self.scaled(4.0)))
                     .border_b(px(1.0))
                     .border_color(border_color)
                     .when_some(self.settings_font_picker_editor.clone(), |this, editor| {
@@ -1886,7 +1941,7 @@ impl EditorView {
                     .id("font-picker-list")
                     .flex_1()
                     .overflow_y_scroll()
-                    .pb(px(self.scaled(8.0)))
+                    .pb(px(self.scaled(4.0)))
                     .track_scroll(&picker.scroll_handle)
                     .children(items),
             );
@@ -1953,6 +2008,11 @@ impl EditorView {
                 }
                 (FontRole::AttachmentLocation, _) => {
                     self.app_settings.attachment_location = font_name;
+                }
+                (FontRole::TerminalCursorShape, _) => {
+                    if let Some(shape) = TerminalCursorShape::from_str(&font_name) {
+                        self.set_terminal_cursor_shape(shape);
+                    }
                 }
                 (FontRole::WhiteboardFont, _) => {
                     self.whiteboard_apply_font_family(font_name, cx);

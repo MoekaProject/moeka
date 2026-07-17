@@ -1,7 +1,7 @@
 use gpui::{
-    AnyElement, App, Bounds, Corners, CursorStyle, ExternalPaths, HitboxBehavior,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Window,
-    canvas, deferred, div, img, prelude::*, px, quad,
+    AnyElement, App, Bounds, Corners, CursorStyle, ExternalPaths, HitboxBehavior, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Window, canvas, deferred,
+    div, img, prelude::*, px, quad,
 };
 
 use super::*;
@@ -13,156 +13,7 @@ pub(super) fn clamp_resize_dimension(value: f32, minimum: f32, maximum: f32) -> 
 }
 
 impl EditorView {
-    pub(super) fn render_chat_panel_drop_targets(
-        &self,
-        editor_pane_width: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let zone_margin = self.scaled(
-            self.styles
-                .utility_panel
-                .utility_panel_drop_target_margin_px,
-        );
-        let zone_radius = self.scaled(
-            self.styles
-                .utility_panel
-                .utility_panel_drop_target_radius_px,
-        );
-        let right_zone_width =
-            (editor_pane_width * 0.28).clamp(self.scaled(160.0), self.scaled(240.0));
-        let bottom_zone_height =
-            (self.last_window_height * 0.22).clamp(self.scaled(120.0), self.scaled(190.0));
-        let border_width = self.scaled(
-            self.styles
-                .utility_panel
-                .utility_panel_drop_target_border_width_px,
-        );
-        let drop_target_bg = self.styles.utility_panel.utility_panel_drop_target_bg;
-        let drop_target_active_bg = self
-            .styles
-            .utility_panel
-            .utility_panel_drop_target_active_bg;
-        let drop_target_border_color = self
-            .styles
-            .utility_panel
-            .utility_panel_drop_target_border_color;
-        let drop_target_active_border_color = self
-            .styles
-            .utility_panel
-            .utility_panel_drop_target_active_border_color;
-        let drop_target_label_bg = self.styles.utility_panel.utility_panel_drop_target_label_bg;
-        let drop_target_label_text_color = self
-            .styles
-            .utility_panel
-            .utility_panel_drop_target_label_text_color;
-        let label_font_size = self.scaled(
-            self.styles
-                .utility_panel
-                .utility_panel_drop_target_label_font_size_px,
-        );
-        let label_padding_x = self.scaled(
-            self.styles
-                .utility_panel
-                .utility_panel_drop_target_label_padding_x_px,
-        );
-        let label_padding_y = self.scaled(
-            self.styles
-                .utility_panel
-                .utility_panel_drop_target_label_padding_y_px,
-        );
-
-        let right_zone = div()
-            .absolute()
-            .right(px(zone_margin))
-            .top(px(zone_margin))
-            .bottom(px(zone_margin))
-            .w(px(right_zone_width))
-            .rounded(px(zone_radius))
-            .border(px(border_width))
-            .border_color(drop_target_border_color)
-            .bg(drop_target_bg)
-            .cursor(CursorStyle::Arrow)
-            .flex()
-            .items_center()
-            .justify_center()
-            .drag_over::<DraggedChatTab>(move |style, _, _, _| {
-                style
-                    .bg(drop_target_active_bg)
-                    .border_color(drop_target_active_border_color)
-            })
-            .on_drop(cx.listener(|this, dragged: &DraggedChatTab, _, cx| {
-                this.switch_to_chat_tab(&dragged.tab_id, cx);
-                this.place_chat_panel(ChatPanelPlacement::Right, cx);
-                this.chat_tab_drag_candidate_id = None;
-                this.chat_tab_dragging_id = None;
-            }))
-            .child(
-                div()
-                    .px(px(label_padding_x))
-                    .py(px(label_padding_y))
-                    .rounded_full()
-                    .bg(drop_target_label_bg)
-                    .text_size(px(label_font_size))
-                    .text_color(drop_target_label_text_color)
-                    .child(crate::i18n::terminal_drop_label(self.ui_language, true)),
-            )
-            .into_any_element();
-
-        let bottom_zone = div()
-            .absolute()
-            .left(px(zone_margin))
-            .right(px(zone_margin))
-            .bottom(px(zone_margin))
-            .h(px(bottom_zone_height))
-            .rounded(px(zone_radius))
-            .border(px(border_width))
-            .border_color(drop_target_border_color)
-            .bg(drop_target_bg)
-            .cursor(CursorStyle::Arrow)
-            .flex()
-            .items_center()
-            .justify_center()
-            .drag_over::<DraggedChatTab>(move |style, _, _, _| {
-                style
-                    .bg(drop_target_active_bg)
-                    .border_color(drop_target_active_border_color)
-            })
-            .on_drop(cx.listener(|this, dragged: &DraggedChatTab, _, cx| {
-                this.switch_to_chat_tab(&dragged.tab_id, cx);
-                this.place_chat_panel(ChatPanelPlacement::Bottom, cx);
-                this.chat_tab_drag_candidate_id = None;
-                this.chat_tab_dragging_id = None;
-            }))
-            .child(
-                div()
-                    .px(px(label_padding_x))
-                    .py(px(label_padding_y))
-                    .rounded_full()
-                    .bg(drop_target_label_bg)
-                    .text_size(px(label_font_size))
-                    .text_color(drop_target_label_text_color)
-                    .child(crate::i18n::terminal_drop_label(self.ui_language, false)),
-            )
-            .into_any_element();
-
-        div()
-            .absolute()
-            .left(px(0.0))
-            .top(px(0.0))
-            .right(px(0.0))
-            .bottom(px(0.0))
-            .child(match self.chat_panel_placement {
-                ChatPanelPlacement::Right => bottom_zone,
-                ChatPanelPlacement::Bottom => right_zone,
-            })
-            .into_any_element()
-    }
-
-    fn render_right_panels(
-        &mut self,
-        chat_panel_focused: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_right_panels(&mut self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("right-panels")
             .h_full()
@@ -183,123 +34,122 @@ impl EditorView {
                 let ups = &self.styles.utility_panel;
                 let panel_w = self.utility_panel_width();
                 let panel_layout_w = self.utility_panel_layout_width();
-                let panel_styles = crate::style::Styles::from_theme(
-                    &self.app_settings.dark_theme_kind().build(),
-                    &self.app_settings.dark_theme_kind().build(),
-                );
-                let panel_border_color = panel_styles.tab_bar.tab_bar_border_color;
+                let panel_top_offset = if self.tabs.is_empty() {
+                    0.0
+                } else {
+                    self.tab_bar_height()
+                };
                 let hover_indicator_color = ups.utility_panel_resize_active_indicator_color;
                 let hover_indicator_width =
                     self.scaled(ups.utility_panel_resize_active_indicator_width_px);
                 let handle_width = self.scaled(ups.utility_panel_resize_handle_width_px);
                 this.child(
                     div()
-                        .id("utility-panel-wrap")
-                        .relative()
+                        .id("utility-panel-column")
                         .h_full()
                         .w(px(panel_w))
-                        .overflow_hidden()
+                        .flex()
+                        .flex_col()
                         .flex_shrink_0()
                         .child(
                             div()
-                                .h_full()
-                                .w(px(panel_layout_w))
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .id("utility-panel-top-bar")
-                                        .h(px(self.tab_bar_height()))
-                                        .w_full()
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .justify_end()
-                                        .bg(ups.utility_panel_bg)
-                                        .border_l(px(ups.utility_panel_border_width_px))
-                                        .border_b(px(ups.utility_panel_border_width_px))
-                                        .border_color(panel_border_color)
-                                        .child(self.render_panel_toggle_actions(cx)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_h(px(0.0))
-                                        .child(self.render_utility_panel(chat_panel_focused, cx)),
-                                ),
+                                .h(px(panel_top_offset))
+                                .w_full()
+                                .flex_none()
+                                .bg(self.styles.tab_bar.tab_bar_bg)
+                                .when(panel_top_offset > 0.0, |this| {
+                                    this.border_b(px(self.styles.tab_bar.tab_bar_border_width_px))
+                                        .border_color(self.styles.tab_bar.tab_bar_border_color)
+                                }),
                         )
                         .child(
                             div()
-                                .id("utility-panel-resize-handle")
-                                .absolute()
-                                .left(px(-handle_width / 2.0))
-                                .top_0()
-                                .w(px(handle_width))
-                                .h_full()
-                                .cursor(CursorStyle::ResizeLeftRight)
-                                .hover(move |style| {
-                                    style
-                                        .border_l(px(hover_indicator_width))
-                                        .border_color(hover_indicator_color)
-                                })
-                                .on_mouse_move(cx.listener(
-                                    |this, event: &MouseMoveEvent, window, cx| {
-                                        if this.utility_panel_resizing {
-                                            let window_width =
-                                                f32::from(window.bounds().size.width);
-                                            let min_w = this.scaled(
-                                                this.styles
-                                                    .utility_panel
-                                                    .utility_panel_resize_min_width_px,
-                                            );
-                                            let max_w = this.scaled(
-                                                this.styles
-                                                    .utility_panel
-                                                    .utility_panel_resize_max_width_px,
-                                            );
-                                            let new_width =
-                                                window_width - f32::from(event.position.x);
-                                            let new_width =
-                                                clamp_resize_dimension(new_width, min_w, max_w);
-                                            if let Some(panel) =
-                                                this.active_resizable_utility_panel()
-                                            {
-                                                this.set_utility_panel_custom_width_for(
-                                                    panel,
-                                                    Some(new_width),
-                                                );
-                                            }
-                                            this.set_utility_panel_width_immediately(new_width);
-                                            cx.notify();
-                                        }
-                                    },
-                                ))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                                        window.prevent_default();
-                                        cx.stop_propagation();
-                                        this.tab_drag_candidate_id = None;
-                                        this.tab_dragging_id = None;
-                                        this.chat_tab_drag_candidate_id = None;
-                                        this.chat_tab_dragging_id = None;
-                                        this.utility_panel_resizing = true;
-                                        cx.notify();
-                                    }),
+                                .id("utility-panel-wrap")
+                                .relative()
+                                .flex_1()
+                                .min_h(px(0.0))
+                                .w_full()
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(px(panel_layout_w))
+                                        .child(self.render_utility_panel(cx)),
                                 )
-                                .on_mouse_up(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.utility_panel_resizing = false;
-                                        cx.notify();
-                                    }),
-                                )
-                                .on_mouse_up_out(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.utility_panel_resizing = false;
-                                        cx.notify();
-                                    }),
+                                .child(
+                                    div()
+                                        .id("utility-panel-resize-handle")
+                                        .absolute()
+                                        .left(px(-handle_width / 2.0))
+                                        .top_0()
+                                        .w(px(handle_width))
+                                        .h_full()
+                                        .cursor(CursorStyle::ResizeLeftRight)
+                                        .hover(move |style| {
+                                            style
+                                                .border_l(px(hover_indicator_width))
+                                                .border_color(hover_indicator_color)
+                                        })
+                                        .on_mouse_move(cx.listener(
+                                            |this, event: &MouseMoveEvent, window, cx| {
+                                                if this.utility_panel_resizing {
+                                                    let window_width =
+                                                        f32::from(window.bounds().size.width);
+                                                    let min_w = this.scaled(
+                                                        this.styles
+                                                            .utility_panel
+                                                            .utility_panel_resize_min_width_px,
+                                                    );
+                                                    let max_w = this.scaled(
+                                                        this.styles
+                                                            .utility_panel
+                                                            .utility_panel_resize_max_width_px,
+                                                    );
+                                                    let new_width =
+                                                        window_width - f32::from(event.position.x);
+                                                    let new_width = clamp_resize_dimension(
+                                                        new_width, min_w, max_w,
+                                                    );
+                                                    if let Some(panel) =
+                                                        this.active_resizable_utility_panel()
+                                                    {
+                                                        this.set_utility_panel_custom_width_for(
+                                                            panel,
+                                                            Some(new_width),
+                                                        );
+                                                    }
+                                                    this.set_utility_panel_width_immediately(
+                                                        new_width,
+                                                    );
+                                                    cx.notify();
+                                                }
+                                            },
+                                        ))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                                window.prevent_default();
+                                                cx.stop_propagation();
+                                                this.tab_drag_candidate_id = None;
+                                                this.tab_dragging_id = None;
+                                                this.utility_panel_resizing = true;
+                                                cx.notify();
+                                            }),
+                                        )
+                                        .on_mouse_up(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.utility_panel_resizing = false;
+                                                cx.notify();
+                                            }),
+                                        )
+                                        .on_mouse_up_out(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.utility_panel_resizing = false;
+                                                cx.notify();
+                                            }),
+                                        ),
                                 ),
                         ),
                 )
@@ -525,6 +375,8 @@ impl EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(target_os = "macos")]
+        self.sync_macos_traffic_light_position(window);
         self.execute_pending_command(window, cx);
         self.refresh_chat_terminal_metrics(window, cx);
         self.process_pending_inline_diff(cx);
@@ -535,20 +387,25 @@ impl Render for EditorView {
             window.focus(&self.focus_handle(cx));
             self.pending_editor_focus = false;
         }
-        if self.pending_chat_input_focus {
-            window.focus(&self.chat_panel_focus_handle);
-            window.invalidate_character_coordinates();
-            self.pending_chat_input_focus = false;
+        if let Some(tab_id) = self.pending_terminal_focus.clone() {
+            if self.active_terminal_tab_id().as_deref() != Some(tab_id.as_str()) {
+                self.pending_terminal_focus = None;
+            } else if let Some(state) = self.terminal_tab_states.get(&tab_id) {
+                window.focus(&state.focus_handle);
+                window.invalidate_character_coordinates();
+                self.pending_terminal_focus = None;
+            }
         }
-        if self.utility_panel == Some(RightUtilityPanel::Chat)
-            && self.chat_panel_focus_handle.is_focused(window)
+        if self
+            .terminal_tab_states
+            .values()
+            .any(|state| state.focus_handle.is_focused(window))
         {
             window.invalidate_character_coordinates();
         }
         if self.focus_handle.is_focused(window) && self.active_tab_supports_text_buffer() {
             window.invalidate_character_coordinates();
         }
-        let chat_panel_focused = self.chat_panel_focus_handle.is_focused(window);
         let resizing = self.sidebar_resizing
             || self.file_list_resizing
             || self.utility_panel_resizing
@@ -641,15 +498,11 @@ impl Render for EditorView {
                     if this.panes.len() < 2 {
                         return;
                     }
-                    let target = this
-                        .panes
-                        .iter()
-                        .map(|pane| pane.id)
-                        .find(|pane_id| {
-                            this.pane_bounds
-                                .get(pane_id)
-                                .is_some_and(|bounds| bounds.contains(&event.position))
-                        });
+                    let target = this.panes.iter().map(|pane| pane.id).find(|pane_id| {
+                        this.pane_bounds
+                            .get(pane_id)
+                            .is_some_and(|bounds| bounds.contains(&event.position))
+                    });
                     if let Some(pane_id) = target {
                         this.focus_pane(pane_id, cx);
                     }
@@ -921,12 +774,62 @@ impl Render for EditorView {
                             )
                         }),
                 )
-                    // Transparent sensing area for resize drag
-                    .child(
+                // Transparent sensing area for resize drag
+                .child(
+                    div()
+                        .id("sidebar-resize-handle")
+                        .absolute()
+                        .left(px(sidebar_w - handle_width / 2.0))
+                        .top_0()
+                        .w(px(handle_width))
+                        .h_full()
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .hover(move |style| {
+                            style
+                                .border_l(px(hover_indicator_width))
+                                .border_color(hover_indicator_color)
+                        })
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                            if this.sidebar_resizing {
+                                let new_width = f32::from(event.position.x);
+                                let min_w =
+                                    this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
+                                let max_w =
+                                    this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
+                                let new_width = clamp_resize_dimension(new_width, min_w, max_w);
+                                this.set_active_sidebar_custom_width(new_width);
+                                this.set_sidebar_width_immediately(new_width);
+                                cx.notify();
+                            }
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                this.sidebar_resizing = true;
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.sidebar_resizing = false;
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.sidebar_resizing = false;
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .when(file_list_w > 0.5, |this| {
+                    this.child(
                         div()
-                            .id("sidebar-resize-handle")
+                            .id("file-list-resize-handle")
                             .absolute()
-                            .left(px(sidebar_w - handle_width / 2.0))
+                            .left(px(sidebar_w + file_list_w - handle_width / 2.0))
                             .top_0()
                             .w(px(handle_width))
                             .h_full()
@@ -937,103 +840,47 @@ impl Render for EditorView {
                                     .border_color(hover_indicator_color)
                             })
                             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                                if this.sidebar_resizing {
-                                    let new_width = f32::from(event.position.x);
+                                if this.file_list_resizing {
+                                    let new_width = f32::from(event.position.x)
+                                        - this.sidebar_width()
+                                        - this.file_list_resize_grab_offset_x;
                                     let min_w = this
-                                        .scaled(this.styles.sidebar.sidebar_resize_min_width_px);
+                                        .scaled(this.styles.sidebar.file_list_resize_min_width_px);
                                     let max_w = this
-                                        .scaled(this.styles.sidebar.sidebar_resize_max_width_px);
-                                    let new_width =
-                                        clamp_resize_dimension(new_width, min_w, max_w);
-                                    this.set_active_sidebar_custom_width(new_width);
-                                    this.set_sidebar_width_immediately(new_width);
+                                        .scaled(this.styles.sidebar.file_list_resize_max_width_px);
+                                    let new_width = clamp_resize_dimension(new_width, min_w, max_w);
+                                    this.file_list_custom_width = Some(new_width);
+                                    this.file_list_display_width = new_width;
+                                    this.file_list_layout_width = new_width;
+                                    this.file_list_width_target = new_width;
+                                    this.file_list_width_task = None;
                                     cx.notify();
                                 }
                             }))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                    this.sidebar_resizing = true;
+                                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                    let border_x = this.sidebar_width() + this.file_list_width();
+                                    this.file_list_resize_grab_offset_x =
+                                        f32::from(event.position.x) - border_x;
+                                    this.file_list_resizing = true;
                                     cx.notify();
                                 }),
                             )
                             .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
-                                    this.sidebar_resizing = false;
-                                    cx.notify();
+                                    this.finish_file_list_resize(cx);
                                 }),
                             )
                             .on_mouse_up_out(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
-                                    this.sidebar_resizing = false;
-                                    cx.notify();
+                                    this.finish_file_list_resize(cx);
                                 }),
                             ),
                     )
-                    .when(file_list_w > 0.5, |this| {
-                        this.child(
-                            div()
-                                .id("file-list-resize-handle")
-                                .absolute()
-                                .left(px(sidebar_w + file_list_w - handle_width / 2.0))
-                                .top_0()
-                                .w(px(handle_width))
-                                .h_full()
-                                .cursor(CursorStyle::ResizeLeftRight)
-                                .hover(move |style| {
-                                    style
-                                        .border_l(px(hover_indicator_width))
-                                        .border_color(hover_indicator_color)
-                                })
-                                .on_mouse_move(cx.listener(
-                                    |this, event: &MouseMoveEvent, _, cx| {
-                                        if this.file_list_resizing {
-                                            let new_width = f32::from(event.position.x)
-                                                - this.sidebar_width()
-                                                - this.file_list_resize_grab_offset_x;
-                                            let min_w = this.scaled(
-                                                this.styles.sidebar.file_list_resize_min_width_px,
-                                            );
-                                            let max_w = this.scaled(
-                                                this.styles.sidebar.file_list_resize_max_width_px,
-                                            );
-                                            let new_width =
-                                                clamp_resize_dimension(new_width, min_w, max_w);
-                                            this.file_list_custom_width = Some(new_width);
-                                            this.file_list_display_width = new_width;
-                                            this.file_list_layout_width = new_width;
-                                            this.file_list_width_target = new_width;
-                                            this.file_list_width_task = None;
-                                            cx.notify();
-                                        }
-                                    },
-                                ))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                                        let border_x = this.sidebar_width() + this.file_list_width();
-                                        this.file_list_resize_grab_offset_x =
-                                            f32::from(event.position.x) - border_x;
-                                        this.file_list_resizing = true;
-                                        cx.notify();
-                                    }),
-                                )
-                                .on_mouse_up(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.finish_file_list_resize(cx);
-                                    }),
-                                )
-                                .on_mouse_up_out(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.finish_file_list_resize(cx);
-                                    }),
-                                ),
-                        )
-                    })
+                })
             })
             .child(
                 div()
@@ -1054,66 +901,84 @@ impl Render for EditorView {
                             .overflow_hidden()
                             .flex()
                             .flex_col()
-                    .when(show_empty_workspace, |this| {
-                        // Empty state: no tabs open
-                        let bg_hover = self.styles.sidebar.sidebar_item_hover_bg;
-                        let btn_color = self.styles.sidebar.sidebar_empty_btn_text_color;
-                        let border_color = self.styles.sidebar.sidebar_empty_btn_border_color;
-                        let file_drop_bg = self.styles.editor.editor_file_drop_bg;
-                        this.child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .justify_center()
-                                .drag_over::<ExternalPaths>(move |style, _, _, _| {
-                                    style.bg(file_drop_bg)
-                                })
-                                .on_drop(cx.listener(
-                                    |this, paths: &ExternalPaths, _, cx| {
-                                        this.open_external_paths_in_tabs(paths.paths(), cx);
-                                    },
-                                ))
-                                .cursor(CursorStyle::Arrow)
-                                .child(
+                            .when(show_empty_workspace, |this| {
+                                // Empty state: no tabs open
+                                let bg_hover = self.styles.sidebar.sidebar_item_hover_bg;
+                                let btn_color = self.styles.sidebar.sidebar_empty_btn_text_color;
+                                let border_color =
+                                    self.styles.sidebar.sidebar_empty_btn_border_color;
+                                let file_drop_bg = self.styles.editor.editor_file_drop_bg;
+                                this.child(
                                     div()
-                                        .id("empty-workspace-btn")
-                                        .px(px(20.0))
-                                        .py(px(8.0))
-                                        .border(px(1.5))
-                                        .border_dashed()
-                                        .border_color(border_color)
-                                        .rounded_full()
-                                        .text_size(px(self.scaled(
-                                            self.styles.sidebar.sidebar_empty_btn_font_size_px,
-                                        )))
-                                        .text_color(btn_color)
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .justify_center()
+                                        .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                                            style.bg(file_drop_bg)
+                                        })
+                                        .on_drop(cx.listener(
+                                            |this, paths: &ExternalPaths, _, cx| {
+                                                this.open_external_paths_in_tabs(paths.paths(), cx);
+                                            },
+                                        ))
                                         .cursor(CursorStyle::Arrow)
-                                        .hover(move |s| s.bg(bg_hover))
-                                        .child(self.t(crate::i18n::TextKey::NewFile))
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                                this.create_scratch_tab(cx);
-                                            }),
+                                        .child(
+                                            div()
+                                                .id("empty-workspace-btn")
+                                                .px(px(20.0))
+                                                .py(px(8.0))
+                                                .border(px(1.5))
+                                                .border_dashed()
+                                                .border_color(border_color)
+                                                .rounded_full()
+                                                .text_size(px(self.scaled(
+                                                    self.styles
+                                                        .sidebar
+                                                        .sidebar_empty_btn_font_size_px,
+                                                )))
+                                                .text_color(btn_color)
+                                                .cursor(CursorStyle::Arrow)
+                                                .hover(move |s| s.bg(bg_hover))
+                                                .child(self.t(crate::i18n::TextKey::NewFile))
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(
+                                                        |this, _: &MouseDownEvent, _, cx| {
+                                                            this.create_scratch_tab(cx);
+                                                        },
+                                                    ),
+                                                ),
                                         ),
                                 )
-                        )
-                    })
-                    .when(!show_empty_workspace, |this| {
-                        this.child(self.render_workspace_content_column(
-                            chat_panel_focused,
-                            window,
-                            cx,
-                        ))
-                    })
-
-
+                            })
+                            .when(!show_empty_workspace, |this| {
+                                this.child(self.render_workspace_content_column(window, cx))
+                            }),
                     )
                     .when(self.should_render_right_panels(), |this| {
-                        this.child(self.render_right_panels(chat_panel_focused, cx))
-                    }),
+                        this.child(self.render_right_panels(cx))
+                    })
+                    .when(
+                        !show_empty_workspace
+                            && self.should_render_utility_panel_on_right()
+                            && !self.focused_pane_active_tab_is_terminal(),
+                        |this| {
+                            this.child(
+                                div()
+                                    .id("workspace-tab-bar-actions")
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .h(px(self.tab_bar_height()))
+                                    .flex()
+                                    .items_center()
+                                    .justify_end()
+                                    .child(self.render_tab_bar_toggle_actions(cx)),
+                            )
+                        },
+                    ),
             )
             .when(resizing, |this| {
                 let indicator_line = if self.sidebar_resizing {
@@ -1156,43 +1021,23 @@ impl Render for EditorView {
                         .styles
                         .utility_panel
                         .utility_panel_resize_active_indicator_color;
-                    if self.should_render_bottom_chat_panel() {
-                        let left = if self.should_render_sidebar_panel() {
-                            self.sidebar_width()
-                        } else {
-                            0.0
-                        };
-                        let width = (self.last_window_width - left).max(0.0);
-                        let y = (self.last_window_height - self.utility_panel_width()).max(0.0);
-                        Some(
-                            div()
-                                .absolute()
-                                .left(px(left))
-                                .top(px(y))
-                                .w(px(width))
-                                .h(px(iw))
-                                .bg(ic)
-                                .into_any_element(),
-                        )
+                    let top = if self.tabs.is_empty() {
+                        0.0
                     } else {
-                        let top = if self.tabs.is_empty() {
-                            0.0
-                        } else {
-                            self.tab_bar_height()
-                        };
-                        let height = (self.last_window_height - top).max(0.0);
-                        let x = (self.last_window_width - self.utility_panel_width()).max(0.0);
-                        Some(
-                            div()
-                                .absolute()
-                                .left(px(x))
-                                .top(px(top))
-                                .w(px(iw))
-                                .h(px(height))
-                                .bg(ic)
-                                .into_any_element(),
-                        )
-                    }
+                        self.tab_bar_height()
+                    };
+                    let height = (self.last_window_height - top).max(0.0);
+                    let x = (self.last_window_width - self.utility_panel_width()).max(0.0);
+                    Some(
+                        div()
+                            .absolute()
+                            .left(px(x))
+                            .top(px(top))
+                            .w(px(iw))
+                            .h(px(height))
+                            .bg(ic)
+                            .into_any_element(),
+                    )
                 } else {
                     None
                 };
@@ -1201,10 +1046,6 @@ impl Render for EditorView {
                         Some(SplitAxis::Vertical) => CursorStyle::ResizeUpDown,
                         _ => CursorStyle::ResizeLeftRight,
                     }
-                } else if self.utility_panel_resizing
-                    && self.should_render_bottom_chat_panel()
-                {
-                    CursorStyle::ResizeUpDown
                 } else {
                     CursorStyle::ResizeLeftRight
                 };
@@ -1233,14 +1074,13 @@ impl Render for EditorView {
                                 this.set_sidebar_width_immediately(new_width);
                                 cx.notify();
                             } else if this.file_list_resizing {
-                                let new_width =
-                                    f32::from(event.position.x)
-                                        - this.sidebar_width()
-                                        - this.file_list_resize_grab_offset_x;
-                                let min_w = this
-                                    .scaled(this.styles.sidebar.file_list_resize_min_width_px);
-                                let max_w = this
-                                    .scaled(this.styles.sidebar.file_list_resize_max_width_px);
+                                let new_width = f32::from(event.position.x)
+                                    - this.sidebar_width()
+                                    - this.file_list_resize_grab_offset_x;
+                                let min_w =
+                                    this.scaled(this.styles.sidebar.file_list_resize_min_width_px);
+                                let max_w =
+                                    this.scaled(this.styles.sidebar.file_list_resize_max_width_px);
                                 let new_width = clamp_resize_dimension(new_width, min_w, max_w);
                                 this.file_list_custom_width = Some(new_width);
                                 this.file_list_display_width = new_width;
@@ -1255,24 +1095,23 @@ impl Render for EditorView {
                                     .map(|panel| this.utility_panel_resize_bounds_for(panel))
                                     .unwrap_or_else(|| {
                                         (
-                                            this.scaled(this.styles.utility_panel.utility_panel_resize_min_width_px),
-                                            this.scaled(this.styles.utility_panel.utility_panel_resize_max_width_px),
+                                            this.scaled(
+                                                this.styles
+                                                    .utility_panel
+                                                    .utility_panel_resize_min_width_px,
+                                            ),
+                                            this.scaled(
+                                                this.styles
+                                                    .utility_panel
+                                                    .utility_panel_resize_max_width_px,
+                                            ),
                                         )
                                     });
-                                let new_size = if this.should_render_bottom_chat_panel() {
-                                    let window_height = f32::from(window.bounds().size.height);
-                                    clamp_resize_dimension(
-                                        window_height - f32::from(event.position.y),
-                                        min_w,
-                                        max_w,
-                                    )
-                                } else {
-                                    clamp_resize_dimension(
-                                        window_width - f32::from(event.position.x),
-                                        min_w,
-                                        max_w,
-                                    )
-                                };
+                                let new_size = clamp_resize_dimension(
+                                    window_width - f32::from(event.position.x),
+                                    min_w,
+                                    max_w,
+                                );
                                 if let Some(panel) = active_panel {
                                     this.set_utility_panel_custom_width_for(panel, Some(new_size));
                                 }

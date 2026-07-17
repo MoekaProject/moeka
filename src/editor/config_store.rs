@@ -75,6 +75,9 @@ pub(crate) struct TabSessionRecord {
     pub path: Option<PathBuf>,
     #[serde(default)]
     pub file_kind: Option<String>,
+    /// Agent CLI identifier for terminal tabs (kind == "terminal").
+    #[serde(default)]
+    pub agent_cli: Option<String>,
     #[serde(default)]
     pub is_preview: bool,
     #[serde(default)]
@@ -219,6 +222,7 @@ mod tests {
             simple_mode: false,
             attachment_location: "current_file".to_string(),
             attachment_folder: "attachments".to_string(),
+            terminal_cursor_shape: "bar".to_string(),
             date_time_format: "%Y-%m-%d %H:%M".to_string(),
             starred_files: Vec::new(),
             keybindings: std::collections::BTreeMap::new(),
@@ -285,6 +289,10 @@ mod tests {
             AppSettings::default().light_editor_theme_mode
         );
         assert_eq!(loaded.settings.ui_font, AppSettings::default().ui_font);
+        assert_eq!(
+            loaded.settings.terminal_cursor_shape,
+            AppSettings::default().terminal_cursor_shape
+        );
         assert_eq!(loaded.workspaces.roots, vec![PathBuf::from("/tmp/demo")]);
         assert_eq!(loaded.schema_version, CONFIG_SCHEMA_VERSION);
     }
@@ -337,6 +345,7 @@ mod tests {
                 title: "note.md".to_string(),
                 path: Some(source_path.clone()),
                 file_kind: Some("markdown".to_string()),
+                agent_cli: None,
                 is_preview: false,
                 is_pinned: true,
                 view: TabViewState {

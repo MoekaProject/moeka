@@ -226,9 +226,7 @@ impl EditorView {
             .bg(bg)
             .text_size(px(self.scaled(12.0)))
             .when_some(branch_label, |this, branch| {
-                this.child(self.render_status_bar_branch_button(
-                    branch, title_color, hover_bg, cx,
-                ))
+                this.child(self.render_status_bar_branch_button(branch, title_color, hover_bg, cx))
             })
             .child(div().flex_1())
             .child(self.render_status_bar_label(cursor_label, value_color))

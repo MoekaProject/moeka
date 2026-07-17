@@ -3265,13 +3265,8 @@ impl EditorView {
         *content_y += items.len() as f32 * item_height;
     }
 
-    pub(crate) fn render_utility_panel(
-        &mut self,
-        is_chat_focused: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(crate) fn render_utility_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         match self.displayed_utility_panel {
-            Some(RightUtilityPanel::Chat) => self.render_chat_panel(is_chat_focused, cx),
             Some(RightUtilityPanel::Info) => self.render_info_panel(cx),
             Some(RightUtilityPanel::GitHistory) => self.render_git_panel(cx),
             Some(RightUtilityPanel::Outline) => self.render_outline_panel(cx),

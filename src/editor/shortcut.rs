@@ -122,7 +122,7 @@ impl CommandId {
             Self::FindInFiles => "Search across workspace files",
             Self::ToggleSidebar => "Show or hide the sidebar",
             Self::ToggleOutline => "Show or hide the document outline",
-            Self::ToggleChat => "Show or hide Chat",
+            Self::ToggleChat => "Show or hide Terminal",
             Self::ToggleInfo => "Show or hide file information",
             Self::ToggleGitHistory => "Show or hide Git history",
             Self::ToggleTheme => "Switch between light and dark themes",
@@ -484,7 +484,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         "View",
         Some("⌃⌘I"),
         false,
-        crate::i18n::chat_label,
+        crate::i18n::terminal_label,
     ),
     command(
         CommandId::ToggleInfo,

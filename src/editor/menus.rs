@@ -1038,21 +1038,6 @@ impl EditorView {
 
     pub(crate) fn open_terminal_context_menu(
         &mut self,
-        position: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_context_menu(
-            ContextMenu {
-                position,
-                kind: ContextMenuKind::Terminal,
-            },
-            true,
-            cx,
-        );
-    }
-
-    pub(crate) fn open_chat_tab_context_menu(
-        &mut self,
         tab_id: String,
         position: Point<Pixels>,
         cx: &mut Context<Self>,
@@ -1060,14 +1045,14 @@ impl EditorView {
         self.open_context_menu(
             ContextMenu {
                 position,
-                kind: ContextMenuKind::ChatTab { tab_id },
+                kind: ContextMenuKind::Terminal { tab_id },
             },
             true,
             cx,
         );
     }
 
-    pub(crate) fn open_chat_tab_create_context_menu(
+    pub(crate) fn open_terminal_tab_create_context_menu(
         &mut self,
         position: Point<Pixels>,
         cx: &mut Context<Self>,
@@ -1075,7 +1060,7 @@ impl EditorView {
         if self
             .context_menu
             .as_ref()
-            .is_some_and(|menu| menu.kind == ContextMenuKind::ChatTabCreate)
+            .is_some_and(|menu| menu.kind == ContextMenuKind::TerminalTabCreate)
         {
             self.close_context_menu(cx);
             return;
@@ -1084,7 +1069,7 @@ impl EditorView {
         self.open_context_menu(
             ContextMenu {
                 position,
-                kind: ContextMenuKind::ChatTabCreate,
+                kind: ContextMenuKind::TerminalTabCreate,
             },
             true,
             cx,
@@ -1613,78 +1598,6 @@ impl EditorView {
                             .path(icon_path)
                             .size(px(icon_size))
                             .text_color(wss.ws_menu_item_action_icon_color),
-                    ),
-            )
-            .child(label.to_string())
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event, window, cx| {
-                    cx.stop_propagation();
-                    this.close_context_menu(cx);
-                    handler(this, window, cx);
-                }),
-            )
-            .into_any_element()
-    }
-
-    fn render_context_menu_item_with_icon_and_check(
-        &self,
-        label: &str,
-        icon_path: &'static str,
-        is_active: bool,
-        cx: &mut Context<Self>,
-        handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
-    ) -> AnyElement {
-        let ms = &self.styles.context_menu;
-        let wss = &self.styles.workspace_switcher;
-        let hover_bg = ms.menu_item_hover_bg;
-        let text_color = ms.menu_item_primary_text_color;
-        let check_size = self.scaled(wss.ws_menu_item_check_size_px);
-        let icon_size = self.scaled(ms.menu_format_icon_size_px);
-        let gap = self.scaled(wss.ws_menu_item_action_icon_gap_px);
-        let icon_column_width = check_size.max(icon_size);
-
-        div()
-            .w_full()
-            .h(px(self.scaled(ms.menu_item_height_px)))
-            .px(px(self.scaled(ms.menu_item_padding_x_px)))
-            .flex()
-            .items_center()
-            .gap(px(gap))
-            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
-            .text_color(text_color)
-            .hover(move |s| s.bg(hover_bg))
-            .cursor(CursorStyle::Arrow)
-            .child(
-                div()
-                    .w(px(check_size))
-                    .h(px(check_size))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .when(is_active, |this| {
-                        this.child(
-                            svg()
-                                .path(CHECK_SVG_PATH)
-                                .size(px(check_size))
-                                .text_color(wss.ws_menu_item_check_color),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .w(px(icon_column_width))
-                    .h(px(icon_column_width))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        svg()
-                            .path(icon_path)
-                            .size(px(icon_size))
-                            .text_color(ms.menu_format_icon_color),
                     ),
             )
             .child(label.to_string())
@@ -4136,41 +4049,62 @@ impl EditorView {
                     self.scaled(self.styles.context_menu.menu_tab_width_px),
                 )
             }
-            ContextMenuKind::Terminal => {
+            ContextMenuKind::Terminal { tab_id } => {
                 let mut items = Vec::new();
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::Copy),
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.close_context_menu(cx);
-                        let _ = this.copy_chat_terminal_selection(cx);
-                    },
-                ));
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::Paste),
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.paste_chat_terminal_from_clipboard(cx);
-                    },
-                ));
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::SelectAll),
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.close_context_menu(cx);
-                        let _ = this.select_all_chat_terminal(cx);
-                    },
-                ));
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::Copy),
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            let _ = this.copy_chat_terminal_selection(&id, cx);
+                        },
+                    ));
+                }
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::Paste),
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.paste_chat_terminal_from_clipboard(&id, cx);
+                        },
+                    ));
+                }
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::SelectAll),
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            let _ = this.select_all_chat_terminal(&id, cx);
+                        },
+                    ));
+                }
+                {
+                    let id = tab_id.clone();
+                    items.push(self.render_context_menu_item(
+                        self.t(crate::i18n::TextKey::ClearTerminal),
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.close_context_menu(cx);
+                            this.clear_terminal(&id, cx);
+                        },
+                    ));
+                }
                 (
                     items,
                     self.scaled(self.styles.context_menu.menu_sidebar_width_px),
                 )
             }
-            ContextMenuKind::ChatTabCreate => {
+            ContextMenuKind::TerminalTabCreate => {
                 let mut items = Vec::new();
                 let mut agent_clis = ChatAgentCli::all();
                 agent_clis.sort_by_key(|agent_cli| !matches!(agent_cli, ChatAgentCli::Terminal));
@@ -4182,108 +4116,7 @@ impl EditorView {
                         cx,
                         move |this, _, cx| {
                             this.close_context_menu(cx);
-                            this.create_chat_tab_with_agent(agent_cli, cx);
-                        },
-                    ));
-                }
-                (
-                    items,
-                    self.scaled(
-                        self.styles
-                            .context_menu
-                            .menu_sidebar_width_px
-                            .max(self.styles.context_menu.menu_tab_width_px),
-                    ),
-                )
-            }
-            ContextMenuKind::ChatTab { tab_id } => {
-                let mut items = Vec::new();
-                let (is_pinned, active_agent_cli) = self
-                    .chat_tabs
-                    .iter()
-                    .find(|tab| tab.id == *tab_id)
-                    .map(|tab| (tab.is_pinned, tab.agent_cli))
-                    .unwrap_or((false, ChatAgentCli::GithubCopilot));
-                {
-                    let id = tab_id.clone();
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::Close),
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.close_chat_tab(&id, cx);
-                        },
-                    ));
-                }
-                {
-                    let id = tab_id.clone();
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::CloseOthers),
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.close_chat_other_tabs(&id, cx);
-                        },
-                    ));
-                }
-                {
-                    let id = tab_id.clone();
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::CloseLeft),
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.close_chat_left_tabs(&id, cx);
-                        },
-                    ));
-                }
-                {
-                    let id = tab_id.clone();
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::CloseRight),
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.close_chat_right_tabs(&id, cx);
-                        },
-                    ));
-                }
-                items.push(self.render_context_menu_separator());
-                let mut agent_clis = ChatAgentCli::all();
-                agent_clis.sort_by_key(|agent_cli| !matches!(agent_cli, ChatAgentCli::Terminal));
-                for agent_cli in agent_clis {
-                    let id = tab_id.clone();
-                    let is_active = active_agent_cli == agent_cli;
-                    items.push(self.render_context_menu_item_with_icon_and_check(
-                        agent_cli.label(),
-                        agent_cli.icon_path(),
-                        is_active,
-                        cx,
-                        move |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.select_chat_tab_agent_cli(&id, agent_cli, cx);
-                        },
-                    ));
-                }
-                items.push(self.render_context_menu_separator());
-                {
-                    let id = tab_id.clone();
-                    let label = if is_pinned {
-                        self.t(crate::i18n::TextKey::UnpinTab)
-                    } else {
-                        self.t(crate::i18n::TextKey::PinTab)
-                    };
-                    items.push(self.render_context_menu_item(
-                        label,
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.toggle_chat_tab_pin(&id, cx);
+                            this.create_terminal_tab(agent_cli, cx);
                         },
                     ));
                 }

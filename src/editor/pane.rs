@@ -547,6 +547,23 @@ impl EditorView {
         self.swapped_pane_id.unwrap_or(self.focused_pane_id)
     }
 
+    /// Whether the active tab in the focused pane is a terminal. During
+    /// `with_pane`, the focused pane's live root state is temporarily parked in
+    /// the swapped pane's slot, so this must not inspect the swapped-in tab.
+    pub(crate) fn focused_pane_active_tab_is_terminal(&self) -> bool {
+        let Some(swapped_pane_id) = self.swapped_pane_id else {
+            return self.active_tab_is_terminal();
+        };
+        self.panes
+            .iter()
+            .find(|pane| pane.id == swapped_pane_id)
+            .and_then(|pane| {
+                let active_id = pane.state.active_tab_id.as_deref()?;
+                pane.state.tabs.iter().find(|tab| tab.id == active_id)
+            })
+            .is_some_and(|tab| tab.kind.is_terminal())
+    }
+
     /// Runs `f` with `pane_id`'s state swapped into the root fields. For the
     /// focused (or already swapped-in) pane this is a plain call.
     pub(crate) fn with_pane<R>(&mut self, pane_id: PaneId, f: impl FnOnce(&mut Self) -> R) -> R {
@@ -650,7 +667,12 @@ impl EditorView {
             self.sync_path_in_sidebar_state(path, cx);
         }
         self.pause_blinking(cx);
-        self.request_editor_focus(cx);
+        if let Some(terminal_tab_id) = self.active_terminal_tab_id() {
+            self.pending_terminal_focus = Some(terminal_tab_id);
+            cx.notify();
+        } else {
+            self.request_editor_focus(cx);
+        }
         cx.notify();
     }
 

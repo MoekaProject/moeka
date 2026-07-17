@@ -485,11 +485,10 @@ pub(crate) enum ContextMenuKind {
         row: usize,
         col: usize,
     },
-    Terminal,
-    ChatTabCreate,
-    ChatTab {
+    Terminal {
         tab_id: String,
     },
+    TerminalTabCreate,
 }
 
 #[derive(Clone)]
@@ -703,16 +702,8 @@ pub(crate) struct WorkspaceFileCandidate {
 pub(crate) struct DraggedTab {
     pub tab_id: String,
     pub title: String,
-    pub path: Option<PathBuf>,
     pub source_index: usize,
     pub source_pane_id: PaneId,
-}
-
-#[derive(Clone)]
-pub(crate) struct DraggedChatTab {
-    pub tab_id: String,
-    pub title: String,
-    pub source_index: usize,
 }
 
 pub(crate) struct DraggedTabView {
@@ -1509,6 +1500,8 @@ pub struct EditorView {
     pub(crate) file_clipboard: Option<FileClipboard>,
     pub(crate) multi_cursor_clipboard: Option<MultiCursorClipboard>,
     pub(crate) ui_scale: f32,
+    #[cfg(target_os = "macos")]
+    pub(crate) traffic_light_ui_scale: Option<f32>,
     pub(crate) folded_sections: HashSet<usize>,
     pub(crate) folded_image_previews: HashSet<usize>,
     pub(crate) generated_preview_keys: HashSet<String>,
@@ -1695,9 +1688,6 @@ pub struct EditorView {
     pub(crate) branch_picker_task: Option<Task<()>>,
     pub(crate) utility_panel: Option<RightUtilityPanel>,
     pub(crate) displayed_utility_panel: Option<RightUtilityPanel>,
-    pub(crate) chat_panel_visible: bool,
-    pub(crate) chat_panel_placement: ChatPanelPlacement,
-    pub(crate) chat_panel_custom_size: Option<f32>,
     pub(crate) info_panel_custom_width: Option<f32>,
     pub(crate) git_history_panel_custom_width: Option<f32>,
     pub(crate) outline_panel_custom_width: Option<f32>,
@@ -1847,27 +1837,15 @@ pub struct EditorView {
     pub(crate) language_picker_scroll_handle: ScrollHandle,
     pub(crate) language_picker_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
 
-    // ── Chat panel state ───────────────────────────────────────────
-    pub(crate) chat_tabs: Vec<chat_panel::ChatTab>,
-    pub(crate) active_chat_tab_id: Option<String>,
-    pub(crate) chat_tab_activation_history: Vec<String>,
-    pub(crate) chat_tab_drag_candidate_id: Option<String>,
-    pub(crate) chat_tab_dragging_id: Option<String>,
-    pub(crate) chat_tab_bar_scroll_handle: ScrollHandle,
-    pub(crate) chat_panel_focus_handle: FocusHandle,
-    pub(crate) pending_chat_input_focus: bool,
-    pub(crate) chat_terminal_scroll_px: Pixels,
-    pub(crate) chat_terminal_mouse_scroll_px: Point<Pixels>,
+    // ── Terminal tab state ─────────────────────────────────────────
+    /// Per-terminal-tab runtime state keyed by `OpenTab::id`. Root-level (not
+    /// part of the per-pane swap state) so terminal tabs can move between
+    /// panes while their PTY sessions stay alive.
+    pub(crate) terminal_tab_states: HashMap<String, chat_panel::TerminalTabState>,
+    /// Terminal tab that should grab keyboard focus on the next render.
+    pub(crate) pending_terminal_focus: Option<String>,
     pub(crate) chat_terminal_cell_width_px: f32,
     pub(crate) chat_terminal_cell_height_px: f32,
-    pub(crate) chat_terminal_marked_text: Option<String>,
-    pub(crate) chat_terminal_selection: Option<chat_panel::ChatTerminalSelection>,
-    pub(crate) chat_terminal_selecting: bool,
-    pub(crate) chat_terminal_mouse_left_pressed: bool,
-    pub(crate) chat_terminal_mouse_middle_pressed: bool,
-    pub(crate) chat_terminal_mouse_right_pressed: bool,
-    pub(crate) chat_terminal_last_mouse_cell: Option<(usize, usize)>,
-    pub(crate) chat_terminal_input_bounds: Option<gpui::Bounds<gpui::Pixels>>,
 
     // Settings panel state
     pub(crate) settings_scroll_handle: ScrollHandle,
@@ -1896,7 +1874,7 @@ pub struct EditorView {
 impl Drop for EditorView {
     fn drop(&mut self) {
         self.flush_recovery_files();
-        self.stop_chat_terminal();
+        self.stop_all_terminal_sessions();
         let diagnostics = self.runtime_profile_diagnostics();
         if let Some(profiler) = self.runtime_profiler.take()
             && let Err(error) = profiler.stop_with_diagnostics("drop", Some(diagnostics))
@@ -2083,6 +2061,8 @@ impl EditorView {
             file_clipboard: None,
             multi_cursor_clipboard: None,
             ui_scale: app_settings.ui_scale,
+            #[cfg(target_os = "macos")]
+            traffic_light_ui_scale: None,
             folded_sections: HashSet::new(),
             folded_image_previews: HashSet::new(),
             generated_preview_keys: HashSet::new(),
@@ -2254,9 +2234,6 @@ impl EditorView {
             branch_picker_task: None,
             utility_panel: None,
             displayed_utility_panel: None,
-            chat_panel_visible: false,
-            chat_panel_placement: ChatPanelPlacement::Right,
-            chat_panel_custom_size: None,
             info_panel_custom_width: None,
             git_history_panel_custom_width: None,
             outline_panel_custom_width: None,
@@ -2376,26 +2353,10 @@ impl EditorView {
             language_picker_selected_index: 0,
             language_picker_scroll_handle: ScrollHandle::new(),
             language_picker_editor: None,
-            chat_tabs: Vec::new(),
-            active_chat_tab_id: None,
-            chat_tab_activation_history: Vec::new(),
-            chat_tab_drag_candidate_id: None,
-            chat_tab_dragging_id: None,
-            chat_tab_bar_scroll_handle: ScrollHandle::new(),
-            chat_panel_focus_handle: cx.focus_handle(),
-            pending_chat_input_focus: false,
-            chat_terminal_scroll_px: Pixels::ZERO,
-            chat_terminal_mouse_scroll_px: gpui::point(Pixels::ZERO, Pixels::ZERO),
+            terminal_tab_states: HashMap::new(),
+            pending_terminal_focus: None,
             chat_terminal_cell_width_px: 0.0,
             chat_terminal_cell_height_px: 0.0,
-            chat_terminal_marked_text: None,
-            chat_terminal_selection: None,
-            chat_terminal_selecting: false,
-            chat_terminal_mouse_left_pressed: false,
-            chat_terminal_mouse_middle_pressed: false,
-            chat_terminal_mouse_right_pressed: false,
-            chat_terminal_last_mouse_cell: None,
-            chat_terminal_input_bounds: None,
 
             // Settings panel state
             settings_scroll_handle: ScrollHandle::new(),
@@ -2600,7 +2561,10 @@ impl EditorView {
             self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
         let max_scroll =
             (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0);
-        !self.active_tab_is_image() && !self.active_tab_is_binary() && max_scroll > 1.0
+        !self.active_tab_is_image()
+            && !self.active_tab_is_binary()
+            && !self.active_tab_is_terminal()
+            && max_scroll > 1.0
     }
 
     fn editor_scrollbar_track_top(&self) -> f32 {
@@ -3017,7 +2981,6 @@ impl EditorView {
 
     pub(crate) fn utility_panel_custom_width_for(&self, panel: RightUtilityPanel) -> Option<f32> {
         match panel {
-            RightUtilityPanel::Chat => self.chat_panel_custom_size,
             RightUtilityPanel::Info => self.info_panel_custom_width,
             RightUtilityPanel::GitHistory => self.git_history_panel_custom_width,
             RightUtilityPanel::Outline => self.outline_panel_custom_width,
@@ -3030,7 +2993,6 @@ impl EditorView {
         width: Option<f32>,
     ) {
         match panel {
-            RightUtilityPanel::Chat => self.chat_panel_custom_size = width,
             RightUtilityPanel::Info => self.info_panel_custom_width = width,
             RightUtilityPanel::GitHistory => self.git_history_panel_custom_width = width,
             RightUtilityPanel::Outline => self.outline_panel_custom_width = width,
@@ -3064,14 +3026,8 @@ impl EditorView {
         self.utility_panel == Some(panel)
     }
 
-    pub(crate) fn should_render_bottom_chat_panel(&self) -> bool {
-        self.should_render_utility_panel()
-            && self.displayed_utility_panel == Some(RightUtilityPanel::Chat)
-            && self.chat_panel_placement == ChatPanelPlacement::Bottom
-    }
-
     pub(crate) fn should_render_utility_panel_on_right(&self) -> bool {
-        self.should_render_utility_panel() && !self.should_render_bottom_chat_panel()
+        self.should_render_utility_panel()
     }
 
     pub(crate) fn theme_debugger_target_width(&self) -> f32 {

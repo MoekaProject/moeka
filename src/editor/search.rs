@@ -27,7 +27,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.active_tab_supports_text_search() {
+        if !self.active_tab_supports_text_search() && !self.active_tab_is_terminal() {
             return;
         }
         self.open_search(false, window, cx);
@@ -96,9 +96,11 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_supports_text_search() {
+        let is_terminal = self.active_tab_is_terminal();
+        if !self.active_tab_supports_text_search() && !is_terminal {
             return;
         }
+        let with_replace = with_replace && !is_terminal;
         let was_visible = self.search_visible;
         self.search_visible = true;
         self.search_replace_visible = with_replace;
@@ -142,14 +144,24 @@ impl EditorView {
         }
 
         if !was_visible {
-            let selection = self.cursor.selection_range();
-            let selection =
-                self.buffer.clamp_offset(selection.start)..self.buffer.clamp_offset(selection.end);
-            if !selection.is_empty() && selection.len() < 200 {
-                let selected_text = self.buffer.text()[selection].to_string();
-                if !selected_text.contains('\n') {
+            if let Some(tab_id) = self.active_terminal_tab_id() {
+                if let Some(selected_text) = self
+                    .chat_terminal_selection_text(&tab_id)
+                    .filter(|text| !text.is_empty() && text.len() < 200 && !text.contains('\n'))
+                {
                     self.search_query = selected_text;
                     self.run_search(cx);
+                }
+            } else {
+                let selection = self.cursor.selection_range();
+                let selection = self.buffer.clamp_offset(selection.start)
+                    ..self.buffer.clamp_offset(selection.end);
+                if !selection.is_empty() && selection.len() < 200 {
+                    let selected_text = self.buffer.text()[selection].to_string();
+                    if !selected_text.contains('\n') {
+                        self.search_query = selected_text;
+                        self.run_search(cx);
+                    }
                 }
             }
         }
@@ -215,11 +227,20 @@ impl EditorView {
         self.search_visible = false;
         self.search_matches.clear();
         self.search_current_index = None;
-        window.focus(&self.focus_handle(cx));
+        if let Some(tab_id) = self.active_terminal_tab_id() {
+            self.clear_terminal_search(&tab_id);
+            self.focus_terminal_tab(&tab_id, window);
+        } else {
+            window.focus(&self.focus_handle(cx));
+        }
         cx.notify();
     }
 
     pub(crate) fn run_search(&mut self, cx: &mut Context<Self>) {
+        if let Some(tab_id) = self.active_terminal_tab_id() {
+            self.run_terminal_search(&tab_id, cx);
+            return;
+        }
         self.search_matches = find_search_matches(
             self.buffer.text(),
             &self.search_query,
@@ -243,6 +264,10 @@ impl EditorView {
     }
 
     pub(crate) fn search_navigate(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if let Some(tab_id) = self.active_terminal_tab_id() {
+            self.terminal_search_navigate(&tab_id, forward, cx);
+            return;
+        }
         let reran_search = if self.search_matches.is_empty() && !self.search_query.is_empty() {
             self.run_search(cx);
             true
@@ -382,7 +407,11 @@ impl EditorView {
     pub(crate) fn render_search_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let search_styles = &self.styles.search;
 
-        let match_count = self.search_matches.len();
+        let match_count = if let Some(tab_id) = self.active_terminal_tab_id() {
+            self.terminal_search_match_count(&tab_id)
+        } else {
+            self.search_matches.len()
+        };
         let current_idx = self.search_current_index;
         let counter_text = if match_count > 0 {
             format!(

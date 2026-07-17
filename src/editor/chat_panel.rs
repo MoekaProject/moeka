@@ -1,41 +1,95 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, ffi::OsString};
 
 use alacritty_terminal::{
     event::{Event as AlacTermEvent, EventListener},
     grid::{Dimensions, Scroll},
-    index::{Column, Line, Point as AlacPoint},
+    index::{Column, Direction as AlacDirection, Line, Point as AlacPoint},
     sync::FairMutex,
     term::{
         Config, RenderableCursor, Term, TermMode,
         cell::{Cell, Flags},
+        search::{Match as TermSearchMatch, RegexIter, RegexSearch},
     },
-    vte::ansi::{Color as AlacColor, CursorShape as AlacCursorShape, NamedColor, Processor, Rgb},
+    vte::ansi::{
+        ClearMode, Color as AlacColor, CursorShape as AlacCursorShape,
+        CursorStyle as AlacCursorStyle, Handler as AnsiHandler, NamedColor, Processor, Rgb,
+    },
 };
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, DragMoveEvent, Element,
-    ElementId, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId, Hsla, InputHandler,
-    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, ScrollWheelEvent, SharedString, Style, TextRun as GpuiTextRun, TouchPhase,
-    UTF16Selection, Window, div, fill, point, prelude::*, px, relative, size, svg,
+    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, Font,
+    FontFallbacks, FontStyle, FontWeight, GlobalElementId, Hsla, InputHandler, KeyDownEvent,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    ScrollWheelEvent, SharedString, Style, TextRun as GpuiTextRun, TouchPhase, UTF16Selection,
+    Window, div, fill, point, prelude::*, px, relative, size,
 };
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use super::*;
 
 const CHAT_PANEL_DEFAULT_ROWS: u16 = 28;
 const CHAT_PANEL_DEFAULT_COLS: u16 = 96;
 const CHAT_PANEL_POLL_MS: u64 = 33;
+const TERMINAL_PROCESS_INFO_POLL_MS: u64 = 500;
+const TERMINAL_SEARCH_MAX_MATCHES: usize = 1000;
+
+fn alacritty_cursor_style(shape: TerminalCursorShape) -> AlacCursorStyle {
+    let shape = match shape {
+        TerminalCursorShape::Block => AlacCursorShape::Block,
+        TerminalCursorShape::Underline => AlacCursorShape::Underline,
+        TerminalCursorShape::Bar => AlacCursorShape::Beam,
+        TerminalCursorShape::Hollow => AlacCursorShape::HollowBlock,
+    };
+    AlacCursorStyle {
+        shape,
+        blinking: false,
+    }
+}
+
+fn terminal_config(cursor_shape: TerminalCursorShape) -> Config {
+    let mut config = Config::default();
+    config.default_cursor_style = alacritty_cursor_style(cursor_shape);
+    config
+}
+
+fn terminal_process_title(cwd: &std::path::Path, process_name: &str, argv: &[String]) -> String {
+    let directory = cwd
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| cwd.to_string_lossy().into_owned());
+    let command_name = std::path::Path::new(process_name)
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| process_name.to_string());
+    let arguments = argv
+        .iter()
+        .skip(1)
+        .filter(|argument| !argument.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let command = if arguments.is_empty() {
+        command_name
+    } else {
+        format!("{command_name} {arguments}")
+    };
+    format!("{directory} - {command}")
+}
 
 pub(crate) struct ChatTerminalSession {
     pub(crate) status: ChatTerminalStatus,
     pub(crate) snapshot: ChatTerminalSnapshot,
+    dynamic_title: Option<String>,
     runtime: Option<ChatTerminalRuntime>,
     receiver: Option<mpsc::Receiver<ChatTerminalEvent>>,
     pub(crate) poll_task: Option<Task<()>>,
@@ -43,13 +97,60 @@ pub(crate) struct ChatTerminalSession {
     cols: u16,
 }
 
-pub(crate) struct ChatTab {
-    pub(crate) id: String,
-    pub(crate) title: String,
-    pub(crate) agent_cli: ChatAgentCli,
-    pub(crate) instance_index: usize,
-    pub(crate) is_pinned: bool,
+/// Per-terminal-tab runtime state, keyed by [`OpenTab::id`] in
+/// `EditorView::terminal_tab_states`. Lives outside `OpenTab` because the PTY
+/// session is not cloneable, and outside the per-pane swap state so terminal
+/// tabs can move freely between panes.
+pub(crate) struct TerminalTabState {
+    pub(crate) focus_handle: FocusHandle,
     pub(crate) session: Option<ChatTerminalSession>,
+    pub(crate) input_bounds: Option<Bounds<Pixels>>,
+    marked_text: Option<String>,
+    selection: Option<ChatTerminalSelection>,
+    selecting: bool,
+    scroll_px: Pixels,
+    mouse_scroll_px: Point<Pixels>,
+    mouse_left_pressed: bool,
+    mouse_middle_pressed: bool,
+    mouse_right_pressed: bool,
+    last_mouse_cell: Option<(usize, usize)>,
+    /// Active in-terminal search matches, in absolute grid coordinates.
+    search_matches: Vec<TermSearchMatch>,
+    /// Compiled regex pattern of the active search, kept so matches can be
+    /// recomputed when new terminal output arrives.
+    search_pattern: Option<String>,
+}
+
+impl TerminalTabState {
+    fn new(cx: &mut Context<EditorView>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            session: None,
+            input_bounds: None,
+            marked_text: None,
+            selection: None,
+            selecting: false,
+            scroll_px: Pixels::ZERO,
+            mouse_scroll_px: point(Pixels::ZERO, Pixels::ZERO),
+            mouse_left_pressed: false,
+            mouse_middle_pressed: false,
+            mouse_right_pressed: false,
+            last_mouse_cell: None,
+            search_matches: Vec::new(),
+            search_pattern: None,
+        }
+    }
+
+    fn clear_interaction_state(&mut self) {
+        self.marked_text = None;
+        self.selection = None;
+        self.selecting = false;
+        self.mouse_scroll_px = point(Pixels::ZERO, Pixels::ZERO);
+        self.mouse_left_pressed = false;
+        self.mouse_middle_pressed = false;
+        self.mouse_right_pressed = false;
+        self.last_mouse_cell = None;
+    }
 }
 
 struct ChatTerminalRuntime {
@@ -57,6 +158,11 @@ struct ChatTerminalRuntime {
     child: Box<dyn Child + Send + Sync>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     term: Arc<FairMutex<Term<ChatTerminalListener>>>,
+    config: Config,
+    process_system: System,
+    process_refresh_kind: ProcessRefreshKind,
+    last_process_info_refresh: Instant,
+    last_foreground_pid: Option<Pid>,
     reader_thread: Option<JoinHandle<()>>,
 }
 
@@ -141,13 +247,6 @@ struct ChatTerminalPaintBatch {
     cell_count: usize,
     style: GpuiTextRun,
     font_size: f32,
-}
-
-#[derive(Clone, Copy)]
-enum ChatTabDropTarget<'a> {
-    Before(&'a str),
-    After(&'a str),
-    End,
 }
 
 impl ChatTerminalSelection {
@@ -257,15 +356,21 @@ impl ChatTerminalPaintBatch {
 
 struct ChatTerminalInputElement {
     editor: gpui::Entity<EditorView>,
+    tab_id: String,
 }
 
 struct ChatTerminalSurfaceElement {
     editor: gpui::Entity<EditorView>,
     snapshot: ChatTerminalSnapshot,
     selection: Option<ChatTerminalSelection>,
+    selecting: bool,
     cursor_row: Option<usize>,
     cursor_col: usize,
     cursor_visible: bool,
+    cursor_shape: AlacCursorShape,
+    focused: bool,
+    search_matches: Vec<TermSearchMatch>,
+    current_search_match: Option<usize>,
     default_fg: Hsla,
     default_bg: Hsla,
     cursor_color: Hsla,
@@ -274,6 +379,7 @@ struct ChatTerminalSurfaceElement {
 
 struct ChatTerminalInputHandler {
     editor: gpui::Entity<EditorView>,
+    tab_id: String,
     bounds: Bounds<Pixels>,
 }
 
@@ -327,13 +433,15 @@ impl Element for ChatTerminalInputElement {
         _window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let _ = self.editor.update(cx, |editor, cx| {
-            let bounds_changed = editor
-                .chat_terminal_input_bounds
-                .is_none_or(|current| current != bounds);
-            editor.chat_terminal_input_bounds = Some(bounds);
+        let tab_id = self.tab_id.clone();
+        self.editor.update(cx, |editor, cx| {
+            let Some(state) = editor.terminal_tab_states.get_mut(&tab_id) else {
+                return;
+            };
+            let bounds_changed = state.input_bounds.is_none_or(|current| current != bounds);
+            state.input_bounds = Some(bounds);
             if bounds_changed {
-                editor.resize_chat_terminal();
+                editor.resize_chat_terminal(&tab_id);
                 cx.notify();
             }
         });
@@ -350,11 +458,20 @@ impl Element for ChatTerminalInputElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let focus_handle = self.editor.read(cx).chat_panel_focus_handle.clone();
+        let Some(focus_handle) = self
+            .editor
+            .read(cx)
+            .terminal_tab_states
+            .get(&self.tab_id)
+            .map(|state| state.focus_handle.clone())
+        else {
+            return;
+        };
         window.handle_input(
             &focus_handle,
             ChatTerminalInputHandler {
                 editor: self.editor.clone(),
+                tab_id: self.tab_id.clone(),
                 bounds: *prepaint,
             },
             cx,
@@ -411,34 +528,90 @@ impl Element for ChatTerminalSurfaceElement {
     ) {
         let editor = self.editor.read(cx);
         let (body_font_size, cell_width, cell_height) = editor.chat_terminal_metrics();
-        let cursor_width = editor.styles.cursor.cursor_width_px.max(1.0);
-        let cursor_height = cell_height * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
-        let cursor_opacity = if editor.chat_terminal_selecting {
+        let beam_width = editor.styles.cursor.cursor_width_px.max(1.0);
+        let cursor_opacity = if !self.focused {
+            1.0
+        } else if self.selecting {
             editor.styles.cursor.cursor_opacity_max
         } else {
             editor.cursor_opacity
         };
         let mut cursor_color = self.cursor_color;
         cursor_color.a *= cursor_opacity;
+        let selection_bg = editor.theme.selection;
+        let search_match_bg = editor.styles.search.search_match_bg;
+        let search_match_active_bg = editor.styles.search.search_match_active_bg;
         let rows = EditorView::chat_terminal_rows(&self.snapshot);
         let base_font = editor.chat_terminal_font(window);
         let origin = bounds.origin;
 
-        let cursor_bounds = |row_index: usize, col_index: usize| {
+        // Per-visible-line search highlight intervals:
+        // source_line -> [(start_col, end_col_inclusive, is_current)].
+        let mut search_rows: HashMap<i32, Vec<(usize, usize, bool)>> = HashMap::new();
+        if !self.search_matches.is_empty() {
+            let min_line = rows.first().map(|row| row.source_line).unwrap_or(0);
+            let max_line = rows.last().map(|row| row.source_line).unwrap_or(0);
+            let cols = (self.snapshot.cols as usize).max(1);
+            for (match_index, search_match) in self.search_matches.iter().enumerate() {
+                let is_current = self.current_search_match == Some(match_index);
+                let (match_start, match_end) = (*search_match.start(), *search_match.end());
+                if match_end.line.0 < min_line || match_start.line.0 > max_line {
+                    continue;
+                }
+                for line in match_start.line.0.max(min_line)..=match_end.line.0.min(max_line) {
+                    let start_col = if line == match_start.line.0 {
+                        match_start.column.0
+                    } else {
+                        0
+                    };
+                    let end_col = if line == match_end.line.0 {
+                        match_end.column.0
+                    } else {
+                        cols - 1
+                    };
+                    search_rows
+                        .entry(line)
+                        .or_default()
+                        .push((start_col, end_col, is_current));
+                }
+            }
+        }
+
+        let cell_bounds = |row_index: usize, col_index: usize, width_cells: f32| {
             Bounds::new(
                 point(
                     origin.x + px(col_index as f32 * cell_width),
-                    origin.y
-                        + px(row_index as f32 * cell_height + (cell_height - cursor_height) / 2.0),
+                    origin.y + px(row_index as f32 * cell_height),
                 ),
-                size(px(cursor_width), px(cursor_height)),
+                size(px(cell_width * width_cells), px(cell_height)),
             )
         };
 
         let mut batches: Vec<ChatTerminalPaintBatch> = Vec::new();
+        let mut cursor_paint: Option<(usize, usize, bool)> = None;
 
         for (row_index, row) in rows.iter().enumerate() {
+            let row_search = search_rows.get(&row.source_line);
             let mut previous_cell_had_extras = false;
+            // In-progress run of same-colored background cells:
+            // (start_col as f32, width in cells, color).
+            let mut bg_run: Option<(f32, f32, Hsla)> = None;
+
+            let flush_bg =
+                |run: &mut Option<(f32, f32, Hsla)>, window: &mut Window, row_index: usize| {
+                    if let Some((start, width, color)) = run.take() {
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(
+                                    origin.x + px(start * cell_width),
+                                    origin.y + px(row_index as f32 * cell_height),
+                                ),
+                                size(px(width * cell_width), px(cell_height)),
+                            ),
+                            color,
+                        ));
+                    }
+                };
 
             for (col_index, cell) in row.cells.iter().enumerate() {
                 let mut fg = terminal_color_to_hsla(
@@ -468,29 +641,46 @@ impl Element for ChatTerminalSurfaceElement {
                     .selection
                     .is_some_and(|selection| selection.contains(row_index, col_index));
                 if is_selected {
-                    bg = editor.theme.selection;
+                    bg = selection_bg;
+                }
+                if let Some(intervals) = row_search {
+                    for (start_col, end_col, is_current) in intervals {
+                        if col_index >= *start_col && col_index <= *end_col {
+                            bg = if *is_current {
+                                search_match_active_bg
+                            } else {
+                                search_match_bg
+                            };
+                            break;
+                        }
+                    }
                 }
 
                 let is_cursor = self.cursor_visible
                     && self.cursor_row == Some(row_index)
                     && col_index == self.cursor_col;
+                let is_wide = cell.flags.contains(Flags::WIDE_CHAR);
+                let width_cells = if is_wide { 2.0 } else { 1.0 };
+                if is_cursor {
+                    cursor_paint = Some((row_index, col_index, is_wide));
+                }
 
+                // Merge horizontally adjacent same-colored backgrounds into a
+                // single quad.
                 if bg != self.default_bg {
-                    let width = if cell.flags.contains(Flags::WIDE_CHAR) {
-                        cell_width * 2.0
-                    } else {
-                        cell_width
-                    };
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            point(
-                                origin.x + px(col_index as f32 * cell_width),
-                                origin.y + px(row_index as f32 * cell_height),
-                            ),
-                            size(px(width), px(cell_height)),
-                        ),
-                        bg,
-                    ));
+                    match bg_run.as_mut() {
+                        Some((start, width, color))
+                            if *color == bg && *start + *width == col_index as f32 =>
+                        {
+                            *width += width_cells;
+                        }
+                        _ => {
+                            flush_bg(&mut bg_run, window, row_index);
+                            bg_run = Some((col_index as f32, width_cells, bg));
+                        }
+                    }
+                } else {
+                    flush_bg(&mut bg_run, window, row_index);
                 }
 
                 if cell.c == ' ' && previous_cell_had_extras {
@@ -503,10 +693,17 @@ impl Element for ChatTerminalSurfaceElement {
                 let text = normalize_cell_char(cell);
                 let has_visible_text = cell.c != ' ' || cell.zerowidth().is_some();
                 if !has_visible_text {
-                    if is_cursor {
-                        window.paint_quad(fill(cursor_bounds(row_index, col_index), cursor_color));
-                    }
                     continue;
+                }
+
+                // A focused block cursor inverts the glyph under it while the
+                // blink phase keeps the block visible.
+                if is_cursor
+                    && self.focused
+                    && self.cursor_shape == AlacCursorShape::Block
+                    && cursor_opacity > 0.5
+                {
+                    fg = self.default_bg;
                 }
 
                 let font = Font {
@@ -522,13 +719,29 @@ impl Element for ChatTerminalSurfaceElement {
                     },
                     ..base_font.clone()
                 };
+                let has_underline = cell.flags.intersects(
+                    Flags::UNDERLINE
+                        | Flags::DOUBLE_UNDERLINE
+                        | Flags::UNDERCURL
+                        | Flags::DOTTED_UNDERLINE
+                        | Flags::DASHED_UNDERLINE,
+                );
                 let run = GpuiTextRun {
                     len: text.len(),
                     font,
                     color: fg,
                     background_color: None,
-                    underline: None,
-                    strikethrough: None,
+                    underline: has_underline.then(|| gpui::UnderlineStyle {
+                        color: Some(fg),
+                        thickness: px(1.0),
+                        wavy: cell.flags.contains(Flags::UNDERCURL),
+                    }),
+                    strikethrough: cell.flags.contains(Flags::STRIKEOUT).then(|| {
+                        gpui::StrikethroughStyle {
+                            color: Some(fg),
+                            thickness: px(1.0),
+                        }
+                    }),
                 };
 
                 if let Some(last) = batches.last_mut()
@@ -545,9 +758,60 @@ impl Element for ChatTerminalSurfaceElement {
                         body_font_size,
                     ));
                 }
+            }
 
-                if is_cursor {
-                    window.paint_quad(fill(cursor_bounds(row_index, col_index), cursor_color));
+            flush_bg(&mut bg_run, window, row_index);
+        }
+
+        // Cursor: painted before text so a filled block sits underneath the
+        // (inverted) glyph. Unfocused terminals render a hollow block.
+        if let Some((row_index, col_index, is_wide)) = cursor_paint {
+            let width_cells = if is_wide { 2.0 } else { 1.0 };
+            let full = cell_bounds(row_index, col_index, width_cells);
+            if !self.focused {
+                window.paint_quad(gpui::quad(
+                    full,
+                    0.0,
+                    gpui::transparent_black(),
+                    1.0,
+                    cursor_color,
+                    gpui::BorderStyle::Solid,
+                ));
+            } else {
+                match self.cursor_shape {
+                    AlacCursorShape::Block => {
+                        window.paint_quad(fill(full, cursor_color));
+                    }
+                    AlacCursorShape::Underline => {
+                        let thickness = (cell_height * 0.12).clamp(1.0, 3.0);
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(
+                                    full.origin.x,
+                                    full.origin.y + full.size.height - px(thickness),
+                                ),
+                                size(full.size.width, px(thickness)),
+                            ),
+                            cursor_color,
+                        ));
+                    }
+                    AlacCursorShape::HollowBlock => {
+                        window.paint_quad(gpui::quad(
+                            full,
+                            0.0,
+                            gpui::transparent_black(),
+                            1.0,
+                            cursor_color,
+                            gpui::BorderStyle::Solid,
+                        ));
+                    }
+                    AlacCursorShape::Beam => {
+                        window.paint_quad(fill(
+                            Bounds::new(full.origin, size(px(beam_width), full.size.height)),
+                            cursor_color,
+                        ));
+                    }
+                    AlacCursorShape::Hidden => {}
                 }
             }
         }
@@ -574,8 +838,9 @@ impl InputHandler for ChatTerminalInputHandler {
     fn marked_text_range(&mut self, _window: &mut Window, cx: &mut App) -> Option<Range<usize>> {
         self.editor
             .read(cx)
-            .chat_terminal_marked_text
-            .as_ref()
+            .terminal_tab_states
+            .get(&self.tab_id)
+            .and_then(|state| state.marked_text.as_ref())
             .map(|text| 0..text.encode_utf16().count())
     }
 
@@ -596,12 +861,13 @@ impl InputHandler for ChatTerminalInputHandler {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let tab_id = self.tab_id.clone();
         self.editor.update(cx, |editor, editor_cx| {
-            editor.chat_terminal_marked_text = None;
             editor.pause_cursor_blinking(editor_cx);
-            if let Some(session) = editor.active_chat_terminal_mut() {
-                let _ = session.write_bytes(text.as_bytes());
+            if let Some(state) = editor.terminal_tab_states.get_mut(&tab_id) {
+                state.marked_text = None;
             }
+            editor.terminal_write_user_input(&tab_id, text.as_bytes());
             editor_cx.notify();
         });
         window.invalidate_character_coordinates();
@@ -615,8 +881,11 @@ impl InputHandler for ChatTerminalInputHandler {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let tab_id = self.tab_id.clone();
         self.editor.update(cx, |editor, editor_cx| {
-            editor.chat_terminal_marked_text = (!new_text.is_empty()).then(|| new_text.to_string());
+            if let Some(state) = editor.terminal_tab_states.get_mut(&tab_id) {
+                state.marked_text = (!new_text.is_empty()).then(|| new_text.to_string());
+            }
             editor.pause_cursor_blinking(editor_cx);
             editor_cx.notify();
         });
@@ -624,8 +893,11 @@ impl InputHandler for ChatTerminalInputHandler {
     }
 
     fn unmark_text(&mut self, window: &mut Window, cx: &mut App) {
+        let tab_id = self.tab_id.clone();
         self.editor.update(cx, |editor, editor_cx| {
-            editor.chat_terminal_marked_text = None;
+            if let Some(state) = editor.terminal_tab_states.get_mut(&tab_id) {
+                state.marked_text = None;
+            }
             editor_cx.notify();
         });
         window.invalidate_character_coordinates();
@@ -639,7 +911,7 @@ impl InputHandler for ChatTerminalInputHandler {
     ) -> Option<Bounds<Pixels>> {
         let editor = self.editor.read(cx);
         let snapshot = editor
-            .active_chat_terminal()
+            .terminal_session(&self.tab_id)
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         let (_, cell_width, cell_height) = editor.chat_terminal_metrics();
@@ -702,30 +974,6 @@ impl Default for ChatTerminalSnapshot {
             },
             display_offset: 0,
             history_size: 0,
-        }
-    }
-}
-
-impl ChatTab {
-    fn new(id: String, agent_cli: ChatAgentCli, instance_index: usize) -> Self {
-        Self {
-            title: agent_cli.label().to_string(),
-            id,
-            agent_cli,
-            instance_index,
-            is_pinned: false,
-            session: None,
-        }
-    }
-
-    fn title_suffix(&self) -> Option<String> {
-        (self.instance_index > 1).then(|| format!(" - {}", self.instance_index))
-    }
-
-    fn display_title(&self) -> String {
-        match self.title_suffix() {
-            Some(suffix) => format!("{}{}", self.title, suffix),
-            None => self.title.clone(),
         }
     }
 }
@@ -796,6 +1044,7 @@ impl ChatTerminalSession {
         Self {
             status: ChatTerminalStatus::Unavailable(message.into()),
             snapshot: ChatTerminalSnapshot::default(),
+            dynamic_title: None,
             runtime: None,
             receiver: None,
             poll_task: None,
@@ -804,7 +1053,11 @@ impl ChatTerminalSession {
         }
     }
 
-    fn launch(cwd: PathBuf, agent_cli: ChatAgentCli) -> anyhow::Result<Self> {
+    fn launch(
+        cwd: PathBuf,
+        agent_cli: ChatAgentCli,
+        cursor_shape: TerminalCursorShape,
+    ) -> anyhow::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: CHAT_PANEL_DEFAULT_ROWS,
@@ -813,6 +1066,11 @@ impl ChatTerminalSession {
             pixel_height: 0,
         })?;
 
+        let initial_process_name = match agent_cli {
+            ChatAgentCli::Terminal => chat_terminal_default_shell_program(),
+            _ => agent_cli.command_name().to_string(),
+        };
+        let initial_title = terminal_process_title(&cwd, &initial_process_name, &[]);
         let mut command = agent_cli.build_command();
         command.cwd(cwd.clone());
         configure_chat_terminal_environment(&mut command);
@@ -821,8 +1079,9 @@ impl ChatTerminalSession {
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
         let mut reader = pair.master.try_clone_reader()?;
 
+        let config = terminal_config(cursor_shape);
         let term = Arc::new(FairMutex::new(Term::new(
-            Config::default(),
+            config.clone(),
             &ChatTerminalSize {
                 rows: CHAT_PANEL_DEFAULT_ROWS as usize,
                 cols: CHAT_PANEL_DEFAULT_COLS as usize,
@@ -861,11 +1120,21 @@ impl ChatTerminalSession {
         let mut session = Self {
             status: ChatTerminalStatus::Launching,
             snapshot: ChatTerminalSnapshot::default(),
+            dynamic_title: Some(initial_title),
             runtime: Some(ChatTerminalRuntime {
                 master: pair.master,
                 child,
                 writer,
                 term,
+                config,
+                process_system: System::new(),
+                process_refresh_kind: ProcessRefreshKind::new()
+                    .with_cmd(UpdateKind::Always)
+                    .with_cwd(UpdateKind::Always)
+                    .with_exe(UpdateKind::Always),
+                last_process_info_refresh: Instant::now()
+                    - Duration::from_millis(TERMINAL_PROCESS_INFO_POLL_MS),
+                last_foreground_pid: None,
                 reader_thread: Some(reader_thread),
             }),
             receiver: Some(receiver),
@@ -875,6 +1144,56 @@ impl ChatTerminalSession {
         };
         session.refresh_snapshot();
         Ok(session)
+    }
+
+    fn refresh_dynamic_title(&mut self) -> Option<String> {
+        let runtime = self.runtime.as_mut()?;
+        if runtime.last_process_info_refresh.elapsed()
+            < Duration::from_millis(TERMINAL_PROCESS_INFO_POLL_MS)
+        {
+            return None;
+        }
+        runtime.last_process_info_refresh = Instant::now();
+
+        #[cfg(unix)]
+        let foreground_pid = runtime
+            .master
+            .process_group_leader()
+            .and_then(|pid| (pid > 0).then_some(pid as u32));
+        #[cfg(not(unix))]
+        let foreground_pid: Option<u32> = None;
+        let pid = foreground_pid.or_else(|| runtime.child.process_id())?;
+        let pid = Pid::from_u32(pid);
+        if runtime.last_foreground_pid != Some(pid) {
+            runtime.process_system = System::new();
+            runtime.last_foreground_pid = Some(pid);
+        }
+        runtime.process_system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            runtime.process_refresh_kind,
+        );
+        let process = runtime.process_system.process(pid)?;
+        let cwd = process.cwd()?;
+        let process_name = process.name().to_string_lossy();
+        let argv = process
+            .cmd()
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let title = terminal_process_title(cwd, &process_name, &argv);
+        if self.dynamic_title.as_deref() == Some(title.as_str()) {
+            return None;
+        }
+        self.dynamic_title = Some(title.clone());
+        Some(title)
+    }
+
+    fn set_cursor_shape(&mut self, cursor_shape: TerminalCursorShape) {
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.config.default_cursor_style = alacritty_cursor_style(cursor_shape);
+            runtime.term.lock().set_options(runtime.config.clone());
+            self.refresh_snapshot();
+        }
     }
 
     fn write_bytes(&self, bytes: &[u8]) -> anyhow::Result<()> {
@@ -989,6 +1308,83 @@ impl ChatTerminalSession {
         }
 
         self.refresh_snapshot();
+    }
+
+    /// Clears the screen and scrollback like Terminal.app's Cmd+K, keeping the
+    /// current prompt line (mirrors Zed's `clear_saved_screen`).
+    fn clear(&mut self) {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+
+        {
+            let mut term = runtime.term.lock();
+            term.clear_screen(ClearMode::Saved);
+
+            let cursor = term.grid().cursor.point;
+            term.grid_mut().reset_region(..cursor.line);
+
+            let columns = term.grid().columns();
+            let line = term.grid()[cursor.line][..Column(columns)]
+                .iter()
+                .cloned()
+                .enumerate()
+                .collect::<Vec<(usize, Cell)>>();
+            for (index, cell) in line {
+                term.grid_mut()[Line(0)][Column(index)] = cell;
+            }
+
+            term.grid_mut().cursor.point = AlacPoint::new(Line(0), term.grid().cursor.point.column);
+            let new_cursor = term.grid().cursor.point;
+            if (new_cursor.line.0 as usize) < term.screen_lines() - 1 {
+                term.grid_mut().reset_region((new_cursor.line + 1)..);
+            }
+        }
+
+        self.refresh_snapshot();
+    }
+
+    /// Runs a regex search over the whole grid (scrollback included).
+    fn search(&self, pattern: &str, max_matches: usize) -> Vec<TermSearchMatch> {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(mut regex) = RegexSearch::new(pattern) else {
+            return Vec::new();
+        };
+
+        let term = runtime.term.lock();
+        let start = AlacPoint::new(term.grid().topmost_line(), Column(0));
+        let end = AlacPoint::new(term.grid().bottommost_line(), term.grid().last_column());
+        RegexIter::new(start, end, AlacDirection::Right, &term, &mut regex)
+            .take(max_matches)
+            .collect()
+    }
+
+    /// Scrolls the viewport the minimal amount needed to make `line` visible.
+    fn scroll_line_into_view(&mut self, line: i32) {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+
+        let delta = {
+            let term = runtime.term.lock();
+            let display_offset = term.grid().display_offset() as i32;
+            let screen_lines = term.screen_lines() as i32;
+            // Visible grid lines are [-display_offset, screen_lines - display_offset).
+            let target_offset = if line < -display_offset {
+                -line
+            } else if line >= screen_lines - display_offset {
+                (screen_lines - 1 - line).max(0)
+            } else {
+                display_offset
+            };
+            target_offset - display_offset
+        };
+
+        if delta != 0 {
+            self.scroll_display(Scroll::Delta(delta));
+        }
     }
 
     fn resize(&mut self, rows: u16, cols: u16) {
@@ -1386,11 +1782,13 @@ fn should_route_chat_terminal_text_input(keystroke: &gpui::Keystroke) -> bool {
         && !keystroke.modifiers.function
 }
 
-fn keystroke_to_terminal_bytes(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
+fn keystroke_to_terminal_bytes(keystroke: &gpui::Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     let modifiers = keystroke.modifiers;
     let key = keystroke.key.as_str();
 
-    if modifiers.platform || modifiers.function {
+    // Note: `modifiers.function` is set for F-keys (and Fn-translated keys
+    // like page-up) on macOS, so it must not disqualify a keystroke.
+    if modifiers.platform {
         return None;
     }
 
@@ -1407,9 +1805,22 @@ fn keystroke_to_terminal_bytes(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
             "left" => Some(format!("\x1b[1;{}D", modifier_code).into_bytes()),
             "home" => Some(format!("\x1b[1;{}H", modifier_code).into_bytes()),
             "end" => Some(format!("\x1b[1;{}F", modifier_code).into_bytes()),
+            "insert" => Some(format!("\x1b[2;{}~", modifier_code).into_bytes()),
             "pageup" => Some(format!("\x1b[5;{}~", modifier_code).into_bytes()),
             "pagedown" => Some(format!("\x1b[6;{}~", modifier_code).into_bytes()),
             "delete" => Some(format!("\x1b[3;{}~", modifier_code).into_bytes()),
+            "f1" => Some(format!("\x1b[1;{}P", modifier_code).into_bytes()),
+            "f2" => Some(format!("\x1b[1;{}Q", modifier_code).into_bytes()),
+            "f3" => Some(format!("\x1b[1;{}R", modifier_code).into_bytes()),
+            "f4" => Some(format!("\x1b[1;{}S", modifier_code).into_bytes()),
+            "f5" => Some(format!("\x1b[15;{}~", modifier_code).into_bytes()),
+            "f6" => Some(format!("\x1b[17;{}~", modifier_code).into_bytes()),
+            "f7" => Some(format!("\x1b[18;{}~", modifier_code).into_bytes()),
+            "f8" => Some(format!("\x1b[19;{}~", modifier_code).into_bytes()),
+            "f9" => Some(format!("\x1b[20;{}~", modifier_code).into_bytes()),
+            "f10" => Some(format!("\x1b[21;{}~", modifier_code).into_bytes()),
+            "f11" => Some(format!("\x1b[23;{}~", modifier_code).into_bytes()),
+            "f12" => Some(format!("\x1b[24;{}~", modifier_code).into_bytes()),
             _ => None,
         };
 
@@ -1418,6 +1829,8 @@ fn keystroke_to_terminal_bytes(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
         }
     }
 
+    // DECCKM: application cursor keys send SS3 (`ESC O`) sequences.
+    let app_cursor = mode.contains(TermMode::APP_CURSOR);
     let mut bytes = match key {
         "enter" | "return" => vec![b'\r'],
         "backspace" => vec![0x7f],
@@ -1429,23 +1842,68 @@ fn keystroke_to_terminal_bytes(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
             }
         }
         "escape" => vec![0x1b],
+        "left" if app_cursor => b"\x1bOD".to_vec(),
+        "right" if app_cursor => b"\x1bOC".to_vec(),
+        "up" if app_cursor => b"\x1bOA".to_vec(),
+        "down" if app_cursor => b"\x1bOB".to_vec(),
+        "home" if app_cursor => b"\x1bOH".to_vec(),
+        "end" if app_cursor => b"\x1bOF".to_vec(),
         "left" => b"\x1b[D".to_vec(),
         "right" => b"\x1b[C".to_vec(),
         "up" => b"\x1b[A".to_vec(),
         "down" => b"\x1b[B".to_vec(),
         "home" => b"\x1b[H".to_vec(),
         "end" => b"\x1b[F".to_vec(),
+        "insert" => b"\x1b[2~".to_vec(),
         "pageup" => b"\x1b[5~".to_vec(),
         "pagedown" => b"\x1b[6~".to_vec(),
         "delete" => b"\x1b[3~".to_vec(),
+        "f1" => b"\x1bOP".to_vec(),
+        "f2" => b"\x1bOQ".to_vec(),
+        "f3" => b"\x1bOR".to_vec(),
+        "f4" => b"\x1bOS".to_vec(),
+        "f5" => b"\x1b[15~".to_vec(),
+        "f6" => b"\x1b[17~".to_vec(),
+        "f7" => b"\x1b[18~".to_vec(),
+        "f8" => b"\x1b[19~".to_vec(),
+        "f9" => b"\x1b[20~".to_vec(),
+        "f10" => b"\x1b[21~".to_vec(),
+        "f11" => b"\x1b[23~".to_vec(),
+        "f12" => b"\x1b[24~".to_vec(),
         _ => {
-            if modifiers.control && key.len() == 1 {
-                let ascii = key.as_bytes()[0].to_ascii_lowercase();
-                if ascii.is_ascii_lowercase() {
-                    vec![ascii - b'a' + 1]
+            if modifiers.control {
+                // Control characters beyond a-z.
+                let byte = match key {
+                    "space" | "@" | "2" => Some(0x00),
+                    "[" => Some(0x1b),
+                    "\\" => Some(0x1c),
+                    "]" => Some(0x1d),
+                    "^" | "6" => Some(0x1e),
+                    "_" | "-" | "/" => Some(0x1f),
+                    "?" => Some(0x7f),
+                    _ => None,
+                };
+                if let Some(byte) = byte {
+                    vec![byte]
+                } else if key.len() == 1 {
+                    let ascii = key.as_bytes()[0].to_ascii_lowercase();
+                    if ascii.is_ascii_lowercase() {
+                        vec![ascii - b'a' + 1]
+                    } else {
+                        return None;
+                    }
                 } else {
                     return None;
                 }
+            } else if modifiers.alt && key.len() == 1 && key.is_ascii() {
+                // Alt-as-meta: send ESC + the base key, not the composed
+                // Option character macOS produces (e.g. option-a = "å").
+                let ch = if modifiers.shift {
+                    key.as_bytes()[0].to_ascii_uppercase()
+                } else {
+                    key.as_bytes()[0]
+                };
+                vec![ch]
             } else if let Some(key_char) = &keystroke.key_char {
                 key_char.as_bytes().to_vec()
             } else {
@@ -1532,10 +1990,12 @@ impl EditorView {
     }
 
     pub(crate) fn active_chat_terminal_scrollbar_metrics(&self) -> Option<(f32, f32, f32)> {
-        let session = self.active_chat_terminal()?;
+        let tab_id = self.active_terminal_tab_id()?;
+        let session = self.terminal_session(&tab_id)?;
         let (_, _, cell_height) = self.chat_terminal_metrics();
         let viewport_height = self
-            .chat_terminal_input_bounds
+            .terminal_tab_state(&tab_id)
+            .and_then(|state| state.input_bounds)
             .map(|bounds| f32::from(bounds.size.height))
             .unwrap_or_else(|| session.snapshot.rows.max(1) as f32 * cell_height);
         let max_scroll = session.snapshot.history_size as f32 * cell_height;
@@ -1554,7 +2014,10 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let (_, _, cell_height) = self.chat_terminal_metrics();
-        let Some(session) = self.active_chat_terminal_mut() else {
+        let Some(tab_id) = self.active_terminal_tab_id() else {
+            return;
+        };
+        let Some(session) = self.terminal_session_mut(&tab_id) else {
             return;
         };
 
@@ -1628,67 +2091,83 @@ impl EditorView {
             .position(|row| row.source_line == snapshot.cursor.point.line.0)
     }
 
-    fn clear_chat_terminal_interaction_state(&mut self) {
-        self.chat_terminal_marked_text = None;
-        self.chat_terminal_selection = None;
-        self.chat_terminal_selecting = false;
-        self.chat_terminal_mouse_scroll_px = point(Pixels::ZERO, Pixels::ZERO);
-        self.chat_terminal_mouse_left_pressed = false;
-        self.chat_terminal_mouse_middle_pressed = false;
-        self.chat_terminal_mouse_right_pressed = false;
-        self.chat_terminal_last_mouse_cell = None;
+    pub(super) fn focus_terminal_tab(&self, tab_id: &str, window: &mut Window) {
+        if let Some(state) = self.terminal_tab_states.get(tab_id) {
+            window.focus(&state.focus_handle);
+        }
     }
 
-    fn focus_chat_terminal_panel(&self, window: &mut Window) {
-        window.focus(&self.chat_panel_focus_handle);
-    }
-
-    fn set_chat_terminal_mouse_button_state(&mut self, button: MouseButton, pressed: bool) {
+    fn set_chat_terminal_mouse_button_state(
+        &mut self,
+        tab_id: &str,
+        button: MouseButton,
+        pressed: bool,
+    ) {
+        let Some(state) = self.terminal_tab_states.get_mut(tab_id) else {
+            return;
+        };
         match button {
-            MouseButton::Left => self.chat_terminal_mouse_left_pressed = pressed,
-            MouseButton::Middle => self.chat_terminal_mouse_middle_pressed = pressed,
-            MouseButton::Right => self.chat_terminal_mouse_right_pressed = pressed,
+            MouseButton::Left => state.mouse_left_pressed = pressed,
+            MouseButton::Middle => state.mouse_middle_pressed = pressed,
+            MouseButton::Right => state.mouse_right_pressed = pressed,
             _ => {}
         }
     }
 
-    fn ensure_default_chat_tab(&mut self) {
-        if self.chat_tabs.is_empty() {
-            let id = self.next_tab_identity();
-            self.chat_tabs
-                .push(ChatTab::new(id.clone(), ChatAgentCli::GithubCopilot, 1));
-            self.active_chat_tab_id = Some(id);
-            return;
-        }
-
-        if self.active_chat_tab_index().is_none() {
-            self.active_chat_tab_id = self.chat_tabs.first().map(|tab| tab.id.clone());
-        }
+    pub(crate) fn terminal_tab_state(&self, tab_id: &str) -> Option<&TerminalTabState> {
+        self.terminal_tab_states.get(tab_id)
     }
 
-    pub(crate) fn active_chat_tab_index(&self) -> Option<usize> {
-        self.active_chat_tab_id
+    pub(crate) fn terminal_session(&self, tab_id: &str) -> Option<&ChatTerminalSession> {
+        self.terminal_tab_states
+            .get(tab_id)
+            .and_then(|state| state.session.as_ref())
+    }
+
+    pub(crate) fn terminal_session_mut(
+        &mut self,
+        tab_id: &str,
+    ) -> Option<&mut ChatTerminalSession> {
+        self.terminal_tab_states
+            .get_mut(tab_id)
+            .and_then(|state| state.session.as_mut())
+    }
+
+    /// The active tab of the current (root-swapped-in) pane when it is a
+    /// terminal tab.
+    pub(crate) fn active_terminal_tab_id(&self) -> Option<String> {
+        self.active_tab_id
             .as_ref()
-            .and_then(|id| self.chat_tabs.iter().position(|tab| &tab.id == id))
+            .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
+            .filter(|tab| tab.kind.is_terminal())
+            .map(|tab| tab.id.clone())
     }
 
-    fn active_chat_tab(&self) -> Option<&ChatTab> {
-        self.active_chat_tab_index()
-            .and_then(|index| self.chat_tabs.get(index))
+    pub(crate) fn active_tab_is_terminal(&self) -> bool {
+        self.active_terminal_tab_id().is_some()
     }
 
-    fn active_chat_tab_mut(&mut self) -> Option<&mut ChatTab> {
-        let index = self.active_chat_tab_index()?;
-        self.chat_tabs.get_mut(index)
+    pub(crate) fn has_terminal_tabs(&self) -> bool {
+        self.all_tabs().any(|tab| tab.kind.is_terminal())
     }
 
-    fn active_chat_terminal(&self) -> Option<&ChatTerminalSession> {
-        self.active_chat_tab().and_then(|tab| tab.session.as_ref())
+    fn ensure_terminal_tab_state(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        if !self.terminal_tab_states.contains_key(tab_id) {
+            self.terminal_tab_states
+                .insert(tab_id.to_string(), TerminalTabState::new(cx));
+        }
     }
 
-    fn active_chat_terminal_mut(&mut self) -> Option<&mut ChatTerminalSession> {
-        self.active_chat_tab_mut()
-            .and_then(|tab| tab.session.as_mut())
+    /// Stops and removes the terminal runtime state for a closed tab.
+    pub(crate) fn stop_terminal_tab(&mut self, tab_id: &str) {
+        if self.pending_terminal_focus.as_deref() == Some(tab_id) {
+            self.pending_terminal_focus = None;
+        }
+        if let Some(mut state) = self.terminal_tab_states.remove(tab_id)
+            && let Some(session) = state.session.as_mut()
+        {
+            session.stop();
+        }
     }
 
     fn build_chat_terminal_session(&self, agent_cli: ChatAgentCli) -> ChatTerminalSession {
@@ -1706,7 +2185,8 @@ impl EditorView {
             ));
         }
 
-        match ChatTerminalSession::launch(cwd, agent_cli) {
+        match ChatTerminalSession::launch(cwd, agent_cli, self.app_settings.terminal_cursor_shape())
+        {
             Ok(mut session) => {
                 session.status = ChatTerminalStatus::Running;
                 session
@@ -1715,16 +2195,22 @@ impl EditorView {
         }
     }
 
-    fn active_missing_agent_cli_install_target(&self) -> Option<(ChatAgentCli, &'static str)> {
-        let tab = self.active_chat_tab()?;
-        let session = tab.session.as_ref()?;
+    fn missing_agent_cli_install_target(
+        &self,
+        tab_id: &str,
+    ) -> Option<(ChatAgentCli, &'static str)> {
+        let agent_cli = self
+            .all_tabs()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.kind.terminal_agent())?;
+        let session = self.terminal_session(tab_id)?;
         if !matches!(session.status, ChatTerminalStatus::Unavailable(_)) {
             return None;
         }
-        if agent_cli_command_exists(tab.agent_cli) {
+        if agent_cli_command_exists(agent_cli) {
             return None;
         }
-        Some((tab.agent_cli, tab.agent_cli.install_url()?))
+        Some((agent_cli, agent_cli.install_url()?))
     }
 
     fn open_agent_cli_install_page(&mut self, agent_cli: ChatAgentCli, _cx: &mut Context<Self>) {
@@ -1734,311 +2220,152 @@ impl EditorView {
         let _ = std::process::Command::new("open").arg(url).spawn();
     }
 
-    fn next_chat_tab_agent_cli(&self) -> ChatAgentCli {
-        self.active_chat_tab()
-            .map(|tab| tab.agent_cli)
-            .or_else(|| self.chat_tabs.last().map(|tab| tab.agent_cli))
-            .unwrap_or(ChatAgentCli::GithubCopilot)
-    }
-
-    fn next_chat_tab_instance_index(&self, agent_cli: ChatAgentCli) -> usize {
-        self.chat_tabs
-            .iter()
-            .filter(|tab| tab.agent_cli == agent_cli)
-            .count()
-            + 1
-    }
-
-    pub(crate) fn create_chat_tab(&mut self, cx: &mut Context<Self>) {
-        let agent_cli = self.next_chat_tab_agent_cli();
-        self.create_chat_tab_with_agent(agent_cli, cx);
-    }
-
-    pub(crate) fn create_chat_tab_with_agent(
+    /// Creates a terminal tab in the current pane and activates it. Returns
+    /// the new tab's id.
+    pub(crate) fn create_terminal_tab(
         &mut self,
         agent_cli: ChatAgentCli,
         cx: &mut Context<Self>,
-    ) {
-        let id = self.next_tab_identity();
-        let instance_index = self.next_chat_tab_instance_index(agent_cli);
-        self.chat_tabs
-            .push(ChatTab::new(id.clone(), agent_cli, instance_index));
-        self.active_chat_tab_id = Some(id.clone());
-        self.record_active_chat_tab();
-        self.chat_terminal_scroll_px = Pixels::ZERO;
-        self.chat_terminal_input_bounds = None;
-        self.clear_chat_terminal_interaction_state();
-        self.scroll_chat_tab_bar_to_end(cx);
-        if self.utility_panel == Some(RightUtilityPanel::Chat) {
-            self.open_chat_terminal(cx);
+    ) -> String {
+        self.persist_active_tab_state();
+        let instance_index = self
+            .all_tabs()
+            .filter(|tab| tab.kind.terminal_agent() == Some(agent_cli))
+            .count()
+            + 1;
+        let title = if instance_index > 1 {
+            format!("{} - {}", agent_cli.label(), instance_index)
         } else {
-            cx.notify();
-        }
-    }
-
-    fn scroll_chat_tab_bar_to_end(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(16))
-                .await;
-            let _ = this.update(cx, |this, _| {
-                let offset = this.chat_tab_bar_scroll_handle.offset();
-                let max_offset = this.chat_tab_bar_scroll_handle.max_offset();
-                let trailing_reserved =
-                    this.scaled(this.styles.tab_bar.tab_end_drop_target_width_px);
-                let target_x = -((max_offset.width - px(trailing_reserved)).max(px(0.0)));
-                this.chat_tab_bar_scroll_handle
-                    .set_offset(point(target_x, offset.y));
-            });
-        })
-        .detach();
-    }
-
-    pub(crate) fn switch_to_chat_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
-        if !self.chat_tabs.iter().any(|tab| tab.id == tab_id) {
-            return;
-        }
-
-        self.active_chat_tab_id = Some(tab_id.to_string());
-        self.record_active_chat_tab();
-        self.chat_terminal_scroll_px = Pixels::ZERO;
-        self.chat_terminal_input_bounds = None;
-        self.clear_chat_terminal_interaction_state();
-        if self.utility_panel == Some(RightUtilityPanel::Chat) {
-            self.open_chat_terminal(cx);
-        } else {
-            cx.notify();
-        }
-    }
-
-    fn close_chat_tabs_by_ids(&mut self, tab_ids: &[String], cx: &mut Context<Self>) {
-        if tab_ids.is_empty() {
-            return;
-        }
-
-        let active_removed = self
-            .active_chat_tab_id
-            .as_ref()
-            .is_some_and(|active_id| tab_ids.iter().any(|id| id == active_id));
-        let removed_active_index = self.active_chat_tab_index();
-
-        for tab_id in tab_ids {
-            if let Some(index) = self.chat_tabs.iter().position(|tab| &tab.id == tab_id) {
-                let mut removed = self.chat_tabs.remove(index);
-                self.chat_tab_activation_history
-                    .retain(|history_id| history_id != tab_id);
-                if let Some(mut session) = removed.session.take() {
-                    session.stop();
-                }
-            }
-        }
-
-        if self.chat_tabs.is_empty() {
-            self.active_chat_tab_id = None;
-            if self.chat_panel_visible {
-                self.hide_chat_panel(cx);
-            } else {
-                cx.notify();
-            }
-            return;
-        }
-
-        if active_removed {
-            self.active_chat_tab_id = self
-                .chat_tab_activation_history
-                .iter()
-                .rev()
-                .find(|history_id| self.chat_tabs.iter().any(|tab| &tab.id == *history_id))
-                .cloned()
-                .or_else(|| {
-                    let fallback_index = removed_active_index
-                        .unwrap_or(0)
-                        .saturating_sub(1)
-                        .min(self.chat_tabs.len().saturating_sub(1));
-                    self.chat_tabs.get(fallback_index).map(|tab| tab.id.clone())
-                });
-            self.record_active_chat_tab();
-            if self.utility_panel == Some(RightUtilityPanel::Chat) {
-                self.open_chat_terminal(cx);
-            } else {
-                cx.notify();
-            }
-        } else {
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn close_chat_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
-        self.close_chat_tabs_by_ids(&[tab_id.to_string()], cx);
-    }
-
-    fn record_active_chat_tab(&mut self) {
-        let Some(active_id) = self.active_chat_tab_id.clone() else {
-            return;
+            agent_cli.label().to_string()
         };
-        self.chat_tab_activation_history
-            .retain(|history_id| history_id != &active_id);
-        self.chat_tab_activation_history.push(active_id);
-    }
-
-    pub(crate) fn close_chat_left_tabs(&mut self, from_tab_id: &str, cx: &mut Context<Self>) {
-        let Some(index) = self.chat_tabs.iter().position(|tab| tab.id == from_tab_id) else {
-            return;
+        let tab_id = self.next_tab_identity();
+        let tab = OpenTab {
+            id: tab_id.clone(),
+            title,
+            kind: TabKind::Terminal(agent_cli),
+            path: None,
+            file_kind: None,
+            editor_left_aligned: false,
+            snapshot: EditorSnapshot {
+                text: String::new(),
+                cursor_offset: 0,
+                cursor_anchor: 0,
+                scroll_offset: 0.0,
+                extra_cursors: Vec::new(),
+            },
+            image_view: ImageViewState::default(),
+            whiteboard: None,
+            git_diff: None,
+            inline_diff: None,
+            is_preview: false,
+            is_dirty: false,
+            is_deleted: false,
+            is_pinned: false,
+            recovery: config_store::TabRecoveryState::default(),
+            history: history_store::TabHistory::default(),
         };
-        let ids: Vec<String> = self.chat_tabs[..index]
-            .iter()
-            .filter(|tab| !tab.is_pinned)
-            .map(|tab| tab.id.clone())
-            .collect();
-        self.close_chat_tabs_by_ids(&ids, cx);
+        self.ensure_terminal_tab_state(&tab_id, cx);
+        self.tabs.push(tab);
+        if let Some(index) = self.tabs.len().checked_sub(1) {
+            self.activate_tab_by_index(index, cx);
+        }
+        self.scroll_tab_bar_to_end(cx);
+        session_store::persist_session(self);
+        tab_id
     }
 
-    pub(crate) fn close_chat_other_tabs(&mut self, current_tab_id: &str, cx: &mut Context<Self>) {
-        let ids: Vec<String> = self
-            .chat_tabs
-            .iter()
-            .filter(|tab| tab.id != current_tab_id && !tab.is_pinned)
-            .map(|tab| tab.id.clone())
-            .collect();
-        self.close_chat_tabs_by_ids(&ids, cx);
-    }
-
-    pub(crate) fn close_chat_right_tabs(&mut self, from_tab_id: &str, cx: &mut Context<Self>) {
-        let Some(index) = self.chat_tabs.iter().position(|tab| tab.id == from_tab_id) else {
-            return;
-        };
-        let ids: Vec<String> = self.chat_tabs[(index + 1)..]
-            .iter()
-            .filter(|tab| !tab.is_pinned)
-            .map(|tab| tab.id.clone())
-            .collect();
-        self.close_chat_tabs_by_ids(&ids, cx);
-    }
-
-    pub(crate) fn toggle_chat_tab_pin(&mut self, tab_id: &str, cx: &mut Context<Self>) {
-        let Some(index) = self.chat_tabs.iter().position(|tab| tab.id == tab_id) else {
-            return;
-        };
-
-        let mut tab = self.chat_tabs.remove(index);
-        tab.is_pinned = !tab.is_pinned;
-        let insert_index = if tab.is_pinned {
-            self.chat_tabs
-                .iter()
-                .position(|candidate| !candidate.is_pinned)
-                .unwrap_or(self.chat_tabs.len())
-        } else {
-            self.chat_tabs
-                .iter()
-                .rposition(|candidate| candidate.is_pinned)
-                .map(|index| index + 1)
-                .unwrap_or(0)
-        };
-        self.chat_tabs
-            .insert(insert_index.min(self.chat_tabs.len()), tab);
-        self.active_chat_tab_id = Some(tab_id.to_string());
-        cx.notify();
-    }
-
-    pub(crate) fn reorder_chat_tab_before(
+    /// Opens a terminal tab in a new pane on the right side of the focused
+    /// pane (or in place when the focused pane has no other tabs).
+    pub(crate) fn open_terminal_tab_in_right_split(
         &mut self,
-        from_id: &str,
-        to_id: &str,
+        agent_cli: ChatAgentCli,
         cx: &mut Context<Self>,
-    ) {
-        if from_id == to_id {
-            return;
+    ) -> String {
+        let focused = self.focused_pane_id;
+        let had_other_tabs = self.pane_tab_count(focused) > 0;
+        let tab_id = self.create_terminal_tab(agent_cli, cx);
+        if had_other_tabs {
+            self.split_pane_with_tab(focused, SplitDirection::Right, &tab_id, cx);
         }
-        let Some(from_index) = self.chat_tabs.iter().position(|tab| tab.id == from_id) else {
-            return;
-        };
-        let Some(mut to_index) = self.chat_tabs.iter().position(|tab| tab.id == to_id) else {
-            return;
-        };
-        let moved = self.chat_tabs.remove(from_index);
-        if from_index < to_index {
-            to_index = to_index.saturating_sub(1);
-        }
-        self.chat_tabs.insert(to_index, moved);
-        cx.notify();
+        tab_id
     }
 
-    pub(crate) fn reorder_chat_tab_after(
-        &mut self,
-        from_id: &str,
-        to_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        if from_id == to_id {
-            return;
-        }
-        let Some(from_index) = self.chat_tabs.iter().position(|tab| tab.id == from_id) else {
-            return;
-        };
-        let Some(mut to_index) = self.chat_tabs.iter().position(|tab| tab.id == to_id) else {
-            return;
-        };
-        let moved = self.chat_tabs.remove(from_index);
-        if from_index < to_index {
-            to_index = to_index.saturating_sub(1);
-        }
-        self.chat_tabs
-            .insert((to_index + 1).min(self.chat_tabs.len()), moved);
-        cx.notify();
-    }
-
-    pub(crate) fn reorder_chat_tab_to_end(&mut self, from_id: &str, cx: &mut Context<Self>) {
-        let Some(from_index) = self.chat_tabs.iter().position(|tab| tab.id == from_id) else {
-            return;
-        };
-        let moved = self.chat_tabs.remove(from_index);
-        self.chat_tabs.push(moved);
-        cx.notify();
-    }
-
-    fn chat_tab_drop_changes_order_for(
-        current_tab_ids: &[String],
-        from_id: &str,
-        target: ChatTabDropTarget<'_>,
-    ) -> bool {
-        let Some(from_index) = current_tab_ids.iter().position(|tab_id| tab_id == from_id) else {
-            return false;
-        };
-
-        let mut reordered = current_tab_ids.to_vec();
-        let moved = reordered.remove(from_index);
-        match target {
-            ChatTabDropTarget::Before(to_id) => {
-                let Some(to_index) = reordered.iter().position(|tab_id| tab_id == to_id) else {
-                    return false;
-                };
-                reordered.insert(to_index, moved);
+    /// The chat/terminal toggle: opens a terminal tab in a right split when no
+    /// terminal tab exists, otherwise closes every terminal tab (collapsing
+    /// panes that become empty).
+    pub(crate) fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
+        let terminal_ids: Vec<String> = self
+            .all_tabs()
+            .filter(|tab| tab.kind.is_terminal())
+            .map(|tab| tab.id.clone())
+            .collect();
+        if terminal_ids.is_empty() {
+            self.open_terminal_tab_in_right_split(ChatAgentCli::Terminal, cx);
+        } else {
+            for tab_id in terminal_ids {
+                self.close_tab(&tab_id, cx);
             }
-            ChatTabDropTarget::After(to_id) => {
-                let Some(to_index) = reordered.iter().position(|tab_id| tab_id == to_id) else {
-                    return false;
-                };
-                reordered.insert((to_index + 1).min(reordered.len()), moved);
-            }
-            ChatTabDropTarget::End => reordered.push(moved),
         }
+    }
 
-        reordered != current_tab_ids
+    /// Writes user-initiated input to the PTY: scrolls the viewport back to
+    /// the bottom and clears any selection first (matching common terminal
+    /// behavior; see Zed's `Terminal::input`).
+    fn terminal_write_user_input(&mut self, tab_id: &str, bytes: &[u8]) {
+        let Some(state) = self.terminal_tab_states.get_mut(tab_id) else {
+            return;
+        };
+        state.selection = None;
+        state.selecting = false;
+        if let Some(session) = state.session.as_mut() {
+            if session.snapshot.display_offset != 0 {
+                session.scroll_display(Scroll::Bottom);
+            }
+            let _ = session.write_bytes(bytes);
+        }
     }
 
     fn send_chat_terminal_bytes(
         &mut self,
+        tab_id: &str,
         bytes: &[u8],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus_chat_terminal_panel(window);
+        self.focus_terminal_tab(tab_id, window);
         cx.stop_propagation();
-        self.chat_terminal_marked_text = None;
         self.pause_cursor_blinking(cx);
-        if let Some(session) = self.active_chat_terminal_mut() {
-            let _ = session.write_bytes(bytes);
+        if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+            state.marked_text = None;
         }
+        self.terminal_write_user_input(tab_id, bytes);
+    }
+
+    /// Finds or creates the terminal tab that chat references should be sent
+    /// to: the current pane's active terminal tab, any open terminal tab, or a
+    /// freshly opened right-split terminal.
+    fn ensure_chat_terminal_target(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let existing = self.active_terminal_tab_id().or_else(|| {
+            self.all_tabs()
+                .find(|tab| tab.kind.is_terminal())
+                .map(|tab| tab.id.clone())
+        });
+        let tab_id = match existing {
+            Some(tab_id) => {
+                if let Some(owner) = self.pane_id_for_tab(&tab_id)
+                    && owner != self.focused_pane_id
+                {
+                    self.focus_pane(owner, cx);
+                }
+                self.switch_to_tab(&tab_id, cx);
+                tab_id
+            }
+            None => self.open_terminal_tab_in_right_split(ChatAgentCli::GithubCopilot, cx),
+        };
+        self.ensure_terminal_session(&tab_id, cx);
+        self.pending_terminal_focus = Some(tab_id.clone());
+        cx.notify();
+        Some(tab_id)
     }
 
     fn insert_chat_reference_labels(&mut self, labels: &[String], cx: &mut Context<Self>) {
@@ -2052,12 +2379,11 @@ impl EditorView {
             return;
         }
 
-        self.ensure_chat_terminal_visible(cx);
-        if self.active_chat_terminal().is_none() {
-            self.open_chat_terminal(cx);
-        }
+        let Some(tab_id) = self.ensure_chat_terminal_target(cx) else {
+            return;
+        };
         self.pause_cursor_blinking(cx);
-        if let Some(session) = self.active_chat_terminal_mut() {
+        if let Some(session) = self.terminal_session(&tab_id) {
             let _ = session.write_bytes(text.as_bytes());
         }
     }
@@ -2077,46 +2403,15 @@ impl EditorView {
         self.insert_chat_reference_labels(&labels, cx);
     }
 
-    pub(crate) fn add_dragged_tab_to_chat(
-        &mut self,
-        title: &str,
-        path: Option<&PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(label) = path
-            .and_then(|path| self.chat_drop_reference_label_for_path(path))
-            .or_else(|| {
-                let trimmed = title.trim();
-                (!trimmed.is_empty()).then(|| trimmed.to_string())
-            })
-        else {
-            return;
-        };
-        self.insert_chat_reference_labels(&[label], cx);
-    }
-
-    pub(crate) fn ensure_chat_terminal_visible(&mut self, cx: &mut Context<Self>) {
-        self.pending_chat_input_focus = true;
-        if self.utility_panel != Some(RightUtilityPanel::Chat) {
-            self.reveal_chat_panel(cx);
-            return;
-        }
-
-        if self.active_chat_terminal().is_none() {
-            self.open_chat_terminal(cx);
-            return;
-        }
-
-        cx.notify();
-    }
-
     pub(crate) fn add_path_to_chat(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         let Some(relative_path) = self.relative_path_for_path(path) else {
             return;
         };
 
-        self.ensure_chat_terminal_visible(cx);
-        if let Some(session) = self.active_chat_terminal_mut() {
+        let Some(tab_id) = self.ensure_chat_terminal_target(cx) else {
+            return;
+        };
+        if let Some(session) = self.terminal_session(&tab_id) {
             let _ = session.write_bytes(format!("@{} ", relative_path).as_bytes());
         }
     }
@@ -2131,8 +2426,10 @@ impl EditorView {
             return;
         }
 
-        self.ensure_chat_terminal_visible(cx);
-        if let Some(session) = self.active_chat_terminal_mut() {
+        let Some(tab_id) = self.ensure_chat_terminal_target(cx) else {
+            return;
+        };
+        if let Some(session) = self.terminal_session(&tab_id) {
             let _ = session.write_bytes(references.as_bytes());
         }
     }
@@ -2176,14 +2473,21 @@ impl EditorView {
             )
         };
 
-        self.ensure_chat_terminal_visible(cx);
-        if let Some(session) = self.active_chat_terminal_mut() {
+        let Some(tab_id) = self.ensure_chat_terminal_target(cx) else {
+            return;
+        };
+        if let Some(session) = self.terminal_session(&tab_id) {
             let _ = session.write_bytes(text.as_bytes());
         }
     }
 
-    fn swallow_chat_terminal_editor_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus_chat_terminal_panel(window);
+    fn swallow_chat_terminal_editor_action(
+        &mut self,
+        tab_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_terminal_tab(tab_id, window);
         cx.stop_propagation();
     }
 
@@ -2196,93 +2500,193 @@ impl EditorView {
             })
     }
 
-    pub(crate) fn open_chat_terminal(&mut self, cx: &mut Context<Self>) {
-        self.ensure_default_chat_tab();
-        self.pending_chat_input_focus = true;
-        self.clear_chat_terminal_interaction_state();
-
-        let Some(active_index) = self.active_chat_tab_index() else {
-            cx.notify();
+    /// Lazily spawns the PTY session for a terminal tab (no-op when already
+    /// running or when the tab is not a terminal tab).
+    pub(crate) fn ensure_terminal_session(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        let Some(agent_cli) = self
+            .all_tabs()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.kind.terminal_agent())
+        else {
             return;
         };
-
-        if self.chat_tabs[active_index].session.is_none() {
-            let agent_cli = self.chat_tabs[active_index].agent_cli;
-            self.chat_tabs[active_index].title = agent_cli.label().to_string();
-            let session = self.build_chat_terminal_session(agent_cli);
-            let should_poll = matches!(session.status, ChatTerminalStatus::Running);
-            self.chat_tabs[active_index].session = Some(session);
-            if should_poll {
-                let tab_id = self.chat_tabs[active_index].id.clone();
-                self.start_chat_terminal_poll(tab_id, cx);
-            }
+        self.ensure_terminal_tab_state(tab_id, cx);
+        let Some(state) = self.terminal_tab_states.get(tab_id) else {
+            return;
+        };
+        if state.session.is_some() {
+            return;
         }
 
-        self.resize_chat_terminal();
+        let session = self.build_chat_terminal_session(agent_cli);
+        let should_poll = matches!(session.status, ChatTerminalStatus::Running);
+        let initial_title = session.dynamic_title.clone();
+        if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+            state.session = Some(session);
+        }
+        if let Some(title) = initial_title
+            && let Some(tab) = self.all_tabs_mut().find(|tab| tab.id == tab_id)
+        {
+            tab.title = title;
+        }
+        if should_poll {
+            self.start_chat_terminal_poll(tab_id.to_string(), cx);
+        }
+        self.resize_chat_terminal(tab_id);
         cx.notify();
     }
 
-    pub(crate) fn place_chat_panel(
-        &mut self,
-        placement: ChatPanelPlacement,
-        cx: &mut Context<Self>,
-    ) {
-        self.utility_panel_resizing = false;
-        self.chat_panel_visible = true;
-        self.chat_panel_placement = placement;
-        self.set_visible_utility_panel(Some(RightUtilityPanel::Chat), cx);
-        self.open_chat_terminal(cx);
-    }
-
-    pub(crate) fn select_chat_tab_agent_cli(
-        &mut self,
-        tab_id: &str,
-        agent_cli: ChatAgentCli,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(index) = self.chat_tabs.iter().position(|tab| tab.id == tab_id) else {
-            return;
-        };
-
-        if self.chat_tabs[index].agent_cli == agent_cli {
-            cx.notify();
-            return;
-        }
-
-        self.chat_tabs[index].agent_cli = agent_cli;
-        self.chat_tabs[index].title = agent_cli.label().to_string();
-        if let Some(mut session) = self.chat_tabs[index].session.take() {
-            session.stop();
-        }
-
-        if self.active_chat_tab_id.as_deref() == Some(tab_id)
-            && self.utility_panel == Some(RightUtilityPanel::Chat)
-        {
-            self.open_chat_terminal(cx);
-        } else {
-            cx.notify();
+    pub(crate) fn set_terminal_cursor_shape(&mut self, cursor_shape: TerminalCursorShape) {
+        self.app_settings.terminal_cursor_shape = cursor_shape.as_str().to_string();
+        for state in self.terminal_tab_states.values_mut() {
+            if let Some(session) = state.session.as_mut() {
+                session.set_cursor_shape(cursor_shape);
+            }
         }
     }
 
-    pub(crate) fn stop_chat_terminal(&mut self) {
-        self.pending_chat_input_focus = false;
-        self.chat_terminal_scroll_px = Pixels::ZERO;
-        self.chat_terminal_input_bounds = None;
-        self.clear_chat_terminal_interaction_state();
-        for tab in &mut self.chat_tabs {
-            if let Some(mut session) = tab.session.take() {
+    /// Stops every terminal PTY session (used on shutdown).
+    pub(crate) fn stop_all_terminal_sessions(&mut self) {
+        self.pending_terminal_focus = None;
+        for state in self.terminal_tab_states.values_mut() {
+            if let Some(session) = state.session.as_mut() {
                 session.stop();
             }
         }
     }
 
-    fn start_chat_terminal_poll(&mut self, tab_id: String, cx: &mut Context<Self>) {
-        let Some(session) = self
-            .chat_tabs
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.session.as_mut())
+    /// Clears the terminal screen and scrollback (Cmd+K).
+    pub(crate) fn clear_terminal(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        let Some(state) = self.terminal_tab_states.get_mut(tab_id) else {
+            return;
+        };
+        state.selection = None;
+        state.selecting = false;
+        if let Some(session) = state.session.as_mut() {
+            session.clear();
+            if let Some(pattern) = state.search_pattern.clone() {
+                state.search_matches = session.search(&pattern, TERMINAL_SEARCH_MAX_MATCHES);
+            }
+        }
+        self.search_current_index = None;
+        cx.notify();
+    }
+
+    /// Builds the regex pattern for terminal search from the shared search-bar
+    /// options. Returns None for an empty (or invalid regex) query.
+    fn terminal_search_pattern(&self) -> Option<String> {
+        let query = self.search_query.trim_end_matches('\n');
+        if query.is_empty() {
+            return None;
+        }
+        let mut pattern = if self.search_use_regex {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
+        if self.search_whole_word {
+            pattern = format!(r"\b(?:{pattern})\b");
+        }
+        if !self.search_case_sensitive {
+            pattern = format!("(?i){pattern}");
+        }
+        Some(pattern)
+    }
+
+    /// Runs the search-bar query against the terminal grid (scrollback
+    /// included) and highlights/activates the match closest to the bottom.
+    pub(crate) fn run_terminal_search(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        let pattern = self.terminal_search_pattern();
+        let Some(state) = self.terminal_tab_states.get_mut(tab_id) else {
+            return;
+        };
+
+        let Some(pattern) = pattern else {
+            state.search_pattern = None;
+            state.search_matches.clear();
+            self.search_current_index = None;
+            cx.notify();
+            return;
+        };
+
+        state.search_pattern = Some(pattern.clone());
+        state.search_matches = state
+            .session
+            .as_ref()
+            .map(|session| session.search(&pattern, TERMINAL_SEARCH_MAX_MATCHES))
+            .unwrap_or_default();
+
+        if state.search_matches.is_empty() {
+            self.search_current_index = None;
+        } else {
+            // Terminals usually care about the most recent output: activate
+            // the last match and bring it into view.
+            let index = state.search_matches.len() - 1;
+            self.search_current_index = Some(index);
+            self.scroll_terminal_match_into_view(tab_id, index);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn terminal_search_match_count(&self, tab_id: &str) -> usize {
+        self.terminal_tab_state(tab_id)
+            .map(|state| state.search_matches.len())
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn terminal_search_navigate(
+        &mut self,
+        tab_id: &str,
+        forward: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let count = self.terminal_search_match_count(tab_id);
+        if count == 0 {
+            if !self.search_query.is_empty() {
+                self.run_terminal_search(tab_id, cx);
+            }
+            return;
+        }
+
+        let index = match self.search_current_index {
+            Some(current) if forward => (current + 1) % count,
+            Some(current) => (current + count - 1) % count,
+            None => {
+                if forward {
+                    0
+                } else {
+                    count - 1
+                }
+            }
+        };
+        self.search_current_index = Some(index.min(count - 1));
+        self.scroll_terminal_match_into_view(tab_id, index);
+        cx.notify();
+    }
+
+    fn scroll_terminal_match_into_view(&mut self, tab_id: &str, index: usize) {
+        let Some(line) = self
+            .terminal_tab_state(tab_id)
+            .and_then(|state| state.search_matches.get(index))
+            .map(|search_match| search_match.start().line.0)
         else {
+            return;
+        };
+        if let Some(session) = self.terminal_session_mut(tab_id) {
+            session.scroll_line_into_view(line);
+        }
+    }
+
+    /// Clears terminal search state (search bar dismissed).
+    pub(crate) fn clear_terminal_search(&mut self, tab_id: &str) {
+        if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+            state.search_pattern = None;
+            state.search_matches.clear();
+        }
+    }
+
+    fn start_chat_terminal_poll(&mut self, tab_id: String, cx: &mut Context<Self>) {
+        let Some(session) = self.terminal_session_mut(&tab_id) else {
             return;
         };
 
@@ -2290,57 +2694,70 @@ impl EditorView {
             loop {
                 let done = this
                     .update(cx, |this, cx| {
-                        let Some(tab) = this.chat_tabs.iter_mut().find(|tab| tab.id == tab_id)
-                        else {
-                            return true;
-                        };
-                        let Some(session) = tab.session.as_mut() else {
-                            return true;
-                        };
+                        let (mut changed, exited, title_update) = {
+                            let Some(state) = this.terminal_tab_states.get_mut(&tab_id) else {
+                                return true;
+                            };
+                            let Some(session) = state.session.as_mut() else {
+                                return true;
+                            };
 
-                        let mut changed = false;
-                        let mut exited = false;
-                        let mut clear_interaction_state = false;
-                        let events = session
-                            .receiver
-                            .as_ref()
-                            .map(|receiver| receiver.try_iter().collect::<Vec<_>>())
-                            .unwrap_or_default();
-                        for event in events {
-                            changed = true;
-                            match event {
-                                ChatTerminalEvent::Updated => {
-                                    if matches!(session.status, ChatTerminalStatus::Launching) {
-                                        session.status = ChatTerminalStatus::Running;
+                            let mut changed = false;
+                            let mut exited = false;
+                            let mut clear_interaction_state = false;
+                            let events = session
+                                .receiver
+                                .as_ref()
+                                .map(|receiver| receiver.try_iter().collect::<Vec<_>>())
+                                .unwrap_or_default();
+                            for event in events {
+                                changed = true;
+                                match event {
+                                    ChatTerminalEvent::Updated => {
+                                        if matches!(session.status, ChatTerminalStatus::Launching) {
+                                            session.status = ChatTerminalStatus::Running;
+                                        }
+                                        state.selection = None;
+                                        state.selecting = false;
+                                        session.refresh_snapshot();
+                                        // Keep active search results in sync with
+                                        // new output.
+                                        if let Some(pattern) = state.search_pattern.clone() {
+                                            state.search_matches = session
+                                                .search(&pattern, TERMINAL_SEARCH_MAX_MATCHES);
+                                        }
                                     }
-                                    if this.active_chat_tab_id.as_deref() == Some(tab_id.as_str()) {
-                                        this.chat_terminal_selection = None;
-                                        this.chat_terminal_selecting = false;
+                                    ChatTerminalEvent::Exited => {
+                                        session.status = ChatTerminalStatus::Exited;
+                                        clear_interaction_state = true;
+                                        session.refresh_snapshot();
+                                        session.poll_task = None;
+                                        exited = true;
                                     }
-                                    session.refresh_snapshot();
-                                }
-                                ChatTerminalEvent::Exited => {
-                                    session.status = ChatTerminalStatus::Exited;
-                                    clear_interaction_state = true;
-                                    session.refresh_snapshot();
-                                    session.poll_task = None;
-                                    exited = true;
-                                }
-                                ChatTerminalEvent::Error(message) => {
-                                    session.status = ChatTerminalStatus::Unavailable(message);
-                                    clear_interaction_state = true;
-                                    session.poll_task = None;
-                                    exited = true;
+                                    ChatTerminalEvent::Error(message) => {
+                                        session.status = ChatTerminalStatus::Unavailable(message);
+                                        clear_interaction_state = true;
+                                        session.poll_task = None;
+                                        exited = true;
+                                    }
                                 }
                             }
-                        }
 
-                        if clear_interaction_state
-                            && this.active_chat_tab_id.as_deref() == Some(tab_id.as_str())
+                            let title_update =
+                                (!exited).then(|| session.refresh_dynamic_title()).flatten();
+                            if clear_interaction_state {
+                                state.clear_interaction_state();
+                            }
+                            (changed, exited, title_update)
+                        };
+
+                        if let Some(title) = title_update
+                            && let Some(tab) = this.all_tabs_mut().find(|tab| tab.id == tab_id)
+                            && tab.title != title
                         {
-                            this.clear_chat_terminal_interaction_state();
+                            tab.title = title;
+                            changed = true;
                         }
-
                         if changed {
                             cx.notify();
                         }
@@ -2359,38 +2776,16 @@ impl EditorView {
         }));
     }
 
-    fn resize_chat_terminal(&mut self) {
+    fn resize_chat_terminal(&mut self, tab_id: &str) {
         let (_, cell_width, cell_height) = self.chat_terminal_metrics();
-        let (panel_width, panel_height) = if let Some(bounds) = self.chat_terminal_input_bounds {
-            (
-                f32::from(bounds.size.width).max(220.0),
-                f32::from(bounds.size.height).max(120.0),
-            )
-        } else {
-            let terminal_padding =
-                self.scaled(self.styles.utility_panel.utility_panel_terminal_padding_px);
-            let border_width = self.scaled(self.styles.utility_panel.utility_panel_border_width_px);
-            let tab_bar_height = self.tab_bar_height();
-            let panel_width = if self.chat_panel_placement == ChatPanelPlacement::Bottom {
-                (self.last_window_width
-                    - self.sidebar_width()
-                    - self.right_panel_width()
-                    - terminal_padding * 2.0)
-                    .max(220.0)
-            } else {
-                (self.utility_panel_width() - terminal_padding * 2.0 - border_width).max(220.0)
-            };
-            let panel_height = if self.chat_panel_placement == ChatPanelPlacement::Bottom {
-                (self.utility_panel_width()
-                    - terminal_padding * 2.0
-                    - tab_bar_height
-                    - border_width)
-                    .max(120.0)
-            } else {
-                (self.last_window_height - terminal_padding * 2.0 - tab_bar_height).max(240.0)
-            };
-            (panel_width, panel_height)
+        let Some(state) = self.terminal_tab_states.get_mut(tab_id) else {
+            return;
         };
+        let Some(bounds) = state.input_bounds else {
+            return;
+        };
+        let panel_width = f32::from(bounds.size.width).max(220.0);
+        let panel_height = f32::from(bounds.size.height).max(120.0);
         let cols = (panel_width / cell_width.max(1.0)).floor() as u16;
         let row_height = cell_height.max(1.0);
         let raw_rows = panel_height / row_height;
@@ -2401,55 +2796,90 @@ impl EditorView {
         } else {
             whole_rows as u16
         };
-        if let Some(session) = self.active_chat_terminal_mut() {
-            if session.rows != rows.max(2) || session.cols != cols.max(20) {
-                session.resize(rows, cols);
-            }
+        if let Some(session) = state.session.as_mut()
+            && (session.rows != rows.max(2) || session.cols != cols.max(20))
+        {
+            session.resize(rows, cols);
         }
     }
 
     fn on_chat_terminal_key_down(
         &mut self,
+        tab_id: &str,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus_chat_terminal_panel(window);
+        self.focus_terminal_tab(tab_id, window);
         if should_route_chat_terminal_text_input(&event.keystroke) {
             return;
         }
         cx.stop_propagation();
-        let Some(bytes) = keystroke_to_terminal_bytes(&event.keystroke) else {
+
+        let mode = self
+            .terminal_session(tab_id)
+            .map(ChatTerminalSession::term_mode)
+            .unwrap_or(TermMode::NONE);
+
+        // Shift+PageUp/PageDown/Home/End scroll the local viewport instead of
+        // being sent to the application (unless it runs on the alt screen).
+        let modifiers = event.keystroke.modifiers;
+        if modifiers.shift
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.platform
+            && !mode.contains(TermMode::ALT_SCREEN)
+        {
+            let scroll = match event.keystroke.key.as_str() {
+                "pageup" => Some(Scroll::PageUp),
+                "pagedown" => Some(Scroll::PageDown),
+                "home" => Some(Scroll::Top),
+                "end" => Some(Scroll::Bottom),
+                _ => None,
+            };
+            if let Some(scroll) = scroll {
+                if let Some(session) = self.terminal_session_mut(tab_id) {
+                    session.scroll_display(scroll);
+                    self.reveal_panel_scrollbar(PanelScrollbarKind::ChatTerminal, cx);
+                    cx.notify();
+                }
+                return;
+            }
+        }
+
+        let Some(bytes) = keystroke_to_terminal_bytes(&event.keystroke, mode) else {
             return;
         };
         self.pause_cursor_blinking(cx);
-        if let Some(session) = self.active_chat_terminal_mut() {
-            let _ = session.write_bytes(&bytes);
-        }
+        self.terminal_write_user_input(tab_id, &bytes);
+        cx.notify();
     }
 
     fn on_chat_terminal_scroll(
         &mut self,
+        tab_id: &str,
         event: &ScrollWheelEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus_chat_terminal_panel(window);
+        self.focus_terminal_tab(tab_id, window);
         cx.stop_propagation();
-        self.chat_terminal_selection = None;
-        self.chat_terminal_selecting = false;
+        if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+            state.selection = None;
+            state.selecting = false;
+        }
         self.reveal_panel_scrollbar(PanelScrollbarKind::ChatTerminal, cx);
 
         let (_, cell_width, line_height) = self.chat_terminal_metrics();
-        if self.forward_chat_terminal_protocol_scroll(event, cell_width, line_height) {
+        if self.forward_chat_terminal_protocol_scroll(tab_id, event, cell_width, line_height) {
             cx.notify();
             return;
         }
-        let Some(delta) = self.chat_terminal_scroll_lines(event, line_height) else {
+        let Some(delta) = self.chat_terminal_scroll_lines(tab_id, event, line_height) else {
             return;
         };
 
-        if let Some(session) = self.active_chat_terminal_mut() {
+        if let Some(session) = self.terminal_session_mut(tab_id) {
             session.scroll_display(Scroll::Delta(delta));
             cx.notify();
         }
@@ -2457,24 +2887,26 @@ impl EditorView {
 
     fn chat_terminal_scroll_lines(
         &mut self,
+        tab_id: &str,
         event: &ScrollWheelEvent,
         line_height: f32,
     ) -> Option<i32> {
         let line_height = px(line_height.max(1.0));
         let scroll_height = self
-            .active_chat_terminal()
+            .terminal_session(tab_id)
             .map(|session| line_height * session.snapshot.rows.max(1) as f32)
             .unwrap_or(line_height);
+        let state = self.terminal_tab_states.get_mut(tab_id)?;
         match event.touch_phase {
             TouchPhase::Started => {
-                self.chat_terminal_scroll_px = Pixels::ZERO;
+                state.scroll_px = Pixels::ZERO;
                 None
             }
             TouchPhase::Moved => {
-                let old_offset = (self.chat_terminal_scroll_px / line_height) as i32;
-                self.chat_terminal_scroll_px += event.delta.pixel_delta(line_height).y;
-                let new_offset = (self.chat_terminal_scroll_px / line_height) as i32;
-                self.chat_terminal_scroll_px %= scroll_height;
+                let old_offset = (state.scroll_px / line_height) as i32;
+                state.scroll_px += event.delta.pixel_delta(line_height).y;
+                let new_offset = (state.scroll_px / line_height) as i32;
+                state.scroll_px %= scroll_height;
                 Some(new_offset - old_offset)
             }
             TouchPhase::Ended => None,
@@ -2483,15 +2915,20 @@ impl EditorView {
 
     fn on_chat_terminal_paste_action(
         &mut self,
+        tab_id: &str,
         _: &Paste,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.swallow_chat_terminal_editor_action(window, cx);
-        self.paste_chat_terminal_from_clipboard(cx);
+        self.swallow_chat_terminal_editor_action(tab_id, window, cx);
+        self.paste_chat_terminal_from_clipboard(tab_id, cx);
     }
 
-    pub(crate) fn paste_chat_terminal_from_clipboard(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn paste_chat_terminal_from_clipboard(
+        &mut self,
+        tab_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some(item) = cx.read_from_clipboard() else {
             return;
         };
@@ -2499,17 +2936,34 @@ impl EditorView {
             return;
         };
         self.pause_cursor_blinking(cx);
-        if let Some(session) = self.active_chat_terminal_mut() {
-            let _ = session.write_bytes(text.as_bytes());
-        }
+
+        // Bracketed paste lets applications (vim, zsh, ...) treat the payload
+        // as a literal block; otherwise newlines must become carriage returns.
+        let bracketed = self
+            .terminal_session(tab_id)
+            .is_some_and(|session| session.term_mode().contains(TermMode::BRACKETED_PASTE));
+        let bytes = if bracketed {
+            let mut bytes = b"\x1b[200~".to_vec();
+            bytes.extend_from_slice(text.replace("\x1b[201~", "").as_bytes());
+            bytes.extend_from_slice(b"\x1b[201~");
+            bytes
+        } else {
+            text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+        };
+        self.terminal_write_user_input(tab_id, &bytes);
+        cx.notify();
     }
 
-    fn chat_terminal_cell_from_position(&self, position: Point<Pixels>) -> Option<(usize, usize)> {
-        let bounds = self.chat_terminal_input_bounds?;
+    fn chat_terminal_cell_from_position(
+        &self,
+        tab_id: &str,
+        position: Point<Pixels>,
+    ) -> Option<(usize, usize)> {
+        let bounds = self.terminal_tab_state(tab_id)?.input_bounds?;
         let local = bounds.localize(&position)?;
         let (_, cell_width, cell_height) = self.chat_terminal_metrics();
         let snapshot = self
-            .active_chat_terminal()
+            .terminal_session(tab_id)
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         if snapshot.rows == 0 || snapshot.cols == 0 {
@@ -2523,9 +2977,9 @@ impl EditorView {
         Some((row, col))
     }
 
-    fn chat_terminal_normalized_col(&self, row: usize, col: usize) -> Option<usize> {
+    fn chat_terminal_normalized_col(&self, tab_id: &str, row: usize, col: usize) -> Option<usize> {
         let snapshot = self
-            .active_chat_terminal()
+            .terminal_session(tab_id)
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         let rows = Self::chat_terminal_rows(&snapshot);
@@ -2533,24 +2987,30 @@ impl EditorView {
         previous_non_spacer_terminal_col(row_cells, col)
     }
 
-    fn chat_terminal_mouse_event_cell(&self, position: Point<Pixels>) -> Option<(usize, usize)> {
-        let (row, col) = self.chat_terminal_cell_from_position(position)?;
+    fn chat_terminal_mouse_event_cell(
+        &self,
+        tab_id: &str,
+        position: Point<Pixels>,
+    ) -> Option<(usize, usize)> {
+        let (row, col) = self.chat_terminal_cell_from_position(tab_id, position)?;
         Some((
             row,
-            self.chat_terminal_normalized_col(row, col).unwrap_or(col),
+            self.chat_terminal_normalized_col(tab_id, row, col)
+                .unwrap_or(col),
         ))
     }
 
-    pub(crate) fn copy_chat_terminal_selection(&self, cx: &mut Context<Self>) -> bool {
-        let Some(selection) = self.chat_terminal_selection else {
-            return false;
-        };
+    /// The plain text of the current selection, if any.
+    pub(crate) fn chat_terminal_selection_text(&self, tab_id: &str) -> Option<String> {
+        let selection = self
+            .terminal_tab_state(tab_id)
+            .and_then(|state| state.selection)?;
         if selection.is_empty() {
-            return false;
+            return None;
         }
 
         let snapshot = self
-            .active_chat_terminal()
+            .terminal_session(tab_id)
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         let rows = Self::chat_terminal_rows(&snapshot);
@@ -2593,26 +3053,43 @@ impl EditorView {
         }
 
         if lines.is_empty() {
-            return false;
+            return None;
         }
+        Some(lines.join("\n"))
+    }
 
-        cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
+    pub(crate) fn copy_chat_terminal_selection(
+        &self,
+        tab_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(text) = self.chat_terminal_selection_text(tab_id) else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
         true
     }
 
     fn chat_terminal_selection_for_click(
         &self,
+        tab_id: &str,
         row: usize,
         col: usize,
     ) -> Option<ChatTerminalSelection> {
-        let col = self.chat_terminal_normalized_col(row, col).unwrap_or(col);
-        self.chat_terminal_word_selection(row, col)
+        let col = self
+            .chat_terminal_normalized_col(tab_id, row, col)
+            .unwrap_or(col);
+        self.chat_terminal_word_selection(tab_id, row, col)
             .or_else(|| Some(ChatTerminalSelection::single(row, col)))
     }
 
-    pub(crate) fn select_all_chat_terminal(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn select_all_chat_terminal(
+        &mut self,
+        tab_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let snapshot = self
-            .active_chat_terminal()
+            .terminal_session(tab_id)
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         let rows = Self::chat_terminal_rows(&snapshot);
@@ -2627,24 +3104,28 @@ impl EditorView {
             .rposition(|cell| !is_chat_terminal_spacer_cell(cell))
             .unwrap_or(0);
 
-        self.chat_terminal_selection = Some(ChatTerminalSelection {
+        let Some(state) = self.terminal_tab_states.get_mut(tab_id) else {
+            return false;
+        };
+        state.selection = Some(ChatTerminalSelection {
             start_row: 0,
             start_col: 0,
             end_row,
             end_col,
         });
-        self.chat_terminal_selecting = false;
+        state.selecting = false;
         cx.notify();
         true
     }
 
     fn chat_terminal_word_selection(
         &self,
+        tab_id: &str,
         row: usize,
         col: usize,
     ) -> Option<ChatTerminalSelection> {
         let snapshot = self
-            .active_chat_terminal()
+            .terminal_session(tab_id)
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         let rows = Self::chat_terminal_rows(&snapshot);
@@ -2659,8 +3140,34 @@ impl EditorView {
         })
     }
 
+    /// Triple-click: selects the whole visual line (trailing blanks excluded).
+    fn chat_terminal_line_selection(
+        &self,
+        tab_id: &str,
+        row: usize,
+    ) -> Option<ChatTerminalSelection> {
+        let snapshot = self
+            .terminal_session(tab_id)
+            .map(|session| session.snapshot.clone())
+            .unwrap_or_default();
+        let rows = Self::chat_terminal_rows(&snapshot);
+        let row_cells = &rows.get(row)?.cells;
+        let end_col = row_cells
+            .iter()
+            .rposition(|cell| !is_chat_terminal_spacer_cell(cell) && cell.c != ' ')
+            .unwrap_or(0);
+
+        Some(ChatTerminalSelection {
+            start_row: row,
+            start_col: 0,
+            end_row: row,
+            end_col,
+        })
+    }
+
     fn send_chat_terminal_mouse_button_report(
         &mut self,
+        tab_id: &str,
         button: MouseButton,
         position: Point<Pixels>,
         shift: bool,
@@ -2668,7 +3175,7 @@ impl EditorView {
         control: bool,
     ) -> bool {
         let is_mouse_mode = self
-            .active_chat_terminal()
+            .terminal_session(tab_id)
             .is_some_and(|session| session.mouse_mode(shift));
         if !is_mouse_mode {
             return false;
@@ -2676,15 +3183,17 @@ impl EditorView {
         let Some(button_code) = chat_terminal_mouse_button_code(button) else {
             return false;
         };
-        let Some((row, col)) = self.chat_terminal_mouse_event_cell(position) else {
+        let Some((row, col)) = self.chat_terminal_mouse_event_cell(tab_id, position) else {
             return false;
         };
 
-        self.chat_terminal_selection = None;
-        self.chat_terminal_selecting = false;
-        self.chat_terminal_last_mouse_cell = Some((row, col));
-        self.set_chat_terminal_mouse_button_state(button, true);
-        if let Some(session) = self.active_chat_terminal() {
+        if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+            state.selection = None;
+            state.selecting = false;
+            state.last_mouse_cell = Some((row, col));
+        }
+        self.set_chat_terminal_mouse_button_state(tab_id, button, true);
+        if let Some(session) = self.terminal_session(tab_id) {
             let _ = session.write_mouse_report(row, col, button_code, false, shift, alt, control);
         }
         true
@@ -2692,6 +3201,7 @@ impl EditorView {
 
     fn send_chat_terminal_mouse_release_report(
         &mut self,
+        tab_id: &str,
         button: MouseButton,
         position: Point<Pixels>,
         shift: bool,
@@ -2699,25 +3209,34 @@ impl EditorView {
         control: bool,
     ) -> bool {
         let is_mouse_mode = self
-            .active_chat_terminal()
+            .terminal_session(tab_id)
             .is_some_and(|session| session.mouse_mode(shift));
-        self.set_chat_terminal_mouse_button_state(button, false);
+        self.set_chat_terminal_mouse_button_state(tab_id, button, false);
         if !is_mouse_mode {
-            self.chat_terminal_last_mouse_cell = None;
+            if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+                state.last_mouse_cell = None;
+            }
             return false;
         }
         let Some(button_code) = chat_terminal_mouse_button_code(button) else {
-            self.chat_terminal_last_mouse_cell = None;
+            if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+                state.last_mouse_cell = None;
+            }
             return false;
         };
         let cell = self
-            .chat_terminal_mouse_event_cell(position)
-            .or(self.chat_terminal_last_mouse_cell);
-        self.chat_terminal_last_mouse_cell = None;
+            .chat_terminal_mouse_event_cell(tab_id, position)
+            .or_else(|| {
+                self.terminal_tab_state(tab_id)
+                    .and_then(|state| state.last_mouse_cell)
+            });
+        if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+            state.last_mouse_cell = None;
+        }
         let Some((row, col)) = cell else {
             return false;
         };
-        if let Some(session) = self.active_chat_terminal() {
+        if let Some(session) = self.terminal_session(tab_id) {
             let _ = session.write_mouse_report(row, col, button_code, true, shift, alt, control);
         }
         true
@@ -2725,13 +3244,14 @@ impl EditorView {
 
     fn send_chat_terminal_mouse_motion_report(
         &mut self,
+        tab_id: &str,
         position: Point<Pixels>,
         shift: bool,
         alt: bool,
         control: bool,
     ) -> bool {
         let Some(mode) = self
-            .active_chat_terminal()
+            .terminal_session(tab_id)
             .map(ChatTerminalSession::term_mode)
         else {
             return false;
@@ -2739,19 +3259,22 @@ impl EditorView {
         if shift || !mode.intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
             return false;
         }
-        let Some((row, col)) = self.chat_terminal_mouse_event_cell(position) else {
+        let Some((row, col)) = self.chat_terminal_mouse_event_cell(tab_id, position) else {
             return false;
         };
-        if self.chat_terminal_last_mouse_cell == Some((row, col)) {
+        let Some(state) = self.terminal_tab_states.get_mut(tab_id) else {
+            return false;
+        };
+        if state.last_mouse_cell == Some((row, col)) {
             return true;
         }
-        self.chat_terminal_last_mouse_cell = Some((row, col));
+        state.last_mouse_cell = Some((row, col));
 
-        let button_code = if self.chat_terminal_mouse_left_pressed {
+        let button_code = if state.mouse_left_pressed {
             Some(32)
-        } else if self.chat_terminal_mouse_middle_pressed {
+        } else if state.mouse_middle_pressed {
             Some(33)
-        } else if self.chat_terminal_mouse_right_pressed {
+        } else if state.mouse_right_pressed {
             Some(34)
         } else if mode.contains(TermMode::MOUSE_MOTION) {
             Some(35)
@@ -2759,7 +3282,7 @@ impl EditorView {
             None
         };
         if let Some(button_code) = button_code
-            && let Some(session) = self.active_chat_terminal()
+            && let Some(session) = self.terminal_session(tab_id)
         {
             let _ = session.write_mouse_report(row, col, button_code, false, shift, alt, control);
         }
@@ -2768,38 +3291,49 @@ impl EditorView {
 
     fn forward_chat_terminal_protocol_scroll(
         &mut self,
+        tab_id: &str,
         event: &ScrollWheelEvent,
         cell_width: f32,
         line_height: f32,
     ) -> bool {
         let modifiers = event.modifiers;
-        let Some(session) = self.active_chat_terminal() else {
+        let Some(session) = self.terminal_session(tab_id) else {
             return false;
         };
         let mode = session.term_mode();
+        let alternate_scroll = session.alternate_scroll_mode(modifiers.shift);
 
         if !modifiers.shift && mode.intersects(TermMode::MOUSE_MODE) {
             match event.touch_phase {
                 TouchPhase::Started => {
-                    self.chat_terminal_mouse_scroll_px = point(Pixels::ZERO, Pixels::ZERO);
+                    if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+                        state.mouse_scroll_px = point(Pixels::ZERO, Pixels::ZERO);
+                    }
                     return true;
                 }
                 TouchPhase::Ended => return true,
                 TouchPhase::Moved => {}
             }
 
-            let Some((row, col)) = self.chat_terminal_mouse_event_cell(event.position) else {
+            let Some((row, col)) = self.chat_terminal_mouse_event_cell(tab_id, event.position)
+            else {
                 return true;
             };
             let delta = event.delta.pixel_delta(px(line_height.max(1.0)));
             let step_width = px(cell_width.max(1.0));
             let step_height = px(line_height.max(1.0));
-            self.chat_terminal_mouse_scroll_px.x += delta.x;
-            self.chat_terminal_mouse_scroll_px.y += delta.y;
+            let Some(state) = self.terminal_tab_states.get_mut(tab_id) else {
+                return true;
+            };
+            state.mouse_scroll_px.x += delta.x;
+            state.mouse_scroll_px.y += delta.y;
 
-            let vertical_steps = (self.chat_terminal_mouse_scroll_px.y / step_height) as i32;
-            let horizontal_steps = (self.chat_terminal_mouse_scroll_px.x / step_width) as i32;
-            if let Some(session) = self.active_chat_terminal() {
+            let vertical_steps = (state.mouse_scroll_px.y / step_height) as i32;
+            let horizontal_steps = (state.mouse_scroll_px.x / step_width) as i32;
+            state.last_mouse_cell = Some((row, col));
+            state.mouse_scroll_px.x %= step_width;
+            state.mouse_scroll_px.y %= step_height;
+            if let Some(session) = self.terminal_session(tab_id) {
                 for _ in 0..vertical_steps.abs() {
                     let button_code = if vertical_steps > 0 { 64 } else { 65 };
                     let _ = session.write_mouse_report(
@@ -2825,17 +3359,15 @@ impl EditorView {
                     );
                 }
             }
-
-            self.chat_terminal_last_mouse_cell = Some((row, col));
-            self.chat_terminal_mouse_scroll_px.x %= step_width;
-            self.chat_terminal_mouse_scroll_px.y %= step_height;
             return true;
         }
 
-        if session.alternate_scroll_mode(modifiers.shift) {
+        if alternate_scroll {
             match event.touch_phase {
                 TouchPhase::Started => {
-                    self.chat_terminal_mouse_scroll_px = point(Pixels::ZERO, Pixels::ZERO);
+                    if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+                        state.mouse_scroll_px = point(Pixels::ZERO, Pixels::ZERO);
+                    }
                     return true;
                 }
                 TouchPhase::Ended => return true,
@@ -2845,11 +3377,16 @@ impl EditorView {
             let delta = event.delta.pixel_delta(px(line_height.max(1.0)));
             let step_width = px(cell_width.max(1.0));
             let step_height = px(line_height.max(1.0));
-            self.chat_terminal_mouse_scroll_px.x += delta.x;
-            self.chat_terminal_mouse_scroll_px.y += delta.y;
+            let Some(state) = self.terminal_tab_states.get_mut(tab_id) else {
+                return true;
+            };
+            state.mouse_scroll_px.x += delta.x;
+            state.mouse_scroll_px.y += delta.y;
 
-            let vertical_steps = (self.chat_terminal_mouse_scroll_px.y / step_height) as i32;
-            let horizontal_steps = (self.chat_terminal_mouse_scroll_px.x / step_width) as i32;
+            let vertical_steps = (state.mouse_scroll_px.y / step_height) as i32;
+            let horizontal_steps = (state.mouse_scroll_px.x / step_width) as i32;
+            state.mouse_scroll_px.x %= step_width;
+            state.mouse_scroll_px.y %= step_height;
             let mut bytes = Vec::new();
             for _ in 0..vertical_steps.abs() {
                 bytes.extend_from_slice(if vertical_steps > 0 {
@@ -2866,13 +3403,10 @@ impl EditorView {
                 });
             }
             if !bytes.is_empty()
-                && let Some(session) = self.active_chat_terminal()
+                && let Some(session) = self.terminal_session(tab_id)
             {
                 let _ = session.write_bytes(&bytes);
             }
-
-            self.chat_terminal_mouse_scroll_px.x %= step_width;
-            self.chat_terminal_mouse_scroll_px.y %= step_height;
             return true;
         }
 
@@ -2881,14 +3415,23 @@ impl EditorView {
 
     fn on_chat_terminal_mouse_down(
         &mut self,
+        tab_id: &str,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus_chat_terminal_panel(window);
+        if let Some(owner) = self.pane_id_for_tab(tab_id)
+            && owner != self.focused_pane_id
+        {
+            self.focus_pane(owner, cx);
+        }
+        self.focus_terminal_tab(tab_id, window);
         cx.stop_propagation();
-        self.chat_terminal_marked_text = None;
+        if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+            state.marked_text = None;
+        }
         if self.send_chat_terminal_mouse_button_report(
+            tab_id,
             MouseButton::Left,
             event.position,
             event.modifiers.shift,
@@ -2898,31 +3441,62 @@ impl EditorView {
             cx.notify();
             return;
         }
-        if let Some((row, col)) = self.chat_terminal_cell_from_position(event.position) {
-            let col = self.chat_terminal_normalized_col(row, col).unwrap_or(col);
-            self.chat_terminal_selection = if event.click_count >= 2 {
-                self.chat_terminal_selection_for_click(row, col)
+        if let Some((row, col)) = self.chat_terminal_cell_from_position(tab_id, event.position) {
+            let col = self
+                .chat_terminal_normalized_col(tab_id, row, col)
+                .unwrap_or(col);
+            let shift_extend = event.modifiers.shift
+                && event.click_count == 1
+                && self
+                    .terminal_tab_state(tab_id)
+                    .is_some_and(|state| state.selection.is_some());
+            if shift_extend {
+                if let Some(selection) = self
+                    .terminal_tab_states
+                    .get_mut(tab_id)
+                    .and_then(|state| state.selection.as_mut())
+                {
+                    selection.end_row = row;
+                    selection.end_col = col;
+                }
+                if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+                    state.selecting = true;
+                }
+                cx.notify();
+                return;
+            }
+            let selection = if event.click_count >= 3 {
+                self.chat_terminal_line_selection(tab_id, row)
+            } else if event.click_count == 2 {
+                self.chat_terminal_selection_for_click(tab_id, row, col)
             } else {
                 Some(ChatTerminalSelection::single(row, col))
             };
-            self.chat_terminal_selecting = event.click_count < 2;
+            if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+                state.selection = selection;
+                state.selecting = event.click_count < 2;
+            }
             cx.notify();
-        } else {
-            self.chat_terminal_selection = None;
-            self.chat_terminal_selecting = false;
+        } else if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+            state.selection = None;
+            state.selecting = false;
         }
     }
 
     fn on_chat_terminal_middle_mouse_down(
         &mut self,
+        tab_id: &str,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus_chat_terminal_panel(window);
+        self.focus_terminal_tab(tab_id, window);
         cx.stop_propagation();
-        self.chat_terminal_marked_text = None;
+        if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+            state.marked_text = None;
+        }
         if self.send_chat_terminal_mouse_button_report(
+            tab_id,
             MouseButton::Middle,
             event.position,
             event.modifiers.shift,
@@ -2935,11 +3509,13 @@ impl EditorView {
 
     fn on_chat_terminal_mouse_move(
         &mut self,
+        tab_id: &str,
         event: &MouseMoveEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.send_chat_terminal_mouse_motion_report(
+            tab_id,
             event.position,
             event.modifiers.shift,
             event.modifiers.alt,
@@ -2947,16 +3523,70 @@ impl EditorView {
         ) {
             return;
         }
-        if !self.chat_terminal_selecting || !event.dragging() {
+        if !self
+            .terminal_tab_state(tab_id)
+            .is_some_and(|state| state.selecting)
+            || !event.dragging()
+        {
             return;
         }
 
-        let Some((row, col)) = self.chat_terminal_cell_from_position(event.position) else {
+        // Dragging beyond the vertical bounds auto-scrolls the viewport
+        // (clamped to 3 rows per event, like Zed) and shifts the
+        // viewport-relative selection anchor to compensate.
+        let Some(bounds) = self
+            .terminal_tab_state(tab_id)
+            .and_then(|state| state.input_bounds)
+        else {
             return;
         };
-        let col = self.chat_terminal_normalized_col(row, col).unwrap_or(col);
+        let (_, _, cell_height) = self.chat_terminal_metrics();
+        let top = f32::from(bounds.origin.y);
+        let bottom = top + f32::from(bounds.size.height);
+        let left = f32::from(bounds.origin.x);
+        let right = left + f32::from(bounds.size.width);
+        let y = f32::from(event.position.y);
+        let scroll_delta = if y < top {
+            (((top - y) / cell_height.max(1.0)).ceil() as i32).clamp(1, 3)
+        } else if y > bottom {
+            -(((y - bottom) / cell_height.max(1.0)).ceil() as i32).clamp(1, 3)
+        } else {
+            0
+        };
+        if scroll_delta != 0 {
+            let max_row = self
+                .terminal_session(tab_id)
+                .map(|session| session.snapshot.rows.max(1) as i32 - 1)
+                .unwrap_or(0);
+            if let Some(session) = self.terminal_session_mut(tab_id) {
+                session.scroll_display(Scroll::Delta(scroll_delta));
+            }
+            if let Some(selection) = self
+                .terminal_tab_states
+                .get_mut(tab_id)
+                .and_then(|state| state.selection.as_mut())
+            {
+                selection.start_row =
+                    (selection.start_row as i32 + scroll_delta).clamp(0, max_row) as usize;
+            }
+        }
 
-        if let Some(selection) = self.chat_terminal_selection.as_mut() {
+        let clamped = point(
+            px(f32::from(event.position.x).clamp(left, (right - 1.0).max(left))),
+            px(y.clamp(top, (bottom - 1.0).max(top))),
+        );
+        let Some((row, col)) = self.chat_terminal_cell_from_position(tab_id, clamped) else {
+            return;
+        };
+        let col = self
+            .chat_terminal_normalized_col(tab_id, row, col)
+            .unwrap_or(col);
+
+        if let Some(selection) = self
+            .terminal_tab_states
+            .get_mut(tab_id)
+            .and_then(|state| state.selection.as_mut())
+        {
             selection.end_row = row;
             selection.end_col = col;
             cx.notify();
@@ -2965,15 +3595,19 @@ impl EditorView {
 
     fn on_chat_terminal_context_menu(
         &mut self,
+        tab_id: &str,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus_chat_terminal_panel(window);
+        self.focus_terminal_tab(tab_id, window);
         window.prevent_default();
         cx.stop_propagation();
-        self.chat_terminal_marked_text = None;
+        if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+            state.marked_text = None;
+        }
         if self.send_chat_terminal_mouse_button_report(
+            tab_id,
             MouseButton::Right,
             event.position,
             event.modifiers.shift,
@@ -2983,26 +3617,32 @@ impl EditorView {
             cx.notify();
             return;
         }
-        if let Some((row, col)) = self.chat_terminal_cell_from_position(event.position) {
-            let col = self.chat_terminal_normalized_col(row, col).unwrap_or(col);
-            let keep_selection = self
-                .chat_terminal_selection
-                .map(ChatTerminalSelection::normalized)
-                .is_some_and(|selection| !selection.is_empty() && selection.contains(row, col));
-            if !keep_selection {
-                self.chat_terminal_selection = Some(ChatTerminalSelection::single(row, col));
+        if let Some((row, col)) = self.chat_terminal_cell_from_position(tab_id, event.position) {
+            let col = self
+                .chat_terminal_normalized_col(tab_id, row, col)
+                .unwrap_or(col);
+            if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+                let keep_selection = state
+                    .selection
+                    .map(ChatTerminalSelection::normalized)
+                    .is_some_and(|selection| !selection.is_empty() && selection.contains(row, col));
+                if !keep_selection {
+                    state.selection = Some(ChatTerminalSelection::single(row, col));
+                }
             }
         }
-        self.open_terminal_context_menu(event.position, cx);
+        self.open_terminal_context_menu(tab_id.to_string(), event.position, cx);
     }
 
     fn on_chat_terminal_mouse_up(
         &mut self,
+        tab_id: &str,
         event: &MouseUpEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.send_chat_terminal_mouse_release_report(
+            tab_id,
             MouseButton::Left,
             event.position,
             event.modifiers.shift,
@@ -3011,23 +3651,24 @@ impl EditorView {
         ) {
             return;
         }
-        self.chat_terminal_selecting = false;
-        if self
-            .chat_terminal_selection
-            .is_some_and(ChatTerminalSelection::is_empty)
-        {
-            self.chat_terminal_selection = None;
+        if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+            state.selecting = false;
+            if state.selection.is_some_and(ChatTerminalSelection::is_empty) {
+                state.selection = None;
+            }
         }
         cx.notify();
     }
 
     fn on_chat_terminal_right_mouse_up(
         &mut self,
+        tab_id: &str,
         event: &MouseUpEvent,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
         let _ = self.send_chat_terminal_mouse_release_report(
+            tab_id,
             MouseButton::Right,
             event.position,
             event.modifiers.shift,
@@ -3038,11 +3679,13 @@ impl EditorView {
 
     fn on_chat_terminal_middle_mouse_up(
         &mut self,
+        tab_id: &str,
         event: &MouseUpEvent,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
         let _ = self.send_chat_terminal_mouse_release_report(
+            tab_id,
             MouseButton::Middle,
             event.position,
             event.modifiers.shift,
@@ -3051,529 +3694,66 @@ impl EditorView {
         );
     }
 
-    fn render_chat_tab_title_label(&self, tab: &ChatTab, is_active: bool) -> AnyElement {
-        let ts = &self.styles.tab_bar;
-        let ups = &self.styles.utility_panel;
-        let text_color = if is_active {
-            ups.utility_panel_item_value_text_color
-        } else {
-            ups.utility_panel_item_label_text_color
-        };
-        let suffix_opacity = if is_active { 0.7 } else { 0.5 };
-
-        div()
-            .flex_1()
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(2.0)))
-            .text_size(px(self.scaled(ts.tab_item_font_size_px)))
-            .text_color(text_color)
-            .font_weight(if is_active {
-                FontWeight::MEDIUM
-            } else {
-                FontWeight::NORMAL
-            })
-            .child(
-                div().flex_1().min_w(px(0.0)).overflow_hidden().child(
-                    div()
-                        .whitespace_nowrap()
-                        .truncate()
-                        .child(tab.title.clone()),
-                ),
-            )
-            .when_some(tab.title_suffix(), |this, suffix| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .opacity(suffix_opacity)
-                        .child(suffix),
-                )
-            })
-            .into_any_element()
-    }
-
-    fn render_chat_tab(&self, tab: &ChatTab, cx: &mut Context<Self>) -> AnyElement {
-        let is_active = self.active_chat_tab_id.as_deref() == Some(tab.id.as_str());
-        let tab_index = self
-            .chat_tabs
-            .iter()
-            .position(|candidate| candidate.id == tab.id)
-            .unwrap_or(0);
-        let tab_id = tab.id.clone();
-        let close_id = tab.id.clone();
-        let middle_close_id = tab.id.clone();
-        let context_tab_id = tab.id.clone();
-        let drag_tab_id = tab.id.clone();
-        let hover_tab_id = tab.id.clone();
-        let drop_tab_id = tab.id.clone();
-        let drag_title = tab.display_title();
-        let terminal_styles = crate::style::Styles::from_theme(
-            &self.app_settings.dark_theme_kind().build(),
-            &self.app_settings.dark_theme_kind().build(),
-        );
-        let ts = &terminal_styles.tab_bar;
-        let tab_hover_bg = ts.tab_item_hover_bg;
-        let close_hover_bg = ts.tab_item_close_hover_bg;
-        let drop_indicator_color = ts.tab_drop_indicator_color;
-        let drop_indicator_width = ts.tab_drop_indicator_width_px;
-        let source_opacity = ts.tab_drag_source_opacity;
-        let agent_icon_size = self.scaled(ts.tab_item_icon_size_px);
-        let tab_surface_height = self.tab_bar_height();
-        let tab_bg = if is_active {
-            ts.tab_item_active_bg
-        } else {
-            gpui::transparent_black()
-        };
-        let tab_text_color = if is_active {
-            ts.tab_item_active_text_color
-        } else {
-            ts.tab_item_text_color
-        };
-        let is_being_dragged = self.chat_tab_dragging_id.as_deref() == Some(tab.id.as_str());
-        let current_tab_ids: Vec<String> =
-            self.chat_tabs.iter().map(|tab| tab.id.clone()).collect();
-
-        div()
-            .id(SharedString::from(format!("chat-tab-{}", tab.id)))
-            .group("chat-tab-item")
-            .relative()
-            .h(px(self.tab_bar_height()))
-            .min_w(px(self.scaled(ts.tab_item_min_width_px)))
-            .max_w(px(self.scaled(ts.tab_item_max_width_px)))
-            .flex_none()
-            .when(is_being_dragged, |this: gpui::Stateful<gpui::Div>| {
-                this.opacity(source_opacity)
-            })
-            .drag_over::<DraggedChatTab>({
-                let drop_tab_id = drop_tab_id.clone();
-                move |style, dragged, _, _| {
-                    let drop_target = if tab_index <= dragged.source_index {
-                        ChatTabDropTarget::Before(drop_tab_id.as_str())
-                    } else {
-                        ChatTabDropTarget::After(drop_tab_id.as_str())
-                    };
-                    if !Self::chat_tab_drop_changes_order_for(
-                        &current_tab_ids,
-                        &dragged.tab_id,
-                        drop_target,
-                    ) {
-                        return style;
-                    }
-                    if matches!(drop_target, ChatTabDropTarget::Before(_)) {
-                        style
-                            .border_l(px(drop_indicator_width))
-                            .border_r(px(0.0))
-                            .border_color(drop_indicator_color)
-                    } else {
-                        style
-                            .border_l(px(0.0))
-                            .border_r(px(drop_indicator_width))
-                            .border_color(drop_indicator_color)
-                    }
-                }
-            })
-            .on_drop(cx.listener(move |this, dragged: &DraggedChatTab, _, cx| {
-                let place_after = this
-                    .chat_tabs
-                    .iter()
-                    .position(|candidate| candidate.id == dragged.tab_id)
-                    .zip(
-                        this.chat_tabs
-                            .iter()
-                            .position(|candidate| candidate.id == drop_tab_id),
-                    )
-                    .is_some_and(|(from_index, to_index)| from_index < to_index);
-                let current_tab_ids: Vec<String> =
-                    this.chat_tabs.iter().map(|tab| tab.id.clone()).collect();
-                let drop_target = if place_after {
-                    ChatTabDropTarget::After(drop_tab_id.as_str())
-                } else {
-                    ChatTabDropTarget::Before(drop_tab_id.as_str())
-                };
-                if !Self::chat_tab_drop_changes_order_for(
-                    &current_tab_ids,
-                    &dragged.tab_id,
-                    drop_target,
-                ) {
-                    this.chat_tab_drag_candidate_id = None;
-                    this.chat_tab_dragging_id = None;
-                    return;
-                }
-                if place_after {
-                    this.reorder_chat_tab_after(&dragged.tab_id, &drop_tab_id, cx);
-                } else {
-                    this.reorder_chat_tab_before(&dragged.tab_id, &drop_tab_id, cx);
-                }
-                this.chat_tab_drag_candidate_id = None;
-                this.chat_tab_dragging_id = None;
-            }))
-            .child(
-                div()
-                    .relative()
-                    .h(px(tab_surface_height))
-                    .pl(px(self.scaled(ts.tab_item_padding_left_px)))
-                    .pr(px(self.scaled(ts.tab_item_padding_right_px)))
-                    .flex()
-                    .items_center()
-                    .gap(px(self.scaled(ts.tab_item_gap_px)))
-                    .bg(tab_bg)
-                    .border_r(px(ts.tab_item_border_width_px))
-                    .border_color(ts.tab_item_border_color)
-                    .hover(move |style| style.bg(tab_hover_bg))
-                    .child(
-                        svg()
-                            .path(tab.agent_cli.icon_path())
-                            .size(px(agent_icon_size))
-                            .text_color(tab_text_color)
-                            .opacity(if is_active {
-                                ts.tab_item_icon_active_opacity
-                            } else {
-                                ts.tab_item_icon_inactive_opacity
-                            }),
-                    )
-                    .child(self.render_chat_tab_title_label(tab, is_active))
-                    .when(tab.is_pinned, |this| {
-                        this.child(
-                            svg()
-                                .path("assets/icons/format/pin.svg")
-                                .size(px(self.scaled(ts.tab_pin_icon_size_px)))
-                                .text_color(ts.tab_pin_icon_color)
-                                .opacity(if is_active {
-                                    ts.tab_item_icon_active_opacity
-                                } else {
-                                    ts.tab_item_icon_inactive_opacity
-                                }),
-                        )
-                    })
-                    .child(tooltip::with_tooltip(
-                        div()
-                            .w(px(self.scaled(ts.tab_item_close_size_px)))
-                            .h(px(self.scaled(ts.tab_item_close_size_px)))
-                            .rounded_full()
-                            .flex()
-                            .flex_none()
-                            .justify_center()
-                            .items_center()
-                            .text_size(px(self.scaled(ts.tab_item_close_font_size_px)))
-                            .text_color(tab_text_color)
-                            .opacity(if is_active {
-                                ts.tab_item_close_active_opacity
-                            } else {
-                                ts.tab_item_close_inactive_opacity
-                            })
-                            .group_hover("chat-tab-item", |style| {
-                                style.opacity(ts.tab_item_close_active_opacity)
-                            })
-                            .hover(move |style| style.bg(close_hover_bg))
-                            .child("✕")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.close_chat_tab(&close_id, cx);
-                                }),
-                            ),
-                        cx.entity().clone(),
-                        self.t(crate::i18n::TextKey::Close),
-                        is_active.then_some("⌘W"),
-                    ))
-                    .child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .h(px(ts.tab_bar_border_width_px))
-                            .bg(if is_active {
-                                gpui::transparent_black()
-                            } else {
-                                ts.tab_item_border_color
-                            }),
-                    ),
-            )
-            .on_drag(
-                DraggedChatTab {
-                    tab_id: drag_tab_id.clone(),
-                    title: drag_title,
-                    source_index: tab_index,
-                },
-                {
-                    let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
-                    let ghost_background_color = self.styles.tooltip.tooltip_bg;
-                    let ghost_text_color = self.styles.tooltip.tooltip_title_text_color;
-                    move |dragged, offset, _window, cx| {
-                        cx.new(|_cx| DraggedTabView {
-                            title: dragged.title.clone(),
-                            font_size_px: ghost_font_size_px,
-                            background_color: ghost_background_color,
-                            text_color: ghost_text_color,
-                            cursor_offset: offset,
-                        })
-                    }
-                },
-            )
-            .on_drag_move(cx.listener(
-                move |this, _event: &DragMoveEvent<DraggedChatTab>, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.chat_tab_drag_candidate_id = Some(drag_tab_id.clone());
-                    this.chat_tab_dragging_id = Some(drag_tab_id.clone());
-                },
-            ))
-            .on_mouse_move(
-                cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
-                    if event.dragging()
-                        && (this.chat_tab_drag_candidate_id.as_deref()
-                            == Some(hover_tab_id.as_str())
-                            || this.chat_tab_dragging_id.is_some())
-                    {
-                        this.chat_tab_dragging_id = Some(hover_tab_id.clone());
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    }
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    window.prevent_default();
-                    this.chat_tab_drag_candidate_id = Some(tab_id.clone());
-                    this.switch_to_chat_tab(&tab_id, cx);
-                    cx.stop_propagation();
-                    if event.click_count >= 2 {
-                        window.prevent_default();
-                    }
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.open_chat_tab_context_menu(context_tab_id.clone(), event.position, cx);
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(move |this, _, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.close_chat_tab(&middle_close_id, cx);
-                }),
-            )
-            .into_any_element()
-    }
-
-    fn render_chat_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let terminal_styles = crate::style::Styles::from_theme(
-            &self.app_settings.dark_theme_kind().build(),
-            &self.app_settings.dark_theme_kind().build(),
-        );
-        let ts = &terminal_styles.tab_bar;
-        let inner_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
-        let end_drop_indicator_color = ts.tab_drop_indicator_color;
-        let end_drop_indicator_width = ts.tab_drop_indicator_width_px;
-        let current_tab_ids: Vec<String> =
-            self.chat_tabs.iter().map(|tab| tab.id.clone()).collect();
-        let tab_items: Vec<AnyElement> = self
-            .chat_tabs
-            .iter()
-            .map(|tab| self.render_chat_tab(tab, cx))
-            .collect();
-
-        let new_hover_color = ts.tab_new_hover_text_color;
-        let new_hover_bg = ts.tab_item_hover_bg;
-        let end_drop_target_width = self.scaled(ts.tab_end_drop_target_width_px);
-        let new_tab_button = tooltip::with_tooltip(
-            div()
-                .id("chat-tab-bar-new")
-                .h(px(inner_height))
-                .w(px(self.scaled(ts.tab_new_width_px)))
-                .flex_none()
-                .flex()
-                .justify_center()
-                .items_center()
-                .border_r(px(ts.tab_item_border_width_px))
-                .border_color(gpui::transparent_black())
-                .text_size(px(self.scaled(ts.tab_new_font_size_px)))
-                .text_color(ts.tab_new_text_color)
-                .hover(move |style| {
-                    style
-                        .text_color(new_hover_color)
-                        .bg(new_hover_bg)
-                        .border_color(ts.tab_item_border_color)
-                })
-                .child("+")
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.create_chat_tab(cx);
-                    }),
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                        this.open_chat_tab_create_context_menu(event.position, cx);
-                    }),
-                ),
-            cx.entity().clone(),
-            crate::i18n::new_chat_label(self.ui_language),
-            Some("⌘N"),
-        );
-        let end_drop_target = div()
-            .h(px(inner_height))
-            .w(px(end_drop_target_width))
-            .flex_none()
-            .drag_over::<DraggedChatTab>(move |style, dragged, _, _| {
-                if Self::chat_tab_drop_changes_order_for(
-                    &current_tab_ids,
-                    &dragged.tab_id,
-                    ChatTabDropTarget::End,
-                ) {
-                    style
-                        .border_l(px(end_drop_indicator_width))
-                        .border_color(end_drop_indicator_color)
-                } else {
-                    style
-                }
-            })
-            .on_drop(cx.listener(move |this, dragged: &DraggedChatTab, _, cx| {
-                let current_tab_ids: Vec<String> =
-                    this.chat_tabs.iter().map(|tab| tab.id.clone()).collect();
-                if Self::chat_tab_drop_changes_order_for(
-                    &current_tab_ids,
-                    &dragged.tab_id,
-                    ChatTabDropTarget::End,
-                ) {
-                    this.reorder_chat_tab_to_end(&dragged.tab_id, cx);
-                }
-                this.chat_tab_drag_candidate_id = None;
-                this.chat_tab_dragging_id = None;
-            }))
-            .into_any_element();
-
-        div()
-            .id("chat-tab-bar")
-            .relative()
-            .w_full()
-            .h(px(self.tab_bar_height()))
-            .flex()
-            .items_start()
-            .bg(ts.tab_bar_bg)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    if this.chat_tab_drag_candidate_id.is_some()
-                        || this.chat_tab_dragging_id.is_some()
-                    {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    }
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                if event.dragging()
-                    && (this.chat_tab_drag_candidate_id.is_some()
-                        || this.chat_tab_dragging_id.is_some())
-                {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.chat_tab_drag_candidate_id = None;
-                    if this.chat_tab_dragging_id.take().is_some() {
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.chat_tab_drag_candidate_id = None;
-                    if this.chat_tab_dragging_id.take().is_some() {
-                        cx.notify();
-                    }
-                }),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .bottom_0()
-                    .h(px(ts.tab_bar_border_width_px))
-                    .bg(ts.tab_bar_border_color),
-            )
-            .child(
-                div()
-                    .id("chat-tab-bar-scroll")
-                    .flex_1()
-                    .h_full()
-                    .min_w(px(0.0))
-                    .flex()
-                    .items_start()
-                    .overflow_x_scroll()
-                    .track_scroll(&self.chat_tab_bar_scroll_handle)
-                    .children(tab_items)
-                    .child(new_tab_button)
-                    .child(end_drop_target),
-            )
-            .into_any_element()
-    }
-
-    pub(crate) fn render_chat_panel(
+    pub(crate) fn render_terminal_tab_content(
         &mut self,
-        is_focused: bool,
+        tab_id: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.resize_chat_terminal();
+        self.ensure_terminal_session(&tab_id, cx);
+        self.resize_chat_terminal(&tab_id);
 
         let ups = &self.styles.utility_panel;
-        let terminal_styles = crate::style::Styles::from_theme(
-            &self.app_settings.dark_theme_kind().build(),
-            &self.app_settings.dark_theme_kind().build(),
-        );
         let (body_font_size, cell_width, cell_height) = self.chat_terminal_metrics();
         let terminal_padding = self.scaled(ups.utility_panel_terminal_padding_px);
         let monospace = SharedString::from(self.styles.editor.editor_monospace_font_family);
-        let default_fg = terminal_styles.editor.editor_text_color;
-        let default_bg = terminal_styles.editor.editor_bg;
-        let panel_border_color = terminal_styles.tab_bar.tab_bar_border_color;
-        let terminal_theme = self.app_settings.dark_theme_kind().build();
-        let cursor_color = terminal_theme.cursor;
-        let palette = terminal_theme_palette(&terminal_theme, default_bg);
+        let default_fg = self.styles.editor.editor_text_color;
+        let default_bg = self.styles.editor.editor_bg;
+        let cursor_color = self.theme.cursor;
+        let palette = terminal_theme_palette(&self.theme, default_bg);
         let file_drop_bg = self.styles.editor.editor_file_drop_bg;
 
+        let Some(focus_handle) = self
+            .terminal_tab_state(&tab_id)
+            .map(|state| state.focus_handle.clone())
+        else {
+            return div().into_any_element();
+        };
+        let is_focused = focus_handle.is_focused(window);
         let snapshot = self
-            .active_chat_terminal()
+            .terminal_session(&tab_id)
             .map(|session| session.snapshot.clone())
             .unwrap_or_default();
         let cursor_row = Self::chat_terminal_cursor_display_row(&snapshot);
         let cursor_col = snapshot.cursor.point.column.0;
         let cursor_visible = matches!(
-            self.active_chat_terminal().map(|session| &session.status),
+            self.terminal_session(&tab_id)
+                .map(|session| &session.status),
             Some(ChatTerminalStatus::Running)
-        ) && is_focused
-            && snapshot.cursor.shape != AlacCursorShape::Hidden
+        ) && snapshot.cursor.shape != AlacCursorShape::Hidden
             && cursor_row.is_some();
-        let selection = self
-            .chat_terminal_selection
+        let cursor_shape = snapshot.cursor.shape;
+        let state = self.terminal_tab_state(&tab_id);
+        let selection = state
+            .and_then(|state| state.selection)
             .filter(|selection| !selection.is_empty())
             .map(ChatTerminalSelection::normalized);
-        let marked_text = self.chat_terminal_marked_text.clone();
-        let missing_agent_cli_install_target = self.active_missing_agent_cli_install_target();
+        let selecting = state.is_some_and(|state| state.selecting);
+        let marked_text = state.and_then(|state| state.marked_text.clone());
+        // The IME preedit overlay replaces the cursor while composing.
+        let cursor_visible = cursor_visible && marked_text.as_deref().is_none_or(str::is_empty);
+        let input_bounds = state.and_then(|state| state.input_bounds);
+        let search_matches = state
+            .map(|state| state.search_matches.clone())
+            .unwrap_or_default();
+        let current_search_match = if search_matches.is_empty() {
+            None
+        } else {
+            self.search_current_index
+        };
+        let missing_agent_cli_install_target = self.missing_agent_cli_install_target(&tab_id);
         let terminal_scrollbar = {
-            let viewport_height = self
-                .chat_terminal_input_bounds
+            let viewport_height = input_bounds
                 .map(|bounds| f32::from(bounds.size.height))
                 .unwrap_or_else(|| snapshot.rows.max(1) as f32 * cell_height);
             let max_scroll = snapshot.history_size as f32 * cell_height;
@@ -3586,325 +3766,415 @@ impl EditorView {
                 viewport_height,
                 max_scroll,
                 scroll_top,
-                self.chat_terminal_scrollbar_track_height(),
+                viewport_height + terminal_padding * 2.0,
                 0.0,
                 self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
                 cx,
             )
         };
 
-        div()
-            .id("chat-panel")
+        /// Registers an `on_action` listener that forwards a fixed escape
+        /// sequence to this tab's PTY.
+        macro_rules! bytes_action {
+            ($el:expr, $action:ty, $bytes:expr) => {
+                $el.on_action(cx.listener({
+                    let tab_id = tab_id.clone();
+                    move |this: &mut Self,
+                          _: &$action,
+                          window: &mut Window,
+                          cx: &mut Context<Self>| {
+                        this.send_chat_terminal_bytes(&tab_id, $bytes, window, cx);
+                    }
+                }))
+            };
+        }
+
+        let root = div()
+            .id(SharedString::from(format!("terminal-tab-{tab_id}")))
             .key_context("ChatTerminal")
-            .track_focus(&self.chat_panel_focus_handle)
+            .track_focus(&focus_handle)
             .relative()
             .flex()
             .flex_col()
-            .on_key_down(cx.listener(Self::on_chat_terminal_key_down))
+            .on_key_down(cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, event: &KeyDownEvent, window, cx| {
+                    this.on_chat_terminal_key_down(&tab_id, event, window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleChatPanel, window, cx| {
                 cx.stop_propagation();
-                this.hide_chat_panel(cx);
+                this.toggle_terminal_panel(cx);
                 window.focus(&this.focus_handle(cx));
             }))
-            .on_action(cx.listener(|this, _: &NewChatTab, window, cx| {
-                cx.stop_propagation();
-                this.create_chat_tab(cx);
-                this.focus_chat_terminal_panel(window);
-            }))
-            .on_action(cx.listener(|this, _: &CloseActiveChatTab, window, cx| {
-                cx.stop_propagation();
-                if let Some(tab_id) = this.active_chat_tab_id.clone() {
-                    this.close_chat_tab(&tab_id, cx);
-                }
-                if this.chat_panel_visible {
-                    this.focus_chat_terminal_panel(window);
-                } else {
-                    window.focus(&this.focus_handle(cx));
+            .on_action(cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, _: &NewChatTab, _, cx| {
+                    cx.stop_propagation();
+                    let agent_cli = this
+                        .all_tabs()
+                        .find(|tab| tab.id == tab_id)
+                        .and_then(|tab| tab.kind.terminal_agent())
+                        .unwrap_or(ChatAgentCli::Terminal);
+                    this.create_terminal_tab(agent_cli, cx);
                 }
             }))
-            .on_scroll_wheel(cx.listener(Self::on_chat_terminal_scroll))
-            .on_action(cx.listener(|this, _: &Undo, window, cx| {
-                this.swallow_chat_terminal_editor_action(window, cx);
+            .on_action(cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, _: &CloseActiveChatTab, _, cx| {
+                    cx.stop_propagation();
+                    this.request_close_tab(&tab_id, cx);
+                }
             }))
-            .on_action(cx.listener(|this, _: &Redo, window, cx| {
-                this.swallow_chat_terminal_editor_action(window, cx);
+            .on_action(cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, _: &ClearTerminal, _, cx| {
+                    cx.stop_propagation();
+                    this.clear_terminal(&tab_id, cx);
+                }
             }))
-            .on_action(cx.listener(|this, _: &Backspace, window, cx| {
-                this.send_chat_terminal_bytes(b"\x7f", window, cx);
+            .on_scroll_wheel(cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, event: &ScrollWheelEvent, window, cx| {
+                    this.on_chat_terminal_scroll(&tab_id, event, window, cx);
+                }
             }))
-            .on_action(cx.listener(|this, _: &Delete, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[3~", window, cx);
+            .on_action(cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, _: &Undo, window, cx| {
+                    this.swallow_chat_terminal_editor_action(&tab_id, window, cx);
+                }
             }))
-            .on_action(cx.listener(|this, _: &Left, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[D", window, cx);
+            .on_action(cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, _: &Redo, window, cx| {
+                    this.swallow_chat_terminal_editor_action(&tab_id, window, cx);
+                }
             }))
-            .on_action(cx.listener(|this, _: &Right, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[C", window, cx);
+            .on_action(cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, _: &SelectAll, window, cx| {
+                    this.swallow_chat_terminal_editor_action(&tab_id, window, cx);
+                    let _ = this.select_all_chat_terminal(&tab_id, cx);
+                }
             }))
-            .on_action(cx.listener(|this, _: &Up, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[A", window, cx);
+            .on_action(cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, _: &Copy, window, cx| {
+                    this.focus_terminal_tab(&tab_id, window);
+                    cx.stop_propagation();
+                    let _ = this.copy_chat_terminal_selection(&tab_id, cx);
+                }
             }))
-            .on_action(cx.listener(|this, _: &Down, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[B", window, cx);
+            .on_action(cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, _: &Cut, window, cx| {
+                    this.focus_terminal_tab(&tab_id, window);
+                    cx.stop_propagation();
+                    let _ = this.copy_chat_terminal_selection(&tab_id, cx);
+                }
             }))
-            .on_action(cx.listener(|this, _: &SelectLeft, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[1;2D", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SelectRight, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[1;2C", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SelectUp, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[1;2A", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SelectDown, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[1;2B", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SelectAll, window, cx| {
-                this.swallow_chat_terminal_editor_action(window, cx);
-                let _ = this.select_all_chat_terminal(cx);
-            }))
-            .on_action(cx.listener(|this, _: &Home, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[H", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &End, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[F", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SelectHome, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[1;2H", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SelectEnd, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[1;2F", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &Enter, window, cx| {
-                this.send_chat_terminal_bytes(b"\r", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &Tab, window, cx| {
-                this.send_chat_terminal_bytes(b"\t", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &BackTab, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b[Z", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &Copy, window, cx| {
-                this.focus_chat_terminal_panel(window);
-                cx.stop_propagation();
-                let _ = this.copy_chat_terminal_selection(cx);
-            }))
-            .on_action(cx.listener(|this, _: &Cut, window, cx| {
-                this.focus_chat_terminal_panel(window);
-                cx.stop_propagation();
-                let _ = this.copy_chat_terminal_selection(cx);
-            }))
-            .on_action(cx.listener(Self::on_chat_terminal_paste_action))
-            .on_action(cx.listener(|this, _: &MoveWordLeft, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1bb", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &MoveWordRight, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1bf", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &DeleteWordLeft, window, cx| {
-                this.send_chat_terminal_bytes(b"\x17", window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &Escape, window, cx| {
-                this.send_chat_terminal_bytes(b"\x1b", window, cx);
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(Self::on_chat_terminal_mouse_down),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(Self::on_chat_terminal_context_menu),
-            )
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(Self::on_chat_terminal_middle_mouse_down),
-            )
-            .on_mouse_move(cx.listener(Self::on_chat_terminal_mouse_move))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(Self::on_chat_terminal_mouse_up),
-            )
-            .on_mouse_up(
-                MouseButton::Right,
-                cx.listener(Self::on_chat_terminal_right_mouse_up),
-            )
-            .on_mouse_up(
-                MouseButton::Middle,
-                cx.listener(Self::on_chat_terminal_middle_mouse_up),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(Self::on_chat_terminal_mouse_up),
-            )
-            .on_mouse_up_out(
-                MouseButton::Right,
-                cx.listener(Self::on_chat_terminal_right_mouse_up),
-            )
-            .on_mouse_up_out(
-                MouseButton::Middle,
-                cx.listener(Self::on_chat_terminal_middle_mouse_up),
-            )
-            .cursor(CursorStyle::Arrow)
-            .h_full()
-            .w_full()
-            .bg(default_bg)
-            .when(
-                self.chat_panel_placement == ChatPanelPlacement::Bottom,
-                |this| {
-                    this.border_t(px(self.scaled(ups.utility_panel_border_width_px)))
-                        .border_color(panel_border_color)
-                },
-            )
-            .when(
-                self.chat_panel_placement != ChatPanelPlacement::Bottom,
-                |this| {
-                    this.border_l(px(self.scaled(ups.utility_panel_border_width_px)))
-                        .border_color(panel_border_color)
-                },
-            )
-            .child(self.render_chat_tab_bar(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .w_full()
-                    .h_full()
-                    .relative()
-                    .child(
-                        div()
-                            .w_full()
-                            .h_full()
-                            .px(px(terminal_padding))
-                            .pt(px(terminal_padding))
-                            .pb(px(terminal_padding))
-                            .relative()
-                            .bg(default_bg)
-                            .overflow_hidden()
-                            .on_scroll_wheel(cx.listener(Self::on_chat_terminal_scroll))
-                            .child(ChatTerminalSurfaceElement {
-                                editor: cx.entity().clone(),
-                                snapshot: snapshot.clone(),
-                                selection,
-                                cursor_row,
-                                cursor_col,
-                                cursor_visible,
-                                default_fg,
-                                default_bg,
-                                cursor_color,
-                                palette,
-                            }),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(
-                                self.scaled(ups.utility_panel_border_width_px) + terminal_padding
-                            ))
-                            .top(px(terminal_padding))
-                            .right(px(terminal_padding))
-                            .bottom(px(terminal_padding))
-                            .on_scroll_wheel(cx.listener(Self::on_chat_terminal_scroll))
-                            .drag_over::<DraggedSidebarItems>(move |style, _, _, _| {
-                                style.bg(file_drop_bg)
-                            })
-                            .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(file_drop_bg))
-                            .on_drop(cx.listener(|this, dragged: &DraggedSidebarItems, _, cx| {
-                                this.add_dragged_paths_to_chat(&dragged.paths, cx);
-                            }))
-                            .on_drop(cx.listener(|this, dragged: &DraggedTab, _, cx| {
-                                this.add_dragged_tab_to_chat(
-                                    &dragged.title,
-                                    dragged.path.as_ref(),
-                                    cx,
+            .on_action(cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, action: &Paste, window, cx| {
+                    this.on_chat_terminal_paste_action(&tab_id, action, window, cx);
+                }
+            }));
+        let root = bytes_action!(root, Backspace, b"\x7f");
+        let root = bytes_action!(root, Delete, b"\x1b[3~");
+        let root = bytes_action!(root, Left, b"\x1b[D");
+        let root = bytes_action!(root, Right, b"\x1b[C");
+        let root = bytes_action!(root, Up, b"\x1b[A");
+        let root = bytes_action!(root, Down, b"\x1b[B");
+        let root = bytes_action!(root, SelectLeft, b"\x1b[1;2D");
+        let root = bytes_action!(root, SelectRight, b"\x1b[1;2C");
+        let root = bytes_action!(root, SelectUp, b"\x1b[1;2A");
+        let root = bytes_action!(root, SelectDown, b"\x1b[1;2B");
+        let root = bytes_action!(root, Home, b"\x1b[H");
+        let root = bytes_action!(root, End, b"\x1b[F");
+        let root = bytes_action!(root, SelectHome, b"\x1b[1;2H");
+        let root = bytes_action!(root, SelectEnd, b"\x1b[1;2F");
+        let root = bytes_action!(root, Enter, b"\r");
+        let root = bytes_action!(root, Tab, b"\t");
+        let root = bytes_action!(root, BackTab, b"\x1b[Z");
+        let root = bytes_action!(root, MoveWordLeft, b"\x1bb");
+        let root = bytes_action!(root, MoveWordRight, b"\x1bf");
+        let root = bytes_action!(root, DeleteWordLeft, b"\x17");
+        let root = bytes_action!(root, Escape, b"\x1b");
+
+        root.on_mouse_down(
+            MouseButton::Left,
+            cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, event: &MouseDownEvent, window, cx| {
+                    this.on_chat_terminal_mouse_down(&tab_id, event, window, cx);
+                }
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, event: &MouseDownEvent, window, cx| {
+                    this.on_chat_terminal_context_menu(&tab_id, event, window, cx);
+                }
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, event: &MouseDownEvent, window, cx| {
+                    this.on_chat_terminal_middle_mouse_down(&tab_id, event, window, cx);
+                }
+            }),
+        )
+        .on_mouse_move(cx.listener({
+            let tab_id = tab_id.clone();
+            move |this, event: &MouseMoveEvent, window, cx| {
+                this.on_chat_terminal_mouse_move(&tab_id, event, window, cx);
+            }
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, event: &MouseUpEvent, window, cx| {
+                    this.on_chat_terminal_mouse_up(&tab_id, event, window, cx);
+                }
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Right,
+            cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, event: &MouseUpEvent, window, cx| {
+                    this.on_chat_terminal_right_mouse_up(&tab_id, event, window, cx);
+                }
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Middle,
+            cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, event: &MouseUpEvent, window, cx| {
+                    this.on_chat_terminal_middle_mouse_up(&tab_id, event, window, cx);
+                }
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, event: &MouseUpEvent, window, cx| {
+                    this.on_chat_terminal_mouse_up(&tab_id, event, window, cx);
+                }
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Right,
+            cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, event: &MouseUpEvent, window, cx| {
+                    this.on_chat_terminal_right_mouse_up(&tab_id, event, window, cx);
+                }
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Middle,
+            cx.listener({
+                let tab_id = tab_id.clone();
+                move |this, event: &MouseUpEvent, window, cx| {
+                    this.on_chat_terminal_middle_mouse_up(&tab_id, event, window, cx);
+                }
+            }),
+        )
+        .cursor(CursorStyle::Arrow)
+        .h_full()
+        .w_full()
+        .bg(default_bg)
+        .child(
+            div()
+                .flex_1()
+                .w_full()
+                .h_full()
+                .relative()
+                .child(
+                    div()
+                        .w_full()
+                        .h_full()
+                        .px(px(terminal_padding))
+                        .pt(px(terminal_padding))
+                        .pb(px(terminal_padding))
+                        .relative()
+                        .bg(default_bg)
+                        .overflow_hidden()
+                        .on_scroll_wheel(cx.listener({
+                            let tab_id = tab_id.clone();
+                            move |this, event: &ScrollWheelEvent, window, cx| {
+                                this.on_chat_terminal_scroll(&tab_id, event, window, cx);
+                            }
+                        }))
+                        .child(ChatTerminalSurfaceElement {
+                            editor: cx.entity().clone(),
+                            snapshot: snapshot.clone(),
+                            selection,
+                            selecting,
+                            cursor_row,
+                            cursor_col,
+                            cursor_visible,
+                            cursor_shape,
+                            focused: is_focused,
+                            search_matches,
+                            current_search_match,
+                            default_fg,
+                            default_bg,
+                            cursor_color,
+                            palette,
+                        }),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(terminal_padding))
+                        .top(px(terminal_padding))
+                        .right(px(terminal_padding))
+                        .bottom(px(terminal_padding))
+                        .on_scroll_wheel(cx.listener({
+                            let tab_id = tab_id.clone();
+                            move |this, event: &ScrollWheelEvent, window, cx| {
+                                this.on_chat_terminal_scroll(&tab_id, event, window, cx);
+                            }
+                        }))
+                        .drag_over::<DraggedSidebarItems>(move |style, _, _, _| {
+                            style.bg(file_drop_bg)
+                        })
+                        .on_drop(cx.listener(|this, dragged: &DraggedSidebarItems, _, cx| {
+                            this.add_dragged_paths_to_chat(&dragged.paths, cx);
+                        }))
+                        .child(ChatTerminalInputElement {
+                            editor: cx.entity().clone(),
+                            tab_id: tab_id.clone(),
+                        })
+                        .when_some(
+                            missing_agent_cli_install_target,
+                            |this, (agent_cli, _url)| {
+                                let button_height = self.scaled(ups.utility_panel_button_height_px);
+                                let button_padding_x = self
+                                    .scaled(ups.utility_panel_button_padding_x_px)
+                                    + self.scaled(6.0);
+                                let button_border_width =
+                                    self.scaled(ups.utility_panel_button_border_width_px);
+                                let label = crate::i18n::install_agent_label(
+                                    self.ui_language,
+                                    agent_cli.label(),
                                 );
-                            }))
-                            .child(ChatTerminalInputElement {
-                                editor: cx.entity().clone(),
-                            })
-                            .when_some(
-                                missing_agent_cli_install_target,
-                                |this, (agent_cli, _url)| {
-                                    let button_height =
-                                        self.scaled(ups.utility_panel_button_height_px);
-                                    let button_padding_x = self
-                                        .scaled(ups.utility_panel_button_padding_x_px)
-                                        + self.scaled(6.0);
-                                    let button_border_width =
-                                        self.scaled(ups.utility_panel_button_border_width_px);
-                                    let label = crate::i18n::install_agent_label(
-                                        self.ui_language,
-                                        agent_cli.label(),
-                                    );
-                                    this.child(
-                                        div()
-                                            .absolute()
-                                            .inset_0()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(
-                                                div()
-                                                    .h(px(button_height))
-                                                    .px(px(button_padding_x))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .rounded_full()
-                                                    .border(px(button_border_width))
-                                                    .border_color(
-                                                        ups.utility_panel_button_border_color,
-                                                    )
-                                                    .bg(default_bg)
-                                                    .text_color(ups.utility_panel_button_text_color)
-                                                    .text_size(px(body_font_size))
-                                                    .line_height(px(button_height))
-                                                    .cursor(CursorStyle::Arrow)
-                                                    .hover(|style| {
-                                                        style.bg(ups.utility_panel_button_hover_bg)
-                                                    })
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener(move |this, _, _, cx| {
-                                                            this.open_agent_cli_install_page(
-                                                                agent_cli, cx,
-                                                            );
-                                                        }),
-                                                    )
-                                                    .child(label),
-                                            ),
-                                    )
-                                },
-                            )
-                            .when_some(
-                                cursor_row.zip(marked_text.filter(|text| !text.is_empty())),
-                                |this, (cursor_row, text)| {
-                                    this.child(
-                                        div()
-                                            .absolute()
-                                            .left(px(cursor_col as f32 * cell_width))
-                                            .top(px(cursor_row as f32 * cell_height))
-                                            .px(px(1.0))
-                                            .h(px(cell_height))
-                                            .text_color(default_fg)
-                                            .font_family(monospace.clone())
-                                            .text_size(px(body_font_size))
-                                            .line_height(px(cell_height))
-                                            .border_b(px(1.0))
-                                            .border_color(cursor_color)
-                                            .bg(default_bg)
-                                            .child(text),
-                                    )
-                                },
-                            ),
-                    ),
-            )
-            .when_some(terminal_scrollbar, |this, scrollbar| this.child(scrollbar))
-            .into_any_element()
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            div()
+                                                .h(px(button_height))
+                                                .px(px(button_padding_x))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded_full()
+                                                .border(px(button_border_width))
+                                                .border_color(ups.utility_panel_button_border_color)
+                                                .bg(default_bg)
+                                                .text_color(ups.utility_panel_button_text_color)
+                                                .text_size(px(body_font_size))
+                                                .line_height(px(button_height))
+                                                .cursor(CursorStyle::Arrow)
+                                                .hover(|style| {
+                                                    style.bg(ups.utility_panel_button_hover_bg)
+                                                })
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(move |this, _, _, cx| {
+                                                        this.open_agent_cli_install_page(
+                                                            agent_cli, cx,
+                                                        );
+                                                    }),
+                                                )
+                                                .child(label),
+                                        ),
+                                )
+                            },
+                        )
+                        .when_some(
+                            cursor_row.zip(marked_text.filter(|text| !text.is_empty())),
+                            |this, (cursor_row, text)| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(cursor_col as f32 * cell_width))
+                                        .top(px(cursor_row as f32 * cell_height))
+                                        .px(px(1.0))
+                                        .h(px(cell_height))
+                                        .text_color(default_fg)
+                                        .font_family(monospace.clone())
+                                        .text_size(px(body_font_size))
+                                        .line_height(px(cell_height))
+                                        .border_b(px(1.0))
+                                        .border_color(cursor_color)
+                                        .bg(default_bg)
+                                        .child(text),
+                                )
+                            },
+                        ),
+                ),
+        )
+        .when_some(terminal_scrollbar, |this, scrollbar| this.child(scrollbar))
+        .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_title_uses_working_directory_and_current_command() {
+        let cwd = std::path::Path::new("/Users/moeka/project");
+        assert_eq!(
+            terminal_process_title(cwd, "/bin/zsh", &["/bin/zsh".to_string()]),
+            "project - zsh"
+        );
+        assert_eq!(
+            terminal_process_title(
+                cwd,
+                "npm",
+                &["npm".to_string(), "run".to_string(), "dev".to_string()],
+            ),
+            "project - npm run dev"
+        );
+        assert_eq!(
+            terminal_process_title(std::path::Path::new("/"), "zsh", &[]),
+            "/ - zsh"
+        );
+    }
+
+    #[test]
+    fn terminal_cursor_shapes_match_zed_alacritty_shapes() {
+        let cases = [
+            (TerminalCursorShape::Block, AlacCursorShape::Block),
+            (TerminalCursorShape::Underline, AlacCursorShape::Underline),
+            (TerminalCursorShape::Bar, AlacCursorShape::Beam),
+            (TerminalCursorShape::Hollow, AlacCursorShape::HollowBlock),
+        ];
+
+        for (setting, expected) in cases {
+            let style = alacritty_cursor_style(setting);
+            assert_eq!(style.shape, expected);
+            assert!(!style.blinking);
+        }
+    }
 
     fn indexed_cell(line: i32, col: usize, ch: char) -> ChatIndexedCell {
         let mut cell = Cell::default();
@@ -4007,6 +4277,83 @@ mod tests {
         assert_eq!(
             EditorView::chat_reference_position_in_buffer(&buffer, inside_li),
             (2, 2)
+        );
+    }
+
+    fn keystroke(spec: &str) -> gpui::Keystroke {
+        gpui::Keystroke::parse(spec).expect("valid keystroke")
+    }
+
+    #[test]
+    fn arrow_keys_respect_application_cursor_mode() {
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("up"), TermMode::NONE),
+            Some(b"\x1b[A".to_vec())
+        );
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("up"), TermMode::APP_CURSOR),
+            Some(b"\x1bOA".to_vec())
+        );
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("end"), TermMode::APP_CURSOR),
+            Some(b"\x1bOF".to_vec())
+        );
+        // Modified arrows use CSI 1;{code} regardless of DECCKM.
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("shift-up"), TermMode::APP_CURSOR),
+            Some(b"\x1b[1;2A".to_vec())
+        );
+    }
+
+    #[test]
+    fn function_keys_map_to_xterm_sequences() {
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("f1"), TermMode::NONE),
+            Some(b"\x1bOP".to_vec())
+        );
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("f5"), TermMode::NONE),
+            Some(b"\x1b[15~".to_vec())
+        );
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("f12"), TermMode::NONE),
+            Some(b"\x1b[24~".to_vec())
+        );
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("shift-f3"), TermMode::NONE),
+            Some(b"\x1b[1;2R".to_vec())
+        );
+    }
+
+    #[test]
+    fn control_characters_cover_specials() {
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("ctrl-c"), TermMode::NONE),
+            Some(vec![0x03])
+        );
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("ctrl-space"), TermMode::NONE),
+            Some(vec![0x00])
+        );
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("ctrl-["), TermMode::NONE),
+            Some(vec![0x1b])
+        );
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("ctrl--"), TermMode::NONE),
+            Some(vec![0x1f])
+        );
+    }
+
+    #[test]
+    fn alt_sends_escape_prefixed_base_key() {
+        // macOS composes option-a into "å"; the terminal should still see
+        // ESC + the plain base key (alt-as-meta).
+        let mut stroke = keystroke("alt-a");
+        stroke.key_char = Some("å".to_string());
+        assert_eq!(
+            keystroke_to_terminal_bytes(&stroke, TermMode::NONE),
+            Some(vec![0x1b, b'a'])
         );
     }
 }

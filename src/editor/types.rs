@@ -35,20 +35,59 @@ pub(crate) enum TabKind {
     Editor,
     Diff,
     Settings,
+    Terminal(ChatAgentCli),
+}
+
+impl TabKind {
+    pub(crate) fn is_terminal(&self) -> bool {
+        matches!(self, Self::Terminal(_))
+    }
+
+    pub(crate) fn terminal_agent(&self) -> Option<ChatAgentCli> {
+        match self {
+            Self::Terminal(agent) => Some(*agent),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RightUtilityPanel {
-    Chat,
     Info,
     GitHistory,
     Outline,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ChatPanelPlacement {
-    Right,
-    Bottom,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TerminalCursorShape {
+    #[default]
+    Block,
+    Underline,
+    Bar,
+    Hollow,
+}
+
+impl TerminalCursorShape {
+    pub(crate) const ALL: [Self; 4] = [Self::Block, Self::Underline, Self::Bar, Self::Hollow];
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Block => "block",
+            Self::Underline => "underline",
+            Self::Bar => "bar",
+            Self::Hollow => "hollow",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "block" => Some(Self::Block),
+            "underline" => Some(Self::Underline),
+            "bar" => Some(Self::Bar),
+            "hollow" => Some(Self::Hollow),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

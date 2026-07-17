@@ -329,6 +329,7 @@ fn tab_to_record(tab: &OpenTab) -> TabSessionRecord {
         title: tab.title.clone(),
         path: tab.path.clone(),
         file_kind: tab.file_kind.as_ref().map(serialize_file_kind),
+        agent_cli: tab.kind.terminal_agent().map(serialize_agent_cli),
         is_preview: tab.is_preview,
         is_pinned: tab.is_pinned,
         view: TabViewState {
@@ -349,6 +350,14 @@ fn tab_to_record(tab: &OpenTab) -> TabSessionRecord {
 }
 
 fn restore_tab_from_record(record: &TabSessionRecord, ui_language: UiLanguage) -> Option<OpenTab> {
+    if record.kind == "terminal" {
+        let agent_cli = record
+            .agent_cli
+            .as_deref()
+            .and_then(deserialize_agent_cli)
+            .unwrap_or(ChatAgentCli::Terminal);
+        return Some(terminal_tab(record, agent_cli));
+    }
     let kind = deserialize_tab_kind(&record.kind)?;
     if kind == TabKind::Settings {
         return Some(settings_tab(record.id.clone()));
@@ -544,6 +553,7 @@ fn serialize_tab_kind(kind: TabKind) -> String {
         TabKind::Editor => "editor",
         TabKind::Diff => "diff",
         TabKind::Settings => "settings",
+        TabKind::Terminal(_) => "terminal",
     }
     .to_string()
 }
@@ -554,6 +564,58 @@ fn deserialize_tab_kind(value: &str) -> Option<TabKind> {
         "diff" => Some(TabKind::Diff),
         "settings" => Some(TabKind::Settings),
         _ => None,
+    }
+}
+
+fn serialize_agent_cli(agent_cli: ChatAgentCli) -> String {
+    match agent_cli {
+        ChatAgentCli::Terminal => "terminal",
+        ChatAgentCli::GithubCopilot => "github_copilot",
+        ChatAgentCli::OpenAICodex => "openai_codex",
+        ChatAgentCli::ClaudeCode => "claude_code",
+        ChatAgentCli::GeminiCli => "gemini_cli",
+    }
+    .to_string()
+}
+
+fn deserialize_agent_cli(value: &str) -> Option<ChatAgentCli> {
+    match value {
+        "terminal" => Some(ChatAgentCli::Terminal),
+        "github_copilot" => Some(ChatAgentCli::GithubCopilot),
+        "openai_codex" => Some(ChatAgentCli::OpenAICodex),
+        "claude_code" => Some(ChatAgentCli::ClaudeCode),
+        "gemini_cli" => Some(ChatAgentCli::GeminiCli),
+        _ => None,
+    }
+}
+
+/// Rebuilds a terminal tab from its session record. The PTY session itself is
+/// respawned lazily when the tab first renders.
+fn terminal_tab(record: &TabSessionRecord, agent_cli: ChatAgentCli) -> OpenTab {
+    OpenTab {
+        id: record.id.clone(),
+        title: record.title.clone(),
+        kind: TabKind::Terminal(agent_cli),
+        path: None,
+        file_kind: None,
+        editor_left_aligned: false,
+        snapshot: EditorSnapshot {
+            text: String::new(),
+            cursor_offset: 0,
+            cursor_anchor: 0,
+            scroll_offset: 0.0,
+            extra_cursors: Vec::new(),
+        },
+        image_view: ImageViewState::default(),
+        whiteboard: None,
+        git_diff: None,
+        inline_diff: None,
+        is_preview: false,
+        is_dirty: false,
+        is_deleted: false,
+        is_pinned: record.is_pinned,
+        recovery: TabRecoveryState::default(),
+        history: history_store::TabHistory::default(),
     }
 }
 
@@ -648,6 +710,7 @@ mod tests {
             title: "note.md".to_string(),
             path: source_path.clone(),
             file_kind: Some("markdown".to_string()),
+            agent_cli: None,
             is_preview: false,
             is_pinned: false,
             view: TabViewState {
@@ -676,6 +739,45 @@ mod tests {
         let encoded = serialize_file_kind(&kind);
         let decoded = deserialize_file_kind(&encoded).unwrap();
         assert_eq!(decoded, kind);
+    }
+
+    #[test]
+    fn terminal_tab_roundtrip_preserves_agent_and_pin_state() {
+        let agents = [
+            ChatAgentCli::Terminal,
+            ChatAgentCli::GithubCopilot,
+            ChatAgentCli::OpenAICodex,
+            ChatAgentCli::ClaudeCode,
+            ChatAgentCli::GeminiCli,
+        ];
+
+        for (index, agent) in agents.into_iter().enumerate() {
+            let record = TabSessionRecord {
+                id: format!("tab-{}", index + 1),
+                kind: "terminal".to_string(),
+                title: agent.label().to_string(),
+                path: None,
+                file_kind: None,
+                agent_cli: Some(serialize_agent_cli(agent)),
+                is_preview: false,
+                is_pinned: true,
+                view: TabViewState::default(),
+                recovery: TabRecoveryState::default(),
+                history: TabHistoryIndex::default(),
+            };
+
+            let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
+            assert_eq!(restored.kind, TabKind::Terminal(agent));
+            assert_eq!(restored.title, record.title);
+            assert!(restored.is_pinned);
+            assert!(restored.path.is_none());
+            assert!(restored.file_kind.is_none());
+
+            let encoded = tab_to_record(&restored);
+            assert_eq!(encoded.kind, "terminal");
+            assert_eq!(encoded.agent_cli, record.agent_cli);
+            assert!(encoded.is_pinned);
+        }
     }
 
     #[test]
@@ -734,6 +836,7 @@ mod tests {
             title: "note.md".to_string(),
             path: Some(source_path.clone()),
             file_kind: Some("markdown".to_string()),
+            agent_cli: None,
             is_preview: false,
             is_pinned: false,
             view: TabViewState {

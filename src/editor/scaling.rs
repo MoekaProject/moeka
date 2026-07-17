@@ -1,4 +1,6 @@
 use gpui::Context;
+#[cfg(target_os = "macos")]
+use gpui::{Window, point, px};
 
 use crate::markdown::BlockType;
 
@@ -30,9 +32,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let previous_panel = self.utility_panel;
-        if next_panel != Some(RightUtilityPanel::Chat) {
-            self.chat_panel_visible = false;
-        }
         self.utility_panel = next_panel;
 
         if next_panel == Some(RightUtilityPanel::Info) {
@@ -40,11 +39,6 @@ impl EditorView {
         }
         if next_panel == Some(RightUtilityPanel::GitHistory) {
             self.invalidate_git_history_cache();
-        }
-        if previous_panel != Some(RightUtilityPanel::Chat)
-            && next_panel == Some(RightUtilityPanel::Chat)
-        {
-            self.open_chat_terminal(cx);
         }
 
         // Switching directly between two visible utility panels is a panel-type
@@ -61,26 +55,29 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn reveal_chat_panel(&mut self, cx: &mut Context<Self>) {
-        self.chat_panel_visible = true;
-        if self.utility_panel != Some(RightUtilityPanel::Chat) {
-            self.set_visible_utility_panel(Some(RightUtilityPanel::Chat), cx);
-        } else {
-            self.open_chat_terminal(cx);
-        }
-    }
-
-    pub(crate) fn hide_chat_panel(&mut self, cx: &mut Context<Self>) {
-        self.chat_panel_visible = false;
-        if self.utility_panel == Some(RightUtilityPanel::Chat) {
-            self.set_visible_utility_panel(None, cx);
-        } else {
-            cx.notify();
-        }
-    }
-
     pub(crate) fn scaled(&self, value: f32) -> f32 {
         value * self.ui_scale
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn traffic_light_position_for_ui_scale(ui_scale: f32) -> gpui::Point<gpui::Pixels> {
+        const BASE_LEFT_PX: f32 = 10.0;
+        const BASE_TOP_PX: f32 = 10.0;
+        point(px(BASE_LEFT_PX * ui_scale), px(BASE_TOP_PX * ui_scale))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn sync_macos_traffic_light_position(&mut self, window: &mut Window) {
+        if self
+            .traffic_light_ui_scale
+            .is_some_and(|scale| (scale - self.ui_scale).abs() < f32::EPSILON)
+        {
+            return;
+        }
+        let position = Self::traffic_light_position_for_ui_scale(self.ui_scale);
+        if apply_macos_traffic_light_position(window, position) {
+            self.traffic_light_ui_scale = Some(self.ui_scale);
+        }
     }
 
     pub(crate) fn base_font_size(&self) -> f32 {
@@ -802,30 +799,6 @@ impl EditorView {
         self.toggle_outline_panel(cx);
     }
 
-    pub(crate) fn toggle_chat_panel(&mut self, cx: &mut Context<Self>) {
-        self.utility_panel_resizing = false;
-        if self.chat_panel_visible {
-            self.hide_chat_panel(cx);
-            return;
-        }
-
-        self.reveal_chat_panel(cx);
-    }
-
-    pub(crate) fn show_chat_panel_bottom(&mut self, cx: &mut Context<Self>) {
-        self.utility_panel_resizing = false;
-        let should_hide = self.chat_panel_visible
-            && self.utility_panel == Some(RightUtilityPanel::Chat)
-            && self.chat_panel_placement == ChatPanelPlacement::Bottom;
-        if should_hide {
-            self.hide_chat_panel(cx);
-            return;
-        }
-
-        self.chat_panel_placement = ChatPanelPlacement::Bottom;
-        self.reveal_chat_panel(cx);
-    }
-
     pub(crate) fn toggle_info_panel(&mut self, cx: &mut Context<Self>) {
         self.toggle_utility_panel(RightUtilityPanel::Info, cx);
     }
@@ -843,26 +816,88 @@ impl EditorView {
         panel: RightUtilityPanel,
         cx: &mut Context<Self>,
     ) {
-        if panel == RightUtilityPanel::Chat {
-            self.toggle_chat_panel(cx);
-            return;
-        }
-
         if self.utility_panel == Some(panel) {
             self.utility_panel_resizing = false;
-            self.chat_panel_visible = false;
             self.set_visible_utility_panel(None, cx);
             return;
         }
 
-        self.chat_panel_visible = false;
         self.set_visible_utility_panel(Some(panel), cx);
     }
 }
 
+#[cfg(target_os = "macos")]
+fn apply_macos_traffic_light_position(
+    window: &mut Window,
+    position: gpui::Point<gpui::Pixels>,
+) -> bool {
+    use core_graphics::geometry::{CGPoint, CGRect};
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() else {
+        return false;
+    };
+
+    unsafe {
+        let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
+        let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return false;
+        }
+        let style_mask: u64 = msg_send![ns_window, styleMask];
+        const NS_WINDOW_STYLE_MASK_FULL_SCREEN: u64 = 1 << 14;
+        if style_mask & NS_WINDOW_STYLE_MASK_FULL_SCREEN != 0 {
+            return false;
+        }
+
+        let close_button: *mut objc::runtime::Object =
+            msg_send![ns_window, standardWindowButton: 0u64];
+        let minimize_button: *mut objc::runtime::Object =
+            msg_send![ns_window, standardWindowButton: 1u64];
+        let zoom_button: *mut objc::runtime::Object =
+            msg_send![ns_window, standardWindowButton: 2u64];
+        if close_button.is_null() || minimize_button.is_null() || zoom_button.is_null() {
+            return false;
+        }
+
+        let window_frame: CGRect = msg_send![ns_window, frame];
+        let content_layout_rect: CGRect = msg_send![ns_window, contentLayoutRect];
+        let close_frame: CGRect = msg_send![close_button, frame];
+        let minimize_frame: CGRect = msg_send![minimize_button, frame];
+        let titlebar_height = window_frame.size.height - content_layout_rect.size.height;
+        let left = f32::from(position.x) as f64;
+        let top = f32::from(position.y) as f64;
+        let y = titlebar_height - top - close_frame.size.height;
+        let spacing = minimize_frame.origin.x - close_frame.origin.x;
+
+        let _: () = msg_send![close_button, setFrameOrigin: CGPoint::new(left, y)];
+        let _: () = msg_send![minimize_button, setFrameOrigin: CGPoint::new(left + spacing, y)];
+        let _: () = msg_send![zoom_button, setFrameOrigin: CGPoint::new(left + spacing * 2.0, y)];
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::EditorView;
     use super::caret_vertical_overflow;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn traffic_light_offset_tracks_ui_scale() {
+        let baseline = EditorView::traffic_light_position_for_ui_scale(1.0);
+        assert_eq!(f32::from(baseline.x), 10.0);
+        assert_eq!(f32::from(baseline.y), 10.0);
+
+        let enlarged = EditorView::traffic_light_position_for_ui_scale(1.4);
+        assert_eq!(f32::from(enlarged.x), 14.0);
+        assert_eq!(f32::from(enlarged.y), 14.0);
+    }
 
     #[test]
     fn caret_scrolls_only_after_leaving_the_viewport() {

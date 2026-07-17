@@ -561,7 +561,7 @@ impl TextInput {
                     this.on_paste(&TextInputPaste, w, cx);
                 },
             ))
-            .child(div().w_full().h(px(1.0)).my(px(4.0)).bg(separator_color))
+            .child(div().w_full().h(px(1.0)).my(px(2.0)).bg(separator_color))
             .child(item(
                 "select-all",
                 crate::i18n::text_input_menu_label(language, "select_all"),

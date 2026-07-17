@@ -3935,6 +3935,7 @@ dependencies = [
  "anyhow",
  "block",
  "chrono",
+ "core-graphics 0.24.0",
  "directories",
  "emojis",
  "gpui",

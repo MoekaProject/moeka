@@ -325,11 +325,14 @@ impl EditorView {
     }
 
     pub(crate) fn chat_terminal_scrollbar_track_height(&self) -> f32 {
-        if self.chat_panel_placement == super::ChatPanelPlacement::Bottom {
-            self.utility_panel_layout_width().max(1.0)
-        } else {
-            self.last_window_height.max(1.0)
-        }
+        let terminal_padding =
+            self.scaled(self.styles.utility_panel.utility_panel_terminal_padding_px);
+        self.active_terminal_tab_id()
+            .and_then(|tab_id| self.terminal_tab_state(&tab_id))
+            .and_then(|state| state.input_bounds)
+            .map(|bounds| f32::from(bounds.size.height) + terminal_padding * 2.0)
+            .unwrap_or(self.last_window_height)
+            .max(1.0)
     }
 
     fn panel_scrollbar_handle(&self, kind: PanelScrollbarKind) -> Option<&ScrollHandle> {

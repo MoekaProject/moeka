@@ -169,6 +169,7 @@ pub(crate) enum TextKey {
     OpenLink,
     AddFileToChat,
     AddSelectionToChat,
+    ClearTerminal,
     CopyPlainText,
     SelectAll,
     Star,
@@ -771,35 +772,6 @@ pub(crate) fn action_items_label(language: UiLanguage, action: &str, count: usiz
     }
 }
 
-pub(crate) fn terminal_drop_label(language: UiLanguage, right: bool) -> &'static str {
-    match (language, right) {
-        (UiLanguage::ChineseSimplified, true) => "终端放在右侧",
-        (UiLanguage::ChineseSimplified, false) => "终端放到下方",
-        (UiLanguage::ChineseTraditional, true) => "終端機放右側",
-        (UiLanguage::ChineseTraditional, false) => "終端機放下方",
-        (UiLanguage::Japanese, true) => "右に配置",
-        (UiLanguage::Japanese, false) => "下に配置",
-        (UiLanguage::Korean, true) => "오른쪽에 배치",
-        (UiLanguage::Korean, false) => "아래에 배치",
-        (UiLanguage::French, true) => "Placer à droite",
-        (UiLanguage::French, false) => "Placer en bas",
-        (UiLanguage::German, true) => "Rechts platzieren",
-        (UiLanguage::German, false) => "Unten platzieren",
-        (UiLanguage::Spanish, true) => "Poner a la derecha",
-        (UiLanguage::Spanish, false) => "Poner abajo",
-        (UiLanguage::Portuguese, true) => "Colocar à direita",
-        (UiLanguage::Portuguese, false) => "Colocar abaixo",
-        (UiLanguage::Russian, true) => "Разместить справа",
-        (UiLanguage::Russian, false) => "Разместить снизу",
-        (UiLanguage::Arabic, true) => "وضعها يمينًا",
-        (UiLanguage::Arabic, false) => "وضعها أسفل",
-        (UiLanguage::Hindi, true) => "दाईं ओर रखें",
-        (UiLanguage::Hindi, false) => "नीचे रखें",
-        (UiLanguage::English, true) => "Place Terminal Right",
-        (UiLanguage::English, false) => "Place Terminal Below",
-    }
-}
-
 pub(crate) fn update_available_label(language: UiLanguage, version: Option<&str>) -> String {
     let base = match language {
         UiLanguage::ChineseSimplified => "新版本",
@@ -1324,6 +1296,131 @@ pub(crate) fn settings_label(language: UiLanguage, key: &str) -> &'static str {
     }
 }
 
+pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => match key {
+            "section" => "终端",
+            "cursor_shape" => "光标样式",
+            "search_cursor_shapes" => "搜索光标样式",
+            "block" => "块状",
+            "underline" => "下划线",
+            "bar" => "竖线",
+            "hollow" => "空心框",
+            _ => "",
+        },
+        UiLanguage::ChineseTraditional => match key {
+            "section" => "終端",
+            "cursor_shape" => "游標樣式",
+            "search_cursor_shapes" => "搜尋游標樣式",
+            "block" => "區塊",
+            "underline" => "底線",
+            "bar" => "垂直線",
+            "hollow" => "空心框",
+            _ => "",
+        },
+        UiLanguage::Japanese => match key {
+            "section" => "ターミナル",
+            "cursor_shape" => "カーソル形状",
+            "search_cursor_shapes" => "カーソル形状を検索",
+            "block" => "ブロック",
+            "underline" => "下線",
+            "bar" => "縦線",
+            "hollow" => "中空",
+            _ => "",
+        },
+        UiLanguage::Korean => match key {
+            "section" => "터미널",
+            "cursor_shape" => "커서 모양",
+            "search_cursor_shapes" => "커서 모양 검색",
+            "block" => "블록",
+            "underline" => "밑줄",
+            "bar" => "세로 막대",
+            "hollow" => "빈 상자",
+            _ => "",
+        },
+        UiLanguage::French => match key {
+            "section" => "Terminal",
+            "cursor_shape" => "Forme du curseur",
+            "search_cursor_shapes" => "Rechercher une forme de curseur",
+            "block" => "Bloc",
+            "underline" => "Souligné",
+            "bar" => "Barre",
+            "hollow" => "Contour",
+            _ => "",
+        },
+        UiLanguage::German => match key {
+            "section" => "Terminal",
+            "cursor_shape" => "Cursorform",
+            "search_cursor_shapes" => "Cursorform suchen",
+            "block" => "Block",
+            "underline" => "Unterstrich",
+            "bar" => "Balken",
+            "hollow" => "Hohl",
+            _ => "",
+        },
+        UiLanguage::Spanish => match key {
+            "section" => "Terminal",
+            "cursor_shape" => "Forma del cursor",
+            "search_cursor_shapes" => "Buscar forma del cursor",
+            "block" => "Bloque",
+            "underline" => "Subrayado",
+            "bar" => "Barra",
+            "hollow" => "Contorno",
+            _ => "",
+        },
+        UiLanguage::Portuguese => match key {
+            "section" => "Terminal",
+            "cursor_shape" => "Forma do cursor",
+            "search_cursor_shapes" => "Buscar forma do cursor",
+            "block" => "Bloco",
+            "underline" => "Sublinhado",
+            "bar" => "Barra",
+            "hollow" => "Vazado",
+            _ => "",
+        },
+        UiLanguage::Russian => match key {
+            "section" => "Терминал",
+            "cursor_shape" => "Форма курсора",
+            "search_cursor_shapes" => "Поиск формы курсора",
+            "block" => "Блок",
+            "underline" => "Подчёркивание",
+            "bar" => "Вертикальная черта",
+            "hollow" => "Контур",
+            _ => "",
+        },
+        UiLanguage::Arabic => match key {
+            "section" => "الطرفية",
+            "cursor_shape" => "شكل المؤشر",
+            "search_cursor_shapes" => "البحث عن شكل المؤشر",
+            "block" => "كتلة",
+            "underline" => "تسطير",
+            "bar" => "شريط عمودي",
+            "hollow" => "مجوف",
+            _ => "",
+        },
+        UiLanguage::Hindi => match key {
+            "section" => "टर्मिनल",
+            "cursor_shape" => "कर्सर का आकार",
+            "search_cursor_shapes" => "कर्सर आकार खोजें",
+            "block" => "ब्लॉक",
+            "underline" => "रेखांकन",
+            "bar" => "लंबवत पट्टी",
+            "hollow" => "खोखला",
+            _ => "",
+        },
+        UiLanguage::English => match key {
+            "section" => "Terminal",
+            "cursor_shape" => "Cursor Shape",
+            "search_cursor_shapes" => "Search cursor shapes",
+            "block" => "Block",
+            "underline" => "Underline",
+            "bar" => "Bar",
+            "hollow" => "Hollow",
+            _ => "",
+        },
+    }
+}
+
 pub(crate) fn boolean_option_label(language: UiLanguage, enabled: bool) -> &'static str {
     match (language, enabled) {
         (UiLanguage::ChineseSimplified, false) => "关闭",
@@ -1696,37 +1793,20 @@ pub(crate) fn whiteboard_label(language: UiLanguage, key: &str) -> &'static str 
     }
 }
 
-pub(crate) fn chat_label(language: UiLanguage) -> &'static str {
+pub(crate) fn terminal_label(language: UiLanguage) -> &'static str {
     match language {
-        UiLanguage::ChineseSimplified => "聊天",
-        UiLanguage::ChineseTraditional => "聊天",
-        UiLanguage::Japanese => "チャット",
-        UiLanguage::Korean => "채팅",
-        UiLanguage::French => "Discussion",
-        UiLanguage::German => "Chat",
-        UiLanguage::Spanish => "Chat",
-        UiLanguage::Portuguese => "Chat",
-        UiLanguage::Russian => "Чат",
-        UiLanguage::Arabic => "الدردشة",
-        UiLanguage::Hindi => "चैट",
-        UiLanguage::English => "Chat",
-    }
-}
-
-pub(crate) fn new_chat_label(language: UiLanguage) -> &'static str {
-    match language {
-        UiLanguage::ChineseSimplified => "新建聊天",
-        UiLanguage::ChineseTraditional => "新增聊天",
-        UiLanguage::Japanese => "新しいチャット",
-        UiLanguage::Korean => "새 채팅",
-        UiLanguage::French => "Nouvelle discussion",
-        UiLanguage::German => "Neuer Chat",
-        UiLanguage::Spanish => "Nuevo chat",
-        UiLanguage::Portuguese => "Novo chat",
-        UiLanguage::Russian => "Новый чат",
-        UiLanguage::Arabic => "دردشة جديدة",
-        UiLanguage::Hindi => "नई चैट",
-        UiLanguage::English => "New Chat",
+        UiLanguage::ChineseSimplified => "终端",
+        UiLanguage::ChineseTraditional => "終端機",
+        UiLanguage::Japanese => "ターミナル",
+        UiLanguage::Korean => "터미널",
+        UiLanguage::French => "Terminal",
+        UiLanguage::German => "Terminal",
+        UiLanguage::Spanish => "Terminal",
+        UiLanguage::Portuguese => "Terminal",
+        UiLanguage::Russian => "Терминал",
+        UiLanguage::Arabic => "الطرفية",
+        UiLanguage::Hindi => "टर्मिनल",
+        UiLanguage::English => "Terminal",
     }
 }
 
@@ -2370,9 +2450,15 @@ fn translate_english(key: TextKey) -> &'static str {
         TextKey::GitInitDone => "Git repository initialized.",
         TextKey::GitCommitDone => "Committed.",
         TextKey::GitSyncUpToDate => "Already up to date.",
-        TextKey::GitSyncConflict => "Sync canceled: local and remote changes conflict. Resolve them in another tool and try again.",
-        TextKey::GitAuthFailed => "Authentication failed. Check your Git credentials (SSH key or credential helper).",
-        TextKey::GitIdentityMissing => "Set your Git identity first: git config --global user.name / user.email",
+        TextKey::GitSyncConflict => {
+            "Sync canceled: local and remote changes conflict. Resolve them in another tool and try again."
+        }
+        TextKey::GitAuthFailed => {
+            "Authentication failed. Check your Git credentials (SSH key or credential helper)."
+        }
+        TextKey::GitIdentityMissing => {
+            "Set your Git identity first: git config --global user.name / user.email"
+        }
         TextKey::GitOperationFailed => "Git operation failed",
         TextKey::GitRemoteAdded => "Remote repository set.",
         TextKey::ThemeDebugger => "Theme Debug",
@@ -2418,6 +2504,7 @@ fn translate_english(key: TextKey) -> &'static str {
         TextKey::OpenLink => "Open Link",
         TextKey::AddFileToChat => "Add File",
         TextKey::AddSelectionToChat => "Add Selection",
+        TextKey::ClearTerminal => "Clear",
         TextKey::CopyPlainText => "Copy Text",
         TextKey::SelectAll => "Select All",
         TextKey::Star => "Star",
@@ -2599,7 +2686,9 @@ fn translate_zh_cn(key: TextKey) -> &'static str {
         TextKey::GitSyncUpToDate => "已是最新。",
         TextKey::GitSyncConflict => "同步已取消:本地与远端改动存在冲突,请先解决冲突后重试。",
         TextKey::GitAuthFailed => "认证失败,请检查系统 Git 凭据(SSH 密钥或凭据助手)。",
-        TextKey::GitIdentityMissing => "请先设置 Git 用户信息:git config --global user.name / user.email",
+        TextKey::GitIdentityMissing => {
+            "请先设置 Git 用户信息:git config --global user.name / user.email"
+        }
         TextKey::GitOperationFailed => "Git 操作失败",
         TextKey::GitRemoteAdded => "已设置远程仓库。",
         TextKey::ThemeDebugger => "主题调试器",
@@ -2646,6 +2735,7 @@ fn translate_zh_cn(key: TextKey) -> &'static str {
         TextKey::OpenLink => "打开链接",
         TextKey::AddFileToChat => "添加文件到聊天",
         TextKey::AddSelectionToChat => "添加选区到聊天",
+        TextKey::ClearTerminal => "清屏",
         TextKey::CopyPlainText => "复制纯文本",
         TextKey::SelectAll => "全选",
         TextKey::Star => "星标",
@@ -2826,7 +2916,9 @@ fn translate_zh_tw(key: TextKey) -> &'static str {
         TextKey::GitSyncUpToDate => "已是最新。",
         TextKey::GitSyncConflict => "同步已取消:本機與遠端變更存在衝突,請先解決衝突後重試。",
         TextKey::GitAuthFailed => "驗證失敗,請檢查系統 Git 認證(SSH 金鑰或認證協助程式)。",
-        TextKey::GitIdentityMissing => "請先設定 Git 使用者資訊:git config --global user.name / user.email",
+        TextKey::GitIdentityMissing => {
+            "請先設定 Git 使用者資訊:git config --global user.name / user.email"
+        }
         TextKey::GitOperationFailed => "Git 操作失敗",
         TextKey::GitRemoteAdded => "已設定遠端存放庫。",
         TextKey::ThemeDebugger => "主題偵錯器",
@@ -2872,6 +2964,7 @@ fn translate_zh_tw(key: TextKey) -> &'static str {
         TextKey::OpenLink => "開啟連結",
         TextKey::AddFileToChat => "加入檔案到聊天",
         TextKey::AddSelectionToChat => "加入選取到聊天",
+        TextKey::ClearTerminal => "清除畫面",
         TextKey::CopyPlainText => "複製純文字",
         TextKey::SelectAll => "全選",
         TextKey::Star => "加上星標",
@@ -3051,9 +3144,15 @@ fn translate_japanese(key: TextKey) -> &'static str {
         TextKey::GitInitDone => "Git リポジトリを初期化しました。",
         TextKey::GitCommitDone => "コミットしました。",
         TextKey::GitSyncUpToDate => "最新の状態です。",
-        TextKey::GitSyncConflict => "同期を中止しました: ローカルとリモートの変更が競合しています。解決してから再試行してください。",
-        TextKey::GitAuthFailed => "認証に失敗しました。Git の資格情報(SSH キーなど)を確認してください。",
-        TextKey::GitIdentityMissing => "先に Git のユーザー情報を設定してください: git config --global user.name / user.email",
+        TextKey::GitSyncConflict => {
+            "同期を中止しました: ローカルとリモートの変更が競合しています。解決してから再試行してください。"
+        }
+        TextKey::GitAuthFailed => {
+            "認証に失敗しました。Git の資格情報(SSH キーなど)を確認してください。"
+        }
+        TextKey::GitIdentityMissing => {
+            "先に Git のユーザー情報を設定してください: git config --global user.name / user.email"
+        }
         TextKey::GitOperationFailed => "Git 操作に失敗しました",
         TextKey::GitRemoteAdded => "リモートリポジトリを設定しました。",
         TextKey::ThemeDebugger => "テーマデバッグ",
@@ -3099,6 +3198,7 @@ fn translate_japanese(key: TextKey) -> &'static str {
         TextKey::OpenLink => "リンクを開く",
         TextKey::AddFileToChat => "ファイル追加",
         TextKey::AddSelectionToChat => "選択を追加",
+        TextKey::ClearTerminal => "クリア",
         TextKey::CopyPlainText => "テキストコピー",
         TextKey::SelectAll => "すべて選択",
         TextKey::Star => "スターを付ける",
@@ -3278,9 +3378,13 @@ fn translate_korean(key: TextKey) -> &'static str {
         TextKey::GitInitDone => "Git 저장소를 초기화했습니다.",
         TextKey::GitCommitDone => "커밋했습니다.",
         TextKey::GitSyncUpToDate => "이미 최신 상태입니다.",
-        TextKey::GitSyncConflict => "동기화가 취소되었습니다: 로컬과 원격 변경이 충돌합니다. 해결 후 다시 시도하세요.",
+        TextKey::GitSyncConflict => {
+            "동기화가 취소되었습니다: 로컬과 원격 변경이 충돌합니다. 해결 후 다시 시도하세요."
+        }
         TextKey::GitAuthFailed => "인증 실패. Git 자격 증명(SSH 키 등)을 확인하세요.",
-        TextKey::GitIdentityMissing => "먼저 Git 사용자 정보를 설정하세요: git config --global user.name / user.email",
+        TextKey::GitIdentityMissing => {
+            "먼저 Git 사용자 정보를 설정하세요: git config --global user.name / user.email"
+        }
         TextKey::GitOperationFailed => "Git 작업 실패",
         TextKey::GitRemoteAdded => "원격 저장소를 설정했습니다.",
         TextKey::ThemeDebugger => "테마 디버거",
@@ -3326,6 +3430,7 @@ fn translate_korean(key: TextKey) -> &'static str {
         TextKey::OpenLink => "링크 열기",
         TextKey::AddFileToChat => "파일 추가",
         TextKey::AddSelectionToChat => "선택 추가",
+        TextKey::ClearTerminal => "지우기",
         TextKey::CopyPlainText => "텍스트 복사",
         TextKey::SelectAll => "전체 선택",
         TextKey::Star => "즐겨찾기",
@@ -3505,9 +3610,15 @@ fn translate_french(key: TextKey) -> &'static str {
         TextKey::GitInitDone => "Dépôt Git initialisé.",
         TextKey::GitCommitDone => "Commit effectué.",
         TextKey::GitSyncUpToDate => "Déjà à jour.",
-        TextKey::GitSyncConflict => "Synchronisation annulée : conflits entre modifications locales et distantes. Résolvez-les puis réessayez.",
-        TextKey::GitAuthFailed => "Échec de l'authentification. Vérifiez vos identifiants Git (clé SSH, etc.).",
-        TextKey::GitIdentityMissing => "Configurez d'abord votre identité Git : git config --global user.name / user.email",
+        TextKey::GitSyncConflict => {
+            "Synchronisation annulée : conflits entre modifications locales et distantes. Résolvez-les puis réessayez."
+        }
+        TextKey::GitAuthFailed => {
+            "Échec de l'authentification. Vérifiez vos identifiants Git (clé SSH, etc.)."
+        }
+        TextKey::GitIdentityMissing => {
+            "Configurez d'abord votre identité Git : git config --global user.name / user.email"
+        }
         TextKey::GitOperationFailed => "Échec de l'opération Git",
         TextKey::GitRemoteAdded => "Dépôt distant configuré.",
         TextKey::ThemeDebugger => "Debug thème",
@@ -3553,6 +3664,7 @@ fn translate_french(key: TextKey) -> &'static str {
         TextKey::OpenLink => "Ouvrir le lien",
         TextKey::AddFileToChat => "Ajouter fichier",
         TextKey::AddSelectionToChat => "Ajouter sélection",
+        TextKey::ClearTerminal => "Effacer",
         TextKey::CopyPlainText => "Copier texte",
         TextKey::SelectAll => "Tout sélectionner",
         TextKey::Star => "Favori",
@@ -3726,15 +3838,23 @@ fn translate_german(key: TextKey) -> &'static str {
         TextKey::GitScopeAll => "Alle",
         TextKey::GitScopeCurrentFile => "Aktuelle Datei",
         TextKey::GitSetRemoteTitle => "Remote-Repository festlegen",
-        TextKey::GitSetRemoteHint => "Geben Sie die Repository-URL zum Synchronisieren ein (z. B. von GitHub).",
+        TextKey::GitSetRemoteHint => {
+            "Geben Sie die Repository-URL zum Synchronisieren ein (z. B. von GitHub)."
+        }
         TextKey::GitSetRemotePlaceholder => "https://github.com/user/repo.git",
         TextKey::GitBranchPlaceholder => "Branch suchen oder erstellen...",
         TextKey::GitInitDone => "Git-Repository initialisiert.",
         TextKey::GitCommitDone => "Committet.",
         TextKey::GitSyncUpToDate => "Bereits aktuell.",
-        TextKey::GitSyncConflict => "Synchronisierung abgebrochen: Lokale und entfernte Änderungen stehen in Konflikt. Bitte lösen und erneut versuchen.",
-        TextKey::GitAuthFailed => "Authentifizierung fehlgeschlagen. Git-Anmeldedaten (SSH-Schlüssel usw.) prüfen.",
-        TextKey::GitIdentityMissing => "Bitte zuerst die Git-Identität setzen: git config --global user.name / user.email",
+        TextKey::GitSyncConflict => {
+            "Synchronisierung abgebrochen: Lokale und entfernte Änderungen stehen in Konflikt. Bitte lösen und erneut versuchen."
+        }
+        TextKey::GitAuthFailed => {
+            "Authentifizierung fehlgeschlagen. Git-Anmeldedaten (SSH-Schlüssel usw.) prüfen."
+        }
+        TextKey::GitIdentityMissing => {
+            "Bitte zuerst die Git-Identität setzen: git config --global user.name / user.email"
+        }
         TextKey::GitOperationFailed => "Git-Vorgang fehlgeschlagen",
         TextKey::GitRemoteAdded => "Remote-Repository festgelegt.",
         TextKey::ThemeDebugger => "Theme-Debugger",
@@ -3780,6 +3900,7 @@ fn translate_german(key: TextKey) -> &'static str {
         TextKey::OpenLink => "Link öffnen",
         TextKey::AddFileToChat => "Datei hinzufügen",
         TextKey::AddSelectionToChat => "Auswahl hinzufügen",
+        TextKey::ClearTerminal => "Leeren",
         TextKey::CopyPlainText => "Text kopieren",
         TextKey::SelectAll => "Alles auswählen",
         TextKey::Star => "Markieren",
@@ -3953,15 +4074,23 @@ fn translate_spanish(key: TextKey) -> &'static str {
         TextKey::GitScopeAll => "Todo",
         TextKey::GitScopeCurrentFile => "Archivo actual",
         TextKey::GitSetRemoteTitle => "Configurar repositorio remoto",
-        TextKey::GitSetRemoteHint => "Introduce la URL del repositorio para sincronizar (p. ej., de GitHub).",
+        TextKey::GitSetRemoteHint => {
+            "Introduce la URL del repositorio para sincronizar (p. ej., de GitHub)."
+        }
         TextKey::GitSetRemotePlaceholder => "https://github.com/user/repo.git",
         TextKey::GitBranchPlaceholder => "Buscar o crear rama...",
         TextKey::GitInitDone => "Repositorio Git inicializado.",
         TextKey::GitCommitDone => "Confirmado.",
         TextKey::GitSyncUpToDate => "Ya está actualizado.",
-        TextKey::GitSyncConflict => "Sincronización cancelada: conflictos entre cambios locales y remotos. Resuélvelos y vuelve a intentarlo.",
-        TextKey::GitAuthFailed => "Error de autenticación. Revisa tus credenciales de Git (clave SSH, etc.).",
-        TextKey::GitIdentityMissing => "Configura primero tu identidad de Git: git config --global user.name / user.email",
+        TextKey::GitSyncConflict => {
+            "Sincronización cancelada: conflictos entre cambios locales y remotos. Resuélvelos y vuelve a intentarlo."
+        }
+        TextKey::GitAuthFailed => {
+            "Error de autenticación. Revisa tus credenciales de Git (clave SSH, etc.)."
+        }
+        TextKey::GitIdentityMissing => {
+            "Configura primero tu identidad de Git: git config --global user.name / user.email"
+        }
         TextKey::GitOperationFailed => "Error en la operación de Git",
         TextKey::GitRemoteAdded => "Repositorio remoto configurado.",
         TextKey::ThemeDebugger => "Debug tema",
@@ -4007,6 +4136,7 @@ fn translate_spanish(key: TextKey) -> &'static str {
         TextKey::OpenLink => "Abrir enlace",
         TextKey::AddFileToChat => "Añadir archivo",
         TextKey::AddSelectionToChat => "Añadir selección",
+        TextKey::ClearTerminal => "Limpiar",
         TextKey::CopyPlainText => "Copiar texto",
         TextKey::SelectAll => "Seleccionar todo",
         TextKey::Star => "Favorito",
@@ -4186,9 +4316,15 @@ fn translate_portuguese(key: TextKey) -> &'static str {
         TextKey::GitInitDone => "Repositório Git inicializado.",
         TextKey::GitCommitDone => "Confirmado.",
         TextKey::GitSyncUpToDate => "Já está atualizado.",
-        TextKey::GitSyncConflict => "Sincronização cancelada: conflitos entre alterações locais e remotas. Resolva-os e tente novamente.",
-        TextKey::GitAuthFailed => "Falha na autenticação. Verifique suas credenciais Git (chave SSH etc.).",
-        TextKey::GitIdentityMissing => "Configure primeiro sua identidade Git: git config --global user.name / user.email",
+        TextKey::GitSyncConflict => {
+            "Sincronização cancelada: conflitos entre alterações locais e remotas. Resolva-os e tente novamente."
+        }
+        TextKey::GitAuthFailed => {
+            "Falha na autenticação. Verifique suas credenciais Git (chave SSH etc.)."
+        }
+        TextKey::GitIdentityMissing => {
+            "Configure primeiro sua identidade Git: git config --global user.name / user.email"
+        }
         TextKey::GitOperationFailed => "Falha na operação Git",
         TextKey::GitRemoteAdded => "Repositório remoto configurado.",
         TextKey::ThemeDebugger => "Depurador de tema",
@@ -4234,6 +4370,7 @@ fn translate_portuguese(key: TextKey) -> &'static str {
         TextKey::OpenLink => "Abrir link",
         TextKey::AddFileToChat => "Adicionar arquivo",
         TextKey::AddSelectionToChat => "Adicionar seleção",
+        TextKey::ClearTerminal => "Limpar",
         TextKey::CopyPlainText => "Copiar texto",
         TextKey::SelectAll => "Selecionar tudo",
         TextKey::Star => "Favoritar",
@@ -4407,15 +4544,23 @@ fn translate_russian(key: TextKey) -> &'static str {
         TextKey::GitScopeAll => "Все",
         TextKey::GitScopeCurrentFile => "Текущий файл",
         TextKey::GitSetRemoteTitle => "Указать удалённый репозиторий",
-        TextKey::GitSetRemoteHint => "Введите URL репозитория для синхронизации (например, с GitHub).",
+        TextKey::GitSetRemoteHint => {
+            "Введите URL репозитория для синхронизации (например, с GitHub)."
+        }
         TextKey::GitSetRemotePlaceholder => "https://github.com/user/repo.git",
         TextKey::GitBranchPlaceholder => "Найти или создать ветку...",
         TextKey::GitInitDone => "Репозиторий Git инициализирован.",
         TextKey::GitCommitDone => "Закоммичено.",
         TextKey::GitSyncUpToDate => "Уже актуально.",
-        TextKey::GitSyncConflict => "Синхронизация отменена: конфликт локальных и удалённых изменений. Разрешите конфликт и повторите.",
-        TextKey::GitAuthFailed => "Ошибка аутентификации. Проверьте учётные данные Git (SSH-ключ и т. п.).",
-        TextKey::GitIdentityMissing => "Сначала настройте Git: git config --global user.name / user.email",
+        TextKey::GitSyncConflict => {
+            "Синхронизация отменена: конфликт локальных и удалённых изменений. Разрешите конфликт и повторите."
+        }
+        TextKey::GitAuthFailed => {
+            "Ошибка аутентификации. Проверьте учётные данные Git (SSH-ключ и т. п.)."
+        }
+        TextKey::GitIdentityMissing => {
+            "Сначала настройте Git: git config --global user.name / user.email"
+        }
         TextKey::GitOperationFailed => "Сбой операции Git",
         TextKey::GitRemoteAdded => "Удалённый репозиторий настроен.",
         TextKey::ThemeDebugger => "Отладка темы",
@@ -4461,6 +4606,7 @@ fn translate_russian(key: TextKey) -> &'static str {
         TextKey::OpenLink => "Открыть ссылку",
         TextKey::AddFileToChat => "Добавить файл",
         TextKey::AddSelectionToChat => "Добавить выбор",
+        TextKey::ClearTerminal => "Очистить",
         TextKey::CopyPlainText => "Копировать текст",
         TextKey::SelectAll => "Выделить всё",
         TextKey::Star => "В избранное",
@@ -4640,9 +4786,13 @@ fn translate_arabic(key: TextKey) -> &'static str {
         TextKey::GitInitDone => "تمت تهيئة مستودع Git.",
         TextKey::GitCommitDone => "تم الإيداع.",
         TextKey::GitSyncUpToDate => "محدث بالفعل.",
-        TextKey::GitSyncConflict => "تم إلغاء المزامنة: تعارض بين التغييرات المحلية والبعيدة. قم بحلها وحاول مرة أخرى.",
+        TextKey::GitSyncConflict => {
+            "تم إلغاء المزامنة: تعارض بين التغييرات المحلية والبعيدة. قم بحلها وحاول مرة أخرى."
+        }
         TextKey::GitAuthFailed => "فشلت المصادقة. تحقق من بيانات اعتماد Git (مفتاح SSH وغيره).",
-        TextKey::GitIdentityMissing => "قم أولاً بتعيين هوية Git: git config --global user.name / user.email",
+        TextKey::GitIdentityMissing => {
+            "قم أولاً بتعيين هوية Git: git config --global user.name / user.email"
+        }
         TextKey::GitOperationFailed => "فشلت عملية Git",
         TextKey::GitRemoteAdded => "تم تعيين المستودع البعيد.",
         TextKey::ThemeDebugger => "تصحيح السمة",
@@ -4688,6 +4838,7 @@ fn translate_arabic(key: TextKey) -> &'static str {
         TextKey::OpenLink => "فتح الرابط",
         TextKey::AddFileToChat => "إضافة ملف",
         TextKey::AddSelectionToChat => "إضافة تحديد",
+        TextKey::ClearTerminal => "مسح",
         TextKey::CopyPlainText => "نسخ نص",
         TextKey::SelectAll => "تحديد الكل",
         TextKey::Star => "تمييز بنجمة",
@@ -4867,9 +5018,13 @@ fn translate_hindi(key: TextKey) -> &'static str {
         TextKey::GitInitDone => "Git रिपॉज़िटरी आरंभ की गई।",
         TextKey::GitCommitDone => "कमिट हो गया।",
         TextKey::GitSyncUpToDate => "पहले से अद्यतित।",
-        TextKey::GitSyncConflict => "सिंक रद्द: स्थानीय और रिमोट परिवर्तनों में संघर्ष है। हल करके पुनः प्रयास करें।",
+        TextKey::GitSyncConflict => {
+            "सिंक रद्द: स्थानीय और रिमोट परिवर्तनों में संघर्ष है। हल करके पुनः प्रयास करें।"
+        }
         TextKey::GitAuthFailed => "प्रमाणीकरण विफल। अपने Git क्रेडेंशियल (SSH कुंजी आदि) जांचें।",
-        TextKey::GitIdentityMissing => "पहले अपनी Git पहचान सेट करें: git config --global user.name / user.email",
+        TextKey::GitIdentityMissing => {
+            "पहले अपनी Git पहचान सेट करें: git config --global user.name / user.email"
+        }
         TextKey::GitOperationFailed => "Git ऑपरेशन विफल",
         TextKey::GitRemoteAdded => "रिमोट रिपॉज़िटरी सेट की गई।",
         TextKey::ThemeDebugger => "थीम डीबगर",
@@ -4915,6 +5070,7 @@ fn translate_hindi(key: TextKey) -> &'static str {
         TextKey::OpenLink => "लिंक खोलें",
         TextKey::AddFileToChat => "फ़ाइल चैट में जोड़ें",
         TextKey::AddSelectionToChat => "चयन चैट में जोड़ें",
+        TextKey::ClearTerminal => "साफ़ करें",
         TextKey::CopyPlainText => "पाठ कॉपी करें",
         TextKey::SelectAll => "सभी चुनें",
         TextKey::Star => "स्टार करें",
@@ -4990,8 +5146,12 @@ fn translate_hindi(key: TextKey) -> &'static str {
 
 pub(crate) fn git_synced_message(language: UiLanguage, pushed: usize, pulled: usize) -> String {
     match language {
-        UiLanguage::ChineseSimplified => format!("已同步:推送 {pushed} 个提交,拉取 {pulled} 个提交。"),
-        UiLanguage::ChineseTraditional => format!("已同步:推送 {pushed} 個提交,拉取 {pulled} 個提交。"),
+        UiLanguage::ChineseSimplified => {
+            format!("已同步:推送 {pushed} 个提交,拉取 {pulled} 个提交。")
+        }
+        UiLanguage::ChineseTraditional => {
+            format!("已同步:推送 {pushed} 個提交,拉取 {pulled} 個提交。")
+        }
         UiLanguage::Japanese => format!("同期しました: プッシュ {pushed} 件、プル {pulled} 件。"),
         UiLanguage::Korean => format!("동기화 완료: 푸시 {pushed}개, 풀 {pulled}개."),
         UiLanguage::French => format!("Synchronisé : {pushed} poussé(s), {pulled} tiré(s)."),
@@ -5062,30 +5222,76 @@ pub(crate) fn git_discard_dialog_message(
     untracked: bool,
 ) -> String {
     match (language, untracked) {
-        (UiLanguage::ChineseSimplified, false) => format!("还原对 “{name}” 的修改?此操作无法撤销。"),
-        (UiLanguage::ChineseSimplified, true) => format!("删除未跟踪文件 “{name}”?文件将移入废纸篓。"),
-        (UiLanguage::ChineseTraditional, false) => format!("還原對「{name}」的修改?此操作無法復原。"),
-        (UiLanguage::ChineseTraditional, true) => format!("刪除未追蹤檔案「{name}」?檔案將移至垃圾桶。"),
-        (UiLanguage::Japanese, false) => format!("「{name}」の変更を元に戻しますか?この操作は取り消せません。"),
-        (UiLanguage::Japanese, true) => format!("未追跡ファイル「{name}」を削除しますか?ファイルはゴミ箱に移動します。"),
-        (UiLanguage::Korean, false) => format!("“{name}”의 변경을 되돌릴까요? 이 작업은 취소할 수 없습니다."),
-        (UiLanguage::Korean, true) => format!("추적되지 않은 파일 “{name}”을(를) 삭제할까요? 휴지통으로 이동합니다."),
-        (UiLanguage::French, false) => format!("Annuler les modifications de « {name} » ? Action irréversible."),
-        (UiLanguage::French, true) => format!("Supprimer le fichier non suivi « {name} » ? Il sera mis à la corbeille."),
-        (UiLanguage::German, false) => format!("Änderungen an „{name}“ verwerfen? Dies kann nicht rückgängig gemacht werden."),
-        (UiLanguage::German, true) => format!("Nicht verfolgte Datei „{name}“ löschen? Sie wird in den Papierkorb verschoben."),
-        (UiLanguage::Spanish, false) => format!("¿Descartar los cambios de «{name}»? Esta acción no se puede deshacer."),
-        (UiLanguage::Spanish, true) => format!("¿Eliminar el archivo sin seguimiento «{name}»? Se moverá a la papelera."),
-        (UiLanguage::Portuguese, false) => format!("Descartar as alterações de “{name}”? Esta ação não pode ser desfeita."),
-        (UiLanguage::Portuguese, true) => format!("Excluir o arquivo não rastreado “{name}”? Ele será movido para a lixeira."),
-        (UiLanguage::Russian, false) => format!("Отменить изменения в «{name}»? Это действие нельзя отменить."),
-        (UiLanguage::Russian, true) => format!("Удалить неотслеживаемый файл «{name}»? Он будет перемещён в корзину."),
-        (UiLanguage::Arabic, false) => format!("تجاهل تغييرات \"{name}\"؟ لا يمكن التراجع عن هذا الإجراء."),
-        (UiLanguage::Arabic, true) => format!("حذف الملف غير المتتبع \"{name}\"؟ سيتم نقله إلى سلة المهملات."),
-        (UiLanguage::Hindi, false) => format!("“{name}” के परिवर्तन छोड़ें? यह क्रिया पूर्ववत नहीं हो सकती।"),
+        (UiLanguage::ChineseSimplified, false) => {
+            format!("还原对 “{name}” 的修改?此操作无法撤销。")
+        }
+        (UiLanguage::ChineseSimplified, true) => {
+            format!("删除未跟踪文件 “{name}”?文件将移入废纸篓。")
+        }
+        (UiLanguage::ChineseTraditional, false) => {
+            format!("還原對「{name}」的修改?此操作無法復原。")
+        }
+        (UiLanguage::ChineseTraditional, true) => {
+            format!("刪除未追蹤檔案「{name}」?檔案將移至垃圾桶。")
+        }
+        (UiLanguage::Japanese, false) => {
+            format!("「{name}」の変更を元に戻しますか?この操作は取り消せません。")
+        }
+        (UiLanguage::Japanese, true) => {
+            format!("未追跡ファイル「{name}」を削除しますか?ファイルはゴミ箱に移動します。")
+        }
+        (UiLanguage::Korean, false) => {
+            format!("“{name}”의 변경을 되돌릴까요? 이 작업은 취소할 수 없습니다.")
+        }
+        (UiLanguage::Korean, true) => {
+            format!("추적되지 않은 파일 “{name}”을(를) 삭제할까요? 휴지통으로 이동합니다.")
+        }
+        (UiLanguage::French, false) => {
+            format!("Annuler les modifications de « {name} » ? Action irréversible.")
+        }
+        (UiLanguage::French, true) => {
+            format!("Supprimer le fichier non suivi « {name} » ? Il sera mis à la corbeille.")
+        }
+        (UiLanguage::German, false) => {
+            format!("Änderungen an „{name}“ verwerfen? Dies kann nicht rückgängig gemacht werden.")
+        }
+        (UiLanguage::German, true) => format!(
+            "Nicht verfolgte Datei „{name}“ löschen? Sie wird in den Papierkorb verschoben."
+        ),
+        (UiLanguage::Spanish, false) => {
+            format!("¿Descartar los cambios de «{name}»? Esta acción no se puede deshacer.")
+        }
+        (UiLanguage::Spanish, true) => {
+            format!("¿Eliminar el archivo sin seguimiento «{name}»? Se moverá a la papelera.")
+        }
+        (UiLanguage::Portuguese, false) => {
+            format!("Descartar as alterações de “{name}”? Esta ação não pode ser desfeita.")
+        }
+        (UiLanguage::Portuguese, true) => {
+            format!("Excluir o arquivo não rastreado “{name}”? Ele será movido para a lixeira.")
+        }
+        (UiLanguage::Russian, false) => {
+            format!("Отменить изменения в «{name}»? Это действие нельзя отменить.")
+        }
+        (UiLanguage::Russian, true) => {
+            format!("Удалить неотслеживаемый файл «{name}»? Он будет перемещён в корзину.")
+        }
+        (UiLanguage::Arabic, false) => {
+            format!("تجاهل تغييرات \"{name}\"؟ لا يمكن التراجع عن هذا الإجراء.")
+        }
+        (UiLanguage::Arabic, true) => {
+            format!("حذف الملف غير المتتبع \"{name}\"؟ سيتم نقله إلى سلة المهملات.")
+        }
+        (UiLanguage::Hindi, false) => {
+            format!("“{name}” के परिवर्तन छोड़ें? यह क्रिया पूर्ववत नहीं हो सकती।")
+        }
         (UiLanguage::Hindi, true) => format!("अनट्रैक्ड फ़ाइल “{name}” हटाएं? यह ट्रैश में चली जाएगी।"),
-        (UiLanguage::English, false) => format!("Discard changes to “{name}”? This cannot be undone."),
-        (UiLanguage::English, true) => format!("Delete untracked file “{name}”? It will be moved to the trash."),
+        (UiLanguage::English, false) => {
+            format!("Discard changes to “{name}”? This cannot be undone.")
+        }
+        (UiLanguage::English, true) => {
+            format!("Delete untracked file “{name}”? It will be moved to the trash.")
+        }
     }
 }
 
@@ -5109,7 +5315,8 @@ pub(crate) fn git_create_branch_label(language: UiLanguage, name: &str) -> Strin
 #[cfg(test)]
 mod action_label_tests {
     use super::{
-        UiLanguage, outline_action_label, sidebar_visibility_action_label, theme_action_label,
+        UiLanguage, outline_action_label, sidebar_visibility_action_label, terminal_settings_label,
+        theme_action_label,
     };
 
     #[test]
@@ -5129,6 +5336,43 @@ mod action_label_tests {
         assert_eq!(
             sidebar_visibility_action_label(UiLanguage::ChineseSimplified, true),
             "隐藏边栏"
+        );
+    }
+
+    #[test]
+    fn terminal_settings_labels_cover_every_language() {
+        let languages = [
+            UiLanguage::English,
+            UiLanguage::ChineseSimplified,
+            UiLanguage::ChineseTraditional,
+            UiLanguage::Japanese,
+            UiLanguage::Korean,
+            UiLanguage::French,
+            UiLanguage::German,
+            UiLanguage::Spanish,
+            UiLanguage::Portuguese,
+            UiLanguage::Russian,
+            UiLanguage::Arabic,
+            UiLanguage::Hindi,
+        ];
+        let keys = [
+            "section",
+            "cursor_shape",
+            "search_cursor_shapes",
+            "block",
+            "underline",
+            "bar",
+            "hollow",
+        ];
+
+        for language in languages {
+            for key in keys {
+                assert!(!terminal_settings_label(language, key).is_empty());
+            }
+        }
+        assert_eq!(
+            terminal_settings_label(UiLanguage::ChineseSimplified, "cursor_shape"),
+            "光标样式"
         );
     }
 

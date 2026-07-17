@@ -386,6 +386,7 @@ fn main() {
             KeyBinding::new("cmd-ctrl-i", ToggleChatPanel, Some("ChatTerminal")),
             KeyBinding::new("cmd-n", NewChatTab, Some("ChatTerminal")),
             KeyBinding::new("cmd-w", CloseActiveChatTab, Some("ChatTerminal")),
+            KeyBinding::new("cmd-k", ClearTerminal, Some("ChatTerminal")),
         ]);
 
         cx.bind_keys([
@@ -514,6 +515,11 @@ fn main() {
         let editor_for_window = editor_for_open_urls.clone();
         #[cfg(target_os = "macos")]
         let pending_paths_for_window = pending_open_paths.clone();
+        #[cfg(target_os = "macos")]
+        let traffic_light_position =
+            EditorView::traffic_light_position_for_ui_scale(editor::AppSettings::load().ui_scale);
+        #[cfg(not(target_os = "macos"))]
+        let traffic_light_position = point(px(10.0), px(10.0));
 
         cx.open_window(
             WindowOptions {
@@ -525,10 +531,9 @@ fn main() {
                 titlebar: Some(TitlebarOptions {
                     title: Some(system_application_display_name().into()),
                     appears_transparent: true,
-                    // Align the native traffic lights with the sidebar top
-                    // toggle row: top spacer is 40px high, macOS buttons are
-                    // ~14px tall, so y=13px puts their center at 20px.
-                    traffic_light_position: Some(point(px(18.0), px(18.0))),
+                    // `(10, 10)` is the baseline at UI scale 1.0. Keep the
+                    // native controls aligned with the scaled application chrome.
+                    traffic_light_position: Some(traffic_light_position),
                 }),
                 window_background: WindowBackgroundAppearance::Transparent,
                 ..Default::default()

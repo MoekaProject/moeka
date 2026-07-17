@@ -1744,9 +1744,9 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let was_visible = self.chat_panel_visible;
-        self.toggle_chat_panel(cx);
-        if was_visible {
+        let had_terminals = self.has_terminal_tabs();
+        self.toggle_terminal_panel(cx);
+        if had_terminals {
             window.focus(&self.focus_handle(cx));
         }
     }

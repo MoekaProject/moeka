@@ -649,6 +649,9 @@ impl EditorView {
         self.active_file_kind_cache = tab.file_kind.clone();
         self.current_file_path = tab.path.clone();
         self.editor_left_aligned = tab.editor_left_aligned;
+        if tab.kind.is_terminal() {
+            self.pending_terminal_focus = Some(tab.id.clone());
+        }
         if matches!(tab.kind, TabKind::Editor | TabKind::Diff) {
             if tab
                 .file_kind
@@ -725,6 +728,9 @@ impl EditorView {
         let was_active = self.active_tab_id.as_deref() == Some(tab_id);
         // Save to recently closed (keep up to 20)
         let removed = self.tabs.remove(index);
+        if removed.kind.is_terminal() {
+            self.stop_terminal_tab(&removed.id);
+        }
         if Self::should_track_in_recently_closed(&removed) {
             self.recently_closed_tabs.push(removed.clone());
             if self.recently_closed_tabs.len() > 20 {
@@ -1043,7 +1049,7 @@ impl EditorView {
         session_store::persist_session(self);
     }
 
-    fn scroll_tab_bar_to_end(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn scroll_tab_bar_to_end(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(16))
@@ -1838,6 +1844,19 @@ impl EditorView {
                         .when(tab_kind == TabKind::Diff, |this| {
                             this.child(self.render_tab_file_indicator(tab, is_active))
                         })
+                        .when_some(tab_kind.terminal_agent(), |this, agent_cli| {
+                            this.child(
+                                svg()
+                                    .path(agent_cli.icon_path())
+                                    .size(px(self.scaled(ts.tab_item_icon_size_px)))
+                                    .text_color(ts.tab_item_icon_color)
+                                    .opacity(if is_active {
+                                        ts.tab_item_icon_active_opacity
+                                    } else {
+                                        ts.tab_item_icon_inactive_opacity
+                                    }),
+                            )
+                        })
                         .when(tab_kind == TabKind::Settings, |this| {
                             this.child(
                                 svg()
@@ -1916,7 +1935,6 @@ impl EditorView {
                 DraggedTab {
                     tab_id: drag_tab_id.clone(),
                     title: drag_title,
-                    path: tab.path.clone(),
                     source_index: tab_index,
                     source_pane_id: pane_id,
                 },
@@ -2048,8 +2066,6 @@ impl EditorView {
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
         let ts = &self.styles.tab_bar;
-        let ups = &self.styles.utility_panel;
-        let in_right_panel_chrome = self.right_panel_width() > 0.5;
         let button_height = (self.tab_bar_height() - self.scaled(6.0)).max(18.0);
         let icon_size = self.scaled(ts.tab_item_icon_size_px);
         let button_padding_x = self.scaled(ts.tab_action_button_padding_x_px);
@@ -2059,17 +2075,9 @@ impl EditorView {
             ts.tab_item_icon_inactive_opacity
         };
         let icon_color = if is_active {
-            if in_right_panel_chrome {
-                ups.utility_panel_item_value_text_color
-            } else {
-                ts.tab_item_active_text_color
-            }
+            ts.tab_item_active_text_color
         } else {
-            if in_right_panel_chrome {
-                ups.utility_panel_item_label_text_color
-            } else {
-                ts.tab_item_icon_color
-            }
+            ts.tab_item_icon_color
         };
         let button = div()
             .id(id)
@@ -2162,6 +2170,57 @@ impl EditorView {
             .into_any_element()
     }
 
+    pub(crate) fn render_tab_bar_toggle_actions(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let inner_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
+
+        div()
+            .id("tab-bar-actions")
+            .h(px(inner_height))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(0.0))
+            .pr(px(self.scaled(ts.tab_item_padding_right_px)))
+            .when(self.prepared_update().is_some(), |this| {
+                this.child(self.render_update_ready_button(cx))
+            })
+            .child(self.render_tab_bar_action_button(
+                "tab-bar-chat-toggle",
+                CHAT_PANEL_SVG_PATH,
+                self.has_terminal_tabs(),
+                true,
+                None,
+                crate::i18n::terminal_label(self.ui_language),
+                Some("⌃⌘I"),
+                cx,
+                |this, cx| this.toggle_terminal_panel(cx),
+            ))
+            .child(self.render_tab_bar_action_button(
+                "tab-bar-info-toggle",
+                INFO_PANEL_SVG_PATH,
+                self.is_utility_panel_active(RightUtilityPanel::Info),
+                true,
+                None,
+                self.t(crate::i18n::TextKey::FileInfo),
+                Some("⌘⌥I"),
+                cx,
+                |this, cx| this.toggle_info_panel(cx),
+            ))
+            .child(self.render_tab_bar_action_button(
+                "tab-bar-git-toggle",
+                GIT_HISTORY_SVG_PATH,
+                self.is_utility_panel_active(RightUtilityPanel::GitHistory),
+                true,
+                None,
+                self.t(crate::i18n::TextKey::GitPanelTitle),
+                Some("⌃⇧G"),
+                cx,
+                |this, cx| this.toggle_git_history_panel(cx),
+            ))
+            .into_any_element()
+    }
+
     pub(crate) fn render_tab_bar(&self, pane_id: PaneId, cx: &mut Context<Self>) -> AnyElement {
         let is_top_left_pane = pane_id == self.top_left_pane_id();
         let is_top_right_pane = pane_id == self.top_right_pane_id();
@@ -2208,6 +2267,14 @@ impl EditorView {
                     cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
                         this.create_scratch_tab(cx);
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.open_terminal_tab_create_context_menu(event.position, cx);
                     }),
                 ),
             cx.entity().clone(),
@@ -2274,9 +2341,6 @@ impl EditorView {
                 .into_any_element(),
         );
 
-        let chat_active = self.is_utility_panel_active(RightUtilityPanel::Chat);
-        let info_active = self.is_utility_panel_active(RightUtilityPanel::Info);
-        let git_active = self.is_utility_panel_active(RightUtilityPanel::GitHistory);
         let can_nav_back = self.can_navigate_tab_history_back();
         let can_nav_forward = self.can_navigate_tab_history_forward();
         let history_button_size = self.tab_bar_height();
@@ -2357,56 +2421,6 @@ impl EditorView {
             .items_center()
             .ml(px(leading_left_margin))
             .child(left_controls);
-        let action_buttons = div()
-            .id("tab-bar-actions")
-            .h(px(inner_height))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(0.0))
-            .pr(px(self.scaled(ts.tab_item_padding_right_px)))
-            .when(self.prepared_update().is_some(), |this| {
-                this.child(self.render_update_ready_button(cx))
-            })
-            .child(self.render_tab_bar_action_button(
-                "tab-bar-chat-toggle",
-                CHAT_PANEL_SVG_PATH,
-                chat_active,
-                true,
-                Some(Self::show_chat_panel_bottom),
-                crate::i18n::chat_label(self.ui_language),
-                Some("⌃⌘I"),
-                cx,
-                |this, cx| {
-                    this.toggle_chat_panel(cx);
-                },
-            ))
-            .child(self.render_tab_bar_action_button(
-                "tab-bar-info-toggle",
-                INFO_PANEL_SVG_PATH,
-                info_active,
-                true,
-                None,
-                self.t(crate::i18n::TextKey::FileInfo),
-                Some("⌘⌥I"),
-                cx,
-                |this, cx| {
-                    this.toggle_info_panel(cx);
-                },
-            ))
-            .child(self.render_tab_bar_action_button(
-                "tab-bar-git-toggle",
-                GIT_HISTORY_SVG_PATH,
-                git_active,
-                true,
-                None,
-                self.t(crate::i18n::TextKey::GitPanelTitle),
-                Some("⌃⇧G"),
-                cx,
-                |this, cx| {
-                    this.toggle_git_history_panel(cx);
-                },
-            ));
         let action_chrome = div()
             .id("tab-bar-actions-chrome")
             .h(px(inner_height))
@@ -2415,8 +2429,10 @@ impl EditorView {
             .items_center()
             .justify_end()
             .when(
-                is_top_right_pane && !self.should_render_utility_panel_on_right(),
-                |this| this.child(action_buttons),
+                is_top_right_pane
+                    && !self.focused_pane_active_tab_is_terminal()
+                    && !self.should_render_utility_panel_on_right(),
+                |this| this.child(self.render_tab_bar_toggle_actions(cx)),
             );
 
         div()
@@ -2491,55 +2507,6 @@ impl EditorView {
                     .children(tab_items),
             )
             .child(action_chrome)
-            .into_any_element()
-    }
-
-    pub(crate) fn render_panel_toggle_actions(&self, cx: &mut Context<Self>) -> AnyElement {
-        let ts = &self.styles.tab_bar;
-        let inner_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
-        div()
-            .id("panel-toggle-actions")
-            .h(px(inner_height))
-            .flex()
-            .items_center()
-            .gap(px(0.0))
-            .pr(px(self.scaled(ts.tab_item_padding_right_px)))
-            .when(self.prepared_update().is_some(), |this| {
-                this.child(self.render_update_ready_button(cx))
-            })
-            .child(self.render_tab_bar_action_button(
-                "panel-chat-toggle",
-                CHAT_PANEL_SVG_PATH,
-                self.is_utility_panel_active(RightUtilityPanel::Chat),
-                true,
-                Some(Self::show_chat_panel_bottom),
-                crate::i18n::chat_label(self.ui_language),
-                Some("⌃⌘I"),
-                cx,
-                |this, cx| this.toggle_chat_panel(cx),
-            ))
-            .child(self.render_tab_bar_action_button(
-                "panel-info-toggle",
-                INFO_PANEL_SVG_PATH,
-                self.is_utility_panel_active(RightUtilityPanel::Info),
-                true,
-                None,
-                self.t(crate::i18n::TextKey::FileInfo),
-                Some("⌘⌥I"),
-                cx,
-                |this, cx| this.toggle_info_panel(cx),
-            ))
-            .child(self.render_tab_bar_action_button(
-                "panel-git-toggle",
-                GIT_HISTORY_SVG_PATH,
-                self.is_utility_panel_active(RightUtilityPanel::GitHistory),
-                true,
-                None,
-                self.t(crate::i18n::TextKey::GitPanelTitle),
-                Some("⌃⇧G"),
-                cx,
-                |this, cx| this.toggle_git_history_panel(cx),
-            ))
             .into_any_element()
     }
 }

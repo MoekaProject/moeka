@@ -126,7 +126,11 @@ impl EditorView {
         styles.text_input_placeholder_color = menu.quick_open_result_secondary_text_color;
         styles.text_input_cursor_color = menu.quick_open_input_text_color;
         styles.text_input_border_width_px = 0.0;
-        styles.text_input_cursor_height_ratio = 0.6;
+        styles.text_input_padding_left_px = menu.quick_open_input_text_padding_left_px;
+        styles.text_input_padding_right_px = menu.quick_open_input_text_padding_left_px;
+        styles.text_input_font_size_px = menu.quick_open_result_name_font_size_px;
+        styles.text_input_cursor_height_ratio = menu.quick_open_input_cursor_height_ratio;
+        styles.text_input_cursor_height_adjust_px = menu.quick_open_input_cursor_height_adjust_px;
         styles
     }
 
@@ -335,8 +339,8 @@ impl EditorView {
         let text_primary = styles.quick_open_result_text_color;
         let text_secondary = styles.quick_open_result_secondary_text_color;
         let row_h = self.scaled(24.0);
-        let name_font = self.scaled(12.0);
-        let input_h = self.scaled(42.0);
+        let name_font = self.scaled(styles.quick_open_result_name_font_size_px);
+        let input_h = self.scaled(33.0);
         let max_visible = 12usize;
         let visible_rows = self
             .language_picker_items
@@ -384,11 +388,11 @@ impl EditorView {
             rows.push(
                 div()
                     .w_full()
-                    .h(px(self.scaled(56.0)))
+                    .h(px(self.scaled(styles.quick_open_empty_height_px)))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(self.scaled(13.0)))
+                    .text_size(px(self.scaled(styles.quick_open_empty_font_size_px)))
                     .text_color(text_secondary)
                     .child(crate::i18n::no_matches_label(self.ui_language))
                     .into_any_element(),
@@ -401,7 +405,7 @@ impl EditorView {
                         .id(SharedString::from(format!("language-picker-{index}")))
                         .mx(px(1.0))
                         .h(px(row_h))
-                        .px(px(self.scaled(10.0)))
+                        .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
                         .flex()
                         .items_center()
                         .cursor(CursorStyle::Arrow)
@@ -473,8 +477,8 @@ impl EditorView {
                     .child(
                         div()
                             .w_full()
-                            .px(px(self.scaled(6.0)))
-                            .py(px(self.scaled(6.0)))
+                            .px(px(self.scaled(styles.quick_open_input_padding_x_px)))
+                            .py(px(self.scaled(4.0)))
                             .border_b(px(1.0))
                             .border_color(border)
                             .when_some(self.language_picker_editor.clone(), |this, editor| {
@@ -487,7 +491,7 @@ impl EditorView {
                             .w_full()
                             .max_h(px(max_results_h))
                             .overflow_y_scroll()
-                            .pb(px(self.scaled(8.0)))
+                            .pb(px(self.scaled(4.0)))
                             .track_scroll(&self.language_picker_scroll_handle)
                             .children(rows),
                     ),

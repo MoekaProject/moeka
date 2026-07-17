@@ -76,6 +76,7 @@ actions!(
         ToggleChatPanel,
         NewChatTab,
         CloseActiveChatTab,
+        ClearTerminal,
         ToggleTheme,
         ToggleEditorLeftAlign,
         SelectLine,

@@ -131,9 +131,7 @@ impl EditorView {
                     ups.utility_panel_item_label_text_color
                 })
                 .when(active, |this| this.bg(hover_bg))
-                .when(!active, |this| {
-                    this.hover(move |style| style.bg(hover_bg))
-                })
+                .when(!active, |this| this.hover(move |style| style.bg(hover_bg)))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| {
@@ -215,15 +213,13 @@ impl EditorView {
             button
         } else {
             let hover_bg = ups.utility_panel_button_hover_bg;
-            button
-                .hover(move |style| style.bg(hover_bg))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.open_branch_picker(event.position, window, cx);
-                    }),
-                )
+            button.hover(move |style| style.bg(hover_bg)).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_branch_picker(event.position, window, cx);
+                }),
+            )
         };
         tooltip::with_tooltip(
             button,
@@ -289,15 +285,13 @@ impl EditorView {
             button
         } else {
             let hover_bg = ups.utility_panel_button_hover_bg;
-            button
-                .hover(move |style| style.bg(hover_bg))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.run_git_operation(GitOperation::Sync, cx);
-                    }),
-                )
+            button.hover(move |style| style.bg(hover_bg)).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.run_git_operation(GitOperation::Sync, cx);
+                }),
+            )
         };
         tooltip::with_tooltip(
             button,
@@ -309,7 +303,10 @@ impl EditorView {
 
     // ── Changes tab ────────────────────────────────────────────────
 
-    fn git_changes_rows(status: &GitPanelStatus, t: impl Fn(crate::i18n::TextKey) -> &'static str) -> Vec<GitChangesRow> {
+    fn git_changes_rows(
+        status: &GitPanelStatus,
+        t: impl Fn(crate::i18n::TextKey) -> &'static str,
+    ) -> Vec<GitChangesRow> {
         let mut rows = Vec::new();
         if !status.conflicted.is_empty() {
             rows.push(GitChangesRow::SectionHeader {
@@ -480,20 +477,18 @@ impl EditorView {
         let button = if busy {
             button
         } else {
-            button
-                .hover(move |style| style.bg(hover_bg))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.run_git_operation(
-                            GitOperation::Init {
-                                base_dir: base_dir.clone(),
-                            },
-                            cx,
-                        );
-                    }),
-                )
+            button.hover(move |style| style.bg(hover_bg)).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.run_git_operation(
+                        GitOperation::Init {
+                            base_dir: base_dir.clone(),
+                        },
+                        cx,
+                    );
+                }),
+            )
         };
 
         div()
@@ -566,23 +561,17 @@ impl EditorView {
                 if busy {
                     this.child(button)
                 } else {
-                    this.child(
-                        button
-                            .hover(move |style| style.bg(hover_bg))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    let operation = match action {
-                                        GitSectionHeaderAction::StageAll => GitOperation::StageAll,
-                                        GitSectionHeaderAction::UnstageAll => {
-                                            GitOperation::UnstageAll
-                                        }
-                                    };
-                                    this.run_git_operation(operation, cx);
-                                }),
-                            ),
-                    )
+                    this.child(button.hover(move |style| style.bg(hover_bg)).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            let operation = match action {
+                                GitSectionHeaderAction::StageAll => GitOperation::StageAll,
+                                GitSectionHeaderAction::UnstageAll => GitOperation::UnstageAll,
+                            };
+                            this.run_git_operation(operation, cx);
+                        }),
+                    ))
                 }
             })
             .into_any_element()
@@ -917,41 +906,39 @@ impl EditorView {
         let font_size = self.scaled(ups.utility_panel_item_font_size_px * 0.92);
         let hover_bg = ups.utility_panel_button_hover_bg;
         let has_file = self.current_file_path.is_some();
-        let scope_button = |id: &'static str,
-                            label: &'static str,
-                            scope: GitHistoryScope,
-                            enabled: bool| {
-            let active = self.git_history_scope == scope;
-            let button = div()
-                .id(id)
-                .px(px(self.scaled(6.0)))
-                .py(px(self.scaled(1.0)))
-                .rounded(px(self.scaled(4.0)))
-                .cursor(CursorStyle::Arrow)
-                .text_size(px(font_size))
-                .text_color(if active {
-                    ups.utility_panel_item_value_text_color
+        let scope_button =
+            |id: &'static str, label: &'static str, scope: GitHistoryScope, enabled: bool| {
+                let active = self.git_history_scope == scope;
+                let button = div()
+                    .id(id)
+                    .px(px(self.scaled(6.0)))
+                    .py(px(self.scaled(1.0)))
+                    .rounded(px(self.scaled(4.0)))
+                    .cursor(CursorStyle::Arrow)
+                    .text_size(px(font_size))
+                    .text_color(if active {
+                        ups.utility_panel_item_value_text_color
+                    } else {
+                        ups.utility_panel_item_label_text_color
+                    })
+                    .when(active, |this| this.bg(hover_bg))
+                    .opacity(if enabled { 1.0 } else { 0.45 })
+                    .child(SharedString::from(label.to_string()));
+                if enabled && !active {
+                    button
+                        .hover(move |style| style.bg(hover_bg))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.set_git_history_scope(scope, cx);
+                            }),
+                        )
+                        .into_any_element()
                 } else {
-                    ups.utility_panel_item_label_text_color
-                })
-                .when(active, |this| this.bg(hover_bg))
-                .opacity(if enabled { 1.0 } else { 0.45 })
-                .child(SharedString::from(label.to_string()));
-            if enabled && !active {
-                button
-                    .hover(move |style| style.bg(hover_bg))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.set_git_history_scope(scope, cx);
-                        }),
-                    )
-                    .into_any_element()
-            } else {
-                button.into_any_element()
-            }
-        };
+                    button.into_any_element()
+                }
+            };
 
         div()
             .flex_shrink_0()
@@ -1049,10 +1036,9 @@ impl EditorView {
                         GitHistoryRow::CommitFile(entry) => {
                             self.render_git_commit_file_row(entry, item_height, cx)
                         }
-                        GitHistoryRow::CommitFilesLoading => div()
-                            .h(px(item_height))
-                            .flex_shrink_0()
-                            .into_any_element(),
+                        GitHistoryRow::CommitFilesLoading => {
+                            div().h(px(item_height)).flex_shrink_0().into_any_element()
+                        }
                     });
                 }
                 if list_window.bottom_spacer_px > 0.0 {
@@ -1275,9 +1261,9 @@ impl EditorView {
         let click_path = entry.rel_path.clone();
 
         div()
-            .pl(px(self.scaled(
-                ups.utility_panel_section_padding_x_px + 14.0,
-            )))
+            .pl(px(
+                self.scaled(ups.utility_panel_section_padding_x_px + 14.0)
+            ))
             .pr(px(self.scaled(ups.utility_panel_section_padding_x_px)))
             .w_full()
             .h(px(row_height))

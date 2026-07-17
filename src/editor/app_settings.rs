@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::i18n::{UiLanguage, default_language_code};
 use crate::theme::{EditorThemeMode, ThemeKind};
 
-use super::{SidebarSortMode, config_store};
+use super::{SidebarSortMode, TerminalCursorShape, config_store};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AppSettings {
@@ -59,6 +59,8 @@ pub(crate) struct AppSettings {
     pub attachment_location: String,
     #[serde(default = "default_attachment_folder")]
     pub attachment_folder: String,
+    #[serde(default = "default_terminal_cursor_shape")]
+    pub terminal_cursor_shape: String,
     /// User keybinding overrides: command id (see `CommandId::config_key`) to
     /// gpui keystroke string, e.g. `save: cmd-shift-s`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -161,6 +163,10 @@ fn default_attachment_folder() -> String {
     "attachments".to_string()
 }
 
+fn default_terminal_cursor_shape() -> String {
+    TerminalCursorShape::default().as_str().to_string()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -190,12 +196,17 @@ impl Default for AppSettings {
             simple_mode: false,
             attachment_location: default_attachment_location(),
             attachment_folder: default_attachment_folder(),
+            terminal_cursor_shape: default_terminal_cursor_shape(),
             keybindings: std::collections::BTreeMap::new(),
         }
     }
 }
 
 impl AppSettings {
+    pub(crate) fn terminal_cursor_shape(&self) -> TerminalCursorShape {
+        TerminalCursorShape::from_str(&self.terminal_cursor_shape).unwrap_or_default()
+    }
+
     pub(crate) fn attachment_policy(&self) -> super::AttachmentPolicy {
         super::AttachmentPolicy::from_settings(
             &self.attachment_location,
@@ -442,6 +453,7 @@ pub(crate) fn theme_kind_to_string(kind: ThemeKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::AppSettings;
+    use crate::editor::TerminalCursorShape;
     use crate::editor::attachments::{AttachmentLinkSyntax, AttachmentPathStyle};
     use crate::theme::EditorThemeMode;
 
@@ -453,6 +465,29 @@ mod tests {
         assert_eq!(settings.body_latin_font, "Menlo");
         assert_eq!(settings.body_cjk_font, "Menlo");
         assert_eq!(settings.code_font, "Menlo");
+    }
+
+    #[test]
+    fn terminal_cursor_shape_defaults_to_block_and_rejects_unknown_values() {
+        let default_settings = AppSettings::default();
+        assert_eq!(
+            default_settings.terminal_cursor_shape(),
+            TerminalCursorShape::Block
+        );
+
+        for shape in TerminalCursorShape::ALL {
+            let settings = AppSettings {
+                terminal_cursor_shape: shape.as_str().to_string(),
+                ..AppSettings::default()
+            };
+            assert_eq!(settings.terminal_cursor_shape(), shape);
+        }
+
+        let invalid = AppSettings {
+            terminal_cursor_shape: "unexpected".to_string(),
+            ..AppSettings::default()
+        };
+        assert_eq!(invalid.terminal_cursor_shape(), TerminalCursorShape::Block);
     }
 
     #[test]
