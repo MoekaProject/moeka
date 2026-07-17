@@ -120,7 +120,7 @@ impl EditorView {
         .detach();
     }
 
-    fn on_tab_bar_drag_space_mouse_down(
+    pub(super) fn on_tab_bar_drag_space_mouse_down(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
@@ -2067,7 +2067,13 @@ impl EditorView {
     ) -> AnyElement {
         let ts = &self.styles.tab_bar;
         let button_height = (self.tab_bar_height() - self.scaled(6.0)).max(18.0);
-        let icon_size = self.scaled(ts.tab_item_icon_size_px);
+        let icon_size = self.scaled(
+            if matches!(id, "tab-bar-outline-toggle" | "tab-bar-theme-toggle") {
+                ts.tab_action_emphasis_icon_size_px
+            } else {
+                ts.tab_item_icon_size_px
+            },
+        );
         let button_padding_x = self.scaled(ts.tab_action_button_padding_x_px);
         let button_opacity = if is_active {
             ts.tab_item_icon_active_opacity
@@ -2207,12 +2213,8 @@ impl EditorView {
             .when(self.app_settings.simple_mode, |this| {
                 this.child(self.render_tab_bar_action_button(
                     "tab-bar-theme-toggle",
-                    if self.theme_kind.is_dark() {
-                        THEME_DARK_MINI_SVG_PATH
-                    } else {
-                        THEME_LIGHT_MINI_SVG_PATH
-                    },
-                    true,
+                    MOUNTAIN_SVG_PATH,
+                    !self.theme_kind.is_dark(),
                     true,
                     None,
                     crate::i18n::theme_action_label(self.ui_language, self.theme_kind.is_dark()),
@@ -2394,6 +2396,7 @@ impl EditorView {
                     .flex()
                     .items_center()
                     .justify_center()
+                    .group("tab-history-button")
                     .bg(ts.tab_history_btn_bg)
                     .opacity(if enabled {
                         ts.tab_history_btn_enabled_opacity
@@ -2402,25 +2405,31 @@ impl EditorView {
                     })
                     .cursor(CursorStyle::Arrow)
                     .when(enabled, |this| {
-                        this.hover(move |style| style.bg(ts.tab_history_btn_hover_bg))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    handler(this, cx);
+                        this.child(
+                            svg()
+                                .path(icon_path)
+                                .size(px(history_icon_size))
+                                .text_color(ts.tab_history_btn_icon_color)
+                                .group_hover("tab-history-button", move |style| {
+                                    style.text_color(ts.tab_history_btn_hover_icon_color)
                                 }),
-                            )
-                    })
-                    .child(
-                        svg()
-                            .path(icon_path)
-                            .size(px(history_icon_size))
-                            .text_color(if enabled {
-                                ts.tab_history_btn_icon_color
-                            } else {
-                                ts.tab_history_btn_icon_disabled_color
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                handler(this, cx);
                             }),
-                    )
+                        )
+                    })
+                    .when(!enabled, |this| {
+                        this.child(
+                            svg()
+                                .path(icon_path)
+                                .size(px(history_icon_size))
+                                .text_color(ts.tab_history_btn_icon_disabled_color),
+                        )
+                    })
             };
         let sidebar_tooltip = if self.workspaces.is_empty() {
             self.t(crate::i18n::TextKey::OpenFolder)
@@ -2436,14 +2445,17 @@ impl EditorView {
                 .flex()
                 .items_center()
                 .justify_center()
+                .group("tab-history-button")
                 .bg(ts.tab_history_btn_bg)
                 .cursor(CursorStyle::Arrow)
-                .hover(move |style| style.bg(ts.tab_history_btn_hover_bg))
                 .child(
                     svg()
                         .path("assets/icons/file-tree-toggle.svg")
                         .size(px(self.scaled(ts.tab_item_icon_size_px)))
-                        .text_color(ts.tab_history_btn_icon_color),
+                        .text_color(ts.tab_history_btn_icon_color)
+                        .group_hover("tab-history-button", move |style| {
+                            style.text_color(ts.tab_history_btn_hover_icon_color)
+                        }),
                 )
                 .on_mouse_down(
                     MouseButton::Left,
@@ -2495,6 +2507,10 @@ impl EditorView {
             .flex()
             .items_center()
             .ml(px(leading_left_margin))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+            )
             .child(left_controls);
         let action_chrome = div()
             .id("tab-bar-actions-chrome")
@@ -2520,12 +2536,7 @@ impl EditorView {
             .bg(ts.tab_bar_bg)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    if this.tab_drag_candidate_id.is_some() || this.tab_dragging_id.is_some() {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    }
-                }),
+                cx.listener(Self::on_tab_bar_drag_space_mouse_down),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 if event.dragging()

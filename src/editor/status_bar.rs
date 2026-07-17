@@ -219,7 +219,7 @@ impl EditorView {
             .flex()
             .items_center()
             .justify_end()
-            .pl(px(self.scaled(10.0)))
+            .pl(px(self.scaled(self.styles.status_bar_padding_left_px)))
             .pr(px(0.0))
             .border_t(px(border_width))
             .border_color(border)
@@ -270,7 +270,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let font_size = self.scaled(11.0);
-        div()
+        let button = div()
             .id("status-bar-branch")
             .px(px(self.scaled(6.0)))
             .h_full()
@@ -303,6 +303,15 @@ impl EditorView {
                     .text_color(title_color)
                     .child(branch),
             )
+            .into_any_element();
+        let bounds_cell = self.status_bar_branch_button_bounds.clone();
+        div()
+            .h_full()
+            .flex_none()
+            .on_children_prepainted(move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
+                bounds_cell.set(bounds.first().copied());
+            })
+            .child(button)
             .into_any_element()
     }
 
@@ -316,7 +325,7 @@ impl EditorView {
         action: Option<StatusBarAction>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
+        let button = div()
             .px(px(self.scaled(6.0)))
             .h_full()
             .flex()
@@ -341,6 +350,25 @@ impl EditorView {
                     }),
                 )
             })
+            .into_any_element();
+        let bounds_cell = match action {
+            Some(StatusBarAction::OpenIndentationMenu) => {
+                Some(self.status_bar_indent_button_bounds.clone())
+            }
+            Some(StatusBarAction::OpenLanguagePicker) => {
+                Some(self.status_bar_language_button_bounds.clone())
+            }
+            None => None,
+        };
+        div()
+            .h_full()
+            .flex_none()
+            .when_some(bounds_cell, |this, bounds_cell| {
+                this.on_children_prepainted(move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
+                    bounds_cell.set(bounds.first().copied());
+                })
+            })
+            .child(button)
             .into_any_element()
     }
 

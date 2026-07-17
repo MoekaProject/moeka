@@ -975,6 +975,10 @@ impl Render for EditorView {
                                     .flex()
                                     .items_center()
                                     .justify_end()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+                                    )
                                     .child(self.render_tab_bar_toggle_actions(cx)),
                             )
                         },

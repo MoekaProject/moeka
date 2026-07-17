@@ -3,7 +3,8 @@
 //! "create branch" row when the query does not match an existing branch.
 
 use gpui::{
-    AnyElement, Context, CursorStyle, MouseButton, Pixels, Point, Window, div, prelude::*, px,
+    AnyElement, Bounds, Context, CursorStyle, MouseButton, Pixels, Point, Window, div, point,
+    prelude::*, px, size,
 };
 
 use super::*;
@@ -47,35 +48,33 @@ impl EditorView {
             return;
         }
 
+        let branches = git_repo_root(&base_dir)
+            .map(|repo_root| collect_local_branches(&repo_root))
+            .unwrap_or_default();
         self.branch_picker_visible = true;
-        self.branch_picker_anchor = Some(position);
+        self.branch_picker_anchor = [
+            self.status_bar_branch_button_bounds.get(),
+            self.git_panel_branch_button_bounds.get(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|bounds| bounds.contains(&position))
+        .or_else(|| {
+            Some(Bounds::new(
+                point(
+                    position.x,
+                    px(self.last_window_height - self.status_bar_height()),
+                ),
+                size(px(0.0), px(self.status_bar_height())),
+            ))
+        });
         self.branch_picker_query.clear();
         self.branch_picker_selected_index = 0;
-        self.branch_picker_all.clear();
+        self.branch_picker_all = branches;
         self.branch_picker_current = self
             .git_panel_repo_status()
             .map(|status| status.branch_label());
         self.update_branch_picker_results(cx);
-
-        // Load the branch list off the main thread.
-        self.branch_picker_task = Some(cx.spawn(async move |this, cx| {
-            let branches = cx
-                .background_executor()
-                .spawn(async move {
-                    git_repo_root(&base_dir)
-                        .map(|repo_root| collect_local_branches(&repo_root))
-                        .unwrap_or_default()
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                this.branch_picker_task = None;
-                if this.branch_picker_visible {
-                    this.branch_picker_all = branches;
-                    this.update_branch_picker_results(cx);
-                }
-            })
-            .ok();
-        }));
 
         if self.branch_picker_editor.is_none() {
             let styles = self.language_picker_text_input_styles();
@@ -127,7 +126,6 @@ impl EditorView {
     pub(crate) fn close_branch_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.branch_picker_visible = false;
         self.branch_picker_anchor = None;
-        self.branch_picker_task = None;
         window.focus(&self.focus_handle(cx));
         cx.notify();
     }
@@ -221,34 +219,26 @@ impl EditorView {
             .min(max_visible)
             .max(1);
         let desired_h = input_h + visible_rows as f32 * row_h;
-        let panel_w = self
-            .scaled(220.0)
-            .min(self.last_window_width - 16.0)
-            .max(self.scaled(180.0));
+        let desired_panel_w = self.scaled(220.0).max(self.scaled(180.0));
         let anchor = self.branch_picker_anchor.unwrap_or_else(|| {
-            gpui::point(
-                px(self.last_window_width - 8.0),
-                px(self.last_window_height - 8.0),
+            Bounds::new(
+                point(px(8.0), px(self.last_window_height)),
+                size(px(0.0), px(0.0)),
             )
         });
-        let anchor_x = f32::from(anchor.x);
-        let anchor_y = f32::from(anchor.y);
-        let gap = self.scaled(4.0);
-        let available_below = (self.last_window_height - anchor_y - gap - 8.0).max(0.0);
-        let available_above = (anchor_y - gap - 8.0).max(0.0);
-        let show_above = desired_h > available_below && available_above > available_below;
-        let panel_h = if show_above {
-            desired_h.min(available_above).max(self.scaled(100.0))
-        } else {
-            desired_h.min(available_below).max(self.scaled(100.0))
-        };
-        let panel_left =
-            (anchor_x - panel_w).clamp(8.0, (self.last_window_width - panel_w - 8.0).max(8.0));
-        let panel_top = if show_above {
-            (anchor_y - panel_h - gap).max(8.0)
-        } else {
-            (anchor_y + gap).min((self.last_window_height - panel_h - 8.0).max(8.0))
-        };
+        let placement = helpers::anchored_popup_placement(
+            self.last_window_width,
+            self.last_window_height,
+            anchor,
+            desired_panel_w,
+            desired_h,
+            false,
+            self.scaled(self.styles.anchored_popup_gap_px),
+            self.scaled(self.styles.anchored_popup_margin_px),
+        );
+        let panel_w = placement.width;
+        let panel_h = placement.max_height;
+        let panel_left = placement.left;
         let max_results_h = (panel_h - input_h).max(row_h);
 
         let mut rows = Vec::new();
@@ -328,6 +318,50 @@ impl EditorView {
             }
         }
 
+        let panel = div()
+            .id("branch-picker-overlay")
+            .absolute()
+            .left(px(panel_left))
+            .w(px(panel_w))
+            .max_h(px(panel_h))
+            .bg(bg)
+            .border(px(1.0))
+            .border_color(border)
+            .rounded(px(self.scaled(8.0)))
+            .overflow_hidden()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, window, cx| {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                }),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .px(px(self.scaled(styles.quick_open_input_padding_x_px)))
+                    .py(px(self.scaled(4.0)))
+                    .border_b(px(1.0))
+                    .border_color(border)
+                    .when_some(self.branch_picker_editor.clone(), |this, editor| {
+                        this.child(editor)
+                    }),
+            )
+            .child(
+                div()
+                    .id("branch-picker-results")
+                    .w_full()
+                    .max_h(px(max_results_h))
+                    .overflow_y_scroll()
+                    .pb(px(self.scaled(4.0)))
+                    .track_scroll(&self.branch_picker_scroll_handle)
+                    .children(rows),
+            );
+        let panel = match placement.vertical {
+            helpers::AnchoredPopupVertical::Above { bottom } => panel.bottom(px(bottom)),
+            helpers::AnchoredPopupVertical::Below { top } => panel.top(px(top)),
+        };
+
         div()
             .occlude()
             .absolute()
@@ -350,47 +384,7 @@ impl EditorView {
                         }),
                     ),
             )
-            .child(
-                div()
-                    .id("branch-picker-overlay")
-                    .absolute()
-                    .top(px(panel_top))
-                    .left(px(panel_left.max(0.0)))
-                    .w(px(panel_w))
-                    .bg(bg)
-                    .border(px(1.0))
-                    .border_color(border)
-                    .rounded(px(self.scaled(8.0)))
-                    .overflow_hidden()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_, _, window, cx| {
-                            cx.stop_propagation();
-                            window.prevent_default();
-                        }),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .px(px(self.scaled(styles.quick_open_input_padding_x_px)))
-                            .py(px(self.scaled(4.0)))
-                            .border_b(px(1.0))
-                            .border_color(border)
-                            .when_some(self.branch_picker_editor.clone(), |this, editor| {
-                                this.child(editor)
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("branch-picker-results")
-                            .w_full()
-                            .max_h(px(max_results_h))
-                            .overflow_y_scroll()
-                            .pb(px(self.scaled(4.0)))
-                            .track_scroll(&self.branch_picker_scroll_handle)
-                            .children(rows),
-                    ),
-            )
+            .child(panel)
             .into_any_element()
     }
 }

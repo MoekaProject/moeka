@@ -221,12 +221,20 @@ impl EditorView {
                 }),
             )
         };
-        tooltip::with_tooltip(
+        let button = tooltip::with_tooltip(
             button,
             cx.entity().clone(),
             self.t(crate::i18n::TextKey::GitSwitchBranch).to_string(),
             None::<&'static str>,
-        )
+        );
+        let bounds_cell = self.git_panel_branch_button_bounds.clone();
+        div()
+            .flex_none()
+            .on_children_prepainted(move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
+                bounds_cell.set(bounds.first().copied());
+            })
+            .child(button)
+            .into_any_element()
     }
 
     fn render_git_sync_button(&self, cx: &mut Context<Self>) -> AnyElement {

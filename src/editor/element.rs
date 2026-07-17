@@ -4141,8 +4141,8 @@ impl Element for EditorElement {
                                         .unwrap_or_default();
                                     let cell_source_start = buffer.line_start(source_line)
                                         + cell_layout.cell_range.start;
-                                    let cell_source_end = buffer.line_start(source_line)
-                                        + cell_layout.cell_range.end;
+                                    let cell_source_end =
+                                        buffer.line_start(source_line) + cell_layout.cell_range.end;
 
                                     let cell_text: SharedString =
                                         if cell_layout.display_text.is_empty() {
@@ -4959,7 +4959,11 @@ impl Element for EditorElement {
                             size(px(icon_size), px(icon_size)),
                         ),
                         icon_path,
-                        gutter_styles.gutter_heading_color,
+                        crate::theme::with_alpha(
+                            gutter_styles.gutter_heading_color,
+                            gutter_styles.gutter_heading_color.a
+                                * gutter_styles.gutter_heading_opacity,
+                        ),
                     ));
                 }
                 _ => {}

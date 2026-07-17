@@ -30,6 +30,78 @@ use super::*;
 
 const CODE_HIGHLIGHT_CACHE_MAX_ENTRIES: usize = 8192;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum AnchoredPopupVertical {
+    Above { bottom: f32 },
+    Below { top: f32 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AnchoredPopupPlacement {
+    pub left: f32,
+    pub width: f32,
+    pub max_height: f32,
+    pub vertical: AnchoredPopupVertical,
+}
+
+pub(crate) fn anchored_popup_placement(
+    viewport_width: f32,
+    viewport_height: f32,
+    anchor: Bounds<Pixels>,
+    desired_width: f32,
+    desired_height: f32,
+    match_anchor_width: bool,
+    gap: f32,
+    margin: f32,
+) -> AnchoredPopupPlacement {
+    let anchor_left = f32::from(anchor.origin.x);
+    let anchor_top = f32::from(anchor.origin.y);
+    let anchor_width = f32::from(anchor.size.width);
+    let anchor_height = f32::from(anchor.size.height);
+    let anchor_right = anchor_left + anchor_width;
+    let anchor_bottom = anchor_top + anchor_height;
+    let available_width = (viewport_width - margin * 2.0).max(0.0);
+    let width = if match_anchor_width {
+        anchor_width
+    } else {
+        desired_width
+    }
+    .min(available_width)
+    .max(0.0);
+
+    let left = if anchor_left + width <= viewport_width - margin {
+        anchor_left.max(margin)
+    } else {
+        (anchor_right - width).clamp(margin, (viewport_width - width - margin).max(margin))
+    };
+
+    let space_above = (anchor_top - gap - margin).max(0.0);
+    let space_below = (viewport_height - anchor_bottom - gap - margin).max(0.0);
+    let open_above = space_above >= desired_height || space_above >= space_below;
+    let (max_height, vertical) = if open_above {
+        (
+            desired_height.min(space_above),
+            AnchoredPopupVertical::Above {
+                bottom: viewport_height - anchor_top + gap,
+            },
+        )
+    } else {
+        (
+            desired_height.min(space_below),
+            AnchoredPopupVertical::Below {
+                top: anchor_bottom + gap,
+            },
+        )
+    };
+
+    AnchoredPopupPlacement {
+        left,
+        width,
+        max_height,
+        vertical,
+    }
+}
+
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct CodeHighlightCacheKey {
     language: String,
@@ -225,10 +297,7 @@ pub(crate) fn active_ranges_have_non_eol_position(
 }
 
 fn heading_syntax_is_active(decoration: &LineDecoration, active_ranges: &[Range<usize>]) -> bool {
-    decoration
-        .syntax_ranges
-        .iter()
-        .any(|range| active_ranges_intersect(active_ranges, &range.range))
+    matches!(decoration.block_type, BlockType::Heading(_)) && !active_ranges.is_empty()
 }
 
 fn scaled_inline_placeholder(text: &str, scale: f32) -> String {
@@ -2069,17 +2138,76 @@ fn apply_mermaid_block_highlighting(
 mod tests {
     use std::ops::Range;
 
-    use gpui::{FontStyle, FontWeight, TextRun, font};
+    use gpui::{Bounds, FontStyle, FontWeight, TextRun, font, point, px, size};
 
     use crate::markdown;
     use crate::theme::Theme;
 
     use super::{
-        GeneratedPreviewFontFamilies, build_display_text, build_generated_block_preview_svg,
-        build_text_runs_for_display, compute_display_prefix_bytes, compute_generated_preview_size,
-        normalize_mermaid_svg_source, prefix_is_folded, task_prefix_is_folded,
-        wrap_segment_byte_ranges,
+        AnchoredPopupVertical, GeneratedPreviewFontFamilies, anchored_popup_placement,
+        build_display_text, build_generated_block_preview_svg, build_text_runs_for_display,
+        compute_display_prefix_bytes, compute_generated_preview_size, normalize_mermaid_svg_source,
+        prefix_is_folded, task_prefix_is_folded, wrap_segment_byte_ranges,
     };
+
+    #[test]
+    fn anchored_popup_uses_gap_and_left_alignment_above() {
+        let placement = anchored_popup_placement(
+            800.0,
+            600.0,
+            Bounds::new(point(px(520.0), px(560.0)), size(px(100.0), px(24.0))),
+            220.0,
+            240.0,
+            false,
+            2.0,
+            8.0,
+        );
+
+        assert_eq!(placement.left, 520.0);
+        assert_eq!(placement.width, 220.0);
+        assert_eq!(
+            placement.vertical,
+            AnchoredPopupVertical::Above { bottom: 42.0 }
+        );
+    }
+
+    #[test]
+    fn anchored_popup_right_aligns_when_right_space_is_insufficient() {
+        let placement = anchored_popup_placement(
+            800.0,
+            600.0,
+            Bounds::new(point(px(700.0), px(40.0)), size(px(80.0), px(24.0))),
+            220.0,
+            180.0,
+            false,
+            2.0,
+            8.0,
+        );
+
+        assert_eq!(placement.left, 560.0);
+        assert_eq!(placement.width, 220.0);
+        assert_eq!(
+            placement.vertical,
+            AnchoredPopupVertical::Below { top: 66.0 }
+        );
+    }
+
+    #[test]
+    fn anchored_popup_can_match_anchor_width() {
+        let placement = anchored_popup_placement(
+            800.0,
+            600.0,
+            Bounds::new(point(px(300.0), px(200.0)), size(px(180.0), px(30.0))),
+            240.0,
+            120.0,
+            true,
+            2.0,
+            8.0,
+        );
+
+        assert_eq!(placement.left, 300.0);
+        assert_eq!(placement.width, 180.0);
+    }
 
     fn generated_preview_fonts() -> GeneratedPreviewFontFamilies<'static> {
         GeneratedPreviewFontFamilies {
@@ -2288,7 +2416,7 @@ mod tests {
     }
 
     #[test]
-    fn heading_prefix_stays_collapsed_when_cursor_is_in_body_text() {
+    fn heading_prefix_expands_when_cursor_is_in_body_text() {
         let line = "# title";
         let decoration = markdown::parse_decorations(line)
             .into_iter()
@@ -2310,7 +2438,7 @@ mod tests {
             1.0,
         );
 
-        assert_eq!(display_text, "title");
+        assert_eq!(display_text, line);
     }
 
     #[test]
@@ -2340,7 +2468,7 @@ mod tests {
     }
 
     #[test]
-    fn heading_prefix_stays_collapsed_when_selection_is_in_body_text() {
+    fn heading_prefix_expands_when_selection_is_in_body_text() {
         let line = "# title";
         let decoration = markdown::parse_decorations(line)
             .into_iter()
@@ -2362,11 +2490,11 @@ mod tests {
             1.0,
         );
 
-        assert_eq!(display_text, "title");
+        assert_eq!(display_text, line);
     }
 
     #[test]
-    fn heading_prefix_stays_collapsed_after_marker_space() {
+    fn heading_prefix_expands_after_marker_space() {
         let line = "# ";
         let decoration = markdown::parse_decorations(line)
             .into_iter()
@@ -2388,7 +2516,7 @@ mod tests {
             1.0,
         );
 
-        assert_eq!(display_text, "");
+        assert_eq!(display_text, line);
     }
 
     #[test]
@@ -2817,7 +2945,7 @@ mod tests {
     }
 
     #[test]
-    fn heading_body_cursor_does_not_paint_syntax_marker_color() {
+    fn heading_body_cursor_paints_syntax_marker_color() {
         let line = "# title";
         let decoration = markdown::parse_decorations(line)
             .into_iter()
@@ -2870,8 +2998,8 @@ mod tests {
             false,
         );
 
-        assert_eq!(display_text, "title");
-        assert!(runs.iter().all(|run| run.color != theme.syntax_marker));
+        assert_eq!(display_text, line);
+        assert_eq!(runs.first().map(|run| run.color), Some(theme.syntax_marker));
     }
 
     #[test]

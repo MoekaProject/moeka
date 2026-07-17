@@ -158,8 +158,8 @@ impl EditorView {
         };
         let button = div()
             .id(id)
-            .w(px(self.scaled(ss.sidebar_top_button_size_px)))
-            .h(px(self.scaled(ss.sidebar_top_button_size_px)))
+            .w(px(self.scaled(ss.sidebar_top_button_width_px)))
+            .h(px(self.scaled(ss.sidebar_top_button_height_px)))
             .flex()
             .flex_none()
             .items_center()
@@ -1030,42 +1030,44 @@ impl EditorView {
             .flex_none()
             .flex()
             .items_center()
-            .justify_end()
+            .justify_start()
             .when(ss.sidebar_top_buttons_visible, |this| {
-                this.pr(px(self.scaled(ss.sidebar_top_button_padding_right_px)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(self.scaled(ss.sidebar_top_button_gap_px)))
-                            .child(self.render_sidebar_top_button(
-                                "sidebar-top-filetree",
-                                "assets/icons/filetree.svg",
-                                !self.workspace_search_visible,
-                                crate::i18n::sidebar_action_label(self.ui_language, "files"),
-                                None,
-                                cx,
-                                |this, _event, window, cx| {
-                                    this.sidebar_visible = true;
-                                    if this.workspace_search_visible {
-                                        this.close_workspace_search(window, cx);
-                                    } else {
-                                        cx.notify();
-                                    }
-                                },
-                            ))
-                            .child(self.render_sidebar_top_button(
-                                "sidebar-top-search",
-                                "assets/icons/search.svg",
-                                self.workspace_search_visible,
-                                crate::i18n::sidebar_action_label(self.ui_language, "search"),
-                                Some("⌘⇧F"),
-                                cx,
-                                |this, _event, window, cx| {
-                                    this.toggle_workspace_search(window, cx);
-                                },
-                            )),
-                    )
+                this.pl(px(self.scaled(
+                    self.styles.tab_bar.tab_history_hidden_sidebar_margin_px,
+                )))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(self.scaled(ss.sidebar_top_button_gap_px)))
+                        .child(self.render_sidebar_top_button(
+                            "sidebar-top-filetree",
+                            "assets/icons/filetree.svg",
+                            !self.workspace_search_visible,
+                            crate::i18n::sidebar_action_label(self.ui_language, "files"),
+                            None,
+                            cx,
+                            |this, _event, window, cx| {
+                                this.sidebar_visible = true;
+                                if this.workspace_search_visible {
+                                    this.close_workspace_search(window, cx);
+                                } else {
+                                    cx.notify();
+                                }
+                            },
+                        ))
+                        .child(self.render_sidebar_top_button(
+                            "sidebar-top-search",
+                            "assets/icons/search.svg",
+                            self.workspace_search_visible,
+                            crate::i18n::sidebar_action_label(self.ui_language, "search"),
+                            Some("⌘⇧F"),
+                            cx,
+                            |this, _event, window, cx| {
+                                this.toggle_workspace_search(window, cx);
+                            },
+                        )),
+                )
             })
             .when(!self.workspace_search_visible, |this| {
                 let sidebar_tooltip = if self.workspaces.is_empty() {
@@ -1076,39 +1078,52 @@ impl EditorView {
                         self.sidebar_visible,
                     )
                 };
-                this.pr(px(self.scaled(ss.sidebar_top_button_padding_right_px)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(self.scaled(ss.sidebar_top_button_gap_px)))
-                            .child(self.render_sidebar_top_button(
-                                "sidebar-top-file-tree-toggle",
-                                "assets/icons/file-tree-toggle.svg",
-                                self.sidebar_visible,
-                                sidebar_tooltip,
-                                Some("⌘⇧S"),
-                                cx,
-                                |this, _event, _window, cx| {
-                                    if this.workspaces.is_empty() {
-                                        this.pick_workspace_folder(cx);
-                                    } else {
-                                        this.toggle_sidebar_visibility(cx);
-                                    }
-                                },
-                            ))
-                            .child(self.render_sidebar_top_button(
-                                "sidebar-top-file-list-toggle",
-                                "assets/icons/file-list-toggle.svg",
-                                self.file_list_visible,
-                                crate::i18n::sidebar_action_label(self.ui_language, "file_list"),
-                                None,
-                                cx,
-                                |this, _event, _window, cx| {
-                                    this.toggle_file_list_visible(cx);
-                                },
-                            )),
-                    )
+                this.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .pl(px(self.scaled(
+                                    self.styles.tab_bar.tab_history_hidden_sidebar_margin_px,
+                                )))
+                                .child(self.render_sidebar_top_button(
+                                    "sidebar-top-file-tree-toggle",
+                                    "assets/icons/file-tree-toggle.svg",
+                                    self.sidebar_visible,
+                                    sidebar_tooltip,
+                                    Some("⌘⇧S"),
+                                    cx,
+                                    |this, _event, _window, cx| {
+                                        if this.workspaces.is_empty() {
+                                            this.pick_workspace_folder(cx);
+                                        } else {
+                                            this.toggle_sidebar_visibility(cx);
+                                        }
+                                    },
+                                )),
+                        )
+                        .child(
+                            div()
+                                .pr(px(self.scaled(ss.sidebar_top_button_padding_right_px)))
+                                .child(self.render_sidebar_top_button(
+                                    "sidebar-top-file-list-toggle",
+                                    "assets/icons/file-list-toggle.svg",
+                                    self.file_list_visible,
+                                    crate::i18n::sidebar_action_label(
+                                        self.ui_language,
+                                        "file_list",
+                                    ),
+                                    None,
+                                    cx,
+                                    |this, _event, _window, cx| {
+                                        this.toggle_file_list_visible(cx);
+                                    },
+                                )),
+                        ),
+                )
             })
             .on_mouse_down(
                 MouseButton::Left,
@@ -1506,7 +1521,7 @@ impl EditorView {
             .as_ref()
             .is_some_and(|target| target == &self.sidebar_root);
 
-        div()
+        let bar = div()
             .id("workspace-bar")
             .w_full()
             .h(px(self.status_bar_height()))
@@ -1544,9 +1559,7 @@ impl EditorView {
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
-                    let pos = event.position;
-                    let menu_pos = gpui::point(pos.x, pos.y - gpui::px(20.0));
-                    this.open_workspace_menu(menu_pos, cx);
+                    this.open_workspace_menu(event.position, cx);
                 }),
             )
             .on_mouse_down(
@@ -1554,9 +1567,7 @@ impl EditorView {
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
-                    let pos = event.position;
-                    let menu_pos = gpui::point(pos.x, pos.y - gpui::px(20.0));
-                    this.open_workspace_menu(menu_pos, cx);
+                    this.open_workspace_menu(event.position, cx);
                 }),
             )
             .drag_over::<DraggedSidebarItems>({
@@ -1595,6 +1606,16 @@ impl EditorView {
                     this.move_sidebar_items(paths, root.clone(), cx);
                 })
             })
+            .into_any_element();
+        let bounds_cell = self.workspace_bar_bounds.clone();
+        div()
+            .w_full()
+            .h(px(self.status_bar_height()))
+            .flex_none()
+            .on_children_prepainted(move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
+                bounds_cell.set(bounds.first().copied());
+            })
+            .child(bar)
             .into_any_element()
     }
 }

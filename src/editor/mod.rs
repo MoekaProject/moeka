@@ -86,6 +86,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Cursor as IoCursor;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -1442,6 +1443,7 @@ pub struct EditorView {
     pub(crate) generated_preview_views: HashMap<String, ImageViewState>,
     pub(crate) generated_preview_drag_state: Option<GeneratedPreviewDragState>,
     pub(crate) sidebar_root: PathBuf,
+    pub(crate) workspace_bar_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) expanded_dirs: HashSet<PathBuf>,
     /// 多选：所有选中的 sidebar 路径
     pub(crate) selected_sidebar_paths: HashSet<PathBuf>,
@@ -1677,7 +1679,9 @@ pub struct EditorView {
     pub(crate) git_remote_input_visible: bool,
     pub(crate) git_remote_input_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) branch_picker_visible: bool,
-    pub(crate) branch_picker_anchor: Option<Point<Pixels>>,
+    pub(crate) branch_picker_anchor: Option<Bounds<Pixels>>,
+    pub(crate) status_bar_branch_button_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    pub(crate) git_panel_branch_button_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) branch_picker_query: String,
     pub(crate) branch_picker_all: Vec<String>,
     pub(crate) branch_picker_current: Option<String>,
@@ -1685,7 +1689,6 @@ pub struct EditorView {
     pub(crate) branch_picker_selected_index: usize,
     pub(crate) branch_picker_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) branch_picker_scroll_handle: ScrollHandle,
-    pub(crate) branch_picker_task: Option<Task<()>>,
     pub(crate) utility_panel: Option<RightUtilityPanel>,
     pub(crate) displayed_utility_panel: Option<RightUtilityPanel>,
     pub(crate) info_panel_custom_width: Option<f32>,
@@ -1830,7 +1833,9 @@ pub struct EditorView {
     pub(crate) command_palette_pending: Option<shortcut::CommandId>,
     pub(crate) language_picker_visible: bool,
     pub(crate) language_picker_mode: language_picker::LanguagePickerMode,
-    pub(crate) language_picker_anchor: Option<gpui::Point<Pixels>>,
+    pub(crate) language_picker_anchor: Option<Bounds<Pixels>>,
+    pub(crate) status_bar_indent_button_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    pub(crate) status_bar_language_button_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) language_picker_query: String,
     pub(crate) language_picker_items: Vec<language_picker::LanguagePickerItem>,
     pub(crate) language_picker_selected_index: usize,
@@ -2018,6 +2023,7 @@ impl EditorView {
             generated_preview_views: HashMap::new(),
             generated_preview_drag_state: None,
             sidebar_root: sidebar_root.clone(),
+            workspace_bar_bounds: Rc::new(Cell::new(None)),
             expanded_dirs,
             selected_sidebar_paths: HashSet::new(),
             current_file_path: None,
@@ -2225,6 +2231,8 @@ impl EditorView {
             git_remote_input_editor: None,
             branch_picker_visible: false,
             branch_picker_anchor: None,
+            status_bar_branch_button_bounds: Rc::new(Cell::new(None)),
+            git_panel_branch_button_bounds: Rc::new(Cell::new(None)),
             branch_picker_query: String::new(),
             branch_picker_all: Vec::new(),
             branch_picker_current: None,
@@ -2232,7 +2240,6 @@ impl EditorView {
             branch_picker_selected_index: 0,
             branch_picker_editor: None,
             branch_picker_scroll_handle: ScrollHandle::new(),
-            branch_picker_task: None,
             utility_panel: None,
             displayed_utility_panel: None,
             info_panel_custom_width: None,
@@ -2349,6 +2356,8 @@ impl EditorView {
             language_picker_visible: false,
             language_picker_mode: language_picker::LanguagePickerMode::Language,
             language_picker_anchor: None,
+            status_bar_indent_button_bounds: Rc::new(Cell::new(None)),
+            status_bar_language_button_bounds: Rc::new(Cell::new(None)),
             language_picker_query: String::new(),
             language_picker_items: Vec::new(),
             language_picker_selected_index: 0,

@@ -13,6 +13,7 @@ use crate::i18n::{
 };
 use crate::theme::{EditorThemeMode, ThemeKind};
 
+use super::helpers;
 use super::{
     APP_VERSION, DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, SITE_SVG_PATH,
     THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape, attachments, tooltip,
@@ -50,8 +51,6 @@ pub(crate) struct FontPickerState {
     pub selected_index: usize,
     pub render_limit: usize,
     pub scroll_handle: ScrollHandle,
-    /// Locked direction: once decided, keep dropdown above or below.
-    pub show_above: std::cell::Cell<Option<bool>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1692,7 +1691,6 @@ impl EditorView {
             selected_index,
             render_limit,
             scroll_handle,
-            show_above: std::cell::Cell::new(None),
         });
 
         // Create TextInput for search
@@ -1852,52 +1850,31 @@ impl EditorView {
             .font_picker_button_bounds
             .get(&(picker.role, picker.option_index))
             .and_then(|rc| rc.get());
-        let (button_x, button_y, button_w_val, button_h) = match button_bounds {
-            Some(b) => (
-                f32::from(b.origin.x),
-                f32::from(b.origin.y),
-                f32::from(b.size.width),
-                f32::from(b.size.height),
-            ),
-            None => (button_left, 200.0, button_w, self.scaled(30.0)),
-        };
-
-        let dropdown_w = button_w_val;
-        let gap = self.scaled(4.0);
+        let button_bounds = button_bounds.unwrap_or_else(|| {
+            gpui::Bounds::new(
+                gpui::point(px(button_left), px(200.0)),
+                gpui::size(px(button_w), px(self.scaled(30.0))),
+            )
+        });
         let desired_visible = picker.filtered.len().min(200).min(max_visible).max(1);
         let desired_h = desired_visible as f32 * item_h + self.scaled(33.0);
-        let window_h = self.last_window_height - 2.0 * border_w;
-        let final_x = button_x.max(8.0);
-        let below_y = button_y + button_h + gap;
-        let available_below = (window_h - below_y - 8.0).max(0.0);
-        let available_above = (button_y - gap - 8.0).max(0.0);
-        // Lock direction on first render, keep it stable as height changes
-        let show_above = match picker.show_above.get() {
-            Some(locked) => locked,
-            None => {
-                let initial = desired_h > available_below && available_above > available_below;
-                picker.show_above.set(Some(initial));
-                initial
-            }
-        };
-        let final_max_h = if show_above {
-            desired_h.min(available_above).max(100.0)
-        } else {
-            desired_h.min(available_below).max(100.0)
-        };
-        let dropdown_y = if show_above {
-            (button_y - final_max_h - gap).max(8.0)
-        } else {
-            below_y
-        };
+        let placement = helpers::anchored_popup_placement(
+            self.last_window_width,
+            self.last_window_height,
+            button_bounds,
+            f32::from(button_bounds.size.width),
+            desired_h,
+            true,
+            self.scaled(self.styles.anchored_popup_gap_px),
+            self.scaled(self.styles.anchored_popup_margin_px),
+        );
 
         let dropdown = div()
             .id("font-picker-dropdown")
             .absolute()
-            .left(px(final_x))
-            .top(px(dropdown_y))
-            .w(px(dropdown_w))
-            .max_h(px(final_max_h))
+            .left(px(placement.left))
+            .w(px(placement.width))
+            .max_h(px(placement.max_height))
             .bg(bg)
             .border(px(1.0))
             .border_color(border_color)
@@ -1957,6 +1934,10 @@ impl EditorView {
                     .track_scroll(&picker.scroll_handle)
                     .children(items),
             );
+        let dropdown = match placement.vertical {
+            helpers::AnchoredPopupVertical::Above { bottom } => dropdown.bottom(px(bottom)),
+            helpers::AnchoredPopupVertical::Below { top } => dropdown.top(px(top)),
+        };
 
         // Full-screen occluded backdrop — clicking it closes the picker
         div()

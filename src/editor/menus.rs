@@ -3256,6 +3256,38 @@ impl EditorView {
         self.context_menu_panel_layout_with_anchor(position, width, estimated_menu_height, 0.0)
     }
 
+    fn button_context_menu_panel_layout(
+        &self,
+        anchor: Bounds<Pixels>,
+        width: f32,
+        estimated_menu_height: f32,
+    ) -> ContextMenuPanelLayout {
+        let margin = self.scaled(self.styles.anchored_popup_margin_px);
+        let placement = helpers::anchored_popup_placement(
+            self.last_window_width,
+            self.last_window_height,
+            anchor,
+            width,
+            estimated_menu_height,
+            false,
+            self.scaled(self.styles.anchored_popup_gap_px),
+            margin,
+        );
+        let (estimated_top, bottom_anchor) = match placement.vertical {
+            helpers::AnchoredPopupVertical::Above { bottom } => (0.0, Some(bottom)),
+            helpers::AnchoredPopupVertical::Below { top } => (top, None),
+        };
+        ContextMenuPanelLayout {
+            left: placement.left,
+            estimated_top,
+            max_height: placement.max_height,
+            bottom_anchor,
+            overlay_width: self.last_window_width,
+            overlay_height: self.last_window_height,
+            margin,
+        }
+    }
+
     fn context_menu_panel_layout_with_anchor(
         &self,
         position: Point<Pixels>,
@@ -4378,12 +4410,28 @@ impl EditorView {
 
         let estimated_menu_height = self.estimated_context_menu_height(items.len());
         let anchor_height = self.context_menu_anchor_height(&menu.kind);
-        let layout = self.context_menu_panel_layout_with_anchor(
-            menu.position,
-            width,
-            estimated_menu_height,
-            anchor_height,
-        );
+        let layout = if matches!(menu.kind, ContextMenuKind::Workspace) {
+            self.workspace_bar_bounds
+                .get()
+                .map(|anchor| {
+                    self.button_context_menu_panel_layout(anchor, width, estimated_menu_height)
+                })
+                .unwrap_or_else(|| {
+                    self.context_menu_panel_layout_with_anchor(
+                        menu.position,
+                        width,
+                        estimated_menu_height,
+                        anchor_height,
+                    )
+                })
+        } else {
+            self.context_menu_panel_layout_with_anchor(
+                menu.position,
+                width,
+                estimated_menu_height,
+                anchor_height,
+            )
+        };
         let main_menu = self.render_context_menu_panel("context-menu", layout, width, items, cx);
 
         let submenu = if matches!(menu.kind, ContextMenuKind::Format)

@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use gpui::{
-    AnyElement, Context, CursorStyle, MouseButton, Pixels, Point, Window, div, prelude::*, px,
+    AnyElement, Bounds, Context, CursorStyle, MouseButton, Pixels, Point, Window, div, point,
+    prelude::*, px, size,
 };
 
 use super::status_bar::IndentKind;
@@ -128,7 +129,7 @@ impl EditorView {
         styles.text_input_border_width_px = 0.0;
         styles.text_input_padding_left_px = menu.quick_open_input_text_padding_left_px;
         styles.text_input_padding_right_px = menu.quick_open_input_text_padding_left_px;
-        styles.text_input_font_size_px = menu.quick_open_result_name_font_size_px;
+        styles.text_input_font_size_px = self.scaled(menu.quick_open_result_name_font_size_px);
         styles.text_input_cursor_height_ratio = menu.quick_open_input_cursor_height_ratio;
         styles.text_input_cursor_height_adjust_px = menu.quick_open_input_cursor_height_adjust_px;
         styles
@@ -165,7 +166,19 @@ impl EditorView {
 
         self.language_picker_visible = true;
         self.language_picker_mode = mode;
-        self.language_picker_anchor = Some(position);
+        self.language_picker_anchor = match mode {
+            LanguagePickerMode::Indentation => self.status_bar_indent_button_bounds.get(),
+            LanguagePickerMode::Language => self.status_bar_language_button_bounds.get(),
+        }
+        .or_else(|| {
+            Some(Bounds::new(
+                point(
+                    position.x,
+                    px(self.last_window_height - self.status_bar_height()),
+                ),
+                size(px(0.0), px(self.status_bar_height())),
+            ))
+        });
         self.language_picker_query.clear();
         self.language_picker_selected_index = 0;
         self.update_language_picker_results(cx);
@@ -349,38 +362,33 @@ impl EditorView {
             .min(max_visible)
             .max(1);
         let desired_h = input_h + visible_rows as f32 * row_h;
-        let (target_w, min_w) = match self.language_picker_mode {
+        let (target_w, min_w): (f32, f32) = match self.language_picker_mode {
             LanguagePickerMode::Indentation => (120.0, 112.0),
             LanguagePickerMode::Language => (160.0, 140.0),
         };
-        let panel_w = self
-            .scaled(target_w)
-            .min(self.last_window_width - 16.0)
-            .max(self.scaled(min_w));
+        let desired_panel_w = self.scaled(target_w.max(240.0)).max(self.scaled(min_w));
         let anchor = self.language_picker_anchor.unwrap_or_else(|| {
-            gpui::point(
-                px(self.last_window_width - 8.0),
-                px(self.last_window_height - 8.0),
+            Bounds::new(
+                point(
+                    px(self.last_window_width - 8.0),
+                    px(self.last_window_height),
+                ),
+                size(px(0.0), px(0.0)),
             )
         });
-        let anchor_x = f32::from(anchor.x);
-        let anchor_y = f32::from(anchor.y);
-        let gap = self.scaled(4.0);
-        let available_below = (self.last_window_height - anchor_y - gap - 8.0).max(0.0);
-        let available_above = (anchor_y - gap - 8.0).max(0.0);
-        let show_above = desired_h > available_below && available_above > available_below;
-        let panel_h = if show_above {
-            desired_h.min(available_above).max(self.scaled(100.0))
-        } else {
-            desired_h.min(available_below).max(self.scaled(100.0))
-        };
-        let panel_left =
-            (anchor_x - panel_w).clamp(8.0, (self.last_window_width - panel_w - 8.0).max(8.0));
-        let panel_top = if show_above {
-            (anchor_y - panel_h - gap).max(8.0)
-        } else {
-            (anchor_y + gap).min((self.last_window_height - panel_h - 8.0).max(8.0))
-        };
+        let placement = helpers::anchored_popup_placement(
+            self.last_window_width,
+            self.last_window_height,
+            anchor,
+            desired_panel_w,
+            desired_h,
+            false,
+            self.scaled(self.styles.anchored_popup_gap_px),
+            self.scaled(self.styles.anchored_popup_margin_px),
+        );
+        let panel_w = placement.width;
+        let panel_h = placement.max_height;
+        let panel_left = placement.left;
         let max_results_h = (panel_h - input_h).max(row_h);
 
         let mut rows = Vec::new();
@@ -433,6 +441,50 @@ impl EditorView {
             }
         }
 
+        let panel = div()
+            .id("language-picker-overlay")
+            .absolute()
+            .left(px(panel_left))
+            .w(px(panel_w))
+            .max_h(px(panel_h))
+            .bg(bg)
+            .border(px(1.0))
+            .border_color(border)
+            .rounded(px(self.scaled(8.0)))
+            .overflow_hidden()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, window, cx| {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                }),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .px(px(self.scaled(styles.quick_open_input_padding_x_px)))
+                    .py(px(self.scaled(4.0)))
+                    .border_b(px(1.0))
+                    .border_color(border)
+                    .when_some(self.language_picker_editor.clone(), |this, editor| {
+                        this.child(editor)
+                    }),
+            )
+            .child(
+                div()
+                    .id("language-picker-results")
+                    .w_full()
+                    .max_h(px(max_results_h))
+                    .overflow_y_scroll()
+                    .pb(px(self.scaled(4.0)))
+                    .track_scroll(&self.language_picker_scroll_handle)
+                    .children(rows),
+            );
+        let panel = match placement.vertical {
+            helpers::AnchoredPopupVertical::Above { bottom } => panel.bottom(px(bottom)),
+            helpers::AnchoredPopupVertical::Below { top } => panel.top(px(top)),
+        };
+
         div()
             .occlude()
             .absolute()
@@ -455,47 +507,7 @@ impl EditorView {
                         }),
                     ),
             )
-            .child(
-                div()
-                    .id("language-picker-overlay")
-                    .absolute()
-                    .top(px(panel_top))
-                    .left(px(panel_left.max(0.0)))
-                    .w(px(panel_w.max(240.0)))
-                    .bg(bg)
-                    .border(px(1.0))
-                    .border_color(border)
-                    .rounded(px(self.scaled(8.0)))
-                    .overflow_hidden()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_, _, window, cx| {
-                            cx.stop_propagation();
-                            window.prevent_default();
-                        }),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .px(px(self.scaled(styles.quick_open_input_padding_x_px)))
-                            .py(px(self.scaled(4.0)))
-                            .border_b(px(1.0))
-                            .border_color(border)
-                            .when_some(self.language_picker_editor.clone(), |this, editor| {
-                                this.child(editor)
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("language-picker-results")
-                            .w_full()
-                            .max_h(px(max_results_h))
-                            .overflow_y_scroll()
-                            .pb(px(self.scaled(4.0)))
-                            .track_scroll(&self.language_picker_scroll_handle)
-                            .children(rows),
-                    ),
-            )
+            .child(panel)
             .into_any_element()
     }
 }
