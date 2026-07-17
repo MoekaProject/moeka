@@ -61,11 +61,10 @@ impl EditorView {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn traffic_light_position_for_ui_scale(ui_scale: f32) -> gpui::Point<gpui::Pixels> {
-        const TAB_BAR_HEIGHT_PX: f32 = 30.0;
         const STANDARD_BUTTON_HEIGHT_PX: f32 = 14.0;
         traffic_light_offsets_for_layout(
             ui_scale,
-            TAB_BAR_HEIGHT_PX * ui_scale,
+            crate::style::TOP_BAR_HEIGHT_PX * ui_scale,
             STANDARD_BUTTON_HEIGHT_PX,
         )
     }
@@ -918,7 +917,8 @@ mod tests {
     #[test]
     fn traffic_light_stays_centered_in_scaled_tab_bar() {
         let button_height = 14.0;
-        for (ui_scale, tab_bar_height) in [(0.8, 24.0), (1.0, 30.0), (1.4, 42.0)] {
+        for ui_scale in [0.8, 1.0, 1.4] {
+            let tab_bar_height = crate::style::TOP_BAR_HEIGHT_PX * ui_scale;
             let offsets = traffic_light_offsets_for_layout(ui_scale, tab_bar_height, button_height);
             assert_eq!(f32::from(offsets.x), 10.0 * ui_scale);
             assert_eq!(

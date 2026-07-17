@@ -6,6 +6,8 @@ use gpui::{FontWeight, Hsla};
 
 use crate::theme::{Theme, with_alpha};
 
+pub(crate) const TOP_BAR_HEIGHT_PX: f32 = 33.0;
+
 /// Per-component style configuration, derived from the active theme.
 ///
 /// Naming convention: `{功能}_{位置}_{状态}_{样式}_{单位}`
@@ -1440,7 +1442,7 @@ impl Styles {
                 sidebar_top_buttons_visible: false,
                 sidebar_top_button_padding_right_px: 10.0,
                 sidebar_top_button_gap_px: 6.0,
-                sidebar_top_button_size_px: 15.0,
+                sidebar_top_button_size_px: 18.0,
                 sidebar_top_button_icon_size_px: 15.0,
                 sidebar_top_button_inactive_color: sidebar_theme.text_secondary,
                 sidebar_top_button_active_color: sidebar_theme.text_primary,
@@ -1538,7 +1540,7 @@ impl Styles {
                 // Slightly lighter than the file tree background so the two
                 // panes read as separate layers (chrome palette is always dark).
                 file_list_bg: sidebar_theme.bg_tertiary,
-                file_list_header_height_px: 30.0,
+                file_list_header_height_px: TOP_BAR_HEIGHT_PX,
                 file_list_header_padding_left_px: 12.0,
                 file_list_header_padding_right_px: 4.0,
                 file_list_header_gap_px: 6.0,
@@ -1654,7 +1656,7 @@ impl Styles {
                 utility_panel_visibility_animation_ms: 220,
             },
             tab_bar: TabBarStyles {
-                tab_bar_height_px: 30.0,
+                tab_bar_height_px: TOP_BAR_HEIGHT_PX,
                 tab_bar_bg: theme.bg_bar,
                 tab_bar_border_width_px: 1.0,
                 tab_bar_border_color: theme.border_secondary,

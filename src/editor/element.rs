@@ -4139,6 +4139,10 @@ impl Element for EditorElement {
                                         .and_then(|t| t.cells.get(cell_layout.col))
                                         .cloned()
                                         .unwrap_or_default();
+                                    let cell_source_start = buffer.line_start(source_line)
+                                        + cell_layout.cell_range.start;
+                                    let cell_source_end = buffer.line_start(source_line)
+                                        + cell_layout.cell_range.end;
 
                                     let cell_text: SharedString =
                                         if cell_layout.display_text.is_empty() {
@@ -4153,7 +4157,7 @@ impl Element for EditorElement {
                                             .next()
                                             .unwrap_or_default();
 
-                                    let cell_runs = helpers::build_text_runs_for_display(
+                                    let mut cell_runs = helpers::build_text_runs_for_display(
                                         &cell_layout.display_text,
                                         &cell_content,
                                         &cell_layout.display_to_buffer,
@@ -4186,6 +4190,44 @@ impl Element for EditorElement {
                                         None,
                                         false,
                                     );
+                                    helpers::apply_search_match_text_styles(
+                                        &mut cell_runs,
+                                        &cell_layout.display_text,
+                                        &cell_layout.display_to_buffer,
+                                        cell_source_start,
+                                        &editor.search_matches,
+                                        editor.search_current_index,
+                                        editor.styles.search.search_match_text_color,
+                                        editor.styles.search.search_match_active_text_color,
+                                    );
+                                    if editor.current_file_path
+                                        == editor.workspace_search_highlight_path
+                                    {
+                                        helpers::apply_search_match_text_styles(
+                                            &mut cell_runs,
+                                            &cell_layout.display_text,
+                                            &cell_layout.display_to_buffer,
+                                            cell_source_start,
+                                            &editor.workspace_search_highlight_ranges,
+                                            editor.workspace_search_highlight_current_index,
+                                            editor.styles.search.search_match_text_color,
+                                            editor.styles.search.search_match_active_text_color,
+                                        );
+                                    }
+                                    if editor.current_file_path
+                                        == editor.outline_flash_highlight_path
+                                    {
+                                        helpers::apply_search_match_text_styles(
+                                            &mut cell_runs,
+                                            &cell_layout.display_text,
+                                            &cell_layout.display_to_buffer,
+                                            cell_source_start,
+                                            &editor.outline_flash_highlight_ranges,
+                                            editor.outline_flash_highlight_current_index,
+                                            editor.styles.search.search_match_text_color,
+                                            editor.styles.search.search_match_active_text_color,
+                                        );
+                                    }
 
                                     // Apply table/front-matter text styling
                                     let cell_runs =
@@ -4216,6 +4258,82 @@ impl Element for EditorElement {
                                         None,
                                     ) {
                                         if let Some(shaped) = shaped_lines.into_iter().next() {
+                                            let mut push_search_highlights =
+                                                |matches: &[std::ops::Range<usize>],
+                                                 active_index: Option<usize>| {
+                                                    for (match_index, search_match) in
+                                                        matches.iter().enumerate()
+                                                    {
+                                                        let match_start = search_match
+                                                            .start
+                                                            .max(cell_source_start);
+                                                        let match_end =
+                                                            search_match.end.min(cell_source_end);
+                                                        if match_start >= match_end {
+                                                            continue;
+                                                        }
+                                                        push_diff_inline_highlight_quads(
+                                                            &mut search_match_quads,
+                                                            &[match_start - cell_source_start
+                                                                ..match_end - cell_source_start],
+                                                            &cell_layout.display_text,
+                                                            cell_content.len(),
+                                                            &cell_layout.buffer_to_display,
+                                                            &cell_runs,
+                                                            &shaped,
+                                                            cell_x,
+                                                            cell_text_y,
+                                                            line_height,
+                                                            font_size,
+                                                            0.0,
+                                                            if active_index == Some(match_index) {
+                                                                editor
+                                                                    .styles
+                                                                    .search
+                                                                    .search_match_active_bg
+                                                            } else {
+                                                                editor.styles.search.search_match_bg
+                                                            },
+                                                            editor
+                                                                .styles
+                                                                .search
+                                                                .search_match_border_color,
+                                                            editor.scaled(
+                                                                editor
+                                                                    .styles
+                                                                    .search
+                                                                    .search_match_border_width_px,
+                                                            ),
+                                                            px(0.0),
+                                                            px(3.0),
+                                                            px((line_height - font_size).max(0.0)
+                                                                * 0.25),
+                                                            letter_spacing,
+                                                            window,
+                                                        );
+                                                    }
+                                                };
+                                            push_search_highlights(
+                                                &editor.search_matches,
+                                                editor.search_current_index,
+                                            );
+                                            if editor.current_file_path
+                                                == editor.workspace_search_highlight_path
+                                            {
+                                                push_search_highlights(
+                                                    &editor.workspace_search_highlight_ranges,
+                                                    editor.workspace_search_highlight_current_index,
+                                                );
+                                            }
+                                            if editor.current_file_path
+                                                == editor.outline_flash_highlight_path
+                                            {
+                                                push_search_highlights(
+                                                    &editor.outline_flash_highlight_ranges,
+                                                    editor.outline_flash_highlight_current_index,
+                                                );
+                                            }
+
                                             if let Some(cell_range) = row_ti
                                                 .and_then(|t| t.cell_ranges.get(cell_layout.col))
                                             {
