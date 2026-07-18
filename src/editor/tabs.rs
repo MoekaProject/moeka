@@ -650,6 +650,7 @@ impl EditorView {
         self.current_file_path = tab.path.clone();
         self.editor_left_aligned = tab.editor_left_aligned;
         if tab.kind.is_terminal() {
+            self.hide_right_panels_for_terminal(cx);
             self.pending_terminal_focus = Some(tab.id.clone());
         }
         if matches!(tab.kind, TabKind::Editor | TabKind::Diff) {

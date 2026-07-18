@@ -641,6 +641,7 @@ impl EditorView {
             self.settings_ui_font_size_editor.as_ref(),
             self.settings_line_height_editor.as_ref(),
             self.settings_letter_spacing_editor.as_ref(),
+            self.settings_editor_content_width_editor.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -1049,7 +1050,14 @@ impl EditorView {
 
     // ── Font section ────────────────────────────────────────────
 
-    fn render_font_section(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_font_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.ensure_font_size_editor(cx);
+        self.ensure_ui_font_size_editor(cx);
+        self.ensure_line_height_editor(cx);
+        self.ensure_letter_spacing_editor(cx);
+        self.ensure_editor_content_width_editor(cx);
+        self.ensure_settings_stepper_blur_subscriptions(window, cx);
+
         let ui_font = self.styles.ui_font_family;
         let body_latin = self.styles.editor.editor_body_latin_font_family;
         let body_cjk = self.styles.editor.editor_body_cjk_font_family;
@@ -1106,7 +1114,114 @@ impl EditorView {
             .child(self.render_line_height_row(cx))
             // Letter spacing
             .child(self.render_letter_spacing_row(cx))
+            // Editor content width
+            .child(self.render_editor_content_width_row(cx))
             .into_any_element()
+    }
+
+    fn ensure_settings_stepper_blur_subscriptions(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.settings_stepper_blur_subscriptions.is_empty() {
+            return;
+        }
+
+        let font_size_editor = self.settings_font_size_editor.clone().unwrap();
+        let focus_handle = font_size_editor.read(cx).focus_handle.clone();
+        self.settings_stepper_blur_subscriptions.push(cx.on_blur(
+            &focus_handle,
+            window,
+            move |this, _, cx| {
+                let text = font_size_editor.read(cx).text().to_string();
+                if let Some(value) = text.parse::<f32>().ok().filter(|value| value.is_finite()) {
+                    this.apply_font_size(value, cx);
+                } else {
+                    let current = this.app_settings.font_size;
+                    this.sync_inline_stepper_editor(&font_size_editor, format!("{current:.0}"), cx);
+                }
+            },
+        ));
+
+        let ui_scale_editor = self.settings_ui_font_size_editor.clone().unwrap();
+        let focus_handle = ui_scale_editor.read(cx).focus_handle.clone();
+        self.settings_stepper_blur_subscriptions.push(cx.on_blur(
+            &focus_handle,
+            window,
+            move |this, _, cx| {
+                let text = ui_scale_editor.read(cx).text().to_string();
+                if let Some(value) = text.parse::<f32>().ok().filter(|value| value.is_finite()) {
+                    this.apply_ui_scale(value, cx);
+                } else {
+                    this.sync_inline_stepper_editor(
+                        &ui_scale_editor,
+                        format!("{:.1}", this.ui_scale),
+                        cx,
+                    );
+                }
+            },
+        ));
+
+        let line_height_editor = self.settings_line_height_editor.clone().unwrap();
+        let focus_handle = line_height_editor.read(cx).focus_handle.clone();
+        self.settings_stepper_blur_subscriptions.push(cx.on_blur(
+            &focus_handle,
+            window,
+            move |this, _, cx| {
+                let text = line_height_editor.read(cx).text().to_string();
+                if let Some(value) = text.parse::<f32>().ok().filter(|value| value.is_finite()) {
+                    this.apply_line_height(value, cx);
+                } else {
+                    let current = this.app_settings.line_height;
+                    this.sync_inline_stepper_editor(
+                        &line_height_editor,
+                        format!("{current:.1}"),
+                        cx,
+                    );
+                }
+            },
+        ));
+
+        let letter_spacing_editor = self.settings_letter_spacing_editor.clone().unwrap();
+        let focus_handle = letter_spacing_editor.read(cx).focus_handle.clone();
+        self.settings_stepper_blur_subscriptions.push(cx.on_blur(
+            &focus_handle,
+            window,
+            move |this, _, cx| {
+                let text = letter_spacing_editor.read(cx).text().to_string();
+                if let Some(value) = text.parse::<f32>().ok().filter(|value| value.is_finite()) {
+                    this.apply_letter_spacing(value, cx);
+                } else {
+                    let current = this.app_settings.letter_spacing;
+                    this.sync_inline_stepper_editor(
+                        &letter_spacing_editor,
+                        format!("{current:.1}"),
+                        cx,
+                    );
+                }
+            },
+        ));
+
+        let content_width_editor = self.settings_editor_content_width_editor.clone().unwrap();
+        let focus_handle = content_width_editor.read(cx).focus_handle.clone();
+        self.settings_stepper_blur_subscriptions.push(cx.on_blur(
+            &focus_handle,
+            window,
+            move |this, _, cx| {
+                let text = content_width_editor.read(cx).text().to_string();
+                if let Some(value) = text.parse::<f32>().ok().filter(|value| value.is_finite()) {
+                    this.apply_editor_content_width(value, cx);
+                } else {
+                    let current = this.app_settings.editor_content_width;
+                    this.sync_inline_stepper_editor(
+                        &content_width_editor,
+                        format!("{current:.0}"),
+                        cx,
+                    );
+                }
+            },
+        ));
     }
 
     fn render_picker_row(
@@ -1217,7 +1332,7 @@ impl EditorView {
             |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
                 crate::text_input::TextInputEvent::Submit => {
                     let text = editor.read(cx).text().to_string();
-                    if let Ok(size) = text.parse::<f32>() {
+                    if let Some(size) = text.parse::<f32>().ok().filter(|value| value.is_finite()) {
                         this.apply_font_size(size, cx);
                     }
                 }
@@ -1353,7 +1468,8 @@ impl EditorView {
             |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
                 crate::text_input::TextInputEvent::Submit => {
                     let text = editor.read(cx).text().to_string();
-                    if let Ok(scale) = text.parse::<f32>() {
+                    if let Some(scale) = text.parse::<f32>().ok().filter(|value| value.is_finite())
+                    {
                         this.apply_ui_scale(scale, cx);
                     }
                 }
@@ -1455,7 +1571,7 @@ impl EditorView {
             |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
                 crate::text_input::TextInputEvent::Submit => {
                     let text = editor.read(cx).text().to_string();
-                    if let Ok(val) = text.parse::<f32>() {
+                    if let Some(val) = text.parse::<f32>().ok().filter(|value| value.is_finite()) {
                         this.apply_line_height(val, cx);
                     }
                 }
@@ -1556,7 +1672,7 @@ impl EditorView {
             |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
                 crate::text_input::TextInputEvent::Submit => {
                     let text = editor.read(cx).text().to_string();
-                    if let Ok(val) = text.parse::<f32>() {
+                    if let Some(val) = text.parse::<f32>().ok().filter(|value| value.is_finite()) {
                         this.apply_letter_spacing(val, cx);
                     }
                 }
@@ -1569,6 +1685,110 @@ impl EditorView {
         )
         .detach();
         self.settings_letter_spacing_editor = Some(editor);
+    }
+
+    // ── Editor content width stepper ────────────────────────────
+
+    fn render_editor_content_width_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.ensure_editor_content_width_editor(cx);
+        let text_secondary = self.styles.settings_panel.settings_secondary_text_color;
+        let border_color = self.theme.border_primary;
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(self.scaled(12.0)))
+            .child(
+                div()
+                    .w(px(self.scaled(120.0)))
+                    .text_size(px(self.scaled(13.0)))
+                    .text_color(text_secondary)
+                    .child(self.t(TextKey::EditorContentWidth)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(0.0))
+                    .child(self.render_settings_stepper_button(
+                        "editor-content-width-dec",
+                        "−",
+                        false,
+                        None,
+                        cx,
+                        |this, cx| {
+                            let current = this.app_settings.editor_content_width;
+                            this.apply_editor_content_width(current - 20.0, cx);
+                        },
+                    ))
+                    .child(
+                        div()
+                            .w(px(self.scaled(60.0)))
+                            .h(px(self.scaled(30.0)))
+                            .border_y(px(1.0))
+                            .border_color(border_color)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when_some(
+                                self.settings_editor_content_width_editor.clone(),
+                                |this, editor| this.child(editor),
+                            ),
+                    )
+                    .child(self.render_settings_stepper_button(
+                        "editor-content-width-inc",
+                        "+",
+                        true,
+                        None,
+                        cx,
+                        |this, cx| {
+                            let current = this.app_settings.editor_content_width;
+                            this.apply_editor_content_width(current + 20.0, cx);
+                        },
+                    )),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn apply_editor_content_width(&mut self, value: f32, cx: &mut Context<Self>) {
+        let value = value.round().clamp(320.0, 1600.0);
+        self.styles.editor.editor_max_width_px = value;
+        self.app_settings.editor_content_width = value;
+        if let Some(editor) = &self.settings_editor_content_width_editor {
+            self.sync_inline_stepper_editor(editor, format!("{value:.0}"), cx);
+        }
+        self.finalize_settings_change(cx);
+    }
+
+    fn ensure_editor_content_width_editor(&mut self, cx: &mut Context<Self>) {
+        if self.settings_editor_content_width_editor.is_some() {
+            return;
+        }
+        let editor = self.build_inline_stepper_editor(
+            format!("{:.0}", self.app_settings.effective_editor_content_width()),
+            cx,
+        );
+        cx.subscribe(
+            &editor,
+            |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Submit => {
+                    let text = editor.read(cx).text().to_string();
+                    if let Some(value) = text.parse::<f32>().ok().filter(|value| value.is_finite())
+                    {
+                        this.apply_editor_content_width(value, cx);
+                    }
+                }
+                crate::text_input::TextInputEvent::Escape => {
+                    let current = this.app_settings.editor_content_width;
+                    this.sync_inline_stepper_editor(&editor, format!("{current:.0}"), cx);
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        self.settings_editor_content_width_editor = Some(editor);
     }
 
     // ── Font picker overlay ─────────────────────────────────────

@@ -156,10 +156,9 @@ impl EditorView {
                     .overflow_hidden()
                     .child(self.render_pane_layout(&layout, &mut Vec::new(), window, cx)),
             )
-            .when(
-                !self.active_tab_is_settings() && !self.active_tab_is_terminal(),
-                |this| this.child(self.render_status_bar(cx)),
-            )
+            .when(!self.active_tab_is_settings(), |this| {
+                this.child(self.render_status_bar(cx))
+            })
             .into_any_element()
     }
 
@@ -1084,11 +1083,14 @@ impl EditorView {
                         },
                     )
                     .when(
-                        self.tab_dragging_id.is_some()
-                            && matches!(self.tab_drag_split_target, Some((id, _)) if id == pane_id),
+                        matches!(
+                            self.tab_drag_split_target.or(self.context_menu_pane_target),
+                            Some((id, _)) if id == pane_id
+                        ),
                         |this| {
                             let direction = self
                                 .tab_drag_split_target
+                                .or(self.context_menu_pane_target)
                                 .and_then(|(_, direction)| direction);
                             let overlay_bg = self.styles.editor.editor_file_drop_bg;
                             let overlay = div().absolute().bg(overlay_bg);

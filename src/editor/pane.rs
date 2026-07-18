@@ -668,6 +668,7 @@ impl EditorView {
         }
         self.pause_blinking(cx);
         if let Some(terminal_tab_id) = self.active_terminal_tab_id() {
+            self.hide_right_panels_for_terminal(cx);
             self.pending_terminal_focus = Some(terminal_tab_id);
             cx.notify();
         } else {

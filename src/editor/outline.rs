@@ -987,7 +987,7 @@ impl EditorView {
                 let color = if is_active {
                     os.outline_rail_label_active_color
                 } else {
-                    os.outline_rail_label_color
+                    ups.utility_panel_item_value_text_color
                 };
                 let indent = depth as f32 * indent_step.max(0.0);
                 let inner_padding_left = section_padding_x + indent;
@@ -1008,7 +1008,7 @@ impl EditorView {
                         .pr(px(section_padding_x))
                         .py(px(item_padding_y))
                         .flex()
-                        .items_start()
+                        .items_center()
                         .gap(px(fold_icon_gap))
                         .text_size(px(font_size))
                         .text_color(color)

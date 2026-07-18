@@ -3,6 +3,7 @@ use gpui::{AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, div, p
 use crate::markdown::{self, BlockType};
 use crate::theme::with_alpha;
 
+use super::chat_panel::TerminalStatusSummary;
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +203,16 @@ impl EditorView {
         } else {
             with_alpha(self.theme.text_secondary, 0.62)
         };
+        if let Some(summary) = self.active_terminal_status_summary() {
+            return self.render_terminal_status_bar(
+                summary,
+                bg,
+                border,
+                border_width,
+                title_color,
+                value_color,
+            );
+        }
         let hover_bg = with_alpha(self.theme.text_primary, 0.08);
         let cursor_label = self.cursor_status_label();
         let (indent_title, indent_value) = self.indent_settings.status_parts(self.ui_language);
@@ -248,6 +259,76 @@ impl EditorView {
                 Some(StatusBarAction::OpenLanguagePicker),
                 cx,
             ))
+            .into_any_element()
+    }
+
+    fn render_terminal_status_bar(
+        &self,
+        summary: TerminalStatusSummary,
+        bg: gpui::Hsla,
+        border: gpui::Hsla,
+        border_width: f32,
+        title_color: gpui::Hsla,
+        value_color: gpui::Hsla,
+    ) -> AnyElement {
+        let agent_label = summary.agent.label();
+        let show_title = !summary.title.is_empty() && summary.title != agent_label;
+        let scrollback = summary.scrollback().map(|(offset, history_size)| {
+            crate::i18n::terminal_scrollback_label(self.ui_language, offset, history_size)
+        });
+
+        div()
+            .id("terminal-status-bar")
+            .h(px(self.status_bar_height()))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .pl(px(self.scaled(self.styles.status_bar_padding_left_px)))
+            .pr(px(0.0))
+            .border_t(px(border_width))
+            .border_color(border)
+            .bg(bg)
+            .text_size(px(self.scaled(12.0)))
+            .child(
+                div()
+                    .h_full()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .px(px(self.scaled(6.0)))
+                    .flex()
+                    .items_center()
+                    .gap(px(self.scaled(4.0)))
+                    .child(
+                        gpui::svg()
+                            .path(summary.agent.icon_path())
+                            .size(px(self.scaled(11.0)))
+                            .flex_none()
+                            .text_color(title_color),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .text_color(title_color)
+                            .child(agent_label),
+                    )
+                    .when(show_title, |this| {
+                        this.child(div().flex_none().text_color(value_color).child("·"))
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .truncate()
+                                    .whitespace_nowrap()
+                                    .text_color(value_color)
+                                    .child(summary.title),
+                            )
+                    }),
+            )
+            .when_some(scrollback, |this, scrollback| {
+                this.child(self.render_status_bar_label(scrollback, value_color))
+            })
             .into_any_element()
     }
 

@@ -1474,6 +1474,8 @@ pub struct EditorView {
     /// While a tab drag hovers a pane's content area: the hovered pane and the
     /// split direction (None = merge into that pane).
     pub(crate) tab_drag_split_target: Option<(PaneId, Option<SplitDirection>)>,
+    /// Pane previewed by a split/move item in a tab or terminal context menu.
+    pub(crate) context_menu_pane_target: Option<(PaneId, Option<SplitDirection>)>,
     /// An in-progress drag on a divider between two split children.
     pub(crate) pane_resize_drag: Option<PaneResizeDrag>,
     pub(crate) last_editor_left: f32,
@@ -1847,6 +1849,8 @@ pub struct EditorView {
     /// part of the per-pane swap state) so terminal tabs can move between
     /// panes while their PTY sessions stay alive.
     pub(crate) terminal_tab_states: HashMap<String, chat_panel::TerminalTabState>,
+    /// Terminal tab ids ordered from least to most recently focused.
+    pub(crate) terminal_focus_history: Vec<String>,
     /// Terminal tab that should grab keyboard focus on the next render.
     pub(crate) pending_terminal_focus: Option<String>,
     pub(crate) chat_terminal_cell_width_px: f32,
@@ -1861,6 +1865,9 @@ pub struct EditorView {
     pub(crate) settings_ui_font_size_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) settings_line_height_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) settings_letter_spacing_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) settings_editor_content_width_editor:
+        Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) settings_stepper_blur_subscriptions: Vec<gpui::Subscription>,
     pub(crate) settings_attachment_folder_editor:
         Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) font_picker_trigger_position: Option<gpui::Point<gpui::Pixels>>,
@@ -1923,6 +1930,7 @@ impl EditorView {
         styles.editor.editor_paragraph_line_height_factor = app_settings.line_height;
         styles.editor.editor_heading_line_height_factor = app_settings.line_height;
         styles.editor.editor_letter_spacing_px = app_settings.letter_spacing;
+        styles.editor.editor_max_width_px = app_settings.effective_editor_content_width();
         styles.ui_font_family = Box::leak(app_settings.ui_font.clone().into_boxed_str());
         styles.editor.editor_body_latin_font_family =
             Box::leak(app_settings.body_latin_font.clone().into_boxed_str());
@@ -2041,6 +2049,7 @@ impl EditorView {
             next_pane_id: 1,
             pane_bounds: HashMap::new(),
             tab_drag_split_target: None,
+            context_menu_pane_target: None,
             pane_resize_drag: None,
             last_editor_left: 0.0,
             last_editor_width: init_max_width,
@@ -2364,6 +2373,7 @@ impl EditorView {
             language_picker_scroll_handle: ScrollHandle::new(),
             language_picker_editor: None,
             terminal_tab_states: HashMap::new(),
+            terminal_focus_history: Vec::new(),
             pending_terminal_focus: None,
             chat_terminal_cell_width_px: 0.0,
             chat_terminal_cell_height_px: 0.0,
@@ -2377,6 +2387,8 @@ impl EditorView {
             settings_ui_font_size_editor: None,
             settings_line_height_editor: None,
             settings_letter_spacing_editor: None,
+            settings_editor_content_width_editor: None,
+            settings_stepper_blur_subscriptions: Vec::new(),
             settings_attachment_folder_editor: None,
             font_picker_trigger_position: None,
             font_picker_button_bounds: std::collections::HashMap::new(),
@@ -3042,7 +3054,7 @@ impl EditorView {
     }
 
     pub(crate) fn should_render_utility_panel_on_right(&self) -> bool {
-        self.should_render_utility_panel()
+        !self.focused_pane_active_tab_is_terminal() && self.should_render_utility_panel()
     }
 
     pub(crate) fn theme_debugger_target_width(&self) -> f32 {
@@ -3062,7 +3074,8 @@ impl EditorView {
     }
 
     pub(crate) fn should_render_theme_debugger_panel(&self) -> bool {
-        self.displayed_theme_debugger
+        !self.focused_pane_active_tab_is_terminal()
+            && self.displayed_theme_debugger
             && (self.theme_debugger_width_task.is_some() || self.theme_debugger_width() > 0.5)
     }
 

@@ -1292,6 +1292,7 @@ impl Styles {
         let text_input_theme = if is_light { theme } else { ui_theme };
         let text_input_shadow = !is_light;
         let settings_theme = if is_light { theme } else { ui_theme };
+        let utility_panel_theme = theme;
         let settings_active_bg = if is_light {
             theme.bg_selected
         } else {
@@ -1353,7 +1354,7 @@ impl Styles {
                 editor_padding_right_px: 40.0,
                 editor_padding_bottom_px: 200.0,
                 editor_wrap_right_padding_px: 24.0,
-                editor_max_width_px: 800.0,
+                editor_max_width_px: 700.0,
                 editor_non_markdown_max_width_px: 1120.0,
                 editor_file_drop_bg: with_alpha(theme.text_accent, 0.2),
                 editor_path_bar_height_px: 30.0,
@@ -1600,7 +1601,7 @@ impl Styles {
                 outline_rail_label_indent_guide_width_px: 1.0,
                 outline_rail_label_indent_guide_dash_length_px: 3.0,
                 outline_rail_label_indent_guide_gap_length_px: 3.0,
-                outline_rail_label_indent_guide_color: with_alpha(ui_theme.text_secondary, 0.6),
+                outline_rail_label_indent_guide_color: with_alpha(theme.text_secondary, 0.6),
                 outline_rail_label_fold_icon_size_px: 10.0,
                 outline_rail_label_fold_icon_gap_px: 2.0,
                 outline_rail_label_gap_px: 8.0,
@@ -1610,17 +1611,17 @@ impl Styles {
                 outline_rail_label_line_height_px: 15.0,
                 outline_rail_label_wrap_chars_per_line: 24,
                 outline_rail_label_max_lines: 3,
-                outline_rail_label_color: ui_theme.text_secondary,
-                outline_rail_label_hover_color: ui_theme.text_bright,
-                outline_rail_label_active_color: ui_theme.text_bright,
+                outline_rail_label_color: theme.text_secondary,
+                outline_rail_label_hover_color: theme.text_bright,
+                outline_rail_label_active_color: theme.text_bright,
                 outline_rail_tick_level_opacities: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
                 outline_rail_label_level_opacities: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
                 outline_rail_label_level_brightness_mix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 outline_rail_row_height_px: 4.0,
                 outline_rail_tick_width_px: 8.0,
                 outline_rail_tick_thickness_px: 0.66,
-                outline_rail_tick_color: with_alpha(ui_theme.text_primary, 0.3),
-                outline_rail_tick_active_color: with_alpha(ui_theme.text_primary, 0.58),
+                outline_rail_tick_color: with_alpha(theme.text_primary, 0.3),
+                outline_rail_tick_active_color: with_alpha(theme.text_primary, 0.58),
                 outline_rail_tick_active_extra_width_px: 3.0,
                 outline_rail_tick_active_animation_seconds: 0.2,
                 outline_rail_edge_fade_px: 48.0,
@@ -1631,41 +1632,41 @@ impl Styles {
             },
             utility_panel: UtilityPanelStyles {
                 utility_panel_width_px: RIGHT_PANEL_MIN_WIDTH_PX,
-                utility_panel_bg: ui_theme.bg_secondary,
+                utility_panel_bg: utility_panel_theme.bg_secondary,
                 utility_panel_terminal_padding_px: 10.0,
                 utility_panel_border_width_px: 1.0,
-                utility_panel_border_color: ui_theme.border_primary,
+                utility_panel_border_color: utility_panel_theme.border_primary,
                 utility_panel_top_spacer_height_px: 14.0,
                 utility_panel_bottom_spacer_height_px: 14.0,
                 utility_panel_header_height_px: 15.0,
                 utility_panel_header_padding_x_px: 14.0,
                 utility_panel_header_font_size_px: ui_font_size_xs_px,
-                utility_panel_header_text_color: ui_theme.text_primary,
+                utility_panel_header_text_color: utility_panel_theme.text_primary,
                 utility_panel_section_gap_px: 18.0,
                 utility_panel_section_padding_x_px: 14.0,
                 utility_panel_section_title_font_size_px: ui_font_size_xs_px,
-                utility_panel_section_title_text_color: ui_theme.text_primary,
+                utility_panel_section_title_text_color: utility_panel_theme.text_primary,
                 utility_panel_item_height_px: 24.0,
                 utility_panel_item_gap_px: 8.0,
                 utility_panel_item_font_size_px: ui_font_size_sm_px,
-                utility_panel_item_label_text_color: ui_theme.text_secondary,
-                utility_panel_item_value_text_color: ui_theme.text_primary,
+                utility_panel_item_label_text_color: utility_panel_theme.text_secondary,
+                utility_panel_item_value_text_color: utility_panel_theme.text_primary,
                 utility_panel_terminal_inactive_opacity: 1.0,
                 utility_panel_button_height_px: 28.0,
                 utility_panel_button_gap_px: 8.0,
                 utility_panel_button_padding_x_px: 10.0,
                 utility_panel_button_radius_px: 6.0,
                 utility_panel_button_border_width_px: 1.0,
-                utility_panel_button_border_color: ui_theme.border_primary,
-                utility_panel_button_text_color: ui_theme.text_primary,
-                utility_panel_button_hover_bg: ui_theme.bg_hover,
+                utility_panel_button_border_color: utility_panel_theme.border_primary,
+                utility_panel_button_text_color: utility_panel_theme.text_primary,
+                utility_panel_button_hover_bg: utility_panel_theme.bg_hover,
                 utility_panel_empty_font_size_px: ui_font_size_sm_px,
-                utility_panel_empty_text_color: ui_theme.text_secondary,
+                utility_panel_empty_text_color: utility_panel_theme.text_secondary,
                 utility_panel_resize_handle_width_px: 5.0,
                 utility_panel_resize_indicator_width_px: 1.0,
                 utility_panel_resize_active_indicator_width_px: 3.0,
-                utility_panel_resize_indicator_color: ui_theme.border_primary,
-                utility_panel_resize_active_indicator_color: ui_theme.text_accent,
+                utility_panel_resize_indicator_color: utility_panel_theme.border_primary,
+                utility_panel_resize_active_indicator_color: utility_panel_theme.text_accent,
                 utility_panel_resize_min_width_px: RIGHT_PANEL_MIN_WIDTH_PX,
                 utility_panel_resize_max_width_px: RIGHT_PANEL_MAX_WIDTH_PX,
                 utility_panel_visibility_animation_ms: 220,
@@ -1811,7 +1812,7 @@ impl Styles {
                 tooltip_gap_px: 5.0,
                 tooltip_radius_px: 8.0,
                 tooltip_border_width_px: 1.0,
-                tooltip_bg: with_alpha(ui_theme.bg_elevated, 0.96),
+                tooltip_bg: with_alpha(ui_theme.bg_elevated, 1.0),
                 tooltip_border_color: with_alpha(ui_theme.border_primary, 0.32),
                 tooltip_title_font_size_px: ui_font_size_sm_px,
                 tooltip_title_text_color: ui_theme.text_primary,
@@ -1888,7 +1889,7 @@ impl Styles {
                 generated_preview_padding_y_px: 12.0,
             },
             quote_block: QuoteBlockStyles {
-                quote_block_border_width_px: 4.0,
+                quote_block_border_width_px: 3.0,
                 quote_block_radius_px: 0.0,
                 quote_block_padding_top_px: 0.0,
                 quote_block_padding_bottom_px: 0.0,
@@ -1898,7 +1899,7 @@ impl Styles {
                 quote_block_padding_right_px: 10.0,
                 quote_block_callout_icon_color: theme.bold,
                 quote_block_callout_icon_size_factor: 2.175,
-                quote_block_callout_icon_min_px: 28.0,
+                quote_block_callout_icon_min_px: 14.0,
                 quote_block_callout_icon_max_line_height_factor: 1.5,
                 quote_block_callout_icon_label_gap_px: 3.0,
                 quote_block_bg: with_alpha(theme.text_secondary, if is_light { 0.0 } else { 0.0 }),
@@ -2159,7 +2160,7 @@ impl Styles {
                 notification_gap_px: 8.0,
                 notification_padding_x_px: 14.0,
                 notification_padding_y_px: 10.0,
-                notification_radius_px: 8.0,
+                notification_radius_px: 0.0,
                 notification_border_width_px: 1.0,
                 notification_bg: ui_theme.bg_elevated,
                 notification_border_color: ui_theme.border_primary,
@@ -2467,6 +2468,62 @@ mod tests {
             crate::theme::with_alpha(theme.border_primary, 0.38)
         );
         assert!(styles.code_block.generated_preview_action_border_color.a < 0.5);
+    }
+
+    #[test]
+    fn utility_panel_colors_follow_the_active_light_theme() {
+        let light_theme = Theme::one_light();
+        let dark_ui_theme = Theme::one_dark();
+        let styles = Styles::from_theme(&light_theme, &dark_ui_theme);
+        let panel = &styles.utility_panel;
+
+        assert_eq!(panel.utility_panel_bg, light_theme.bg_secondary);
+        assert_eq!(panel.utility_panel_border_color, light_theme.border_primary);
+        assert_eq!(
+            panel.utility_panel_header_text_color,
+            light_theme.text_primary
+        );
+        assert_eq!(
+            panel.utility_panel_item_label_text_color,
+            light_theme.text_secondary
+        );
+        assert_eq!(
+            panel.utility_panel_item_value_text_color,
+            light_theme.text_primary
+        );
+        assert_eq!(
+            panel.utility_panel_button_border_color,
+            light_theme.border_primary
+        );
+        assert_eq!(
+            panel.utility_panel_button_text_color,
+            light_theme.text_primary
+        );
+        assert_eq!(panel.utility_panel_button_hover_bg, light_theme.bg_hover);
+        assert_eq!(
+            panel.utility_panel_resize_indicator_color,
+            light_theme.border_primary
+        );
+        assert_eq!(
+            panel.utility_panel_resize_active_indicator_color,
+            light_theme.text_accent
+        );
+        assert_eq!(
+            styles.outline.outline_rail_label_color,
+            light_theme.text_secondary
+        );
+        assert_eq!(
+            styles.outline.outline_rail_label_hover_color,
+            light_theme.text_bright
+        );
+        assert_eq!(
+            styles.outline.outline_rail_label_active_color,
+            light_theme.text_bright
+        );
+        assert_eq!(
+            styles.outline.outline_rail_tick_color,
+            crate::theme::with_alpha(light_theme.text_primary, 0.3)
+        );
     }
 
     #[test]

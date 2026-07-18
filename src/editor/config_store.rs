@@ -213,6 +213,7 @@ mod tests {
             font_size: 17.0,
             line_height: 1.7,
             letter_spacing: 0.5,
+            editor_content_width: 800.0,
             sidebar_sort_mode: "created_desc".to_string(),
             file_list_width: None,
             file_list_visible: true,

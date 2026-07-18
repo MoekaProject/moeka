@@ -35,6 +35,7 @@ pub(crate) enum TextKey {
     DateTimeFormat,
     LineHeight,
     LetterSpacing,
+    EditorContentWidth,
     SearchFonts,
     SearchLanguages,
     SearchDateTimeFormats,
@@ -176,10 +177,9 @@ pub(crate) enum TextKey {
     Unstar,
     PinTab,
     UnpinTab,
-    // Pending use by the in-progress split-pane tab menu.
-    #[allow(dead_code)]
+    SplitTabLeft,
     SplitTabRight,
-    #[allow(dead_code)]
+    SplitTabUp,
     SplitTabDown,
     RevealInFileTree,
     CopyPath,
@@ -1822,6 +1822,103 @@ pub(crate) fn terminal_label(language: UiLanguage) -> &'static str {
     }
 }
 
+pub(crate) fn move_tab_to_pane_label(language: UiLanguage, pane_number: usize) -> String {
+    match language {
+        UiLanguage::ChineseSimplified => format!("移动到分屏 {pane_number}"),
+        UiLanguage::ChineseTraditional => format!("移動到分割畫面 {pane_number}"),
+        UiLanguage::Japanese => format!("ペイン {pane_number} に移動"),
+        UiLanguage::Korean => format!("분할 {pane_number}(으)로 이동"),
+        UiLanguage::French => format!("Déplacer vers le volet {pane_number}"),
+        UiLanguage::German => format!("In Bereich {pane_number} verschieben"),
+        UiLanguage::Spanish => format!("Mover al panel {pane_number}"),
+        UiLanguage::Portuguese => format!("Mover para o painel {pane_number}"),
+        UiLanguage::Russian => format!("Переместить в область {pane_number}"),
+        UiLanguage::Arabic => format!("نقل إلى الجزء {pane_number}"),
+        UiLanguage::Hindi => format!("पेन {pane_number} में ले जाएँ"),
+        UiLanguage::English => format!("Move to Pane {pane_number}"),
+    }
+}
+
+pub(crate) fn terminal_scrollback_label(
+    language: UiLanguage,
+    display_offset: usize,
+    history_size: usize,
+) -> String {
+    let label = match language {
+        UiLanguage::ChineseSimplified => "回滚",
+        UiLanguage::ChineseTraditional => "回捲",
+        UiLanguage::Japanese => "スクロールバック",
+        UiLanguage::Korean => "스크롤백",
+        UiLanguage::French => "Historique",
+        UiLanguage::German => "Verlauf",
+        UiLanguage::Spanish => "Historial",
+        UiLanguage::Portuguese => "Histórico",
+        UiLanguage::Russian => "История",
+        UiLanguage::Arabic => "السجل",
+        UiLanguage::Hindi => "स्क्रॉलबैक",
+        UiLanguage::English => "Scrollback",
+    };
+    format!("{label} {display_offset}/{history_size}")
+}
+
+#[cfg(test)]
+mod terminal_status_tests {
+    use super::{
+        TextKey, UiLanguage, move_tab_to_pane_label, terminal_scrollback_label, translate,
+    };
+
+    #[test]
+    fn terminal_scrollback_labels_cover_all_ui_languages() {
+        let languages = [
+            UiLanguage::English,
+            UiLanguage::ChineseSimplified,
+            UiLanguage::ChineseTraditional,
+            UiLanguage::Japanese,
+            UiLanguage::Korean,
+            UiLanguage::French,
+            UiLanguage::German,
+            UiLanguage::Spanish,
+            UiLanguage::Portuguese,
+            UiLanguage::Russian,
+            UiLanguage::Arabic,
+            UiLanguage::Hindi,
+        ];
+        for language in languages {
+            let scrollback = terminal_scrollback_label(language, 24, 120);
+            assert!(scrollback.contains("24/120"));
+        }
+    }
+
+    #[test]
+    fn pane_menu_labels_cover_all_ui_languages() {
+        let languages = [
+            UiLanguage::English,
+            UiLanguage::ChineseSimplified,
+            UiLanguage::ChineseTraditional,
+            UiLanguage::Japanese,
+            UiLanguage::Korean,
+            UiLanguage::French,
+            UiLanguage::German,
+            UiLanguage::Spanish,
+            UiLanguage::Portuguese,
+            UiLanguage::Russian,
+            UiLanguage::Arabic,
+            UiLanguage::Hindi,
+        ];
+        for language in languages {
+            for key in [
+                TextKey::SplitTabLeft,
+                TextKey::SplitTabRight,
+                TextKey::SplitTabUp,
+                TextKey::SplitTabDown,
+            ] {
+                assert!(!translate(language, key).is_empty());
+            }
+            assert!(move_tab_to_pane_label(language, 2).contains('2'));
+        }
+    }
+}
+
 pub(crate) fn open_terminal_window_label(language: UiLanguage) -> &'static str {
     match language {
         UiLanguage::ChineseSimplified => "打开终端",
@@ -2393,6 +2490,7 @@ fn translate_english(key: TextKey) -> &'static str {
         TextKey::DateTimeFormat => "Date Format",
         TextKey::LineHeight => "Line Height",
         TextKey::LetterSpacing => "Spacing",
+        TextKey::EditorContentWidth => "Content Width",
         TextKey::SearchFonts => "Search...",
         TextKey::SearchLanguages => "Search...",
         TextKey::SearchDateTimeFormats => "Search...",
@@ -2540,7 +2638,9 @@ fn translate_english(key: TextKey) -> &'static str {
         TextKey::Unstar => "Unstar",
         TextKey::PinTab => "Pin Tab",
         TextKey::UnpinTab => "Unpin",
+        TextKey::SplitTabLeft => "Split Left",
         TextKey::SplitTabRight => "Split Right",
+        TextKey::SplitTabUp => "Split Up",
         TextKey::SplitTabDown => "Split Down",
         TextKey::RevealInFileTree => "Reveal in Tree",
         TextKey::CopyPath => "Copy Path",
@@ -2627,6 +2727,7 @@ fn translate_zh_cn(key: TextKey) -> &'static str {
         TextKey::DateTimeFormat => "日期时间格式",
         TextKey::LineHeight => "编辑器行间距",
         TextKey::LetterSpacing => "编辑器字符间距",
+        TextKey::EditorContentWidth => "编辑器内容宽度",
         TextKey::SearchFonts => "搜索字体...",
         TextKey::SearchLanguages => "搜索语言...",
         TextKey::SearchDateTimeFormats => "搜索日期时间格式...",
@@ -2771,7 +2872,9 @@ fn translate_zh_cn(key: TextKey) -> &'static str {
         TextKey::Unstar => "取消星标",
         TextKey::PinTab => "固定标签",
         TextKey::UnpinTab => "取消固定",
+        TextKey::SplitTabLeft => "在左侧拆分",
         TextKey::SplitTabRight => "在右侧拆分",
+        TextKey::SplitTabUp => "在上方拆分",
         TextKey::SplitTabDown => "在下方拆分",
         TextKey::RevealInFileTree => "定位到文件树",
         TextKey::CopyPath => "复制路径",
@@ -2857,6 +2960,7 @@ fn translate_zh_tw(key: TextKey) -> &'static str {
         TextKey::DateTimeFormat => "日期時間格式",
         TextKey::LineHeight => "編輯器行高",
         TextKey::LetterSpacing => "編輯器字距",
+        TextKey::EditorContentWidth => "編輯器內容寬度",
         TextKey::SearchFonts => "搜尋字體...",
         TextKey::SearchLanguages => "搜尋語言...",
         TextKey::SearchDateTimeFormats => "搜尋日期時間格式...",
@@ -3000,7 +3104,9 @@ fn translate_zh_tw(key: TextKey) -> &'static str {
         TextKey::Unstar => "取消星標",
         TextKey::PinTab => "固定分頁",
         TextKey::UnpinTab => "取消固定",
+        TextKey::SplitTabLeft => "在左側分割",
         TextKey::SplitTabRight => "在右側分割",
+        TextKey::SplitTabUp => "在上方分割",
         TextKey::SplitTabDown => "在下方分割",
         TextKey::RevealInFileTree => "在檔案樹中定位",
         TextKey::CopyPath => "複製路徑",
@@ -3087,6 +3193,7 @@ fn translate_japanese(key: TextKey) -> &'static str {
         TextKey::DateTimeFormat => "日時形式",
         TextKey::LineHeight => "行間",
         TextKey::LetterSpacing => "文字間隔",
+        TextKey::EditorContentWidth => "コンテンツ幅",
         TextKey::SearchFonts => "フォントを検索...",
         TextKey::SearchLanguages => "言語を検索...",
         TextKey::SearchDateTimeFormats => "形式を検索...",
@@ -3234,7 +3341,9 @@ fn translate_japanese(key: TextKey) -> &'static str {
         TextKey::Unstar => "スターを外す",
         TextKey::PinTab => "タブを固定",
         TextKey::UnpinTab => "固定を解除",
+        TextKey::SplitTabLeft => "左に分割",
         TextKey::SplitTabRight => "右に分割",
+        TextKey::SplitTabUp => "上に分割",
         TextKey::SplitTabDown => "下に分割",
         TextKey::RevealInFileTree => "ツリーで表示",
         TextKey::CopyPath => "パスをコピー",
@@ -3321,6 +3430,7 @@ fn translate_korean(key: TextKey) -> &'static str {
         TextKey::DateTimeFormat => "날짜 형식",
         TextKey::LineHeight => "줄 간격",
         TextKey::LetterSpacing => "자간",
+        TextKey::EditorContentWidth => "콘텐츠 너비",
         TextKey::SearchFonts => "글꼴 검색...",
         TextKey::SearchLanguages => "언어 검색...",
         TextKey::SearchDateTimeFormats => "형식 검색...",
@@ -3466,7 +3576,9 @@ fn translate_korean(key: TextKey) -> &'static str {
         TextKey::Unstar => "즐겨찾기 해제",
         TextKey::PinTab => "탭 고정",
         TextKey::UnpinTab => "고정 해제",
+        TextKey::SplitTabLeft => "왼쪽으로 분할",
         TextKey::SplitTabRight => "오른쪽으로 분할",
+        TextKey::SplitTabUp => "위로 분할",
         TextKey::SplitTabDown => "아래로 분할",
         TextKey::RevealInFileTree => "트리에서 표시",
         TextKey::CopyPath => "경로 복사",
@@ -3553,6 +3665,7 @@ fn translate_french(key: TextKey) -> &'static str {
         TextKey::DateTimeFormat => "Date",
         TextKey::LineHeight => "Hauteur de ligne",
         TextKey::LetterSpacing => "Espacement",
+        TextKey::EditorContentWidth => "Largeur du contenu",
         TextKey::SearchFonts => "Rechercher...",
         TextKey::SearchLanguages => "Rechercher...",
         TextKey::SearchDateTimeFormats => "Rechercher...",
@@ -3700,7 +3813,9 @@ fn translate_french(key: TextKey) -> &'static str {
         TextKey::Unstar => "Retirer favori",
         TextKey::PinTab => "Épingler l'onglet",
         TextKey::UnpinTab => "Désépingler",
+        TextKey::SplitTabLeft => "Diviser à gauche",
         TextKey::SplitTabRight => "Diviser à droite",
+        TextKey::SplitTabUp => "Diviser en haut",
         TextKey::SplitTabDown => "Diviser en bas",
         TextKey::RevealInFileTree => "Dans l'arbre",
         TextKey::CopyPath => "Copier le chemin",
@@ -3787,6 +3902,7 @@ fn translate_german(key: TextKey) -> &'static str {
         TextKey::DateTimeFormat => "Datum",
         TextKey::LineHeight => "Zeilenhöhe",
         TextKey::LetterSpacing => "Abstand",
+        TextKey::EditorContentWidth => "Inhaltsbreite",
         TextKey::SearchFonts => "Suchen...",
         TextKey::SearchLanguages => "Sprachen suchen...",
         TextKey::SearchDateTimeFormats => "Suchen...",
@@ -3936,7 +4052,9 @@ fn translate_german(key: TextKey) -> &'static str {
         TextKey::Unstar => "Markierung entfernen",
         TextKey::PinTab => "Tab anheften",
         TextKey::UnpinTab => "Lösen",
+        TextKey::SplitTabLeft => "Links teilen",
         TextKey::SplitTabRight => "Rechts teilen",
+        TextKey::SplitTabUp => "Oben teilen",
         TextKey::SplitTabDown => "Unten teilen",
         TextKey::RevealInFileTree => "Im Baum anzeigen",
         TextKey::CopyPath => "Pfad kopieren",
@@ -4023,6 +4141,7 @@ fn translate_spanish(key: TextKey) -> &'static str {
         TextKey::DateTimeFormat => "Fecha",
         TextKey::LineHeight => "Altura de línea",
         TextKey::LetterSpacing => "Espaciado",
+        TextKey::EditorContentWidth => "Ancho del contenido",
         TextKey::SearchFonts => "Buscar fuentes...",
         TextKey::SearchLanguages => "Buscar idiomas...",
         TextKey::SearchDateTimeFormats => "Buscar...",
@@ -4172,7 +4291,9 @@ fn translate_spanish(key: TextKey) -> &'static str {
         TextKey::Unstar => "Quitar favorito",
         TextKey::PinTab => "Fijar pestaña",
         TextKey::UnpinTab => "Desfijar",
+        TextKey::SplitTabLeft => "Dividir a la izquierda",
         TextKey::SplitTabRight => "Dividir a la derecha",
+        TextKey::SplitTabUp => "Dividir arriba",
         TextKey::SplitTabDown => "Dividir abajo",
         TextKey::RevealInFileTree => "Mostrar en árbol",
         TextKey::CopyPath => "Copiar ruta",
@@ -4259,6 +4380,7 @@ fn translate_portuguese(key: TextKey) -> &'static str {
         TextKey::DateTimeFormat => "Data",
         TextKey::LineHeight => "Altura da linha",
         TextKey::LetterSpacing => "Espaçamento",
+        TextKey::EditorContentWidth => "Largura do conteúdo",
         TextKey::SearchFonts => "Pesquisar fontes...",
         TextKey::SearchLanguages => "Pesquisar idiomas...",
         TextKey::SearchDateTimeFormats => "Pesquisar...",
@@ -4406,7 +4528,9 @@ fn translate_portuguese(key: TextKey) -> &'static str {
         TextKey::Unstar => "Desfavoritar",
         TextKey::PinTab => "Fixar aba",
         TextKey::UnpinTab => "Desafixar",
+        TextKey::SplitTabLeft => "Dividir à esquerda",
         TextKey::SplitTabRight => "Dividir à direita",
+        TextKey::SplitTabUp => "Dividir acima",
         TextKey::SplitTabDown => "Dividir abaixo",
         TextKey::RevealInFileTree => "Mostrar na árvore",
         TextKey::CopyPath => "Copiar caminho",
@@ -4493,6 +4617,7 @@ fn translate_russian(key: TextKey) -> &'static str {
         TextKey::DateTimeFormat => "Дата",
         TextKey::LineHeight => "Высота строки",
         TextKey::LetterSpacing => "Интервал",
+        TextKey::EditorContentWidth => "Ширина содержимого",
         TextKey::SearchFonts => "Поиск...",
         TextKey::SearchLanguages => "Поиск...",
         TextKey::SearchDateTimeFormats => "Поиск...",
@@ -4642,7 +4767,9 @@ fn translate_russian(key: TextKey) -> &'static str {
         TextKey::Unstar => "Убрать",
         TextKey::PinTab => "Закрепить вкладку",
         TextKey::UnpinTab => "Открепить",
+        TextKey::SplitTabLeft => "Разделить влево",
         TextKey::SplitTabRight => "Разделить вправо",
+        TextKey::SplitTabUp => "Разделить вверх",
         TextKey::SplitTabDown => "Разделить вниз",
         TextKey::RevealInFileTree => "Показать в дереве",
         TextKey::CopyPath => "Копировать путь",
@@ -4729,6 +4856,7 @@ fn translate_arabic(key: TextKey) -> &'static str {
         TextKey::DateTimeFormat => "التاريخ",
         TextKey::LineHeight => "ارتفاع السطر",
         TextKey::LetterSpacing => "تباعد الأحرف",
+        TextKey::EditorContentWidth => "عرض المحتوى",
         TextKey::SearchFonts => "بحث...",
         TextKey::SearchLanguages => "بحث...",
         TextKey::SearchDateTimeFormats => "بحث...",
@@ -4874,7 +5002,9 @@ fn translate_arabic(key: TextKey) -> &'static str {
         TextKey::Unstar => "إزالة النجمة",
         TextKey::PinTab => "تثبيت التبويب",
         TextKey::UnpinTab => "إلغاء التثبيت",
+        TextKey::SplitTabLeft => "تقسيم لليسار",
         TextKey::SplitTabRight => "تقسيم لليمين",
+        TextKey::SplitTabUp => "تقسيم للأعلى",
         TextKey::SplitTabDown => "تقسيم للأسفل",
         TextKey::RevealInFileTree => "إظهار في الشجرة",
         TextKey::CopyPath => "نسخ المسار",
@@ -4961,6 +5091,7 @@ fn translate_hindi(key: TextKey) -> &'static str {
         TextKey::DateTimeFormat => "दिनांक",
         TextKey::LineHeight => "लाइन ऊँचाई",
         TextKey::LetterSpacing => "अक्षर अंतर",
+        TextKey::EditorContentWidth => "सामग्री की चौड़ाई",
         TextKey::SearchFonts => "फ़ॉन्ट खोजें...",
         TextKey::SearchLanguages => "भाषाएँ खोजें...",
         TextKey::SearchDateTimeFormats => "खोजें...",
@@ -5106,7 +5237,9 @@ fn translate_hindi(key: TextKey) -> &'static str {
         TextKey::Unstar => "स्टार हटाएँ",
         TextKey::PinTab => "टैब पिन करें",
         TextKey::UnpinTab => "पिन हटाएँ",
+        TextKey::SplitTabLeft => "बाईं ओर विभाजित करें",
         TextKey::SplitTabRight => "दाईं ओर विभाजित करें",
+        TextKey::SplitTabUp => "ऊपर विभाजित करें",
         TextKey::SplitTabDown => "नीचे विभाजित करें",
         TextKey::RevealInFileTree => "ट्री में दिखाएँ",
         TextKey::CopyPath => "पथ कॉपी करें",

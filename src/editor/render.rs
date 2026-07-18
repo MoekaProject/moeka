@@ -396,11 +396,13 @@ impl Render for EditorView {
                 self.pending_terminal_focus = None;
             }
         }
-        if self
+        let focused_terminal_tab_id = self
             .terminal_tab_states
-            .values()
-            .any(|state| state.focus_handle.is_focused(window))
-        {
+            .iter()
+            .find(|(_, state)| state.focus_handle.is_focused(window))
+            .map(|(tab_id, _)| tab_id.clone());
+        if let Some(tab_id) = focused_terminal_tab_id {
+            self.record_terminal_focus(&tab_id);
             window.invalidate_character_coordinates();
         }
         if self.focus_handle.is_focused(window) && self.active_tab_supports_text_buffer() {

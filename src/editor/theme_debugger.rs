@@ -72,6 +72,7 @@ impl EditorView {
         self.styles.editor.editor_paragraph_line_height_factor = self.app_settings.line_height;
         self.styles.editor.editor_heading_line_height_factor = self.app_settings.line_height;
         self.styles.editor.editor_letter_spacing_px = self.app_settings.letter_spacing;
+        self.styles.editor.editor_max_width_px = self.app_settings.effective_editor_content_width();
         self.styles.ui_font_family = Box::leak(self.app_settings.ui_font.clone().into_boxed_str());
         self.styles.editor.editor_body_latin_font_family =
             Box::leak(self.app_settings.body_latin_font.clone().into_boxed_str());
@@ -93,13 +94,15 @@ impl EditorView {
             self.settings_ui_font_size_editor = None;
             self.settings_line_height_editor = None;
             self.settings_letter_spacing_editor = None;
+            self.settings_editor_content_width_editor = None;
+            self.settings_stepper_blur_subscriptions.clear();
             self.ensure_font_size_editor(cx);
             self.ensure_ui_font_size_editor(cx);
         }
     }
 
     pub(crate) fn right_panel_width(&self) -> f32 {
-        if self.tabs.is_empty() {
+        if self.tabs.is_empty() || self.focused_pane_active_tab_is_terminal() {
             return 0.0;
         }
 
@@ -122,6 +125,19 @@ impl EditorView {
         }
         self.sync_theme_debugger_width_animation(cx);
         cx.notify();
+    }
+
+    pub(crate) fn hide_right_panels_for_terminal(&mut self, cx: &mut Context<Self>) {
+        if self.utility_panel.is_some() {
+            self.utility_panel_resizing = false;
+            self.set_visible_utility_panel(None, cx);
+        }
+        if self.theme_debugger_visible {
+            self.theme_debugger_visible = false;
+            self.theme_debugger_drag_target = None;
+            self.sync_theme_debugger_width_animation(cx);
+            cx.notify();
+        }
     }
 
     fn theme_debugger_text_input_styles(&self) -> crate::style::TextInputStyles {

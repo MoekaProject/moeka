@@ -158,7 +158,8 @@ impl EditorView {
         let had_submenu = self.context_submenu.take().is_some();
         let had_submenu_aim = self.context_submenu_aim.take().is_some();
         let had_submenu_hovered = std::mem::replace(&mut self.context_submenu_hovered, false);
-        if had_menu || had_submenu || had_submenu_aim || had_submenu_hovered {
+        let had_pane_target = self.context_menu_pane_target.take().is_some();
+        if had_menu || had_submenu || had_submenu_aim || had_submenu_hovered || had_pane_target {
             if let Some(start) = self.slash_menu_start.take() {
                 let end = self.cursor.offset;
                 if end > start {
@@ -1077,6 +1078,9 @@ impl EditorView {
     }
 
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.context_menu_pane_target.take().is_some() {
+            cx.notify();
+        }
         if self.context_menu.is_none() {
             self.finish_close_context_menu(cx);
             self.context_menu_opacity = 0.0;
@@ -1475,6 +1479,96 @@ impl EditorView {
     }
 
     // ── Context menu rendering ──────────────────────────────────────
+
+    fn render_context_menu_pane_item(
+        &self,
+        label: &str,
+        target: (PaneId, Option<SplitDirection>),
+        cx: &mut Context<Self>,
+        handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        div()
+            .id(SharedString::from(format!("pane-menu-target-{label}")))
+            .w_full()
+            .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+                let next = if *hovering {
+                    Some(target)
+                } else if this.context_menu_pane_target == Some(target) {
+                    None
+                } else {
+                    this.context_menu_pane_target
+                };
+                if this.context_menu_pane_target != next {
+                    this.context_menu_pane_target = next;
+                    cx.notify();
+                }
+            }))
+            .child(self.render_context_menu_item(label, false, cx, handler))
+            .into_any_element()
+    }
+
+    fn append_tab_pane_context_menu_items(
+        &self,
+        items: &mut Vec<AnyElement>,
+        tab_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source_pane) = self.pane_id_for_tab(tab_id) else {
+            return;
+        };
+        items.push(self.render_context_menu_separator());
+        for (label, direction) in [
+            (
+                self.t(crate::i18n::TextKey::SplitTabLeft),
+                SplitDirection::Left,
+            ),
+            (
+                self.t(crate::i18n::TextKey::SplitTabRight),
+                SplitDirection::Right,
+            ),
+            (self.t(crate::i18n::TextKey::SplitTabUp), SplitDirection::Up),
+            (
+                self.t(crate::i18n::TextKey::SplitTabDown),
+                SplitDirection::Down,
+            ),
+        ] {
+            let id = tab_id.to_string();
+            items.push(self.render_context_menu_pane_item(
+                label,
+                (source_pane, Some(direction)),
+                cx,
+                move |this, _, cx| {
+                    this.close_context_menu(cx);
+                    this.split_pane_with_tab(source_pane, direction, &id, cx);
+                },
+            ));
+        }
+
+        let target_panes = self
+            .pane_layout
+            .leaf_ids()
+            .into_iter()
+            .enumerate()
+            .filter(|(_, pane_id)| *pane_id != source_pane)
+            .collect::<Vec<_>>();
+        if target_panes.is_empty() {
+            return;
+        }
+        items.push(self.render_context_menu_separator());
+        for (index, target_pane) in target_panes {
+            let id = tab_id.to_string();
+            let label = crate::i18n::move_tab_to_pane_label(self.ui_language, index + 1);
+            items.push(self.render_context_menu_pane_item(
+                &label,
+                (target_pane, None),
+                cx,
+                move |this, _, cx| {
+                    this.close_context_menu(cx);
+                    this.move_tab_to_pane(&id, target_pane, None, cx);
+                },
+            ));
+        }
+    }
 
     fn render_context_menu_item(
         &self,
@@ -2705,8 +2799,43 @@ impl EditorView {
                 ));
             }
 
-            // Text/code editors only expose Cut/Copy/Paste; markdown-specific
-            // actions below do not apply to plain text or source files.
+            if let Some(current_path) = self.current_file_path.clone() {
+                items.push(self.render_context_menu_separator());
+
+                let chat_path = current_path.clone();
+                items.push(self.render_format_context_menu_item_with_hover_behavior(
+                    self.t(crate::i18n::TextKey::AddFileToChat),
+                    Some(MENU_AT_SVG_PATH),
+                    None,
+                    false,
+                    false,
+                    FormatMenuHoverBehavior::ClearSubmenu,
+                    cx,
+                    move |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.add_path_to_chat(&chat_path, cx);
+                    },
+                ));
+
+                let selection_path = current_path;
+                let selection_range = self.cursor.selection_range();
+                items.push(self.render_format_context_menu_item_with_hover_behavior(
+                    self.t(crate::i18n::TextKey::AddSelectionToChat),
+                    Some(CHAT_SVG_PATH),
+                    None,
+                    false,
+                    false,
+                    FormatMenuHoverBehavior::ClearSubmenu,
+                    cx,
+                    move |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.add_selection_to_chat(&selection_path, selection_range.clone(), cx);
+                    },
+                ));
+            }
+
+            // Markdown-specific actions below do not apply to plain text or
+            // source files; chat reference actions above remain available.
             if self.active_tab_is_non_markdown_text() {
                 return items;
             }
@@ -2726,41 +2855,6 @@ impl EditorView {
                     this.copy_plain_text_to_clipboard(cx);
                 },
             ));
-
-            if let Some(current_path) = self.current_file_path.clone() {
-                items.push(self.render_context_menu_separator());
-
-                let chat_path = current_path.clone();
-                items.push(self.render_format_context_menu_item_with_hover_behavior(
-                    self.t(crate::i18n::TextKey::AddFileToChat),
-                    Some(MENU_AT_SVG_PATH),
-                    None,
-                    false,
-                    false,
-                    FormatMenuHoverBehavior::ClearSubmenu,
-                    cx,
-                    move |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.add_path_to_chat(&chat_path, cx);
-                    },
-                ));
-
-                let selection_path = current_path.clone();
-                let selection_range = self.cursor.selection_range();
-                items.push(self.render_format_context_menu_item_with_hover_behavior(
-                    self.t(crate::i18n::TextKey::AddSelectionToChat),
-                    Some(CHAT_SVG_PATH),
-                    None,
-                    false,
-                    false,
-                    FormatMenuHoverBehavior::ClearSubmenu,
-                    cx,
-                    move |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.add_selection_to_chat(&selection_path, selection_range.clone(), cx);
-                    },
-                ));
-            }
 
             items.push(self.render_context_menu_separator());
             items.push(self.render_format_submenu_trigger_item(
@@ -3990,33 +4084,7 @@ impl EditorView {
                         },
                     ));
                 }
-                items.push(self.render_context_menu_separator());
-                {
-                    let id = tab_id.clone();
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::SplitTabRight),
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.close_context_menu(cx);
-                            let pane_id = this.focused_pane_id;
-                            this.split_pane_with_tab(pane_id, SplitDirection::Right, &id, cx);
-                        },
-                    ));
-                }
-                {
-                    let id = tab_id.clone();
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::SplitTabDown),
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.close_context_menu(cx);
-                            let pane_id = this.focused_pane_id;
-                            this.split_pane_with_tab(pane_id, SplitDirection::Down, &id, cx);
-                        },
-                    ));
-                }
+                self.append_tab_pane_context_menu_items(&mut items, tab_id, cx);
                 if let Some(tab) = self.tabs.iter().find(|t| t.id == *tab_id) {
                     if let Some(path) = &tab.path {
                         let chat_path = path.clone();
@@ -4131,9 +4199,15 @@ impl EditorView {
                         },
                     ));
                 }
+                self.append_tab_pane_context_menu_items(&mut items, tab_id, cx);
                 (
                     items,
-                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                    self.scaled(
+                        self.styles
+                            .context_menu
+                            .menu_sidebar_width_px
+                            .max(self.styles.context_menu.menu_tab_width_px),
+                    ),
                 )
             }
             ContextMenuKind::TerminalTabCreate => {

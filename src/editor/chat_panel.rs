@@ -36,6 +36,13 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use super::*;
 
 const CHAT_PANEL_DEFAULT_ROWS: u16 = 28;
+
+fn most_recent_open_terminal_id(
+    history: &[String],
+    mut is_open: impl FnMut(&str) -> bool,
+) -> Option<String> {
+    history.iter().rev().find(|id| is_open(id)).cloned()
+}
 const CHAT_PANEL_DEFAULT_COLS: u16 = 96;
 const CHAT_PANEL_POLL_MS: u64 = 33;
 const TERMINAL_PROCESS_INFO_POLL_MS: u64 = 500;
@@ -172,6 +179,20 @@ pub(crate) enum ChatTerminalStatus {
     Running,
     Exited,
     Unavailable(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalStatusSummary {
+    pub(crate) agent: ChatAgentCli,
+    pub(crate) title: String,
+    pub(crate) history_size: usize,
+    pub(crate) display_offset: usize,
+}
+
+impl TerminalStatusSummary {
+    pub(crate) fn scrollback(&self) -> Option<(usize, usize)> {
+        (self.display_offset > 0).then_some((self.display_offset, self.history_size))
+    }
 }
 
 #[derive(Clone)]
@@ -2223,6 +2244,27 @@ impl EditorView {
         self.active_terminal_tab_id().is_some()
     }
 
+    pub(crate) fn active_terminal_status_summary(&self) -> Option<TerminalStatusSummary> {
+        let tab_id = self.active_tab_id.as_ref()?;
+        let tab = self.tabs.iter().find(|tab| &tab.id == tab_id)?;
+        let agent = tab.kind.terminal_agent()?;
+        let (history_size, display_offset) = self
+            .terminal_session(tab_id)
+            .map(|session| {
+                (
+                    session.snapshot.history_size,
+                    session.snapshot.display_offset,
+                )
+            })
+            .unwrap_or((0, 0));
+        Some(TerminalStatusSummary {
+            agent,
+            title: tab.title.clone(),
+            history_size,
+            display_offset,
+        })
+    }
+
     pub(crate) fn has_terminal_tabs(&self) -> bool {
         self.all_tabs().any(|tab| tab.kind.is_terminal())
     }
@@ -2239,6 +2281,7 @@ impl EditorView {
         if self.pending_terminal_focus.as_deref() == Some(tab_id) {
             self.pending_terminal_focus = None;
         }
+        self.terminal_focus_history.retain(|id| id != tab_id);
         if let Some(mut state) = self.terminal_tab_states.remove(tab_id)
             && let Some(session) = state.session.as_mut()
         {
@@ -2421,11 +2464,16 @@ impl EditorView {
     /// to: the current pane's active terminal tab, any open terminal tab, or a
     /// freshly opened right-split terminal.
     fn ensure_chat_terminal_target(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        let existing = self.active_terminal_tab_id().or_else(|| {
-            self.all_tabs()
-                .find(|tab| tab.kind.is_terminal())
-                .map(|tab| tab.id.clone())
+        let recent = most_recent_open_terminal_id(&self.terminal_focus_history, |tab_id| {
+            self.pane_id_for_tab(tab_id).is_some()
         });
+        let existing = recent
+            .or_else(|| self.active_terminal_tab_id())
+            .or_else(|| {
+                self.all_tabs()
+                    .find(|tab| tab.kind.is_terminal())
+                    .map(|tab| tab.id.clone())
+            });
         let tab_id = match existing {
             Some(tab_id) => {
                 if let Some(owner) = self.pane_id_for_tab(&tab_id)
@@ -2444,6 +2492,21 @@ impl EditorView {
         Some(tab_id)
     }
 
+    pub(crate) fn record_terminal_focus(&mut self, tab_id: &str) {
+        if self.pane_id_for_tab(tab_id).is_none() {
+            return;
+        }
+        if self
+            .terminal_focus_history
+            .last()
+            .is_some_and(|id| id == tab_id)
+        {
+            return;
+        }
+        self.terminal_focus_history.retain(|id| id != tab_id);
+        self.terminal_focus_history.push(tab_id.to_string());
+    }
+
     fn insert_chat_reference_labels(&mut self, labels: &[String], cx: &mut Context<Self>) {
         let text = labels
             .iter()
@@ -2459,9 +2522,7 @@ impl EditorView {
             return;
         };
         self.pause_cursor_blinking(cx);
-        if let Some(session) = self.terminal_session(&tab_id) {
-            let _ = session.write_bytes(text.as_bytes());
-        }
+        self.terminal_write_user_input(&tab_id, text.as_bytes());
     }
 
     fn chat_drop_reference_label_for_path(&self, path: &std::path::Path) -> Option<String> {
@@ -2487,9 +2548,7 @@ impl EditorView {
         let Some(tab_id) = self.ensure_chat_terminal_target(cx) else {
             return;
         };
-        if let Some(session) = self.terminal_session(&tab_id) {
-            let _ = session.write_bytes(format!("@{} ", relative_path).as_bytes());
-        }
+        self.terminal_write_user_input(&tab_id, format!("@{} ", relative_path).as_bytes());
     }
 
     pub(crate) fn add_paths_to_chat(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
@@ -2505,9 +2564,7 @@ impl EditorView {
         let Some(tab_id) = self.ensure_chat_terminal_target(cx) else {
             return;
         };
-        if let Some(session) = self.terminal_session(&tab_id) {
-            let _ = session.write_bytes(references.as_bytes());
-        }
+        self.terminal_write_user_input(&tab_id, references.as_bytes());
     }
 
     fn chat_reference_position(&self, offset: usize) -> (usize, usize) {
@@ -2552,9 +2609,7 @@ impl EditorView {
         let Some(tab_id) = self.ensure_chat_terminal_target(cx) else {
             return;
         };
-        if let Some(session) = self.terminal_session(&tab_id) {
-            let _ = session.write_bytes(text.as_bytes());
-        }
+        self.terminal_write_user_input(&tab_id, text.as_bytes());
     }
 
     fn swallow_chat_terminal_editor_action(
@@ -4282,6 +4337,32 @@ mod tests {
             terminal_process_title(std::path::Path::new("/"), "zsh", &[]),
             "/ - zsh"
         );
+    }
+
+    #[test]
+    fn terminal_status_summary_only_reports_scrollback_away_from_bottom() {
+        let mut summary = TerminalStatusSummary {
+            agent: ChatAgentCli::Terminal,
+            title: "project - zsh".to_string(),
+            history_size: 120,
+            display_offset: 0,
+        };
+        assert_eq!(summary.scrollback(), None);
+
+        summary.display_offset = 24;
+        assert_eq!(summary.scrollback(), Some((24, 120)));
+    }
+
+    #[test]
+    fn recent_terminal_target_skips_closed_tabs() {
+        let history = vec![
+            "terminal-a".to_string(),
+            "terminal-b".to_string(),
+            "terminal-c".to_string(),
+        ];
+        let target =
+            most_recent_open_terminal_id(&history, |id| matches!(id, "terminal-a" | "terminal-b"));
+        assert_eq!(target.as_deref(), Some("terminal-b"));
     }
 
     #[test]

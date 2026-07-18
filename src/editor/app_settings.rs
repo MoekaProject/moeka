@@ -37,6 +37,8 @@ pub(crate) struct AppSettings {
     pub line_height: f32,
     #[serde(default = "default_letter_spacing")]
     pub letter_spacing: f32,
+    #[serde(default = "default_editor_content_width")]
+    pub editor_content_width: f32,
     #[serde(default = "default_sidebar_sort_mode")]
     pub sidebar_sort_mode: String,
     #[serde(default)]
@@ -129,6 +131,10 @@ fn default_letter_spacing() -> f32 {
     1.0
 }
 
+fn default_editor_content_width() -> f32 {
+    700.0
+}
+
 fn default_sidebar_sort_mode() -> String {
     "created_desc".to_string()
 }
@@ -191,6 +197,7 @@ impl Default for AppSettings {
             font_size: default_font_size(),
             line_height: default_line_height(),
             letter_spacing: default_letter_spacing(),
+            editor_content_width: default_editor_content_width(),
             sidebar_sort_mode: default_sidebar_sort_mode(),
             file_list_width: None,
             file_list_visible: default_file_list_visible(),
@@ -212,6 +219,10 @@ impl Default for AppSettings {
 impl AppSettings {
     pub(crate) fn effective_editor_font_size(&self) -> f32 {
         (self.font_size - 1.0).clamp(9.0, 29.0)
+    }
+
+    pub(crate) fn effective_editor_content_width(&self) -> f32 {
+        self.editor_content_width.round().clamp(320.0, 1600.0)
     }
 
     pub(crate) fn terminal_cursor_shape(&self) -> TerminalCursorShape {
@@ -486,6 +497,19 @@ mod tests {
 
         settings.font_size = 20.0;
         assert_eq!(settings.effective_editor_font_size(), 19.0);
+    }
+
+    #[test]
+    fn editor_content_width_defaults_to_700() {
+        let mut settings = AppSettings::default();
+        assert_eq!(settings.editor_content_width, 700.0);
+        assert_eq!(settings.effective_editor_content_width(), 700.0);
+
+        settings.editor_content_width = 100.0;
+        assert_eq!(settings.effective_editor_content_width(), 320.0);
+
+        settings.editor_content_width = 2000.0;
+        assert_eq!(settings.effective_editor_content_width(), 1600.0);
     }
 
     #[test]

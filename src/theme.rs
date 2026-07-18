@@ -319,6 +319,7 @@ macro_rules! hex_hsla {
 /// against bright surroundings. Used as the `window_border` field value for
 /// light theme builders; also tunable per-theme via the theme debugger.
 pub const LIGHT_WINDOW_BORDER: Hsla = hex_to_hsla("#00000033");
+pub const DARK_EDITOR_LINK: Hsla = hex_to_hsla("#5AA0FF");
 
 /// Per-theme token colors for code block syntax highlighting.
 ///
@@ -810,6 +811,9 @@ pub fn apply_editor_theme_mode(theme: &Theme, mode: EditorThemeMode, is_dark: bo
         themed.list_marker = subtle;
         themed.checkbox_checked = subtle;
         themed.gutter_heading = with_alpha(themed.text_primary, if is_dark { 1.0 } else { 1.0 });
+    }
+    if is_dark {
+        themed.link = DARK_EDITOR_LINK;
     }
     themed
 }
@@ -2323,7 +2327,10 @@ fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditorThemeMode, Theme, ThemeColorField, apply_editor_theme_mode, with_alpha};
+    use super::{
+        DARK_EDITOR_LINK, EditorThemeMode, Theme, ThemeColorField, ThemeKind,
+        apply_editor_theme_mode, with_alpha,
+    };
 
     #[test]
     fn interface_semantic_colors_round_trip_for_all_builtin_themes() {
@@ -2371,7 +2378,18 @@ mod tests {
         assert_eq!(themed.border_code_block, base.border_code_block);
         assert_eq!(themed.heading, with_alpha(base.text_bright, 0.88));
         assert_eq!(themed.inline_code, with_alpha(base.text_bright, 0.88));
-        assert_eq!(themed.link, crate::hex_hsla!("#0057CDFF"));
+        assert_eq!(themed.link, DARK_EDITOR_LINK);
+    }
+
+    #[test]
+    fn dark_editor_themes_share_link_color_in_all_modes() {
+        for kind in ThemeKind::dark_themes() {
+            let base = kind.build();
+            for mode in EditorThemeMode::all() {
+                let themed = apply_editor_theme_mode(&base, *mode, true);
+                assert_eq!(themed.link, DARK_EDITOR_LINK, "{}", kind.label());
+            }
+        }
     }
 
     #[test]
