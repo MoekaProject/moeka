@@ -412,6 +412,7 @@ fn main() {
             KeyBinding::new("escape", Escape, Some("MarkdownEditor")),
             KeyBinding::new("cmd-ctrl-1", ToggleOutline, Some("MarkdownEditor")),
             KeyBinding::new("cmd-ctrl-i", ToggleChatPanel, Some("MarkdownEditor")),
+            KeyBinding::new("cmd-ctrl-t", ToggleTerminalPanel, Some("MarkdownEditor")),
             KeyBinding::new("cmd-alt-i", ToggleInfoPanel, Some("MarkdownEditor")),
             KeyBinding::new("ctrl-shift-g", ToggleGitHistory, Some("MarkdownEditor")),
             KeyBinding::new("cmd-alt-y", ToggleThemeDebugger, Some("MarkdownEditor")),
@@ -456,6 +457,7 @@ fn main() {
 
         cx.bind_keys([
             KeyBinding::new("cmd-ctrl-i", ToggleChatPanel, Some("ChatTerminal")),
+            KeyBinding::new("cmd-ctrl-t", ToggleTerminalPanel, Some("ChatTerminal")),
             KeyBinding::new("cmd-n", NewChatTab, Some("ChatTerminal")),
             KeyBinding::new("cmd-w", CloseActiveChatTab, Some("ChatTerminal")),
             KeyBinding::new("cmd-k", ClearTerminal, Some("ChatTerminal")),

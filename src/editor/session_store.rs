@@ -18,7 +18,7 @@ pub(crate) fn persist_session(editor: &EditorView) {
     };
     let leaf_ids = editor.pane_layout.leaf_ids();
     let focused_pane_leaf = leaf_ids.iter().position(|id| *id == editor.focused_pane_id);
-    config.session = SessionConfig {
+    let session = SessionConfig {
         active_tab_id: editor.active_tab_id.clone(),
         next_tab_id: Some(editor.next_tab_id),
         // Legacy flat list: the currently focused pane's tabs.
@@ -30,8 +30,45 @@ pub(crate) fn persist_session(editor: &EditorView) {
             .collect(),
         pane_layout: Some(pane_layout_to_record(editor, &editor.pane_layout)),
         focused_pane_leaf,
+        active_acp_session: config.session.active_acp_session.clone(),
     };
+    // Startup/theme refreshes can operate on the default welcome tab before a
+    // real restored session is ready. Preserve a previously saved work session
+    // instead of overwriting it with that placeholder state.
+    if !is_default_welcome_session(editor) || !session_contains_nonwelcome_tabs(&config.session) {
+        config.session = session;
+    }
     config_store::save_config(&config);
+}
+
+fn is_default_welcome_session(editor: &EditorView) -> bool {
+    let tabs = editor
+        .all_tabs()
+        .filter(|tab| tab.kind != TabKind::Diff)
+        .collect::<Vec<_>>();
+    tabs.len() == 1 && tabs[0].id == WELCOME_TAB_ID && tabs[0].path.is_none()
+}
+
+fn session_contains_nonwelcome_tabs(session: &SessionConfig) -> bool {
+    fn layout_contains_nonwelcome(layout: &PaneLayoutRecord) -> bool {
+        match layout {
+            PaneLayoutRecord::Leaf { tabs, .. } => tabs
+                .iter()
+                .any(|tab| tab.id != WELCOME_TAB_ID || tab.path.is_some()),
+            PaneLayoutRecord::Split { children, .. } => {
+                children.iter().any(layout_contains_nonwelcome)
+            }
+        }
+    }
+
+    session
+        .pane_layout
+        .as_ref()
+        .is_some_and(layout_contains_nonwelcome)
+        || session
+            .tabs
+            .iter()
+            .any(|tab| tab.id != WELCOME_TAB_ID || tab.path.is_some())
 }
 
 fn pane_layout_to_record(editor: &EditorView, layout: &PaneLayout) -> PaneLayoutRecord {
@@ -83,6 +120,7 @@ pub(crate) fn restore_session(editor: &mut EditorView) {
         editor.expanded_dirs.clear();
         editor.expanded_dirs.insert(active_root);
     }
+    editor.restore_active_acp_session(config.session.active_acp_session.as_ref());
 
     // Split-pane layout (new format) supersedes the legacy flat tab list.
     if let Some(layout_record) = config.session.pane_layout.as_ref()
@@ -356,6 +394,9 @@ fn restore_tab_from_record(record: &TabSessionRecord, ui_language: UiLanguage) -
             .as_deref()
             .and_then(deserialize_agent_cli)
             .unwrap_or(ChatAgentCli::Terminal);
+        if agent_cli != ChatAgentCli::Terminal {
+            return None;
+        }
         return Some(terminal_tab(record, agent_cli));
     }
     let kind = deserialize_tab_kind(&record.kind)?;
@@ -742,41 +783,51 @@ mod tests {
     }
 
     #[test]
-    fn terminal_tab_roundtrip_preserves_agent_and_pin_state() {
-        let agents = [
-            ChatAgentCli::Terminal,
+    fn terminal_tab_roundtrip_preserves_shell_and_pin_state() {
+        let record = TabSessionRecord {
+            id: "tab-1".to_string(),
+            kind: "terminal".to_string(),
+            title: ChatAgentCli::Terminal.label().to_string(),
+            path: None,
+            file_kind: None,
+            agent_cli: Some(serialize_agent_cli(ChatAgentCli::Terminal)),
+            is_preview: false,
+            is_pinned: true,
+            view: TabViewState::default(),
+            recovery: TabRecoveryState::default(),
+            history: TabHistoryIndex::default(),
+        };
+
+        let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
+        assert_eq!(restored.kind, TabKind::Terminal(ChatAgentCli::Terminal));
+        assert!(restored.is_pinned);
+        let encoded = tab_to_record(&restored);
+        assert_eq!(encoded.kind, "terminal");
+        assert_eq!(encoded.agent_cli, record.agent_cli);
+    }
+
+    #[test]
+    fn legacy_agent_terminal_tabs_are_not_restored() {
+        for agent in [
             ChatAgentCli::GithubCopilot,
             ChatAgentCli::OpenAICodex,
             ChatAgentCli::ClaudeCode,
             ChatAgentCli::GeminiCli,
-        ];
-
-        for (index, agent) in agents.into_iter().enumerate() {
+        ] {
             let record = TabSessionRecord {
-                id: format!("tab-{}", index + 1),
+                id: "legacy-agent".to_string(),
                 kind: "terminal".to_string(),
                 title: agent.label().to_string(),
                 path: None,
                 file_kind: None,
                 agent_cli: Some(serialize_agent_cli(agent)),
                 is_preview: false,
-                is_pinned: true,
+                is_pinned: false,
                 view: TabViewState::default(),
                 recovery: TabRecoveryState::default(),
                 history: TabHistoryIndex::default(),
             };
-
-            let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
-            assert_eq!(restored.kind, TabKind::Terminal(agent));
-            assert_eq!(restored.title, record.title);
-            assert!(restored.is_pinned);
-            assert!(restored.path.is_none());
-            assert!(restored.file_kind.is_none());
-
-            let encoded = tab_to_record(&restored);
-            assert_eq!(encoded.kind, "terminal");
-            assert_eq!(encoded.agent_cli, record.agent_cli);
-            assert!(encoded.is_pinned);
+            assert!(restore_tab_from_record(&record, UiLanguage::English).is_none());
         }
     }
 

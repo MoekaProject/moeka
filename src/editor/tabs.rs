@@ -2227,11 +2227,22 @@ impl EditorView {
             .child(self.render_tab_bar_action_button(
                 "tab-bar-chat-toggle",
                 CHAT_PANEL_SVG_PATH,
+                self.is_utility_panel_active(RightUtilityPanel::Agent),
+                true,
+                None,
+                crate::i18n::agent_label(self.ui_language),
+                Some("⌃⌘I"),
+                cx,
+                |this, cx| this.toggle_agent_panel(cx),
+            ))
+            .child(self.render_tab_bar_action_button(
+                "tab-bar-terminal-toggle",
+                MENU_TERMINAL_SVG_PATH,
                 self.has_terminal_tabs(),
                 true,
                 None,
                 crate::i18n::terminal_label(self.ui_language),
-                Some("⌃⌘I"),
+                Some("⌃⌘T"),
                 cx,
                 |this, cx| this.toggle_terminal_panel(cx),
             ))
@@ -2521,9 +2532,7 @@ impl EditorView {
             .items_center()
             .justify_end()
             .when(
-                is_top_right_pane
-                    && !self.focused_pane_active_tab_is_terminal()
-                    && !self.should_render_utility_panel_on_right(),
+                is_top_right_pane && !self.should_render_utility_panel_on_right(),
                 |this| this.child(self.render_tab_bar_toggle_actions(cx)),
             );
 

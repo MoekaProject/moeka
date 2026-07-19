@@ -383,7 +383,7 @@ impl EntityInputHandler for EditorView {
                 self.ensure_wiki_link_menu_for_cursor(cx);
             }
         } else if self.maybe_open_wiki_link_menu_after_edit(cx) {
-        } else if new_text == "/" && self.active_tab_is_markdown() {
+        } else if new_text == "/" && self.active_tab_is_markdown() && !self.embedded_editor {
             let (line, col) = self.buffer.offset_to_line_col(new_offset);
             let line_content = self.buffer.line_content(line);
             let trimmed = line_content.trim();

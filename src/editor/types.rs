@@ -53,6 +53,7 @@ impl TabKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RightUtilityPanel {
+    Agent,
     Info,
     GitHistory,
     Outline,

@@ -175,6 +175,7 @@ pub(crate) struct EditorPrepaintState {
     code_block_copy_hitboxes: Vec<Hitbox>,
     preview_zoom_buttons: Vec<CodeBlockCopyButtonPaint>,
     preview_zoom_hitboxes: Vec<Hitbox>,
+    tooltips: Vec<(Hitbox, Bounds<Pixels>, SharedString)>,
 }
 
 struct CodeBlockGroupBounds {
@@ -1634,6 +1635,24 @@ impl Element for EditorElement {
             editor.scroll_to_cursor();
         });
 
+        // Embedded editors track their container height exactly: sync the
+        // viewport and re-clamp the scroll before the layout loop reads it, so
+        // container resizes never leave the content over-scrolled (content
+        // pushed out of the top of the view, blank space below the last line).
+        // Read-only transcripts additionally follow the bottom while attached.
+        self.editor.update(cx, |editor, _| {
+            if editor.embedded_editor {
+                editor.last_viewport_height = bounds.size.height.into();
+                if editor.embedded_read_only && editor.embedded_stick_to_bottom {
+                    let painted = editor.embedded_content_height.get();
+                    if painted > 0.0 {
+                        editor.scroll_offset = (painted - editor.last_viewport_height).max(0.0);
+                    }
+                }
+                editor.clamp_scroll();
+            }
+        });
+
         let editor = self.editor.read(cx);
         let theme = &editor.theme;
         let buffer = &editor.buffer;
@@ -2443,6 +2462,12 @@ impl Element for EditorElement {
                     }
                 }
             }
+            // Transcript editors remain selectable, but should keep Markdown
+            // markers folded while a selection changes so wrapping and height
+            // do not shift underneath the pointer.
+            if editor.embedded_read_only {
+                active_ranges.clear();
+            }
             for marked in editor.marked_ranges() {
                 if heading_content_start.is_some() && ime_active_on_line {
                     continue;
@@ -2466,7 +2491,8 @@ impl Element for EditorElement {
                 }
                 active_ranges.push(start..end);
             }
-            if (!editor.is_selecting || !editor.selection_drag_has_moved)
+            if !editor.embedded_read_only
+                && (!editor.is_selecting || !editor.selection_drag_has_moved)
                 && active_ranges.is_empty()
                 && !editor.suppress_fold_for_empty_selection_drag
                 && let Some(col) = cursor_col
@@ -2805,6 +2831,7 @@ impl Element for EditorElement {
                     && editor.extra_cursors.is_empty()
                     && !skip_block_line_highlight
                     && editor.app_settings.highlight_line_background
+                    && !editor.embedded_editor
                 {
                     let highlight_vertical_inset = if matches!(block_type, BlockType::Heading(_)) {
                         f32::from(cursor_aligned_vertical_inset(editor, line_height))
@@ -5885,6 +5912,7 @@ impl Element for EditorElement {
                 && editor.extra_cursors.is_empty()
                 && !skip_block_line_highlight
                 && editor.app_settings.highlight_line_background
+                && !editor.embedded_editor
             {
                 let highlight_vertical_inset = if matches!(block_type, BlockType::Heading(_)) {
                     f32::from(cursor_aligned_vertical_inset(editor, line_height))
@@ -7548,29 +7576,9 @@ impl Element for EditorElement {
             }
         }
 
-        for (hitbox, tooltip_bounds, tooltip_title) in generated_preview_tooltips {
-            tooltip::request_tooltip_for_hitbox(
-                window,
-                cx,
-                self.editor.clone(),
-                &hitbox,
-                tooltip_bounds,
-                tooltip_title,
-                None::<&'static str>,
-            );
-        }
-
         for (tooltip_bounds, tooltip_title) in editor_icon_tooltips {
             let hitbox = window.insert_hitbox(tooltip_bounds, HitboxBehavior::Normal);
-            tooltip::request_tooltip_for_hitbox(
-                window,
-                cx,
-                self.editor.clone(),
-                &hitbox,
-                tooltip_bounds,
-                tooltip_title,
-                None::<&'static str>,
-            );
+            generated_preview_tooltips.push((hitbox, tooltip_bounds, tooltip_title));
         }
 
         self.editor.update(cx, |editor, cx| {
@@ -7739,6 +7747,34 @@ impl Element for EditorElement {
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
 
+        // Tooltips must be requested during prepaint (gpui asserts the phase).
+        for (_, tooltip_bounds, tooltip_title) in &generated_preview_tooltips {
+            tooltip::request_tooltip_for_hitbox(
+                window,
+                cx,
+                self.editor.clone(),
+                *tooltip_bounds,
+                tooltip_title.clone(),
+                None::<&'static str>,
+            );
+        }
+
+        // Record the layout-accurate content height for embedded editors so
+        // containers measuring it (agent composer) never see estimate flicker.
+        {
+            let editor = self.editor.read(cx);
+            if editor.embedded_editor {
+                let content_height = editor.total_content_height();
+                if (content_height - editor.embedded_content_height.get()).abs() > 0.5 {
+                    editor.embedded_content_height.set(content_height);
+                    let entity = self.editor.clone();
+                    cx.defer(move |cx| {
+                        entity.update(cx, |_, cx| cx.notify());
+                    });
+                }
+            }
+        }
+
         let mut prepaint_state = EditorPrepaintState {
             hitbox,
             link_hitboxes,
@@ -7773,6 +7809,7 @@ impl Element for EditorElement {
             code_block_copy_hitboxes,
             preview_zoom_buttons,
             preview_zoom_hitboxes,
+            tooltips: generated_preview_tooltips,
             image_edit_icons,
             link_underlines,
             inline_overlays,
@@ -7803,6 +7840,9 @@ impl Element for EditorElement {
             .editor
             .update(cx, |editor, _| editor.begin_pane_swap(self.pane_id));
         let is_focused_pane = self.editor.read(cx).focused_pane_id == self.pane_id;
+        for (hitbox, tooltip_bounds, _) in &prepaint.tooltips {
+            tooltip::register_tooltip_hover_refresh(window, hitbox, *tooltip_bounds);
+        }
         let editor = self.editor.read(cx);
         let focus_handle = editor.focus_handle.clone();
         let cursor_style = match editor.hovering_handle {

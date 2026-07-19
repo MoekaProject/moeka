@@ -1,3 +1,9 @@
+mod acp_client;
+mod acp_client_services;
+mod acp_registry;
+mod acp_session_store;
+mod acp_transcript;
+mod agent_panel;
 mod app_settings;
 mod assets;
 mod attachments;
@@ -27,6 +33,7 @@ mod input_wrap;
 mod language_detection;
 mod language_picker;
 mod list_viewport;
+mod markdown_editor;
 mod menus;
 mod notifications;
 mod outline;
@@ -1339,6 +1346,16 @@ pub struct EditorView {
     pub cursor: Cursor,
     pub(crate) extra_cursors: Vec<Cursor>,
     pub(crate) focus_handle: FocusHandle,
+    pub(crate) embedded_editor: bool,
+    /// Layout-accurate content height recorded during element prepaint, used
+    /// by embedded containers (agent composer) so their measured height never
+    /// oscillates between estimated and shaped layouts while typing.
+    pub(crate) embedded_content_height: Cell<f32>,
+    /// Read-only embedded editors (agent transcript) follow the newest content
+    /// while the view rests at the bottom; scrolling up detaches, scrolling
+    /// back to the bottom re-attaches.
+    pub(crate) embedded_stick_to_bottom: bool,
+    pub(crate) embedded_read_only: bool,
     pub(crate) theme_kind: ThemeKind,
     pub(crate) editor_theme_mode: EditorThemeMode,
     pub(crate) theme: Theme,
@@ -1693,6 +1710,32 @@ pub struct EditorView {
     pub(crate) branch_picker_scroll_handle: ScrollHandle,
     pub(crate) utility_panel: Option<RightUtilityPanel>,
     pub(crate) displayed_utility_panel: Option<RightUtilityPanel>,
+    pub(crate) agent_panel_custom_width: Option<f32>,
+    pub(crate) agent_registry_state: acp_registry::AgentRegistryState,
+    pub(crate) agent_registry_task: Option<Task<()>>,
+    pub(crate) agent_install_states: HashMap<String, acp_registry::AgentInstallStatus>,
+    pub(crate) agent_install_task: Option<Task<()>>,
+    pub(crate) agent_panel_scroll_handle: ScrollHandle,
+    pub(crate) selected_agent_id: Option<String>,
+    pub(crate) acp_panel_state: acp_client::AcpPanelState,
+    pub(crate) acp_command_tx: Option<async_channel::Sender<acp_client::AcpCommand>>,
+    pub(crate) acp_event_task: Option<Task<()>>,
+    pub(crate) acp_session_save_epoch: u64,
+    pub(crate) acp_session_save_task: Option<Task<()>>,
+    pub(crate) stored_acp_sessions: Vec<acp_session_store::StoredAcpSession>,
+    pub(crate) pending_acp_open_session: Option<acp_session_store::StoredAcpSession>,
+    pub(crate) agent_history_visible: bool,
+    pub(crate) agent_composer_expanded: bool,
+    pub(crate) agent_popup_menu: Option<agent_panel::AgentPopupMenu>,
+    pub(crate) agent_popup_anchor: Option<Bounds<Pixels>>,
+    pub(crate) agent_panel_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    pub(crate) agent_menu_query: String,
+    pub(crate) agent_menu_search_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) agent_slash_selected: usize,
+    pub(crate) agent_slash_filter: String,
+    pub(crate) agent_transcript_editor:
+        Option<gpui::Entity<markdown_editor::EmbeddedMarkdownEditor>>,
+    pub(crate) agent_composer_editor: Option<gpui::Entity<markdown_editor::EmbeddedMarkdownEditor>>,
     pub(crate) info_panel_custom_width: Option<f32>,
     pub(crate) git_history_panel_custom_width: Option<f32>,
     pub(crate) outline_panel_custom_width: Option<f32>,
@@ -1885,7 +1928,10 @@ pub struct EditorView {
 
 impl Drop for EditorView {
     fn drop(&mut self) {
-        self.flush_recovery_files();
+        if !self.embedded_editor {
+            self.flush_recovery_files();
+        }
+        self.stop_acp_agent();
         self.stop_all_terminal_sessions();
         let diagnostics = self.runtime_profile_diagnostics();
         if let Some(profiler) = self.runtime_profiler.take()
@@ -1898,20 +1944,48 @@ impl Drop for EditorView {
 
 impl EditorView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::new_with_mode(cx, false, false, None)
+    }
+
+    pub(crate) fn new_embedded_markdown(
+        text: &str,
+        read_only: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_mode(cx, true, read_only, Some(text))
+    }
+
+    fn new_with_mode(
+        cx: &mut Context<Self>,
+        embedded_editor: bool,
+        embedded_read_only: bool,
+        initial_text: Option<&str>,
+    ) -> Self {
         let sidebar_root = PathBuf::new();
         let expanded_dirs = HashSet::new();
         let sidebar_error = None;
         let app_settings = AppSettings::load();
-        let runtime_profiler = match profiler::RuntimeProfiler::start_from_env() {
-            Ok(profiler) => profiler,
-            Err(error) => {
-                eprintln!("Failed to start runtime profiler from environment: {error:#}");
-                None
+        let runtime_profiler = if embedded_editor {
+            None
+        } else {
+            match profiler::RuntimeProfiler::start_from_env() {
+                Ok(profiler) => profiler,
+                Err(error) => {
+                    eprintln!("Failed to start runtime profiler from environment: {error:#}");
+                    None
+                }
             }
         };
-        settings_panel::apply_app_icon_to_dock();
+        if !embedded_editor {
+            settings_panel::apply_app_icon_to_dock();
+        }
         let ui_language = app_settings.ui_language();
-        let welcome_tab = builtin_welcome_tab(ui_language);
+        let mut welcome_tab = builtin_welcome_tab(ui_language);
+        if let Some(text) = initial_text {
+            welcome_tab.snapshot.text = text.to_string();
+            welcome_tab.snapshot.cursor_offset = text.len();
+            welcome_tab.snapshot.cursor_anchor = text.len();
+        }
         let welcome_file_kind = welcome_tab.file_kind.clone();
         let buffer = Buffer::from_text(&welcome_tab.snapshot.text);
         let decorations = markdown::parse_decorations(buffer.text());
@@ -1941,6 +2015,25 @@ impl EditorView {
         styles.editor.editor_heading_cjk_font_family = styles.editor.editor_body_cjk_font_family;
         styles.editor.editor_monospace_font_family =
             Box::leak(app_settings.code_font.clone().into_boxed_str());
+        if embedded_editor {
+            // Panel-embedded editors (agent transcript/composer) use compact
+            // chrome: tight padding, full-width wrapping, and a smaller body
+            // font tuned for the utility panel.
+            styles.editor.editor_font_size_px = 12.0;
+            styles.editor.editor_h1_font_size_px = 15.0;
+            styles.editor.editor_h2_font_size_px = 14.0;
+            styles.editor.editor_h3_font_size_px = 13.0;
+            styles.editor.editor_h4_font_size_px = 12.0;
+            styles.editor.editor_h5_font_size_px = 12.0;
+            styles.editor.editor_h6_font_size_px = 12.0;
+            styles.editor.editor_padding_left_px = 12.0;
+            styles.editor.editor_padding_right_px = 12.0;
+            styles.editor.editor_padding_top_px = 10.0;
+            styles.editor.editor_padding_bottom_px = 12.0;
+            styles.editor.editor_max_width_px = 4096.0;
+            styles.editor.editor_paragraph_line_height_factor = 1.5;
+            styles.editor.editor_heading_line_height_factor = 1.4;
+        }
         let init_max_width = styles.editor.editor_max_width_px;
         let init_padding_left = styles.editor.editor_padding_left_px;
         let init_padding_right = styles.editor.editor_padding_right_px;
@@ -1952,6 +2045,10 @@ impl EditorView {
             cursor: Cursor::new(),
             extra_cursors: Vec::new(),
             focus_handle: cx.focus_handle(),
+            embedded_editor,
+            embedded_content_height: Cell::new(0.0),
+            embedded_stick_to_bottom: true,
+            embedded_read_only,
             theme_kind,
             editor_theme_mode,
             theme,
@@ -2251,6 +2348,31 @@ impl EditorView {
             branch_picker_scroll_handle: ScrollHandle::new(),
             utility_panel: None,
             displayed_utility_panel: None,
+            agent_panel_custom_width: None,
+            agent_registry_state: acp_registry::AgentRegistryState::default(),
+            agent_registry_task: None,
+            agent_install_states: HashMap::new(),
+            agent_install_task: None,
+            agent_panel_scroll_handle: ScrollHandle::new(),
+            selected_agent_id: None,
+            acp_panel_state: acp_client::AcpPanelState::default(),
+            acp_command_tx: None,
+            acp_event_task: None,
+            acp_session_save_epoch: 0,
+            acp_session_save_task: None,
+            stored_acp_sessions: Vec::new(),
+            pending_acp_open_session: None,
+            agent_history_visible: false,
+            agent_composer_expanded: false,
+            agent_popup_menu: None,
+            agent_popup_anchor: None,
+            agent_panel_bounds: Rc::new(Cell::new(None)),
+            agent_menu_query: String::new(),
+            agent_menu_search_editor: None,
+            agent_slash_selected: 0,
+            agent_slash_filter: String::new(),
+            agent_transcript_editor: None,
+            agent_composer_editor: None,
             info_panel_custom_width: None,
             git_history_panel_custom_width: None,
             outline_panel_custom_width: None,
@@ -2402,30 +2524,40 @@ impl EditorView {
         this.last_content_left = this.padding_left();
         this.last_text_width =
             (init_max_width - this.padding_left() - this.padding_right()).max(this.scaled(120.0));
-        session_store::restore_session(&mut this);
-        this.refresh_builtin_tab_titles();
-        this.sync_panel_display_state();
-        this.start_update_check(cx);
+        if !embedded_editor {
+            session_store::restore_session(&mut this);
+            this.refresh_builtin_tab_titles();
+            this.sync_panel_display_state();
+            this.start_update_check(cx);
+        } else {
+            this.editor_left_aligned = true;
+            this.cursor.offset = this.buffer.len();
+            this.cursor.anchor = this.buffer.len();
+        }
         this.start_blinking(cx);
-        if !this.sidebar_root.as_os_str().is_empty() {
+        if !embedded_editor && !this.sidebar_root.as_os_str().is_empty() {
             this.start_watching(cx);
         }
-        this.ensure_font_size_editor(cx);
-        this.ensure_ui_font_size_editor(cx);
+        if !embedded_editor {
+            this.ensure_font_size_editor(cx);
+            this.ensure_ui_font_size_editor(cx);
+        }
         this.toolbar_opacity = this.desired_toolbar_opacity();
         this.toolbar_opacity_target = this.toolbar_opacity;
         // Warm up the syntect syntax set off the UI thread so the first code
         // block render doesn't pay the grammar-loading cost.
-        cx.background_executor()
-            .spawn(async {
-                let _ = helpers::syntax_set();
-            })
-            .detach();
-        let (_, keybinding_warnings) =
-            shortcut::keybinding_overrides(&this.app_settings.keybindings);
-        for warning in keybinding_warnings {
-            let message = format!("{}: {warning}", this.t(TextKey::OperationFailed));
-            this.notify_error(message, cx);
+        if !embedded_editor {
+            cx.background_executor()
+                .spawn(async {
+                    let _ = helpers::syntax_set();
+                })
+                .detach();
+            let (_, keybinding_warnings) =
+                shortcut::keybinding_overrides(&this.app_settings.keybindings);
+            for warning in keybinding_warnings {
+                let message = format!("{}: {warning}", this.t(TextKey::OperationFailed));
+                this.notify_error(message, cx);
+            }
         }
 
         this
@@ -2433,6 +2565,42 @@ impl EditorView {
 
     pub(crate) fn t(&self, key: TextKey) -> &'static str {
         crate::i18n::translate(self.ui_language, key)
+    }
+
+    pub(crate) fn set_embedded_markdown_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if !self.embedded_editor || self.buffer.text() == text {
+            return;
+        }
+        // Streaming updates usually append: keep the shaped layout of the
+        // unchanged line prefix so content heights stay accurate and the view
+        // doesn't jitter between estimated and shaped layouts.
+        let keep_lines = {
+            let old = self.buffer.text();
+            let common = old
+                .as_bytes()
+                .iter()
+                .zip(text.as_bytes())
+                .take_while(|(a, b)| a == b)
+                .count();
+            old[..common].matches('\n').count()
+        };
+        self.buffer = Buffer::from_text(text);
+        self.cursor.offset = self.buffer.len();
+        self.cursor.anchor = self.buffer.len();
+        self.extra_cursors.clear();
+        if self.embedded_read_only {
+            // The transcript follows the bottom via `embedded_stick_to_bottom`
+            // instead of cursor-driven scrolling.
+            self.pending_scroll_to_cursor = false;
+        } else {
+            self.pending_scroll_to_cursor = true;
+        }
+        self.reparse();
+        self.line_display_info.truncate(keep_lines);
+        self.layout_dirty = true;
+        self.invalidate_line_geometry_cache();
+        self.invalidate_indent_guide_step_cache();
+        cx.notify();
     }
 
     pub(crate) fn refresh_builtin_tab_titles(&mut self) {
@@ -2584,14 +2752,10 @@ impl EditorView {
     }
 
     fn editor_scrollbar_can_show(&self) -> bool {
-        let last_line_height =
-            self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
-        let max_scroll =
-            (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0);
         !self.active_tab_is_image()
             && !self.active_tab_is_binary()
             && !self.active_tab_is_terminal()
-            && max_scroll > 1.0
+            && self.editor_scrollbar_max_scroll() > 1.0
     }
 
     fn editor_scrollbar_track_top(&self) -> f32 {
@@ -2652,15 +2816,18 @@ impl EditorView {
 
         let track_top = self.editor_scrollbar_track_top();
         let viewport_height = self.editor_scrollbar_track_height();
-        let total_content_height = self.total_content_height().max(1.0);
+        let total_content_height = if self.embedded_editor {
+            self.total_content_height()
+                .max(self.embedded_content_height.get())
+        } else {
+            self.total_content_height()
+        }
+        .max(1.0);
         let min_thumb_height = self.scaled(self.styles.editor.editor_scrollbar_min_thumb_height_px);
         let thumb_height = (viewport_height * (viewport_height / total_content_height))
             .clamp(min_thumb_height, viewport_height.max(min_thumb_height));
 
-        let last_line_height =
-            self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
-        let max_scroll =
-            (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0);
+        let max_scroll = self.editor_scrollbar_max_scroll();
         if max_scroll <= 0.0 {
             return None;
         }
@@ -2672,9 +2839,20 @@ impl EditorView {
     }
 
     fn editor_scrollbar_max_scroll(&self) -> f32 {
-        let last_line_height =
-            self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
-        (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0)
+        if self.embedded_editor {
+            // Must match `clamp_scroll`: embedded editors pin scrolling to
+            // the exact content height (no scroll-beyond-last-line), so the
+            // thumb reaches the track bottom when the content does.
+            (self
+                .total_content_height()
+                .max(self.embedded_content_height.get())
+                - self.last_viewport_height)
+                .max(0.0)
+        } else {
+            let last_line_height =
+                self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
+            (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0)
+        }
     }
 
     fn desired_editor_scrollbar_opacity(&self) -> f32 {
@@ -2996,7 +3174,12 @@ impl EditorView {
     }
 
     pub(crate) fn utility_panel_resize_bounds_for(&self, panel: RightUtilityPanel) -> (f32, f32) {
-        if panel == RightUtilityPanel::Outline {
+        if panel == RightUtilityPanel::Agent {
+            (
+                self.scaled(self.styles.utility_panel.utility_panel_resize_min_width_px),
+                f32::MAX,
+            )
+        } else if panel == RightUtilityPanel::Outline {
             self.outline_panel_resize_bounds()
         } else {
             (
@@ -3008,6 +3191,7 @@ impl EditorView {
 
     pub(crate) fn utility_panel_custom_width_for(&self, panel: RightUtilityPanel) -> Option<f32> {
         match panel {
+            RightUtilityPanel::Agent => self.agent_panel_custom_width,
             RightUtilityPanel::Info => self.info_panel_custom_width,
             RightUtilityPanel::GitHistory => self.git_history_panel_custom_width,
             RightUtilityPanel::Outline => self.outline_panel_custom_width,
@@ -3020,6 +3204,7 @@ impl EditorView {
         width: Option<f32>,
     ) {
         match panel {
+            RightUtilityPanel::Agent => self.agent_panel_custom_width = width,
             RightUtilityPanel::Info => self.info_panel_custom_width = width,
             RightUtilityPanel::GitHistory => self.git_history_panel_custom_width = width,
             RightUtilityPanel::Outline => self.outline_panel_custom_width = width,
@@ -3054,7 +3239,7 @@ impl EditorView {
     }
 
     pub(crate) fn should_render_utility_panel_on_right(&self) -> bool {
-        !self.focused_pane_active_tab_is_terminal() && self.should_render_utility_panel()
+        self.should_render_utility_panel()
     }
 
     pub(crate) fn theme_debugger_target_width(&self) -> f32 {
@@ -5444,7 +5629,7 @@ impl EditorView {
     }
 
     pub(crate) fn active_tab_is_read_only(&self) -> bool {
-        self.active_tab_is_diff()
+        self.embedded_read_only || self.active_tab_is_diff()
     }
 
     pub(crate) fn active_image_view_state(&self) -> Option<ImageViewState> {
@@ -7147,6 +7332,15 @@ impl EditorView {
             *w = *w * (clamped / self.ui_scale);
         }
         self.ui_scale = clamped;
+        for embedded_editor in [
+            self.agent_transcript_editor.clone(),
+            self.agent_composer_editor.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            embedded_editor.update(cx, |editor, cx| editor.set_ui_scale(clamped, cx));
+        }
         self.sync_panel_display_state();
         self.sync_overlay_text_input_styles(cx);
         // Zooming changes the scaled font sizes, so the cached per-line layout

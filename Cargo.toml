@@ -52,12 +52,25 @@ usvg = { version = "0.45.1", default-features = false, features = [
   "memmap-fonts",
 ] }
 tantivy = "0.26.1"
+agent-client-protocol = "=1.2.0"
+async-channel = "=2.5.0"
+sha2 = "=0.10.9"
+zip = { version = "=0.6.6", default-features = false, features = [
+  "deflate",
+  "bzip2",
+] }
+tar = "=0.4.44"
+flate2 = "=1.1.5"
+bzip2 = "=0.6.1"
+blocking = "=1.6.2"
+libc = "=0.2.186"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 pprof = { version = "0.15", features = ["flamegraph"] }
 
 [dev-dependencies]
 tempfile = "3"
+futures = "=0.3.32"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"

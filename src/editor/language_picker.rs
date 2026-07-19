@@ -426,7 +426,11 @@ impl EditorView {
                                 .overflow_hidden()
                                 .truncate()
                                 .text_size(px(name_font))
-                                .text_color(text_primary)
+                                .text_color(if is_selected {
+                                    self.theme.text_accent
+                                } else {
+                                    text_primary
+                                })
                                 .child(item.name.clone()),
                         )
                         .on_mouse_down(

@@ -2030,7 +2030,11 @@ impl EditorView {
                     .flex()
                     .items_center()
                     .text_size(px(self.scaled(menu.quick_open_result_name_font_size_px)))
-                    .text_color(text_primary)
+                    .text_color(if is_selected {
+                        self.theme.text_accent
+                    } else {
+                        text_primary
+                    })
                     .when_some(preview_font, |this, preview_font| {
                         this.font_family(SharedString::from(preview_font))
                     })

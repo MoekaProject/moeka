@@ -74,6 +74,7 @@ actions!(
         ZoomReset,
         ToggleSidebar,
         ToggleChatPanel,
+        ToggleTerminalPanel,
         NewChatTab,
         CloseActiveChatTab,
         ClearTerminal,

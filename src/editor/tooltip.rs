@@ -13,6 +13,10 @@ use super::{
     },
 };
 
+/// Explicit tooltip text line-height factor, shared between the rendered view
+/// and the size estimate so above-anchor placement never overlaps the button.
+const TOOLTIP_LINE_HEIGHT_FACTOR: f32 = 1.3;
+
 pub(crate) fn with_tooltip(
     child: impl IntoElement,
     editor: Entity<EditorView>,
@@ -28,11 +32,15 @@ pub(crate) fn with_tooltip(
     .into_any_element()
 }
 
+/// Requests the tooltip when the pointer is inside `bounds`.
+///
+/// Must be called during the prepaint phase (`Window::set_tooltip` asserts
+/// prepaint). Pair it with [`register_tooltip_hover_refresh`] during paint so
+/// hover changes trigger a redraw.
 pub(crate) fn request_tooltip_for_hitbox(
     window: &mut Window,
     cx: &mut App,
     editor: Entity<EditorView>,
-    hitbox: &Hitbox,
     bounds: Bounds<Pixels>,
     title: impl Into<SharedString>,
     shortcut: Option<impl Into<SharedString>>,
@@ -41,9 +49,7 @@ pub(crate) fn request_tooltip_for_hitbox(
         return;
     }
 
-    let is_hovered = bounds.contains(&window.mouse_position());
-    register_hover_refresh(window, hitbox, is_hovered);
-    if !is_hovered {
+    if !bounds.contains(&window.mouse_position()) {
         return;
     }
 
@@ -78,8 +84,16 @@ pub(crate) fn request_tooltip_for_hitbox(
     });
 }
 
-fn register_hover_refresh(window: &mut Window, hitbox: &Hitbox, is_hovered: bool) {
-    let hover_state = Rc::new(Cell::new(is_hovered));
+/// Registers a mouse-move listener that redraws when hover state changes.
+///
+/// Must be called during the paint phase (`Window::on_mouse_event` asserts
+/// paint).
+pub(crate) fn register_tooltip_hover_refresh(
+    window: &mut Window,
+    hitbox: &Hitbox,
+    bounds: Bounds<Pixels>,
+) {
+    let hover_state = Rc::new(Cell::new(bounds.contains(&window.mouse_position())));
     let hitbox = hitbox.clone();
     window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _cx| {
         if phase != DispatchPhase::Bubble {
@@ -144,7 +158,6 @@ impl Element for TooltipTrigger {
             window,
             cx,
             self.editor.clone(),
-            &hitbox,
             bounds,
             self.title.clone(),
             self.shortcut.clone(),
@@ -156,13 +169,14 @@ impl Element for TooltipTrigger {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
-        _prepaint: &mut Self::PrepaintState,
+        hitbox: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
         self.child.paint(window, cx);
+        register_tooltip_hover_refresh(window, hitbox, bounds);
     }
 }
 
@@ -194,6 +208,7 @@ impl Render for TooltipView {
             .items_center()
             .justify_center()
             .gap(px(editor.scaled(styles.tooltip_gap_px)))
+            .line_height(px(title_font_size * TOOLTIP_LINE_HEIGHT_FACTOR))
             .bg(styles.tooltip_bg)
             .border(px(editor.scaled(styles.tooltip_border_width_px)))
             .border_color(styles.tooltip_border_color)
@@ -249,11 +264,14 @@ fn tooltip_size(editor: &EditorView, title: &str, shortcut: Option<&str>) -> (f3
         + gap
         + title_font_size
         + editor.scaled(styles.tooltip_padding_x_px) * 2.0;
-    let content_height = title_font_size.max(if shortcut_width > 0.0 {
-        editor.scaled(styles.tooltip_shortcut_key_height_px)
-    } else {
-        0.0
-    });
+    // Match TooltipView's explicit line height so the height estimate is
+    // exact; an underestimate makes above-anchor tooltips overlap the button.
+    let content_height =
+        (title_font_size * TOOLTIP_LINE_HEIGHT_FACTOR).max(if shortcut_width > 0.0 {
+            editor.scaled(styles.tooltip_shortcut_key_height_px)
+        } else {
+            0.0
+        });
     let height = content_height + editor.scaled(styles.tooltip_padding_y_px) * 2.0;
     (width, height)
 }

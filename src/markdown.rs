@@ -1330,6 +1330,40 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
             });
         }
     }
+
+    // Conceal the `>` markers on every blockquote line — including list rows,
+    // blank `>` separators, and nested content, which the event loop above
+    // does not cover — so an uninterrupted run of quote lines renders as one
+    // merged quote block instead of bare `>` characters.
+    for (line, decoration) in decorations.iter_mut().enumerate() {
+        let in_blockquote = decoration.block_type == BlockType::Blockquote
+            || decoration
+                .block_contexts
+                .contains(&BlockContext::Blockquote);
+        if !in_blockquote || decoration.table_info.is_some() {
+            continue;
+        }
+        let start = line_starts[line];
+        let end = line_starts.get(line + 1).copied().unwrap_or(text.len());
+        let content = &text[start..end];
+        let content = content.strip_suffix('\n').unwrap_or(content);
+        let prefix_len = blockquote_prefix_len(content);
+        if prefix_len == 0 {
+            continue;
+        }
+        let covered = decoration.syntax_ranges.iter().any(|syntax_range| {
+            syntax_range.range.start == 0 && syntax_range.range.end >= prefix_len
+        });
+        if !covered {
+            decoration.syntax_ranges.insert(
+                0,
+                SyntaxRange {
+                    range: 0..prefix_len,
+                    trigger_range: 0..prefix_len,
+                },
+            );
+        }
+    }
     decorations
 }
 
@@ -2327,7 +2361,12 @@ pub fn parse_table_cells_with_ranges(content: &str) -> Vec<(String, Range<usize>
     let has_leading_pipe = pipe_offsets.first() == Some(&0);
     let has_trailing_pipe = pipe_offsets.last().copied() == source.len().checked_sub(1);
     let inner_start = usize::from(has_leading_pipe);
-    let inner_end = source.len().saturating_sub(usize::from(has_trailing_pipe));
+    // A lone `|` counts as both the leading and trailing pipe; clamp so the
+    // inner region stays a valid (possibly empty) range.
+    let inner_end = source
+        .len()
+        .saturating_sub(usize::from(has_trailing_pipe))
+        .max(inner_start);
     let separators = pipe_offsets
         .into_iter()
         .filter(|offset| *offset >= inner_start && *offset < inner_end);
@@ -3309,8 +3348,19 @@ mod tests {
 
     use super::{
         BlockContext, BlockPreviewKind, BlockType, CalloutKind, InlineKind, LineDecoration,
-        LocalLinkSyntax, parse_decorations, parse_local_link_targets, raw_wiki_link_ranges,
+        LocalLinkSyntax, parse_decorations, parse_local_link_targets,
+        parse_table_cells_with_ranges, raw_wiki_link_ranges,
     };
+
+    #[test]
+    fn lone_pipe_row_parses_without_panic() {
+        // A row consisting of a single `|` counts as both the leading and
+        // trailing pipe; it must not slice out of bounds.
+        let cells = parse_table_cells_with_ranges("|");
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].0, "");
+        assert!(!parse_table_cells_with_ranges("  |  ").is_empty());
+    }
 
     #[derive(Debug, serde::Deserialize)]
     struct CommonMarkExample {
@@ -4373,5 +4423,34 @@ mod tests {
                 .iter()
                 .any(|preview| { preview.source_text.contains("E = mc^2") })
         );
+    }
+}
+
+#[cfg(test)]
+mod quote_merge_tests {
+    use super::{BlockContext, BlockType, parse_decorations};
+
+    #[test]
+    fn consecutive_quote_lines_conceal_markers_on_every_line() {
+        // List rows, blank `>` separators, and nested content inside a quote
+        // must all hide their `>` prefix so the run renders as one block.
+        let text = "> a\n>\n> - item one\n> - item two\n>\n> 1. ordered\n> b";
+        let decorations = parse_decorations(text);
+        for (index, (line, decoration)) in text.lines().zip(decorations.iter()).enumerate() {
+            let in_quote = decoration.block_type == BlockType::Blockquote
+                || decoration
+                    .block_contexts
+                    .contains(&BlockContext::Blockquote);
+            assert!(in_quote, "line {index} {line:?} should be in the quote");
+            let marker_len = line.len() - line.trim_start_matches(['>', ' ']).len();
+            assert!(
+                decoration
+                    .syntax_ranges
+                    .iter()
+                    .any(|syntax_range| syntax_range.range.start == 0
+                        && syntax_range.range.end >= marker_len.min(2)),
+                "line {index} {line:?} should conceal its quote marker"
+            );
+        }
     }
 }

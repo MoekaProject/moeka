@@ -44,6 +44,16 @@ pub(crate) struct SessionConfig {
     /// Index of the focused pane within the layout's leaf order.
     #[serde(default)]
     pub focused_pane_leaf: Option<usize>,
+    /// Last active ACP session; transcript data lives in the separate ACP
+    /// session store and this only records which one to restore at launch.
+    #[serde(default)]
+    pub active_acp_session: Option<ActiveAcpSessionRecord>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ActiveAcpSessionRecord {
+    pub agent_id: String,
+    pub session_id: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -342,6 +352,7 @@ mod tests {
             next_tab_id: Some(8),
             pane_layout: None,
             focused_pane_leaf: None,
+            active_acp_session: None,
             tabs: vec![TabSessionRecord {
                 id: "tab-7".to_string(),
                 kind: "editor".to_string(),

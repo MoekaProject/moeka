@@ -643,11 +643,23 @@ impl EditorView {
     }
 
     pub(crate) fn clamp_scroll(&mut self) {
-        // Allow scrolling the last line to the top (like Monaco's scrollBeyondLastLine)
-        let last_line_height =
-            self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
-        let max_scroll =
-            (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0);
+        let max_scroll = if self.embedded_editor {
+            // Embedded editors (agent transcript/composer) pin the scroll
+            // range to the exact content height: no scroll-beyond-last-line,
+            // so no blank gap can appear below the content. Prefer the
+            // layout-accurate painted height over mid-frame estimates.
+            (self
+                .total_content_height()
+                .max(self.embedded_content_height.get())
+                - self.last_viewport_height)
+                .max(0.0)
+        } else {
+            // Allow scrolling the last line to the top (like Monaco's
+            // scrollBeyondLastLine).
+            let last_line_height =
+                self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
+            (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0)
+        };
         self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
     }
 

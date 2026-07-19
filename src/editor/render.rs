@@ -95,16 +95,26 @@ impl EditorView {
                                                 if this.utility_panel_resizing {
                                                     let window_width =
                                                         f32::from(window.bounds().size.width);
-                                                    let min_w = this.scaled(
-                                                        this.styles
-                                                            .utility_panel
-                                                            .utility_panel_resize_min_width_px,
-                                                    );
-                                                    let max_w = this.scaled(
-                                                        this.styles
-                                                            .utility_panel
-                                                            .utility_panel_resize_max_width_px,
-                                                    );
+                                                    let active_panel =
+                                                        this.active_resizable_utility_panel();
+                                                    let (min_w, max_w) = active_panel
+                                                        .map(|panel| {
+                                                            this.utility_panel_resize_bounds_for(panel)
+                                                        })
+                                                        .unwrap_or_else(|| {
+                                                            (
+                                                                this.scaled(
+                                                                    this.styles
+                                                                        .utility_panel
+                                                                        .utility_panel_resize_min_width_px,
+                                                                ),
+                                                                this.scaled(
+                                                                    this.styles
+                                                                        .utility_panel
+                                                                        .utility_panel_resize_max_width_px,
+                                                                ),
+                                                            )
+                                                        });
                                                     let new_width =
                                                         window_width - f32::from(event.position.x);
                                                     let new_width = clamp_resize_dimension(
@@ -290,7 +300,7 @@ impl EditorView {
                         .map(|(button_bounds, icon_path, hovered, action)| {
                             let hitbox =
                                 window.insert_hitbox(button_bounds, HitboxBehavior::Normal);
-                            let tooltip_title = {
+                            let tooltip_title = SharedString::from({
                                 let editor = editor_handle.read(cx);
                                 match action {
                                     GeneratedPreviewAction::Fullscreen => {
@@ -316,12 +326,12 @@ impl EditorView {
                                     }
                                     _ => "",
                                 }
-                            };
+                            });
+                            // Tooltips must be requested during prepaint.
                             tooltip::request_tooltip_for_hitbox(
                                 window,
                                 cx,
                                 editor_handle.clone(),
-                                &hitbox,
                                 button_bounds,
                                 tooltip_title,
                                 None::<&'static str>,
@@ -333,6 +343,7 @@ impl EditorView {
                 move |_bounds, paints, window, cx| {
                     for (button_bounds, icon_path, hovered, hitbox) in paints {
                         window.set_cursor_style(CursorStyle::Arrow, &hitbox);
+                        tooltip::register_tooltip_hover_refresh(window, &hitbox, button_bounds);
                         let bg = if hovered { button_hover_bg } else { button_bg };
                         window.paint_quad(quad(
                             button_bounds,
@@ -415,136 +426,148 @@ impl Render for EditorView {
         let show_empty_workspace = self.panes.len() == 1 && self.tabs.is_empty();
         let ws = &self.styles.window;
         let editor = cx.entity().clone();
-        window.on_mouse_event({
-            let editor = editor.clone();
-            move |event: &MouseMoveEvent, phase, _window, cx| {
-                if !phase.capture() {
-                    return;
-                }
+        let global_mouse_listeners = (!self.embedded_editor).then(|| {
+            canvas(
+                |_, _, _| (),
+                move |_, _, window, _cx| {
+                    window.on_mouse_event({
+                        let editor = editor.clone();
+                        move |event: &MouseMoveEvent, phase, _window, cx| {
+                            if !phase.capture() {
+                                return;
+                            }
 
-                let handled = editor.update(cx, |this, cx| {
-                    if this.editor_scrollbar_drag.is_none() {
-                        return false;
-                    }
+                            let handled = editor.update(cx, |this, cx| {
+                                if this.editor_scrollbar_drag.is_none() {
+                                    return false;
+                                }
 
-                    if event.dragging() {
-                        this.hovered_editor_position = Some(event.position);
-                        this.set_editor_scrollbar_hovered(true, cx);
-                        this.update_editor_scrollbar_drag(event.position, cx);
-                    } else {
-                        this.stop_editor_scrollbar_drag(event.position, cx);
-                    }
-                    true
-                });
-                if handled {
-                    cx.stop_propagation();
-                }
-            }
-        });
-        window.on_mouse_event({
-            let editor = editor.clone();
-            move |event: &MouseMoveEvent, phase, _window, cx| {
-                if !phase.capture() {
-                    return;
-                }
-
-                let handled = editor.update(cx, |this, cx| {
-                    if event.dragging() {
-                        this.update_panel_scrollbar_drag(event.position, cx)
-                    } else {
-                        this.stop_panel_scrollbar_drag(cx)
-                    }
-                });
-                if handled {
-                    cx.stop_propagation();
-                }
-            }
-        });
-        window.on_mouse_event({
-            let editor = editor.clone();
-            move |event: &MouseUpEvent, phase, _window, cx| {
-                if !phase.capture() || event.button != MouseButton::Left {
-                    return;
-                }
-
-                let handled = editor.update(cx, |this, cx| {
-                    this.stop_editor_scrollbar_drag(event.position, cx)
-                });
-                if handled {
-                    cx.stop_propagation();
-                }
-            }
-        });
-        window.on_mouse_event({
-            let editor = editor.clone();
-            move |event: &MouseUpEvent, phase, _window, cx| {
-                if !phase.capture() || event.button != MouseButton::Left {
-                    return;
-                }
-
-                let handled = editor.update(cx, |this, cx| this.stop_panel_scrollbar_drag(cx));
-                if handled {
-                    cx.stop_propagation();
-                }
-            }
-        });
-        // Focus the pane under the cursor before any bubble-phase handler
-        // runs, so subsequent listeners operate on the right pane's state.
-        window.on_mouse_event({
-            let editor = editor.clone();
-            move |event: &MouseDownEvent, phase, _window, cx| {
-                if !phase.capture() {
-                    return;
-                }
-                editor.update(cx, |this, cx| {
-                    if this.panes.len() < 2 {
-                        return;
-                    }
-                    let target = this.panes.iter().map(|pane| pane.id).find(|pane_id| {
-                        this.pane_bounds
-                            .get(pane_id)
-                            .is_some_and(|bounds| bounds.contains(&event.position))
-                    });
-                    if let Some(pane_id) = target {
-                        this.focus_pane(pane_id, cx);
-                    }
-                });
-            }
-        });
-        // Completes a tab drag over a pane's content area (split or merge).
-        // Handled in the capture phase from our own tracked drag state instead
-        // of gpui's drop dispatch, which is raced by the drag source's
-        // capture-phase stop_propagation and other bubble listeners.
-        window.on_mouse_event({
-            let editor = editor.clone();
-            move |event: &MouseUpEvent, phase, _window, cx| {
-                if !phase.capture() || event.button != MouseButton::Left {
-                    return;
-                }
-                editor.update(cx, |this, cx| {
-                    let Some((pane_id, direction)) = this.tab_drag_split_target.take() else {
-                        return;
-                    };
-                    let Some(tab_id) = this.tab_dragging_id.take() else {
-                        return;
-                    };
-                    this.tab_drag_candidate_id = None;
-                    match direction {
-                        Some(direction) => {
-                            this.split_pane_with_tab(pane_id, direction, &tab_id, cx);
-                        }
-                        None => {
-                            if this.pane_id_for_tab(&tab_id) != Some(pane_id) {
-                                this.move_tab_to_pane(&tab_id, pane_id, None, cx);
-                            } else {
-                                this.focus_pane(pane_id, cx);
-                                this.switch_to_tab(&tab_id, cx);
+                                if event.dragging() {
+                                    this.hovered_editor_position = Some(event.position);
+                                    this.set_editor_scrollbar_hovered(true, cx);
+                                    this.update_editor_scrollbar_drag(event.position, cx);
+                                } else {
+                                    this.stop_editor_scrollbar_drag(event.position, cx);
+                                }
+                                true
+                            });
+                            if handled {
+                                cx.stop_propagation();
                             }
                         }
-                    }
-                    cx.notify();
-                });
-            }
+                    });
+                    window.on_mouse_event({
+                        let editor = editor.clone();
+                        move |event: &MouseMoveEvent, phase, _window, cx| {
+                            if !phase.capture() {
+                                return;
+                            }
+
+                            let handled = editor.update(cx, |this, cx| {
+                                if event.dragging() {
+                                    this.update_panel_scrollbar_drag(event.position, cx)
+                                } else {
+                                    this.stop_panel_scrollbar_drag(cx)
+                                }
+                            });
+                            if handled {
+                                cx.stop_propagation();
+                            }
+                        }
+                    });
+                    window.on_mouse_event({
+                        let editor = editor.clone();
+                        move |event: &MouseUpEvent, phase, _window, cx| {
+                            if !phase.capture() || event.button != MouseButton::Left {
+                                return;
+                            }
+
+                            let handled = editor.update(cx, |this, cx| {
+                                this.stop_editor_scrollbar_drag(event.position, cx)
+                            });
+                            if handled {
+                                cx.stop_propagation();
+                            }
+                        }
+                    });
+                    window.on_mouse_event({
+                        let editor = editor.clone();
+                        move |event: &MouseUpEvent, phase, _window, cx| {
+                            if !phase.capture() || event.button != MouseButton::Left {
+                                return;
+                            }
+
+                            let handled =
+                                editor.update(cx, |this, cx| this.stop_panel_scrollbar_drag(cx));
+                            if handled {
+                                cx.stop_propagation();
+                            }
+                        }
+                    });
+                    // Focus the pane under the cursor before any bubble-phase handler
+                    // runs, so subsequent listeners operate on the right pane's state.
+                    window.on_mouse_event({
+                        let editor = editor.clone();
+                        move |event: &MouseDownEvent, phase, _window, cx| {
+                            if !phase.capture() {
+                                return;
+                            }
+                            editor.update(cx, |this, cx| {
+                                if this.panes.len() < 2 {
+                                    return;
+                                }
+                                let target =
+                                    this.panes.iter().map(|pane| pane.id).find(|pane_id| {
+                                        this.pane_bounds
+                                            .get(pane_id)
+                                            .is_some_and(|bounds| bounds.contains(&event.position))
+                                    });
+                                if let Some(pane_id) = target {
+                                    this.focus_pane(pane_id, cx);
+                                }
+                            });
+                        }
+                    });
+                    // Completes a tab drag over a pane's content area (split or merge).
+                    // Handled in the capture phase from our own tracked drag state instead
+                    // of gpui's drop dispatch, which is raced by the drag source's
+                    // capture-phase stop_propagation and other bubble listeners.
+                    window.on_mouse_event({
+                        let editor = editor.clone();
+                        move |event: &MouseUpEvent, phase, _window, cx| {
+                            if !phase.capture() || event.button != MouseButton::Left {
+                                return;
+                            }
+                            editor.update(cx, |this, cx| {
+                                let Some((pane_id, direction)) = this.tab_drag_split_target.take()
+                                else {
+                                    return;
+                                };
+                                let Some(tab_id) = this.tab_dragging_id.take() else {
+                                    return;
+                                };
+                                this.tab_drag_candidate_id = None;
+                                match direction {
+                                    Some(direction) => {
+                                        this.split_pane_with_tab(pane_id, direction, &tab_id, cx);
+                                    }
+                                    None => {
+                                        if this.pane_id_for_tab(&tab_id) != Some(pane_id) {
+                                            this.move_tab_to_pane(&tab_id, pane_id, None, cx);
+                                        } else {
+                                            this.focus_pane(pane_id, cx);
+                                            this.switch_to_tab(&tab_id, cx);
+                                        }
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .size_full()
         });
         // Store window bounds for menu positioning
         let wb = window.bounds();
@@ -560,6 +583,9 @@ impl Render for EditorView {
                 "MarkdownEditor"
             })
             .track_focus(&self.focus_handle(cx))
+            .when_some(global_mouse_listeners, |this, listeners| {
+                this.child(listeners)
+            })
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if this.active_tab_is_whiteboard()
                     && event.keystroke.key == "space"
@@ -711,6 +737,7 @@ impl Render for EditorView {
             .on_key_down(cx.listener(Self::on_preview_overlay_key_down))
             .on_action(cx.listener(Self::on_toggle_outline))
             .on_action(cx.listener(Self::on_toggle_info_panel))
+            .on_action(cx.listener(Self::on_toggle_terminal_panel))
             .on_action(cx.listener(Self::on_toggle_git_history))
             .on_action(cx.listener(Self::on_toggle_theme_debugger))
             .on_action(cx.listener(Self::on_add_cursor_above))
@@ -963,9 +990,7 @@ impl Render for EditorView {
                         this.child(self.render_right_panels(cx))
                     })
                     .when(
-                        !show_empty_workspace
-                            && self.should_render_utility_panel_on_right()
-                            && !self.focused_pane_active_tab_is_terminal(),
+                        !show_empty_workspace && self.should_render_utility_panel_on_right(),
                         |this| {
                             this.child(
                                 div()

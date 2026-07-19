@@ -2151,6 +2151,33 @@ mod tests {
     };
 
     #[test]
+    fn quote_lines_hide_markers_in_display_text() {
+        let text = "> a\n>\n> - item one\n> - item two\n>\n> 1. ordered\n> b";
+        let decorations = markdown::parse_decorations(text);
+        for (line_content, decoration) in text.lines().zip(decorations.iter()) {
+            let (display_text, ..) = build_display_text(
+                line_content,
+                decoration,
+                &[],
+                false,
+                None,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1.0,
+                1.0,
+                1.0,
+            );
+            assert!(
+                !display_text.contains('>'),
+                "line {line_content:?} rendered {display_text:?}"
+            );
+        }
+    }
+
+    #[test]
     fn anchored_popup_uses_gap_and_left_alignment_above() {
         let placement = anchored_popup_placement(
             800.0,

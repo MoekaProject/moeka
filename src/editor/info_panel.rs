@@ -3267,6 +3267,7 @@ impl EditorView {
 
     pub(crate) fn render_utility_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         match self.displayed_utility_panel {
+            Some(RightUtilityPanel::Agent) => self.render_agent_panel(cx),
             Some(RightUtilityPanel::Info) => self.render_info_panel(cx),
             Some(RightUtilityPanel::GitHistory) => self.render_git_panel(cx),
             Some(RightUtilityPanel::Outline) => self.render_outline_panel(cx),

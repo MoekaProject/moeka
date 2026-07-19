@@ -36,13 +36,6 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use super::*;
 
 const CHAT_PANEL_DEFAULT_ROWS: u16 = 28;
-
-fn most_recent_open_terminal_id(
-    history: &[String],
-    mut is_open: impl FnMut(&str) -> bool,
-) -> Option<String> {
-    history.iter().rev().find(|id| is_open(id)).cloned()
-}
 const CHAT_PANEL_DEFAULT_COLS: u16 = 96;
 const CHAT_PANEL_POLL_MS: u64 = 33;
 const TERMINAL_PROCESS_INFO_POLL_MS: u64 = 500;
@@ -1011,14 +1004,8 @@ impl Default for ChatTerminalSnapshot {
 }
 
 impl ChatAgentCli {
-    pub(crate) fn all() -> [Self; 5] {
-        [
-            Self::GithubCopilot,
-            Self::Terminal,
-            Self::OpenAICodex,
-            Self::ClaudeCode,
-            Self::GeminiCli,
-        ]
+    pub(crate) fn all() -> [Self; 1] {
+        [Self::Terminal]
     }
 
     pub(crate) fn label(self) -> &'static str {
@@ -2460,38 +2447,6 @@ impl EditorView {
         self.terminal_write_user_input(tab_id, bytes);
     }
 
-    /// Finds or creates the terminal tab that chat references should be sent
-    /// to: the current pane's active terminal tab, any open terminal tab, or a
-    /// freshly opened right-split terminal.
-    fn ensure_chat_terminal_target(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        let recent = most_recent_open_terminal_id(&self.terminal_focus_history, |tab_id| {
-            self.pane_id_for_tab(tab_id).is_some()
-        });
-        let existing = recent
-            .or_else(|| self.active_terminal_tab_id())
-            .or_else(|| {
-                self.all_tabs()
-                    .find(|tab| tab.kind.is_terminal())
-                    .map(|tab| tab.id.clone())
-            });
-        let tab_id = match existing {
-            Some(tab_id) => {
-                if let Some(owner) = self.pane_id_for_tab(&tab_id)
-                    && owner != self.focused_pane_id
-                {
-                    self.focus_pane(owner, cx);
-                }
-                self.switch_to_tab(&tab_id, cx);
-                tab_id
-            }
-            None => self.open_terminal_tab_in_right_split(ChatAgentCli::GithubCopilot, cx),
-        };
-        self.ensure_terminal_session(&tab_id, cx);
-        self.pending_terminal_focus = Some(tab_id.clone());
-        cx.notify();
-        Some(tab_id)
-    }
-
     pub(crate) fn record_terminal_focus(&mut self, tab_id: &str) {
         if self.pane_id_for_tab(tab_id).is_none() {
             return;
@@ -2507,64 +2462,19 @@ impl EditorView {
         self.terminal_focus_history.push(tab_id.to_string());
     }
 
-    fn insert_chat_reference_labels(&mut self, labels: &[String], cx: &mut Context<Self>) {
-        let text = labels
-            .iter()
-            .map(|label| label.trim())
-            .filter(|label| !label.is_empty())
-            .map(|label| format!("@{} ", label))
-            .collect::<String>();
-        if text.is_empty() {
-            return;
-        }
-
-        let Some(tab_id) = self.ensure_chat_terminal_target(cx) else {
-            return;
-        };
-        self.pause_cursor_blinking(cx);
-        self.terminal_write_user_input(&tab_id, text.as_bytes());
-    }
-
-    fn chat_drop_reference_label_for_path(&self, path: &std::path::Path) -> Option<String> {
-        path.file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .or_else(|| self.relative_path_for_path(path))
-    }
-
     pub(crate) fn add_dragged_paths_to_chat(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let labels: Vec<String> = paths
-            .iter()
-            .filter_map(|path| self.chat_drop_reference_label_for_path(path))
-            .collect();
         self.clear_sidebar_drag_state(cx);
-        self.insert_chat_reference_labels(&labels, cx);
+        self.add_paths_to_chat(paths, cx);
     }
 
     pub(crate) fn add_path_to_chat(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        let Some(relative_path) = self.relative_path_for_path(path) else {
-            return;
-        };
-
-        let Some(tab_id) = self.ensure_chat_terminal_target(cx) else {
-            return;
-        };
-        self.terminal_write_user_input(&tab_id, format!("@{} ", relative_path).as_bytes());
+        self.add_acp_resource_link(path, None, cx);
     }
 
     pub(crate) fn add_paths_to_chat(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let references = paths
-            .iter()
-            .filter_map(|path| self.relative_path_for_path(path))
-            .map(|relative_path| format!("@{} ", relative_path))
-            .collect::<String>();
-        if references.is_empty() {
-            return;
+        for path in paths {
+            self.add_acp_resource_link(path, None, cx);
         }
-
-        let Some(tab_id) = self.ensure_chat_terminal_target(cx) else {
-            return;
-        };
-        self.terminal_write_user_input(&tab_id, references.as_bytes());
     }
 
     fn chat_reference_position(&self, offset: usize) -> (usize, usize) {
@@ -2595,21 +2505,17 @@ impl EditorView {
             return;
         };
         let (start_line, start_col) = self.chat_reference_position(range.start);
-        let text = if range.is_empty() {
-            format!("@{} L{}:C{} ", relative_path, start_line, start_col)
+        let title = if range.is_empty() {
+            format!("{} L{}:C{}", relative_path, start_line, start_col)
         } else {
             let end_anchor = range.end.saturating_sub(1);
             let (end_line, end_col) = self.chat_reference_position(end_anchor);
             format!(
-                "@{} L{}:C{}-L{}:C{} ",
+                "{} L{}:C{}-L{}:C{}",
                 relative_path, start_line, start_col, end_line, end_col
             )
         };
-
-        let Some(tab_id) = self.ensure_chat_terminal_target(cx) else {
-            return;
-        };
-        self.terminal_write_user_input(&tab_id, text.as_bytes());
+        self.add_acp_resource_link(path, Some(title), cx);
     }
 
     fn swallow_chat_terminal_editor_action(
@@ -3983,6 +3889,11 @@ impl EditorView {
             }))
             .on_action(cx.listener(|this, _: &ToggleChatPanel, window, cx| {
                 cx.stop_propagation();
+                this.toggle_agent_panel(cx);
+                window.focus(&this.focus_handle(cx));
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTerminalPanel, window, cx| {
+                cx.stop_propagation();
                 this.toggle_terminal_panel(cx);
                 window.focus(&this.focus_handle(cx));
             }))
@@ -4351,18 +4262,6 @@ mod tests {
 
         summary.display_offset = 24;
         assert_eq!(summary.scrollback(), Some((24, 120)));
-    }
-
-    #[test]
-    fn recent_terminal_target_skips_closed_tabs() {
-        let history = vec![
-            "terminal-a".to_string(),
-            "terminal-b".to_string(),
-            "terminal-c".to_string(),
-        ];
-        let target =
-            most_recent_open_terminal_id(&history, |id| matches!(id, "terminal-a" | "terminal-b"));
-        assert_eq!(target.as_deref(), Some("terminal-b"));
     }
 
     #[test]

@@ -2564,6 +2564,16 @@ impl EditorView {
             .into();
         self.scroll_offset -= delta_y;
         self.clamp_scroll();
+        if self.embedded_editor && self.embedded_read_only {
+            // Re-attach bottom-following only when the user scrolls back down
+            // to the end of the transcript.
+            let max_scroll = (self
+                .total_content_height()
+                .max(self.embedded_content_height.get())
+                - self.last_viewport_height)
+                .max(0.0);
+            self.embedded_stick_to_bottom = self.scroll_offset >= max_scroll - 4.0;
+        }
         self.update_toolbar_visibility_for_scroll(cx);
         self.reveal_editor_scrollbar(cx);
         cx.notify();
