@@ -330,6 +330,9 @@ fn hydrate_active_tab_state(editor: &mut EditorView) {
     let active_tab = editor.tabs[index].clone();
     editor.current_file_path = active_tab.path.clone();
     editor.editor_left_aligned = active_tab.editor_left_aligned;
+    // Keep the file-kind cache in sync so the status bar (language label)
+    // and file-kind-dependent paths work right after session restore.
+    editor.active_file_kind_cache = active_tab.file_kind.clone();
     if active_tab.kind == TabKind::Editor {
         if active_tab
             .file_kind

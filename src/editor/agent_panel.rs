@@ -13,7 +13,7 @@ use super::acp_client::{AcpConnectionStatus, PendingAcpPermission};
 use super::acp_registry::{AgentInstallStatus, AgentRegistryStatus, RegistryAgent};
 use super::acp_session_store::StoredAcpSession;
 use super::markdown_editor::{EmbeddedMarkdownEditor, EmbeddedMarkdownEditorEvent};
-use super::{EditorView, RightUtilityPanel, SearchMenuConfig, SearchMenuRow};
+use super::{EditorView, PanelScrollbarKind, RightUtilityPanel, SearchMenuConfig, SearchMenuRow};
 
 // Mingcute icons copied into the project (assets/icons/agent/).
 const AGENT_HISTORY_SVG_PATH: &str = "assets/icons/agent/history.svg";
@@ -34,8 +34,10 @@ const COMPOSER_MIN_HEIGHT: f32 = 56.0;
 const COMPOSER_MAX_HEIGHT: f32 = 180.0;
 /// Header icon button rect (before UI scaling): slightly wider than tall so
 /// the hover background reads as a square around the icon.
-const AGENT_HEADER_BUTTON_SIZE: f32 = 22.0;
-const AGENT_HEADER_BUTTON_WIDTH: f32 = 30.0;
+const AGENT_HEADER_BUTTON_SIZE: f32 = 28.0;
+const AGENT_HEADER_BUTTON_WIDTH: f32 = 32.0;
+/// Fixed session-history row height (before UI scaling) for virtualization.
+const AGENT_HISTORY_ROW_HEIGHT: f32 = 48.0;
 /// A popup menu opened from the composer bottom controls.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentPopupMenu {
@@ -450,16 +452,21 @@ impl EditorView {
         div()
             .id(("agent-stored-session", index))
             .w_full()
+            // Fixed row height keeps the virtualized window's geometry exact.
+            .h(px(self.scaled(AGENT_HISTORY_ROW_HEIGHT)))
             .px(px(padding))
-            .py(px(self.scaled(8.0)))
             .flex()
             .flex_col()
+            .justify_center()
             .gap(px(self.scaled(2.0)))
             .cursor(CursorStyle::Arrow)
             .hover(move |style| style.bg(styles.utility_panel_button_hover_bg))
             .child(
                 div()
                     .w_full()
+                    .overflow_hidden()
+                    .truncate()
+                    .whitespace_nowrap()
                     .text_size(px(self.scaled(styles.utility_panel_item_font_size_px)))
                     .text_color(styles.utility_panel_item_value_text_color)
                     .child(SharedString::from(title)),
@@ -496,16 +503,65 @@ impl EditorView {
 
     fn render_history_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let styles = &self.styles.utility_panel;
-        let stored_sessions = self.stored_acp_sessions.clone();
+        let row_height = self.scaled(AGENT_HISTORY_ROW_HEIGHT);
+        let session_count = self.stored_acp_sessions.len();
+        // Virtualized window: only the rows near the viewport are rendered,
+        // the rest is represented by top/bottom spacers.
+        let list_window = super::list_viewport::fixed_list_window(
+            &self.agent_history_scroll_handle,
+            self.last_viewport_height,
+            0.0,
+            row_height,
+            session_count,
+            8,
+            0,
+        );
+        let visible_sessions: Vec<(usize, StoredAcpSession)> = list_window
+            .render
+            .clone()
+            .filter_map(|index| {
+                self.stored_acp_sessions
+                    .get(index)
+                    .map(|session| (index, session.clone()))
+            })
+            .collect();
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(visible_sessions.len() + 2);
+        rows.push(
+            div()
+                .h(px(list_window.top_spacer_px))
+                .flex_shrink_0()
+                .into_any_element(),
+        );
+        for (index, session) in &visible_sessions {
+            rows.push(self.render_stored_session_row(session, *index, cx));
+        }
+        rows.push(
+            div()
+                .h(px(list_window.bottom_spacer_px))
+                .flex_shrink_0()
+                .into_any_element(),
+        );
+
+        let scrollbar = self.render_scrollbar_for_handle(
+            PanelScrollbarKind::AgentHistory,
+            &self.agent_history_scroll_handle,
+            f32::from(self.agent_history_scroll_handle.bounds().size.height),
+            0.0,
+            self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
+            cx,
+        );
+
         div()
             .id("agent-session-history")
             .flex_1()
             .min_h(px(0.0))
             .w_full()
-            .overflow_y_scroll()
+            .flex()
+            .flex_col()
             .child(
                 div()
                     .w_full()
+                    .flex_none()
                     .px(px(self.scaled(styles.utility_panel_section_padding_x_px)))
                     .pt(px(self.scaled(10.0)))
                     .pb(px(self.scaled(4.0)))
@@ -515,13 +571,30 @@ impl EditorView {
                     .text_color(styles.utility_panel_section_title_text_color)
                     .child(self.agent_text("history")),
             )
-            .children(
-                stored_sessions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, session)| self.render_stored_session_row(session, index, cx)),
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .relative()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id("agent-session-history-scroll")
+                            .h_full()
+                            .w_full()
+                            .overflow_y_scroll()
+                            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                                this.reveal_panel_scrollbar(PanelScrollbarKind::AgentHistory, cx);
+                            }))
+                            .track_scroll(&self.agent_history_scroll_handle)
+                            .flex()
+                            .flex_col()
+                            .children(rows),
+                    )
+                    .when_some(scrollbar, |this, scrollbar| this.child(scrollbar)),
             )
-            .when(stored_sessions.is_empty(), |this| {
+            .when(session_count == 0, |this| {
                 this.child(
                     div()
                         .w_full()
@@ -1525,13 +1598,7 @@ impl EditorView {
                                                     )
                                                     .child(SharedString::from(name)),
                                             )
-                                        })
-                                        .child(
-                                            div()
-                                                .text_size(px(self.scaled(11.0)))
-                                                .text_color(styles.utility_panel_empty_text_color)
-                                                .child(self.agent_text("empty_hint")),
-                                        ),
+                                        }),
                                 )
                             } else {
                                 this.when_some(transcript_editor, |this, editor| this.child(editor))

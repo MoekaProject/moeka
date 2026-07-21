@@ -286,31 +286,39 @@ impl EditorView {
     }
 
     pub(crate) fn new_acp_session(&mut self, cx: &mut Context<Self>) {
-        if !matches!(
+        if matches!(
             self.acp_panel_state.status,
-            AcpConnectionStatus::Ready | AcpConnectionStatus::Failed(_)
+            AcpConnectionStatus::Connecting
+                | AcpConnectionStatus::Authenticating
+                | AcpConnectionStatus::Prompting
         ) {
             return;
         }
         self.persist_active_acp_session(cx);
         self.cancel_pending_acp_permission();
+        self.pending_acp_open_session = None;
+        let was_ready = self.acp_panel_state.status == AcpConnectionStatus::Ready;
         self.acp_panel_state.session_id = None;
         self.acp_panel_state.transcript.clear();
         self.acp_panel_state.updates.clear();
         self.acp_panel_state.extensions.clear();
         self.acp_panel_state.pending_attachments.clear();
-        self.acp_panel_state.status = AcpConnectionStatus::Connecting;
         self.sync_agent_transcript_editor(cx);
         if let Some(composer) = self.agent_composer_editor.clone() {
             composer.update(cx, |composer, cx| composer.clear(cx));
         }
-        if self
-            .acp_command_tx
-            .as_ref()
-            .is_none_or(|sender| sender.try_send(AcpCommand::NewSession).is_err())
+        // Reuse the live connection when possible; otherwise (re)launch the
+        // selected agent instead of failing on a dead channel.
+        if was_ready
+            && self
+                .acp_command_tx
+                .as_ref()
+                .is_some_and(|sender| sender.try_send(AcpCommand::NewSession).is_ok())
         {
-            self.acp_panel_state.status =
-                AcpConnectionStatus::Failed("ACP command channel closed".to_string());
+            self.acp_panel_state.status = AcpConnectionStatus::Connecting;
+        } else {
+            self.acp_panel_state.status = AcpConnectionStatus::Disconnected;
+            self.start_selected_acp_agent(cx);
         }
         cx.notify();
     }

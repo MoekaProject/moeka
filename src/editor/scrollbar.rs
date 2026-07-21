@@ -14,10 +14,11 @@ pub(crate) enum PanelScrollbarKind {
     GitHistory,
     GitChanges,
     ChatTerminal,
+    AgentHistory,
 }
 
 impl PanelScrollbarKind {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Sidebar,
         Self::FileList,
         Self::Info,
@@ -25,6 +26,7 @@ impl PanelScrollbarKind {
         Self::GitHistory,
         Self::GitChanges,
         Self::ChatTerminal,
+        Self::AgentHistory,
     ];
 
     fn id(self) -> &'static str {
@@ -36,6 +38,7 @@ impl PanelScrollbarKind {
             Self::GitHistory => "git-history-scrollbar",
             Self::GitChanges => "git-changes-scrollbar",
             Self::ChatTerminal => "chat-terminal-scrollbar",
+            Self::AgentHistory => "agent-history-scrollbar",
         }
     }
 }
@@ -269,6 +272,14 @@ impl EditorView {
                     f32::from(self.git_changes_scroll_handle.bounds().size.height);
                 (metrics, track_height_px, 0.0)
             }
+            PanelScrollbarKind::AgentHistory => {
+                let metrics = VerticalScrollbarMetrics::from_scroll_handle(
+                    &self.agent_history_scroll_handle,
+                )?;
+                let track_height_px =
+                    f32::from(self.agent_history_scroll_handle.bounds().size.height);
+                (metrics, track_height_px, 0.0)
+            }
             PanelScrollbarKind::ChatTerminal => {
                 let (viewport_height, max_scroll, scroll_top) =
                     self.active_chat_terminal_scrollbar_metrics()?;
@@ -342,6 +353,7 @@ impl EditorView {
             PanelScrollbarKind::Outline => Some(&self.outline_panel_scroll_handle),
             PanelScrollbarKind::GitHistory => Some(&self.git_history_scroll_handle),
             PanelScrollbarKind::GitChanges => Some(&self.git_changes_scroll_handle),
+            PanelScrollbarKind::AgentHistory => Some(&self.agent_history_scroll_handle),
             PanelScrollbarKind::ChatTerminal => None,
         }
     }
@@ -719,7 +731,8 @@ impl EditorView {
             | PanelScrollbarKind::Info
             | PanelScrollbarKind::Outline
             | PanelScrollbarKind::GitHistory
-            | PanelScrollbarKind::GitChanges => {
+            | PanelScrollbarKind::GitChanges
+            | PanelScrollbarKind::AgentHistory => {
                 if let Some(handle) = self.panel_scrollbar_handle(kind) {
                     let max_scroll = f32::from(handle.max_offset().height);
                     let scroll_top = scroll_top.clamp(0.0, max_scroll);
