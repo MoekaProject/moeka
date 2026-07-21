@@ -98,12 +98,25 @@ impl EditorView {
         persist_active_session_reference(&self.acp_panel_state);
     }
 
-    pub(crate) fn refresh_stored_acp_sessions(&mut self) {
-        self.stored_acp_sessions = self
-            .selected_agent_id
-            .as_deref()
-            .map(load_sessions)
-            .unwrap_or_default();
+    /// Reloads the session history (all agents) on a background thread;
+    /// session files embed full transcripts, so parsing them on the UI
+    /// thread would hitch with long chats.
+    pub(crate) fn refresh_stored_acp_sessions(&mut self, cx: &mut Context<Self>) {
+        self.stored_acp_sessions_epoch = self.stored_acp_sessions_epoch.wrapping_add(1);
+        let epoch = self.stored_acp_sessions_epoch;
+        self.stored_acp_sessions_task = Some(cx.spawn(async move |this, cx| {
+            let sessions = cx
+                .background_executor()
+                .spawn(async move { load_all_sessions() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.stored_acp_sessions_epoch == epoch {
+                    this.stored_acp_sessions = sessions;
+                    this.stored_acp_sessions_task = None;
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     pub(crate) fn open_stored_acp_session(
@@ -112,6 +125,16 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.persist_active_acp_session(cx);
+        // History spans every agent: opening a session that belongs to a
+        // different agent must relaunch that agent instead of reusing the
+        // current connection.
+        let same_agent =
+            self.acp_panel_state.agent_id.as_deref() == Some(session.agent_id.as_str());
+        self.selected_agent_id = Some(session.agent_id.clone());
+        if !same_agent {
+            self.stop_acp_agent();
+            self.acp_panel_state.status = super::acp_client::AcpConnectionStatus::Disconnected;
+        }
         self.acp_panel_state.agent_id = Some(session.agent_id.clone());
         self.acp_panel_state.agent_name = Some(session.agent_name.clone());
         self.acp_panel_state.session_id = Some(agent_client_protocol::schema::v1::SessionId::new(
@@ -130,11 +153,13 @@ impl EditorView {
             });
         }
 
-        if matches!(
-            self.acp_panel_state.status,
-            super::acp_client::AcpConnectionStatus::Ready
-                | super::acp_client::AcpConnectionStatus::Failed(_)
-        ) && self.acp_command_tx.is_some()
+        if same_agent
+            && matches!(
+                self.acp_panel_state.status,
+                super::acp_client::AcpConnectionStatus::Ready
+                    | super::acp_client::AcpConnectionStatus::Failed(_)
+            )
+            && self.acp_command_tx.is_some()
         {
             self.send_pending_acp_open_session(cx);
         } else {
@@ -269,6 +294,29 @@ pub(crate) fn load_sessions(agent_id: &str) -> Vec<StoredAcpSession> {
         .filter_map(|entry| fs::read(entry.path()).ok())
         .filter_map(|source| serde_json::from_slice::<StoredAcpSession>(&source).ok())
         .filter(|record| record.schema_version == ACP_SESSION_SCHEMA_VERSION)
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    sessions
+}
+
+/// Every stored session across all agents, most recent first.
+pub(crate) fn load_all_sessions() -> Vec<StoredAcpSession> {
+    let Ok(entries) = fs::read_dir(sessions_dir()) else {
+        return Vec::new();
+    };
+    let mut sessions = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_dir()))
+        .flat_map(|entry| {
+            fs::read_dir(entry.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| fs::read(entry.path()).ok())
+                .filter_map(|source| serde_json::from_slice::<StoredAcpSession>(&source).ok())
+                .filter(|record| record.schema_version == ACP_SESSION_SCHEMA_VERSION)
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     sessions

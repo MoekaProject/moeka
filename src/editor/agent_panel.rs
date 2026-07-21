@@ -13,7 +13,7 @@ use super::acp_client::{AcpConnectionStatus, PendingAcpPermission};
 use super::acp_registry::{AgentInstallStatus, AgentRegistryStatus, RegistryAgent};
 use super::acp_session_store::StoredAcpSession;
 use super::markdown_editor::{EmbeddedMarkdownEditor, EmbeddedMarkdownEditorEvent};
-use super::{EditorView, RightUtilityPanel};
+use super::{EditorView, RightUtilityPanel, SearchMenuConfig, SearchMenuRow};
 
 // Mingcute icons copied into the project (assets/icons/agent/).
 const AGENT_HISTORY_SVG_PATH: &str = "assets/icons/agent/history.svg";
@@ -32,9 +32,16 @@ const AGENT_COLLAPSE_SVG_PATH: &str = "assets/icons/agent/collapse.svg";
 /// Composer editor height bounds inside the card (before UI scaling).
 const COMPOSER_MIN_HEIGHT: f32 = 56.0;
 const COMPOSER_MAX_HEIGHT: f32 = 180.0;
+/// Header icon button rect (before UI scaling): slightly wider than tall so
+/// the hover background reads as a square around the icon.
+const AGENT_HEADER_BUTTON_SIZE: f32 = 22.0;
+const AGENT_HEADER_BUTTON_WIDTH: f32 = 30.0;
 /// A popup menu opened from the composer bottom controls.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentPopupMenu {
+    /// Searchable ACP registry agent picker (opened from the header
+    /// connection-status button).
+    Registry,
     /// Session mode picker.
     Mode,
     /// Select-type session config picker (model, reasoning effort, …).
@@ -48,12 +55,15 @@ impl EditorView {
         self.set_visible_utility_panel(opening.then_some(RightUtilityPanel::Agent), cx);
         if opening {
             self.ensure_agent_registry_loaded(cx);
+            // A restored session starts disconnected; reconnect as soon as
+            // the panel becomes visible.
+            self.request_acp_auto_connect(cx);
         }
     }
 
     fn ensure_agent_markdown_editors(&mut self, cx: &mut Context<Self>) {
         if self.agent_menu_search_editor.is_none() {
-            let styles = self.quick_open_text_input_styles();
+            let styles = self.search_menu_text_input_styles();
             let placeholder = self.agent_text("search");
             let editor = cx.new(move |cx| {
                 let mut input = crate::text_input::TextInput::new(styles, placeholder, cx);
@@ -150,6 +160,27 @@ impl EditorView {
             .detach();
             self.agent_composer_editor = Some(composer);
         }
+        self.sync_agent_editor_fonts(cx);
+    }
+
+    /// Pushes the host's configured editor fonts (and UI font) into the
+    /// panel-embedded transcript and composer editors.
+    pub(crate) fn sync_agent_editor_fonts(&mut self, cx: &mut Context<Self>) {
+        let body_latin = self.styles.editor.editor_body_latin_font_family;
+        let body_cjk = self.styles.editor.editor_body_cjk_font_family;
+        let monospace = self.styles.editor.editor_monospace_font_family;
+        let ui_font = self.styles.ui_font_family;
+        for editor in [
+            self.agent_transcript_editor.clone(),
+            self.agent_composer_editor.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            editor.update(cx, |editor, cx| {
+                editor.set_editor_fonts(body_latin, body_cjk, monospace, ui_font, cx)
+            });
+        }
     }
 
     // ── Chat: slash command completion state ────────────────────────────
@@ -239,6 +270,12 @@ impl EditorView {
     }
 
     fn acp_status_label(&self) -> String {
+        if matches!(
+            self.selected_agent_install_status(),
+            Some(AgentInstallStatus::Installing)
+        ) {
+            return self.agent_text("installing").to_string();
+        }
         match &self.acp_panel_state.status {
             AcpConnectionStatus::Disconnected => self.agent_text("not_connected").to_string(),
             AcpConnectionStatus::Connecting => self.agent_text("connecting").to_string(),
@@ -276,8 +313,8 @@ impl EditorView {
         let hover_bg = styles.utility_panel_button_hover_bg;
         let button = div()
             .id(id)
-            .h_full()
-            .w(px(self.scaled(styles.utility_panel_header_height_px)))
+            .w(px(self.scaled(AGENT_HEADER_BUTTON_WIDTH)))
+            .h(px(self.scaled(AGENT_HEADER_BUTTON_SIZE)))
             .flex_none()
             .flex()
             .items_center()
@@ -301,254 +338,94 @@ impl EditorView {
         super::tooltip::with_tooltip(button, cx.entity().clone(), tooltip, None::<&'static str>)
     }
 
-    // ── Registry ────────────────────────────────────────────────────────
+    // ── Registry (searchable menu from the header status button) ────────
 
-    fn render_registry_agent_row(
-        &self,
-        agent: &RegistryAgent,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let styles = &self.styles.utility_panel;
-        let selected = self.selected_agent_id.as_deref() == Some(agent.id.as_str());
-        let agent_id = agent.id.clone();
-        let row_padding = self.scaled(styles.utility_panel_section_padding_x_px);
-        let font_size = self.scaled(styles.utility_panel_item_font_size_px);
-        let description_size = self.scaled(11.0);
-        let accent = self.theme.text_accent;
-        let hover_bg = styles.utility_panel_button_hover_bg;
-
-        div()
-            .id(SharedString::from(format!(
-                "agent-registry-row-{}",
-                agent.id
-            )))
-            .w_full()
-            .pl(px(row_padding - self.scaled(2.0)))
-            .pr(px(row_padding))
-            .py(px(self.scaled(9.0)))
-            .flex()
-            .flex_col()
-            .gap(px(self.scaled(3.0)))
-            .border_l(px(self.scaled(2.0)))
-            .border_color(if selected {
-                accent
-            } else {
-                gpui::transparent_black()
-            })
-            .when(selected, |this| this.bg(hover_bg))
-            .hover(move |style| style.bg(hover_bg))
-            .cursor(CursorStyle::Arrow)
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(self.scaled(6.0)))
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .text_size(px(font_size))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(styles.utility_panel_item_value_text_color)
-                            .child(SharedString::from(agent.name.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .px(px(self.scaled(5.0)))
-                            .py(px(self.scaled(1.0)))
-                            .rounded(px(self.scaled(4.0)))
-                            .bg(self.theme.bg_code_inline)
-                            .text_size(px(self.scaled(10.0)))
-                            .text_color(styles.utility_panel_item_label_text_color)
-                            .child(format!(
-                                "{} · {}",
-                                agent.version,
-                                agent.distribution_label()
-                            )),
-                    ),
-            )
-            .when(!agent.description.is_empty(), |this| {
-                this.child(
-                    div()
-                        .w_full()
-                        .text_size(px(description_size))
-                        .text_color(styles.utility_panel_empty_text_color)
-                        .child(SharedString::from(agent.description.clone())),
-                )
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.selected_agent_id = Some(agent_id.clone());
-                    this.refresh_stored_acp_sessions();
-                    cx.notify();
-                }),
-            )
-            .into_any_element()
-    }
-
-    fn render_registry_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let styles = &self.styles.utility_panel;
-        let section_padding_x = self.scaled(styles.utility_panel_section_padding_x_px);
-        let empty_font_size = self.scaled(styles.utility_panel_empty_font_size_px);
-        let agents = self.agent_registry_state.agents.clone();
-        let status = self.agent_registry_state.status.clone();
-
-        div()
-            .id("agent-registry-list")
-            .flex_1()
-            .min_h(px(0.0))
-            .w_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.agent_panel_scroll_handle)
-            .child(
-                div()
-                    .w_full()
-                    .px(px(section_padding_x))
-                    .pt(px(self.scaled(10.0)))
-                    .pb(px(self.scaled(4.0)))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(px(
-                        self.scaled(styles.utility_panel_section_title_font_size_px)
-                    ))
-                    .text_color(styles.utility_panel_section_title_text_color)
-                    .child(self.agent_text("registry_title"))
-                    .when(matches!(status, AgentRegistryStatus::Offline(_)), |this| {
-                        this.child(
-                            div()
-                                .text_size(px(self.scaled(10.0)))
-                                .text_color(styles.utility_panel_empty_text_color)
-                                .child(self.agent_text("offline_cached")),
-                        )
-                    }),
-            )
-            .when(!agents.is_empty(), |this| {
-                this.children(
-                    agents
-                        .iter()
-                        .map(|agent| self.render_registry_agent_row(agent, cx)),
-                )
-            })
-            .when(agents.is_empty(), |this| {
-                let message = match &status {
-                    AgentRegistryStatus::Loading => self.agent_text("loading_registry").to_string(),
-                    AgentRegistryStatus::Failed(error) => error.clone(),
-                    _ => crate::i18n::agent_panel_empty_label(self.ui_language).to_string(),
-                };
-                this.child(
-                    div()
-                        .w_full()
-                        .px(px(section_padding_x))
-                        .py(px(self.scaled(24.0)))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(empty_font_size))
-                        .text_color(styles.utility_panel_empty_text_color)
-                        .child(message),
-                )
-            })
-            .into_any_element()
-    }
-
-    fn render_registry_action_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let styles = &self.styles.utility_panel;
-        let section_padding_x = self.scaled(styles.utility_panel_section_padding_x_px);
-        let selected_agent = self.selected_registry_agent().cloned();
-        let selected_can_launch = selected_agent
-            .as_ref()
-            .is_some_and(|agent| self.agent_launch_recipe(agent).is_some());
-        let selected_has_binary = selected_agent
-            .as_ref()
-            .and_then(RegistryAgent::platform_binary)
-            .is_some();
-        let install_status = self.selected_agent_install_status().cloned();
-        let install_running = matches!(install_status, Some(AgentInstallStatus::Installing));
-        let primary_label = if install_running {
-            self.agent_text("installing")
-        } else if selected_can_launch {
-            self.agent_text("start")
-        } else if matches!(install_status, Some(AgentInstallStatus::Failed(_))) {
-            self.agent_text("retry_install")
-        } else if selected_has_binary {
-            self.agent_text("install")
+    /// Connects the selected registry agent: launches it when a recipe is
+    /// available, otherwise installs the platform binary first.
+    pub(crate) fn connect_selected_registry_agent(&mut self, cx: &mut Context<Self>) {
+        let Some(agent) = self.selected_registry_agent().cloned() else {
+            return;
+        };
+        if self.agent_launch_recipe(&agent).is_some() {
+            self.start_selected_acp_agent(cx);
+        } else if agent.platform_binary().is_some() {
+            self.install_selected_agent(cx);
         } else {
-            self.agent_text("unavailable")
-        };
-        let primary_enabled = !install_running && (selected_can_launch || selected_has_binary);
-        let accent = self.theme.text_accent;
-        let on_accent = self.theme.text_on_accent;
-        let button_height = self.scaled(styles.utility_panel_button_height_px + 4.0);
-        let install_error = match &install_status {
-            Some(AgentInstallStatus::Failed(error)) => Some(error.clone()),
-            _ => None,
-        };
+            let message = self.agent_text("unavailable").to_string();
+            self.notify_error(message, cx);
+        }
+    }
 
-        div()
-            .w_full()
-            .flex_none()
-            .px(px(section_padding_x))
-            .py(px(self.scaled(10.0)))
-            .flex()
-            .flex_col()
-            .gap(px(self.scaled(6.0)))
-            .border_t(px(styles.utility_panel_border_width_px))
-            .border_color(styles.utility_panel_border_color)
-            .when_some(install_error, |this, error| {
-                this.child(
-                    div()
-                        .w_full()
-                        .text_size(px(self.scaled(11.0)))
-                        .text_color(self.theme.text_danger)
-                        .child(error),
-                )
+    /// Rows for the searchable ACP registry agent menu.
+    fn agent_registry_menu_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let query = self.agent_menu_query.trim().to_lowercase();
+        let agents: Vec<RegistryAgent> = self
+            .agent_registry_state
+            .agents
+            .iter()
+            .filter(|agent| {
+                query.is_empty()
+                    || agent.name.to_lowercase().contains(&query)
+                    || agent.description.to_lowercase().contains(&query)
             })
-            .child(
+            .cloned()
+            .collect();
+        if agents.is_empty() {
+            // With a query the standard "No matches" row applies; otherwise
+            // surface the registry loading / failure state inside the menu.
+            if !query.is_empty() {
+                return Vec::new();
+            }
+            let message = match &self.agent_registry_state.status {
+                AgentRegistryStatus::Loading => self.agent_text("loading_registry").to_string(),
+                AgentRegistryStatus::Failed(error) => error.clone(),
+                _ => crate::i18n::agent_panel_empty_label(self.ui_language).to_string(),
+            };
+            let styles = &self.styles.quick_open;
+            return vec![
                 div()
-                    .id("agent-start")
-                    .h(px(button_height))
                     .w_full()
+                    .h(px(self.scaled(styles.quick_open_empty_height_px)))
+                    .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded_full()
-                    .text_size(px(self.scaled(styles.utility_panel_item_font_size_px)))
-                    .map(|this| {
-                        if primary_enabled {
-                            this.bg(accent)
-                                .text_color(on_accent)
-                                .cursor(CursorStyle::Arrow)
-                                .hover(move |style| style.opacity(0.9))
-                        } else {
-                            this.border(
-                                px(self.scaled(styles.utility_panel_button_border_width_px)),
-                            )
-                            .border_color(styles.utility_panel_button_border_color)
-                            .text_color(styles.utility_panel_button_text_color)
-                            .opacity(0.45)
-                        }
-                    })
-                    .when(primary_enabled, |this| {
-                        this.on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                if selected_can_launch {
-                                    this.start_selected_acp_agent(cx);
-                                } else {
-                                    this.install_selected_agent(cx);
-                                }
-                            }),
-                        )
-                    })
-                    .child(primary_label),
-            )
-            .into_any_element()
+                    .text_size(px(self.scaled(styles.quick_open_empty_font_size_px)))
+                    .text_color(styles.quick_open_empty_text_color)
+                    .child(SharedString::from(message))
+                    .into_any_element(),
+            ];
+        }
+        agents
+            .into_iter()
+            .enumerate()
+            .map(|(index, agent)| {
+                let checked = self.selected_agent_id.as_deref() == Some(agent.id.as_str());
+                let installing = matches!(
+                    self.agent_install_states.get(agent.id.as_str()),
+                    Some(AgentInstallStatus::Installing)
+                );
+                let detail = if installing {
+                    self.agent_text("installing").to_string()
+                } else {
+                    format!("{} · {}", agent.version, agent.distribution_label())
+                };
+                let agent_id = agent.id.clone();
+                self.render_agent_menu_row(
+                    ("agent-registry-item", index),
+                    agent.name.clone(),
+                    Some(detail),
+                    checked,
+                    false,
+                    move |this, window, cx| {
+                        this.close_agent_popup_menu(window, cx);
+                        this.selected_agent_id = Some(agent_id.clone());
+                        this.connect_selected_registry_agent(cx);
+                    },
+                    cx,
+                )
+            })
+            .collect()
     }
 
     // ── History ─────────────────────────────────────────────────────────
@@ -562,6 +439,7 @@ impl EditorView {
         let styles = &self.styles.utility_panel;
         let padding = self.scaled(styles.utility_panel_section_padding_x_px);
         let title = session.display_title();
+        let agent_name = session.agent_name.clone();
         let timestamp: String = session
             .updated_at
             .replace('T', " ")
@@ -588,8 +466,21 @@ impl EditorView {
             )
             .child(
                 div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(self.scaled(6.0)))
                     .text_size(px(self.scaled(10.5)))
                     .text_color(styles.utility_panel_empty_text_color)
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(px(self.scaled(120.0)))
+                            .overflow_hidden()
+                            .truncate()
+                            .whitespace_nowrap()
+                            .child(SharedString::from(agent_name)),
+                    )
                     .child(SharedString::from(timestamp)),
             )
             .on_mouse_down(
@@ -648,7 +539,9 @@ impl EditorView {
 
     // ── Chat: composer bottom controls & popup menus ────────────────────
 
-    /// A compact menu-trigger button in the composer bottom row.
+    /// A compact menu-trigger button in the composer bottom row. `menu`
+    /// registers the button as a popup trigger so the menu backdrop can
+    /// switch menus when another trigger is clicked while one is open.
     #[allow(clippy::too_many_arguments)]
     fn render_composer_menu_button(
         &self,
@@ -657,23 +550,24 @@ impl EditorView {
         label: String,
         tooltip: String,
         open: bool,
+        menu: Option<AgentPopupMenu>,
         on_click: impl Fn(&mut Self, Option<Bounds<Pixels>>, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let styles = &self.styles.utility_panel;
-        let hover_bg = styles.utility_panel_button_hover_bg;
+        // Status-bar-like hover: square background at full row height.
+        let hover_bg = crate::theme::with_alpha(self.theme.text_primary, 0.08);
         let text_color = styles.utility_panel_button_text_color;
         let bounds = Rc::new(Cell::new(None));
         let click_bounds = bounds.clone();
         let button = div()
             .id(id)
-            .h(px(self.scaled(20.0)))
+            .h_full()
             .max_w(px(self.scaled(130.0)))
             .px(px(self.scaled(7.0)))
             .flex()
             .items_center()
             .gap(px(self.scaled(3.0)))
-            .rounded_full()
             .text_size(px(self.scaled(10.5)))
             .text_color(text_color)
             .when(open, |this| this.bg(hover_bg))
@@ -708,10 +602,18 @@ impl EditorView {
                 }),
             );
         let bounds_cell = bounds.clone();
+        let trigger_registry = self.agent_menu_trigger_bounds.clone();
         let button = div()
             .flex_none()
+            .h_full()
+            .flex()
+            .items_center()
             .on_children_prepainted(move |bounds: Vec<Bounds<Pixels>>, _, _| {
-                bounds_cell.set(bounds.first().copied());
+                let first = bounds.first().copied();
+                bounds_cell.set(first);
+                if let (Some(menu), Some(bounds)) = (menu, first) {
+                    trigger_registry.borrow_mut().push((menu, bounds));
+                }
             })
             .child(button);
         super::tooltip::with_tooltip(
@@ -734,62 +636,11 @@ impl EditorView {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let styles = &self.styles.utility_panel;
-        let hover_bg = styles.utility_panel_button_hover_bg;
-        div()
-            .id(id)
-            .w_full()
-            .min_h(px(self.scaled(26.0)))
-            .px(px(self.scaled(8.0)))
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(6.0)))
-            .text_size(px(self.scaled(11.5)))
-            .text_color(styles.utility_panel_button_text_color)
-            .cursor(CursorStyle::Arrow)
-            .hover(move |style| style.bg(hover_bg))
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .flex_1()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_color(if checked {
-                        self.theme.text_accent
-                    } else {
-                        styles.utility_panel_button_text_color
-                    })
-                    .child(SharedString::from(label)),
-            )
-            .when_some(description, |this, description| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .max_w(px(self.scaled(110.0)))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_size(px(self.scaled(10.0)))
-                        .text_color(styles.utility_panel_empty_text_color)
-                        .child(SharedString::from(description)),
-                )
-            })
-            .when(submenu, |this| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(self.scaled(9.0)))
-                        .text_color(styles.utility_panel_item_label_text_color)
-                        .child("▸"),
-                )
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    on_click(this, window, cx);
-                }),
-            )
-            .into_any_element()
+        let row = SearchMenuRow::new(label)
+            .detail(description)
+            .checked(checked)
+            .submenu(submenu);
+        self.render_search_menu_row(id, row, on_click, cx)
     }
 
     /// A searchable menu positioned with the same anchored placement logic as
@@ -800,11 +651,6 @@ impl EditorView {
         rows: Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let styles = &self.styles.quick_open;
-        let input_height = self.scaled(33.0);
-        let row_height = self.scaled(26.0);
-        let desired_height =
-            input_height + (rows.len().min(8).max(1) as f32 * row_height) + self.scaled(4.0);
         let panel_bounds = self.agent_panel_bounds.get();
         let panel_width = panel_bounds
             .map(|bounds| f32::from(bounds.size.width))
@@ -833,61 +679,24 @@ impl EditorView {
                 )
             },
         );
-        let placement = super::helpers::anchored_popup_placement(
-            panel_width,
-            panel_height,
+        let config = SearchMenuConfig {
+            id,
             anchor,
-            self.scaled(220.0),
-            desired_height,
-            false,
-            self.scaled(self.styles.anchored_popup_gap_px),
-            self.scaled(self.styles.anchored_popup_margin_px),
-        );
-        let results_height = (placement.max_height - input_height).max(row_height);
-        let menu = div()
-            .id(id)
-            .absolute()
-            .left(px(placement.left))
-            .w(px(placement.width))
-            .max_h(px(placement.max_height))
-            .bg(styles.quick_open_panel_bg)
-            .border(px(1.0))
-            .border_color(styles.quick_open_panel_border_color)
-            .rounded(px(self.scaled(8.0)))
-            .overflow_hidden()
-            .shadow_md()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, window, cx| {
-                    cx.stop_propagation();
-                    window.prevent_default();
-                }),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .px(px(self.scaled(styles.quick_open_input_padding_x_px)))
-                    .py(px(self.scaled(4.0)))
-                    .border_b(px(1.0))
-                    .border_color(styles.quick_open_panel_border_color)
-                    .when_some(self.agent_menu_search_editor.clone(), |this, editor| {
-                        this.child(editor)
-                    }),
-            )
-            .child(
-                div()
-                    .id("agent-popup-results")
-                    .w_full()
-                    .max_h(px(results_height))
-                    .overflow_y_scroll()
-                    .pb(px(self.scaled(4.0)))
-                    .children(rows),
-            );
-        let menu = match placement.vertical {
-            super::helpers::AnchoredPopupVertical::Above { bottom } => menu.bottom(px(bottom)),
-            super::helpers::AnchoredPopupVertical::Below { top } => menu.top(px(top)),
+            viewport_width: panel_width,
+            viewport_height: panel_height,
+            desired_width: self.scaled(220.0),
+            match_anchor_width: false,
+            row_count: rows.len(),
         };
-        deferred(menu).into_any_element()
+        deferred(self.render_search_menu_panel(
+            &config,
+            self.agent_menu_search_editor.clone(),
+            None,
+            None,
+            rows,
+            cx,
+        ))
+        .into_any_element()
     }
 
     /// Rows for the session mode picker.
@@ -949,7 +758,6 @@ impl EditorView {
         let current_value = select.current_value.clone();
         let capitalize = config_option_capitalizes_values(option);
         let query = self.agent_menu_query.trim().to_lowercase();
-        let styles = &self.styles.utility_panel;
 
         let value_rows =
             |values: Vec<agent_client_protocol::schema::v1::SessionConfigSelectOption>,
@@ -1002,37 +810,18 @@ impl EditorView {
                     let Some(group) = groups.get(group_index) else {
                         return Vec::new();
                     };
-                    let mut rows = vec![
-                        div()
-                            .id(("agent-config-group-back", config_index))
-                            .w_full()
-                            .min_h(px(self.scaled(26.0)))
-                            .px(px(self.scaled(8.0)))
-                            .flex()
-                            .items_center()
-                            .gap(px(self.scaled(6.0)))
-                            .text_size(px(self.scaled(11.0)))
-                            .text_color(styles.utility_panel_item_label_text_color)
-                            .cursor(CursorStyle::Arrow)
-                            .hover({
-                                let hover_bg = styles.utility_panel_button_hover_bg;
-                                move |style| style.bg(hover_bg)
-                            })
-                            .child("‹")
-                            .child(SharedString::from(group.name.clone()))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.agent_popup_menu = Some(AgentPopupMenu::Config {
-                                        index: config_index,
-                                        group: None,
-                                    });
-                                    cx.notify();
-                                }),
-                            )
-                            .into_any_element(),
-                    ];
+                    let mut rows = vec![self.render_search_menu_row(
+                        ("agent-config-group-back", config_index),
+                        SearchMenuRow::new(group.name.clone()).back(true),
+                        move |this, _, cx| {
+                            this.agent_popup_menu = Some(AgentPopupMenu::Config {
+                                index: config_index,
+                                group: None,
+                            });
+                            cx.notify();
+                        },
+                        cx,
+                    )];
                     rows.extend(value_rows(group.options.clone(), cx));
                     rows
                 }
@@ -1200,6 +989,7 @@ impl EditorView {
                 label,
                 self.agent_text("session_mode").to_string(),
                 open,
+                Some(AgentPopupMenu::Mode),
                 move |this, anchor, window, cx| {
                     this.set_agent_popup_menu_at(
                         if open {
@@ -1253,6 +1043,7 @@ impl EditorView {
                         label,
                         option.name.clone(),
                         open,
+                        Some(AgentPopupMenu::Config { index, group: None }),
                         move |this, anchor, window, cx| {
                             this.set_agent_popup_menu_at(
                                 if open {
@@ -1284,6 +1075,7 @@ impl EditorView {
                         label,
                         option.name.clone(),
                         false,
+                        None,
                         move |this, _, _, cx| {
                             this.set_acp_config(config_id.clone(), next_value.clone(), cx);
                         },
@@ -1467,7 +1259,6 @@ impl EditorView {
         card_border_color.a = (card_border_color.a * 1.6).min(1.0);
         let button_text_color = styles.utility_panel_button_text_color;
         let empty_text_color = styles.utility_panel_empty_text_color;
-        let hover_bg = styles.utility_panel_button_hover_bg;
         let expanded = self.agent_composer_expanded;
         let composer_editor = self.agent_composer_editor.clone();
         let is_ready = self.acp_panel_state.status == AcpConnectionStatus::Ready;
@@ -1484,7 +1275,9 @@ impl EditorView {
                 self.scaled(COMPOSER_MIN_HEIGHT),
                 self.scaled(COMPOSER_MAX_HEIGHT),
             );
-        let bottom_row_height = self.scaled(30.0);
+        // Bottom controls row matches the status bar height so the panel's
+        // chrome strips line up with the editor chrome.
+        let bottom_row_height = self.status_bar_height();
         let usage_label = self.acp_panel_state.usage.as_ref().map(|usage| {
             format!(
                 "{} / {}",
@@ -1542,13 +1335,12 @@ impl EditorView {
                             .absolute()
                             .top(px(self.scaled(4.0)))
                             .right(px(self.scaled(4.0)))
-                            .size(px(self.scaled(26.0)))
+                            .size(px(self.scaled(20.0)))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_full()
+                            .group("agent-composer-expand")
                             .cursor(CursorStyle::Arrow)
-                            .hover(move |style| style.bg(hover_bg))
                             .child(
                                 svg()
                                     .path(if expanded {
@@ -1556,8 +1348,13 @@ impl EditorView {
                                     } else {
                                         AGENT_EXPAND_SVG_PATH
                                     })
-                                    .size(px(self.scaled(15.0)))
-                                    .text_color(empty_text_color),
+                                    .size(px(self.scaled(13.0)))
+                                    .text_color(crate::theme::with_alpha(empty_text_color, 0.7))
+                                    .group_hover("agent-composer-expand", {
+                                        let hover_color =
+                                            styles.utility_panel_item_value_text_color;
+                                        move |style| style.text_color(hover_color)
+                                    }),
                             )
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -1576,10 +1373,10 @@ impl EditorView {
                             .flex()
                             .items_center()
                             .gap(px(self.scaled(6.0)))
-                            .px(px(self.scaled(6.0)))
                             .child(
                                 div()
                                     .min_w(px(0.0))
+                                    .h_full()
                                     .flex_1()
                                     .flex()
                                     .items_center()
@@ -1618,6 +1415,8 @@ impl EditorView {
                                 div()
                                     .id("agent-send-stop")
                                     .size(px(self.scaled(18.0)))
+                                    .mr(px(self.scaled(6.0)))
+                                    .mb(px(self.scaled(3.0)))
                                     .flex_none()
                                     .flex()
                                     .items_center()
@@ -1632,12 +1431,16 @@ impl EditorView {
                                                     .text_color(danger),
                                             )
                                         } else if send_enabled {
-                                            this.bg(accent).child(
-                                                svg()
-                                                    .path(AGENT_SEND_SVG_PATH)
-                                                    .size(px(self.scaled(10.0)))
-                                                    .text_color(on_accent),
-                                            )
+                                            // Slightly dimmed at rest; hover
+                                            // brightens to the full accent.
+                                            this.bg(crate::theme::with_alpha(accent, 0.82))
+                                                .hover(move |style| style.bg(accent))
+                                                .child(
+                                                    svg()
+                                                        .path(AGENT_SEND_SVG_PATH)
+                                                        .size(px(self.scaled(10.0)))
+                                                        .text_color(on_accent),
+                                                )
                                         } else {
                                             this.opacity(0.4).child(
                                                 svg()
@@ -1751,6 +1554,8 @@ impl EditorView {
     pub(crate) fn render_agent_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_agent_registry_loaded(cx);
         self.ensure_agent_markdown_editors(cx);
+        // Rebuilt by every trigger button's prepaint callback this frame.
+        self.agent_menu_trigger_bounds.borrow_mut().clear();
         let styles = &self.styles.utility_panel;
         let panel_bg = styles.utility_panel_bg;
         let panel_border_width = styles.utility_panel_border_width_px;
@@ -1758,26 +1563,21 @@ impl EditorView {
         let header_text_color = styles.utility_panel_header_text_color;
         let item_label_text_color = styles.utility_panel_item_label_text_color;
         let empty_text_color = styles.utility_panel_empty_text_color;
-        let header_height = self.scaled(styles.utility_panel_header_height_px);
-        let header_padding_x = self.scaled(styles.utility_panel_header_padding_x_px);
         let header_font_size = self.scaled(styles.utility_panel_header_font_size_px);
         let selected_name = self.acp_panel_state.agent_name.clone().or_else(|| {
             self.selected_registry_agent()
                 .map(|agent| agent.name.clone())
         });
-        let has_restored_session = self.acp_panel_state.session_id.is_some()
-            && !self.acp_panel_state.transcript.is_empty();
-        let show_registry = matches!(
-            self.acp_panel_state.status,
-            AcpConnectionStatus::Disconnected | AcpConnectionStatus::Failed(_)
-        ) && !has_restored_session;
-        let show_history = !show_registry && self.agent_history_visible;
+        let show_history = self.agent_history_visible;
         let status_label = self.acp_status_label();
         let status_color = self.acp_status_color();
         let history_visible = self.agent_history_visible;
-        let menu_open = self.agent_popup_menu.is_some() && !show_registry && !show_history;
+        let menu_open = self.agent_popup_menu.is_some();
+        let registry_open = self.agent_popup_menu == Some(AgentPopupMenu::Registry);
+        let status_hover_bg = crate::theme::with_alpha(self.theme.text_primary, 0.08);
 
         let popup_rows = match self.agent_popup_menu {
+            Some(AgentPopupMenu::Registry) => self.agent_registry_menu_rows(cx),
             Some(AgentPopupMenu::Mode) => self.agent_mode_menu_rows(cx),
             Some(AgentPopupMenu::Config { index, group }) => {
                 self.agent_config_menu_rows(index, group, cx)
@@ -1792,13 +1592,84 @@ impl EditorView {
             _ => Vec::new(),
         };
 
-        let body = if show_registry {
-            self.render_registry_body(cx)
-        } else if show_history {
+        let body = if show_history {
             self.render_history_body(cx)
         } else {
             self.render_chat_body(cx)
         };
+
+        // Connection status button: opens the searchable agent registry menu.
+        let connection_anchor = Rc::new(Cell::new(None));
+        let connection_anchor_click = connection_anchor.clone();
+        let connection_button = div()
+            .id("agent-connection-button")
+            .h(px(self.scaled(AGENT_HEADER_BUTTON_SIZE)))
+            .min_w(px(0.0))
+            .px(px(self.scaled(6.0)))
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(5.0)))
+            .when(registry_open, |this| this.bg(status_hover_bg))
+            .cursor(CursorStyle::Arrow)
+            .hover(move |style| style.bg(status_hover_bg))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(self.scaled(7.0)))
+                    .rounded_full()
+                    .bg(status_color),
+            )
+            .when_some(selected_name, |this, name| {
+                this.child(
+                    div()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .truncate()
+                        .whitespace_nowrap()
+                        .text_size(px(self.scaled(11.5)))
+                        .text_color(item_label_text_color)
+                        .child(SharedString::from(name)),
+                )
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(self.scaled(10.5)))
+                    .text_color(empty_text_color)
+                    .child(SharedString::from(status_label)),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    if this.agent_popup_menu == Some(AgentPopupMenu::Registry) {
+                        this.close_agent_popup_menu(window, cx);
+                    } else {
+                        this.ensure_agent_registry_loaded(cx);
+                        this.set_agent_popup_menu_at(
+                            Some(AgentPopupMenu::Registry),
+                            connection_anchor_click.get(),
+                            cx,
+                        );
+                        this.focus_agent_menu_search(window, cx);
+                    }
+                }),
+            );
+        let connection_anchor_cell = connection_anchor.clone();
+        let connection_trigger_registry = self.agent_menu_trigger_bounds.clone();
+        let connection_button = div()
+            .min_w(px(0.0))
+            .flex()
+            .on_children_prepainted(move |bounds: Vec<Bounds<Pixels>>, _, _| {
+                let first = bounds.first().copied();
+                connection_anchor_cell.set(first);
+                if let Some(bounds) = first {
+                    connection_trigger_registry
+                        .borrow_mut()
+                        .push((AgentPopupMenu::Registry, bounds));
+                }
+            })
+            .child(connection_button);
 
         let panel = div()
             .id("agent-panel")
@@ -1810,78 +1681,50 @@ impl EditorView {
             .border_color(panel_border_color)
             .child(
                 div()
-                    .h(px(header_height))
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(0.0))
-                    .pl(px(header_padding_x))
+                    .gap(px(self.scaled(6.0)))
                     .border_b(px(panel_border_width))
                     .border_color(panel_border_color)
                     .text_size(px(header_font_size))
                     .text_color(header_text_color)
+                    .child(connection_button)
+                    .child(div().flex_1())
                     .child(
                         div()
-                            .flex_1()
+                            .flex_none()
                             .flex()
                             .items_center()
-                            .py(px(self.scaled(3.0)))
-                            .gap(px(self.scaled(5.0)))
-                            .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .size(px(self.scaled(7.0)))
-                                    .rounded_full()
-                                    .bg(status_color),
-                            )
-                            .when_some(selected_name, |this, name| {
-                                this.child(
-                                    div()
-                                        .min_w(px(0.0))
-                                        .text_size(px(self.scaled(11.5)))
-                                        .text_color(item_label_text_color)
-                                        .child(SharedString::from(name)),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(self.scaled(10.5)))
-                                    .text_color(empty_text_color)
-                                    .child(SharedString::from(status_label)),
-                            ),
-                    )
-                    .when(!show_registry, |this| {
-                        this.child(self.render_header_icon_button(
-                            "agent-session-history-toggle",
-                            AGENT_HISTORY_SVG_PATH,
-                            crate::i18n::agent_panel_text(self.ui_language, "history"),
-                            history_visible,
-                            |this, cx| {
-                                this.agent_history_visible = !this.agent_history_visible;
-                                this.refresh_stored_acp_sessions();
-                                cx.notify();
-                            },
-                            cx,
-                        ))
-                        .child(self.render_header_icon_button(
-                            "agent-new-session",
-                            AGENT_NEW_SESSION_SVG_PATH,
-                            crate::i18n::agent_panel_text(self.ui_language, "new_session"),
-                            false,
-                            |this, cx| this.new_acp_session(cx),
-                            cx,
-                        ))
-                    }),
+                            .child(self.render_header_icon_button(
+                                "agent-session-history-toggle",
+                                AGENT_HISTORY_SVG_PATH,
+                                crate::i18n::agent_panel_text(self.ui_language, "history"),
+                                history_visible,
+                                |this, cx| {
+                                    this.agent_history_visible = !this.agent_history_visible;
+                                    if this.agent_history_visible {
+                                        this.refresh_stored_acp_sessions(cx);
+                                    }
+                                    cx.notify();
+                                },
+                                cx,
+                            ))
+                            .child(self.render_header_icon_button(
+                                "agent-new-session",
+                                AGENT_NEW_SESSION_SVG_PATH,
+                                crate::i18n::agent_panel_text(self.ui_language, "new_session"),
+                                false,
+                                |this, cx| this.new_acp_session(cx),
+                                cx,
+                            )),
+                    ),
             )
             .child(body)
-            .when(show_registry && self.selected_agent_id.is_some(), |this| {
-                this.child(self.render_registry_action_bar(cx))
-            })
             .when(menu_open, |this| {
                 // Click-away backdrop: painted above the panel body but below
-                // the deferred popup menu, so any outside click dismisses it.
+                // the deferred popup menu. Clicks on another trigger button
+                // switch straight to that menu; anywhere else dismisses.
                 this.child(
                     div()
                         .id("agent-menu-backdrop")
@@ -1892,14 +1735,39 @@ impl EditorView {
                         .size_full()
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
+                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                                 cx.stop_propagation();
-                                this.close_agent_popup_menu(window, cx);
+                                let hit = this
+                                    .agent_menu_trigger_bounds
+                                    .borrow()
+                                    .iter()
+                                    .find(|(_, bounds)| bounds.contains(&event.position))
+                                    .map(|(menu, bounds)| (*menu, *bounds));
+                                let Some((menu, bounds)) = hit else {
+                                    this.close_agent_popup_menu(window, cx);
+                                    return;
+                                };
+                                let same = match (this.agent_popup_menu, menu) {
+                                    (
+                                        Some(AgentPopupMenu::Config { index: open, .. }),
+                                        AgentPopupMenu::Config { index, .. },
+                                    ) => open == index,
+                                    (open, menu) => open == Some(menu),
+                                };
+                                if same {
+                                    this.close_agent_popup_menu(window, cx);
+                                    return;
+                                }
+                                if menu == AgentPopupMenu::Registry {
+                                    this.ensure_agent_registry_loaded(cx);
+                                }
+                                this.set_agent_popup_menu_at(Some(menu), Some(bounds), cx);
+                                this.focus_agent_menu_search(window, cx);
                             }),
                         ),
                 )
             })
-            .when(!popup_rows.is_empty(), |this| {
+            .when(menu_open, |this| {
                 this.child(self.render_agent_popup_container("agent-popup-menu", popup_rows, cx))
             })
             .when(!slash_rows.is_empty(), |this| {

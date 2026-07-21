@@ -2562,17 +2562,32 @@ impl EditorView {
             ))
             .y
             .into();
+        let scroll_offset_before_wheel = self.scroll_offset;
         self.scroll_offset -= delta_y;
         self.clamp_scroll();
         if self.embedded_editor && self.embedded_read_only {
-            // Re-attach bottom-following only when the user scrolls back down
-            // to the end of the transcript.
-            let max_scroll = (self
-                .total_content_height()
-                .max(self.embedded_content_height.get())
-                - self.last_viewport_height)
-                .max(0.0);
-            self.embedded_stick_to_bottom = self.scroll_offset >= max_scroll - 4.0;
+            // A pending streaming-update anchor stores the scroll offset it
+            // was captured at; fold the user's wheel delta into it so the
+            // post-layout anchor correction doesn't cancel this scroll.
+            let applied_delta = self.scroll_offset - scroll_offset_before_wheel;
+            if let Some(anchor) = self.pending_click_anchor.as_mut() {
+                anchor.scroll_before += applied_delta;
+            }
+            if delta_y > 0.0 {
+                // Scrolling up detaches bottom-following immediately; the
+                // 4px re-attach tolerance below would otherwise re-stick on
+                // small trackpad deltas and snap the view back to the bottom.
+                self.embedded_stick_to_bottom = false;
+            } else {
+                // Re-attach bottom-following only when the user scrolls back
+                // down to the end of the transcript.
+                let max_scroll = (self
+                    .total_content_height()
+                    .max(self.embedded_content_height.get())
+                    - self.last_viewport_height)
+                    .max(0.0);
+                self.embedded_stick_to_bottom = self.scroll_offset >= max_scroll - 4.0;
+            }
         }
         self.update_toolbar_visibility_for_scroll(cx);
         self.reveal_editor_scrollbar(cx);

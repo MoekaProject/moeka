@@ -45,7 +45,7 @@ pub(crate) fn request_tooltip_for_hitbox(
     title: impl Into<SharedString>,
     shortcut: Option<impl Into<SharedString>>,
 ) {
-    if editor.read(cx).context_menu.is_some() {
+    if editor.read(cx).global_tooltips_suppressed() {
         return;
     }
 
@@ -78,7 +78,7 @@ pub(crate) fn request_tooltip_for_hitbox(
         view: tooltip_view.into(),
         mouse_position: deployment - point(px(1.0), px(1.0)),
         check_visible_and_update: Rc::new(move |_, window, cx| {
-            visible_editor.read(cx).context_menu.is_none()
+            !visible_editor.read(cx).global_tooltips_suppressed()
                 && visible_bounds.contains(&window.mouse_position())
         }),
     });
@@ -208,6 +208,7 @@ impl Render for TooltipView {
             .items_center()
             .justify_center()
             .gap(px(editor.scaled(styles.tooltip_gap_px)))
+            .font_family(SharedString::from(editor.styles.ui_font_family))
             .line_height(px(title_font_size * TOOLTIP_LINE_HEIGHT_FACTOR))
             .bg(styles.tooltip_bg)
             .border(px(editor.scaled(styles.tooltip_border_width_px)))

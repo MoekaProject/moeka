@@ -808,7 +808,7 @@ impl EditorView {
         if self.git_commit_message_editor.is_some() {
             return;
         }
-        let mut styles = self.language_picker_text_input_styles();
+        let mut styles = self.search_menu_text_input_styles();
         let ups = &self.styles.utility_panel;
         styles.text_input_bg = ups.utility_panel_bg;
         styles.text_input_focus_bg = ups.utility_panel_bg;
@@ -1397,7 +1397,7 @@ impl EditorView {
     pub(crate) fn open_git_remote_input(&mut self, cx: &mut Context<Self>) {
         self.git_remote_input_visible = true;
         if self.git_remote_input_editor.is_none() {
-            let styles = self.language_picker_text_input_styles();
+            let styles = self.search_menu_text_input_styles();
             let placeholder = self.t(crate::i18n::TextKey::GitSetRemotePlaceholder);
             let editor = cx.new(|cx| {
                 let mut input = crate::text_input::TextInput::new(styles, placeholder, cx);

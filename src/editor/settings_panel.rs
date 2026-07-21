@@ -13,10 +13,10 @@ use crate::i18n::{
 };
 use crate::theme::{EditorThemeMode, ThemeKind};
 
-use super::helpers;
 use super::{
     APP_VERSION, DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, SITE_SVG_PATH,
-    THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape, attachments, tooltip,
+    SearchMenuConfig, SearchMenuRow, THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH,
+    TerminalCursorShape, attachments, tooltip,
 };
 
 // ── Font picker state ───────────────────────────────────────────────
@@ -614,26 +614,6 @@ impl EditorView {
         styles
     }
 
-    fn settings_picker_text_input_styles(&self) -> crate::style::TextInputStyles {
-        let mut styles = self.settings_text_input_styles();
-        let menu = &self.styles.quick_open;
-        styles.text_input_bg = menu.quick_open_input_bg;
-        styles.text_input_hover_bg = Some(menu.quick_open_input_focus_bg);
-        styles.text_input_focus_bg = menu.quick_open_input_focus_bg;
-        styles.text_input_text_color = menu.quick_open_input_text_color;
-        styles.text_input_placeholder_color = menu.quick_open_result_secondary_text_color;
-        styles.text_input_cursor_color = menu.quick_open_input_text_color;
-        styles.text_input_height_px = self.scaled(24.0);
-        styles.text_input_padding_left_px = self.scaled(menu.quick_open_input_text_padding_left_px);
-        styles.text_input_padding_right_px =
-            self.scaled(menu.quick_open_input_text_padding_left_px);
-        styles.text_input_font_size_px = self.scaled(menu.quick_open_result_name_font_size_px);
-        styles.text_input_cursor_height_ratio = menu.quick_open_input_cursor_height_ratio;
-        styles.text_input_cursor_height_adjust_px =
-            self.scaled(menu.quick_open_input_cursor_height_adjust_px);
-        styles
-    }
-
     pub(crate) fn sync_settings_text_input_styles(&mut self, cx: &mut Context<Self>) {
         let stepper_styles = self.inline_stepper_input_styles();
         for editor in [
@@ -656,7 +636,7 @@ impl EditorView {
             editor.update(cx, |input, cx| input.set_styles(styles, cx));
         }
         if let Some(editor) = &self.settings_font_picker_editor {
-            let styles = self.settings_picker_text_input_styles();
+            let styles = self.search_menu_text_input_styles();
             editor.update(cx, |input, cx| input.set_styles(styles, cx));
         }
     }
@@ -1914,7 +1894,7 @@ impl EditorView {
         });
 
         // Create TextInput for search
-        let styles = self.settings_picker_text_input_styles();
+        let styles = self.search_menu_text_input_styles();
         let editor = cx.new(move |cx| {
             let mut input = crate::text_input::TextInput::new(styles, &placeholder, cx);
             // The font picker overlay is deferred; a deferred context menu
@@ -2003,57 +1983,6 @@ impl EditorView {
         picker: &FontPickerState,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let menu = &self.styles.quick_open;
-        let bg = menu.quick_open_panel_bg;
-        let border_color = menu.quick_open_panel_border_color;
-        let text_primary = menu.quick_open_result_text_color;
-        let hover_bg = menu.quick_open_result_hover_bg;
-        let selected_bg = menu.quick_open_result_selected_bg;
-
-        let max_visible = 12;
-        let item_h = self.scaled(24.0);
-        let items: Vec<AnyElement> = picker
-            .filtered
-            .iter()
-            .take(picker.render_limit)
-            .enumerate()
-            .map(|(idx, option)| {
-                let value = option.value.clone();
-                let label = option.label.clone();
-                let preview_font = option.preview_font.clone();
-                let is_selected = idx == picker.selected_index;
-                div()
-                    .id(SharedString::from(format!("fp-item-{idx}")))
-                    .mx(px(1.0))
-                    .h(px(item_h))
-                    .px(px(self.scaled(menu.quick_open_result_padding_x_px)))
-                    .flex()
-                    .items_center()
-                    .text_size(px(self.scaled(menu.quick_open_result_name_font_size_px)))
-                    .text_color(if is_selected {
-                        self.theme.text_accent
-                    } else {
-                        text_primary
-                    })
-                    .when_some(preview_font, |this, preview_font| {
-                        this.font_family(SharedString::from(preview_font))
-                    })
-                    .when(is_selected, |this| this.bg(selected_bg))
-                    .hover(move |s| s.bg(hover_bg))
-                    .cursor(CursorStyle::Arrow)
-                    .child(label)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            window.prevent_default();
-                            this.apply_font_selection(value.clone(), cx);
-                        }),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-
         // Determine position: left-align with the trigger button's left edge.
         // Layout: sidebar? | [workspace-pane: settings_panel(max_w=560, mx_auto, px=40, font_row: label=120 + gap=12 + button)] | utility panel?
         let border_w = self.styles.window.window_border_width_px;
@@ -2080,112 +2009,61 @@ impl EditorView {
                 gpui::size(px(button_w), px(self.scaled(30.0))),
             )
         });
-        let desired_visible = picker.filtered.len().min(200).min(max_visible).max(1);
-        let desired_h = desired_visible as f32 * item_h + self.scaled(33.0);
-        let placement = helpers::anchored_popup_placement(
-            self.last_window_width,
-            self.last_window_height,
-            button_bounds,
-            f32::from(button_bounds.size.width),
-            desired_h,
-            true,
-            self.scaled(self.styles.anchored_popup_gap_px),
-            self.scaled(self.styles.anchored_popup_margin_px),
-        );
 
-        let dropdown = div()
-            .id("font-picker-dropdown")
-            .absolute()
-            .left(px(placement.left))
-            .w(px(placement.width))
-            .max_h(px(placement.max_height))
-            .bg(bg)
-            .border(px(1.0))
-            .border_color(border_color)
-            .rounded(px(self.scaled(8.0)))
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .cursor(CursorStyle::Arrow)
-            // Stop mouse events from reaching the backdrop
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, window, cx| {
-                    cx.stop_propagation();
-                    window.prevent_default();
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|_, _, window, cx| {
-                    cx.stop_propagation();
-                    window.prevent_default();
-                }),
-            )
-            .on_mouse_move(cx.listener(|_, _, _, _| {}))
-            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                if let Some(picker) = &mut this.settings_font_picker {
-                    let next = super::list_viewport::PICKER_LIST_POLICY.extend_near_end(
-                        picker.render_limit,
-                        picker.filtered.len(),
-                        picker.scroll_handle.bottom_item(),
-                    );
-                    if next != picker.render_limit {
-                        picker.render_limit = next;
-                        cx.notify();
-                    }
-                }
-            }))
-            // Search input using TextInput component
-            .child(
-                div()
-                    .w_full()
-                    .px(px(self.scaled(menu.quick_open_input_padding_x_px)))
-                    .py(px(self.scaled(4.0)))
-                    .border_b(px(1.0))
-                    .border_color(border_color)
-                    .when_some(self.settings_font_picker_editor.clone(), |this, editor| {
-                        this.child(editor)
-                    }),
-            )
-            // Font list
-            .child(
-                div()
-                    .id("font-picker-list")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .pb(px(self.scaled(4.0)))
-                    .track_scroll(&picker.scroll_handle)
-                    .children(items),
-            );
-        let dropdown = match placement.vertical {
-            helpers::AnchoredPopupVertical::Above { bottom } => dropdown.bottom(px(bottom)),
-            helpers::AnchoredPopupVertical::Below { top } => dropdown.top(px(top)),
+        let config = SearchMenuConfig {
+            id: "font-picker-dropdown",
+            anchor: button_bounds,
+            viewport_width: self.last_window_width,
+            viewport_height: self.last_window_height,
+            desired_width: f32::from(button_bounds.size.width),
+            match_anchor_width: true,
+            row_count: picker.filtered.len(),
         };
 
-        // Full-screen occluded backdrop — clicking it closes the picker
-        div()
-            .occlude()
-            .absolute()
-            .left(px(0.0))
-            .top(px(0.0))
-            .w_full()
-            .h_full()
-            .cursor(CursorStyle::Arrow)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.close_font_picker(cx);
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, _, _, cx| {
-                    this.close_font_picker(cx);
-                }),
-            )
-            .child(dropdown)
-            .into_any_element()
+        let rows = picker
+            .filtered
+            .iter()
+            .take(picker.render_limit)
+            .enumerate()
+            .map(|(idx, option)| {
+                let value = option.value.clone();
+                let row = SearchMenuRow::new(option.label.clone())
+                    .selected(idx == picker.selected_index)
+                    .preview_font(option.preview_font.clone());
+                self.render_search_menu_row(
+                    SharedString::from(format!("fp-item-{idx}")),
+                    row,
+                    move |this, _, cx| {
+                        this.apply_font_selection(value.clone(), cx);
+                    },
+                    cx,
+                )
+            })
+            .collect();
+
+        let on_scroll_extend: super::search_menu::SearchMenuScrollExtend = Box::new(|this, cx| {
+            if let Some(picker) = &mut this.settings_font_picker {
+                let next = super::list_viewport::PICKER_LIST_POLICY.extend_near_end(
+                    picker.render_limit,
+                    picker.filtered.len(),
+                    picker.scroll_handle.bottom_item(),
+                );
+                if next != picker.render_limit {
+                    picker.render_limit = next;
+                    cx.notify();
+                }
+            }
+        });
+
+        self.render_search_menu_overlay(
+            &config,
+            self.settings_font_picker_editor.clone(),
+            Some(&picker.scroll_handle),
+            Some(on_scroll_extend),
+            rows,
+            |this, _, cx| this.close_font_picker(cx),
+            cx,
+        )
     }
 
     fn apply_font_selection(&mut self, font_name: String, cx: &mut Context<Self>) {
@@ -2239,6 +2117,7 @@ impl EditorView {
             }
             self.app_settings.save();
             self.clear_all_tab_layout_caches();
+            self.sync_agent_editor_fonts(cx);
             cx.notify();
         }
     }

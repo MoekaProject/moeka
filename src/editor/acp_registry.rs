@@ -180,11 +180,17 @@ impl EditorView {
                                 .first()
                                 .map(|agent| agent.id.clone());
                         }
-                        this.refresh_stored_acp_sessions();
+                        this.refresh_stored_acp_sessions(cx);
                         this.agent_registry_state.status = match offline_error {
                             Some(error) => AgentRegistryStatus::Offline(error),
                             None => AgentRegistryStatus::Ready,
                         };
+                        if this.acp_auto_connect_pending {
+                            this.acp_auto_connect_pending = false;
+                            if this.is_utility_panel_active(super::RightUtilityPanel::Agent) {
+                                this.request_acp_auto_connect(cx);
+                            }
+                        }
                     }
                     Err(error) => {
                         this.agent_registry_state.status = AgentRegistryStatus::Failed(error);
@@ -242,7 +248,23 @@ impl EditorView {
                     },
                     Err(error) => AgentInstallStatus::Failed(error),
                 };
+                let installed = matches!(status, AgentInstallStatus::Installed { .. });
+                let failed_error = match &status {
+                    AgentInstallStatus::Failed(error) => Some(error.clone()),
+                    _ => None,
+                };
+                let agent_id = agent.id.clone();
                 this.agent_install_states.insert(agent.id, status);
+                if let Some(error) = failed_error {
+                    // The registry action bar is gone; surface install
+                    // failures as a toast instead.
+                    this.notify_error(error, cx);
+                } else if installed && this.selected_agent_id.as_deref() == Some(agent_id.as_str())
+                {
+                    // Installing from the registry menu flows straight into
+                    // connecting the agent.
+                    this.start_selected_acp_agent(cx);
+                }
                 cx.notify();
             });
         }));

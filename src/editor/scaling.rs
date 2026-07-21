@@ -642,8 +642,8 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn clamp_scroll(&mut self) {
-        let max_scroll = if self.embedded_editor {
+    pub(crate) fn max_scroll_offset(&self) -> f32 {
+        if self.embedded_editor {
             // Embedded editors (agent transcript/composer) pin the scroll
             // range to the exact content height: no scroll-beyond-last-line,
             // so no blank gap can appear below the content. Prefer the
@@ -654,13 +654,21 @@ impl EditorView {
                 - self.last_viewport_height)
                 .max(0.0)
         } else {
+            // No scrolling (and no scrollbar) when the whole document
+            // already fits inside the viewport.
+            if self.total_content_height() <= self.last_viewport_height {
+                return 0.0;
+            }
             // Allow scrolling the last line to the top (like Monaco's
             // scrollBeyondLastLine).
             let last_line_height =
                 self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
             (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0)
-        };
-        self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
+        }
+    }
+
+    pub(crate) fn clamp_scroll(&mut self) {
+        self.scroll_offset = self.scroll_offset.clamp(0.0, self.max_scroll_offset());
     }
 
     // ── Visual wrap-line cursor movement helpers ─────────────────────

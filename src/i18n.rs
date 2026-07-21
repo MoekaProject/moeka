@@ -1824,18 +1824,18 @@ pub(crate) fn terminal_label(language: UiLanguage) -> &'static str {
 
 pub(crate) fn agent_label(language: UiLanguage) -> &'static str {
     match language {
-        UiLanguage::ChineseSimplified => "智能体",
-        UiLanguage::ChineseTraditional => "代理程式",
-        UiLanguage::Japanese => "エージェント",
-        UiLanguage::Korean => "에이전트",
-        UiLanguage::French => "Agent",
-        UiLanguage::German => "Agent",
-        UiLanguage::Spanish => "Agente",
-        UiLanguage::Portuguese => "Agente",
-        UiLanguage::Russian => "Агент",
-        UiLanguage::Arabic => "الوكيل",
-        UiLanguage::Hindi => "एजेंट",
-        UiLanguage::English => "Agent",
+        UiLanguage::ChineseSimplified => "聊天",
+        UiLanguage::ChineseTraditional => "聊天",
+        UiLanguage::Japanese => "チャット",
+        UiLanguage::Korean => "채팅",
+        UiLanguage::French => "Chat",
+        UiLanguage::German => "Chat",
+        UiLanguage::Spanish => "Chat",
+        UiLanguage::Portuguese => "Chat",
+        UiLanguage::Russian => "Чат",
+        UiLanguage::Arabic => "الدردشة",
+        UiLanguage::Hindi => "चैट",
+        UiLanguage::English => "Chat",
     }
 }
 
@@ -1853,6 +1853,24 @@ pub(crate) fn agent_panel_empty_label(language: UiLanguage) -> &'static str {
         UiLanguage::Arabic => "اختر وكيلاً لبدء المحادثة",
         UiLanguage::Hindi => "चैट शुरू करने के लिए एजेंट चुनें",
         UiLanguage::English => "Select an agent to start chatting",
+    }
+}
+
+/// Placeholder for the agent chat composer input.
+pub(crate) fn agent_composer_placeholder(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "Enter 发送，Shift + Enter 换行，/ 唤出命令",
+        UiLanguage::ChineseTraditional => "Enter 傳送，Shift + Enter 換行，/ 叫出命令",
+        UiLanguage::Japanese => "Enter で送信、Shift + Enter で改行、/ でコマンド",
+        UiLanguage::Korean => "Enter 전송, Shift + Enter 줄바꿈, / 명령",
+        UiLanguage::French => "Entrée : envoyer, Maj + Entrée : saut de ligne, / : commandes",
+        UiLanguage::German => "Enter: Senden, Umschalt + Enter: Zeilenumbruch, /: Befehle",
+        UiLanguage::Spanish => "Enter: enviar, Shift + Enter: nueva línea, /: comandos",
+        UiLanguage::Portuguese => "Enter: enviar, Shift + Enter: nova linha, /: comandos",
+        UiLanguage::Russian => "Enter — отправить, Shift + Enter — новая строка, / — команды",
+        UiLanguage::Arabic => "Enter للإرسال، Shift + Enter لسطر جديد، / للأوامر",
+        UiLanguage::Hindi => "भेजने के लिए Enter, नई पंक्ति के लिए Shift + Enter, कमांड के लिए /",
+        UiLanguage::English => "Enter to send, Shift + Enter for a new line, / for commands",
     }
 }
 

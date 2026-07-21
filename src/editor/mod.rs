@@ -46,6 +46,7 @@ mod scaling;
 mod scrollbar;
 mod search;
 mod search_index;
+mod search_menu;
 mod session_store;
 pub(crate) mod settings_panel;
 mod shortcut;
@@ -82,6 +83,7 @@ pub(crate) use pane::{
     Pane, PaneId, PaneLayout, PaneResizeDrag, PaneState, SplitAxis, SplitDirection,
 };
 pub(crate) use scrollbar::{PanelScrollbarKind, PanelScrollbarState};
+pub(crate) use search_menu::{SearchMenuConfig, SearchMenuRow};
 pub(crate) use shortcut::{register_keybinding_overrides, set_application_menus};
 pub(crate) use status_bar::IndentSettings;
 pub(crate) use types::*;
@@ -1715,7 +1717,6 @@ pub struct EditorView {
     pub(crate) agent_registry_task: Option<Task<()>>,
     pub(crate) agent_install_states: HashMap<String, acp_registry::AgentInstallStatus>,
     pub(crate) agent_install_task: Option<Task<()>>,
-    pub(crate) agent_panel_scroll_handle: ScrollHandle,
     pub(crate) selected_agent_id: Option<String>,
     pub(crate) acp_panel_state: acp_client::AcpPanelState,
     pub(crate) acp_command_tx: Option<async_channel::Sender<acp_client::AcpCommand>>,
@@ -1723,12 +1724,20 @@ pub struct EditorView {
     pub(crate) acp_session_save_epoch: u64,
     pub(crate) acp_session_save_task: Option<Task<()>>,
     pub(crate) stored_acp_sessions: Vec<acp_session_store::StoredAcpSession>,
+    pub(crate) stored_acp_sessions_task: Option<Task<()>>,
+    pub(crate) stored_acp_sessions_epoch: u64,
     pub(crate) pending_acp_open_session: Option<acp_session_store::StoredAcpSession>,
+    pub(crate) acp_auto_connect_pending: bool,
     pub(crate) agent_history_visible: bool,
     pub(crate) agent_composer_expanded: bool,
     pub(crate) agent_popup_menu: Option<agent_panel::AgentPopupMenu>,
     pub(crate) agent_popup_anchor: Option<Bounds<Pixels>>,
     pub(crate) agent_panel_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Window-space bounds of every popup-menu trigger button in the agent
+    /// panel, rebuilt each frame; lets the menu backdrop re-dispatch clicks
+    /// so pressing another trigger switches menus in one click.
+    pub(crate) agent_menu_trigger_bounds:
+        Rc<std::cell::RefCell<Vec<(agent_panel::AgentPopupMenu, Bounds<Pixels>)>>>,
     pub(crate) agent_menu_query: String,
     pub(crate) agent_menu_search_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) agent_slash_selected: usize,
@@ -2026,10 +2035,18 @@ impl EditorView {
             styles.editor.editor_h4_font_size_px = 12.0;
             styles.editor.editor_h5_font_size_px = 12.0;
             styles.editor.editor_h6_font_size_px = 12.0;
-            styles.editor.editor_padding_left_px = 12.0;
-            styles.editor.editor_padding_right_px = 12.0;
-            styles.editor.editor_padding_top_px = 10.0;
-            styles.editor.editor_padding_bottom_px = 12.0;
+            if embedded_read_only {
+                styles.editor.editor_padding_left_px = 12.0;
+                styles.editor.editor_padding_right_px = 12.0;
+                styles.editor.editor_padding_top_px = 10.0;
+                styles.editor.editor_padding_bottom_px = 12.0;
+            } else {
+                // Composer: compact, equal padding on all four sides.
+                styles.editor.editor_padding_left_px = 8.0;
+                styles.editor.editor_padding_right_px = 8.0;
+                styles.editor.editor_padding_top_px = 8.0;
+                styles.editor.editor_padding_bottom_px = 8.0;
+            }
             styles.editor.editor_max_width_px = 4096.0;
             styles.editor.editor_paragraph_line_height_factor = 1.5;
             styles.editor.editor_heading_line_height_factor = 1.4;
@@ -2353,7 +2370,6 @@ impl EditorView {
             agent_registry_task: None,
             agent_install_states: HashMap::new(),
             agent_install_task: None,
-            agent_panel_scroll_handle: ScrollHandle::new(),
             selected_agent_id: None,
             acp_panel_state: acp_client::AcpPanelState::default(),
             acp_command_tx: None,
@@ -2361,12 +2377,16 @@ impl EditorView {
             acp_session_save_epoch: 0,
             acp_session_save_task: None,
             stored_acp_sessions: Vec::new(),
+            stored_acp_sessions_task: None,
+            stored_acp_sessions_epoch: 0,
             pending_acp_open_session: None,
+            acp_auto_connect_pending: false,
             agent_history_visible: false,
             agent_composer_expanded: false,
             agent_popup_menu: None,
             agent_popup_anchor: None,
             agent_panel_bounds: Rc::new(Cell::new(None)),
+            agent_menu_trigger_bounds: Rc::new(std::cell::RefCell::new(Vec::new())),
             agent_menu_query: String::new(),
             agent_menu_search_editor: None,
             agent_slash_selected: 0,
@@ -2567,6 +2587,11 @@ impl EditorView {
         crate::i18n::translate(self.ui_language, key)
     }
 
+    /// Global icon tooltips are hidden while any menu-like overlay is open.
+    pub(crate) fn global_tooltips_suppressed(&self) -> bool {
+        self.context_menu.is_some() || self.agent_popup_menu.is_some()
+    }
+
     pub(crate) fn set_embedded_markdown_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if !self.embedded_editor || self.buffer.text() == text {
             return;
@@ -2584,6 +2609,23 @@ impl EditorView {
                 .count();
             old[..common].matches('\n').count()
         };
+        // While the reader has scrolled away from the bottom, anchor the top
+        // visible line across the update: transcript regeneration can change
+        // content or invalidate shaped layout above the viewport, and without
+        // an anchor the same scroll offset then maps to a shifted position
+        // (visible as downward jumps while scrolling up during streaming).
+        if self.embedded_read_only
+            && !self.embedded_stick_to_bottom
+            && !self.layout_dirty
+            && self.scroll_offset > 0.5
+        {
+            let line = self.line_at_y(self.scroll_offset);
+            self.pending_click_anchor = Some(ClickScrollAnchor {
+                line,
+                rel_y_before: self.text_y_offset_for_line(line),
+                scroll_before: self.scroll_offset,
+            });
+        }
         self.buffer = Buffer::from_text(text);
         self.cursor.offset = self.buffer.len();
         self.cursor.anchor = self.buffer.len();
@@ -2839,20 +2881,9 @@ impl EditorView {
     }
 
     fn editor_scrollbar_max_scroll(&self) -> f32 {
-        if self.embedded_editor {
-            // Must match `clamp_scroll`: embedded editors pin scrolling to
-            // the exact content height (no scroll-beyond-last-line), so the
-            // thumb reaches the track bottom when the content does.
-            (self
-                .total_content_height()
-                .max(self.embedded_content_height.get())
-                - self.last_viewport_height)
-                .max(0.0)
-        } else {
-            let last_line_height =
-                self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
-            (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0)
-        }
+        // Single source of truth shared with `clamp_scroll`, so the thumb
+        // range always matches the actual scrollable range.
+        self.max_scroll_offset()
     }
 
     fn desired_editor_scrollbar_opacity(&self) -> f32 {
@@ -3677,7 +3708,15 @@ impl EditorView {
             editor.update(cx, |input, cx| input.set_styles(styles, cx));
         }
         if let Some(editor) = &self.language_picker_editor {
-            let styles = self.language_picker_text_input_styles();
+            let styles = self.search_menu_text_input_styles();
+            editor.update(cx, |input, cx| input.set_styles(styles, cx));
+        }
+        if let Some(editor) = &self.branch_picker_editor {
+            let styles = self.search_menu_text_input_styles();
+            editor.update(cx, |input, cx| input.set_styles(styles, cx));
+        }
+        if let Some(editor) = &self.agent_menu_search_editor {
+            let styles = self.search_menu_text_input_styles();
             editor.update(cx, |input, cx| input.set_styles(styles, cx));
         }
         if let Some(sidebar_edit) = &self.sidebar_edit {

@@ -70,7 +70,9 @@ pub(crate) fn anchored_popup_placement(
     .max(0.0);
 
     let left = if anchor_left + width <= viewport_width - margin {
-        anchor_left.max(margin)
+        // Fits: align the popup's left edge exactly with the anchor so
+        // trigger buttons and their menus line up, even flush at an edge.
+        anchor_left.max(0.0)
     } else {
         (anchor_right - width).clamp(margin, (viewport_width - width - margin).max(margin))
     };
@@ -1605,13 +1607,15 @@ pub(crate) fn compute_display_prefix_bytes(
             }
         }
         BlockType::OrderedList => {
-            if prefix_collapsed {
-                trimmed
-                    .find(". ")
-                    .map(|p| leading_ws + p + 2)
-                    .unwrap_or_else(|| leading_ws + char_boundary_after_n_chars(trimmed, 4))
+            // Handles both `1. ` and `1) ` marker styles (plus trailing
+            // whitespace) so the marker highlight never bleeds into content.
+            let prefix_len = markdown::ordered_list_prefix_len(trimmed);
+            if prefix_len > 0 {
+                leading_ws + prefix_len
+            } else if prefix_collapsed {
+                leading_ws + char_boundary_after_n_chars(trimmed, 4)
             } else {
-                trimmed.find(". ").map(|p| leading_ws + p + 2).unwrap_or(0)
+                0
             }
         }
         _ => 0,
@@ -2199,6 +2203,24 @@ mod tests {
     }
 
     #[test]
+    fn anchored_popup_left_aligns_with_flush_edge_anchor() {
+        // Trigger buttons flush against the panel's left edge must get a
+        // menu whose left edge lines up exactly (no margin inset).
+        let placement = anchored_popup_placement(
+            360.0,
+            600.0,
+            Bounds::new(point(px(0.0), px(560.0)), size(px(90.0), px(24.0))),
+            220.0,
+            240.0,
+            false,
+            2.0,
+            8.0,
+        );
+
+        assert_eq!(placement.left, 0.0);
+    }
+
+    #[test]
     fn anchored_popup_right_aligns_when_right_space_is_insufficient() {
         let placement = anchored_popup_placement(
             800.0,
@@ -2664,6 +2686,27 @@ mod tests {
         assert!(prefix_collapsed);
         assert!(display_text.starts_with("1. "));
         assert_eq!(runs.first().map(|run| run.color), Some(list_marker_color));
+    }
+
+    #[test]
+    fn paren_ordered_list_marker_highlight_excludes_content() {
+        // `1) ABC`: the marker highlight must stop after `1) ` and not bleed
+        // into the first content character.
+        let line = "1) ABC";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        assert_eq!(decoration.block_type, markdown::BlockType::OrderedList);
+        let display_text = line;
+        assert_eq!(
+            compute_display_prefix_bytes(display_text, &decoration.block_type, true, 0),
+            3
+        );
+        assert_eq!(
+            compute_display_prefix_bytes(display_text, &decoration.block_type, false, 0),
+            3
+        );
     }
 
     #[test]

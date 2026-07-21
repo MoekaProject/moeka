@@ -123,6 +123,27 @@ pub(crate) struct PendingAcpPermission {
 }
 
 impl EditorView {
+    /// Reconnects a restored session automatically: launches the selected
+    /// agent as soon as the registry knows how to, otherwise defers until
+    /// the registry load completes.
+    pub(crate) fn request_acp_auto_connect(&mut self, cx: &mut Context<Self>) {
+        if self.pending_acp_open_session.is_none()
+            || !matches!(
+                self.acp_panel_state.status,
+                AcpConnectionStatus::Disconnected
+            )
+        {
+            return;
+        }
+        if self.selected_registry_agent().is_some() {
+            self.acp_auto_connect_pending = false;
+            self.start_selected_acp_agent(cx);
+        } else {
+            self.acp_auto_connect_pending = true;
+            self.ensure_agent_registry_loaded(cx);
+        }
+    }
+
     pub(crate) fn start_selected_acp_agent(&mut self, cx: &mut Context<Self>) {
         if !matches!(
             self.acp_panel_state.status,
@@ -164,12 +185,32 @@ impl EditorView {
             .collect::<HashMap<_, _>>();
 
         self.stop_acp_agent();
+        // Keep a restored session's transcript visible while (re)connecting
+        // instead of flashing an empty chat until the session replays.
+        let restored = self
+            .pending_acp_open_session
+            .as_ref()
+            .filter(|session| session.agent_id == agent.id);
         self.acp_panel_state = AcpPanelState {
             status: AcpConnectionStatus::Connecting,
             agent_id: Some(agent.id.clone()),
             agent_name: Some(agent.name.clone()),
+            transcript: restored
+                .map(|session| session.restored_transcript())
+                .unwrap_or_default(),
+            updates: restored
+                .map(|session| session.updates.clone())
+                .unwrap_or_default(),
+            extensions: restored
+                .map(|session| session.extensions.clone())
+                .unwrap_or_default(),
+            modes: restored.and_then(|session| session.modes.clone()),
+            config_options: restored
+                .map(|session| session.config_options.clone())
+                .unwrap_or_default(),
             ..AcpPanelState::default()
         };
+        self.sync_agent_transcript_editor(cx);
         let (command_tx, command_rx) = async_channel::unbounded();
         let (event_tx, event_rx) = async_channel::unbounded();
         self.acp_command_tx = Some(command_tx);

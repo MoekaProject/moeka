@@ -1,9 +1,6 @@
 use std::collections::HashSet;
 
-use gpui::{
-    AnyElement, Bounds, Context, CursorStyle, MouseButton, Pixels, Point, Window, div, point,
-    prelude::*, px, size,
-};
+use gpui::{AnyElement, Bounds, Context, Pixels, Point, Window, point, prelude::*, px, size};
 
 use super::status_bar::IndentKind;
 use super::*;
@@ -117,24 +114,6 @@ fn language_item_matches(item: &LanguagePickerItem, query: &str) -> bool {
 }
 
 impl EditorView {
-    pub(crate) fn language_picker_text_input_styles(&self) -> crate::style::TextInputStyles {
-        let mut styles = self.styles.text_input.clone();
-        let menu = &self.styles.quick_open;
-        styles.text_input_bg = menu.quick_open_input_bg;
-        styles.text_input_hover_bg = Some(menu.quick_open_input_focus_bg);
-        styles.text_input_focus_bg = menu.quick_open_input_focus_bg;
-        styles.text_input_text_color = menu.quick_open_input_text_color;
-        styles.text_input_placeholder_color = menu.quick_open_result_secondary_text_color;
-        styles.text_input_cursor_color = menu.quick_open_input_text_color;
-        styles.text_input_border_width_px = 0.0;
-        styles.text_input_padding_left_px = menu.quick_open_input_text_padding_left_px;
-        styles.text_input_padding_right_px = menu.quick_open_input_text_padding_left_px;
-        styles.text_input_font_size_px = self.scaled(menu.quick_open_result_name_font_size_px);
-        styles.text_input_cursor_height_ratio = menu.quick_open_input_cursor_height_ratio;
-        styles.text_input_cursor_height_adjust_px = menu.quick_open_input_cursor_height_adjust_px;
-        styles
-    }
-
     pub(crate) fn open_language_picker(
         &mut self,
         position: Point<Pixels>,
@@ -184,7 +163,7 @@ impl EditorView {
         self.update_language_picker_results(cx);
 
         if self.language_picker_editor.is_none() {
-            let styles = self.language_picker_text_input_styles();
+            let styles = self.search_menu_text_input_styles();
             let ui_language = self.ui_language;
             let editor = cx.new(move |cx| {
                 let mut input = crate::text_input::TextInput::new(
@@ -227,7 +206,7 @@ impl EditorView {
 
         if let Some(editor) = &self.language_picker_editor {
             editor.update(cx, |input, cx| {
-                input.styles = self.language_picker_text_input_styles();
+                input.styles = self.search_menu_text_input_styles();
                 input.placeholder = SharedString::from(picker_placeholder(
                     self.language_picker_mode,
                     self.ui_language,
@@ -344,29 +323,6 @@ impl EditorView {
     }
 
     pub(crate) fn render_language_picker_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
-        let styles = &self.styles.quick_open;
-        let bg = styles.quick_open_panel_bg;
-        let border = styles.quick_open_panel_border_color;
-        let selected_bg = styles.quick_open_result_selected_bg;
-        let hover_bg = styles.quick_open_result_hover_bg;
-        let text_primary = styles.quick_open_result_text_color;
-        let text_secondary = styles.quick_open_result_secondary_text_color;
-        let row_h = self.scaled(24.0);
-        let name_font = self.scaled(styles.quick_open_result_name_font_size_px);
-        let input_h = self.scaled(33.0);
-        let max_visible = 12usize;
-        let visible_rows = self
-            .language_picker_items
-            .len()
-            .min(200)
-            .min(max_visible)
-            .max(1);
-        let desired_h = input_h + visible_rows as f32 * row_h;
-        let (target_w, min_w): (f32, f32) = match self.language_picker_mode {
-            LanguagePickerMode::Indentation => (120.0, 112.0),
-            LanguagePickerMode::Language => (160.0, 140.0),
-        };
-        let desired_panel_w = self.scaled(target_w.max(240.0)).max(self.scaled(min_w));
         let anchor = self.language_picker_anchor.unwrap_or_else(|| {
             Bounds::new(
                 point(
@@ -376,143 +332,44 @@ impl EditorView {
                 size(px(0.0), px(0.0)),
             )
         });
-        let placement = helpers::anchored_popup_placement(
-            self.last_window_width,
-            self.last_window_height,
+        let config = SearchMenuConfig {
+            id: "language-picker-overlay",
             anchor,
-            desired_panel_w,
-            desired_h,
-            false,
-            self.scaled(self.styles.anchored_popup_gap_px),
-            self.scaled(self.styles.anchored_popup_margin_px),
-        );
-        let panel_w = placement.width;
-        let panel_h = placement.max_height;
-        let panel_left = placement.left;
-        let max_results_h = (panel_h - input_h).max(row_h);
-
-        let mut rows = Vec::new();
-        if self.language_picker_items.is_empty() {
-            rows.push(
-                div()
-                    .w_full()
-                    .h(px(self.scaled(styles.quick_open_empty_height_px)))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(self.scaled(styles.quick_open_empty_font_size_px)))
-                    .text_color(text_secondary)
-                    .child(crate::i18n::no_matches_label(self.ui_language))
-                    .into_any_element(),
-            );
-        } else {
-            for (index, item) in self.language_picker_items.iter().enumerate() {
-                let is_selected = index == self.language_picker_selected_index;
-                rows.push(
-                    div()
-                        .id(SharedString::from(format!("language-picker-{index}")))
-                        .mx(px(1.0))
-                        .h(px(row_h))
-                        .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
-                        .flex()
-                        .items_center()
-                        .cursor(CursorStyle::Arrow)
-                        .when(is_selected, |this| this.bg(selected_bg))
-                        .hover(move |style| style.bg(hover_bg))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .overflow_hidden()
-                                .truncate()
-                                .text_size(px(name_font))
-                                .text_color(if is_selected {
-                                    self.theme.text_accent
-                                } else {
-                                    text_primary
-                                })
-                                .child(item.name.clone()),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                this.language_picker_selected_index = index;
-                                this.confirm_language_picker(cx);
-                            }),
-                        )
-                        .into_any_element(),
-                );
-            }
-        }
-
-        let panel = div()
-            .id("language-picker-overlay")
-            .absolute()
-            .left(px(panel_left))
-            .w(px(panel_w))
-            .max_h(px(panel_h))
-            .bg(bg)
-            .border(px(1.0))
-            .border_color(border)
-            .rounded(px(self.scaled(8.0)))
-            .overflow_hidden()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, window, cx| {
-                    cx.stop_propagation();
-                    window.prevent_default();
-                }),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .px(px(self.scaled(styles.quick_open_input_padding_x_px)))
-                    .py(px(self.scaled(4.0)))
-                    .border_b(px(1.0))
-                    .border_color(border)
-                    .when_some(self.language_picker_editor.clone(), |this, editor| {
-                        this.child(editor)
-                    }),
-            )
-            .child(
-                div()
-                    .id("language-picker-results")
-                    .w_full()
-                    .max_h(px(max_results_h))
-                    .overflow_y_scroll()
-                    .pb(px(self.scaled(4.0)))
-                    .track_scroll(&self.language_picker_scroll_handle)
-                    .children(rows),
-            );
-        let panel = match placement.vertical {
-            helpers::AnchoredPopupVertical::Above { bottom } => panel.bottom(px(bottom)),
-            helpers::AnchoredPopupVertical::Below { top } => panel.top(px(top)),
+            viewport_width: self.last_window_width,
+            viewport_height: self.last_window_height,
+            desired_width: self.scaled(240.0),
+            match_anchor_width: false,
+            row_count: self.language_picker_items.len(),
         };
 
-        div()
-            .occlude()
-            .absolute()
-            .left(px(0.0))
-            .top(px(0.0))
-            .w_full()
-            .h_full()
-            .child(
-                div()
-                    .absolute()
-                    .left(px(0.0))
-                    .top(px(0.0))
-                    .w_full()
-                    .h_full()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.close_language_picker(window, cx);
-                        }),
-                    ),
-            )
-            .child(panel)
-            .into_any_element()
+        let rows = self
+            .language_picker_items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let row = SearchMenuRow::new(item.name.clone())
+                    .selected(index == self.language_picker_selected_index);
+                self.render_search_menu_row(
+                    SharedString::from(format!("language-picker-{index}")),
+                    row,
+                    move |this, _, cx| {
+                        this.language_picker_selected_index = index;
+                        this.confirm_language_picker(cx);
+                    },
+                    cx,
+                )
+            })
+            .collect();
+
+        self.render_search_menu_overlay(
+            &config,
+            self.language_picker_editor.clone(),
+            Some(&self.language_picker_scroll_handle),
+            None,
+            rows,
+            |this, window, cx| this.close_language_picker(window, cx),
+            cx,
+        )
     }
 }
 

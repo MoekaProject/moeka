@@ -74,6 +74,38 @@ impl EmbeddedMarkdownEditor {
             .update(cx, |editor, cx| editor.set_ui_scale(scale, cx));
     }
 
+    /// Applies the host's configured editor fonts (body Latin/CJK and code)
+    /// so panel-embedded content matches the settings at runtime.
+    pub(crate) fn set_editor_fonts(
+        &mut self,
+        body_latin: &'static str,
+        body_cjk: &'static str,
+        monospace: &'static str,
+        ui_font: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.update(cx, |editor, cx| {
+            let editor_styles = &mut editor.styles.editor;
+            if editor_styles.editor_body_latin_font_family == body_latin
+                && editor_styles.editor_body_cjk_font_family == body_cjk
+                && editor_styles.editor_monospace_font_family == monospace
+                && editor.styles.ui_font_family == ui_font
+            {
+                return;
+            }
+            editor_styles.editor_body_latin_font_family = body_latin;
+            editor_styles.editor_heading_latin_font_family = body_latin;
+            editor_styles.editor_body_cjk_font_family = body_cjk;
+            editor_styles.editor_heading_cjk_font_family = body_cjk;
+            editor_styles.editor_monospace_font_family = monospace;
+            editor.styles.ui_font_family = ui_font;
+            editor.line_display_info.clear();
+            editor.layout_dirty = true;
+            editor.invalidate_line_geometry_cache();
+            cx.notify();
+        });
+    }
+
     pub(crate) fn append_text(&mut self, text: &str, cx: &mut Context<Self>) {
         let mut updated = self.editor.read(cx).buffer.text().to_string();
         updated.push_str(text);

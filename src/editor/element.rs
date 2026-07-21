@@ -2018,8 +2018,15 @@ impl Element for EditorElement {
             }
         };
 
-        if buffer.text().is_empty() && editor.active_tab_is_markdown() {
-            let placeholder = "键入 / 命令或右键插入格式...";
+        if buffer.text().is_empty()
+            && editor.active_tab_is_markdown()
+            && !(editor.embedded_editor && editor.embedded_read_only)
+        {
+            let placeholder = if editor.embedded_editor {
+                crate::i18n::agent_composer_placeholder(editor.ui_language)
+            } else {
+                "键入 / 命令或右键插入格式..."
+            };
             let placeholder_runs = inline_overlay_runs(
                 placeholder,
                 &body_font,
