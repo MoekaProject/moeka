@@ -122,11 +122,6 @@ impl EmbeddedMarkdownEditor {
         self.intercept_navigation = intercept;
     }
 
-    /// Redirects `cmd+f` in this editor to another embedded editor.
-    pub(crate) fn set_find_target(&mut self, target: gpui::WeakEntity<EmbeddedMarkdownEditor>) {
-        self.find_target = Some(target);
-    }
-
     /// Opens the inner editor's find bar (search-only, no replace).
     pub(crate) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editor

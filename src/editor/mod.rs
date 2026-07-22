@@ -4,6 +4,7 @@ mod acp_registry;
 mod acp_session_store;
 mod acp_transcript;
 mod agent_panel;
+mod agent_timeline;
 mod app_settings;
 mod assets;
 mod attachments;
@@ -1770,8 +1771,18 @@ pub struct EditorView {
     pub(crate) agent_session_rename_blur_sub: Option<gpui::Subscription>,
     pub(crate) agent_slash_selected: usize,
     pub(crate) agent_slash_filter: String,
-    pub(crate) agent_transcript_editor:
-        Option<gpui::Entity<markdown_editor::EmbeddedMarkdownEditor>>,
+    /// Per-entry timeline view state mirroring the ACP transcript (Markdown
+    /// editor entities for text entries plus synced lengths).
+    pub(crate) agent_timeline_items: Vec<agent_timeline::AgentTimelineItem>,
+    /// Transcript identity the timeline items were built for; a mismatch
+    /// rebuilds the whole timeline (session switch/new/clear).
+    pub(crate) agent_timeline_epoch: u64,
+    pub(crate) agent_timeline_scroll_handle: ScrollHandle,
+    /// Follow the newest content while the user stays at the bottom.
+    pub(crate) agent_timeline_stick_to_bottom: Rc<Cell<bool>>,
+    /// Explicit per-entry overrides for the collapsible thinking blocks;
+    /// unset entries default to expanded only while they stream.
+    pub(crate) agent_thought_expanded: std::collections::HashMap<usize, bool>,
     pub(crate) agent_composer_editor: Option<gpui::Entity<markdown_editor::EmbeddedMarkdownEditor>>,
     pub(crate) pending_agent_composer_focus: bool,
     pub(crate) info_panel_custom_width: Option<f32>,
@@ -2434,7 +2445,11 @@ impl EditorView {
             agent_session_rename_blur_sub: None,
             agent_slash_selected: 0,
             agent_slash_filter: String::new(),
-            agent_transcript_editor: None,
+            agent_timeline_items: Vec::new(),
+            agent_timeline_epoch: 0,
+            agent_timeline_scroll_handle: ScrollHandle::new(),
+            agent_timeline_stick_to_bottom: Rc::new(Cell::new(true)),
+            agent_thought_expanded: std::collections::HashMap::new(),
             agent_composer_editor: None,
             pending_agent_composer_focus: false,
             info_panel_custom_width: None,
@@ -7459,12 +7474,11 @@ impl EditorView {
             *w = *w * (clamped / self.ui_scale);
         }
         self.ui_scale = clamped;
-        for embedded_editor in [
-            self.agent_transcript_editor.clone(),
-            self.agent_composer_editor.clone(),
-        ]
-        .into_iter()
-        .flatten()
+        for embedded_editor in self
+            .agent_timeline_items
+            .iter()
+            .filter_map(|item| item.editor.clone())
+            .chain(self.agent_composer_editor.clone())
         {
             embedded_editor.update(cx, |editor, cx| editor.set_ui_scale(clamped, cx));
         }

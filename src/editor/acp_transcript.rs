@@ -2,9 +2,10 @@
 //!
 //! Streaming `SessionUpdate`s are folded into a list of [`TranscriptEntry`]
 //! values instead of an append-only string, so tool calls can update their
-//! status in place (Zed-style) and the rendered Markdown stays clean. The
-//! entries are then projected into a single Markdown document that the
-//! embedded read-only editor renders through the normal Markdown pipeline.
+//! status in place (Zed-style). The entries are rendered per type by the
+//! agent timeline (`agent_timeline.rs`): text-bearing entries reuse the
+//! read-only embedded Markdown editor, structured entries use dedicated
+//! icon-based rows.
 
 use agent_client_protocol::schema::v1::{
     ContentBlock, PlanEntryStatus, SessionUpdate, ToolCallStatus, ToolKind,
@@ -42,14 +43,44 @@ pub(crate) enum TranscriptEntry {
     Error { message: String },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AcpTranscript {
     pub entries: Vec<TranscriptEntry>,
+    /// Identity stamp used by the timeline view to detect that the whole
+    /// transcript was replaced (session switch, new session, clear) rather
+    /// than mutated in place. Never persisted; restored transcripts always
+    /// get a fresh stamp.
+    #[serde(skip, default = "next_transcript_epoch")]
+    pub epoch: u64,
+}
+
+impl Default for AcpTranscript {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            epoch: next_transcript_epoch(),
+        }
+    }
+}
+
+/// Monotonic, process-unique transcript identity stamps.
+fn next_transcript_epoch() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 impl AcpTranscript {
+    pub fn with_entries(entries: Vec<TranscriptEntry>) -> Self {
+        Self {
+            entries,
+            epoch: next_transcript_epoch(),
+        }
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.epoch = next_transcript_epoch();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -76,7 +107,7 @@ impl AcpTranscript {
     }
 
     /// Folds a streaming update into the entry list. Returns `true` when the
-    /// transcript changed and the rendered Markdown must be refreshed.
+    /// transcript changed and the timeline must re-sync.
     pub fn apply_update(&mut self, update: &SessionUpdate) -> bool {
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => {
@@ -200,91 +231,9 @@ impl AcpTranscript {
             |entry| matches!(entry, TranscriptEntry::ToolCall { id: call_id, .. } if call_id == id),
         )
     }
-
-    /// Projects the entries into the Markdown document shown in the
-    /// transcript editor.
-    pub fn to_markdown(&self, labels: &TranscriptLabels) -> String {
-        let mut out = String::new();
-        for entry in &self.entries {
-            let block = match entry {
-                TranscriptEntry::User { text, attachments } => {
-                    let mut quoted = String::new();
-                    for line in text.lines() {
-                        quoted.push_str("> ");
-                        quoted.push_str(line);
-                        quoted.push('\n');
-                    }
-                    if text.lines().count() == 0 {
-                        quoted.push_str(">\n");
-                    }
-                    for (name, uri) in attachments {
-                        quoted.push_str(&format!("> 📎 [{name}]({uri})\n"));
-                    }
-                    quoted
-                }
-                TranscriptEntry::Agent { text } => format!("{}\n", text.trim_end()),
-                TranscriptEntry::Thought { text } => {
-                    let mut quoted = String::new();
-                    quoted.push_str(&format!("> *{}*\n>\n", labels.thinking));
-                    for line in text.lines() {
-                        quoted.push_str("> ");
-                        quoted.push_str(line);
-                        quoted.push('\n');
-                    }
-                    quoted
-                }
-                TranscriptEntry::ToolCall {
-                    title,
-                    kind,
-                    status,
-                    details,
-                    ..
-                } => {
-                    let icon = tool_kind_symbol(*kind);
-                    let status_label = match status {
-                        ToolCallStatus::Pending => labels.tool_pending,
-                        ToolCallStatus::InProgress => labels.tool_running,
-                        ToolCallStatus::Completed => labels.tool_done,
-                        ToolCallStatus::Failed => labels.tool_failed,
-                        _ => labels.tool_pending,
-                    };
-                    let mut block = format!("{icon} `{}` · {status_label}\n", sanitize(title));
-                    for detail in details.iter().take(4) {
-                        block.push_str(&format!("  · {}\n", sanitize(detail)));
-                    }
-                    block
-                }
-                TranscriptEntry::Plan { entries } => {
-                    let mut block = format!("**{}**\n\n", labels.plan);
-                    for (status, content) in entries {
-                        let marker = match status {
-                            PlanEntryStatus::Completed => "- [x]",
-                            _ => "- [ ]",
-                        };
-                        block.push_str(&format!("{marker} {}\n", sanitize(content)));
-                    }
-                    block
-                }
-                TranscriptEntry::TurnEnded { stop_reason } => {
-                    format!("> ⚠️ {} `{stop_reason}`\n", labels.turn_stopped)
-                }
-                TranscriptEntry::Error { message } => {
-                    format!("> ❌ {}\n", sanitize(message))
-                }
-            };
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&block);
-        }
-        // Drop trailing newlines so the transcript editor doesn't render an
-        // extra empty line after the last entry.
-        out.truncate(out.trim_end_matches('\n').len());
-        out
-    }
 }
 
-/// Localized labels injected into the generated Markdown.
+/// Localized labels for the structured timeline blocks.
 pub(crate) struct TranscriptLabels {
     pub thinking: &'static str,
     pub plan: &'static str,
@@ -295,31 +244,12 @@ pub(crate) struct TranscriptLabels {
     pub turn_stopped: &'static str,
 }
 
-fn tool_kind_symbol(kind: ToolKind) -> &'static str {
-    match kind {
-        ToolKind::Read => "📖",
-        ToolKind::Edit => "✏️",
-        ToolKind::Delete => "🗑️",
-        ToolKind::Move => "📦",
-        ToolKind::Search => "🔍",
-        ToolKind::Execute => "🖥️",
-        ToolKind::Think => "💭",
-        ToolKind::Fetch => "🌐",
-        ToolKind::SwitchMode => "🔀",
-        _ => "🔧",
-    }
-}
-
-fn sanitize(text: &str) -> String {
-    text.replace('\n', " ")
-}
-
 fn content_block_markdown(content: &ContentBlock) -> String {
     match content {
         ContentBlock::Text(text) => text.text.clone(),
         ContentBlock::ResourceLink(link) => format!("[{}]({})", link.name, link.uri),
-        ContentBlock::Image(_) => "🖼️ *image*".to_string(),
-        ContentBlock::Audio(_) => "🔊 *audio*".to_string(),
+        ContentBlock::Image(_) => "*[image]*".to_string(),
+        ContentBlock::Audio(_) => "*[audio]*".to_string(),
         other => {
             let mut block = String::from("\n\n```json\n");
             match serde_json::to_string_pretty(other) {
@@ -415,10 +345,6 @@ mod tests {
         ToolCallUpdateFields,
     };
 
-    fn labels() -> TranscriptLabels {
-        transcript_labels(crate::i18n::UiLanguage::English)
-    }
-
     #[test]
     fn streams_agent_chunks_into_one_entry() {
         let mut transcript = AcpTranscript::default();
@@ -429,7 +355,12 @@ mod tests {
             ContentBlock::Text(TextContent::new("**world**")),
         )));
         assert_eq!(transcript.entries.len(), 1);
-        assert_eq!(transcript.to_markdown(&labels()), "Hello **world**");
+        assert_eq!(
+            transcript.entries[0],
+            TranscriptEntry::Agent {
+                text: "Hello **world**".to_string()
+            }
+        );
     }
 
     #[test]
@@ -443,22 +374,30 @@ mod tests {
             ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
         )));
         assert_eq!(transcript.entries.len(), 1);
-        let markdown = transcript.to_markdown(&labels());
-        assert!(markdown.contains("`Read file` · done"), "{markdown}");
+        assert!(matches!(
+            &transcript.entries[0],
+            TranscriptEntry::ToolCall {
+                title,
+                status: ToolCallStatus::Completed,
+                ..
+            } if title == "Read file"
+        ));
     }
 
     #[test]
-    fn user_prompt_renders_as_quote_card() {
+    fn user_prompt_keeps_text_and_attachments() {
         let mut transcript = AcpTranscript::default();
         transcript.push_user_prompt(
             "line one\nline two",
             vec![("notes.md".into(), "file:///notes.md".into())],
         );
-        let markdown = transcript.to_markdown(&labels());
-        assert!(!markdown.contains("You"));
-        assert!(markdown.contains("> line one"));
-        assert!(markdown.contains("> line two"));
-        assert!(markdown.contains("[notes.md](file:///notes.md)"));
+        assert_eq!(
+            transcript.entries[0],
+            TranscriptEntry::User {
+                text: "line one\nline two".to_string(),
+                attachments: vec![("notes.md".into(), "file:///notes.md".into())],
+            }
+        );
     }
 
     #[test]
@@ -481,17 +420,40 @@ mod tests {
                 .count(),
             1
         );
-        assert!(transcript.to_markdown(&labels()).contains("- [x] step"));
+        assert!(matches!(
+            &transcript.entries[0],
+            TranscriptEntry::Plan { entries }
+                if entries == &[(PlanEntryStatus::Completed, "step".to_string())]
+        ));
     }
 
     #[test]
-    fn thought_chunks_render_quoted() {
+    fn thought_chunks_fold_into_one_entry() {
         let mut transcript = AcpTranscript::default();
         transcript.apply_update(&SessionUpdate::AgentThoughtChunk(ContentChunk::new(
-            ContentBlock::Text(TextContent::new("consider the plan")),
+            ContentBlock::Text(TextContent::new("consider ")),
         )));
-        let markdown = transcript.to_markdown(&labels());
-        assert!(markdown.contains("> *Thinking*"));
-        assert!(markdown.contains("> consider the plan"));
+        transcript.apply_update(&SessionUpdate::AgentThoughtChunk(ContentChunk::new(
+            ContentBlock::Text(TextContent::new("the plan")),
+        )));
+        assert_eq!(transcript.entries.len(), 1);
+        assert_eq!(
+            transcript.entries[0],
+            TranscriptEntry::Thought {
+                text: "consider the plan".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn transcripts_get_distinct_epochs() {
+        let first = AcpTranscript::default();
+        let second = AcpTranscript::with_entries(Vec::new());
+        assert_ne!(first.epoch, second.epoch);
+
+        let mut third = AcpTranscript::default();
+        let before = third.epoch;
+        third.clear();
+        assert_ne!(before, third.epoch);
     }
 }

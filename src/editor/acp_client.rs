@@ -211,7 +211,7 @@ impl EditorView {
                 .unwrap_or_default(),
             ..AcpPanelState::default()
         };
-        self.sync_agent_transcript_editor(cx);
+        self.sync_agent_timeline(cx);
         let (command_tx, command_rx) = async_channel::unbounded();
         let (event_tx, event_rx) = async_channel::unbounded();
         self.acp_command_tx = Some(command_tx);
@@ -281,7 +281,7 @@ impl EditorView {
             self.acp_panel_state.status =
                 AcpConnectionStatus::Failed("ACP command channel closed".to_string());
         }
-        self.sync_agent_transcript_editor(cx);
+        self.sync_agent_timeline(cx);
         self.queue_active_acp_session_save(cx);
         cx.notify();
     }
@@ -305,7 +305,7 @@ impl EditorView {
         self.acp_panel_state.updates.clear();
         self.acp_panel_state.extensions.clear();
         self.acp_panel_state.pending_attachments.clear();
-        self.sync_agent_transcript_editor(cx);
+        self.sync_agent_timeline(cx);
         if let Some(composer) = self.agent_composer_editor.clone() {
             composer.update(cx, |composer, cx| composer.clear(cx));
         }
@@ -558,19 +558,10 @@ impl EditorView {
                 self.acp_command_tx = None;
             }
         }
-        self.sync_agent_transcript_editor(cx);
+        self.sync_agent_timeline(cx);
         if should_persist && !suppressed_replay {
             self.queue_active_acp_session_save(cx);
         }
-    }
-
-    pub(crate) fn sync_agent_transcript_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.agent_transcript_editor.clone() else {
-            return;
-        };
-        let labels = super::acp_transcript::transcript_labels(self.ui_language);
-        let transcript = self.acp_panel_state.transcript.to_markdown(&labels);
-        editor.update(cx, |editor, cx| editor.set_text(&transcript, cx));
     }
 
     fn apply_acp_file_write(

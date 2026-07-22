@@ -69,9 +69,7 @@ impl StoredAcpSession {
     /// block for records saved before entries existed.
     pub(crate) fn restored_transcript(&self) -> AcpTranscript {
         if !self.transcript_entries.is_empty() {
-            return AcpTranscript {
-                entries: self.transcript_entries.clone(),
-            };
+            return AcpTranscript::with_entries(self.transcript_entries.clone());
         }
         let mut transcript = AcpTranscript::default();
         if !self.transcript_markdown.trim().is_empty() {
@@ -187,7 +185,7 @@ impl EditorView {
         self.acp_panel_state.modes = session.modes.clone();
         self.acp_panel_state.config_options = session.config_options.clone();
         self.pending_acp_open_session = Some(session.clone());
-        self.sync_agent_transcript_editor(cx);
+        self.sync_agent_timeline(cx);
         if let Some(composer) = self.agent_composer_editor.clone() {
             composer.update(cx, |editor, cx| {
                 editor.set_text(&session.composer_draft, cx)

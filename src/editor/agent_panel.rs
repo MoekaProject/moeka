@@ -24,14 +24,21 @@ const AGENT_HISTORY_SVG_PATH: &str = "assets/icons/agent/history.svg";
 const AGENT_NEW_SESSION_SVG_PATH: &str = "assets/icons/agent/new-session.svg";
 const AGENT_SEND_SVG_PATH: &str = "assets/icons/agent/send.svg";
 const AGENT_STOP_SVG_PATH: &str = "assets/icons/agent/stop.svg";
-const AGENT_CHEVRON_UP_SVG_PATH: &str = "assets/icons/agent/chevron-up.svg";
-const AGENT_ATTACHMENT_SVG_PATH: &str = "assets/icons/agent/attachment.svg";
+pub(crate) const AGENT_CHEVRON_UP_SVG_PATH: &str = "assets/icons/agent/chevron-up.svg";
+pub(crate) const AGENT_ATTACHMENT_SVG_PATH: &str = "assets/icons/agent/attachment.svg";
 const AGENT_MODE_SVG_PATH: &str = "assets/icons/agent/mode.svg";
 const AGENT_MODEL_SVG_PATH: &str = "assets/icons/agent/model.svg";
 const AGENT_EFFORT_SVG_PATH: &str = "assets/icons/agent/effort.svg";
 const AGENT_CONFIG_SVG_PATH: &str = "assets/icons/agent/config.svg";
 const AGENT_EXPAND_SVG_PATH: &str = "assets/icons/agent/expand.svg";
 const AGENT_COLLAPSE_SVG_PATH: &str = "assets/icons/agent/collapse.svg";
+// Status icons shared by the chat timeline, permission prompt, and the
+// generating strip.
+pub(crate) const AGENT_STATUS_PENDING_SVG_PATH: &str = "assets/icons/agent/status-pending.svg";
+pub(crate) const AGENT_STATUS_RUNNING_SVG_PATH: &str = "assets/icons/agent/status-running.svg";
+pub(crate) const AGENT_STATUS_DONE_SVG_PATH: &str = "assets/icons/agent/status-done.svg";
+pub(crate) const AGENT_STATUS_FAILED_SVG_PATH: &str = "assets/icons/agent/status-failed.svg";
+const AGENT_PERMISSION_ALWAYS_SVG_PATH: &str = "assets/icons/agent/permission-always.svg";
 
 /// Composer editor height bounds inside the card (before UI scaling).
 const COMPOSER_MIN_HEIGHT: f32 = 56.0;
@@ -91,14 +98,6 @@ impl EditorView {
             )
             .detach();
             self.agent_menu_search_editor = Some(editor);
-        }
-        if self.agent_transcript_editor.is_none() {
-            let labels = super::acp_transcript::transcript_labels(self.ui_language);
-            let transcript = self.acp_panel_state.transcript.to_markdown(&labels);
-            let editor =
-                cx.new(move |cx| EmbeddedMarkdownEditor::new(&transcript, true, false, cx));
-            editor.update(cx, |editor, cx| editor.set_ui_scale(self.ui_scale, cx));
-            self.agent_transcript_editor = Some(editor);
         }
         if self.agent_composer_editor.is_none() {
             let draft = self
@@ -166,14 +165,6 @@ impl EditorView {
             .detach();
             self.agent_composer_editor = Some(composer);
         }
-        // `cmd+f` in the composer searches the transcript.
-        if let (Some(transcript), Some(composer)) = (
-            self.agent_transcript_editor.clone(),
-            self.agent_composer_editor.clone(),
-        ) {
-            let target = transcript.downgrade();
-            composer.update(cx, |composer, _| composer.set_find_target(target));
-        }
         self.sync_agent_editor_fonts(cx);
     }
 
@@ -184,12 +175,12 @@ impl EditorView {
         let body_cjk = self.styles.editor.editor_body_cjk_font_family;
         let monospace = self.styles.editor.editor_monospace_font_family;
         let ui_font = self.styles.ui_font_family;
-        for editor in [
-            self.agent_transcript_editor.clone(),
-            self.agent_composer_editor.clone(),
-        ]
-        .into_iter()
-        .flatten()
+        for editor in self
+            .agent_timeline_items
+            .iter()
+            .filter_map(|item| item.editor.clone())
+            .chain(self.agent_composer_editor.clone())
+            .collect::<Vec<_>>()
         {
             editor.update(cx, |editor, cx| {
                 editor.set_editor_fonts(body_latin, body_cjk, monospace, ui_font, cx)
@@ -1664,10 +1655,12 @@ impl EditorView {
                     .gap(px(self.scaled(3.0)))
                     .children(options.into_iter().enumerate().map(|(index, option)| {
                         let option_id = option.option_id.clone();
-                        let (glyph, glyph_color) = match option.kind {
-                            PermissionOptionKind::AllowOnce => ("✓", green),
-                            PermissionOptionKind::AllowAlways => ("✓✓", green),
-                            _ => ("✕", red),
+                        let (icon_path, icon_color) = match option.kind {
+                            PermissionOptionKind::AllowOnce => (AGENT_STATUS_DONE_SVG_PATH, green),
+                            PermissionOptionKind::AllowAlways => {
+                                (AGENT_PERMISSION_ALWAYS_SVG_PATH, green)
+                            }
+                            _ => (AGENT_STATUS_FAILED_SVG_PATH, red),
                         };
                         div()
                             .id(("agent-permission-option", index))
@@ -1686,9 +1679,14 @@ impl EditorView {
                                 div()
                                     .flex_none()
                                     .w(px(self.scaled(18.0)))
-                                    .text_size(px(self.scaled(10.0)))
-                                    .text_color(glyph_color)
-                                    .child(glyph),
+                                    .flex()
+                                    .items_center()
+                                    .child(
+                                        svg()
+                                            .path(icon_path)
+                                            .size(px(self.scaled(13.0)))
+                                            .text_color(icon_color),
+                                    ),
                             )
                             .child(option.name)
                             .on_mouse_down(
@@ -1723,7 +1721,11 @@ impl EditorView {
                     .gap(px(self.scaled(6.0)))
                     .text_size(px(self.scaled(11.0)))
                     .text_color(styles.utility_panel_empty_text_color)
-                    .child("⋯")
+                    .child(super::agent_timeline::spinning_status_icon(
+                        SharedString::from("agent-generating-spinner"),
+                        self.scaled(12.0),
+                        styles.utility_panel_empty_text_color,
+                    ))
                     .child(self.agent_text("working")),
             )
             .child(
@@ -2079,11 +2081,48 @@ impl EditorView {
 
     fn render_chat_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let styles = &self.styles.utility_panel;
-        let transcript_editor = self.agent_transcript_editor.clone();
         let transcript_empty = self.acp_panel_state.transcript.is_empty();
         let is_prompting = self.acp_panel_state.status == AcpConnectionStatus::Prompting;
         let pending_permission = self.acp_panel_state.pending_permission.clone();
         let agent_name = self.acp_panel_state.agent_name.clone();
+
+        let transcript_area = if transcript_empty {
+            let empty_state = div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(self.scaled(6.0)))
+                .max_w(px(self.scaled(240.0)))
+                .when_some(agent_name, |this, name| {
+                    this.child(
+                        div()
+                            .text_size(px(self.scaled(13.0)))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(styles.utility_panel_item_value_text_color)
+                            .child(SharedString::from(name)),
+                    )
+                });
+            div()
+                .id("agent-transcript")
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full()
+                .overflow_hidden()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(empty_state)
+                .into_any_element()
+        } else {
+            div()
+                .id("agent-transcript")
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full()
+                .overflow_hidden()
+                .child(self.render_agent_timeline(cx))
+                .into_any_element()
+        };
 
         div()
             .id("agent-chat-content")
@@ -2092,39 +2131,7 @@ impl EditorView {
             .w_full()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .id("agent-transcript")
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .w_full()
-                    .overflow_hidden()
-                    .map(|this| {
-                        if transcript_empty {
-                            this.flex().items_center().justify_center().child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .gap(px(self.scaled(6.0)))
-                                    .max_w(px(self.scaled(240.0)))
-                                    .when_some(agent_name, |this, name| {
-                                        this.child(
-                                            div()
-                                                .text_size(px(self.scaled(13.0)))
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(
-                                                    styles.utility_panel_item_value_text_color,
-                                                )
-                                                .child(SharedString::from(name)),
-                                        )
-                                    }),
-                            )
-                        } else {
-                            this.when_some(transcript_editor, |this, editor| this.child(editor))
-                        }
-                    }),
-            )
+            .child(transcript_area)
             .when(is_prompting, |this| {
                 this.child(self.render_generating_strip(cx))
             })
