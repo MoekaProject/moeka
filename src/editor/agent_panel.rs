@@ -5,15 +5,19 @@
 use std::{cell::Cell, rc::Rc};
 
 use gpui::{
-    AnyElement, Bounds, Context, CursorStyle, Focusable, FontWeight, MouseButton, Pixels,
-    SharedString, Window, deferred, div, point, prelude::*, px, size, svg,
+    AnyElement, AppContext, Bounds, Context, CursorStyle, Focusable, FontWeight, MouseButton,
+    Pixels, SharedString, Transformation, Window, deferred, div, point, prelude::*, px, radians,
+    size, svg,
 };
 
 use super::acp_client::{AcpConnectionStatus, PendingAcpPermission};
 use super::acp_registry::{AgentInstallStatus, AgentRegistryStatus, RegistryAgent};
 use super::acp_session_store::StoredAcpSession;
 use super::markdown_editor::{EmbeddedMarkdownEditor, EmbeddedMarkdownEditorEvent};
-use super::{EditorView, PanelScrollbarKind, RightUtilityPanel, SearchMenuConfig, SearchMenuRow};
+use super::{
+    DraggedSidebarItems, EditorView, MENU_PIN_SVG_PATH, PanelScrollbarKind, RightUtilityPanel,
+    SearchMenuConfig, SearchMenuRow,
+};
 
 // Mingcute icons copied into the project (assets/icons/agent/).
 const AGENT_HISTORY_SVG_PATH: &str = "assets/icons/agent/history.svg";
@@ -63,7 +67,7 @@ impl EditorView {
         }
     }
 
-    fn ensure_agent_markdown_editors(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_agent_markdown_editors(&mut self, cx: &mut Context<Self>) {
         if self.agent_menu_search_editor.is_none() {
             let styles = self.search_menu_text_input_styles();
             let placeholder = self.agent_text("search");
@@ -162,6 +166,14 @@ impl EditorView {
             .detach();
             self.agent_composer_editor = Some(composer);
         }
+        // `cmd+f` in the composer searches the transcript.
+        if let (Some(transcript), Some(composer)) = (
+            self.agent_transcript_editor.clone(),
+            self.agent_composer_editor.clone(),
+        ) {
+            let target = transcript.downgrade();
+            composer.update(cx, |composer, _| composer.set_find_target(target));
+        }
         self.sync_agent_editor_fonts(cx);
     }
 
@@ -183,6 +195,182 @@ impl EditorView {
                 editor.set_editor_fonts(body_latin, body_cjk, monospace, ui_font, cx)
             });
         }
+    }
+
+    /// Applies an in-progress composer height drag at pointer `pointer_y`.
+    /// Shared by the handle itself and the root full-window drag overlay so
+    /// fast pointer movement never loses the drag.
+    pub(crate) fn update_agent_composer_resize(&mut self, pointer_y: f32, cx: &mut Context<Self>) {
+        let Some((start_y, start_height)) = self.agent_composer_resize_drag else {
+            return;
+        };
+        let min_height = self.scaled(COMPOSER_MIN_HEIGHT);
+        let panel_height = self
+            .agent_panel_bounds
+            .get()
+            .map(|bounds| f32::from(bounds.size.height))
+            .unwrap_or(self.last_window_height);
+        let cap = (panel_height * 0.6).max(min_height);
+        self.agent_composer_custom_height =
+            Some((start_height + (start_y - pointer_y)).clamp(min_height, cap));
+        cx.notify();
+    }
+
+    /// Applies an in-progress history sub-panel width drag at `pointer_x`.
+    /// The whole panel grows/shrinks with it so the chat column keeps its
+    /// width.
+    pub(crate) fn update_agent_history_resize(&mut self, pointer_x: f32, cx: &mut Context<Self>) {
+        if !self.agent_history_resizing {
+            return;
+        }
+        let panel_right = self
+            .agent_panel_bounds
+            .get()
+            .map(|bounds| f32::from(bounds.origin.x) + f32::from(bounds.size.width))
+            .unwrap_or(self.last_window_width);
+        let min_width = self.scaled(170.0);
+        let max_width = (self.last_window_width * 0.4).max(min_width);
+        self.agent_history_panel_custom_width =
+            Some((panel_right - pointer_x).clamp(min_width, max_width));
+        self.set_utility_panel_width_immediately(self.utility_panel_target_width());
+        cx.notify();
+    }
+
+    pub(crate) fn start_agent_session_rename(
+        &mut self,
+        agent_id: String,
+        session_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = self
+            .stored_acp_sessions
+            .iter()
+            .find(|session| session.agent_id == agent_id && session.session_id == session_id)
+            .map(StoredAcpSession::display_title)
+            .unwrap_or_default();
+        let styles = self.search_menu_text_input_styles();
+        let placeholder = self.t(crate::i18n::TextKey::RenameNamePlaceholder);
+        let editor = cx.new(move |cx| {
+            let mut input = crate::text_input::TextInput::new(styles, placeholder, cx);
+            input.context_menu_enabled = false;
+            input.set_text(&title, cx);
+            input.select_all(cx);
+            input
+        });
+        cx.subscribe(
+            &editor,
+            |this, _editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Submit => this.commit_agent_session_rename(cx),
+                crate::text_input::TextInputEvent::Escape => {
+                    this.agent_session_rename_target = None;
+                    this.agent_session_rename_editor = None;
+                    this.agent_session_rename_blur_sub = None;
+                    cx.notify();
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        let focus_handle = editor.read(cx).focus_handle.clone();
+        let blur_sub = cx.on_blur(&focus_handle, window, |this, _, cx| {
+            this.commit_agent_session_rename(cx);
+        });
+        self.agent_session_rename_target = Some((agent_id, session_id));
+        self.agent_session_rename_editor = Some(editor.clone());
+        self.agent_session_rename_blur_sub = Some(blur_sub);
+        window.focus(&focus_handle);
+        cx.notify();
+    }
+
+    fn commit_agent_session_rename(&mut self, cx: &mut Context<Self>) {
+        let Some((agent_id, session_id)) = self.agent_session_rename_target.take() else {
+            return;
+        };
+        let title = self
+            .agent_session_rename_editor
+            .take()
+            .map(|editor| editor.read(cx).text().to_string())
+            .unwrap_or_default();
+        self.agent_session_rename_blur_sub = None;
+        self.selected_agent_session_ids.clear();
+        self.agent_session_selection_anchor = None;
+        self.set_acp_session_custom_title(&agent_id, &session_id, Some(title), cx);
+    }
+
+    fn visible_agent_session_keys(&self) -> Vec<(String, String)> {
+        let mut keys = self
+            .stored_acp_sessions
+            .iter()
+            .filter(|session| !session.archived)
+            .map(|session| (session.agent_id.clone(), session.session_id.clone()))
+            .collect::<Vec<_>>();
+        if self.agent_history_show_archived {
+            keys.extend(
+                self.stored_acp_sessions
+                    .iter()
+                    .filter(|session| session.archived)
+                    .map(|session| (session.agent_id.clone(), session.session_id.clone())),
+            );
+        }
+        keys
+    }
+
+    fn select_agent_session(&mut self, key: (String, String), shift: bool, command: bool) {
+        if shift {
+            let keys = self.visible_agent_session_keys();
+            let anchor = self
+                .agent_session_selection_anchor
+                .clone()
+                .unwrap_or_else(|| key.clone());
+            let anchor_index = keys.iter().position(|candidate| *candidate == anchor);
+            let target_index = keys.iter().position(|candidate| *candidate == key);
+            if let (Some(anchor_index), Some(target_index)) = (anchor_index, target_index) {
+                if !command {
+                    self.selected_agent_session_ids.clear();
+                }
+                let (start, end) = if anchor_index <= target_index {
+                    (anchor_index, target_index)
+                } else {
+                    (target_index, anchor_index)
+                };
+                self.selected_agent_session_ids
+                    .extend(keys[start..=end].iter().cloned());
+            }
+        } else if command {
+            if !self.selected_agent_session_ids.remove(&key) {
+                self.selected_agent_session_ids.insert(key.clone());
+            }
+            self.agent_session_selection_anchor = Some(key);
+        } else {
+            self.selected_agent_session_ids.clear();
+            self.selected_agent_session_ids.insert(key.clone());
+            self.agent_session_selection_anchor = Some(key);
+        }
+    }
+
+    pub(crate) fn selected_agent_session_targets(
+        &self,
+        fallback: &(String, String),
+    ) -> Vec<(String, String)> {
+        if self.selected_agent_session_ids.contains(fallback) {
+            self.visible_agent_session_keys()
+                .into_iter()
+                .filter(|key| self.selected_agent_session_ids.contains(key))
+                .collect()
+        } else {
+            vec![fallback.clone()]
+        }
+    }
+
+    /// Current width of the history sub-panel (used both for rendering and
+    /// for widening the whole chat panel while history is visible).
+    pub(crate) fn agent_history_panel_width(&self) -> f32 {
+        let min_width = self.scaled(170.0);
+        let max_width = (self.last_window_width * 0.4).max(min_width);
+        self.agent_history_panel_custom_width
+            .unwrap_or_else(|| self.scaled(250.0))
+            .clamp(min_width, max_width)
     }
 
     // ── Chat: slash command completion state ────────────────────────────
@@ -251,7 +439,73 @@ impl EditorView {
         if let Some(editor) = self.agent_menu_search_editor.clone() {
             editor.update(cx, |editor, cx| editor.set_text("", cx));
         }
+        if let Some(popup_menu) = popup_menu {
+            self.agent_menu_scroll_handle
+                .scroll_to_item(self.agent_popup_selected_index(popup_menu));
+        }
         cx.notify();
+    }
+
+    fn agent_popup_selected_index(&self, popup_menu: AgentPopupMenu) -> usize {
+        use agent_client_protocol::schema::v1::{SessionConfigKind, SessionConfigSelectOptions};
+
+        match popup_menu {
+            AgentPopupMenu::Registry => self
+                .selected_agent_id
+                .as_deref()
+                .and_then(|selected| {
+                    self.agent_registry_state
+                        .agents
+                        .iter()
+                        .position(|agent| agent.id == selected)
+                })
+                .unwrap_or(0),
+            AgentPopupMenu::Mode => self
+                .acp_panel_state
+                .modes
+                .as_ref()
+                .and_then(|modes| {
+                    modes
+                        .available_modes
+                        .iter()
+                        .position(|mode| mode.id == modes.current_mode_id)
+                })
+                .unwrap_or(0),
+            AgentPopupMenu::Config { index, group } => {
+                let Some(option) = self.acp_panel_state.config_options.get(index) else {
+                    return 0;
+                };
+                let SessionConfigKind::Select(select) = &option.kind else {
+                    return 0;
+                };
+                match (&select.options, group) {
+                    (SessionConfigSelectOptions::Ungrouped(values), _) => values
+                        .iter()
+                        .position(|value| value.value == select.current_value)
+                        .unwrap_or(0),
+                    (SessionConfigSelectOptions::Grouped(groups), None) => groups
+                        .iter()
+                        .position(|group| {
+                            group
+                                .options
+                                .iter()
+                                .any(|value| value.value == select.current_value)
+                        })
+                        .unwrap_or(0),
+                    (SessionConfigSelectOptions::Grouped(groups), Some(group_index)) => groups
+                        .get(group_index)
+                        .and_then(|group| {
+                            group
+                                .options
+                                .iter()
+                                .position(|value| value.value == select.current_value)
+                        })
+                        .map(|index| index + 1)
+                        .unwrap_or(0),
+                    _ => 0,
+                }
+            }
+        }
     }
 
     fn close_agent_popup_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -440,37 +694,80 @@ impl EditorView {
     ) -> AnyElement {
         let styles = &self.styles.utility_panel;
         let padding = self.scaled(styles.utility_panel_section_padding_x_px);
+        let key = (session.agent_id.clone(), session.session_id.clone());
+        let active = self.acp_panel_state.agent_id.as_deref() == Some(session.agent_id.as_str())
+            && self
+                .acp_panel_state
+                .session_id
+                .as_ref()
+                .is_some_and(|session_id| session_id.0.to_string() == session.session_id);
+        let selected = active || self.selected_agent_session_ids.contains(&key);
+        let selected_bg = styles.utility_panel_button_hover_bg;
+        let renaming =
+            self.agent_session_rename_target
+                .as_ref()
+                .is_some_and(|(agent_id, session_id)| {
+                    *agent_id == session.agent_id && *session_id == session.session_id
+                });
+        let rename_editor = renaming
+            .then(|| self.agent_session_rename_editor.clone())
+            .flatten();
         let title = session.display_title();
         let agent_name = session.agent_name.clone();
-        let timestamp: String = session
-            .updated_at
-            .replace('T', " ")
-            .chars()
-            .take(16)
-            .collect();
-        let session = session.clone();
+        let timestamp = relative_session_time(&session.updated_at, self.ui_language);
+        let open_session = session.clone();
+        let click_key = key.clone();
+        let context_key = key.clone();
+        let menu_agent_id = session.agent_id.clone();
+        let menu_session_id = session.session_id.clone();
         div()
             .id(("agent-stored-session", index))
             .w_full()
             // Fixed row height keeps the virtualized window's geometry exact.
             .h(px(self.scaled(AGENT_HISTORY_ROW_HEIGHT)))
+            .flex_none()
             .px(px(padding))
             .flex()
             .flex_col()
             .justify_center()
             .gap(px(self.scaled(2.0)))
+            .when(selected, |this| this.bg(selected_bg))
             .cursor(CursorStyle::Arrow)
             .hover(move |style| style.bg(styles.utility_panel_button_hover_bg))
-            .child(
+            .child(if let Some(editor) = rename_editor {
                 div()
                     .w_full()
-                    .overflow_hidden()
-                    .truncate()
-                    .whitespace_nowrap()
-                    .text_size(px(self.scaled(styles.utility_panel_item_font_size_px)))
-                    .text_color(styles.utility_panel_item_value_text_color)
-                    .child(SharedString::from(title)),
-            )
+                    .h(px(self.scaled(22.0)))
+                    .child(editor)
+                    .into_any_element()
+            } else {
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(self.scaled(5.0)))
+                    .when(session.pinned, |this| {
+                        this.child(
+                            svg()
+                                .path(MENU_PIN_SVG_PATH)
+                                .flex_none()
+                                .size(px(self.scaled(11.0)))
+                                .text_color(styles.utility_panel_item_label_text_color),
+                        )
+                    })
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .overflow_hidden()
+                            .truncate()
+                            .whitespace_nowrap()
+                            .text_size(px(self.scaled(styles.utility_panel_item_font_size_px)))
+                            .text_color(styles.utility_panel_item_value_text_color)
+                            .child(SharedString::from(title)),
+                    )
+                    .into_any_element()
+            })
             .child(
                 div()
                     .w_full()
@@ -492,10 +789,37 @@ impl EditorView {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                     cx.stop_propagation();
-                    this.agent_history_visible = false;
-                    this.open_stored_acp_session(session.clone(), cx);
+                    if this
+                        .agent_session_rename_target
+                        .as_ref()
+                        .is_some_and(|target| *target != click_key)
+                    {
+                        this.commit_agent_session_rename(cx);
+                    }
+                    let shift = event.modifiers.shift;
+                    let command = event.modifiers.platform;
+                    this.select_agent_session(click_key.clone(), shift, command);
+                    if !shift && !command {
+                        this.open_stored_acp_session(open_session.clone(), cx);
+                    }
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if !this.selected_agent_session_ids.contains(&context_key) {
+                        this.select_agent_session(context_key.clone(), false, false);
+                    }
+                    this.open_agent_session_context_menu(
+                        menu_agent_id.clone(),
+                        menu_session_id.clone(),
+                        event.position,
+                        cx,
+                    );
                 }),
             )
             .into_any_element()
@@ -504,7 +828,26 @@ impl EditorView {
     fn render_history_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let styles = &self.styles.utility_panel;
         let row_height = self.scaled(AGENT_HISTORY_ROW_HEIGHT);
-        let session_count = self.stored_acp_sessions.len();
+        let active_sessions = self
+            .stored_acp_sessions
+            .iter()
+            .filter(|session| !session.archived)
+            .cloned()
+            .collect::<Vec<_>>();
+        let archived_sessions = self
+            .stored_acp_sessions
+            .iter()
+            .filter(|session| session.archived)
+            .cloned()
+            .collect::<Vec<_>>();
+        let archive_header_index = active_sessions.len();
+        let session_count = active_sessions.len()
+            + usize::from(!archived_sessions.is_empty())
+            + if self.agent_history_show_archived {
+                archived_sessions.len()
+            } else {
+                0
+            };
         // Virtualized window: only the rows near the viewport are rendered,
         // the rest is represented by top/bottom spacers.
         let list_window = super::list_viewport::fixed_list_window(
@@ -516,24 +859,95 @@ impl EditorView {
             8,
             0,
         );
-        let visible_sessions: Vec<(usize, StoredAcpSession)> = list_window
-            .render
-            .clone()
-            .filter_map(|index| {
-                self.stored_acp_sessions
-                    .get(index)
-                    .map(|session| (index, session.clone()))
-            })
-            .collect();
-        let mut rows: Vec<AnyElement> = Vec::with_capacity(visible_sessions.len() + 2);
+        let mut rows: Vec<AnyElement> =
+            Vec::with_capacity(list_window.render.len().saturating_add(2));
         rows.push(
             div()
                 .h(px(list_window.top_spacer_px))
                 .flex_shrink_0()
                 .into_any_element(),
         );
-        for (index, session) in &visible_sessions {
-            rows.push(self.render_stored_session_row(session, *index, cx));
+        for index in list_window.render.clone() {
+            if let Some(session) = active_sessions.get(index) {
+                rows.push(self.render_stored_session_row(session, index, cx));
+                continue;
+            }
+            if archived_sessions.is_empty() || index < archive_header_index {
+                continue;
+            }
+            if index == archive_header_index {
+                let expanded = self.agent_history_show_archived;
+                let count = archived_sessions.len();
+                let archive_header_top = archive_header_index as f32 * row_height;
+                rows.push(
+                    div()
+                        .id("agent-archived-sessions-toggle")
+                        .h(px(row_height))
+                        .flex_none()
+                        .w_full()
+                        .px(px(self.scaled(styles.utility_panel_section_padding_x_px)))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .cursor(CursorStyle::Arrow)
+                        .hover(move |style| style.bg(styles.utility_panel_button_hover_bg))
+                        .child(
+                            div()
+                                .text_size(px(self.scaled(styles.utility_panel_item_font_size_px)))
+                                .text_color(styles.utility_panel_item_value_text_color)
+                                .child(format!(
+                                    "{} ({count})",
+                                    crate::i18n::agent_session_menu_text(
+                                        self.ui_language,
+                                        "archived",
+                                    )
+                                )),
+                        )
+                        .child(
+                            svg()
+                                .path(AGENT_CHEVRON_UP_SVG_PATH)
+                                .size(px(self.scaled(16.0)))
+                                .when(!expanded, |this| {
+                                    this.with_transformation(Transformation::rotate(radians(
+                                        std::f32::consts::PI,
+                                    )))
+                                })
+                                .text_color(styles.utility_panel_item_label_text_color),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.agent_history_show_archived =
+                                    !this.agent_history_show_archived;
+                                let expanding = !expanded;
+                                let current_top =
+                                    (-f32::from(this.agent_history_scroll_handle.offset().y))
+                                        .max(0.0);
+                                let target_top = if expanding {
+                                    let viewport_height = f32::from(
+                                        this.agent_history_scroll_handle.bounds().size.height,
+                                    );
+                                    let first_archived_bottom =
+                                        archive_header_top + row_height * 2.0;
+                                    current_top
+                                        .max((first_archived_bottom - viewport_height).max(0.0))
+                                } else {
+                                    current_top
+                                };
+                                this.pending_agent_history_scroll_top.set(Some(target_top));
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element(),
+                );
+                continue;
+            }
+            if self.agent_history_show_archived
+                && let Some(session) = archived_sessions.get(index - archive_header_index - 1)
+            {
+                rows.push(self.render_stored_session_row(session, index, cx));
+            }
         }
         rows.push(
             div()
@@ -550,6 +964,8 @@ impl EditorView {
             self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
             cx,
         );
+        let pending_scroll_top = self.pending_agent_history_scroll_top.clone();
+        let history_scroll_handle = self.agent_history_scroll_handle.clone();
 
         div()
             .id("agent-session-history")
@@ -580,21 +996,39 @@ impl EditorView {
                     .overflow_hidden()
                     .child(
                         div()
-                            .id("agent-session-history-scroll")
                             .h_full()
                             .w_full()
-                            .overflow_y_scroll()
-                            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                                this.reveal_panel_scrollbar(PanelScrollbarKind::AgentHistory, cx);
-                            }))
-                            .track_scroll(&self.agent_history_scroll_handle)
-                            .flex()
-                            .flex_col()
-                            .children(rows),
+                            .on_children_prepainted(move |_, _, _| {
+                                let Some(scroll_top) = pending_scroll_top.take() else {
+                                    return;
+                                };
+                                let max_scroll =
+                                    f32::from(history_scroll_handle.max_offset().height);
+                                let offset = history_scroll_handle.offset();
+                                history_scroll_handle
+                                    .set_offset(point(offset.x, px(-scroll_top.min(max_scroll))));
+                            })
+                            .child(
+                                div()
+                                    .id("agent-session-history-scroll")
+                                    .h_full()
+                                    .w_full()
+                                    .overflow_y_scroll()
+                                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                                        this.reveal_panel_scrollbar(
+                                            PanelScrollbarKind::AgentHistory,
+                                            cx,
+                                        );
+                                    }))
+                                    .track_scroll(&self.agent_history_scroll_handle)
+                                    .flex()
+                                    .flex_col()
+                                    .children(rows),
+                            ),
                     )
                     .when_some(scrollbar, |this, scrollbar| this.child(scrollbar)),
             )
-            .when(session_count == 0, |this| {
+            .when(self.stored_acp_sessions.is_empty(), |this| {
                 this.child(
                     div()
                         .w_full()
@@ -764,7 +1198,7 @@ impl EditorView {
         deferred(self.render_search_menu_panel(
             &config,
             self.agent_menu_search_editor.clone(),
-            None,
+            Some(&self.agent_menu_scroll_handle),
             None,
             rows,
             cx,
@@ -1340,14 +1774,24 @@ impl EditorView {
             .as_ref()
             .map(|editor| editor.read(cx).text(cx).trim().is_empty())
             .unwrap_or(true);
-        let editor_height = composer_editor
-            .as_ref()
-            .map(|editor| editor.read(cx).content_height(cx))
-            .unwrap_or(0.0)
-            .clamp(
-                self.scaled(COMPOSER_MIN_HEIGHT),
-                self.scaled(COMPOSER_MAX_HEIGHT),
-            );
+        let editor_height = {
+            let min_height = self.scaled(COMPOSER_MIN_HEIGHT);
+            let panel_height = self
+                .agent_panel_bounds
+                .get()
+                .map(|bounds| f32::from(bounds.size.height))
+                .unwrap_or(self.last_window_height);
+            let drag_cap = (panel_height * 0.6).max(min_height);
+            match self.agent_composer_custom_height {
+                // User-dragged height wins over auto-grow.
+                Some(custom) => custom.clamp(min_height, drag_cap),
+                None => composer_editor
+                    .as_ref()
+                    .map(|editor| editor.read(cx).content_height(cx))
+                    .unwrap_or(0.0)
+                    .clamp(min_height, self.scaled(COMPOSER_MAX_HEIGHT)),
+            }
+        };
         // Bottom controls row matches the status bar height so the panel's
         // chrome strips line up with the editor chrome.
         let bottom_row_height = self.status_bar_height();
@@ -1369,6 +1813,23 @@ impl EditorView {
             .id("agent-composer-wrap")
             .relative()
             .w_full()
+            .drag_over::<DraggedSidebarItems>({
+                let drop_bg = self.styles.editor.editor_file_drop_bg;
+                let border_color = self
+                    .styles
+                    .utility_panel
+                    .utility_panel_resize_active_indicator_color;
+                let border_width = self.scaled(2.0);
+                move |style, _, _, _| {
+                    style
+                        .bg(drop_bg)
+                        .border(px(border_width))
+                        .border_color(border_color)
+                }
+            })
+            .on_drop(cx.listener(|this, dragged: &DraggedSidebarItems, _, cx| {
+                this.add_dragged_paths_to_chat(&dragged.paths, cx);
+            }))
             .map(|this| {
                 if expanded {
                     this.flex_1().min_h(px(0.0)).flex().flex_col()
@@ -1378,6 +1839,67 @@ impl EditorView {
             })
             .pt(px(self.scaled(0.0)))
             .pb(px(self.scaled(0.0)))
+            .when(!expanded, |this| {
+                // Drag the composer's top border to grow the input upwards.
+                let start_height = editor_height;
+                let indicator_color = self
+                    .styles
+                    .utility_panel
+                    .utility_panel_resize_active_indicator_color;
+                let indicator_thickness = self.scaled(
+                    self.styles
+                        .utility_panel
+                        .utility_panel_resize_active_indicator_width_px,
+                );
+                let dragging = self.agent_composer_resize_drag.is_some();
+                this.child(
+                    div()
+                        .id("agent-composer-resize-handle")
+                        .absolute()
+                        .top(px(-5.0))
+                        .left(px(0.0))
+                        .w_full()
+                        .h(px(10.0))
+                        .group("agent-composer-resize")
+                        .cursor(CursorStyle::ResizeUpDown)
+                        .child(
+                            // Highlight line centered on the composer's top
+                            // border (hover and while dragging).
+                            div()
+                                .absolute()
+                                .left(px(0.0))
+                                .w_full()
+                                .top(px(5.0 - indicator_thickness / 2.0))
+                                .h(px(indicator_thickness))
+                                .when(dragging, |this| this.bg(indicator_color))
+                                .group_hover("agent-composer-resize", move |style| {
+                                    style.bg(indicator_color)
+                                }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                this.agent_composer_resize_drag =
+                                    Some((f32::from(event.position.y), start_height));
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                            if this.agent_composer_resize_drag.is_some() {
+                                this.update_agent_composer_resize(f32::from(event.position.y), cx);
+                            }
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.agent_composer_resize_drag = None;
+                                cx.notify();
+                            }),
+                        ),
+                )
+            })
             .child(
                 div()
                     .w_full()
@@ -1562,7 +2084,6 @@ impl EditorView {
         let is_prompting = self.acp_panel_state.status == AcpConnectionStatus::Prompting;
         let pending_permission = self.acp_panel_state.pending_permission.clone();
         let agent_name = self.acp_panel_state.agent_name.clone();
-        let composer_expanded = self.agent_composer_expanded;
 
         div()
             .id("agent-chat-content")
@@ -1571,48 +2092,45 @@ impl EditorView {
             .w_full()
             .flex()
             .flex_col()
-            .when(!composer_expanded, |this| {
-                this.child(
-                    div()
-                        .id("agent-transcript")
-                        .flex_1()
-                        .min_h(px(0.0))
-                        .w_full()
-                        .overflow_hidden()
-                        .map(|this| {
-                            if transcript_empty {
-                                this.flex().items_center().justify_center().child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .items_center()
-                                        .gap(px(self.scaled(6.0)))
-                                        .max_w(px(self.scaled(240.0)))
-                                        .when_some(agent_name, |this, name| {
-                                            this.child(
-                                                div()
-                                                    .text_size(px(self.scaled(13.0)))
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .text_color(
-                                                        styles.utility_panel_item_value_text_color,
-                                                    )
-                                                    .child(SharedString::from(name)),
-                                            )
-                                        }),
-                                )
-                            } else {
-                                this.when_some(transcript_editor, |this, editor| this.child(editor))
-                            }
-                        }),
-                )
-            })
+            .child(
+                div()
+                    .id("agent-transcript")
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .overflow_hidden()
+                    .map(|this| {
+                        if transcript_empty {
+                            this.flex().items_center().justify_center().child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .gap(px(self.scaled(6.0)))
+                                    .max_w(px(self.scaled(240.0)))
+                                    .when_some(agent_name, |this, name| {
+                                        this.child(
+                                            div()
+                                                .text_size(px(self.scaled(13.0)))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(
+                                                    styles.utility_panel_item_value_text_color,
+                                                )
+                                                .child(SharedString::from(name)),
+                                        )
+                                    }),
+                            )
+                        } else {
+                            this.when_some(transcript_editor, |this, editor| this.child(editor))
+                        }
+                    }),
+            )
             .when(is_prompting, |this| {
                 this.child(self.render_generating_strip(cx))
             })
             .when_some(pending_permission, |this, permission| {
                 this.child(self.render_acp_permission(&permission, cx))
             })
-            .child(self.render_composer(cx))
             .into_any_element()
     }
 
@@ -1659,11 +2177,118 @@ impl EditorView {
             _ => Vec::new(),
         };
 
-        let body = if show_history {
-            self.render_history_body(cx)
-        } else {
-            self.render_chat_body(cx)
+        let upper_body = {
+            let chat_body = self.render_chat_body(cx);
+            if show_history {
+                // History is a sub-panel docked to the right of the chat,
+                // resizable by dragging its left border. The whole panel is
+                // widened by this amount, so the chat column is unaffected.
+                let history_width = self.agent_history_panel_width();
+                div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .flex()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .child(chat_body),
+                    )
+                    .child(
+                        div()
+                            .id("agent-history-panel")
+                            .relative()
+                            .flex_none()
+                            .h_full()
+                            .w(px(history_width))
+                            .border_l(px(panel_border_width))
+                            .border_color(panel_border_color)
+                            .flex()
+                            .flex_col()
+                            .child(self.render_history_body(cx))
+                            .child({
+                                let indicator_color = self
+                                    .styles
+                                    .utility_panel
+                                    .utility_panel_resize_active_indicator_color;
+                                let indicator_thickness = self.scaled(
+                                    self.styles
+                                        .utility_panel
+                                        .utility_panel_resize_active_indicator_width_px,
+                                );
+                                let dragging = self.agent_history_resizing;
+                                div()
+                                    .id("agent-history-resize-handle")
+                                    .absolute()
+                                    .left(px(-4.0))
+                                    .top_0()
+                                    .w(px(8.0))
+                                    .h_full()
+                                    .group("agent-history-resize")
+                                    .cursor(CursorStyle::ResizeLeftRight)
+                                    .child(
+                                        // Highlight line centered on the
+                                        // sub-panel's left border.
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .h_full()
+                                            .left(px(4.0 - indicator_thickness / 2.0))
+                                            .w(px(indicator_thickness))
+                                            .when(dragging, |this| this.bg(indicator_color))
+                                            .group_hover("agent-history-resize", move |style| {
+                                                style.bg(indicator_color)
+                                            }),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(
+                                            |this, _: &gpui::MouseDownEvent, window, cx| {
+                                                window.prevent_default();
+                                                cx.stop_propagation();
+                                                this.agent_history_resizing = true;
+                                                cx.notify();
+                                            },
+                                        ),
+                                    )
+                                    .on_mouse_move(cx.listener(
+                                        |this, event: &gpui::MouseMoveEvent, _, cx| {
+                                            if this.agent_history_resizing {
+                                                this.update_agent_history_resize(
+                                                    f32::from(event.position.x),
+                                                    cx,
+                                                );
+                                            }
+                                        },
+                                    ))
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.agent_history_resizing = false;
+                                            cx.notify();
+                                        }),
+                                    )
+                            }),
+                    )
+                    .into_any_element()
+            } else {
+                chat_body
+            }
         };
+        let composer_expanded = self.agent_composer_expanded;
+        let body = div()
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            .flex()
+            .flex_col()
+            .when(!composer_expanded, |this| this.child(upper_body))
+            .child(self.render_composer(cx))
+            .into_any_element();
 
         // Connection status button: opens the searchable agent registry menu.
         let connection_anchor = Rc::new(Cell::new(None));
@@ -1773,6 +2398,12 @@ impl EditorView {
                                     if this.agent_history_visible {
                                         this.refresh_stored_acp_sessions(cx);
                                     }
+                                    // Resize the outer panel in the same frame
+                                    // that the sibling appears/disappears. An
+                                    // animated outer width would temporarily
+                                    // steal width from the chat column.
+                                    let width = this.utility_panel_target_width();
+                                    this.set_utility_panel_width_immediately(width);
                                     cx.notify();
                                 },
                                 cx,
@@ -1866,6 +2497,16 @@ fn humanize_tokens(count: u64) -> String {
 fn config_option_icon(
     option: &agent_client_protocol::schema::v1::SessionConfigOption,
 ) -> &'static str {
+    use agent_client_protocol::schema::v1::SessionConfigOptionCategory;
+
+    match option.category.as_ref() {
+        Some(SessionConfigOptionCategory::Model | SessionConfigOptionCategory::ModelConfig) => {
+            return AGENT_MODEL_SVG_PATH;
+        }
+        Some(SessionConfigOptionCategory::ThoughtLevel) => return AGENT_EFFORT_SVG_PATH,
+        Some(SessionConfigOptionCategory::Mode) => return AGENT_MODE_SVG_PATH,
+        _ => {}
+    }
     let key = format!(
         "{} {}",
         option.id.to_string().to_lowercase(),
@@ -1901,4 +2542,11 @@ fn capitalize_first(text: &str) -> String {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
     }
+}
+
+fn relative_session_time(value: &str, language: crate::i18n::UiLanguage) -> String {
+    let Ok(time) = chrono::DateTime::parse_from_rfc3339(value) else {
+        return value.replace('T', " ").chars().take(16).collect();
+    };
+    crate::i18n::format_relative_time(language, time.into())
 }

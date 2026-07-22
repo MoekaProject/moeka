@@ -190,6 +190,29 @@ impl EditorView {
         );
     }
 
+    pub(crate) fn open_agent_session_context_menu(
+        &mut self,
+        agent_id: String,
+        session_id: String,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let fallback = (agent_id.clone(), session_id.clone());
+        let targets = self.selected_agent_session_targets(&fallback);
+        self.open_context_menu(
+            ContextMenu {
+                position,
+                kind: ContextMenuKind::AgentSession {
+                    agent_id,
+                    session_id,
+                    targets,
+                },
+            },
+            false,
+            cx,
+        );
+    }
+
     fn current_wiki_link_target(&self) -> Option<Range<usize>> {
         let line = self.cursor_line();
         let decoration = self.decorations.get(line)?;
@@ -3734,6 +3757,136 @@ impl EditorView {
         };
 
         let (items, width) = match &menu.kind {
+            ContextMenuKind::AgentSession {
+                agent_id,
+                session_id,
+                targets,
+            } => {
+                let fallback = (agent_id.clone(), session_id.clone());
+                let targets = if targets.is_empty() {
+                    vec![fallback]
+                } else {
+                    targets.clone()
+                };
+                let sessions = targets
+                    .iter()
+                    .filter_map(|(agent_id, session_id)| {
+                        self.stored_acp_sessions.iter().find(|session| {
+                            session.agent_id == *agent_id && session.session_id == *session_id
+                        })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let session = sessions.first().cloned();
+                let mut items = Vec::new();
+                if let Some(session) = session {
+                    let language = self.ui_language;
+                    if targets.len() == 1 {
+                        let open_session = session.clone();
+                        items.push(self.render_context_menu_item(
+                            crate::i18n::agent_session_menu_text(language, "open"),
+                            false,
+                            cx,
+                            move |this, _, cx| {
+                                this.open_stored_acp_session(open_session.clone(), cx);
+                            },
+                        ));
+
+                        let rename_agent = session.agent_id.clone();
+                        let rename_session = session.session_id.clone();
+                        items.push(self.render_context_menu_item_with_icon(
+                            crate::i18n::agent_session_menu_text(language, "rename"),
+                            MENU_RENAME_SVG_PATH,
+                            false,
+                            cx,
+                            move |this, window, cx| {
+                                this.start_agent_session_rename(
+                                    rename_agent.clone(),
+                                    rename_session.clone(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ));
+                    }
+
+                    let all_pinned = sessions.iter().all(|session| session.pinned);
+                    let pin_targets = targets.clone();
+                    items.push(self.render_context_menu_item_with_icon(
+                        crate::i18n::agent_session_menu_text(
+                            language,
+                            if all_pinned { "unpin" } else { "pin" },
+                        ),
+                        if all_pinned {
+                            MENU_UNPIN_SVG_PATH
+                        } else {
+                            MENU_PIN_SVG_PATH
+                        },
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.set_acp_sessions_pinned(&pin_targets, !all_pinned, cx);
+                        },
+                    ));
+
+                    let all_archived = sessions.iter().all(|session| session.archived);
+                    let archive_targets = targets.clone();
+                    items.push(self.render_context_menu_item(
+                        crate::i18n::agent_session_menu_text(
+                            language,
+                            if all_archived { "unarchive" } else { "archive" },
+                        ),
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.set_acp_sessions_archived(&archive_targets, !all_archived, cx);
+                        },
+                    ));
+
+                    if !targets.is_empty() {
+                        items.push(self.render_context_menu_separator());
+                        let delete_targets = targets.clone();
+                        items.push(self.render_context_menu_item_with_icon(
+                            crate::i18n::agent_session_menu_text(language, "delete"),
+                            MENU_DELETE_SVG_PATH,
+                            true,
+                            cx,
+                            move |this, _, cx| {
+                                this.show_dialog(
+                                    Dialog {
+                                        title: crate::i18n::agent_session_menu_text(
+                                            language,
+                                            "delete_title",
+                                        )
+                                        .to_string(),
+                                        message: crate::i18n::agent_session_menu_text(
+                                            language,
+                                            "delete_message",
+                                        )
+                                        .to_string(),
+                                        save_label: None,
+                                        confirm_label: this
+                                            .t(crate::i18n::TextKey::Delete)
+                                            .to_string(),
+                                        cancel_label: this
+                                            .t(crate::i18n::TextKey::Cancel)
+                                            .to_string(),
+                                        is_danger: true,
+                                        action: DialogAction::DeleteAcpSessions {
+                                            targets: delete_targets.clone(),
+                                        },
+                                    },
+                                    cx,
+                                );
+                            },
+                        ));
+                    }
+                }
+                (
+                    items,
+                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                )
+            }
             ContextMenuKind::Sidebar { path, is_dir } => (
                 self.render_sidebar_context_menu(path.clone(), *is_dir, cx),
                 self.scaled(self.styles.context_menu.menu_sidebar_width_px),

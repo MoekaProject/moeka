@@ -194,7 +194,6 @@ impl EditorView {
                 };
             div()
                 .id(("command-palette", index))
-                .mx(px(1.0))
                 .h(px(row_height))
                 .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
                 .flex()

@@ -60,7 +60,11 @@ impl EditorView {
                                 .when(panel_top_offset > 0.0, |this| {
                                     this.border_b(px(self.styles.tab_bar.tab_bar_border_width_px))
                                         .border_color(self.styles.tab_bar.tab_bar_border_color)
-                                }),
+                                })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+                                ),
                         )
                         .child(
                             div()
@@ -80,16 +84,32 @@ impl EditorView {
                                     div()
                                         .id("utility-panel-resize-handle")
                                         .absolute()
-                                        .left(px(-handle_width / 2.0))
+                                        // Keep the whole hit area inside the
+                                        // clipped panel wrap. Previously half
+                                        // of it was clipped, making border
+                                        // hover difficult to trigger.
+                                        .left(px(0.0))
                                         .top_0()
                                         .w(px(handle_width))
                                         .h_full()
+                                        .group("utility-panel-resize")
                                         .cursor(CursorStyle::ResizeLeftRight)
-                                        .hover(move |style| {
-                                            style
-                                                .border_l(px(hover_indicator_width))
-                                                .border_color(hover_indicator_color)
-                                        })
+                                        .child(
+                                            // Hover highlight on the panel's
+                                            // left border.
+                                            div()
+                                                .absolute()
+                                                .left(px(0.0))
+                                                .top_0()
+                                                .w(px(hover_indicator_width))
+                                                .h_full()
+                                                .group_hover(
+                                                    "utility-panel-resize",
+                                                    move |style| {
+                                                        style.bg(hover_indicator_color)
+                                                    },
+                                                ),
+                                        )
                                         .on_mouse_move(cx.listener(
                                             |this, event: &MouseMoveEvent, window, cx| {
                                                 if this.utility_panel_resizing {
@@ -398,6 +418,12 @@ impl Render for EditorView {
             window.focus(&self.focus_handle(cx));
             self.pending_editor_focus = false;
         }
+        if self.pending_agent_composer_focus {
+            if let Some(composer) = self.agent_composer_editor.as_ref() {
+                composer.focus_handle(cx).focus(window);
+                self.pending_agent_composer_focus = false;
+            }
+        }
         if let Some(tab_id) = self.pending_terminal_focus.clone() {
             if self.active_terminal_tab_id().as_deref() != Some(tab_id.as_str()) {
                 self.pending_terminal_focus = None;
@@ -422,6 +448,8 @@ impl Render for EditorView {
         let resizing = self.sidebar_resizing
             || self.file_list_resizing
             || self.utility_panel_resizing
+            || self.agent_composer_resize_drag.is_some()
+            || self.agent_history_resizing
             || self.pane_resize_drag.is_some();
         let show_empty_workspace = self.panes.len() == 1 && self.tabs.is_empty();
         let ws = &self.styles.window;
@@ -1077,6 +1105,8 @@ impl Render for EditorView {
                         Some(SplitAxis::Vertical) => CursorStyle::ResizeUpDown,
                         _ => CursorStyle::ResizeLeftRight,
                     }
+                } else if self.agent_composer_resize_drag.is_some() {
+                    CursorStyle::ResizeUpDown
                 } else {
                     CursorStyle::ResizeLeftRight
                 };
@@ -1148,6 +1178,10 @@ impl Render for EditorView {
                                 }
                                 this.set_utility_panel_width_immediately(new_size);
                                 cx.notify();
+                            } else if this.agent_composer_resize_drag.is_some() {
+                                this.update_agent_composer_resize(f32::from(event.position.y), cx);
+                            } else if this.agent_history_resizing {
+                                this.update_agent_history_resize(f32::from(event.position.x), cx);
                             }
                         }))
                         .on_mouse_up(
@@ -1155,6 +1189,8 @@ impl Render for EditorView {
                             cx.listener(|this, _, _, cx| {
                                 this.sidebar_resizing = false;
                                 this.utility_panel_resizing = false;
+                                this.agent_composer_resize_drag = None;
+                                this.agent_history_resizing = false;
                                 this.pane_resize_drag = None;
                                 this.finish_file_list_resize(cx);
                                 cx.notify();

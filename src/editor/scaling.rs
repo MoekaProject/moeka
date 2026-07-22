@@ -608,6 +608,9 @@ impl EditorView {
     }
 
     pub(crate) fn center_cursor_in_view(&mut self, cx: &mut Context<Self>) {
+        if self.embedded_editor && self.embedded_read_only {
+            self.embedded_stick_to_bottom = false;
+        }
         if self.layout_dirty {
             self.pending_center_cursor_in_view = true;
             self.pending_scroll_to_cursor = false;
@@ -625,6 +628,9 @@ impl EditorView {
     }
 
     pub(crate) fn center_cursor_in_view_immediately(&mut self, cx: &mut Context<Self>) {
+        if self.embedded_editor && self.embedded_read_only {
+            self.embedded_stick_to_bottom = false;
+        }
         if self.layout_dirty {
             self.pending_center_cursor_in_view = true;
             self.pending_scroll_to_cursor = false;

@@ -1104,6 +1104,19 @@ impl EditorView {
             self.scaled(ss.file_list_item_preview_line_height_px * preview_line_count as f32);
         let click_path = path.clone();
         let context_menu_path = path.clone();
+        let drag_paths = if self.selected_sidebar_paths.contains(&path) {
+            let mut paths = self
+                .selected_sidebar_paths
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            paths.sort();
+            paths
+        } else {
+            vec![path.clone()]
+        };
+        let drag_count = drag_paths.len();
+        let drag_label = item.name.clone();
 
         div()
             .id(SharedString::from(format!("file-list-{}", path.display())))
@@ -1255,6 +1268,24 @@ impl EditorView {
                     this.file_list_menu_origin = true;
                 }),
             )
+            .when(!self.sidebar_resizing && !self.file_list_resizing, |this| {
+                let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
+                let ghost_background_color = self.styles.tooltip.tooltip_bg;
+                let ghost_text_color = self.styles.tooltip.tooltip_title_text_color;
+                this.on_drag(
+                    DraggedSidebarItems { paths: drag_paths },
+                    move |_dragged, offset, _window, cx| {
+                        cx.new(|_cx| DraggedSidebarItemsView {
+                            label: drag_label.clone(),
+                            count: drag_count,
+                            font_size_px: ghost_font_size_px,
+                            background_color: ghost_background_color,
+                            text_color: ghost_text_color,
+                            cursor_offset: offset,
+                        })
+                    },
+                )
+            })
             .into_any_element()
     }
 

@@ -154,14 +154,13 @@ impl EditorView {
 
         div()
             .id(id)
-            .mx(px(1.0))
             .h(px(self.scaled(SEARCH_MENU_ROW_HEIGHT_PX)))
             .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
             .flex()
             .items_center()
             .gap(px(self.scaled(6.0)))
             .cursor(CursorStyle::Arrow)
-            .when(row.selected, |this| this.bg(selected_bg))
+            .when(row.selected || row.checked, |this| this.bg(selected_bg))
             .hover(move |style| style.bg(hover_bg))
             .when(row.back, |this| {
                 this.child(

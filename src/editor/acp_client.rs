@@ -185,6 +185,7 @@ impl EditorView {
             .collect::<HashMap<_, _>>();
 
         self.stop_acp_agent();
+        self.acp_replaying_session = false;
         // Keep a restored session's transcript visible while (re)connecting
         // instead of flashing an empty chat until the session replays.
         let restored = self
@@ -297,6 +298,7 @@ impl EditorView {
         self.persist_active_acp_session(cx);
         self.cancel_pending_acp_permission();
         self.pending_acp_open_session = None;
+        self.acp_replaying_session = false;
         let was_ready = self.acp_panel_state.status == AcpConnectionStatus::Ready;
         self.acp_panel_state.session_id = None;
         self.acp_panel_state.transcript.clear();
@@ -315,7 +317,9 @@ impl EditorView {
                 .as_ref()
                 .is_some_and(|sender| sender.try_send(AcpCommand::NewSession).is_ok())
         {
-            self.acp_panel_state.status = AcpConnectionStatus::Connecting;
+            // The connection is reused; stay Ready instead of flashing
+            // "Connecting…" (which reads as a full reconnect). The follow-up
+            // Ready event refreshes the session id/modes.
         } else {
             self.acp_panel_state.status = AcpConnectionStatus::Disconnected;
             self.start_selected_acp_agent(cx);
@@ -333,7 +337,8 @@ impl EditorView {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
-        let mut resource = ResourceLink::new(name.clone(), file_uri(path));
+        let visible_reference = title.clone().unwrap_or_else(|| name.clone());
+        let mut resource = ResourceLink::new(name, file_uri(path));
         if let Some(title) = title {
             resource = resource.title(title);
         }
@@ -344,9 +349,11 @@ impl EditorView {
             .pending_attachments
             .push(ContentBlock::ResourceLink(resource));
         self.toggle_agent_panel_open(cx);
+        self.ensure_agent_markdown_editors(cx);
+        self.pending_agent_composer_focus = true;
         if let Some(composer) = self.agent_composer_editor.clone() {
             composer.update(cx, |composer, cx| {
-                composer.append_text(&format!("[{name}] "), cx)
+                composer.append_text(&format!("@{visible_reference} "), cx)
             });
         }
         cx.notify();
@@ -419,6 +426,12 @@ impl EditorView {
 
     fn apply_acp_event(&mut self, event: AcpEvent, cx: &mut Context<Self>) {
         let should_persist = !matches!(&event, AcpEvent::Stderr(_));
+        // While a stored session replays on the agent side, the panel keeps
+        // showing the locally restored transcript; replayed updates would
+        // only rebuild the same content slowly (long blank), so they are
+        // dropped (side-state like commands/modes still applies below).
+        let suppressed_replay =
+            self.acp_replaying_session && matches!(&event, AcpEvent::SessionUpdate(_));
         match event {
             AcpEvent::Authenticating => {
                 self.acp_panel_state.status = AcpConnectionStatus::Authenticating;
@@ -429,6 +442,8 @@ impl EditorView {
                 modes,
                 config_options,
             } => {
+                // A Ready after a replaying load marks the replay finished.
+                self.acp_replaying_session = false;
                 self.acp_panel_state.status = AcpConnectionStatus::Ready;
                 self.acp_panel_state.agent_name = agent_name.or_else(|| {
                     self.selected_registry_agent()
@@ -468,8 +483,10 @@ impl EditorView {
                     }
                     _ => {}
                 }
-                self.acp_panel_state.transcript.apply_update(&update);
-                self.acp_panel_state.updates.push(update);
+                if !suppressed_replay {
+                    self.acp_panel_state.transcript.apply_update(&update);
+                    self.acp_panel_state.updates.push(update);
+                }
             }
             AcpEvent::Extension(extension) => {
                 self.acp_panel_state.extensions.push(extension);
@@ -481,14 +498,23 @@ impl EditorView {
                 self.pending_acp_open_session = None;
                 self.acp_panel_state.session_id = Some(session_id);
                 if replaying {
-                    self.acp_panel_state.transcript.clear();
-                    self.acp_panel_state.updates.clear();
+                    // Keep the locally restored transcript on screen instead
+                    // of clearing it and rebuilding from the (slow) replay.
+                    self.acp_replaying_session = true;
                 }
             }
             AcpEvent::SessionArchived(session_id) => {
-                self.pending_acp_open_session = None;
+                // The agent couldn't load/resume this stored session; the
+                // actor keeps the connection and follows up with a fresh
+                // session (Ready). Show the stored transcript read-along and
+                // keep the current status (the connection never dropped).
+                self.acp_replaying_session = false;
+                if let Some(pending) = self.pending_acp_open_session.take() {
+                    self.acp_panel_state.transcript = pending.restored_transcript();
+                    self.acp_panel_state.updates = pending.updates.clone();
+                    self.acp_panel_state.extensions = pending.extensions.clone();
+                }
                 self.acp_panel_state.session_id = Some(session_id);
-                self.acp_panel_state.status = AcpConnectionStatus::Disconnected;
             }
             AcpEvent::Permission(permission) => {
                 self.acp_panel_state.pending_permission = Some(permission);
@@ -519,19 +545,21 @@ impl EditorView {
                 }
             }
             AcpEvent::Failed(error) => {
+                self.acp_replaying_session = false;
                 self.cancel_pending_acp_permission();
                 self.acp_panel_state.transcript.push_error(&error);
                 self.acp_panel_state.status = AcpConnectionStatus::Failed(error);
                 self.acp_command_tx = None;
             }
             AcpEvent::Stopped => {
+                self.acp_replaying_session = false;
                 self.cancel_pending_acp_permission();
                 self.acp_panel_state.status = AcpConnectionStatus::Disconnected;
                 self.acp_command_tx = None;
             }
         }
         self.sync_agent_transcript_editor(cx);
-        if should_persist {
+        if should_persist && !suppressed_replay {
             self.queue_active_acp_session_save(cx);
         }
     }
@@ -855,10 +883,12 @@ async fn run_acp_connection(
                     }
                     AcpCommand::NewSession => {
                         if supports_close {
-                            connection
+                            // Best-effort: a close failure must not tear the
+                            // whole connection down.
+                            let _ = connection
                                 .send_request(CloseSessionRequest::new(session_id.clone()))
                                 .block_task()
-                                .await?;
+                                .await;
                         }
                         let mut request = NewSessionRequest::new(cwd.clone());
                         if supports_additional {
@@ -880,11 +910,12 @@ async fn run_acp_connection(
                     }
                     AcpCommand::OpenSession(target_session_id) => {
                         if supports_close {
-                            connection
+                            let _ = connection
                                 .send_request(CloseSessionRequest::new(session_id.clone()))
                                 .block_task()
-                                .await?;
+                                .await;
                         }
+                        let mut opened = false;
                         if supports_load {
                             let _ = event_tx
                                 .send(AcpEvent::OpeningSession {
@@ -898,18 +929,25 @@ async fn run_acp_connection(
                                 request =
                                     request.additional_directories(additional_directories.clone());
                             }
-                            let response = connection.send_request(request).block_task().await?;
-                            session_id = target_session_id;
-                            session_modes = response.modes;
-                            session_config_options = response.config_options.unwrap_or_default();
-                            let _ = event_tx
-                                .send(AcpEvent::Ready {
-                                    agent_name: display_name.clone(),
-                                    session_id: session_id.clone(),
-                                    modes: session_modes.clone(),
-                                    config_options: session_config_options.clone(),
-                                })
-                                .await;
+                            // A load failure (e.g. the agent no longer knows
+                            // this session) must not kill the connection.
+                            if let Ok(response) =
+                                connection.send_request(request).block_task().await
+                            {
+                                session_id = target_session_id.clone();
+                                session_modes = response.modes;
+                                session_config_options =
+                                    response.config_options.unwrap_or_default();
+                                let _ = event_tx
+                                    .send(AcpEvent::Ready {
+                                        agent_name: display_name.clone(),
+                                        session_id: session_id.clone(),
+                                        modes: session_modes.clone(),
+                                        config_options: session_config_options.clone(),
+                                    })
+                                    .await;
+                                opened = true;
+                            }
                         } else if supports_resume {
                             let _ = event_tx
                                 .send(AcpEvent::OpeningSession {
@@ -923,10 +961,41 @@ async fn run_acp_connection(
                                 request =
                                     request.additional_directories(additional_directories.clone());
                             }
-                            let response = connection.send_request(request).block_task().await?;
-                            session_id = target_session_id;
-                            session_modes = response.modes;
-                            session_config_options = response.config_options.unwrap_or_default();
+                            if let Ok(response) =
+                                connection.send_request(request).block_task().await
+                            {
+                                session_id = target_session_id.clone();
+                                session_modes = response.modes;
+                                session_config_options =
+                                    response.config_options.unwrap_or_default();
+                                let _ = event_tx
+                                    .send(AcpEvent::Ready {
+                                        agent_name: display_name.clone(),
+                                        session_id: session_id.clone(),
+                                        modes: session_modes.clone(),
+                                        config_options: session_config_options.clone(),
+                                    })
+                                    .await;
+                                opened = true;
+                            }
+                        }
+                        if !opened {
+                            // The stored session can't be restored on the
+                            // agent side: keep the connection alive and fall
+                            // back to a fresh session (the stored transcript
+                            // stays visible read-along in the panel).
+                            let _ = event_tx
+                                .send(AcpEvent::SessionArchived(target_session_id))
+                                .await;
+                            let mut request = NewSessionRequest::new(cwd.clone());
+                            if supports_additional {
+                                request =
+                                    request.additional_directories(additional_directories.clone());
+                            }
+                            let session = connection.send_request(request).block_task().await?;
+                            session_id = session.session_id;
+                            session_modes = session.modes;
+                            session_config_options = session.config_options.unwrap_or_default();
                             let _ = event_tx
                                 .send(AcpEvent::Ready {
                                     agent_name: display_name.clone(),
@@ -934,10 +1003,6 @@ async fn run_acp_connection(
                                     modes: session_modes.clone(),
                                     config_options: session_config_options.clone(),
                                 })
-                                .await;
-                        } else {
-                            let _ = event_tx
-                                .send(AcpEvent::SessionArchived(target_session_id))
                                 .await;
                         }
                     }

@@ -16,6 +16,10 @@ pub(crate) enum EmbeddedMarkdownEditorEvent {
 pub(crate) struct EmbeddedMarkdownEditor {
     editor: gpui::Entity<EditorView>,
     submit_on_enter: bool,
+    read_only: bool,
+    /// Where `cmd+f` opens search when this editor is not searchable itself
+    /// (the composer forwards find to the transcript).
+    find_target: Option<gpui::WeakEntity<EmbeddedMarkdownEditor>>,
     /// When true, Up/Down emit navigation events (for an external popup menu)
     /// instead of moving the cursor.
     intercept_navigation: bool,
@@ -37,6 +41,8 @@ impl EmbeddedMarkdownEditor {
         Self {
             editor,
             submit_on_enter,
+            read_only,
+            find_target: None,
             intercept_navigation: false,
         }
     }
@@ -115,6 +121,17 @@ impl EmbeddedMarkdownEditor {
     pub(crate) fn set_intercept_navigation(&mut self, intercept: bool) {
         self.intercept_navigation = intercept;
     }
+
+    /// Redirects `cmd+f` in this editor to another embedded editor.
+    pub(crate) fn set_find_target(&mut self, target: gpui::WeakEntity<EmbeddedMarkdownEditor>) {
+        self.find_target = Some(target);
+    }
+
+    /// Opens the inner editor's find bar (search-only, no replace).
+    pub(crate) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |editor, cx| editor.open_search(false, window, cx));
+    }
 }
 
 impl EventEmitter<EmbeddedMarkdownEditorEvent> for EmbeddedMarkdownEditor {}
@@ -146,6 +163,11 @@ impl Render for EmbeddedMarkdownEditor {
                     )
                 })
         };
+        // Read-only transcripts host the shared find bar as an overlay.
+        let search_bar = (self.read_only && self.editor.read(cx).search_visible).then(|| {
+            self.editor
+                .update(cx, |editor, cx| editor.render_search_bar(cx))
+        });
         div()
             .id("embedded-markdown-editor")
             .key_context("MarkdownEditor EmbeddedMarkdownEditor")
@@ -154,6 +176,30 @@ impl Render for EmbeddedMarkdownEditor {
             .size_full()
             .overflow_hidden()
             .cursor(gpui::CursorStyle::IBeam)
+            .on_action(cx.listener(|this, _: &Find, window, cx| {
+                cx.stop_propagation();
+                if this.read_only {
+                    this.open_find(window, cx);
+                } else if let Some(target) = this.find_target.clone() {
+                    let _ = target.update(cx, |target, cx| target.open_find(window, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, action: &FindNext, window, cx| {
+                cx.stop_propagation();
+                this.editor
+                    .update(cx, |editor, cx| editor.on_find_next(action, window, cx));
+            }))
+            .on_action(cx.listener(|this, action: &FindPrevious, window, cx| {
+                cx.stop_propagation();
+                this.editor
+                    .update(cx, |editor, cx| editor.on_find_previous(action, window, cx));
+            }))
+            .on_action(cx.listener(|this, action: &DismissSearch, window, cx| {
+                cx.stop_propagation();
+                this.editor.update(cx, |editor, cx| {
+                    editor.on_dismiss_search(action, window, cx)
+                });
+            }))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, event, window, cx| {
@@ -354,5 +400,6 @@ impl Render for EmbeddedMarkdownEditor {
                     )
                 },
             )
+            .when_some(search_bar, |this, search_bar| this.child(search_bar))
     }
 }

@@ -2204,6 +2204,154 @@ pub(crate) fn agent_panel_text(language: UiLanguage, key: &str) -> &'static str 
     }
 }
 
+/// Local-history management labels for Agent session context menus.
+pub(crate) fn agent_session_menu_text(language: UiLanguage, key: &str) -> &'static str {
+    use UiLanguage::*;
+    match (language, key) {
+        (ChineseSimplified, "open") => "打开",
+        (ChineseSimplified, "rename") => "重命名",
+        (ChineseSimplified, "pin") => "固定",
+        (ChineseSimplified, "unpin") => "取消固定",
+        (ChineseSimplified, "archive") => "移至归档",
+        (ChineseSimplified, "unarchive") => "取消归档",
+        (ChineseSimplified, "archived") => "已归档",
+        (ChineseSimplified, "delete") => "删除本地记录…",
+        (ChineseSimplified, "delete_title") => "删除本地会话记录？",
+        (ChineseSimplified, "delete_message") => {
+            "这只会删除 Moeka 的本地历史记录，不会删除 ACP 服务端会话。"
+        }
+        (ChineseTraditional, "open") => "開啟",
+        (ChineseTraditional, "rename") => "重新命名",
+        (ChineseTraditional, "pin") => "釘選",
+        (ChineseTraditional, "unpin") => "取消釘選",
+        (ChineseTraditional, "archive") => "移至封存",
+        (ChineseTraditional, "unarchive") => "取消封存",
+        (ChineseTraditional, "archived") => "已封存",
+        (ChineseTraditional, "delete") => "刪除本機記錄…",
+        (ChineseTraditional, "delete_title") => "刪除本機工作階段記錄？",
+        (ChineseTraditional, "delete_message") => {
+            "只會刪除 Moeka 的本機歷史，不會刪除 ACP 伺服器工作階段。"
+        }
+        (Japanese, "open") => "開く",
+        (Japanese, "rename") => "名前を変更",
+        (Japanese, "pin") => "固定",
+        (Japanese, "unpin") => "固定を解除",
+        (Japanese, "archive") => "アーカイブ",
+        (Japanese, "unarchive") => "アーカイブを解除",
+        (Japanese, "archived") => "アーカイブ済み",
+        (Japanese, "delete") => "ローカル記録を削除…",
+        (Japanese, "delete_title") => "ローカルセッション記録を削除しますか？",
+        (Japanese, "delete_message") => {
+            "Moeka のローカル履歴のみ削除し、ACP サーバーのセッションは削除しません。"
+        }
+        (Korean, "open") => "열기",
+        (Korean, "rename") => "이름 바꾸기",
+        (Korean, "pin") => "고정",
+        (Korean, "unpin") => "고정 해제",
+        (Korean, "archive") => "보관",
+        (Korean, "unarchive") => "보관 해제",
+        (Korean, "archived") => "보관됨",
+        (Korean, "delete") => "로컬 기록 삭제…",
+        (Korean, "delete_title") => "로컬 세션 기록을 삭제할까요?",
+        (Korean, "delete_message") => {
+            "Moeka 로컬 기록만 삭제하며 ACP 서버 세션은 삭제하지 않습니다."
+        }
+        (French, "open") => "Ouvrir",
+        (French, "rename") => "Renommer",
+        (French, "pin") => "Épingler",
+        (French, "unpin") => "Désépingler",
+        (French, "archive") => "Archiver",
+        (French, "unarchive") => "Désarchiver",
+        (French, "archived") => "Archivées",
+        (French, "delete") => "Supprimer l’historique local…",
+        (French, "delete_title") => "Supprimer la session locale ?",
+        (French, "delete_message") => {
+            "Seul l’historique local de Moeka sera supprimé, pas la session du serveur ACP."
+        }
+        (German, "open") => "Öffnen",
+        (German, "rename") => "Umbenennen",
+        (German, "pin") => "Anheften",
+        (German, "unpin") => "Lösen",
+        (German, "archive") => "Archivieren",
+        (German, "unarchive") => "Dearchivieren",
+        (German, "archived") => "Archiviert",
+        (German, "delete") => "Lokalen Eintrag löschen…",
+        (German, "delete_title") => "Lokalen Sitzungseintrag löschen?",
+        (German, "delete_message") => {
+            "Nur der lokale Moeka-Verlauf wird gelöscht, nicht die ACP-Serversitzung."
+        }
+        (Spanish, "open") => "Abrir",
+        (Spanish, "rename") => "Renombrar",
+        (Spanish, "pin") => "Fijar",
+        (Spanish, "unpin") => "Desfijar",
+        (Spanish, "archive") => "Archivar",
+        (Spanish, "unarchive") => "Desarchivar",
+        (Spanish, "archived") => "Archivadas",
+        (Spanish, "delete") => "Eliminar registro local…",
+        (Spanish, "delete_title") => "¿Eliminar el registro local?",
+        (Spanish, "delete_message") => {
+            "Solo se eliminará el historial local de Moeka, no la sesión del servidor ACP."
+        }
+        (Portuguese, "open") => "Abrir",
+        (Portuguese, "rename") => "Renomear",
+        (Portuguese, "pin") => "Fixar",
+        (Portuguese, "unpin") => "Desafixar",
+        (Portuguese, "archive") => "Arquivar",
+        (Portuguese, "unarchive") => "Desarquivar",
+        (Portuguese, "archived") => "Arquivadas",
+        (Portuguese, "delete") => "Excluir registro local…",
+        (Portuguese, "delete_title") => "Excluir registro local da sessão?",
+        (Portuguese, "delete_message") => {
+            "Apenas o histórico local do Moeka será excluído, não a sessão do servidor ACP."
+        }
+        (Russian, "open") => "Открыть",
+        (Russian, "rename") => "Переименовать",
+        (Russian, "pin") => "Закрепить",
+        (Russian, "unpin") => "Открепить",
+        (Russian, "archive") => "Архивировать",
+        (Russian, "unarchive") => "Разархивировать",
+        (Russian, "archived") => "Архив",
+        (Russian, "delete") => "Удалить локальную запись…",
+        (Russian, "delete_title") => "Удалить локальную запись сеанса?",
+        (Russian, "delete_message") => {
+            "Будет удалена только локальная история Moeka, но не сеанс на сервере ACP."
+        }
+        (Arabic, "open") => "فتح",
+        (Arabic, "rename") => "إعادة تسمية",
+        (Arabic, "pin") => "تثبيت",
+        (Arabic, "unpin") => "إلغاء التثبيت",
+        (Arabic, "archive") => "أرشفة",
+        (Arabic, "unarchive") => "إلغاء الأرشفة",
+        (Arabic, "archived") => "المؤرشفة",
+        (Arabic, "delete") => "حذف السجل المحلي…",
+        (Arabic, "delete_title") => "حذف سجل الجلسة المحلي؟",
+        (Arabic, "delete_message") => "سيُحذف سجل Moeka المحلي فقط، وليس جلسة خادم ACP.",
+        (Hindi, "open") => "खोलें",
+        (Hindi, "rename") => "नाम बदलें",
+        (Hindi, "pin") => "पिन करें",
+        (Hindi, "unpin") => "अनपिन करें",
+        (Hindi, "archive") => "संग्रहित करें",
+        (Hindi, "unarchive") => "संग्रह से हटाएँ",
+        (Hindi, "archived") => "संग्रहित",
+        (Hindi, "delete") => "स्थानीय रिकॉर्ड हटाएँ…",
+        (Hindi, "delete_title") => "स्थानीय सत्र रिकॉर्ड हटाएँ?",
+        (Hindi, "delete_message") => "केवल Moeka का स्थानीय इतिहास हटेगा, ACP सर्वर सत्र नहीं।",
+        (_, "open") => "Open",
+        (_, "rename") => "Rename",
+        (_, "pin") => "Pin",
+        (_, "unpin") => "Unpin",
+        (_, "archive") => "Archive",
+        (_, "unarchive") => "Unarchive",
+        (_, "archived") => "Archived",
+        (_, "delete") => "Delete Local Record…",
+        (_, "delete_title") => "Delete Local Session Record?",
+        (_, "delete_message") => {
+            "This only deletes Moeka’s local history; the ACP server session is not deleted."
+        }
+        _ => "",
+    }
+}
+
 pub(crate) fn move_tab_to_pane_label(language: UiLanguage, pane_number: usize) -> String {
     match language {
         UiLanguage::ChineseSimplified => format!("移动到分屏 {pane_number}"),

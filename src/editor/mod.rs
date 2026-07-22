@@ -499,6 +499,11 @@ pub(crate) enum ContextMenuKind {
         tab_id: String,
     },
     TerminalTabCreate,
+    AgentSession {
+        agent_id: String,
+        session_id: String,
+        targets: Vec<(String, String)>,
+    },
 }
 
 #[derive(Clone)]
@@ -770,6 +775,9 @@ pub(crate) enum DialogAction {
     GitDiscardEntries {
         tracked: Vec<String>,
         untracked: Vec<String>,
+    },
+    DeleteAcpSessions {
+        targets: Vec<(String, String)>,
     },
     DismissOnly,
 }
@@ -1727,10 +1735,25 @@ pub struct EditorView {
     pub(crate) stored_acp_sessions_task: Option<Task<()>>,
     pub(crate) stored_acp_sessions_epoch: u64,
     pub(crate) agent_history_scroll_handle: ScrollHandle,
+    pub(crate) pending_agent_history_scroll_top: Rc<Cell<Option<f32>>>,
     pub(crate) pending_acp_open_session: Option<acp_session_store::StoredAcpSession>,
+    /// True while the agent replays a stored session after `loadSession`;
+    /// replayed updates are suppressed (the local transcript already shows
+    /// the content).
+    pub(crate) acp_replaying_session: bool,
     pub(crate) acp_auto_connect_pending: bool,
     pub(crate) agent_history_visible: bool,
+    pub(crate) agent_history_show_archived: bool,
+    pub(crate) selected_agent_session_ids: std::collections::HashSet<(String, String)>,
+    pub(crate) agent_session_selection_anchor: Option<(String, String)>,
     pub(crate) agent_composer_expanded: bool,
+    /// User-dragged composer editor height (scaled px); `None` = auto grow.
+    pub(crate) agent_composer_custom_height: Option<f32>,
+    /// Active composer height drag: (start mouse y, start height).
+    pub(crate) agent_composer_resize_drag: Option<(f32, f32)>,
+    /// User-dragged history sub-panel width (scaled px).
+    pub(crate) agent_history_panel_custom_width: Option<f32>,
+    pub(crate) agent_history_resizing: bool,
     pub(crate) agent_popup_menu: Option<agent_panel::AgentPopupMenu>,
     pub(crate) agent_popup_anchor: Option<Bounds<Pixels>>,
     pub(crate) agent_panel_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -1741,11 +1764,16 @@ pub struct EditorView {
         Rc<std::cell::RefCell<Vec<(agent_panel::AgentPopupMenu, Bounds<Pixels>)>>>,
     pub(crate) agent_menu_query: String,
     pub(crate) agent_menu_search_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) agent_menu_scroll_handle: ScrollHandle,
+    pub(crate) agent_session_rename_target: Option<(String, String)>,
+    pub(crate) agent_session_rename_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) agent_session_rename_blur_sub: Option<gpui::Subscription>,
     pub(crate) agent_slash_selected: usize,
     pub(crate) agent_slash_filter: String,
     pub(crate) agent_transcript_editor:
         Option<gpui::Entity<markdown_editor::EmbeddedMarkdownEditor>>,
     pub(crate) agent_composer_editor: Option<gpui::Entity<markdown_editor::EmbeddedMarkdownEditor>>,
+    pub(crate) pending_agent_composer_focus: bool,
     pub(crate) info_panel_custom_width: Option<f32>,
     pub(crate) git_history_panel_custom_width: Option<f32>,
     pub(crate) outline_panel_custom_width: Option<f32>,
@@ -2381,20 +2409,34 @@ impl EditorView {
             stored_acp_sessions_task: None,
             stored_acp_sessions_epoch: 0,
             agent_history_scroll_handle: ScrollHandle::new(),
+            pending_agent_history_scroll_top: Rc::new(Cell::new(None)),
             pending_acp_open_session: None,
+            acp_replaying_session: false,
             acp_auto_connect_pending: false,
             agent_history_visible: false,
+            agent_history_show_archived: false,
+            selected_agent_session_ids: std::collections::HashSet::new(),
+            agent_session_selection_anchor: None,
             agent_composer_expanded: false,
+            agent_composer_custom_height: None,
+            agent_composer_resize_drag: None,
+            agent_history_panel_custom_width: None,
+            agent_history_resizing: false,
             agent_popup_menu: None,
             agent_popup_anchor: None,
             agent_panel_bounds: Rc::new(Cell::new(None)),
             agent_menu_trigger_bounds: Rc::new(std::cell::RefCell::new(Vec::new())),
             agent_menu_query: String::new(),
             agent_menu_search_editor: None,
+            agent_menu_scroll_handle: ScrollHandle::new(),
+            agent_session_rename_target: None,
+            agent_session_rename_editor: None,
+            agent_session_rename_blur_sub: None,
             agent_slash_selected: 0,
             agent_slash_filter: String::new(),
             agent_transcript_editor: None,
             agent_composer_editor: None,
+            pending_agent_composer_focus: false,
             info_panel_custom_width: None,
             git_history_panel_custom_width: None,
             outline_panel_custom_width: None,
@@ -3195,23 +3237,47 @@ impl EditorView {
     }
 
     pub(crate) fn utility_panel_target_width(&self) -> f32 {
-        self.utility_panel
-            .and_then(|panel| self.utility_panel_custom_width_for(panel))
-            .unwrap_or_else(|| {
-                if self.utility_panel == Some(RightUtilityPanel::Outline) {
-                    self.outline_panel_preferred_width()
+        match self.utility_panel {
+            Some(RightUtilityPanel::Agent) => {
+                let history_width = if self.agent_history_visible {
+                    self.agent_history_panel_width()
                 } else {
-                    self.scaled(self.styles.utility_panel.utility_panel_width_px)
-                }
-            })
+                    0.0
+                };
+                self.agent_chat_column_width() + history_width
+            }
+            Some(RightUtilityPanel::Outline) => self
+                .outline_panel_custom_width
+                .unwrap_or_else(|| self.outline_panel_preferred_width()),
+            Some(panel) => self
+                .utility_panel_custom_width_for(panel)
+                .unwrap_or_else(|| self.scaled(self.styles.utility_panel.utility_panel_width_px)),
+            None => self.scaled(self.styles.utility_panel.utility_panel_width_px),
+        }
+    }
+
+    /// Width of the chat column itself. The history sub-panel is always an
+    /// additive sibling, so showing or resizing it never changes this value.
+    pub(crate) fn agent_chat_column_width(&self) -> f32 {
+        let min = self.scaled(self.styles.utility_panel.utility_panel_resize_min_width_px);
+        let max = (self.last_window_width * 0.5).max(min);
+        self.agent_panel_custom_width
+            .unwrap_or_else(|| self.scaled(self.styles.utility_panel.utility_panel_width_px))
+            .clamp(min, max)
     }
 
     pub(crate) fn utility_panel_resize_bounds_for(&self, panel: RightUtilityPanel) -> (f32, f32) {
         if panel == RightUtilityPanel::Agent {
-            (
-                self.scaled(self.styles.utility_panel.utility_panel_resize_min_width_px),
-                f32::MAX,
-            )
+            let min = self.scaled(self.styles.utility_panel.utility_panel_resize_min_width_px);
+            let max = (self.last_window_width * 0.5).max(min);
+            let history_width = if self.agent_history_visible {
+                self.agent_history_panel_width()
+            } else {
+                0.0
+            };
+            // The drag reports the outer width. Keep the chat-column bounds
+            // unchanged and add the history sibling to both limits.
+            (min + history_width, max + history_width)
         } else if panel == RightUtilityPanel::Outline {
             self.outline_panel_resize_bounds()
         } else {
@@ -3237,7 +3303,23 @@ impl EditorView {
         width: Option<f32>,
     ) {
         match panel {
-            RightUtilityPanel::Agent => self.agent_panel_custom_width = width,
+            RightUtilityPanel::Agent => {
+                // The stored custom width is the CHAT column width; when the
+                // history sub-panel is open, the outer resize drag reports
+                // the full panel width, so subtract the history extra.
+                let width = width.map(|width| {
+                    let min =
+                        self.scaled(self.styles.utility_panel.utility_panel_resize_min_width_px);
+                    let max = (self.last_window_width * 0.5).max(min);
+                    let history_width = if self.agent_history_visible {
+                        self.agent_history_panel_width()
+                    } else {
+                        0.0
+                    };
+                    (width - history_width).clamp(min, max)
+                });
+                self.agent_panel_custom_width = width;
+            }
             RightUtilityPanel::Info => self.info_panel_custom_width = width,
             RightUtilityPanel::GitHistory => self.git_history_panel_custom_width = width,
             RightUtilityPanel::Outline => self.outline_panel_custom_width = width,
@@ -4166,6 +4248,9 @@ impl EditorView {
             DialogAction::GitDiscardEntries { tracked, untracked } => {
                 self.run_git_operation(GitOperation::DiscardPaths { tracked, untracked }, cx);
             }
+            DialogAction::DeleteAcpSessions { targets } => {
+                self.delete_local_acp_sessions(&targets, cx);
+            }
             DialogAction::DismissOnly => {}
         }
         cx.notify();
@@ -4260,7 +4345,8 @@ impl EditorView {
             DialogAction::DeletePath { .. }
             | DialogAction::DeletePaths { .. }
             | DialogAction::InstallUpdate { .. }
-            | DialogAction::GitDiscardEntries { .. } => {
+            | DialogAction::GitDiscardEntries { .. }
+            | DialogAction::DeleteAcpSessions { .. } => {
                 // No save action for delete
             }
             DialogAction::DismissOnly => {

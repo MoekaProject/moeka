@@ -258,6 +258,13 @@ impl EditorView {
                     .position(|range| range.start >= cursor_offset)
                     .unwrap_or(0),
             );
+            if self.embedded_editor && self.embedded_read_only {
+                let index = self.search_current_index.unwrap_or(0);
+                let range_start = self.search_matches[index].start;
+                self.cursor.offset = range_start;
+                self.cursor.anchor = range_start;
+                self.center_cursor_in_view_immediately(cx);
+            }
         }
 
         cx.notify();
@@ -309,7 +316,11 @@ impl EditorView {
         let range = &self.search_matches[index];
         self.cursor.offset = range.start;
         self.cursor.anchor = range.start;
-        self.center_cursor_in_view(cx);
+        if self.embedded_editor && self.embedded_read_only {
+            self.center_cursor_in_view_immediately(cx);
+        } else {
+            self.center_cursor_in_view(cx);
+        }
     }
 
     pub(crate) fn replace_current_match(&mut self, cx: &mut Context<Self>) {
@@ -370,13 +381,12 @@ impl EditorView {
 
     pub(crate) fn search_query_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
-        styles.text_input_height_px = self.scaled(self.styles.text_input.text_input_height_px);
+        styles.text_input_height_px = self.scaled(self.styles.search.search_input_height_px);
         styles.text_input_padding_left_px =
             self.scaled(self.styles.search.search_input_left_inset_px);
         styles.text_input_padding_right_px =
             self.scaled(self.styles.search.search_input_right_inset_px);
-        styles.text_input_font_size_px =
-            self.scaled(self.styles.text_input.text_input_font_size_px);
+        styles.text_input_font_size_px = self.scaled(self.styles.search.search_input_font_size_px);
         styles.text_input_radius_px = self.scaled(self.styles.text_input.text_input_radius_px);
         styles.text_input_cursor_width_px =
             self.scaled(self.styles.text_input.text_input_cursor_width_px);
@@ -388,13 +398,12 @@ impl EditorView {
 
     pub(crate) fn search_replace_text_input_styles(&self) -> crate::style::TextInputStyles {
         let mut styles = self.styles.text_input.clone();
-        styles.text_input_height_px = self.scaled(self.styles.text_input.text_input_height_px);
+        styles.text_input_height_px = self.scaled(self.styles.search.search_input_height_px);
         styles.text_input_padding_left_px =
             self.scaled(self.styles.text_input.text_input_padding_left_px);
         styles.text_input_padding_right_px =
             self.scaled(self.styles.text_input.text_input_padding_right_px);
-        styles.text_input_font_size_px =
-            self.scaled(self.styles.text_input.text_input_font_size_px);
+        styles.text_input_font_size_px = self.scaled(self.styles.search.search_input_font_size_px);
         styles.text_input_radius_px = self.scaled(self.styles.text_input.text_input_radius_px);
         styles.text_input_cursor_width_px =
             self.scaled(self.styles.text_input.text_input_cursor_width_px);
@@ -425,7 +434,7 @@ impl EditorView {
             String::new()
         };
 
-        let input_height = self.scaled(self.styles.text_input.text_input_height_px);
+        let input_height = self.scaled(search_styles.search_input_height_px);
         let button_size = self.scaled(search_styles.search_option_btn_size_px);
         let button_icon_size = self.scaled(search_styles.search_option_btn_icon_size_px);
         let button_radius = self.scaled(search_styles.search_option_btn_radius_px);
@@ -703,7 +712,12 @@ impl EditorView {
             .absolute()
             .top(px(self.scaled(search_styles.search_bar_offset_top_px)))
             .right(px(self.scaled(search_styles.search_bar_offset_right_px)))
-            .w(px(self.scaled(search_styles.search_bar_width_px)))
+            // Narrow hosts (agent chat transcript) shrink the bar to fit.
+            .w(px(self.scaled(search_styles.search_bar_width_px).min(
+                (self.last_viewport_width
+                    - self.scaled(search_styles.search_bar_offset_right_px) * 2.0)
+                    .max(180.0),
+            )))
             .bg(search_styles.search_bar_bg)
             .border(px(search_styles.search_bar_border_width_px))
             .border_color(search_styles.search_bar_border_color)
@@ -732,7 +746,7 @@ impl EditorView {
                         this.child(
                             div()
                                 .flex_1()
-                                .h(px(self.scaled(self.styles.text_input.text_input_height_px)))
+                                .h(px(self.scaled(search_styles.search_input_height_px)))
                                 .child(editor),
                         )
                     })
