@@ -3814,6 +3814,13 @@ impl EditorView {
                             this.sidebar_sort_mode = mode;
                             this.app_settings.set_sidebar_sort_mode(mode);
                             this.app_settings.save();
+                            if this.workspace_search_visible {
+                                this.clear_workspace_search_preview_state();
+                                this.sort_workspace_search_results();
+                                this.workspace_search_scroll_handle.scroll_to_item(0);
+                                this.workspace_search_render_limit =
+                                    super::list_viewport::SEARCH_LIST_POLICY.initial_count;
+                            }
                             this.invalidate_sidebar_items_cache();
                             this.context_menu = None;
                             cx.notify();

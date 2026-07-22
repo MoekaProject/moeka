@@ -47,9 +47,14 @@ dist-universal:
 		DMG_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-universal.dmg" \
 		VOLUME_NAME="$(APP_DISPLAY_NAME)-universal"
 
-publish:
+publish: dist
 	@if [[ ! "$(TAG)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
 		echo "Usage: make publish vX.Y.Z (run 'make dist' first)"; \
+		exit 1; \
+	fi
+	@if [[ "$(TAG)" != "v$(VERSION)" ]]; then \
+		echo "Tag/version mismatch: TAG=$(TAG), Cargo.toml version=$(VERSION)."; \
+		echo "Please bump Cargo.toml version or publish with matching tag."; \
 		exit 1; \
 	fi
 	@command -v gh >/dev/null || { echo "gh CLI is required: brew install gh && gh auth login"; exit 1; }

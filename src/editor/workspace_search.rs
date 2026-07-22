@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use gpui::{
     AnyElement, Context, CursorStyle, FontWeight, MouseButton, Window, div, prelude::*, px, svg,
@@ -34,7 +35,24 @@ fn workspace_search_status(
     }
 }
 
+fn begin_workspace_search_staging(
+    visible_results: &mut Vec<WorkspaceSearchResult>,
+    staging_results: &mut Vec<WorkspaceSearchResult>,
+) {
+    // Keep the currently painted result set until every batch for the new
+    // query is ready; only the invisible staging buffer resets here.
+    let _ = visible_results;
+    staging_results.clear();
+}
+
 impl EditorView {
+    pub(crate) fn sort_workspace_search_results(&mut self) {
+        let sort_mode = self.sidebar_sort_mode;
+        self.workspace_search_results.sort_by(|left, right| {
+            compare_workspace_search_paths(sort_mode, &left.path, &right.path)
+        });
+    }
+
     pub(crate) fn on_find_in_files(
         &mut self,
         _: &FindInFiles,
@@ -342,6 +360,7 @@ impl EditorView {
         self.clear_workspace_search_preview_state();
         if query.is_empty() {
             self.workspace_search_results.clear();
+            self.workspace_search_staging_results.clear();
             self.workspace_search_task = None;
             self.workspace_search_render_limit =
                 super::list_viewport::SEARCH_LIST_POLICY.initial_count;
@@ -355,6 +374,7 @@ impl EditorView {
         let root = self.sidebar_root.clone();
         if !root.exists() {
             self.workspace_search_results.clear();
+            self.workspace_search_staging_results.clear();
             self.workspace_search_task = None;
             self.workspace_search_render_limit =
                 super::list_viewport::SEARCH_LIST_POLICY.initial_count;
@@ -367,11 +387,12 @@ impl EditorView {
 
         self.workspace_search_epoch = self.workspace_search_epoch.wrapping_add(1);
         self.workspace_search_task = None;
-        self.workspace_search_results.clear();
+        begin_workspace_search_staging(
+            &mut self.workspace_search_results,
+            &mut self.workspace_search_staging_results,
+        );
         self.workspace_search_pending_paths.clear();
         self.workspace_search_has_more = true;
-        self.workspace_search_render_limit = super::list_viewport::SEARCH_LIST_POLICY.initial_count;
-        self.workspace_search_scroll_handle.scroll_to_item(0);
         self.ensure_workspace_search_index(cx);
         self.seed_workspace_search_paths(root, cx);
     }
@@ -525,14 +546,24 @@ impl EditorView {
                 if this.workspace_search_epoch != epoch {
                     return;
                 }
-                this.workspace_search_results.extend(batch.results);
+                this.workspace_search_staging_results.extend(batch.results);
                 this.workspace_search_pending_paths = batch.pending_paths;
                 this.workspace_search_has_more = !this.workspace_search_pending_paths.is_empty();
-                if this.workspace_search_has_more
-                    && this.workspace_search_total_row_count()
-                        < super::list_viewport::SEARCH_LIST_POLICY.initial_count
-                {
+                if this.workspace_search_has_more {
                     this.schedule_workspace_search_batch(cx);
+                } else {
+                    let mut results = std::mem::take(&mut this.workspace_search_staging_results);
+                    results.sort_by(|left, right| {
+                        compare_workspace_search_paths(
+                            this.sidebar_sort_mode,
+                            &left.path,
+                            &right.path,
+                        )
+                    });
+                    this.workspace_search_results = results;
+                    this.workspace_search_render_limit =
+                        super::list_viewport::SEARCH_LIST_POLICY.initial_count;
+                    this.workspace_search_scroll_handle.scroll_to_item(0);
                 }
                 cx.notify();
             })
@@ -820,6 +851,7 @@ impl EditorView {
             .map(|result| result.matches.len())
             .sum();
         let file_count = self.workspace_search_results.len();
+        let show_sort = !trimmed_query.is_empty() && file_count > 0;
         let status_text = match workspace_search_status(
             trimmed_query.is_empty(),
             self.workspace_search_task.is_some(),
@@ -844,12 +876,30 @@ impl EditorView {
             .px(px(self.scaled(workspace_styles.ws_search_padding_px)))
             .flex()
             .items_center()
+            .justify_between()
             .text_size(px(
                 self.scaled(workspace_styles.ws_search_summary_font_size_px)
             ))
-            .opacity(0.6)
             .text_color(workspace_styles.ws_search_summary_text_color)
-            .child(status_text)
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .opacity(0.6)
+                    .child(status_text),
+            )
+            .when(show_sort, |this| {
+                this.child(self.render_sidebar_header_action_button(
+                    "workspace-search-sort",
+                    FILETREE_SORT_SVG_PATH,
+                    crate::i18n::sidebar_action_label(self.ui_language, "sort"),
+                    None,
+                    cx,
+                    |this, event, _window, cx| {
+                        this.open_sidebar_sort_menu(event.position, cx);
+                    },
+                ))
+            })
             .into_any_element();
 
         let mut result_children: Vec<AnyElement> = Vec::new();
@@ -1125,6 +1175,92 @@ impl EditorView {
             matched,
             format!("{}{}", &line_text[end..after_end], after_suffix),
         )
+    }
+}
+
+fn compare_workspace_search_paths(
+    sort_mode: SidebarSortMode,
+    left: &std::path::Path,
+    right: &std::path::Path,
+) -> std::cmp::Ordering {
+    let file_name = |path: &std::path::Path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    };
+    match sort_mode {
+        SidebarSortMode::NameAsc => file_name(left).cmp(&file_name(right)),
+        SidebarSortMode::NameDesc => file_name(right).cmp(&file_name(left)),
+        SidebarSortMode::Type => left
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .cmp(
+                &right
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase(),
+            )
+            .then_with(|| file_name(left).cmp(&file_name(right))),
+        SidebarSortMode::CreatedDesc | SidebarSortMode::CreatedAsc => {
+            let created = |path: &std::path::Path| {
+                std::fs::metadata(path)
+                    .and_then(|meta| meta.created().or_else(|_| meta.modified()))
+                    .unwrap_or(SystemTime::UNIX_EPOCH)
+            };
+            let order = created(left).cmp(&created(right));
+            let order = if sort_mode == SidebarSortMode::CreatedDesc {
+                order.reverse()
+            } else {
+                order
+            };
+            order.then_with(|| file_name(left).cmp(&file_name(right)))
+        }
+    }
+}
+
+#[cfg(test)]
+mod atomic_search_tests {
+    use super::{begin_workspace_search_staging, compare_workspace_search_paths};
+    use crate::editor::{SidebarSortMode, WorkspaceSearchResult};
+    use std::cmp::Ordering;
+    use std::path::PathBuf;
+
+    #[test]
+    fn starting_a_new_search_preserves_visible_results() {
+        let mut visible = vec![WorkspaceSearchResult {
+            path: PathBuf::from("old.md"),
+            matches: Vec::new(),
+        }];
+        let mut staging = vec![WorkspaceSearchResult {
+            path: PathBuf::from("partial.md"),
+            matches: Vec::new(),
+        }];
+
+        begin_workspace_search_staging(&mut visible, &mut staging);
+
+        assert_eq!(visible.len(), 1);
+        assert!(staging.is_empty());
+    }
+
+    #[test]
+    fn search_file_headers_follow_sidebar_name_and_type_sorting() {
+        let alpha = PathBuf::from("z/alpha.rs");
+        let beta = PathBuf::from("a/beta.md");
+        assert_eq!(
+            compare_workspace_search_paths(SidebarSortMode::NameAsc, &alpha, &beta),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_workspace_search_paths(SidebarSortMode::NameDesc, &alpha, &beta),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_workspace_search_paths(SidebarSortMode::Type, &alpha, &beta),
+            Ordering::Greater
+        );
     }
 }
 
