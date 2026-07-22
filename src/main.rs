@@ -254,7 +254,8 @@ fn open_terminal_window(cx: &mut App) -> anyhow::Result<()> {
         configure_editor_window(window);
         let view = cx.new(|cx| {
             let mut view = EditorView::new(cx);
-            view.create_terminal_tab(editor::ChatAgentCli::Terminal, cx);
+            let launch_cli = view.app_settings.terminal_launch_cli();
+            view.create_terminal_tab(launch_cli, cx);
             view.sidebar_visible = false;
             view.sidebar_resizing = false;
             view.set_sidebar_width_immediately(0.0);
@@ -411,7 +412,6 @@ fn main() {
             KeyBinding::new("cmd-q", Quit, Some("MarkdownEditor")),
             KeyBinding::new("escape", Escape, Some("MarkdownEditor")),
             KeyBinding::new("cmd-ctrl-1", ToggleOutline, Some("MarkdownEditor")),
-            KeyBinding::new("cmd-ctrl-i", ToggleChatPanel, Some("MarkdownEditor")),
             KeyBinding::new("cmd-ctrl-t", ToggleTerminalPanel, Some("MarkdownEditor")),
             KeyBinding::new("cmd-alt-i", ToggleInfoPanel, Some("MarkdownEditor")),
             KeyBinding::new("ctrl-shift-g", ToggleGitHistory, Some("MarkdownEditor")),
@@ -456,7 +456,6 @@ fn main() {
         ]);
 
         cx.bind_keys([
-            KeyBinding::new("cmd-ctrl-i", ToggleChatPanel, Some("ChatTerminal")),
             KeyBinding::new("cmd-ctrl-t", ToggleTerminalPanel, Some("ChatTerminal")),
             KeyBinding::new("cmd-n", NewChatTab, Some("ChatTerminal")),
             KeyBinding::new("cmd-w", CloseActiveChatTab, Some("ChatTerminal")),

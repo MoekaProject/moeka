@@ -1,10 +1,3 @@
-mod acp_client;
-mod acp_client_services;
-mod acp_registry;
-mod acp_session_store;
-mod acp_transcript;
-mod agent_panel;
-mod agent_timeline;
 mod app_settings;
 mod assets;
 mod attachments;
@@ -34,7 +27,6 @@ mod input_wrap;
 mod language_detection;
 mod language_picker;
 mod list_viewport;
-mod markdown_editor;
 mod menus;
 mod notifications;
 mod outline;
@@ -500,11 +492,6 @@ pub(crate) enum ContextMenuKind {
         tab_id: String,
     },
     TerminalTabCreate,
-    AgentSession {
-        agent_id: String,
-        session_id: String,
-        targets: Vec<(String, String)>,
-    },
 }
 
 #[derive(Clone)]
@@ -761,6 +748,9 @@ pub(crate) enum DialogAction {
     CloseTabUnsaved {
         tab_id: String,
     },
+    CloseRunningTerminal {
+        tab_id: String,
+    },
     SaveAndCloseTab {
         tab_id: String,
     },
@@ -776,9 +766,6 @@ pub(crate) enum DialogAction {
     GitDiscardEntries {
         tracked: Vec<String>,
         untracked: Vec<String>,
-    },
-    DeleteAcpSessions {
-        targets: Vec<(String, String)>,
     },
     DismissOnly,
 }
@@ -1359,10 +1346,10 @@ pub struct EditorView {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) embedded_editor: bool,
     /// Layout-accurate content height recorded during element prepaint, used
-    /// by embedded containers (agent composer) so their measured height never
+    /// by embedded containers so their measured height never
     /// oscillates between estimated and shaped layouts while typing.
     pub(crate) embedded_content_height: Cell<f32>,
-    /// Read-only embedded editors (agent transcript) follow the newest content
+    /// Read-only embedded editors follow the newest content
     /// while the view rests at the bottom; scrolling up detaches, scrolling
     /// back to the bottom re-attaches.
     pub(crate) embedded_stick_to_bottom: bool,
@@ -1523,6 +1510,8 @@ pub struct EditorView {
     pub(crate) context_submenu: Option<ContextMenuKind>,
     pub(crate) context_submenu_aim: Option<ContextSubmenuAim>,
     pub(crate) context_submenu_hovered: bool,
+    pub(crate) format_heading_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    pub(crate) format_more_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) context_menu_opacity: f32,
     pub(crate) context_menu_opacity_target: f32,
     pub(crate) context_menu_opacity_epoch: usize,
@@ -1628,7 +1617,9 @@ pub struct EditorView {
         HashMap<PathBuf, Vec<sidebar_tree::SidebarDirectoryChild>>,
     pub(crate) sidebar_directory_loading: HashSet<PathBuf>,
     pub(crate) sidebar_directory_epoch: usize,
+    pub(crate) sidebar_directory_refresh_pending: bool,
     pub(crate) sidebar_scroll_handle: ScrollHandle,
+    pub(crate) pending_sidebar_scroll_top: Rc<Cell<Option<f32>>>,
     pub(crate) tab_bar_scroll_handle: ScrollHandle,
     /// FileList pane (right of the file tree): current directory and cached items.
     pub(crate) file_list_dir: PathBuf,
@@ -1639,6 +1630,7 @@ pub struct EditorView {
     pub(crate) file_list_task: Option<Task<()>>,
     pub(crate) file_list_detail_task: Option<Task<()>>,
     pub(crate) file_list_scroll_handle: ScrollHandle,
+    pub(crate) pending_file_list_scroll_top: Rc<Cell<Option<f32>>>,
     pub(crate) file_list_custom_width: Option<f32>,
     pub(crate) file_list_visible: bool,
     pub(crate) file_list_display_width: f32,
@@ -1721,70 +1713,6 @@ pub struct EditorView {
     pub(crate) branch_picker_scroll_handle: ScrollHandle,
     pub(crate) utility_panel: Option<RightUtilityPanel>,
     pub(crate) displayed_utility_panel: Option<RightUtilityPanel>,
-    pub(crate) agent_panel_custom_width: Option<f32>,
-    pub(crate) agent_registry_state: acp_registry::AgentRegistryState,
-    pub(crate) agent_registry_task: Option<Task<()>>,
-    pub(crate) agent_install_states: HashMap<String, acp_registry::AgentInstallStatus>,
-    pub(crate) agent_install_task: Option<Task<()>>,
-    pub(crate) selected_agent_id: Option<String>,
-    pub(crate) acp_panel_state: acp_client::AcpPanelState,
-    pub(crate) acp_command_tx: Option<async_channel::Sender<acp_client::AcpCommand>>,
-    pub(crate) acp_event_task: Option<Task<()>>,
-    pub(crate) acp_session_save_epoch: u64,
-    pub(crate) acp_session_save_task: Option<Task<()>>,
-    pub(crate) stored_acp_sessions: Vec<acp_session_store::StoredAcpSession>,
-    pub(crate) stored_acp_sessions_task: Option<Task<()>>,
-    pub(crate) stored_acp_sessions_epoch: u64,
-    pub(crate) agent_history_scroll_handle: ScrollHandle,
-    pub(crate) pending_agent_history_scroll_top: Rc<Cell<Option<f32>>>,
-    pub(crate) pending_acp_open_session: Option<acp_session_store::StoredAcpSession>,
-    /// True while the agent replays a stored session after `loadSession`;
-    /// replayed updates are suppressed (the local transcript already shows
-    /// the content).
-    pub(crate) acp_replaying_session: bool,
-    pub(crate) acp_auto_connect_pending: bool,
-    pub(crate) agent_history_visible: bool,
-    pub(crate) agent_history_show_archived: bool,
-    pub(crate) selected_agent_session_ids: std::collections::HashSet<(String, String)>,
-    pub(crate) agent_session_selection_anchor: Option<(String, String)>,
-    pub(crate) agent_composer_expanded: bool,
-    /// User-dragged composer editor height (scaled px); `None` = auto grow.
-    pub(crate) agent_composer_custom_height: Option<f32>,
-    /// Active composer height drag: (start mouse y, start height).
-    pub(crate) agent_composer_resize_drag: Option<(f32, f32)>,
-    /// User-dragged history sub-panel width (scaled px).
-    pub(crate) agent_history_panel_custom_width: Option<f32>,
-    pub(crate) agent_history_resizing: bool,
-    pub(crate) agent_popup_menu: Option<agent_panel::AgentPopupMenu>,
-    pub(crate) agent_popup_anchor: Option<Bounds<Pixels>>,
-    pub(crate) agent_panel_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// Window-space bounds of every popup-menu trigger button in the agent
-    /// panel, rebuilt each frame; lets the menu backdrop re-dispatch clicks
-    /// so pressing another trigger switches menus in one click.
-    pub(crate) agent_menu_trigger_bounds:
-        Rc<std::cell::RefCell<Vec<(agent_panel::AgentPopupMenu, Bounds<Pixels>)>>>,
-    pub(crate) agent_menu_query: String,
-    pub(crate) agent_menu_search_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
-    pub(crate) agent_menu_scroll_handle: ScrollHandle,
-    pub(crate) agent_session_rename_target: Option<(String, String)>,
-    pub(crate) agent_session_rename_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
-    pub(crate) agent_session_rename_blur_sub: Option<gpui::Subscription>,
-    pub(crate) agent_slash_selected: usize,
-    pub(crate) agent_slash_filter: String,
-    /// Per-entry timeline view state mirroring the ACP transcript (Markdown
-    /// editor entities for text entries plus synced lengths).
-    pub(crate) agent_timeline_items: Vec<agent_timeline::AgentTimelineItem>,
-    /// Transcript identity the timeline items were built for; a mismatch
-    /// rebuilds the whole timeline (session switch/new/clear).
-    pub(crate) agent_timeline_epoch: u64,
-    pub(crate) agent_timeline_scroll_handle: ScrollHandle,
-    /// Follow the newest content while the user stays at the bottom.
-    pub(crate) agent_timeline_stick_to_bottom: Rc<Cell<bool>>,
-    /// Explicit per-entry overrides for the collapsible thinking blocks;
-    /// unset entries default to expanded only while they stream.
-    pub(crate) agent_thought_expanded: std::collections::HashMap<usize, bool>,
-    pub(crate) agent_composer_editor: Option<gpui::Entity<markdown_editor::EmbeddedMarkdownEditor>>,
-    pub(crate) pending_agent_composer_focus: bool,
     pub(crate) info_panel_custom_width: Option<f32>,
     pub(crate) git_history_panel_custom_width: Option<f32>,
     pub(crate) outline_panel_custom_width: Option<f32>,
@@ -1945,6 +1873,7 @@ pub struct EditorView {
     pub(crate) terminal_focus_history: Vec<String>,
     /// Terminal tab that should grab keyboard focus on the next render.
     pub(crate) pending_terminal_focus: Option<String>,
+    pub(crate) pending_terminal_inputs: HashMap<String, Vec<u8>>,
     pub(crate) chat_terminal_cell_width_px: f32,
     pub(crate) chat_terminal_cell_height_px: f32,
 
@@ -1961,6 +1890,8 @@ pub struct EditorView {
         Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) settings_stepper_blur_subscriptions: Vec<gpui::Subscription>,
     pub(crate) settings_attachment_folder_editor:
+        Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) settings_terminal_command_args_editor:
         Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) font_picker_trigger_position: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) font_picker_button_bounds: std::collections::HashMap<
@@ -1980,7 +1911,6 @@ impl Drop for EditorView {
         if !self.embedded_editor {
             self.flush_recovery_files();
         }
-        self.stop_acp_agent();
         self.stop_all_terminal_sessions();
         let diagnostics = self.runtime_profile_diagnostics();
         if let Some(profiler) = self.runtime_profiler.take()
@@ -1994,14 +1924,6 @@ impl Drop for EditorView {
 impl EditorView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self::new_with_mode(cx, false, false, None)
-    }
-
-    pub(crate) fn new_embedded_markdown(
-        text: &str,
-        read_only: bool,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::new_with_mode(cx, true, read_only, Some(text))
     }
 
     fn new_with_mode(
@@ -2222,6 +2144,8 @@ impl EditorView {
             context_submenu: None,
             context_submenu_aim: None,
             context_submenu_hovered: false,
+            format_heading_trigger_bounds: Rc::new(Cell::new(None)),
+            format_more_trigger_bounds: Rc::new(Cell::new(None)),
             context_menu_opacity: 0.0,
             context_menu_opacity_target: 0.0,
             context_menu_opacity_epoch: 0,
@@ -2322,7 +2246,9 @@ impl EditorView {
             sidebar_directory_children: HashMap::new(),
             sidebar_directory_loading: HashSet::new(),
             sidebar_directory_epoch: 0,
+            sidebar_directory_refresh_pending: false,
             sidebar_scroll_handle: ScrollHandle::new(),
+            pending_sidebar_scroll_top: Rc::new(Cell::new(None)),
             tab_bar_scroll_handle: ScrollHandle::new(),
             file_list_dir: PathBuf::new(),
             file_list_items: Vec::new(),
@@ -2332,6 +2258,7 @@ impl EditorView {
             file_list_task: None,
             file_list_detail_task: None,
             file_list_scroll_handle: ScrollHandle::new(),
+            pending_file_list_scroll_top: Rc::new(Cell::new(None)),
             file_list_custom_width: app_settings.file_list_width,
             file_list_visible: app_settings.file_list_visible,
             file_list_display_width: 0.0,
@@ -2405,53 +2332,6 @@ impl EditorView {
             branch_picker_scroll_handle: ScrollHandle::new(),
             utility_panel: None,
             displayed_utility_panel: None,
-            agent_panel_custom_width: None,
-            agent_registry_state: acp_registry::AgentRegistryState::default(),
-            agent_registry_task: None,
-            agent_install_states: HashMap::new(),
-            agent_install_task: None,
-            selected_agent_id: None,
-            acp_panel_state: acp_client::AcpPanelState::default(),
-            acp_command_tx: None,
-            acp_event_task: None,
-            acp_session_save_epoch: 0,
-            acp_session_save_task: None,
-            stored_acp_sessions: Vec::new(),
-            stored_acp_sessions_task: None,
-            stored_acp_sessions_epoch: 0,
-            agent_history_scroll_handle: ScrollHandle::new(),
-            pending_agent_history_scroll_top: Rc::new(Cell::new(None)),
-            pending_acp_open_session: None,
-            acp_replaying_session: false,
-            acp_auto_connect_pending: false,
-            agent_history_visible: false,
-            agent_history_show_archived: false,
-            selected_agent_session_ids: std::collections::HashSet::new(),
-            agent_session_selection_anchor: None,
-            agent_composer_expanded: false,
-            agent_composer_custom_height: None,
-            agent_composer_resize_drag: None,
-            agent_history_panel_custom_width: None,
-            agent_history_resizing: false,
-            agent_popup_menu: None,
-            agent_popup_anchor: None,
-            agent_panel_bounds: Rc::new(Cell::new(None)),
-            agent_menu_trigger_bounds: Rc::new(std::cell::RefCell::new(Vec::new())),
-            agent_menu_query: String::new(),
-            agent_menu_search_editor: None,
-            agent_menu_scroll_handle: ScrollHandle::new(),
-            agent_session_rename_target: None,
-            agent_session_rename_editor: None,
-            agent_session_rename_blur_sub: None,
-            agent_slash_selected: 0,
-            agent_slash_filter: String::new(),
-            agent_timeline_items: Vec::new(),
-            agent_timeline_epoch: 0,
-            agent_timeline_scroll_handle: ScrollHandle::new(),
-            agent_timeline_stick_to_bottom: Rc::new(Cell::new(true)),
-            agent_thought_expanded: std::collections::HashMap::new(),
-            agent_composer_editor: None,
-            pending_agent_composer_focus: false,
             info_panel_custom_width: None,
             git_history_panel_custom_width: None,
             outline_panel_custom_width: None,
@@ -2576,6 +2456,7 @@ impl EditorView {
             terminal_tab_states: HashMap::new(),
             terminal_focus_history: Vec::new(),
             pending_terminal_focus: None,
+            pending_terminal_inputs: HashMap::new(),
             chat_terminal_cell_width_px: 0.0,
             chat_terminal_cell_height_px: 0.0,
 
@@ -2591,6 +2472,7 @@ impl EditorView {
             settings_editor_content_width_editor: None,
             settings_stepper_blur_subscriptions: Vec::new(),
             settings_attachment_folder_editor: None,
+            settings_terminal_command_args_editor: None,
             font_picker_trigger_position: None,
             font_picker_button_bounds: std::collections::HashMap::new(),
             cached_font_names: None,
@@ -2648,60 +2530,7 @@ impl EditorView {
 
     /// Global icon tooltips are hidden while any menu-like overlay is open.
     pub(crate) fn global_tooltips_suppressed(&self) -> bool {
-        self.context_menu.is_some() || self.agent_popup_menu.is_some()
-    }
-
-    pub(crate) fn set_embedded_markdown_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        if !self.embedded_editor || self.buffer.text() == text {
-            return;
-        }
-        // Streaming updates usually append: keep the shaped layout of the
-        // unchanged line prefix so content heights stay accurate and the view
-        // doesn't jitter between estimated and shaped layouts.
-        let keep_lines = {
-            let old = self.buffer.text();
-            let common = old
-                .as_bytes()
-                .iter()
-                .zip(text.as_bytes())
-                .take_while(|(a, b)| a == b)
-                .count();
-            old[..common].matches('\n').count()
-        };
-        // While the reader has scrolled away from the bottom, anchor the top
-        // visible line across the update: transcript regeneration can change
-        // content or invalidate shaped layout above the viewport, and without
-        // an anchor the same scroll offset then maps to a shifted position
-        // (visible as downward jumps while scrolling up during streaming).
-        if self.embedded_read_only
-            && !self.embedded_stick_to_bottom
-            && !self.layout_dirty
-            && self.scroll_offset > 0.5
-        {
-            let line = self.line_at_y(self.scroll_offset);
-            self.pending_click_anchor = Some(ClickScrollAnchor {
-                line,
-                rel_y_before: self.text_y_offset_for_line(line),
-                scroll_before: self.scroll_offset,
-            });
-        }
-        self.buffer = Buffer::from_text(text);
-        self.cursor.offset = self.buffer.len();
-        self.cursor.anchor = self.buffer.len();
-        self.extra_cursors.clear();
-        if self.embedded_read_only {
-            // The transcript follows the bottom via `embedded_stick_to_bottom`
-            // instead of cursor-driven scrolling.
-            self.pending_scroll_to_cursor = false;
-        } else {
-            self.pending_scroll_to_cursor = true;
-        }
-        self.reparse();
-        self.line_display_info.truncate(keep_lines);
-        self.layout_dirty = true;
-        self.invalidate_line_geometry_cache();
-        self.invalidate_indent_guide_step_cache();
-        cx.notify();
+        self.context_menu.is_some()
     }
 
     pub(crate) fn refresh_builtin_tab_titles(&mut self) {
@@ -3253,14 +3082,6 @@ impl EditorView {
 
     pub(crate) fn utility_panel_target_width(&self) -> f32 {
         match self.utility_panel {
-            Some(RightUtilityPanel::Agent) => {
-                let history_width = if self.agent_history_visible {
-                    self.agent_history_panel_width()
-                } else {
-                    0.0
-                };
-                self.agent_chat_column_width() + history_width
-            }
             Some(RightUtilityPanel::Outline) => self
                 .outline_panel_custom_width
                 .unwrap_or_else(|| self.outline_panel_preferred_width()),
@@ -3271,29 +3092,8 @@ impl EditorView {
         }
     }
 
-    /// Width of the chat column itself. The history sub-panel is always an
-    /// additive sibling, so showing or resizing it never changes this value.
-    pub(crate) fn agent_chat_column_width(&self) -> f32 {
-        let min = self.scaled(self.styles.utility_panel.utility_panel_resize_min_width_px);
-        let max = (self.last_window_width * 0.5).max(min);
-        self.agent_panel_custom_width
-            .unwrap_or_else(|| self.scaled(self.styles.utility_panel.utility_panel_width_px))
-            .clamp(min, max)
-    }
-
     pub(crate) fn utility_panel_resize_bounds_for(&self, panel: RightUtilityPanel) -> (f32, f32) {
-        if panel == RightUtilityPanel::Agent {
-            let min = self.scaled(self.styles.utility_panel.utility_panel_resize_min_width_px);
-            let max = (self.last_window_width * 0.5).max(min);
-            let history_width = if self.agent_history_visible {
-                self.agent_history_panel_width()
-            } else {
-                0.0
-            };
-            // The drag reports the outer width. Keep the chat-column bounds
-            // unchanged and add the history sibling to both limits.
-            (min + history_width, max + history_width)
-        } else if panel == RightUtilityPanel::Outline {
+        if panel == RightUtilityPanel::Outline {
             self.outline_panel_resize_bounds()
         } else {
             (
@@ -3305,7 +3105,6 @@ impl EditorView {
 
     pub(crate) fn utility_panel_custom_width_for(&self, panel: RightUtilityPanel) -> Option<f32> {
         match panel {
-            RightUtilityPanel::Agent => self.agent_panel_custom_width,
             RightUtilityPanel::Info => self.info_panel_custom_width,
             RightUtilityPanel::GitHistory => self.git_history_panel_custom_width,
             RightUtilityPanel::Outline => self.outline_panel_custom_width,
@@ -3318,23 +3117,6 @@ impl EditorView {
         width: Option<f32>,
     ) {
         match panel {
-            RightUtilityPanel::Agent => {
-                // The stored custom width is the CHAT column width; when the
-                // history sub-panel is open, the outer resize drag reports
-                // the full panel width, so subtract the history extra.
-                let width = width.map(|width| {
-                    let min =
-                        self.scaled(self.styles.utility_panel.utility_panel_resize_min_width_px);
-                    let max = (self.last_window_width * 0.5).max(min);
-                    let history_width = if self.agent_history_visible {
-                        self.agent_history_panel_width()
-                    } else {
-                        0.0
-                    };
-                    (width - history_width).clamp(min, max)
-                });
-                self.agent_panel_custom_width = width;
-            }
             RightUtilityPanel::Info => self.info_panel_custom_width = width,
             RightUtilityPanel::GitHistory => self.git_history_panel_custom_width = width,
             RightUtilityPanel::Outline => self.outline_panel_custom_width = width,
@@ -3814,10 +3596,6 @@ impl EditorView {
             let styles = self.search_menu_text_input_styles();
             editor.update(cx, |input, cx| input.set_styles(styles, cx));
         }
-        if let Some(editor) = &self.agent_menu_search_editor {
-            let styles = self.search_menu_text_input_styles();
-            editor.update(cx, |input, cx| input.set_styles(styles, cx));
-        }
         if let Some(sidebar_edit) = &self.sidebar_edit {
             let styles = self.sidebar_edit_text_input_styles();
             sidebar_edit
@@ -4248,6 +4026,9 @@ impl EditorView {
                     self.close_tab(&tab_id, cx);
                 }
             }
+            DialogAction::CloseRunningTerminal { tab_id } => {
+                self.close_tab(&tab_id, cx);
+            }
             DialogAction::SaveAndCloseTab { .. } => {
                 // Save action is handled separately via save_dialog
             }
@@ -4262,9 +4043,6 @@ impl EditorView {
             }
             DialogAction::GitDiscardEntries { tracked, untracked } => {
                 self.run_git_operation(GitOperation::DiscardPaths { tracked, untracked }, cx);
-            }
-            DialogAction::DeleteAcpSessions { targets } => {
-                self.delete_local_acp_sessions(&targets, cx);
             }
             DialogAction::DismissOnly => {}
         }
@@ -4361,7 +4139,7 @@ impl EditorView {
             | DialogAction::DeletePaths { .. }
             | DialogAction::InstallUpdate { .. }
             | DialogAction::GitDiscardEntries { .. }
-            | DialogAction::DeleteAcpSessions { .. } => {
+            | DialogAction::CloseRunningTerminal { .. } => {
                 // No save action for delete
             }
             DialogAction::DismissOnly => {
@@ -7474,14 +7252,6 @@ impl EditorView {
             *w = *w * (clamped / self.ui_scale);
         }
         self.ui_scale = clamped;
-        for embedded_editor in self
-            .agent_timeline_items
-            .iter()
-            .filter_map(|item| item.editor.clone())
-            .chain(self.agent_composer_editor.clone())
-        {
-            embedded_editor.update(cx, |editor, cx| editor.set_ui_scale(clamped, cx));
-        }
         self.sync_panel_display_state();
         self.sync_overlay_text_input_styles(cx);
         // Zooming changes the scaled font sizes, so the cached per-line layout

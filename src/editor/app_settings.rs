@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::i18n::{UiLanguage, default_language_code};
 use crate::theme::{EditorThemeMode, ThemeKind};
 
-use super::{SidebarSortMode, TerminalCursorShape, config_store};
+use super::{ChatAgentCli, SidebarSortMode, TerminalCursorShape, config_store};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AppSettings {
@@ -65,6 +65,10 @@ pub(crate) struct AppSettings {
     pub terminal_cursor_shape: String,
     #[serde(default = "default_terminal_copy_on_select")]
     pub terminal_copy_on_select: bool,
+    #[serde(default = "default_terminal_launch_command")]
+    pub terminal_launch_command: String,
+    #[serde(default = "default_terminal_command_args")]
+    pub terminal_command_args: String,
     /// User keybinding overrides: command id (see `CommandId::config_key`) to
     /// gpui keystroke string, e.g. `save: cmd-shift-s`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -179,6 +183,14 @@ fn default_terminal_copy_on_select() -> bool {
     true
 }
 
+fn default_terminal_launch_command() -> String {
+    ChatAgentCli::Terminal.settings_value().to_string()
+}
+
+fn default_terminal_command_args() -> String {
+    ChatAgentCli::Terminal.command_name().to_string()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -211,6 +223,8 @@ impl Default for AppSettings {
             attachment_folder: default_attachment_folder(),
             terminal_cursor_shape: default_terminal_cursor_shape(),
             terminal_copy_on_select: default_terminal_copy_on_select(),
+            terminal_launch_command: default_terminal_launch_command(),
+            terminal_command_args: default_terminal_command_args(),
             keybindings: std::collections::BTreeMap::new(),
         }
     }
@@ -227,6 +241,11 @@ impl AppSettings {
 
     pub(crate) fn terminal_cursor_shape(&self) -> TerminalCursorShape {
         TerminalCursorShape::from_str(&self.terminal_cursor_shape).unwrap_or_default()
+    }
+
+    pub(crate) fn terminal_launch_cli(&self) -> ChatAgentCli {
+        ChatAgentCli::from_settings_value(&self.terminal_launch_command)
+            .unwrap_or(ChatAgentCli::Terminal)
     }
 
     pub(crate) fn attachment_policy(&self) -> super::AttachmentPolicy {
@@ -475,8 +494,8 @@ pub(crate) fn theme_kind_to_string(kind: ThemeKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::AppSettings;
-    use crate::editor::TerminalCursorShape;
     use crate::editor::attachments::{AttachmentLinkSyntax, AttachmentPathStyle};
+    use crate::editor::{ChatAgentCli, TerminalCursorShape};
     use crate::theme::EditorThemeMode;
 
     #[test]
@@ -534,6 +553,30 @@ mod tests {
             ..AppSettings::default()
         };
         assert_eq!(invalid.terminal_cursor_shape(), TerminalCursorShape::Block);
+    }
+
+    #[test]
+    fn terminal_launch_command_defaults_and_rejects_unknown_values() {
+        let default_settings = AppSettings::default();
+        assert_eq!(
+            default_settings.terminal_launch_cli(),
+            ChatAgentCli::Terminal
+        );
+        assert!(!default_settings.terminal_command_args.is_empty());
+
+        for agent_cli in ChatAgentCli::all() {
+            let settings = AppSettings {
+                terminal_launch_command: agent_cli.settings_value().to_string(),
+                ..AppSettings::default()
+            };
+            assert_eq!(settings.terminal_launch_cli(), agent_cli);
+        }
+
+        let invalid = AppSettings {
+            terminal_launch_command: "unknown".to_string(),
+            ..AppSettings::default()
+        };
+        assert_eq!(invalid.terminal_launch_cli(), ChatAgentCli::Terminal);
     }
 
     #[test]

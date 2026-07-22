@@ -34,6 +34,19 @@ fn load_sidebar_directory(path: &Path, sort_mode: SidebarSortMode) -> Vec<Sideba
 }
 
 impl EditorView {
+    fn capture_file_view_scroll_positions(&self) {
+        if self.pending_sidebar_scroll_top.get().is_none() {
+            self.pending_sidebar_scroll_top.set(Some(
+                (-f32::from(self.sidebar_scroll_handle.offset().y)).max(0.0),
+            ));
+        }
+        if self.pending_file_list_scroll_top.get().is_none() {
+            self.pending_file_list_scroll_top.set(Some(
+                (-f32::from(self.file_list_scroll_handle.offset().y)).max(0.0),
+            ));
+        }
+    }
+
     pub(crate) fn sidebar_paths_require_structure_refresh(&self, paths: &[PathBuf]) -> bool {
         paths.iter().any(|path| {
             let Ok(metadata) = std::fs::metadata(path) else {
@@ -53,13 +66,67 @@ impl EditorView {
     }
 
     pub(crate) fn invalidate_sidebar_items_cache(&mut self) {
-        self.sidebar_items_dirty = true;
-        self.sidebar_directory_children.clear();
+        self.capture_file_view_scroll_positions();
+        // Preserve the rendered tree until the replacement snapshot is ready.
+        // Clearing the cache produces an empty frame and a visible scroll jump.
         self.sidebar_directory_loading.clear();
         self.sidebar_directory_epoch = self.sidebar_directory_epoch.wrapping_add(1);
+        self.sidebar_directory_refresh_pending = true;
         self.quick_open_index_root = None;
         self.quick_open_file_index.clear();
         self.file_list_dirty = true;
+    }
+
+    pub(crate) fn refresh_sidebar_directories_if_needed(&mut self, cx: &mut Context<Self>) {
+        if !self.sidebar_directory_refresh_pending {
+            return;
+        }
+        self.sidebar_directory_refresh_pending = false;
+        let mut paths = self
+            .expanded_dirs
+            .iter()
+            .filter(|path| path.starts_with(&self.sidebar_root))
+            .cloned()
+            .collect::<Vec<_>>();
+        if self.sidebar_root.exists() && !paths.contains(&self.sidebar_root) {
+            paths.push(self.sidebar_root.clone());
+        }
+        if paths.is_empty() {
+            self.pending_sidebar_scroll_top.set(None);
+            return;
+        }
+
+        let epoch = self.sidebar_directory_epoch;
+        let sort_mode = self.sidebar_sort_mode;
+        self.sidebar_directory_loading.extend(paths.iter().cloned());
+        cx.spawn(async move |this, cx| {
+            let refreshed = cx
+                .background_executor()
+                .spawn(async move {
+                    paths
+                        .into_iter()
+                        .map(|path| {
+                            let children = load_sidebar_directory(&path, sort_mode);
+                            (path, children)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.sidebar_directory_epoch != epoch {
+                    return;
+                }
+                for (path, children) in refreshed {
+                    this.sidebar_directory_loading.remove(&path);
+                    this.sidebar_directory_children.insert(path, children);
+                }
+                this.sidebar_items_dirty = true;
+                this.invalidate_sidebar_git_statuses();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(super) fn invalidate_sidebar_flattened_items(&mut self) {

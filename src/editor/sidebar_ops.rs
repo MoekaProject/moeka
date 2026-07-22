@@ -190,6 +190,10 @@ impl EditorView {
                 moved_selection.insert(reveal_path.clone());
             }
             self.reveal_path_in_sidebar(reveal_path.clone(), cx);
+            if self.file_list_effective_dir() == target_dir {
+                self.file_list_pending_reveal_path = Some(reveal_path.clone());
+                self.file_list_dirty = true;
+            }
             self.selected_sidebar_paths = moved_selection;
             self.focused_sidebar_path = Some(reveal_path.clone());
             self.sidebar_selection_anchor = Some(reveal_path);

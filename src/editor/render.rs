@@ -418,12 +418,6 @@ impl Render for EditorView {
             window.focus(&self.focus_handle(cx));
             self.pending_editor_focus = false;
         }
-        if self.pending_agent_composer_focus {
-            if let Some(composer) = self.agent_composer_editor.as_ref() {
-                composer.focus_handle(cx).focus(window);
-                self.pending_agent_composer_focus = false;
-            }
-        }
         if let Some(tab_id) = self.pending_terminal_focus.clone() {
             if self.active_terminal_tab_id().as_deref() != Some(tab_id.as_str()) {
                 self.pending_terminal_focus = None;
@@ -448,8 +442,6 @@ impl Render for EditorView {
         let resizing = self.sidebar_resizing
             || self.file_list_resizing
             || self.utility_panel_resizing
-            || self.agent_composer_resize_drag.is_some()
-            || self.agent_history_resizing
             || self.pane_resize_drag.is_some();
         let show_empty_workspace = self.panes.len() == 1 && self.tabs.is_empty();
         let ws = &self.styles.window;
@@ -719,7 +711,6 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_zoom_out))
             .on_action(cx.listener(Self::on_zoom_reset))
             .on_action(cx.listener(Self::on_toggle_sidebar))
-            .on_action(cx.listener(Self::on_toggle_chat_panel))
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_toggle_editor_left_align))
             .on_action(cx.listener(Self::on_toggle_word_wrap))
@@ -1105,8 +1096,6 @@ impl Render for EditorView {
                         Some(SplitAxis::Vertical) => CursorStyle::ResizeUpDown,
                         _ => CursorStyle::ResizeLeftRight,
                     }
-                } else if self.agent_composer_resize_drag.is_some() {
-                    CursorStyle::ResizeUpDown
                 } else {
                     CursorStyle::ResizeLeftRight
                 };
@@ -1178,10 +1167,6 @@ impl Render for EditorView {
                                 }
                                 this.set_utility_panel_width_immediately(new_size);
                                 cx.notify();
-                            } else if this.agent_composer_resize_drag.is_some() {
-                                this.update_agent_composer_resize(f32::from(event.position.y), cx);
-                            } else if this.agent_history_resizing {
-                                this.update_agent_history_resize(f32::from(event.position.x), cx);
                             }
                         }))
                         .on_mouse_up(
@@ -1189,8 +1174,6 @@ impl Render for EditorView {
                             cx.listener(|this, _, _, cx| {
                                 this.sidebar_resizing = false;
                                 this.utility_panel_resizing = false;
-                                this.agent_composer_resize_drag = None;
-                                this.agent_history_resizing = false;
                                 this.pane_resize_drag = None;
                                 this.finish_file_list_resize(cx);
                                 cx.notify();

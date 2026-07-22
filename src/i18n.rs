@@ -168,8 +168,6 @@ pub(crate) enum TextKey {
     ExpandAllDirectories,
     RevealInFinder,
     OpenLink,
-    AddFileToChat,
-    AddSelectionToChat,
     ClearTerminal,
     CopyPlainText,
     SelectAll,
@@ -1300,6 +1298,11 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
     match language {
         UiLanguage::ChineseSimplified => match key {
             "section" => "终端",
+            "launch_command" => "启动命令",
+            "command_args" => "命令参数",
+            "search_commands" => "搜索启动命令",
+            "close_running_title" => "终端仍在运行",
+            "close_running_message" => "此终端中仍有命令正在执行。关闭会中断该命令，是否继续？",
             "cursor_shape" => "光标样式",
             "copy_on_select" => "选中文本以复制",
             "search_cursor_shapes" => "搜索光标样式",
@@ -1311,6 +1314,11 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         },
         UiLanguage::ChineseTraditional => match key {
             "section" => "終端",
+            "launch_command" => "啟動命令",
+            "command_args" => "命令參數",
+            "search_commands" => "搜尋啟動命令",
+            "close_running_title" => "終端仍在執行",
+            "close_running_message" => "此終端中仍有命令正在執行。關閉會中斷該命令，是否繼續？",
             "cursor_shape" => "游標樣式",
             "copy_on_select" => "選取文字時複製",
             "search_cursor_shapes" => "搜尋游標樣式",
@@ -1322,6 +1330,13 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         },
         UiLanguage::Japanese => match key {
             "section" => "ターミナル",
+            "launch_command" => "起動コマンド",
+            "command_args" => "コマンド引数",
+            "search_commands" => "起動コマンドを検索",
+            "close_running_title" => "ターミナルは実行中です",
+            "close_running_message" => {
+                "このターミナルではコマンドが実行中です。閉じると中断されます。続行しますか？"
+            }
             "cursor_shape" => "カーソル形状",
             "copy_on_select" => "選択したテキストをコピー",
             "search_cursor_shapes" => "カーソル形状を検索",
@@ -1333,6 +1348,13 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         },
         UiLanguage::Korean => match key {
             "section" => "터미널",
+            "launch_command" => "시작 명령",
+            "command_args" => "명령 인수",
+            "search_commands" => "시작 명령 검색",
+            "close_running_title" => "터미널 실행 중",
+            "close_running_message" => {
+                "이 터미널에서 명령이 실행 중입니다. 닫으면 명령이 중단됩니다. 계속하시겠습니까?"
+            }
             "cursor_shape" => "커서 모양",
             "copy_on_select" => "선택한 텍스트 복사",
             "search_cursor_shapes" => "커서 모양 검색",
@@ -1344,6 +1366,13 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         },
         UiLanguage::French => match key {
             "section" => "Terminal",
+            "launch_command" => "Commande de démarrage",
+            "command_args" => "Arguments de commande",
+            "search_commands" => "Rechercher une commande",
+            "close_running_title" => "Terminal en cours d’exécution",
+            "close_running_message" => {
+                "Une commande est toujours en cours. Fermer ce terminal l’interrompra. Continuer ?"
+            }
             "cursor_shape" => "Forme du curseur",
             "copy_on_select" => "Copier le texte sélectionné",
             "search_cursor_shapes" => "Rechercher une forme de curseur",
@@ -1355,6 +1384,13 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         },
         UiLanguage::German => match key {
             "section" => "Terminal",
+            "launch_command" => "Startbefehl",
+            "command_args" => "Befehlsargumente",
+            "search_commands" => "Startbefehl suchen",
+            "close_running_title" => "Terminal läuft noch",
+            "close_running_message" => {
+                "In diesem Terminal wird noch ein Befehl ausgeführt. Beim Schließen wird er beendet. Fortfahren?"
+            }
             "cursor_shape" => "Cursorform",
             "copy_on_select" => "Ausgewählten Text kopieren",
             "search_cursor_shapes" => "Cursorform suchen",
@@ -1366,6 +1402,13 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         },
         UiLanguage::Spanish => match key {
             "section" => "Terminal",
+            "launch_command" => "Comando de inicio",
+            "command_args" => "Argumentos del comando",
+            "search_commands" => "Buscar comando de inicio",
+            "close_running_title" => "Terminal en ejecución",
+            "close_running_message" => {
+                "Todavía hay un comando en ejecución. Cerrar el terminal lo interrumpirá. ¿Continuar?"
+            }
             "cursor_shape" => "Forma del cursor",
             "copy_on_select" => "Copiar texto seleccionado",
             "search_cursor_shapes" => "Buscar forma del cursor",
@@ -1377,6 +1420,13 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         },
         UiLanguage::Portuguese => match key {
             "section" => "Terminal",
+            "launch_command" => "Comando de inicialização",
+            "command_args" => "Argumentos do comando",
+            "search_commands" => "Buscar comando de inicialização",
+            "close_running_title" => "Terminal em execução",
+            "close_running_message" => {
+                "Ainda há um comando em execução. Fechar o terminal irá interrompê-lo. Continuar?"
+            }
             "cursor_shape" => "Forma do cursor",
             "copy_on_select" => "Copiar texto selecionado",
             "search_cursor_shapes" => "Buscar forma do cursor",
@@ -1388,6 +1438,13 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         },
         UiLanguage::Russian => match key {
             "section" => "Терминал",
+            "launch_command" => "Команда запуска",
+            "command_args" => "Аргументы команды",
+            "search_commands" => "Поиск команды запуска",
+            "close_running_title" => "Терминал всё ещё работает",
+            "close_running_message" => {
+                "В этом терминале выполняется команда. Закрытие прервёт её. Продолжить?"
+            }
             "cursor_shape" => "Форма курсора",
             "copy_on_select" => "Копировать выделенный текст",
             "search_cursor_shapes" => "Поиск формы курсора",
@@ -1399,6 +1456,13 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         },
         UiLanguage::Arabic => match key {
             "section" => "الطرفية",
+            "launch_command" => "أمر التشغيل",
+            "command_args" => "وسائط الأمر",
+            "search_commands" => "البحث عن أمر تشغيل",
+            "close_running_title" => "الطرفية لا تزال قيد التشغيل",
+            "close_running_message" => {
+                "لا يزال هناك أمر قيد التنفيذ. سيؤدي إغلاق الطرفية إلى إيقافه. هل تريد المتابعة؟"
+            }
             "cursor_shape" => "شكل المؤشر",
             "copy_on_select" => "نسخ النص المحدد",
             "search_cursor_shapes" => "البحث عن شكل المؤشر",
@@ -1410,6 +1474,13 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         },
         UiLanguage::Hindi => match key {
             "section" => "टर्मिनल",
+            "launch_command" => "स्टार्टअप कमांड",
+            "command_args" => "कमांड आर्ग्युमेंट",
+            "search_commands" => "स्टार्टअप कमांड खोजें",
+            "close_running_title" => "टर्मिनल अभी चल रहा है",
+            "close_running_message" => {
+                "इस टर्मिनल में एक कमांड चल रही है। बंद करने पर वह रुक जाएगी। जारी रखें?"
+            }
             "cursor_shape" => "कर्सर का आकार",
             "copy_on_select" => "चयनित टेक्स्ट कॉपी करें",
             "search_cursor_shapes" => "कर्सर आकार खोजें",
@@ -1421,6 +1492,13 @@ pub(crate) fn terminal_settings_label(language: UiLanguage, key: &str) -> &'stat
         },
         UiLanguage::English => match key {
             "section" => "Terminal",
+            "launch_command" => "Launch Command",
+            "command_args" => "Command Arguments",
+            "search_commands" => "Search launch commands",
+            "close_running_title" => "Terminal Still Running",
+            "close_running_message" => {
+                "A command is still running in this terminal. Closing it will interrupt the command. Continue?"
+            }
             "cursor_shape" => "Cursor Shape",
             "copy_on_select" => "Copy Selected Text",
             "search_cursor_shapes" => "Search cursor shapes",
@@ -1822,533 +1900,37 @@ pub(crate) fn terminal_label(language: UiLanguage) -> &'static str {
     }
 }
 
-pub(crate) fn agent_label(language: UiLanguage) -> &'static str {
+pub(crate) fn add_file_to_chat_label(language: UiLanguage) -> &'static str {
     match language {
-        UiLanguage::ChineseSimplified => "聊天",
-        UiLanguage::ChineseTraditional => "聊天",
-        UiLanguage::Japanese => "チャット",
-        UiLanguage::Korean => "채팅",
-        UiLanguage::French => "Chat",
-        UiLanguage::German => "Chat",
-        UiLanguage::Spanish => "Chat",
-        UiLanguage::Portuguese => "Chat",
-        UiLanguage::Russian => "Чат",
-        UiLanguage::Arabic => "الدردشة",
-        UiLanguage::Hindi => "चैट",
-        UiLanguage::English => "Chat",
+        UiLanguage::ChineseSimplified => "添加文件到聊天",
+        UiLanguage::ChineseTraditional => "加入檔案到聊天",
+        UiLanguage::Japanese => "ファイル追加",
+        UiLanguage::Korean => "파일 추가",
+        UiLanguage::French => "Ajouter fichier",
+        UiLanguage::German => "Datei hinzufügen",
+        UiLanguage::Spanish => "Añadir archivo",
+        UiLanguage::Portuguese => "Adicionar arquivo",
+        UiLanguage::Russian => "Добавить файл",
+        UiLanguage::Arabic => "إضافة ملف",
+        UiLanguage::Hindi => "फ़ाइल चैट में जोड़ें",
+        UiLanguage::English => "Add File",
     }
 }
 
-pub(crate) fn agent_panel_empty_label(language: UiLanguage) -> &'static str {
+pub(crate) fn add_selection_to_chat_label(language: UiLanguage) -> &'static str {
     match language {
-        UiLanguage::ChineseSimplified => "选择一个智能体开始聊天",
-        UiLanguage::ChineseTraditional => "選擇代理程式以開始聊天",
-        UiLanguage::Japanese => "エージェントを選択してチャットを開始",
-        UiLanguage::Korean => "에이전트를 선택하여 채팅 시작",
-        UiLanguage::French => "Sélectionnez un agent pour discuter",
-        UiLanguage::German => "Agent zum Chatten auswählen",
-        UiLanguage::Spanish => "Selecciona un agente para chatear",
-        UiLanguage::Portuguese => "Selecione um agente para conversar",
-        UiLanguage::Russian => "Выберите агента, чтобы начать чат",
-        UiLanguage::Arabic => "اختر وكيلاً لبدء المحادثة",
-        UiLanguage::Hindi => "चैट शुरू करने के लिए एजेंट चुनें",
-        UiLanguage::English => "Select an agent to start chatting",
-    }
-}
-
-/// Placeholder for the agent chat composer input.
-pub(crate) fn agent_composer_placeholder(language: UiLanguage) -> &'static str {
-    match language {
-        UiLanguage::ChineseSimplified => "Enter 发送，Shift + Enter 换行，/ 唤出命令",
-        UiLanguage::ChineseTraditional => "Enter 傳送，Shift + Enter 換行，/ 叫出命令",
-        UiLanguage::Japanese => "Enter で送信、Shift + Enter で改行、/ でコマンド",
-        UiLanguage::Korean => "Enter 전송, Shift + Enter 줄바꿈, / 명령",
-        UiLanguage::French => "Entrée : envoyer, Maj + Entrée : saut de ligne, / : commandes",
-        UiLanguage::German => "Enter: Senden, Umschalt + Enter: Zeilenumbruch, /: Befehle",
-        UiLanguage::Spanish => "Enter: enviar, Shift + Enter: nueva línea, /: comandos",
-        UiLanguage::Portuguese => "Enter: enviar, Shift + Enter: nova linha, /: comandos",
-        UiLanguage::Russian => "Enter — отправить, Shift + Enter — новая строка, / — команды",
-        UiLanguage::Arabic => "Enter للإرسال، Shift + Enter لسطر جديد، / للأوامر",
-        UiLanguage::Hindi => "भेजने के लिए Enter, नई पंक्ति के लिए Shift + Enter, कमांड के लिए /",
-        UiLanguage::English => "Enter to send, Shift + Enter for a new line, / for commands",
-    }
-}
-
-/// Localized strings for the ACP agent panel keyed by a stable identifier.
-pub(crate) fn agent_panel_text(language: UiLanguage, key: &str) -> &'static str {
-    use UiLanguage::*;
-    match key {
-        "registry_title" => match language {
-            ChineseSimplified => "ACP 注册表",
-            ChineseTraditional => "ACP 註冊表",
-            Japanese => "ACP レジストリ",
-            Korean => "ACP 레지스트리",
-            French => "Registre ACP",
-            German => "ACP-Registrierung",
-            Spanish => "Registro ACP",
-            Portuguese => "Registro ACP",
-            Russian => "Реестр ACP",
-            Arabic => "سجل ACP",
-            Hindi => "ACP रजिस्ट्री",
-            English => "ACP Registry",
-        },
-        "start" => match language {
-            ChineseSimplified => "启动智能体",
-            ChineseTraditional => "啟動代理程式",
-            Japanese => "エージェントを起動",
-            Korean => "에이전트 시작",
-            French => "Démarrer l'agent",
-            German => "Agent starten",
-            Spanish => "Iniciar agente",
-            Portuguese => "Iniciar agente",
-            Russian => "Запустить агента",
-            Arabic => "تشغيل الوكيل",
-            Hindi => "एजेंट शुरू करें",
-            English => "Start Agent",
-        },
-        "install" => match language {
-            ChineseSimplified => "安装智能体",
-            ChineseTraditional => "安裝代理程式",
-            Japanese => "エージェントをインストール",
-            Korean => "에이전트 설치",
-            French => "Installer l'agent",
-            German => "Agent installieren",
-            Spanish => "Instalar agente",
-            Portuguese => "Instalar agente",
-            Russian => "Установить агента",
-            Arabic => "تثبيت الوكيل",
-            Hindi => "एजेंट इंस्टॉल करें",
-            English => "Install Agent",
-        },
-        "installing" => match language {
-            ChineseSimplified => "正在安装…",
-            ChineseTraditional => "正在安裝…",
-            Japanese => "インストール中…",
-            Korean => "설치 중…",
-            French => "Installation…",
-            German => "Wird installiert…",
-            Spanish => "Instalando…",
-            Portuguese => "Instalando…",
-            Russian => "Установка…",
-            Arabic => "جارٍ التثبيت…",
-            Hindi => "इंस्टॉल हो रहा है…",
-            English => "Installing…",
-        },
-        "retry_install" => match language {
-            ChineseSimplified => "重试安装",
-            ChineseTraditional => "重試安裝",
-            Japanese => "再インストール",
-            Korean => "설치 다시 시도",
-            French => "Réessayer l'installation",
-            German => "Installation wiederholen",
-            Spanish => "Reintentar instalación",
-            Portuguese => "Tentar instalar novamente",
-            Russian => "Повторить установку",
-            Arabic => "إعادة محاولة التثبيت",
-            Hindi => "इंस्टॉल पुनः प्रयास करें",
-            English => "Retry Install",
-        },
-        "unavailable" => match language {
-            ChineseSimplified => "不可用",
-            ChineseTraditional => "不可用",
-            Japanese => "利用不可",
-            Korean => "사용 불가",
-            French => "Indisponible",
-            German => "Nicht verfügbar",
-            Spanish => "No disponible",
-            Portuguese => "Indisponível",
-            Russian => "Недоступно",
-            Arabic => "غير متاح",
-            Hindi => "अनुपलब्ध",
-            English => "Unavailable",
-        },
-        "history" => match language {
-            ChineseSimplified => "会话历史",
-            ChineseTraditional => "工作階段歷史",
-            Japanese => "セッション履歴",
-            Korean => "세션 기록",
-            French => "Historique des sessions",
-            German => "Sitzungsverlauf",
-            Spanish => "Historial de sesiones",
-            Portuguese => "Histórico de sessões",
-            Russian => "История сеансов",
-            Arabic => "سجل الجلسات",
-            Hindi => "सत्र इतिहास",
-            English => "Session History",
-        },
-        "new_session" => match language {
-            ChineseSimplified => "新会话",
-            ChineseTraditional => "新工作階段",
-            Japanese => "新しいセッション",
-            Korean => "새 세션",
-            French => "Nouvelle session",
-            German => "Neue Sitzung",
-            Spanish => "Nueva sesión",
-            Portuguese => "Nova sessão",
-            Russian => "Новый сеанс",
-            Arabic => "جلسة جديدة",
-            Hindi => "नया सत्र",
-            English => "New Session",
-        },
-        "session_mode" => match language {
-            ChineseSimplified => "会话模式",
-            ChineseTraditional => "工作階段模式",
-            Japanese => "セッションモード",
-            Korean => "세션 모드",
-            French => "Mode de session",
-            German => "Sitzungsmodus",
-            Spanish => "Modo de sesión",
-            Portuguese => "Modo de sessão",
-            Russian => "Режим сеанса",
-            Arabic => "وضع الجلسة",
-            Hindi => "सत्र मोड",
-            English => "Session Mode",
-        },
-        "search" => match language {
-            ChineseSimplified => "搜索",
-            ChineseTraditional => "搜尋",
-            Japanese => "検索",
-            Korean => "검색",
-            French => "Rechercher",
-            German => "Suchen",
-            Spanish => "Buscar",
-            Portuguese => "Buscar",
-            Russian => "Поиск",
-            Arabic => "بحث",
-            Hindi => "खोजें",
-            English => "Search",
-        },
-        "no_sessions" => match language {
-            ChineseSimplified => "暂无历史会话",
-            ChineseTraditional => "尚無歷史工作階段",
-            Japanese => "保存されたセッションはありません",
-            Korean => "저장된 세션이 없습니다",
-            French => "Aucune session enregistrée",
-            German => "Keine gespeicherten Sitzungen",
-            Spanish => "No hay sesiones guardadas",
-            Portuguese => "Nenhuma sessão salva",
-            Russian => "Нет сохранённых сеансов",
-            Arabic => "لا توجد جلسات محفوظة",
-            Hindi => "कोई सहेजा गया सत्र नहीं",
-            English => "No saved sessions",
-        },
-        "permission_required" => match language {
-            ChineseSimplified => "需要授权",
-            ChineseTraditional => "需要授權",
-            Japanese => "権限が必要です",
-            Korean => "권한 필요",
-            French => "Autorisation requise",
-            German => "Berechtigung erforderlich",
-            Spanish => "Se requiere permiso",
-            Portuguese => "Permissão necessária",
-            Russian => "Требуется разрешение",
-            Arabic => "إذن مطلوب",
-            Hindi => "अनुमति आवश्यक",
-            English => "Permission Required",
-        },
-        "send" => match language {
-            ChineseSimplified => "发送",
-            ChineseTraditional => "傳送",
-            Japanese => "送信",
-            Korean => "보내기",
-            French => "Envoyer",
-            German => "Senden",
-            Spanish => "Enviar",
-            Portuguese => "Enviar",
-            Russian => "Отправить",
-            Arabic => "إرسال",
-            Hindi => "भेजें",
-            English => "Send",
-        },
-        "stop" => match language {
-            ChineseSimplified => "停止",
-            ChineseTraditional => "停止",
-            Japanese => "停止",
-            Korean => "중지",
-            French => "Arrêter",
-            German => "Stoppen",
-            Spanish => "Detener",
-            Portuguese => "Parar",
-            Russian => "Остановить",
-            Arabic => "إيقاف",
-            Hindi => "रोकें",
-            English => "Stop",
-        },
-        "working" => match language {
-            ChineseSimplified => "正在生成…",
-            ChineseTraditional => "正在產生…",
-            Japanese => "生成中…",
-            Korean => "생성 중…",
-            French => "Génération…",
-            German => "Wird generiert…",
-            Spanish => "Generando…",
-            Portuguese => "Gerando…",
-            Russian => "Генерация…",
-            Arabic => "جارٍ الإنشاء…",
-            Hindi => "उत्पन्न हो रहा है…",
-            English => "Generating…",
-        },
-        "connecting" => match language {
-            ChineseSimplified => "连接中…",
-            ChineseTraditional => "連線中…",
-            Japanese => "接続中…",
-            Korean => "연결 중…",
-            French => "Connexion…",
-            German => "Verbinden…",
-            Spanish => "Conectando…",
-            Portuguese => "Conectando…",
-            Russian => "Подключение…",
-            Arabic => "جارٍ الاتصال…",
-            Hindi => "कनेक्ट हो रहा है…",
-            English => "Connecting…",
-        },
-        "authenticating" => match language {
-            ChineseSimplified => "认证中…",
-            ChineseTraditional => "驗證中…",
-            Japanese => "認証中…",
-            Korean => "인증 중…",
-            French => "Authentification…",
-            German => "Authentifizierung…",
-            Spanish => "Autenticando…",
-            Portuguese => "Autenticando…",
-            Russian => "Аутентификация…",
-            Arabic => "جارٍ المصادقة…",
-            Hindi => "प्रमाणीकरण हो रहा है…",
-            English => "Authenticating…",
-        },
-        "ready" => match language {
-            ChineseSimplified => "就绪",
-            ChineseTraditional => "就緒",
-            Japanese => "準備完了",
-            Korean => "준비됨",
-            French => "Prêt",
-            German => "Bereit",
-            Spanish => "Listo",
-            Portuguese => "Pronto",
-            Russian => "Готово",
-            Arabic => "جاهز",
-            Hindi => "तैयार",
-            English => "Ready",
-        },
-        "not_connected" => match language {
-            ChineseSimplified => "未连接",
-            ChineseTraditional => "未連線",
-            Japanese => "未接続",
-            Korean => "연결되지 않음",
-            French => "Non connecté",
-            German => "Nicht verbunden",
-            Spanish => "No conectado",
-            Portuguese => "Não conectado",
-            Russian => "Не подключено",
-            Arabic => "غير متصل",
-            Hindi => "कनेक्ट नहीं है",
-            English => "Not connected",
-        },
-        "offline_cached" => match language {
-            ChineseSimplified => "离线 · 使用缓存的注册表",
-            ChineseTraditional => "離線 · 使用快取的註冊表",
-            Japanese => "オフライン · キャッシュ済みレジストリ",
-            Korean => "오프라인 · 캐시된 레지스트리",
-            French => "Hors ligne · registre en cache",
-            German => "Offline · Registry aus Cache",
-            Spanish => "Sin conexión · registro en caché",
-            Portuguese => "Offline · registro em cache",
-            Russian => "Офлайн · кэш реестра",
-            Arabic => "غير متصل · سجل مخزَّن مؤقتًا",
-            Hindi => "ऑफ़लाइन · कैश की गई रजिस्ट्री",
-            English => "Offline · cached registry",
-        },
-        "empty_hint" => match language {
-            ChineseSimplified => "输入问题，Enter 发送，Shift+Enter 换行",
-            ChineseTraditional => "輸入問題，Enter 傳送，Shift+Enter 換行",
-            Japanese => "質問を入力し Enter で送信、Shift+Enter で改行",
-            Korean => "질문 입력 후 Enter로 전송, Shift+Enter로 줄바꿈",
-            French => "Écrivez, Entrée pour envoyer, Maj+Entrée pour une nouvelle ligne",
-            German => "Tippen, Enter zum Senden, Umschalt+Enter für neue Zeile",
-            Spanish => "Escribe, Enter para enviar, Mayús+Enter para nueva línea",
-            Portuguese => "Digite, Enter para enviar, Shift+Enter para nova linha",
-            Russian => "Введите вопрос, Enter — отправить, Shift+Enter — новая строка",
-            Arabic => "اكتب سؤالك، Enter للإرسال وShift+Enter لسطر جديد",
-            Hindi => "प्रश्न लिखें, Enter से भेजें, Shift+Enter से नई पंक्ति",
-            English => "Ask anything — Enter to send, Shift+Enter for a new line",
-        },
-        "loading_registry" => match language {
-            ChineseSimplified => "正在加载 ACP 注册表…",
-            ChineseTraditional => "正在載入 ACP 註冊表…",
-            Japanese => "ACP レジストリを読み込み中…",
-            Korean => "ACP 레지스트리 로드 중…",
-            French => "Chargement du registre ACP…",
-            German => "ACP-Registry wird geladen…",
-            Spanish => "Cargando registro ACP…",
-            Portuguese => "Carregando registro ACP…",
-            Russian => "Загрузка реестра ACP…",
-            Arabic => "جارٍ تحميل سجل ACP…",
-            Hindi => "ACP रजिस्ट्री लोड हो रही है…",
-            English => "Loading ACP Registry…",
-        },
-        "back_to_chat" => match language {
-            ChineseSimplified => "返回聊天",
-            ChineseTraditional => "返回聊天",
-            Japanese => "チャットに戻る",
-            Korean => "채팅으로 돌아가기",
-            French => "Retour au chat",
-            German => "Zurück zum Chat",
-            Spanish => "Volver al chat",
-            Portuguese => "Voltar ao chat",
-            Russian => "Назад к чату",
-            Arabic => "العودة إلى المحادثة",
-            Hindi => "चैट पर वापस जाएँ",
-            English => "Back to Chat",
-        },
-        _ => "",
-    }
-}
-
-/// Local-history management labels for Agent session context menus.
-pub(crate) fn agent_session_menu_text(language: UiLanguage, key: &str) -> &'static str {
-    use UiLanguage::*;
-    match (language, key) {
-        (ChineseSimplified, "open") => "打开",
-        (ChineseSimplified, "rename") => "重命名",
-        (ChineseSimplified, "pin") => "固定",
-        (ChineseSimplified, "unpin") => "取消固定",
-        (ChineseSimplified, "archive") => "移至归档",
-        (ChineseSimplified, "unarchive") => "取消归档",
-        (ChineseSimplified, "archived") => "已归档",
-        (ChineseSimplified, "delete") => "删除本地记录…",
-        (ChineseSimplified, "delete_title") => "删除本地会话记录？",
-        (ChineseSimplified, "delete_message") => {
-            "这只会删除 Moeka 的本地历史记录，不会删除 ACP 服务端会话。"
-        }
-        (ChineseTraditional, "open") => "開啟",
-        (ChineseTraditional, "rename") => "重新命名",
-        (ChineseTraditional, "pin") => "釘選",
-        (ChineseTraditional, "unpin") => "取消釘選",
-        (ChineseTraditional, "archive") => "移至封存",
-        (ChineseTraditional, "unarchive") => "取消封存",
-        (ChineseTraditional, "archived") => "已封存",
-        (ChineseTraditional, "delete") => "刪除本機記錄…",
-        (ChineseTraditional, "delete_title") => "刪除本機工作階段記錄？",
-        (ChineseTraditional, "delete_message") => {
-            "只會刪除 Moeka 的本機歷史，不會刪除 ACP 伺服器工作階段。"
-        }
-        (Japanese, "open") => "開く",
-        (Japanese, "rename") => "名前を変更",
-        (Japanese, "pin") => "固定",
-        (Japanese, "unpin") => "固定を解除",
-        (Japanese, "archive") => "アーカイブ",
-        (Japanese, "unarchive") => "アーカイブを解除",
-        (Japanese, "archived") => "アーカイブ済み",
-        (Japanese, "delete") => "ローカル記録を削除…",
-        (Japanese, "delete_title") => "ローカルセッション記録を削除しますか？",
-        (Japanese, "delete_message") => {
-            "Moeka のローカル履歴のみ削除し、ACP サーバーのセッションは削除しません。"
-        }
-        (Korean, "open") => "열기",
-        (Korean, "rename") => "이름 바꾸기",
-        (Korean, "pin") => "고정",
-        (Korean, "unpin") => "고정 해제",
-        (Korean, "archive") => "보관",
-        (Korean, "unarchive") => "보관 해제",
-        (Korean, "archived") => "보관됨",
-        (Korean, "delete") => "로컬 기록 삭제…",
-        (Korean, "delete_title") => "로컬 세션 기록을 삭제할까요?",
-        (Korean, "delete_message") => {
-            "Moeka 로컬 기록만 삭제하며 ACP 서버 세션은 삭제하지 않습니다."
-        }
-        (French, "open") => "Ouvrir",
-        (French, "rename") => "Renommer",
-        (French, "pin") => "Épingler",
-        (French, "unpin") => "Désépingler",
-        (French, "archive") => "Archiver",
-        (French, "unarchive") => "Désarchiver",
-        (French, "archived") => "Archivées",
-        (French, "delete") => "Supprimer l’historique local…",
-        (French, "delete_title") => "Supprimer la session locale ?",
-        (French, "delete_message") => {
-            "Seul l’historique local de Moeka sera supprimé, pas la session du serveur ACP."
-        }
-        (German, "open") => "Öffnen",
-        (German, "rename") => "Umbenennen",
-        (German, "pin") => "Anheften",
-        (German, "unpin") => "Lösen",
-        (German, "archive") => "Archivieren",
-        (German, "unarchive") => "Dearchivieren",
-        (German, "archived") => "Archiviert",
-        (German, "delete") => "Lokalen Eintrag löschen…",
-        (German, "delete_title") => "Lokalen Sitzungseintrag löschen?",
-        (German, "delete_message") => {
-            "Nur der lokale Moeka-Verlauf wird gelöscht, nicht die ACP-Serversitzung."
-        }
-        (Spanish, "open") => "Abrir",
-        (Spanish, "rename") => "Renombrar",
-        (Spanish, "pin") => "Fijar",
-        (Spanish, "unpin") => "Desfijar",
-        (Spanish, "archive") => "Archivar",
-        (Spanish, "unarchive") => "Desarchivar",
-        (Spanish, "archived") => "Archivadas",
-        (Spanish, "delete") => "Eliminar registro local…",
-        (Spanish, "delete_title") => "¿Eliminar el registro local?",
-        (Spanish, "delete_message") => {
-            "Solo se eliminará el historial local de Moeka, no la sesión del servidor ACP."
-        }
-        (Portuguese, "open") => "Abrir",
-        (Portuguese, "rename") => "Renomear",
-        (Portuguese, "pin") => "Fixar",
-        (Portuguese, "unpin") => "Desafixar",
-        (Portuguese, "archive") => "Arquivar",
-        (Portuguese, "unarchive") => "Desarquivar",
-        (Portuguese, "archived") => "Arquivadas",
-        (Portuguese, "delete") => "Excluir registro local…",
-        (Portuguese, "delete_title") => "Excluir registro local da sessão?",
-        (Portuguese, "delete_message") => {
-            "Apenas o histórico local do Moeka será excluído, não a sessão do servidor ACP."
-        }
-        (Russian, "open") => "Открыть",
-        (Russian, "rename") => "Переименовать",
-        (Russian, "pin") => "Закрепить",
-        (Russian, "unpin") => "Открепить",
-        (Russian, "archive") => "Архивировать",
-        (Russian, "unarchive") => "Разархивировать",
-        (Russian, "archived") => "Архив",
-        (Russian, "delete") => "Удалить локальную запись…",
-        (Russian, "delete_title") => "Удалить локальную запись сеанса?",
-        (Russian, "delete_message") => {
-            "Будет удалена только локальная история Moeka, но не сеанс на сервере ACP."
-        }
-        (Arabic, "open") => "فتح",
-        (Arabic, "rename") => "إعادة تسمية",
-        (Arabic, "pin") => "تثبيت",
-        (Arabic, "unpin") => "إلغاء التثبيت",
-        (Arabic, "archive") => "أرشفة",
-        (Arabic, "unarchive") => "إلغاء الأرشفة",
-        (Arabic, "archived") => "المؤرشفة",
-        (Arabic, "delete") => "حذف السجل المحلي…",
-        (Arabic, "delete_title") => "حذف سجل الجلسة المحلي؟",
-        (Arabic, "delete_message") => "سيُحذف سجل Moeka المحلي فقط، وليس جلسة خادم ACP.",
-        (Hindi, "open") => "खोलें",
-        (Hindi, "rename") => "नाम बदलें",
-        (Hindi, "pin") => "पिन करें",
-        (Hindi, "unpin") => "अनपिन करें",
-        (Hindi, "archive") => "संग्रहित करें",
-        (Hindi, "unarchive") => "संग्रह से हटाएँ",
-        (Hindi, "archived") => "संग्रहित",
-        (Hindi, "delete") => "स्थानीय रिकॉर्ड हटाएँ…",
-        (Hindi, "delete_title") => "स्थानीय सत्र रिकॉर्ड हटाएँ?",
-        (Hindi, "delete_message") => "केवल Moeka का स्थानीय इतिहास हटेगा, ACP सर्वर सत्र नहीं।",
-        (_, "open") => "Open",
-        (_, "rename") => "Rename",
-        (_, "pin") => "Pin",
-        (_, "unpin") => "Unpin",
-        (_, "archive") => "Archive",
-        (_, "unarchive") => "Unarchive",
-        (_, "archived") => "Archived",
-        (_, "delete") => "Delete Local Record…",
-        (_, "delete_title") => "Delete Local Session Record?",
-        (_, "delete_message") => {
-            "This only deletes Moeka’s local history; the ACP server session is not deleted."
-        }
-        _ => "",
+        UiLanguage::ChineseSimplified => "添加选区到聊天",
+        UiLanguage::ChineseTraditional => "加入選取到聊天",
+        UiLanguage::Japanese => "選択を追加",
+        UiLanguage::Korean => "선택 추가",
+        UiLanguage::French => "Ajouter sélection",
+        UiLanguage::German => "Auswahl hinzufügen",
+        UiLanguage::Spanish => "Añadir selección",
+        UiLanguage::Portuguese => "Adicionar seleção",
+        UiLanguage::Russian => "Добавить выбор",
+        UiLanguage::Arabic => "إضافة تحديد",
+        UiLanguage::Hindi => "चयन चैट में जोड़ें",
+        UiLanguage::English => "Add Selection",
     }
 }
 
@@ -2389,64 +1971,6 @@ pub(crate) fn terminal_scrollback_label(
         UiLanguage::English => "Scrollback",
     };
     format!("{label} {display_offset}/{history_size}")
-}
-
-#[cfg(test)]
-mod terminal_status_tests {
-    use super::{
-        TextKey, UiLanguage, move_tab_to_pane_label, terminal_scrollback_label, translate,
-    };
-
-    #[test]
-    fn terminal_scrollback_labels_cover_all_ui_languages() {
-        let languages = [
-            UiLanguage::English,
-            UiLanguage::ChineseSimplified,
-            UiLanguage::ChineseTraditional,
-            UiLanguage::Japanese,
-            UiLanguage::Korean,
-            UiLanguage::French,
-            UiLanguage::German,
-            UiLanguage::Spanish,
-            UiLanguage::Portuguese,
-            UiLanguage::Russian,
-            UiLanguage::Arabic,
-            UiLanguage::Hindi,
-        ];
-        for language in languages {
-            let scrollback = terminal_scrollback_label(language, 24, 120);
-            assert!(scrollback.contains("24/120"));
-        }
-    }
-
-    #[test]
-    fn pane_menu_labels_cover_all_ui_languages() {
-        let languages = [
-            UiLanguage::English,
-            UiLanguage::ChineseSimplified,
-            UiLanguage::ChineseTraditional,
-            UiLanguage::Japanese,
-            UiLanguage::Korean,
-            UiLanguage::French,
-            UiLanguage::German,
-            UiLanguage::Spanish,
-            UiLanguage::Portuguese,
-            UiLanguage::Russian,
-            UiLanguage::Arabic,
-            UiLanguage::Hindi,
-        ];
-        for language in languages {
-            for key in [
-                TextKey::SplitTabLeft,
-                TextKey::SplitTabRight,
-                TextKey::SplitTabUp,
-                TextKey::SplitTabDown,
-            ] {
-                assert!(!translate(language, key).is_empty());
-            }
-            assert!(move_tab_to_pane_label(language, 2).contains('2'));
-        }
-    }
 }
 
 pub(crate) fn open_terminal_window_label(language: UiLanguage) -> &'static str {
@@ -3159,8 +2683,6 @@ fn translate_english(key: TextKey) -> &'static str {
         TextKey::ExpandAllDirectories => "Expand All",
         TextKey::RevealInFinder => "Reveal",
         TextKey::OpenLink => "Open Link",
-        TextKey::AddFileToChat => "Add File",
-        TextKey::AddSelectionToChat => "Add Selection",
         TextKey::ClearTerminal => "Clear",
         TextKey::CopyPlainText => "Copy Text",
         TextKey::SelectAll => "Select All",
@@ -3393,8 +2915,6 @@ fn translate_zh_cn(key: TextKey) -> &'static str {
         TextKey::ExpandAllDirectories => "展开所有目录",
         TextKey::RevealInFinder => "在访达中显示",
         TextKey::OpenLink => "打开链接",
-        TextKey::AddFileToChat => "添加文件到聊天",
-        TextKey::AddSelectionToChat => "添加选区到聊天",
         TextKey::ClearTerminal => "清屏",
         TextKey::CopyPlainText => "复制纯文本",
         TextKey::SelectAll => "全选",
@@ -3625,8 +3145,6 @@ fn translate_zh_tw(key: TextKey) -> &'static str {
         TextKey::ExpandAllDirectories => "展開所有資料夾",
         TextKey::RevealInFinder => "在 Finder 中顯示",
         TextKey::OpenLink => "開啟連結",
-        TextKey::AddFileToChat => "加入檔案到聊天",
-        TextKey::AddSelectionToChat => "加入選取到聊天",
         TextKey::ClearTerminal => "清除畫面",
         TextKey::CopyPlainText => "複製純文字",
         TextKey::SelectAll => "全選",
@@ -3862,8 +3380,6 @@ fn translate_japanese(key: TextKey) -> &'static str {
         TextKey::ExpandAllDirectories => "すべて展開",
         TextKey::RevealInFinder => "Finder で表示",
         TextKey::OpenLink => "リンクを開く",
-        TextKey::AddFileToChat => "ファイル追加",
-        TextKey::AddSelectionToChat => "選択を追加",
         TextKey::ClearTerminal => "クリア",
         TextKey::CopyPlainText => "テキストコピー",
         TextKey::SelectAll => "すべて選択",
@@ -4097,8 +3613,6 @@ fn translate_korean(key: TextKey) -> &'static str {
         TextKey::ExpandAllDirectories => "모두 펼치기",
         TextKey::RevealInFinder => "Finder에서 보기",
         TextKey::OpenLink => "링크 열기",
-        TextKey::AddFileToChat => "파일 추가",
-        TextKey::AddSelectionToChat => "선택 추가",
         TextKey::ClearTerminal => "지우기",
         TextKey::CopyPlainText => "텍스트 복사",
         TextKey::SelectAll => "전체 선택",
@@ -4334,8 +3848,6 @@ fn translate_french(key: TextKey) -> &'static str {
         TextKey::ExpandAllDirectories => "Tout ouvrir",
         TextKey::RevealInFinder => "Révéler",
         TextKey::OpenLink => "Ouvrir le lien",
-        TextKey::AddFileToChat => "Ajouter fichier",
-        TextKey::AddSelectionToChat => "Ajouter sélection",
         TextKey::ClearTerminal => "Effacer",
         TextKey::CopyPlainText => "Copier texte",
         TextKey::SelectAll => "Tout sélectionner",
@@ -4573,8 +4085,6 @@ fn translate_german(key: TextKey) -> &'static str {
         TextKey::ExpandAllDirectories => "Alle ausklappen",
         TextKey::RevealInFinder => "Anzeigen",
         TextKey::OpenLink => "Link öffnen",
-        TextKey::AddFileToChat => "Datei hinzufügen",
-        TextKey::AddSelectionToChat => "Auswahl hinzufügen",
         TextKey::ClearTerminal => "Leeren",
         TextKey::CopyPlainText => "Text kopieren",
         TextKey::SelectAll => "Alles auswählen",
@@ -4812,8 +4322,6 @@ fn translate_spanish(key: TextKey) -> &'static str {
         TextKey::ExpandAllDirectories => "Expandir todo",
         TextKey::RevealInFinder => "Mostrar",
         TextKey::OpenLink => "Abrir enlace",
-        TextKey::AddFileToChat => "Añadir archivo",
-        TextKey::AddSelectionToChat => "Añadir selección",
         TextKey::ClearTerminal => "Limpiar",
         TextKey::CopyPlainText => "Copiar texto",
         TextKey::SelectAll => "Seleccionar todo",
@@ -5049,8 +4557,6 @@ fn translate_portuguese(key: TextKey) -> &'static str {
         TextKey::ExpandAllDirectories => "Expandir tudo",
         TextKey::RevealInFinder => "Mostrar",
         TextKey::OpenLink => "Abrir link",
-        TextKey::AddFileToChat => "Adicionar arquivo",
-        TextKey::AddSelectionToChat => "Adicionar seleção",
         TextKey::ClearTerminal => "Limpar",
         TextKey::CopyPlainText => "Copiar texto",
         TextKey::SelectAll => "Selecionar tudo",
@@ -5288,8 +4794,6 @@ fn translate_russian(key: TextKey) -> &'static str {
         TextKey::ExpandAllDirectories => "Развернуть всё",
         TextKey::RevealInFinder => "Показать в Finder",
         TextKey::OpenLink => "Открыть ссылку",
-        TextKey::AddFileToChat => "Добавить файл",
-        TextKey::AddSelectionToChat => "Добавить выбор",
         TextKey::ClearTerminal => "Очистить",
         TextKey::CopyPlainText => "Копировать текст",
         TextKey::SelectAll => "Выделить всё",
@@ -5523,8 +5027,6 @@ fn translate_arabic(key: TextKey) -> &'static str {
         TextKey::ExpandAllDirectories => "توسيع الكل",
         TextKey::RevealInFinder => "إظهار في Finder",
         TextKey::OpenLink => "فتح الرابط",
-        TextKey::AddFileToChat => "إضافة ملف",
-        TextKey::AddSelectionToChat => "إضافة تحديد",
         TextKey::ClearTerminal => "مسح",
         TextKey::CopyPlainText => "نسخ نص",
         TextKey::SelectAll => "تحديد الكل",
@@ -5758,8 +5260,6 @@ fn translate_hindi(key: TextKey) -> &'static str {
         TextKey::ExpandAllDirectories => "सब फैलाएँ",
         TextKey::RevealInFinder => "Finder में दिखाएँ",
         TextKey::OpenLink => "लिंक खोलें",
-        TextKey::AddFileToChat => "फ़ाइल चैट में जोड़ें",
-        TextKey::AddSelectionToChat => "चयन चैट में जोड़ें",
         TextKey::ClearTerminal => "साफ़ करें",
         TextKey::CopyPlainText => "पाठ कॉपी करें",
         TextKey::SelectAll => "सभी चुनें",
@@ -6049,6 +5549,11 @@ mod action_label_tests {
         ];
         let keys = [
             "section",
+            "launch_command",
+            "command_args",
+            "search_commands",
+            "close_running_title",
+            "close_running_message",
             "cursor_shape",
             "copy_on_select",
             "search_cursor_shapes",

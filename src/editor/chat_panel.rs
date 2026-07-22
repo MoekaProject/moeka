@@ -95,6 +95,9 @@ pub(crate) struct ChatTerminalSession {
     pub(crate) poll_task: Option<Task<()>>,
     rows: u16,
     cols: u16,
+    /// Dedicated agent/custom commands are meaningful long-running work even
+    /// when their process is the PTY's direct child.
+    warn_on_close: bool,
 }
 
 /// Per-terminal-tab runtime state, keyed by [`OpenTab::id`] in
@@ -1004,8 +1007,14 @@ impl Default for ChatTerminalSnapshot {
 }
 
 impl ChatAgentCli {
-    pub(crate) fn all() -> [Self; 1] {
-        [Self::Terminal]
+    pub(crate) fn all() -> [Self; 5] {
+        [
+            Self::Terminal,
+            Self::OpenAICodex,
+            Self::GithubCopilot,
+            Self::ClaudeCode,
+            Self::GeminiCli,
+        ]
     }
 
     pub(crate) fn label(self) -> &'static str {
@@ -1028,6 +1037,22 @@ impl ChatAgentCli {
         }
     }
 
+    pub(crate) fn settings_value(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::GithubCopilot => "github_copilot",
+            Self::OpenAICodex => "openai_codex",
+            Self::ClaudeCode => "claude_code",
+            Self::GeminiCli => "gemini_cli",
+        }
+    }
+
+    pub(crate) fn from_settings_value(value: &str) -> Option<Self> {
+        Self::all()
+            .into_iter()
+            .find(|agent_cli| agent_cli.settings_value() == value)
+    }
+
     fn install_url(self) -> Option<&'static str> {
         match self {
             Self::GithubCopilot => {
@@ -1040,7 +1065,13 @@ impl ChatAgentCli {
         }
     }
 
-    pub(crate) fn build_command(self) -> CommandBuilder {
+    pub(crate) fn build_command(self, custom_command_line: Option<&str>) -> CommandBuilder {
+        if let Some(command_line) = custom_command_line.filter(|line| !line.trim().is_empty()) {
+            let mut command = CommandBuilder::new(chat_terminal_default_shell_program());
+            command.arg("-lc");
+            command.arg(format!("exec {}", command_line.trim()));
+            return command;
+        }
         match self {
             Self::Terminal => CommandBuilder::new(chat_terminal_default_shell_program()),
             _ => CommandBuilder::new(self.command_name()),
@@ -1069,12 +1100,14 @@ impl ChatTerminalSession {
             poll_task: None,
             rows: CHAT_PANEL_DEFAULT_ROWS,
             cols: CHAT_PANEL_DEFAULT_COLS,
+            warn_on_close: false,
         }
     }
 
     fn launch(
         cwd: PathBuf,
         agent_cli: ChatAgentCli,
+        custom_command_line: Option<&str>,
         cursor_shape: TerminalCursorShape,
     ) -> anyhow::Result<Self> {
         let pty_system = native_pty_system();
@@ -1085,12 +1118,18 @@ impl ChatTerminalSession {
             pixel_height: 0,
         })?;
 
-        let initial_process_name = match agent_cli {
-            ChatAgentCli::Terminal => chat_terminal_default_shell_program(),
-            _ => agent_cli.command_name().to_string(),
-        };
+        let initial_process_name = custom_command_line
+            .and_then(|line| line.split_whitespace().next())
+            .map(str::to_string)
+            .unwrap_or_else(|| match agent_cli {
+                ChatAgentCli::Terminal => chat_terminal_default_shell_program(),
+                _ => agent_cli.command_name().to_string(),
+            });
         let initial_title = terminal_process_title(&cwd, &initial_process_name, &[]);
-        let mut command = agent_cli.build_command();
+        let shell_program = chat_terminal_default_shell_program();
+        let warn_on_close = agent_cli != ChatAgentCli::Terminal
+            || custom_command_line.is_some_and(|line| line.trim() != shell_program);
+        let mut command = agent_cli.build_command(custom_command_line);
         command.cwd(cwd.clone());
         configure_chat_terminal_environment(&mut command);
 
@@ -1160,9 +1199,39 @@ impl ChatTerminalSession {
             poll_task: None,
             rows: CHAT_PANEL_DEFAULT_ROWS,
             cols: CHAT_PANEL_DEFAULT_COLS,
+            warn_on_close,
         };
         session.refresh_snapshot();
         Ok(session)
+    }
+
+    fn has_running_command(&self) -> bool {
+        if !matches!(
+            self.status,
+            ChatTerminalStatus::Launching | ChatTerminalStatus::Running
+        ) {
+            return false;
+        }
+        if self.warn_on_close {
+            return true;
+        }
+        let Some(runtime) = self.runtime.as_ref() else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            let foreground = runtime
+                .master
+                .process_group_leader()
+                .and_then(|pid| (pid > 0).then_some(pid as u32));
+            foreground
+                .zip(runtime.child.process_id())
+                .is_some_and(|(foreground, shell)| foreground != shell)
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
     fn refresh_dynamic_title(&mut self) -> Option<String> {
@@ -2208,6 +2277,11 @@ impl EditorView {
             .and_then(|state| state.session.as_ref())
     }
 
+    pub(crate) fn terminal_tab_has_running_command(&self, tab_id: &str) -> bool {
+        self.terminal_session(tab_id)
+            .is_some_and(ChatTerminalSession::has_running_command)
+    }
+
     pub(crate) fn terminal_session_mut(
         &mut self,
         tab_id: &str,
@@ -2268,6 +2342,7 @@ impl EditorView {
         if self.pending_terminal_focus.as_deref() == Some(tab_id) {
             self.pending_terminal_focus = None;
         }
+        self.pending_terminal_inputs.remove(tab_id);
         self.terminal_focus_history.retain(|id| id != tab_id);
         if let Some(mut state) = self.terminal_tab_states.remove(tab_id)
             && let Some(session) = state.session.as_mut()
@@ -2291,8 +2366,17 @@ impl EditorView {
             ));
         }
 
-        match ChatTerminalSession::launch(cwd, agent_cli, self.app_settings.terminal_cursor_shape())
-        {
+        let configured_command = self.app_settings.terminal_command_args.trim();
+        let custom_command_line = (agent_cli == self.app_settings.terminal_launch_cli()
+            && !configured_command.is_empty()
+            && configured_command != agent_cli.command_name())
+        .then_some(configured_command);
+        match ChatTerminalSession::launch(
+            cwd,
+            agent_cli,
+            custom_command_line,
+            self.app_settings.terminal_cursor_shape(),
+        ) {
             Ok(mut session) => {
                 session.status = ChatTerminalStatus::Running;
                 session
@@ -2406,10 +2490,12 @@ impl EditorView {
             .map(|tab| tab.id.clone())
             .collect();
         if terminal_ids.is_empty() {
-            self.open_terminal_tab_in_right_split(ChatAgentCli::Terminal, cx);
+            self.open_terminal_tab_in_right_split(self.app_settings.terminal_launch_cli(), cx);
         } else {
-            for tab_id in terminal_ids {
-                self.close_tab(&tab_id, cx);
+            self.pending_close_tab_ids = terminal_ids;
+            if let Some(tab_id) = self.pending_close_tab_ids.first().cloned() {
+                self.pending_close_tab_ids.remove(0);
+                self.request_close_tab(&tab_id, cx);
             }
         }
     }
@@ -2462,37 +2548,22 @@ impl EditorView {
         self.terminal_focus_history.push(tab_id.to_string());
     }
 
-    pub(crate) fn add_dragged_paths_to_chat(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        self.clear_sidebar_drag_state(cx);
-        self.add_paths_to_chat(paths, cx);
-    }
-
     pub(crate) fn add_path_to_chat(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        self.add_acp_resource_link(path, None, cx);
+        let Some(relative_path) = self.relative_path_for_path(path) else {
+            return;
+        };
+        self.add_reference_to_terminal(format!("@{relative_path} "), cx);
     }
 
     pub(crate) fn add_paths_to_chat(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        for path in paths {
-            self.add_acp_resource_link(path, None, cx);
+        let references = paths
+            .iter()
+            .filter_map(|path| self.relative_path_for_path(path))
+            .map(|path| format!("@{path} "))
+            .collect::<String>();
+        if !references.is_empty() {
+            self.add_reference_to_terminal(references, cx);
         }
-    }
-
-    fn chat_reference_position(&self, offset: usize) -> (usize, usize) {
-        Self::chat_reference_position_in_buffer(&self.buffer, offset)
-    }
-
-    fn chat_reference_position_in_buffer(
-        buffer: &crate::buffer::Buffer,
-        offset: usize,
-    ) -> (usize, usize) {
-        let clamped = buffer.clamp_offset(offset.min(buffer.len()));
-        let (line, byte_col) = buffer.offset_to_line_col(clamped);
-        let line_content = buffer.line_content(line);
-        let column = line_content[..byte_col.min(line_content.len())]
-            .chars()
-            .count()
-            + 1;
-        (line + 1, column)
     }
 
     pub(crate) fn add_selection_to_chat(
@@ -2504,18 +2575,64 @@ impl EditorView {
         let Some(relative_path) = self.relative_path_for_path(path) else {
             return;
         };
-        let (start_line, start_col) = self.chat_reference_position(range.start);
-        let title = if range.is_empty() {
-            format!("{} L{}:C{}", relative_path, start_line, start_col)
+        let (start_line, start_col) = Self::chat_reference_position(&self.buffer, range.start);
+        let reference = if range.is_empty() {
+            format!("@{relative_path} L{start_line}:C{start_col} ")
         } else {
-            let end_anchor = range.end.saturating_sub(1);
-            let (end_line, end_col) = self.chat_reference_position(end_anchor);
-            format!(
-                "{} L{}:C{}-L{}:C{}",
-                relative_path, start_line, start_col, end_line, end_col
-            )
+            let (end_line, end_col) =
+                Self::chat_reference_position(&self.buffer, range.end.saturating_sub(1));
+            format!("@{relative_path} L{start_line}:C{start_col}-L{end_line}:C{end_col} ")
         };
-        self.add_acp_resource_link(path, Some(title), cx);
+        self.add_reference_to_terminal(reference, cx);
+    }
+
+    fn chat_reference_position(buffer: &crate::buffer::Buffer, offset: usize) -> (usize, usize) {
+        let clamped = buffer.clamp_offset(offset.min(buffer.len()));
+        let (line, byte_col) = buffer.offset_to_line_col(clamped);
+        let line_content = buffer.line_content(line);
+        let column = line_content[..byte_col.min(line_content.len())]
+            .chars()
+            .count()
+            + 1;
+        (line + 1, column)
+    }
+
+    fn add_reference_to_terminal(&mut self, reference: String, cx: &mut Context<Self>) {
+        let tab_id = self
+            .active_terminal_tab_id()
+            .or_else(|| {
+                self.terminal_focus_history
+                    .iter()
+                    .rev()
+                    .find(|id| self.pane_id_for_tab(id).is_some())
+                    .cloned()
+            })
+            .or_else(|| {
+                self.all_tabs()
+                    .find(|tab| tab.kind.is_terminal())
+                    .map(|tab| tab.id.clone())
+            })
+            .unwrap_or_else(|| {
+                self.open_terminal_tab_in_right_split(self.app_settings.terminal_launch_cli(), cx)
+            });
+
+        if let Some(pane_id) = self.pane_id_for_tab(&tab_id) {
+            self.focus_pane(pane_id, cx);
+        }
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) {
+            self.activate_tab_by_index(index, cx);
+        }
+
+        if self.terminal_session(&tab_id).is_some() {
+            self.terminal_write_user_input(&tab_id, reference.as_bytes());
+        } else {
+            self.pending_terminal_inputs
+                .entry(tab_id.clone())
+                .or_default()
+                .extend_from_slice(reference.as_bytes());
+        }
+        self.pending_terminal_focus = Some(tab_id);
+        cx.notify();
     }
 
     fn swallow_chat_terminal_editor_action(
@@ -3786,6 +3903,9 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.ensure_terminal_session(&tab_id, cx);
+        if let Some(bytes) = self.pending_terminal_inputs.remove(&tab_id) {
+            self.terminal_write_user_input(&tab_id, &bytes);
+        }
         self.resize_chat_terminal(&tab_id);
 
         let ups = &self.styles.utility_panel;
@@ -3796,7 +3916,6 @@ impl EditorView {
         let palette = terminal_palette(default_bg);
         let default_fg = palette.foreground;
         let cursor_color = self.theme.cursor;
-        let file_drop_bg = self.styles.editor.editor_file_drop_bg;
 
         let Some(focus_handle) = self
             .terminal_tab_state(&tab_id)
@@ -3886,11 +4005,6 @@ impl EditorView {
                 move |this, event: &KeyDownEvent, window, cx| {
                     this.on_chat_terminal_key_down(&tab_id, event, window, cx);
                 }
-            }))
-            .on_action(cx.listener(|this, _: &ToggleChatPanel, window, cx| {
-                cx.stop_propagation();
-                this.toggle_agent_panel(cx);
-                window.focus(&this.focus_handle(cx));
             }))
             .on_action(cx.listener(|this, _: &ToggleTerminalPanel, window, cx| {
                 cx.stop_propagation();
@@ -4135,12 +4249,6 @@ impl EditorView {
                             move |this, event: &ScrollWheelEvent, window, cx| {
                                 this.on_chat_terminal_scroll(&tab_id, event, window, cx);
                             }
-                        }))
-                        .drag_over::<DraggedSidebarItems>(move |style, _, _, _| {
-                            style.bg(file_drop_bg)
-                        })
-                        .on_drop(cx.listener(|this, dragged: &DraggedSidebarItems, _, cx| {
-                            this.add_dragged_paths_to_chat(&dragged.paths, cx);
                         }))
                         .child(ChatTerminalInputElement {
                             editor: cx.entity().clone(),
@@ -4399,14 +4507,39 @@ mod tests {
     }
 
     #[test]
-    fn chat_reference_position_clamps_inside_cjk_char() {
+    fn chat_reference_position_counts_unicode_columns() {
         let buffer = crate::buffer::Buffer::from_text("标题\n处理");
         let inside_li = buffer.text().find('理').unwrap() + 1;
 
         assert_eq!(
-            EditorView::chat_reference_position_in_buffer(&buffer, inside_li),
+            EditorView::chat_reference_position(&buffer, inside_li),
             (2, 2)
         );
+    }
+
+    #[test]
+    fn terminal_create_menu_includes_all_supported_clis() {
+        assert_eq!(
+            ChatAgentCli::all(),
+            [
+                ChatAgentCli::Terminal,
+                ChatAgentCli::OpenAICodex,
+                ChatAgentCli::GithubCopilot,
+                ChatAgentCli::ClaudeCode,
+                ChatAgentCli::GeminiCli,
+            ]
+        );
+    }
+
+    #[test]
+    fn dedicated_terminal_command_warns_before_close() {
+        let mut session = ChatTerminalSession::unavailable("");
+        session.status = ChatTerminalStatus::Running;
+        session.warn_on_close = true;
+        assert!(session.has_running_command());
+
+        session.status = ChatTerminalStatus::Exited;
+        assert!(!session.has_running_command());
     }
 
     fn keystroke(spec: &str) -> gpui::Keystroke {

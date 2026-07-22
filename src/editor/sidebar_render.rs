@@ -1001,6 +1001,7 @@ impl EditorView {
     pub(crate) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let has_root = self.sidebar_root.exists() && self.sidebar_error.is_none();
         if has_root {
+            self.refresh_sidebar_directories_if_needed(cx);
             self.refresh_sidebar_git_statuses_if_needed(cx);
             if self.expanded_dirs.contains(&self.sidebar_root)
                 && !self
@@ -1415,6 +1416,7 @@ impl EditorView {
                             .overflow_y_scroll()
                             .track_scroll(&self.sidebar_scroll_handle)
                             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                                this.pending_sidebar_scroll_top.set(None);
                                 this.reveal_panel_scrollbar(PanelScrollbarKind::Sidebar, cx);
                             }))
                             .on_mouse_down(
@@ -1608,12 +1610,21 @@ impl EditorView {
             })
             .into_any_element();
         let bounds_cell = self.workspace_bar_bounds.clone();
+        let refresh_ready = self.sidebar_directory_loading.is_empty() && !self.sidebar_items_dirty;
+        let pending_scroll_top = self.pending_sidebar_scroll_top.clone();
+        let sidebar_scroll_handle = self.sidebar_scroll_handle.clone();
         div()
             .w_full()
             .h(px(self.status_bar_height()))
             .flex_none()
             .on_children_prepainted(move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
                 bounds_cell.set(bounds.first().copied());
+                if refresh_ready && let Some(scroll_top) = pending_scroll_top.take() {
+                    let max_scroll = f32::from(sidebar_scroll_handle.max_offset().height);
+                    let offset = sidebar_scroll_handle.offset();
+                    sidebar_scroll_handle
+                        .set_offset(gpui::point(offset.x, px(-scroll_top.min(max_scroll))));
+                }
             })
             .child(bar)
             .into_any_element()

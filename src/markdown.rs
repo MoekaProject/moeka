@@ -266,6 +266,13 @@ fn unordered_list_prefix_len(content: &str) -> usize {
         .count()
 }
 
+fn empty_unordered_list_item_prefix_len(content: &str) -> Option<(usize, usize)> {
+    let leading_ws = content.len() - content.trim_start_matches([' ', '\t']).len();
+    let trimmed = &content[leading_ws..];
+    let prefix_len = unordered_list_prefix_len(trimmed);
+    (prefix_len > 0 && trimmed[prefix_len..].is_empty()).then_some((leading_ws, prefix_len))
+}
+
 fn blockquote_prefix_len(content: &str) -> usize {
     let leading_spaces = content.bytes().take_while(|&byte| byte == b' ').count();
     if leading_spaces > 3 {
@@ -1270,6 +1277,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
         })
         .collect();
 
+    let decoration_count = decorations.len();
     for (line, decoration) in decorations.iter_mut().enumerate() {
         if decoration.table_info.is_some() {
             continue;
@@ -1328,6 +1336,63 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                 range: leading_ws..leading_ws + unordered_prefix_len,
                 trigger_range: leading_ws..leading_ws + unordered_prefix_len,
             });
+        }
+    }
+
+    // CommonMark treats an indented `- ` as a Setext underline. In an editor,
+    // a trailing space on a single marker signals an in-progress nested list:
+    // `- A\n  - `. Recover that narrow physical-line pattern after all parser
+    // events, without changing ordinary `Title\n-` / `Title\n---` headings.
+    for line in 0..decorations.len().saturating_sub(1) {
+        let content = get_line_content(text, &line_starts, line, decoration_count);
+        let first_prefix_len = unordered_list_prefix_len(content);
+        if first_prefix_len == 0 {
+            continue;
+        }
+        let next_line = line + 1;
+        let next_content = get_line_content(text, &line_starts, next_line, decorations.len());
+        let Some((next_leading_ws, next_prefix_len)) =
+            empty_unordered_list_item_prefix_len(next_content)
+        else {
+            continue;
+        };
+
+        decorations[line].block_type = BlockType::UnorderedList;
+        if !decorations[line]
+            .syntax_ranges
+            .iter()
+            .any(|range| range.range == (0..first_prefix_len))
+        {
+            decorations[line].syntax_ranges.push(SyntaxRange {
+                range: 0..first_prefix_len,
+                trigger_range: 0..first_prefix_len,
+            });
+        }
+        decorations[next_line].block_type = BlockType::UnorderedList;
+        decorations[next_line].syntax_ranges.clear();
+        decorations[next_line].syntax_ranges.push(SyntaxRange {
+            range: next_leading_ws..next_leading_ws + next_prefix_len,
+            trigger_range: next_leading_ws..next_leading_ws + next_prefix_len,
+        });
+    }
+
+    // pulldown-cmark emits no blockquote event for an empty in-progress `> `
+    // line. Promote that physical prefix immediately so the editor responds
+    // while the user is still typing the quote body.
+    let decoration_count = decorations.len();
+    for (line, decoration) in decorations.iter_mut().enumerate() {
+        if decoration.block_type != BlockType::Normal || decoration.table_info.is_some() {
+            continue;
+        }
+        let content = get_line_content(text, &line_starts, line, decoration_count);
+        if blockquote_prefix_len(content) > 0 {
+            decoration.block_type = BlockType::Blockquote;
+            if !decoration
+                .block_contexts
+                .contains(&BlockContext::Blockquote)
+            {
+                decoration.block_contexts.push(BlockContext::Blockquote);
+            }
         }
     }
 
@@ -4117,6 +4182,23 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_nested_unordered_item_is_not_setext_heading() {
+        let decorations = parse_decorations("- A\n  - \n");
+
+        assert_eq!(decorations[0].block_type, BlockType::UnorderedList);
+        assert_eq!(decorations[1].block_type, BlockType::UnorderedList);
+        assert_eq!(decorations[0].syntax_ranges[0].range, 0..2);
+        assert_eq!(decorations[1].syntax_ranges[0].range, 2..4);
+    }
+
+    #[test]
+    fn ordinary_setext_heading_still_parses() {
+        let decorations = parse_decorations("Title\n---\n");
+
+        assert_eq!(decorations[0].block_type, BlockType::Heading(2));
+    }
+
+    #[test]
     fn bare_unordered_markers_are_visible_until_space_is_typed() {
         for marker in ["-", "+", "*"] {
             let decorations = parse_decorations(marker);
@@ -4131,6 +4213,32 @@ mod tests {
     }
 
     #[test]
+    fn block_markers_render_immediately_while_typing() {
+        assert_eq!(parse_decorations("# ")[0].block_type, BlockType::Heading(1));
+        assert_eq!(parse_decorations("> ")[0].block_type, BlockType::Blockquote);
+        assert_eq!(
+            parse_decorations("1. ")[0].block_type,
+            BlockType::OrderedList
+        );
+        assert_eq!(
+            parse_decorations("- [ ] ")[0].block_type,
+            BlockType::TaskList(false)
+        );
+        assert_eq!(
+            parse_decorations("```\n")[0].block_type,
+            BlockType::CodeBlockFence
+        );
+    }
+
+    #[test]
+    fn incomplete_paired_inline_syntax_remains_visible() {
+        for source in ["**bold", "[link]", "`code", "==highlight"] {
+            let decoration = &parse_decorations(source)[0];
+            assert!(decoration.syntax_ranges.is_empty(), "{source}");
+        }
+    }
+
+    #[test]
     fn ordered_list_marker_inside_fenced_code_stays_code() {
         let text = "```\n1. item\n```\n";
         let decorations = parse_decorations(text);
@@ -4138,6 +4246,47 @@ mod tests {
         assert_eq!(decorations[0].block_type, BlockType::CodeBlockFence);
         assert_eq!(decorations[1].block_type, BlockType::CodeBlock);
         assert_eq!(decorations[2].block_type, BlockType::CodeBlockFence);
+    }
+
+    #[test]
+    fn heading_marker_inside_unclosed_fence_stays_code() {
+        let decorations = parse_decorations("```rust\n# not a heading\n");
+
+        assert_eq!(decorations[0].block_type, BlockType::CodeBlockFence);
+        assert_eq!(decorations[1].block_type, BlockType::CodeBlock);
+    }
+
+    #[test]
+    fn setext_heading_inside_blockquote_keeps_heading_and_quote_context() {
+        let decorations = parse_decorations("> Title\n> ===\n");
+
+        assert_eq!(decorations[0].block_type, BlockType::Heading(1));
+        assert!(
+            decorations[0]
+                .block_contexts
+                .contains(&BlockContext::Blockquote)
+        );
+    }
+
+    #[test]
+    fn non_initial_front_matter_shape_does_not_override_setext_heading() {
+        let decorations = parse_decorations("Title\n---\nkey: value\n---\n");
+
+        assert_eq!(decorations[0].block_type, BlockType::Heading(2));
+        assert!(decorations.iter().all(|decoration| {
+            decoration
+                .table_info
+                .as_ref()
+                .is_none_or(|table| !table.is_front_matter)
+        }));
+    }
+
+    #[test]
+    fn atx_heading_is_not_overridden_by_adjacent_table_shaped_lines() {
+        let decorations = parse_decorations("# Title\n| a | b |\n| --- | --- |\n");
+
+        assert_eq!(decorations[0].block_type, BlockType::Heading(1));
+        assert_eq!(decorations[1].block_type, BlockType::Table);
     }
 
     #[test]

@@ -567,6 +567,11 @@ impl EditorView {
             self.sync_sidebar_width_animation(cx);
         }
 
+        // Explicit navigation wins over passive refresh scroll restoration;
+        // clear after a possible workspace switch, which invalidates caches.
+        self.pending_sidebar_scroll_top.set(None);
+        self.pending_file_list_scroll_top.set(None);
+
         let mut expanded_changed = switched_workspace;
         let mut directories_to_load = Vec::new();
         expanded_changed |= self.expanded_dirs.insert(root.clone());

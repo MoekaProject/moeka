@@ -630,7 +630,7 @@ fn push_unordered_list_marker_paint(
     ) && let Some(marker_wrapped) = marker_wrapped_lines.pop()
     {
         let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
-        let marker_x = if leading_ws == 0 {
+        let marker_anchor_x = if leading_ws == 0 {
             base_content_x
         } else {
             content_x
@@ -647,6 +647,12 @@ fn push_unordered_list_marker_paint(
                 .editor
                 .editor_unordered_list_marker_font_size_offset_px,
         );
+        // The enlarged bullet is shaped with the monospace font, whose glyph
+        // has visible side bearing inside its advance cell. Pull only the
+        // painted marker left by half the size delta; the hidden prefix width
+        // remains unchanged, so wrapped text and nested-list bodies still
+        // align with their parent content.
+        let marker_x = marker_anchor_x - marker_offset * 0.5;
         let marker_line_height = line_height
             + editor.scaled(
                 editor
@@ -2022,11 +2028,7 @@ impl Element for EditorElement {
             && editor.active_tab_is_markdown()
             && !(editor.embedded_editor && editor.embedded_read_only)
         {
-            let placeholder = if editor.embedded_editor {
-                crate::i18n::agent_composer_placeholder(editor.ui_language)
-            } else {
-                "键入 / 命令或右键插入格式..."
-            };
+            let placeholder = "键入 / 命令或右键插入格式...";
             let placeholder_runs = inline_overlay_runs(
                 placeholder,
                 &body_font,
@@ -7767,7 +7769,7 @@ impl Element for EditorElement {
         }
 
         // Record the layout-accurate content height for embedded editors so
-        // containers measuring it (agent composer) never see estimate flicker.
+        // containers measuring it never see estimate flicker.
         {
             let editor = self.editor.read(cx);
             if editor.embedded_editor {

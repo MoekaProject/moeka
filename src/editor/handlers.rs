@@ -1738,15 +1738,6 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn on_toggle_chat_panel(
-        &mut self,
-        _: &ToggleChatPanel,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_agent_panel(cx);
-    }
-
     pub(crate) fn on_toggle_terminal_panel(
         &mut self,
         _: &ToggleTerminalPanel,

@@ -58,6 +58,26 @@ struct SlashMenuItem {
     action: FormatMenuAction,
 }
 
+fn aligned_submenu_top(
+    trigger_top: f32,
+    trigger_bottom: f32,
+    submenu_height: f32,
+    overlay_height: f32,
+    margin: f32,
+) -> f32 {
+    let desired = if overlay_height - margin - trigger_top >= submenu_height {
+        trigger_top
+    } else if trigger_bottom - margin >= submenu_height {
+        trigger_bottom - submenu_height
+    } else {
+        trigger_top
+    };
+    desired.clamp(
+        margin,
+        (overlay_height - margin - submenu_height).max(margin),
+    )
+}
+
 fn image_markdown_ranges(line_content: &str) -> Option<(Range<usize>, Range<usize>, Range<usize>)> {
     let full_start = line_content.find("![")?;
     let desc_start = full_start + 2;
@@ -90,6 +110,8 @@ impl EditorView {
         self.context_submenu = None;
         self.context_submenu_aim = None;
         self.context_submenu_hovered = false;
+        self.format_heading_trigger_bounds.set(None);
+        self.format_more_trigger_bounds.set(None);
         // Menus opened from the FileList set this back to true right after.
         self.file_list_menu_origin = false;
         if clear_sidebar_edit {
@@ -186,29 +208,6 @@ impl EditorView {
                 kind: ContextMenuKind::SidebarStarred { path },
             },
             true,
-            cx,
-        );
-    }
-
-    pub(crate) fn open_agent_session_context_menu(
-        &mut self,
-        agent_id: String,
-        session_id: String,
-        position: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let fallback = (agent_id.clone(), session_id.clone());
-        let targets = self.selected_agent_session_targets(&fallback);
-        self.open_context_menu(
-            ContextMenu {
-                position,
-                kind: ContextMenuKind::AgentSession {
-                    agent_id,
-                    session_id,
-                    targets,
-                },
-            },
-            false,
             cx,
         );
     }
@@ -415,10 +414,10 @@ impl EditorView {
             current if current == self.t(crate::i18n::TextKey::RevealInFileTree) => {
                 Some(MENU_LOCATE_TREE_SVG_PATH)
             }
-            current if current == self.t(crate::i18n::TextKey::AddFileToChat) => {
+            current if current == crate::i18n::add_file_to_chat_label(self.ui_language) => {
                 Some(MENU_AT_SVG_PATH)
             }
-            current if current == self.t(crate::i18n::TextKey::AddSelectionToChat) => {
+            current if current == crate::i18n::add_selection_to_chat_label(self.ui_language) => {
                 Some(CHAT_SVG_PATH)
             }
             _ if label == self.t(crate::i18n::TextKey::Delete)
@@ -1942,8 +1941,13 @@ impl EditorView {
             gpui::transparent_black()
         };
         let icon_shared = icon_path.map(SharedString::from);
+        let trigger_bounds = match submenu_kind {
+            ContextMenuKind::FormatHeading => self.format_heading_trigger_bounds.clone(),
+            ContextMenuKind::FormatMore => self.format_more_trigger_bounds.clone(),
+            _ => Rc::new(Cell::new(None)),
+        };
 
-        div()
+        let row = div()
             .w_full()
             .h(px(self.scaled(ms.menu_item_height_px)))
             .bg(bg)
@@ -2010,6 +2014,15 @@ impl EditorView {
                     cx.notify();
                 })
             })
+            .into_any_element();
+
+        div()
+            .w_full()
+            .h(px(self.scaled(ms.menu_item_height_px)))
+            .on_children_prepainted(move |bounds: Vec<Bounds<Pixels>>, _, _| {
+                trigger_bounds.set(bounds.first().copied());
+            })
+            .child(row)
             .into_any_element()
     }
 
@@ -2127,6 +2140,19 @@ impl EditorView {
             }
             items.push(self.render_context_menu_separator());
             {
+                let chat_path = path.clone();
+                items.push(self.render_context_menu_item(
+                    crate::i18n::add_file_to_chat_label(self.ui_language),
+                    false,
+                    cx,
+                    move |this, _, cx| {
+                        this.close_context_menu(cx);
+                        this.add_path_to_chat(&chat_path, cx);
+                    },
+                ));
+            }
+            items.push(self.render_context_menu_separator());
+            {
                 let p = path.clone();
                 items.push(self.render_context_menu_item(
                     self.t(crate::i18n::TextKey::RevealInFinder),
@@ -2134,19 +2160,6 @@ impl EditorView {
                     cx,
                     move |this, _, _cx| {
                         this.reveal_in_finder(&p);
-                    },
-                ));
-            }
-            items.push(self.render_context_menu_separator());
-            {
-                let chat_paths = self.sidebar_context_paths(&path);
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::AddFileToChat),
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.add_paths_to_chat(&chat_paths, cx);
                     },
                 ));
             }
@@ -2232,7 +2245,7 @@ impl EditorView {
         {
             let chat_paths = context_paths.clone();
             items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::AddFileToChat),
+                crate::i18n::add_file_to_chat_label(self.ui_language),
                 false,
                 cx,
                 move |this, _, cx| {
@@ -2570,7 +2583,7 @@ impl EditorView {
         {
             let chat_path = path.clone();
             items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::AddFileToChat),
+                crate::i18n::add_file_to_chat_label(self.ui_language),
                 false,
                 cx,
                 move |this, _, cx| {
@@ -2824,10 +2837,9 @@ impl EditorView {
 
             if let Some(current_path) = self.current_file_path.clone() {
                 items.push(self.render_context_menu_separator());
-
                 let chat_path = current_path.clone();
                 items.push(self.render_format_context_menu_item_with_hover_behavior(
-                    self.t(crate::i18n::TextKey::AddFileToChat),
+                    crate::i18n::add_file_to_chat_label(self.ui_language),
                     Some(MENU_AT_SVG_PATH),
                     None,
                     false,
@@ -2843,7 +2855,7 @@ impl EditorView {
                 let selection_path = current_path;
                 let selection_range = self.cursor.selection_range();
                 items.push(self.render_format_context_menu_item_with_hover_behavior(
-                    self.t(crate::i18n::TextKey::AddSelectionToChat),
+                    crate::i18n::add_selection_to_chat_label(self.ui_language),
                     Some(CHAT_SVG_PATH),
                     None,
                     false,
@@ -2858,7 +2870,7 @@ impl EditorView {
             }
 
             // Markdown-specific actions below do not apply to plain text or
-            // source files; chat reference actions above remain available.
+            // source files.
             if self.active_tab_is_non_markdown_text() {
                 return items;
             }
@@ -3533,6 +3545,11 @@ impl EditorView {
             }
             + separator_height;
         let more_trigger_bottom = main_menu_bottom - padding_y;
+        let measured_trigger = match submenu_kind {
+            ContextMenuKind::FormatHeading => self.format_heading_trigger_bounds.get(),
+            ContextMenuKind::FormatMore => self.format_more_trigger_bounds.get(),
+            _ => None,
+        };
         let right_space = main_layout.overlay_width
             - (main_layout.left + main_menu_width)
             - submenu_gap
@@ -3542,10 +3559,22 @@ impl EditorView {
         } else {
             (main_layout.left - submenu_width - submenu_gap).max(main_layout.margin)
         };
-        let desired_top = match submenu_kind {
-            ContextMenuKind::FormatHeading => heading_trigger_top,
-            ContextMenuKind::FormatMore => more_trigger_bottom - submenu_visible_height,
-            _ => main_menu_bottom - submenu_visible_height,
+        let desired_top = if let Some(bounds) = measured_trigger {
+            let (_, trigger_top) = self.context_menu_overlay_coordinates(bounds.origin);
+            let trigger_bottom = trigger_top + f32::from(bounds.size.height);
+            aligned_submenu_top(
+                trigger_top,
+                trigger_bottom,
+                submenu_visible_height,
+                main_layout.overlay_height,
+                main_layout.margin,
+            )
+        } else {
+            match submenu_kind {
+                ContextMenuKind::FormatHeading => heading_trigger_top,
+                ContextMenuKind::FormatMore => more_trigger_bottom - submenu_visible_height,
+                _ => main_menu_bottom - submenu_visible_height,
+            }
         };
         let submenu_top = desired_top.clamp(
             main_layout.margin,
@@ -3757,136 +3786,6 @@ impl EditorView {
         };
 
         let (items, width) = match &menu.kind {
-            ContextMenuKind::AgentSession {
-                agent_id,
-                session_id,
-                targets,
-            } => {
-                let fallback = (agent_id.clone(), session_id.clone());
-                let targets = if targets.is_empty() {
-                    vec![fallback]
-                } else {
-                    targets.clone()
-                };
-                let sessions = targets
-                    .iter()
-                    .filter_map(|(agent_id, session_id)| {
-                        self.stored_acp_sessions.iter().find(|session| {
-                            session.agent_id == *agent_id && session.session_id == *session_id
-                        })
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let session = sessions.first().cloned();
-                let mut items = Vec::new();
-                if let Some(session) = session {
-                    let language = self.ui_language;
-                    if targets.len() == 1 {
-                        let open_session = session.clone();
-                        items.push(self.render_context_menu_item(
-                            crate::i18n::agent_session_menu_text(language, "open"),
-                            false,
-                            cx,
-                            move |this, _, cx| {
-                                this.open_stored_acp_session(open_session.clone(), cx);
-                            },
-                        ));
-
-                        let rename_agent = session.agent_id.clone();
-                        let rename_session = session.session_id.clone();
-                        items.push(self.render_context_menu_item_with_icon(
-                            crate::i18n::agent_session_menu_text(language, "rename"),
-                            MENU_RENAME_SVG_PATH,
-                            false,
-                            cx,
-                            move |this, window, cx| {
-                                this.start_agent_session_rename(
-                                    rename_agent.clone(),
-                                    rename_session.clone(),
-                                    window,
-                                    cx,
-                                );
-                            },
-                        ));
-                    }
-
-                    let all_pinned = sessions.iter().all(|session| session.pinned);
-                    let pin_targets = targets.clone();
-                    items.push(self.render_context_menu_item_with_icon(
-                        crate::i18n::agent_session_menu_text(
-                            language,
-                            if all_pinned { "unpin" } else { "pin" },
-                        ),
-                        if all_pinned {
-                            MENU_UNPIN_SVG_PATH
-                        } else {
-                            MENU_PIN_SVG_PATH
-                        },
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.set_acp_sessions_pinned(&pin_targets, !all_pinned, cx);
-                        },
-                    ));
-
-                    let all_archived = sessions.iter().all(|session| session.archived);
-                    let archive_targets = targets.clone();
-                    items.push(self.render_context_menu_item(
-                        crate::i18n::agent_session_menu_text(
-                            language,
-                            if all_archived { "unarchive" } else { "archive" },
-                        ),
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.set_acp_sessions_archived(&archive_targets, !all_archived, cx);
-                        },
-                    ));
-
-                    if !targets.is_empty() {
-                        items.push(self.render_context_menu_separator());
-                        let delete_targets = targets.clone();
-                        items.push(self.render_context_menu_item_with_icon(
-                            crate::i18n::agent_session_menu_text(language, "delete"),
-                            MENU_DELETE_SVG_PATH,
-                            true,
-                            cx,
-                            move |this, _, cx| {
-                                this.show_dialog(
-                                    Dialog {
-                                        title: crate::i18n::agent_session_menu_text(
-                                            language,
-                                            "delete_title",
-                                        )
-                                        .to_string(),
-                                        message: crate::i18n::agent_session_menu_text(
-                                            language,
-                                            "delete_message",
-                                        )
-                                        .to_string(),
-                                        save_label: None,
-                                        confirm_label: this
-                                            .t(crate::i18n::TextKey::Delete)
-                                            .to_string(),
-                                        cancel_label: this
-                                            .t(crate::i18n::TextKey::Cancel)
-                                            .to_string(),
-                                        is_danger: true,
-                                        action: DialogAction::DeleteAcpSessions {
-                                            targets: delete_targets.clone(),
-                                        },
-                                    },
-                                    cx,
-                                );
-                            },
-                        ));
-                    }
-                }
-                (
-                    items,
-                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
-                )
-            }
             ContextMenuKind::Sidebar { path, is_dir } => (
                 self.render_sidebar_context_menu(path.clone(), *is_dir, cx),
                 self.scaled(self.styles.context_menu.menu_sidebar_width_px),
@@ -4242,7 +4141,7 @@ impl EditorView {
                     if let Some(path) = &tab.path {
                         let chat_path = path.clone();
                         items.push(self.render_context_menu_item(
-                            self.t(crate::i18n::TextKey::AddFileToChat),
+                            crate::i18n::add_file_to_chat_label(self.ui_language),
                             false,
                             cx,
                             move |this, _, cx| {
@@ -4705,5 +4604,20 @@ impl EditorView {
             .child(main_menu)
             .when_some(submenu, |this, submenu| this.child(submenu))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod submenu_layout_tests {
+    use super::aligned_submenu_top;
+
+    #[test]
+    fn submenu_top_aligns_with_trigger_when_space_below_is_available() {
+        assert_eq!(aligned_submenu_top(120.0, 144.0, 180.0, 600.0, 8.0), 120.0);
+    }
+
+    #[test]
+    fn submenu_bottom_aligns_with_trigger_when_only_space_above_is_available() {
+        assert_eq!(aligned_submenu_top(520.0, 544.0, 180.0, 600.0, 8.0), 364.0);
     }
 }

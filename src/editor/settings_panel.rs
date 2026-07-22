@@ -14,9 +14,9 @@ use crate::i18n::{
 use crate::theme::{EditorThemeMode, ThemeKind};
 
 use super::{
-    APP_VERSION, DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, SITE_SVG_PATH,
-    SearchMenuConfig, SearchMenuRow, THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH,
-    TerminalCursorShape, attachments, tooltip,
+    APP_VERSION, ChatAgentCli, DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH,
+    SITE_SVG_PATH, SearchMenuConfig, SearchMenuRow, THEME_DARK_MINI_SVG_PATH,
+    THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape, attachments, tooltip,
 };
 
 // ── Font picker state ───────────────────────────────────────────────
@@ -30,6 +30,7 @@ pub(crate) enum FontRole {
     DateTimeFormat,
     AttachmentLocation,
     TerminalCursorShape,
+    TerminalLaunchCommand,
     /// Font family for selected whiteboard elements (whiteboard panel).
     WhiteboardFont,
 }
@@ -40,6 +41,7 @@ pub(crate) struct PickerOption {
     pub label: String,
     pub search_text: String,
     pub preview_font: Option<String>,
+    pub icon_path: Option<&'static str>,
 }
 
 #[derive(Clone)]
@@ -282,8 +284,10 @@ impl EditorView {
     }
 
     fn render_terminal_settings_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.ensure_terminal_command_args_editor(cx);
         let cursor_shape = self.app_settings.terminal_cursor_shape();
         let current = terminal_settings_label(self.ui_language, cursor_shape.as_str());
+        let launch_cli = self.app_settings.terminal_launch_cli();
 
         div()
             .flex()
@@ -292,6 +296,14 @@ impl EditorView {
             .child(
                 self.render_section_heading(terminal_settings_label(self.ui_language, "section")),
             )
+            .child(self.render_picker_row(
+                terminal_settings_label(self.ui_language, "launch_command"),
+                launch_cli.label(),
+                FontRole::TerminalLaunchCommand,
+                0,
+                cx,
+            ))
+            .child(self.render_terminal_command_args_row())
             .child(self.render_picker_row(
                 terminal_settings_label(self.ui_language, "cursor_shape"),
                 current,
@@ -310,6 +322,59 @@ impl EditorView {
                 ),
             ))
             .into_any_element()
+    }
+
+    fn render_terminal_command_args_row(&self) -> AnyElement {
+        let settings = &self.styles.settings_panel;
+        let control = div()
+            .w_full()
+            .h(px(self.scaled(settings.settings_input_height_px)))
+            .border(px(settings.settings_option_button_border_width_px))
+            .border_color(settings.settings_option_button_border_color)
+            .rounded(px(self.scaled(settings.settings_input_radius_px)))
+            .bg(settings.settings_option_button_bg)
+            .overflow_hidden()
+            .when_some(
+                self.settings_terminal_command_args_editor.clone(),
+                |this, editor| this.child(editor),
+            )
+            .into_any_element();
+        self.render_attachment_settings_row(
+            terminal_settings_label(self.ui_language, "command_args"),
+            control,
+        )
+    }
+
+    fn ensure_terminal_command_args_editor(&mut self, cx: &mut Context<Self>) {
+        if self.settings_terminal_command_args_editor.is_some() {
+            return;
+        }
+        let mut styles = self.settings_text_input_styles();
+        styles.text_input_center = false;
+        styles.text_input_padding_left_px = self.scaled(8.0);
+        styles.text_input_padding_right_px = self.scaled(8.0);
+        let initial = self.app_settings.terminal_command_args.clone();
+        let editor = cx.new(move |cx| {
+            let mut input = crate::text_input::TextInput::new(styles, "copilot --help", cx);
+            input.set_text(&initial, cx);
+            input
+        });
+        cx.subscribe(
+            &editor,
+            |this, editor, event: &crate::text_input::TextInputEvent, cx| {
+                if matches!(
+                    event,
+                    crate::text_input::TextInputEvent::Changed
+                        | crate::text_input::TextInputEvent::Submit
+                ) {
+                    this.app_settings.terminal_command_args = editor.read(cx).text().to_string();
+                    this.app_settings.save();
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+        self.settings_terminal_command_args_editor = Some(editor);
     }
 
     fn render_attachment_settings_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -544,6 +609,7 @@ impl EditorView {
                     label: preview.clone(),
                     search_text: format!("{preview} {format}").to_lowercase(),
                     preview_font: None,
+                    icon_path: None,
                 }
             })
             .collect()
@@ -630,7 +696,13 @@ impl EditorView {
             editor.update(cx, |input, cx| input.set_styles(styles, cx));
         }
 
-        if let Some(editor) = &self.settings_attachment_folder_editor {
+        for editor in [
+            self.settings_attachment_folder_editor.as_ref(),
+            self.settings_terminal_command_args_editor.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             let mut styles = self.settings_text_input_styles();
             styles.text_input_center = false;
             editor.update(cx, |input, cx| input.set_styles(styles, cx));
@@ -1796,10 +1868,30 @@ impl EditorView {
                             search_text: format!("{label} {value}").to_lowercase(),
                             label,
                             preview_font: None,
+                            icon_path: None,
                         }
                     })
                     .collect(),
                 terminal_settings_label(self.ui_language, "search_cursor_shapes").to_string(),
+            ),
+            FontRole::TerminalLaunchCommand => (
+                ChatAgentCli::all()
+                    .into_iter()
+                    .map(|agent_cli| PickerOption {
+                        value: agent_cli.settings_value().to_string(),
+                        label: agent_cli.label().to_string(),
+                        search_text: format!(
+                            "{} {} {}",
+                            agent_cli.label(),
+                            agent_cli.command_name(),
+                            agent_cli.settings_value()
+                        )
+                        .to_lowercase(),
+                        preview_font: None,
+                        icon_path: Some(agent_cli.icon_path()),
+                    })
+                    .collect(),
+                terminal_settings_label(self.ui_language, "search_commands").to_string(),
             ),
             FontRole::AttachmentLocation => (
                 ["current_file", "workspace_folder", "current_file_subfolder"]
@@ -1811,6 +1903,7 @@ impl EditorView {
                             search_text: label.to_lowercase(),
                             label,
                             preview_font: None,
+                            icon_path: None,
                         }
                     })
                     .collect(),
@@ -1824,6 +1917,7 @@ impl EditorView {
                         label: option.label,
                         search_text: option.search_text,
                         preview_font: None,
+                        icon_path: None,
                     })
                     .collect::<Vec<_>>(),
                 self.t(TextKey::SearchLanguages).to_string(),
@@ -1846,6 +1940,7 @@ impl EditorView {
                             label: name.clone(),
                             search_text: name.to_lowercase(),
                             preview_font: Some(name),
+                            icon_path: None,
                         })
                         .collect::<Vec<_>>(),
                     self.t(TextKey::SearchFonts).to_string(),
@@ -1866,6 +1961,9 @@ impl EditorView {
                 .terminal_cursor_shape()
                 .as_str()
                 .to_string(),
+            (FontRole::TerminalLaunchCommand, _) => {
+                self.app_settings.terminal_launch_command.clone()
+            }
             (FontRole::WhiteboardFont, _) => self
                 .whiteboard_current_style()
                 .font
@@ -2029,6 +2127,7 @@ impl EditorView {
                 let value = option.value.clone();
                 let row = SearchMenuRow::new(option.label.clone())
                     .selected(idx == picker.selected_index)
+                    .icon(option.icon_path)
                     .preview_font(option.preview_font.clone());
                 self.render_search_menu_row(
                     SharedString::from(format!("fp-item-{idx}")),
@@ -2109,6 +2208,17 @@ impl EditorView {
                         self.set_terminal_cursor_shape(shape);
                     }
                 }
+                (FontRole::TerminalLaunchCommand, _) => {
+                    if let Some(agent_cli) = ChatAgentCli::from_settings_value(&font_name) {
+                        self.app_settings.terminal_launch_command = font_name;
+                        self.app_settings.terminal_command_args =
+                            agent_cli.command_name().to_string();
+                        if let Some(editor) = self.settings_terminal_command_args_editor.clone() {
+                            let command = self.app_settings.terminal_command_args.clone();
+                            editor.update(cx, |input, cx| input.set_text(&command, cx));
+                        }
+                    }
+                }
                 (FontRole::WhiteboardFont, _) => {
                     self.whiteboard_apply_font_family(font_name, cx);
                     return;
@@ -2117,7 +2227,6 @@ impl EditorView {
             }
             self.app_settings.save();
             self.clear_all_tab_layout_caches();
-            self.sync_agent_editor_fonts(cx);
             cx.notify();
         }
     }

@@ -650,7 +650,7 @@ impl EditorView {
 
     pub(crate) fn max_scroll_offset(&self) -> f32 {
         if self.embedded_editor {
-            // Embedded editors (agent transcript/composer) pin the scroll
+            // Embedded read-only editors pin the scroll
             // range to the exact content height: no scroll-beyond-last-line,
             // so no blank gap can appear below the content. Prefer the
             // layout-accurate painted height over mid-frame estimates.

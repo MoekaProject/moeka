@@ -30,7 +30,6 @@ pub(crate) fn persist_session(editor: &EditorView) {
             .collect(),
         pane_layout: Some(pane_layout_to_record(editor, &editor.pane_layout)),
         focused_pane_leaf,
-        active_acp_session: config.session.active_acp_session.clone(),
     };
     // Startup/theme refreshes can operate on the default welcome tab before a
     // real restored session is ready. Preserve a previously saved work session
@@ -120,7 +119,6 @@ pub(crate) fn restore_session(editor: &mut EditorView) {
         editor.expanded_dirs.clear();
         editor.expanded_dirs.insert(active_root);
     }
-    editor.restore_active_acp_session(config.session.active_acp_session.as_ref());
 
     // Split-pane layout (new format) supersedes the legacy flat tab list.
     if let Some(layout_record) = config.session.pane_layout.as_ref()

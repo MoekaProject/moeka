@@ -392,6 +392,9 @@ impl EditorView {
             self.scaled(self.styles.text_input.text_input_cursor_width_px);
         styles.text_input_bg = gpui::transparent_black();
         styles.text_input_focus_bg = self.styles.search.search_input_focus_bg;
+        styles.text_input_text_color = self.styles.search.search_match_text_color;
+        styles.text_input_placeholder_color = self.styles.search.search_counter_text_color;
+        styles.text_input_cursor_color = self.styles.search.search_option_btn_active_icon_color;
         styles.text_input_cursor_height_ratio = self.styles.search.search_input_cursor_height_ratio;
         styles
     }
@@ -409,6 +412,9 @@ impl EditorView {
             self.scaled(self.styles.text_input.text_input_cursor_width_px);
         styles.text_input_bg = gpui::transparent_black();
         styles.text_input_focus_bg = gpui::transparent_black();
+        styles.text_input_text_color = self.styles.search.search_match_text_color;
+        styles.text_input_placeholder_color = self.styles.search.search_counter_text_color;
+        styles.text_input_cursor_color = self.styles.search.search_option_btn_active_icon_color;
         styles.text_input_cursor_height_ratio = self.styles.search.search_input_cursor_height_ratio;
         styles
     }

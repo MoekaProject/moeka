@@ -8,8 +8,6 @@ use gpui::{
 
 use super::*;
 
-const CHAT_PANEL_SVG_PATH: &str = "assets/icons/chat.svg";
-
 #[derive(Clone, Copy)]
 enum TabDropTarget<'a> {
     Before(&'a str),
@@ -782,6 +780,31 @@ impl EditorView {
             self.focus_pane(owner, cx);
         }
         if let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) {
+            if tab.kind.is_terminal() && self.terminal_tab_has_running_command(tab_id) {
+                self.show_dialog(
+                    Dialog {
+                        title: crate::i18n::terminal_settings_label(
+                            self.ui_language,
+                            "close_running_title",
+                        )
+                        .to_string(),
+                        message: crate::i18n::terminal_settings_label(
+                            self.ui_language,
+                            "close_running_message",
+                        )
+                        .to_string(),
+                        save_label: None,
+                        confirm_label: self.t(crate::i18n::TextKey::Close).to_string(),
+                        cancel_label: self.t(crate::i18n::TextKey::Cancel).to_string(),
+                        is_danger: true,
+                        action: DialogAction::CloseRunningTerminal {
+                            tab_id: tab_id.to_string(),
+                        },
+                    },
+                    cx,
+                );
+                return;
+            }
             if tab.is_dirty {
                 self.show_dialog(
                     Dialog {
@@ -2224,17 +2247,6 @@ impl EditorView {
                     |this, cx| this.toggle_theme(cx),
                 ))
             })
-            .child(self.render_tab_bar_action_button(
-                "tab-bar-chat-toggle",
-                CHAT_PANEL_SVG_PATH,
-                self.is_utility_panel_active(RightUtilityPanel::Agent),
-                true,
-                None,
-                crate::i18n::agent_label(self.ui_language),
-                Some("⌃⌘I"),
-                cx,
-                |this, cx| this.toggle_agent_panel(cx),
-            ))
             .child(self.render_tab_bar_action_button(
                 "tab-bar-terminal-toggle",
                 MENU_TERMINAL_SVG_PATH,

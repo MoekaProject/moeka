@@ -1,13 +1,13 @@
 //! Unified searchable menu component: the single implementation of the
 //! anchored "search input + filtered rows" overlay used by the language /
-//! indentation picker, the git branch picker, the settings / whiteboard
-//! pickers (fonts, interface language, formats, …), and the agent composer
-//! popup menus. All shared styling (panel, input, rows, empty state) lives
-//! here so every searchable menu looks and behaves identically.
+//! indentation picker, the git branch picker, and the settings / whiteboard
+//! pickers (fonts, interface language, formats, …). All shared styling
+//! (panel, input, rows, empty state) lives here so every searchable menu
+//! looks and behaves identically.
 
 use gpui::{
     AnyElement, Bounds, Context, CursorStyle, ElementId, Entity, MouseButton, Pixels, ScrollHandle,
-    SharedString, Window, div, prelude::*, px,
+    SharedString, Window, div, prelude::*, px, svg,
 };
 
 use super::*;
@@ -23,6 +23,8 @@ const SEARCH_MENU_RADIUS_PX: f32 = 8.0;
 #[derive(Default)]
 pub(crate) struct SearchMenuRow {
     pub label: SharedString,
+    /// Optional leading icon (terminal command choices, semantic options).
+    pub icon_path: Option<&'static str>,
     /// Trailing secondary text (e.g. "Current" branch tag, option description).
     pub detail: Option<SharedString>,
     /// Keyboard-selected row: selected background + accent label.
@@ -55,18 +57,8 @@ impl SearchMenuRow {
         self
     }
 
-    pub(crate) fn checked(mut self, checked: bool) -> Self {
-        self.checked = checked;
-        self
-    }
-
-    pub(crate) fn submenu(mut self, submenu: bool) -> Self {
-        self.submenu = submenu;
-        self
-    }
-
-    pub(crate) fn back(mut self, back: bool) -> Self {
-        self.back = back;
+    pub(crate) fn icon(mut self, icon_path: Option<&'static str>) -> Self {
+        self.icon_path = icon_path;
         self
     }
 
@@ -169,6 +161,15 @@ impl EditorView {
                         .text_size(px(detail_font))
                         .text_color(text_secondary)
                         .child("‹"),
+                )
+            })
+            .when_some(row.icon_path, |this, icon_path| {
+                this.child(
+                    svg()
+                        .path(icon_path)
+                        .size(px(self.scaled(14.0)))
+                        .flex_none()
+                        .text_color(label_color),
                 )
             })
             .child(

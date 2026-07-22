@@ -728,6 +728,7 @@ impl EditorView {
                 .unwrap_or_else(|| self.sidebar_root.clone())
         };
         if !path.is_dir() && is_markdown_file(path) {
+            self.pending_file_list_scroll_top.set(None);
             self.file_list_pending_reveal_path = Some(path.to_path_buf());
         }
         if self.file_list_dir == dir {
@@ -736,6 +737,7 @@ impl EditorView {
         }
         self.file_list_dir = dir;
         self.file_list_dirty = true;
+        self.pending_file_list_scroll_top.set(None);
         self.file_list_scroll_handle
             .set_offset(gpui::point(px(0.0), px(0.0)));
         cx.notify();
@@ -750,6 +752,11 @@ impl EditorView {
         }
         if !self.file_list_dirty && self.file_list_loaded_dir.as_deref() == Some(dir.as_path()) {
             return;
+        }
+        if self.pending_file_list_scroll_top.get().is_none() {
+            self.pending_file_list_scroll_top.set(Some(
+                (-f32::from(self.file_list_scroll_handle.offset().y)).max(0.0),
+            ));
         }
         self.file_list_dirty = false;
         self.file_list_epoch = self.file_list_epoch.wrapping_add(1);
@@ -770,6 +777,12 @@ impl EditorView {
                 let mut items = items;
                 preserve_file_list_details(&this.file_list_items, &mut items);
                 this.file_list_items = items;
+                if this.file_list_items.is_empty() {
+                    this.pending_file_list_scroll_top.set(None);
+                    let offset = this.file_list_scroll_handle.offset();
+                    this.file_list_scroll_handle
+                        .set_offset(gpui::point(offset.x, px(0.0)));
+                }
                 this.file_list_loaded_dir = Some(loaded_dir);
                 this.file_list_task = None;
                 cx.notify();
@@ -1386,6 +1399,11 @@ impl EditorView {
             self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
             cx,
         );
+        let refresh_ready = !self.file_list_dirty
+            && self.file_list_task.is_none()
+            && self.file_list_loaded_dir.as_deref() == Some(dir.as_path());
+        let pending_scroll_top = self.pending_file_list_scroll_top.clone();
+        let file_list_scroll_handle = self.file_list_scroll_handle.clone();
 
         div()
             .id("file-list")
@@ -1427,33 +1445,50 @@ impl EditorView {
             } else {
                 let menu_dir = dir.clone();
                 div()
-                    .id("file-list-scroll")
                     .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.file_list_scroll_handle)
-                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                        this.reveal_panel_scrollbar(PanelScrollbarKind::FileList, cx);
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                            this.open_sidebar_context_menu(
-                                menu_dir.clone(),
-                                true,
-                                event.position,
-                                cx,
-                            );
-                            this.file_list_menu_origin = true;
-                        }),
-                    )
-                    .children(list_children)
+                    .min_h(px(0.0))
+                    .when(refresh_ready, |this| {
+                        this.on_children_prepainted(move |_, _, _| {
+                            let Some(scroll_top) = pending_scroll_top.take() else {
+                                return;
+                            };
+                            let max_scroll = f32::from(file_list_scroll_handle.max_offset().height);
+                            let offset = file_list_scroll_handle.offset();
+                            file_list_scroll_handle
+                                .set_offset(gpui::point(offset.x, px(-scroll_top.min(max_scroll))));
+                        })
+                    })
                     .child(
                         div()
-                            .w_full()
-                            .h(px(self.scaled(ss.sidebar_bottom_spacer_height_px)))
-                            .flex_none(),
+                            .id("file-list-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.file_list_scroll_handle)
+                            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                                this.pending_file_list_scroll_top.set(None);
+                                this.reveal_panel_scrollbar(PanelScrollbarKind::FileList, cx);
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    window.prevent_default();
+                                    cx.stop_propagation();
+                                    this.open_sidebar_context_menu(
+                                        menu_dir.clone(),
+                                        true,
+                                        event.position,
+                                        cx,
+                                    );
+                                    this.file_list_menu_origin = true;
+                                }),
+                            )
+                            .children(list_children)
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(self.scaled(ss.sidebar_bottom_spacer_height_px)))
+                                    .flex_none(),
+                            ),
                     )
                     .into_any_element()
             })

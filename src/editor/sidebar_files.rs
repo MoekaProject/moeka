@@ -40,7 +40,7 @@ impl EditorView {
         .detach();
         let focus_handle = editor.read(cx).focus_handle.clone();
         let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
-            this.cancel_sidebar_edit(cx);
+            this.commit_sidebar_edit(cx);
         });
         window.focus(&focus_handle);
         self.sidebar_edit = Some(if starred_surface {
@@ -200,8 +200,6 @@ impl EditorView {
     ) {
         let create_in_file_list = self.file_list_menu_origin;
         if create_in_file_list {
-            self.file_list_scroll_handle
-                .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
             self.file_list_pending_reveal_path = None;
         } else {
             let expanded_changed = self.expanded_dirs.insert(parent.clone());
@@ -555,6 +553,10 @@ impl EditorView {
         self.context_menu = None;
         if let Some(reveal_path) = pasted_paths.first().cloned() {
             self.reveal_path_in_sidebar(reveal_path.clone(), cx);
+            if self.file_list_effective_dir() == target_dir {
+                self.file_list_pending_reveal_path = Some(reveal_path.clone());
+                self.file_list_dirty = true;
+            }
             self.selected_sidebar_paths = pasted_paths.into_iter().collect();
             self.focused_sidebar_path = Some(reveal_path.clone());
             self.sidebar_selection_anchor = Some(reveal_path);
@@ -633,7 +635,18 @@ impl EditorView {
         self.focused_sidebar_path = None;
         self.sidebar_selection_anchor = None;
         self.sidebar_error = None;
+        // This is intentional navigation to a different root: unlike a
+        // refresh, old directory children must not remain visible.
+        self.sidebar_directory_children.clear();
+        self.sidebar_items_cache.clear();
+        self.sidebar_items_dirty = true;
         self.invalidate_sidebar_items_cache();
+        self.pending_sidebar_scroll_top.set(None);
+        self.pending_file_list_scroll_top.set(None);
+        self.sidebar_scroll_handle
+            .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        self.file_list_scroll_handle
+            .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         self.sidebar_git_statuses.clear();
         self.sidebar_git_statuses_task = None;
         self.invalidate_sidebar_git_statuses();
