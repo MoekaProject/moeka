@@ -946,8 +946,12 @@ impl Theme {
         theme.bold = foreground;
         theme.italic = palette.secondary_accent;
         theme.strikethrough = with_alpha(foreground, 0.65);
-        theme.inline_code = palette.secondary_accent;
-        theme.inline_code_bg = with_alpha(foreground, if dark { 0.12 } else { 0.08 });
+        theme.inline_code = foreground;
+        theme.inline_code_bg = if dark {
+            with_alpha(palette.light, 0.16)
+        } else {
+            palette.light_elevated
+        };
         theme.highlight_bg = with_alpha(palette.secondary_accent, 0.28);
         theme.link = palette.secondary_accent;
         theme.syntax_marker = with_alpha(foreground, 0.58);
@@ -2655,6 +2659,8 @@ mod tests {
 
             let dark_theme = dark.build();
             let light_theme = light.build();
+            assert!(dark_theme.bg_primary.l < 0.5, "{}", dark.label());
+            assert!(light_theme.bg_primary.l >= 0.5, "{}", light.label());
             assert_eq!(dark_theme.bg_primary, light_theme.text_primary);
             assert_eq!(dark_theme.text_primary, light_theme.bg_primary);
             assert_ne!(dark_theme.bg_primary, dark_theme.text_primary);
@@ -2682,6 +2688,25 @@ mod tests {
                 ThemeKind::MoekaKraftLight,
             ]
         );
+    }
+
+    #[test]
+    fn moeka_retro_inline_code_tracks_surface_contrast() {
+        for kind in ThemeKind::dark_themes()
+            .iter()
+            .chain(ThemeKind::light_themes())
+            .copied()
+            .filter(|kind| kind.is_moeka_retro())
+        {
+            let theme = kind.build();
+            assert_eq!(theme.inline_code, theme.text_primary, "{}", kind.label());
+            assert_ne!(theme.inline_code_bg, theme.bg_primary, "{}", kind.label());
+            if kind.is_dark() {
+                assert_eq!(theme.inline_code_bg.a, 0.16, "{}", kind.label());
+            } else {
+                assert_eq!(theme.inline_code_bg.a, 1.0, "{}", kind.label());
+            }
+        }
     }
 
     #[test]

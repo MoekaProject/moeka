@@ -324,6 +324,8 @@ pub struct SidebarStyles {
     pub file_list_item_time_color: Hsla,
     pub file_list_item_thumbnail_gap_px: f32,
     pub file_list_item_thumbnail_radius_px: f32,
+    pub file_list_item_thumbnail_border_width_px: f32,
+    pub file_list_item_thumbnail_border_color: Hsla,
     pub file_list_item_bg: Hsla,
     pub file_list_item_hover_bg: Hsla,
     pub file_list_item_selected_bg: Hsla,
@@ -1263,8 +1265,8 @@ pub struct SettingsPanelStyles {
 // ═════════════════════════════════════════════════════════════════════
 
 impl Styles {
-    /// Re-map chrome to the opposite-appearance companion used by every Moeka
-    /// retro theme and apply their shared two-pixel component borders.
+    /// Re-map all chrome to the same-appearance palette used by the active
+    /// Moeka retro theme and apply their shared two-pixel component borders.
     pub(crate) fn apply_moeka_retro_chrome(&mut self, editor: &Theme, chrome: &Theme) {
         let border_width = 2.0;
         let print_surface_text = editor.text_primary;
@@ -1280,6 +1282,8 @@ impl Styles {
         self.sidebar.sidebar_empty_btn_border_width_px = border_width;
         self.sidebar.file_list_header_border_width_px = border_width;
         self.sidebar.file_list_item_separator_width_px = border_width;
+        self.sidebar.file_list_item_thumbnail_border_width_px = border_width;
+        self.sidebar.file_list_item_thumbnail_border_color = chrome.border_primary;
         self.sidebar.sidebar_resize_indicator_width_px = border_width;
         self.sidebar.sidebar_resize_active_indicator_width_px = border_width;
 
@@ -1362,7 +1366,7 @@ impl Styles {
         self.settings_panel.settings_site_button_text_color = chrome.text_primary;
         self.settings_panel.settings_site_button_icon_color = chrome.text_secondary;
         self.settings_panel.settings_site_button_border_color = chrome.border_primary;
-        self.settings_panel.settings_site_button_bg = chrome.bg_primary;
+        self.settings_panel.settings_site_button_bg = chrome.bg_elevated;
         self.settings_panel.settings_site_button_hover_bg = chrome.bg_hover;
         self.settings_panel.settings_option_button_text_color = chrome.text_primary;
         self.settings_panel.settings_option_button_active_text_color = chrome.text_primary;
@@ -1370,7 +1374,7 @@ impl Styles {
         self.settings_panel
             .settings_option_button_active_border_color = chrome.border_primary;
         self.settings_panel.settings_contrast_border_color = editor.text_primary;
-        self.settings_panel.settings_option_button_bg = chrome.bg_primary;
+        self.settings_panel.settings_option_button_bg = chrome.bg_elevated;
         self.settings_panel.settings_option_button_hover_bg = chrome.bg_hover;
         self.settings_panel.settings_option_button_active_bg = chrome.bg_selected;
         self.settings_panel.settings_theme_option_hover_bg = chrome.bg_hover;
@@ -1708,6 +1712,8 @@ impl Styles {
                 file_list_item_time_color: with_alpha(sidebar_theme.text_secondary, 0.75),
                 file_list_item_thumbnail_gap_px: 10.0,
                 file_list_item_thumbnail_radius_px: 6.0,
+                file_list_item_thumbnail_border_width_px: 0.0,
+                file_list_item_thumbnail_border_color: sidebar_theme.border_primary,
                 file_list_item_bg: sidebar_theme.bg_secondary,
                 file_list_item_hover_bg: sidebar_theme.bg_primary,
                 file_list_item_selected_bg: sidebar_theme.bg_primary,
@@ -2569,6 +2575,7 @@ mod tests {
 
         assert_eq!(styles.sidebar.sidebar_bg, styles.sidebar.file_list_bg);
         assert_eq!(styles.sidebar.sidebar_bg, styles.sidebar.file_list_item_bg);
+        assert_eq!(styles.sidebar.file_list_item_thumbnail_border_width_px, 0.0);
     }
 
     #[test]
@@ -2667,70 +2674,75 @@ mod tests {
     }
 
     #[test]
-    fn moeka_print_settings_use_surface_text_and_dark_control_ink() {
-        let editor_theme = Theme::moeka_print_dark();
-        let paper = Theme::moeka_print_light();
-        let mut styles = Styles::from_theme(&editor_theme, &paper);
-        styles.apply_moeka_retro_chrome(&editor_theme, &paper);
+    fn moeka_settings_controls_follow_the_same_appearance() {
+        for kind in crate::theme::ThemeKind::dark_themes()
+            .iter()
+            .chain(crate::theme::ThemeKind::light_themes())
+            .copied()
+            .filter(|kind| kind.is_moeka_retro())
+        {
+            let theme = kind.build();
+            let mut styles = Styles::from_theme(&theme, &theme);
+            styles.apply_moeka_retro_chrome(&theme, &theme);
 
-        assert_eq!(
-            styles.settings_panel.settings_primary_text_color,
-            editor_theme.text_primary
-        );
-        assert_eq!(
-            styles.settings_panel.settings_secondary_text_color,
-            editor_theme.text_secondary
-        );
-        assert_eq!(
-            styles.settings_panel.settings_option_button_text_color,
-            paper.text_primary
-        );
-        assert_eq!(
-            styles.settings_panel.settings_option_button_bg,
-            paper.bg_primary
-        );
-        assert_eq!(
-            styles.settings_panel.settings_option_button_hover_bg,
-            paper.bg_hover
-        );
-        assert_eq!(
-            styles.settings_panel.settings_option_button_active_bg,
-            paper.bg_selected
-        );
-        assert_eq!(
-            styles.settings_panel.settings_contrast_border_color,
-            paper.bg_primary
-        );
-        assert_ne!(
-            styles.settings_panel.settings_contrast_border_color,
-            styles.settings_panel.settings_option_button_border_color
-        );
-        assert_ne!(
-            styles.settings_panel.settings_option_button_bg,
-            editor_theme.bg_primary
-        );
-        assert_ne!(
-            styles.settings_panel.settings_option_button_active_bg,
-            editor_theme.bg_primary
-        );
-        assert_eq!(
-            styles.settings_panel.settings_theme_option_text_color,
-            paper.text_primary
-        );
-        assert_eq!(styles.text_input.text_input_text_color, paper.text_bright);
-        assert_eq!(
-            styles.text_input.text_input_placeholder_color,
-            paper.text_secondary
-        );
-        assert_eq!(styles.text_input.text_input_cursor_color, paper.cursor);
+            assert_eq!(
+                styles.sidebar.sidebar_bg,
+                theme.bg_secondary,
+                "{}",
+                kind.label()
+            );
+            assert_eq!(
+                styles.utility_panel.utility_panel_bg,
+                theme.bg_secondary,
+                "{}",
+                kind.label()
+            );
+            assert_eq!(styles.tab_bar.tab_bar_bg, theme.bg_bar, "{}", kind.label());
+            assert_eq!(
+                styles.settings_panel.settings_primary_text_color,
+                theme.text_primary,
+                "{}",
+                kind.label()
+            );
+            assert_eq!(
+                styles.settings_panel.settings_option_button_text_color,
+                theme.text_primary,
+                "{}",
+                kind.label()
+            );
+            assert_eq!(
+                styles.settings_panel.settings_option_button_bg,
+                theme.bg_elevated,
+                "{}",
+                kind.label()
+            );
+            assert_eq!(
+                styles.settings_panel.settings_option_button_active_bg,
+                theme.bg_selected,
+                "{}",
+                kind.label()
+            );
+            assert_eq!(
+                styles.settings_panel.settings_contrast_border_color,
+                theme.text_primary,
+                "{}",
+                kind.label()
+            );
+            assert_ne!(
+                styles.settings_panel.settings_option_button_bg,
+                theme.bg_primary,
+                "{}",
+                kind.label()
+            );
+            assert_eq!(styles.text_input.text_input_text_color, theme.text_bright);
+        }
     }
 
     #[test]
     fn moeka_print_ui_borders_are_two_pixels() {
         let editor_theme = Theme::moeka_print_dark();
-        let paper = Theme::moeka_print_light();
-        let mut styles = Styles::from_theme(&editor_theme, &paper);
-        styles.apply_moeka_retro_chrome(&editor_theme, &paper);
+        let mut styles = Styles::from_theme(&editor_theme, &editor_theme);
+        styles.apply_moeka_retro_chrome(&editor_theme, &editor_theme);
 
         let borders = [
             ("window", styles.window.window_border_width_px),
@@ -2759,6 +2771,10 @@ mod tests {
             (
                 "file list separator",
                 styles.sidebar.file_list_item_separator_width_px,
+            ),
+            (
+                "file list thumbnail",
+                styles.sidebar.file_list_item_thumbnail_border_width_px,
             ),
             (
                 "utility panel",
@@ -2877,9 +2893,8 @@ mod tests {
             .filter(|kind| kind.is_moeka_retro())
         {
             let editor = kind.build();
-            let chrome = kind.moeka_companion().unwrap().build();
-            let mut styles = Styles::from_theme(&editor, &chrome);
-            styles.apply_moeka_retro_chrome(&editor, &chrome);
+            let mut styles = Styles::from_theme(&editor, &editor);
+            styles.apply_moeka_retro_chrome(&editor, &editor);
 
             assert_eq!(
                 styles.window.window_border_width_px,
@@ -2894,6 +2909,12 @@ mod tests {
                 kind.label()
             );
             assert_eq!(
+                styles.sidebar.file_list_item_thumbnail_border_width_px,
+                2.0,
+                "{}",
+                kind.label()
+            );
+            assert_eq!(
                 styles.settings_panel.settings_option_button_border_width_px,
                 2.0,
                 "{}",
@@ -2902,6 +2923,24 @@ mod tests {
             assert_eq!(
                 styles.settings_panel.settings_contrast_border_color,
                 editor.text_primary,
+                "{}",
+                kind.label()
+            );
+            assert_eq!(
+                styles.utility_panel.utility_panel_button_text_color,
+                editor.text_primary,
+                "{}",
+                kind.label()
+            );
+            assert_ne!(
+                styles.utility_panel.utility_panel_button_text_color,
+                styles.utility_panel.utility_panel_bg,
+                "{}",
+                kind.label()
+            );
+            assert_eq!(
+                styles.editor.editor_inline_code_bg.a,
+                if kind.is_dark() { 0.16 } else { 0.42 },
                 "{}",
                 kind.label()
             );

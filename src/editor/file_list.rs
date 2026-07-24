@@ -1001,6 +1001,8 @@ impl EditorView {
                             .flex_none()
                             .overflow_hidden()
                             .rounded(px(image_radius))
+                            .border(px(ss.file_list_item_thumbnail_border_width_px))
+                            .border_color(ss.file_list_item_thumbnail_border_color)
                             .child(FileListImageElement {
                                 image: image.clone(),
                                 radius: px(image_radius),

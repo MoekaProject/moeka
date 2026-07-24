@@ -281,8 +281,8 @@ impl AppSettings {
     }
 
     pub(crate) fn ui_theme_for(&self, editor_theme_kind: ThemeKind) -> Theme {
-        if let Some(companion) = editor_theme_kind.moeka_companion() {
-            companion.build()
+        if editor_theme_kind.is_moeka_retro() {
+            editor_theme_kind.build()
         } else {
             self.dark_theme_kind().build()
         }
@@ -545,6 +545,23 @@ mod tests {
             AppSettings::parse_theme_kind("MoekaPrint"),
             Some(ThemeKind::MoekaPrintDark)
         );
+    }
+
+    #[test]
+    fn moeka_retro_ui_theme_uses_the_same_appearance() {
+        let settings = AppSettings::default();
+        for kind in ThemeKind::dark_themes()
+            .iter()
+            .chain(ThemeKind::light_themes())
+            .copied()
+            .filter(|kind| kind.is_moeka_retro())
+        {
+            let editor = kind.build();
+            let ui = settings.ui_theme_for(kind);
+            assert_eq!(ui.bg_primary, editor.bg_primary, "{}", kind.label());
+            assert_eq!(ui.bg_secondary, editor.bg_secondary, "{}", kind.label());
+            assert_eq!(ui.text_primary, editor.text_primary, "{}", kind.label());
+        }
     }
 
     #[test]

@@ -846,8 +846,13 @@ impl EditorView {
                                         MouseButton::Left,
                                         cx.listener(|this, _, _, cx| {
                                             if this.settings_theme_dark_mode {
-                                                let light_theme =
-                                                    this.app_settings.light_theme_kind();
+                                                let light_theme = this
+                                                    .theme_kind
+                                                    .moeka_companion()
+                                                    .filter(|kind| !kind.is_dark())
+                                                    .unwrap_or_else(|| {
+                                                        this.app_settings.light_theme_kind()
+                                                    });
                                                 this.set_theme(light_theme, cx);
                                             }
                                         }),
@@ -891,8 +896,13 @@ impl EditorView {
                                         MouseButton::Left,
                                         cx.listener(|this, _, _, cx| {
                                             if !this.settings_theme_dark_mode {
-                                                let dark_theme =
-                                                    this.app_settings.dark_theme_kind();
+                                                let dark_theme = this
+                                                    .theme_kind
+                                                    .moeka_companion()
+                                                    .filter(|kind| kind.is_dark())
+                                                    .unwrap_or_else(|| {
+                                                        this.app_settings.dark_theme_kind()
+                                                    });
                                                 this.set_theme(dark_theme, cx);
                                             }
                                         }),
@@ -1012,8 +1022,16 @@ impl EditorView {
         let swatch_code = preview.inline_code;
         let swatch_secondary_bg = preview.bg_secondary;
         let active_accent = self.theme.text_accent;
-        let inactive_border = preview.border_secondary;
-        let inactive_hover_border = preview.border_tertiary;
+        let inactive_border = if kind.is_moeka_retro() {
+            crate::theme::with_alpha(self.theme.text_primary, 0.24)
+        } else {
+            preview.border_secondary
+        };
+        let inactive_hover_border = if kind.is_moeka_retro() {
+            crate::theme::with_alpha(self.theme.text_primary, 0.48)
+        } else {
+            preview.border_tertiary
+        };
 
         let swatch_size = self.scaled(10.0);
 

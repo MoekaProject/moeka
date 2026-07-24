@@ -3139,11 +3139,7 @@ impl EditorView {
         let share_tooltip = self.t(item.share_action.tooltip_key());
         let source_line = item.source_line;
         let icon_size = self.scaled(ups.utility_panel_item_font_size_px);
-        let share_icon_color = if self.theme_kind.is_dark() {
-            gpui::white()
-        } else {
-            self.theme.text_primary
-        };
+        let share_icon_color = ups.utility_panel_button_text_color;
         div()
             .px(px(self.scaled(ups.utility_panel_section_padding_x_px)))
             .min_h(px(self.scaled(ups.utility_panel_item_height_px)))
