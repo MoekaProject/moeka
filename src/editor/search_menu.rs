@@ -260,7 +260,7 @@ impl EditorView {
             .w(px(placement.width))
             .max_h(px(placement.max_height))
             .bg(bg)
-            .border(px(1.0))
+            .border(px(self.ui_border_width(1.0)))
             .border_color(border)
             .rounded(px(self.scaled(SEARCH_MENU_RADIUS_PX)))
             .shadow_md()
@@ -288,7 +288,7 @@ impl EditorView {
                     .flex_none()
                     .px(px(self.scaled(styles.quick_open_input_padding_x_px)))
                     .py(px(self.scaled(4.0)))
-                    .border_b(px(1.0))
+                    .border_b(px(self.ui_border_width(1.0)))
                     .border_color(border)
                     .when_some(editor, |this, editor| this.child(editor)),
             )

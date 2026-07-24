@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::i18n::{UiLanguage, default_language_code};
-use crate::theme::{EditorThemeMode, ThemeKind};
+use crate::theme::{EditorThemeMode, Theme, ThemeKind};
 
 use super::{ChatAgentCli, SidebarSortMode, TerminalCursorShape, config_store};
 
@@ -280,6 +280,14 @@ impl AppSettings {
         UiLanguage::from_code(&self.language).unwrap_or_else(crate::i18n::detect_system_language)
     }
 
+    pub(crate) fn ui_theme_for(&self, editor_theme_kind: ThemeKind) -> Theme {
+        if let Some(companion) = editor_theme_kind.moeka_companion() {
+            companion.build()
+        } else {
+            self.dark_theme_kind().build()
+        }
+    }
+
     pub(crate) fn dark_theme_kind(&self) -> ThemeKind {
         match Self::parse_theme_kind(&self.dark_theme) {
             Some(kind) if kind.is_dark() => kind,
@@ -302,6 +310,14 @@ impl AppSettings {
 
     fn parse_theme_kind(value: &str) -> Option<ThemeKind> {
         match value {
+            "MoekaPrint" | "MoekaPrintDark" => Some(ThemeKind::MoekaPrintDark),
+            "MoekaPrintLight" => Some(ThemeKind::MoekaPrintLight),
+            "MoekaMonoDark" => Some(ThemeKind::MoekaMonoDark),
+            "MoekaMonoLight" => Some(ThemeKind::MoekaMonoLight),
+            "MoekaNewspaperDark" => Some(ThemeKind::MoekaNewspaperDark),
+            "MoekaNewspaperLight" => Some(ThemeKind::MoekaNewspaperLight),
+            "MoekaKraftDark" => Some(ThemeKind::MoekaKraftDark),
+            "MoekaKraftLight" => Some(ThemeKind::MoekaKraftLight),
             "OneDark" => Some(ThemeKind::OneDark),
             "OneLight" => Some(ThemeKind::OneLight),
             "MilkyDark" | "AyuDark" => Some(ThemeKind::MilkyDark),
@@ -463,6 +479,14 @@ impl AppSettings {
 
 pub(crate) fn theme_kind_to_string(kind: ThemeKind) -> String {
     match kind {
+        ThemeKind::MoekaPrintDark => "MoekaPrintDark",
+        ThemeKind::MoekaPrintLight => "MoekaPrintLight",
+        ThemeKind::MoekaMonoDark => "MoekaMonoDark",
+        ThemeKind::MoekaMonoLight => "MoekaMonoLight",
+        ThemeKind::MoekaNewspaperDark => "MoekaNewspaperDark",
+        ThemeKind::MoekaNewspaperLight => "MoekaNewspaperLight",
+        ThemeKind::MoekaKraftDark => "MoekaKraftDark",
+        ThemeKind::MoekaKraftLight => "MoekaKraftLight",
         ThemeKind::OneDark => "OneDark",
         ThemeKind::OneLight => "OneLight",
         ThemeKind::MilkyDark => "MilkyDark",
@@ -493,10 +517,35 @@ pub(crate) fn theme_kind_to_string(kind: ThemeKind) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::AppSettings;
+    use super::{AppSettings, theme_kind_to_string};
     use crate::editor::attachments::{AttachmentLinkSyntax, AttachmentPathStyle};
     use crate::editor::{ChatAgentCli, TerminalCursorShape};
-    use crate::theme::EditorThemeMode;
+    use crate::theme::{EditorThemeMode, ThemeKind};
+
+    #[test]
+    fn moeka_retro_theme_names_round_trip_and_legacy_print_migrates() {
+        let kinds = [
+            ThemeKind::MoekaPrintDark,
+            ThemeKind::MoekaPrintLight,
+            ThemeKind::MoekaMonoDark,
+            ThemeKind::MoekaMonoLight,
+            ThemeKind::MoekaNewspaperDark,
+            ThemeKind::MoekaNewspaperLight,
+            ThemeKind::MoekaKraftDark,
+            ThemeKind::MoekaKraftLight,
+        ];
+
+        for kind in kinds {
+            assert_eq!(
+                AppSettings::parse_theme_kind(&theme_kind_to_string(kind)),
+                Some(kind)
+            );
+        }
+        assert_eq!(
+            AppSettings::parse_theme_kind("MoekaPrint"),
+            Some(ThemeKind::MoekaPrintDark)
+        );
+    }
 
     #[test]
     fn default_fonts_are_all_menlo() {

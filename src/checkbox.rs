@@ -23,6 +23,7 @@ pub(crate) struct CheckboxColors {
     pub unchecked_background: Hsla,
     pub unchecked_hover_background: Hsla,
     pub unchecked_border: Hsla,
+    pub border_width_px: f32,
     pub thumb: Hsla,
     pub description: Hsla,
 }
@@ -107,7 +108,7 @@ impl Checkbox {
             .flex()
             .items_center()
             .rounded(scaled(10.5))
-            .border(scaled(1.0))
+            .border(scaled(self.colors.border_width_px))
             .border_color(track_border)
             .bg(track_background)
             .group_hover("checkbox", move |style| style.bg(track_hover_background))

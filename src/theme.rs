@@ -1,7 +1,11 @@
 use gpui::Hsla;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemeKind {
+    MoekaPrintDark,
+    MoekaMonoDark,
+    MoekaNewspaperDark,
+    MoekaKraftDark,
     OneDark,
     OneLight,
     MilkyDark,
@@ -16,6 +20,10 @@ pub enum ThemeKind {
     RosePine,
     EverforestDark,
     MonokaiPro,
+    MoekaPrintLight,
+    MoekaMonoLight,
+    MoekaNewspaperLight,
+    MoekaKraftLight,
     GithubLight,
     SolarizedLight,
     CatppuccinLatte,
@@ -43,6 +51,10 @@ impl ThemeKind {
             Self::RosePine,
             Self::EverforestDark,
             Self::MonokaiPro,
+            Self::MoekaPrintDark,
+            Self::MoekaMonoDark,
+            Self::MoekaNewspaperDark,
+            Self::MoekaKraftDark,
         ]
     }
 
@@ -60,11 +72,23 @@ impl ThemeKind {
             Self::EverforestLight,
             Self::AyuLight,
             Self::XcodeLight,
+            Self::MoekaPrintLight,
+            Self::MoekaMonoLight,
+            Self::MoekaNewspaperLight,
+            Self::MoekaKraftLight,
         ]
     }
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::MoekaPrintDark => "Moeka Print Dark",
+            Self::MoekaPrintLight => "Moeka Print Light",
+            Self::MoekaMonoDark => "Moeka Mono Dark",
+            Self::MoekaMonoLight => "Moeka Mono Light",
+            Self::MoekaNewspaperDark => "Moeka Newspaper Dark",
+            Self::MoekaNewspaperLight => "Moeka Newspaper Light",
+            Self::MoekaKraftDark => "Moeka Kraft Dark",
+            Self::MoekaKraftLight => "Moeka Kraft Light",
             Self::OneDark => "One Dark",
             Self::OneLight => "One Light",
             Self::MilkyDark => "Milky Dark",
@@ -96,8 +120,44 @@ impl ThemeKind {
         Self::dark_themes().contains(&self)
     }
 
+    pub fn is_moeka_retro(self) -> bool {
+        matches!(
+            self,
+            Self::MoekaPrintDark
+                | Self::MoekaPrintLight
+                | Self::MoekaMonoDark
+                | Self::MoekaMonoLight
+                | Self::MoekaNewspaperDark
+                | Self::MoekaNewspaperLight
+                | Self::MoekaKraftDark
+                | Self::MoekaKraftLight
+        )
+    }
+
+    pub fn moeka_companion(self) -> Option<Self> {
+        match self {
+            Self::MoekaPrintDark => Some(Self::MoekaPrintLight),
+            Self::MoekaPrintLight => Some(Self::MoekaPrintDark),
+            Self::MoekaMonoDark => Some(Self::MoekaMonoLight),
+            Self::MoekaMonoLight => Some(Self::MoekaMonoDark),
+            Self::MoekaNewspaperDark => Some(Self::MoekaNewspaperLight),
+            Self::MoekaNewspaperLight => Some(Self::MoekaNewspaperDark),
+            Self::MoekaKraftDark => Some(Self::MoekaKraftLight),
+            Self::MoekaKraftLight => Some(Self::MoekaKraftDark),
+            _ => None,
+        }
+    }
+
     pub fn build(self) -> Theme {
         match self {
+            Self::MoekaPrintDark => Theme::moeka_print_dark(),
+            Self::MoekaPrintLight => Theme::moeka_print_light(),
+            Self::MoekaMonoDark => Theme::moeka_mono_dark(),
+            Self::MoekaMonoLight => Theme::moeka_mono_light(),
+            Self::MoekaNewspaperDark => Theme::moeka_newspaper_dark(),
+            Self::MoekaNewspaperLight => Theme::moeka_newspaper_light(),
+            Self::MoekaKraftDark => Theme::moeka_kraft_dark(),
+            Self::MoekaKraftLight => Theme::moeka_kraft_light(),
             Self::OneDark => Theme::one_dark(),
             Self::OneLight => Theme::one_light(),
             Self::MilkyDark => Theme::ayu_dark(),
@@ -818,7 +878,173 @@ pub fn apply_editor_theme_mode(theme: &Theme, mode: EditorThemeMode, is_dark: bo
     themed
 }
 
+#[derive(Clone, Copy)]
+struct MoekaRetroPalette {
+    dark: Hsla,
+    dark_elevated: Hsla,
+    dark_hover: Hsla,
+    light: Hsla,
+    light_elevated: Hsla,
+    light_hover: Hsla,
+    accent: Hsla,
+    secondary_accent: Hsla,
+}
+
 impl Theme {
+    fn moeka_retro(palette: MoekaRetroPalette, dark: bool) -> Self {
+        let mut theme = if dark {
+            Self::ayu_dark()
+        } else {
+            Self::milky()
+        };
+        let (background, elevated, hover, foreground) = if dark {
+            (
+                palette.dark,
+                palette.dark_elevated,
+                palette.dark_hover,
+                palette.light,
+            )
+        } else {
+            (
+                palette.light,
+                palette.light_elevated,
+                palette.light_hover,
+                palette.dark,
+            )
+        };
+
+        theme.text_primary = foreground;
+        theme.text_secondary = with_alpha(foreground, 0.76);
+        theme.text_bright = foreground;
+        theme.text_accent = palette.accent;
+        theme.text_danger = palette.accent;
+        theme.text_on_accent = palette.light;
+        theme.text_warning = palette.secondary_accent;
+        theme.text_warning_hover = palette.secondary_accent;
+        theme.bg_primary = background;
+        theme.bg_secondary = elevated;
+        theme.bg_tertiary = elevated;
+        theme.bg_elevated = elevated;
+        theme.bg_hover = hover;
+        theme.bg_selected = hover;
+        theme.bg_bar = background;
+        theme.bg_tab = elevated;
+        theme.bg_tab_hover = hover;
+        theme.bg_tab_active = background;
+        theme.bg_code = elevated;
+        theme.bg_code_inline = hover;
+        theme.border_primary = foreground;
+        theme.border_secondary = foreground;
+        theme.border_tertiary = with_alpha(foreground, 0.72);
+        theme.border_decorative = foreground;
+        theme.border_code_block = foreground;
+        theme.window_border = foreground;
+        theme.cursor = palette.secondary_accent;
+        theme.selection = with_alpha(palette.secondary_accent, 0.32);
+        theme.line_highlight = with_alpha(foreground, 0.08);
+        theme.heading = palette.accent;
+        theme.bold = foreground;
+        theme.italic = palette.secondary_accent;
+        theme.strikethrough = with_alpha(foreground, 0.65);
+        theme.inline_code = palette.secondary_accent;
+        theme.inline_code_bg = with_alpha(foreground, if dark { 0.12 } else { 0.08 });
+        theme.highlight_bg = with_alpha(palette.secondary_accent, 0.28);
+        theme.link = palette.secondary_accent;
+        theme.syntax_marker = with_alpha(foreground, 0.58);
+        theme.list_marker = palette.accent;
+        theme.checkbox_checked = palette.secondary_accent;
+        theme.gutter_heading = with_alpha(foreground, 0.3);
+        theme.git_status_added = palette.secondary_accent;
+        theme.git_status_modified = palette.accent;
+        theme.diff_added_bg = with_alpha(palette.secondary_accent, if dark { 0.42 } else { 0.22 });
+        theme.diff_removed_bg = with_alpha(palette.accent, if dark { 0.42 } else { 0.22 });
+        theme
+    }
+
+    fn moeka_print_palette() -> MoekaRetroPalette {
+        MoekaRetroPalette {
+            dark: crate::hex_hsla!("#1E212B"),
+            dark_elevated: crate::hex_hsla!("#252936"),
+            dark_hover: crate::hex_hsla!("#323849"),
+            light: crate::hex_hsla!("#F3E6BF"),
+            light_elevated: crate::hex_hsla!("#E9D7A8"),
+            light_hover: crate::hex_hsla!("#DCC58A"),
+            accent: crate::hex_hsla!("#D84A2F"),
+            secondary_accent: crate::hex_hsla!("#D49A21"),
+        }
+    }
+
+    pub fn moeka_print_dark() -> Self {
+        Self::moeka_retro(Self::moeka_print_palette(), true)
+    }
+
+    pub fn moeka_print_light() -> Self {
+        Self::moeka_retro(Self::moeka_print_palette(), false)
+    }
+
+    fn moeka_mono_palette() -> MoekaRetroPalette {
+        MoekaRetroPalette {
+            dark: crate::hex_hsla!("#171717"),
+            dark_elevated: crate::hex_hsla!("#242424"),
+            dark_hover: crate::hex_hsla!("#363636"),
+            light: crate::hex_hsla!("#F1EFE8"),
+            light_elevated: crate::hex_hsla!("#E3E0D8"),
+            light_hover: crate::hex_hsla!("#D1CDC3"),
+            accent: crate::hex_hsla!("#55524D"),
+            secondary_accent: crate::hex_hsla!("#8C877D"),
+        }
+    }
+
+    pub fn moeka_mono_dark() -> Self {
+        Self::moeka_retro(Self::moeka_mono_palette(), true)
+    }
+
+    pub fn moeka_mono_light() -> Self {
+        Self::moeka_retro(Self::moeka_mono_palette(), false)
+    }
+
+    fn moeka_newspaper_palette() -> MoekaRetroPalette {
+        MoekaRetroPalette {
+            dark: crate::hex_hsla!("#25231F"),
+            dark_elevated: crate::hex_hsla!("#332F29"),
+            dark_hover: crate::hex_hsla!("#484139"),
+            light: crate::hex_hsla!("#E7DFCC"),
+            light_elevated: crate::hex_hsla!("#D8CEB8"),
+            light_hover: crate::hex_hsla!("#C8BCA3"),
+            accent: crate::hex_hsla!("#A33A2D"),
+            secondary_accent: crate::hex_hsla!("#435A55"),
+        }
+    }
+
+    pub fn moeka_newspaper_dark() -> Self {
+        Self::moeka_retro(Self::moeka_newspaper_palette(), true)
+    }
+
+    pub fn moeka_newspaper_light() -> Self {
+        Self::moeka_retro(Self::moeka_newspaper_palette(), false)
+    }
+
+    fn moeka_kraft_palette() -> MoekaRetroPalette {
+        MoekaRetroPalette {
+            dark: crate::hex_hsla!("#35281C"),
+            dark_elevated: crate::hex_hsla!("#493727"),
+            dark_hover: crate::hex_hsla!("#5D4733"),
+            light: crate::hex_hsla!("#C9A66B"),
+            light_elevated: crate::hex_hsla!("#B88E50"),
+            light_hover: crate::hex_hsla!("#A77C42"),
+            accent: crate::hex_hsla!("#7E2F24"),
+            secondary_accent: crate::hex_hsla!("#315A48"),
+        }
+    }
+
+    pub fn moeka_kraft_dark() -> Self {
+        Self::moeka_retro(Self::moeka_kraft_palette(), true)
+    }
+
+    pub fn moeka_kraft_light() -> Self {
+        Self::moeka_retro(Self::moeka_kraft_palette(), false)
+    }
+
     pub fn one_dark() -> Self {
         Self {
             // Text
@@ -2390,6 +2616,72 @@ mod tests {
                 assert_eq!(themed.link, DARK_EDITOR_LINK, "{}", kind.label());
             }
         }
+    }
+
+    #[test]
+    fn moeka_print_uses_reference_four_color_palette() {
+        let editor = Theme::moeka_print_dark();
+        let paper = Theme::moeka_print_light();
+
+        assert_eq!(editor.bg_primary, Theme::ayu_dark().bg_primary);
+        assert_eq!(editor.bg_primary, crate::hex_hsla!("#1E212B"));
+        assert_eq!(editor.text_primary, crate::hex_hsla!("#F3E6BF"));
+        assert_eq!(editor.border_primary, crate::hex_hsla!("#F3E6BF"));
+        assert_eq!(editor.text_accent, crate::hex_hsla!("#D84A2F"));
+        assert_eq!(paper.bg_primary, crate::hex_hsla!("#F3E6BF"));
+        assert_eq!(paper.text_primary, crate::hex_hsla!("#1E212B"));
+        assert_eq!(paper.text_accent, crate::hex_hsla!("#D84A2F"));
+    }
+
+    #[test]
+    fn moeka_retro_themes_form_four_dark_light_pairs() {
+        let pairs = [
+            (ThemeKind::MoekaPrintDark, ThemeKind::MoekaPrintLight),
+            (ThemeKind::MoekaMonoDark, ThemeKind::MoekaMonoLight),
+            (
+                ThemeKind::MoekaNewspaperDark,
+                ThemeKind::MoekaNewspaperLight,
+            ),
+            (ThemeKind::MoekaKraftDark, ThemeKind::MoekaKraftLight),
+        ];
+
+        for (dark, light) in pairs {
+            assert!(dark.is_dark(), "{}", dark.label());
+            assert!(!light.is_dark(), "{}", light.label());
+            assert!(dark.is_moeka_retro());
+            assert!(light.is_moeka_retro());
+            assert_eq!(dark.moeka_companion(), Some(light));
+            assert_eq!(light.moeka_companion(), Some(dark));
+
+            let dark_theme = dark.build();
+            let light_theme = light.build();
+            assert_eq!(dark_theme.bg_primary, light_theme.text_primary);
+            assert_eq!(dark_theme.text_primary, light_theme.bg_primary);
+            assert_ne!(dark_theme.bg_primary, dark_theme.text_primary);
+            assert_ne!(light_theme.bg_primary, light_theme.text_primary);
+        }
+    }
+
+    #[test]
+    fn moeka_retro_themes_are_last_in_settings_lists() {
+        assert_eq!(
+            &ThemeKind::dark_themes()[ThemeKind::dark_themes().len() - 4..],
+            &[
+                ThemeKind::MoekaPrintDark,
+                ThemeKind::MoekaMonoDark,
+                ThemeKind::MoekaNewspaperDark,
+                ThemeKind::MoekaKraftDark,
+            ]
+        );
+        assert_eq!(
+            &ThemeKind::light_themes()[ThemeKind::light_themes().len() - 4..],
+            &[
+                ThemeKind::MoekaPrintLight,
+                ThemeKind::MoekaMonoLight,
+                ThemeKind::MoekaNewspaperLight,
+                ThemeKind::MoekaKraftLight,
+            ]
+        );
     }
 
     #[test]

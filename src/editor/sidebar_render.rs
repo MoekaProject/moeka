@@ -452,7 +452,7 @@ impl EditorView {
             .flex()
             .items_center()
             .bg(row_bg)
-            .border_1()
+            .border(px(self.ui_border_width(1.0)))
             .border_color(if is_selected {
                 active_border_color
             } else if is_focused {
@@ -829,7 +829,7 @@ impl EditorView {
             .items_center()
             .opacity(if is_cut_item { 0.48 } else { 1.0 })
             .bg(if is_drag_over { drag_over_bg } else { row_bg })
-            .border_1()
+            .border(px(self.ui_border_width(1.0)))
             .border_color(if is_selected {
                 active_border_color
             } else if is_focused {
@@ -1537,7 +1537,7 @@ impl EditorView {
             } else {
                 wss.ws_bar_bg
             })
-            .border_t(px(1.0))
+            .border_t(px(self.ui_border_width(1.0)))
             .border_color(wss.ws_bar_border_color)
             .cursor(CursorStyle::Arrow)
             .hover(move |s| s.bg(hover_bg))

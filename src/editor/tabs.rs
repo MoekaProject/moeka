@@ -1947,11 +1947,7 @@ impl EditorView {
                             .right_0()
                             .bottom_0()
                             .h(px(ts.tab_bar_border_width_px))
-                            .bg(if is_active {
-                                gpui::transparent_black()
-                            } else {
-                                ts.tab_bar_border_color
-                            }),
+                            .bg(ts.tab_bar_border_color),
                     ),
             )
             // Drag initiation: create ghost element

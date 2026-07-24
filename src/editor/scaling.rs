@@ -59,6 +59,16 @@ impl EditorView {
         value * self.ui_scale
     }
 
+    /// Preserve existing border metrics outside the Moeka retro theme family,
+    /// whose chrome uses a uniform two-pixel rule.
+    pub(crate) fn ui_border_width(&self, default_width: f32) -> f32 {
+        if self.theme_kind.is_moeka_retro() {
+            2.0
+        } else {
+            default_width
+        }
+    }
+
     #[cfg(target_os = "macos")]
     pub(crate) fn traffic_light_position_for_ui_scale(ui_scale: f32) -> gpui::Point<gpui::Pixels> {
         const STANDARD_BUTTON_HEIGHT_PX: f32 = 14.0;

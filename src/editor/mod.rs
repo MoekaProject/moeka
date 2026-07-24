@@ -1968,8 +1968,11 @@ impl EditorView {
             editor_theme_mode,
             theme_kind.is_dark(),
         );
-        let ui_theme = app_settings.dark_theme_kind().build();
+        let ui_theme = app_settings.ui_theme_for(theme_kind);
         let mut styles = crate::style::Styles::from_theme(&theme, &ui_theme);
+        if theme_kind.is_moeka_retro() {
+            styles.apply_moeka_retro_chrome(&theme, &ui_theme);
+        }
         // Keep Markdown headings at their original sizes while rendering body
         // text one point smaller than the configured legacy size.
         styles.editor.editor_font_size_px = app_settings.effective_editor_font_size();

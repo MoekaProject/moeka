@@ -977,7 +977,7 @@ impl Render for EditorView {
                                                 .id("empty-workspace-btn")
                                                 .px(px(20.0))
                                                 .py(px(8.0))
-                                                .border(px(1.5))
+                                                .border(px(self.ui_border_width(1.5)))
                                                 .border_dashed()
                                                 .border_color(border_color)
                                                 .rounded_full()

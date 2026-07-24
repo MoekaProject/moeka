@@ -283,7 +283,7 @@ impl EditorView {
                     .left(px(panel_left.max(0.0)))
                     .w(px(panel_width))
                     .bg(styles.quick_open_panel_bg)
-                    .border(px(1.0))
+                    .border(px(self.ui_border_width(1.0)))
                     .border_color(styles.quick_open_panel_border_color)
                     .rounded(px(self.scaled(styles.quick_open_panel_radius_px)))
                     .shadow_md()
@@ -300,7 +300,7 @@ impl EditorView {
                             .w_full()
                             .px(px(self.scaled(styles.quick_open_input_padding_x_px)))
                             .py(px(self.scaled(styles.quick_open_input_padding_y_px)))
-                            .border_b(px(1.0))
+                            .border_b(px(self.ui_border_width(1.0)))
                             .border_color(styles.quick_open_panel_border_color)
                             .when_some(self.command_palette_editor.clone(), |this, editor| {
                                 this.child(editor)

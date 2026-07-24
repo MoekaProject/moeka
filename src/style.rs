@@ -1025,6 +1025,7 @@ pub struct TextInputStyles {
     pub text_input_menu_bg: Hsla,
     pub text_input_menu_text_color: Hsla,
     pub text_input_menu_font_size_px: f32,
+    pub text_input_menu_border_width_px: f32,
     pub text_input_menu_border_color: Hsla,
     pub text_input_menu_radius_px: f32,
     pub text_input_menu_padding_y_px: f32,
@@ -1234,6 +1235,7 @@ pub struct SettingsPanelStyles {
     pub settings_option_button_active_bg: Hsla,
     pub settings_option_button_border_color: Hsla,
     pub settings_option_button_active_border_color: Hsla,
+    pub settings_contrast_border_color: Hsla,
     pub settings_input_height_px: f32,
     pub settings_input_radius_px: f32,
     pub settings_stepper_input_radius_px: f32,
@@ -1261,6 +1263,131 @@ pub struct SettingsPanelStyles {
 // ═════════════════════════════════════════════════════════════════════
 
 impl Styles {
+    /// Re-map chrome to the opposite-appearance companion used by every Moeka
+    /// retro theme and apply their shared two-pixel component borders.
+    pub(crate) fn apply_moeka_retro_chrome(&mut self, editor: &Theme, chrome: &Theme) {
+        let border_width = 2.0;
+        let print_surface_text = editor.text_primary;
+        let print_surface_text_muted = editor.text_secondary;
+
+        self.window.window_border_width_px = border_width;
+        self.window.window_border_color = chrome.window_border;
+
+        self.editor.editor_path_bar_border_width_px = border_width;
+        self.editor.editor_match_border_width_px = border_width;
+
+        self.sidebar.sidebar_edit_input_border_width_px = border_width;
+        self.sidebar.sidebar_empty_btn_border_width_px = border_width;
+        self.sidebar.file_list_header_border_width_px = border_width;
+        self.sidebar.file_list_item_separator_width_px = border_width;
+        self.sidebar.sidebar_resize_indicator_width_px = border_width;
+        self.sidebar.sidebar_resize_active_indicator_width_px = border_width;
+
+        self.tab_bar.tab_bar_bg = chrome.bg_bar;
+        self.tab_bar.tab_bar_border_width_px = border_width;
+        self.tab_bar.tab_bar_border_color = chrome.border_primary;
+        self.tab_bar.tab_item_bg = chrome.bg_tab;
+        self.tab_bar.tab_item_hover_bg = chrome.bg_tab_hover;
+        self.tab_bar.tab_item_active_bg = chrome.bg_tab_active;
+        self.tab_bar.tab_item_border_width_px = border_width;
+        self.tab_bar.tab_item_border_color = chrome.border_primary;
+        self.tab_bar.tab_item_icon_color = chrome.text_secondary;
+        self.tab_bar.tab_item_badge_bg = with_alpha(chrome.text_secondary, 0.24);
+        self.tab_bar.tab_item_badge_text_color = chrome.text_primary;
+        self.tab_bar.tab_item_text_color = chrome.text_primary;
+        self.tab_bar.tab_item_active_text_color = chrome.text_bright;
+        self.tab_bar.tab_item_close_text_color = chrome.text_primary;
+        self.tab_bar.tab_item_close_hover_bg = chrome.bg_hover;
+        self.tab_bar.tab_item_dirty_dot_color = chrome.text_accent;
+        self.tab_bar.tab_item_deleted_text_color = chrome.text_secondary;
+        self.tab_bar.tab_new_text_color = chrome.text_secondary;
+        self.tab_bar.tab_new_hover_text_color = chrome.text_bright;
+        self.tab_bar.tab_drop_indicator_color = chrome.text_accent;
+        self.tab_bar.tab_pin_icon_color = chrome.text_secondary;
+        self.tab_bar.tab_overflow_text_color = chrome.text_secondary;
+        self.tab_bar.tab_overflow_bg = chrome.bg_tab;
+        self.tab_bar.tab_history_group_border_width_px = border_width;
+        self.tab_bar.tab_history_group_border_color = chrome.border_primary;
+        self.tab_bar.tab_history_btn_bg = chrome.bg_tab;
+        self.tab_bar.tab_history_btn_icon_color = chrome.text_primary;
+        self.tab_bar.tab_history_btn_hover_icon_color = chrome.text_bright;
+        self.tab_bar.tab_history_btn_icon_disabled_color = chrome.text_secondary;
+
+        self.utility_panel.utility_panel_bg = chrome.bg_secondary;
+        self.utility_panel.utility_panel_border_width_px = border_width;
+        self.utility_panel.utility_panel_border_color = chrome.border_primary;
+        self.utility_panel.utility_panel_header_text_color = chrome.text_primary;
+        self.utility_panel.utility_panel_section_title_text_color = chrome.text_primary;
+        self.utility_panel.utility_panel_item_label_text_color = chrome.text_secondary;
+        self.utility_panel.utility_panel_item_value_text_color = chrome.text_primary;
+        self.utility_panel.utility_panel_button_border_width_px = border_width;
+        self.utility_panel.utility_panel_button_border_color = chrome.border_primary;
+        self.utility_panel.utility_panel_button_text_color = chrome.text_primary;
+        self.utility_panel.utility_panel_button_hover_bg = chrome.bg_hover;
+        self.utility_panel.utility_panel_empty_text_color = chrome.text_secondary;
+        self.utility_panel.utility_panel_resize_indicator_width_px = border_width;
+        self.utility_panel
+            .utility_panel_resize_active_indicator_width_px = border_width;
+        self.utility_panel.utility_panel_resize_indicator_color = chrome.border_primary;
+        self.utility_panel
+            .utility_panel_resize_active_indicator_color = chrome.text_accent;
+
+        self.toolbar.toolbar_whiteboard_border_width_px = border_width;
+        self.tooltip.tooltip_border_width_px = border_width;
+        self.code_block.code_block_border_width_px = border_width;
+        self.code_block.code_block_split_border_width_px = border_width;
+        self.checkbox.checkbox_border_width_px = border_width;
+        self.code_block.code_block_copy_button_border_width_px = border_width;
+        self.code_block.generated_preview_action_border_width_px = border_width;
+        self.quote_block.quote_block_border_width_px = border_width;
+        self.selection.selection_diff_revert_button_border_width_px = border_width;
+        self.table.table_border_width_px = border_width;
+        self.table.table_selection_border_width_px = border_width;
+        self.image_preview.image_active_border_width_px = border_width;
+        self.dialog.dialog_border_width_px = border_width;
+        self.notification.notification_border_width_px = border_width;
+        self.context_menu.menu_border_width_px = border_width;
+        self.text_input.text_input_border_width_px = border_width;
+        self.search.search_bar_border_width_px = border_width;
+        self.workspace_search.ws_search_input_border_width_px = border_width;
+        self.workspace_search.ws_search_file_header_border_width_px = border_width;
+
+        self.settings_panel.settings_title_version_text_color = print_surface_text_muted;
+        self.settings_panel.settings_primary_text_color = print_surface_text;
+        self.settings_panel.settings_secondary_text_color = print_surface_text_muted;
+        self.settings_panel.settings_site_button_border_width_px = border_width;
+        self.settings_panel.settings_option_button_border_width_px = border_width;
+        self.settings_panel.settings_theme_toggle_border_width_px = border_width;
+        self.settings_panel.settings_theme_option_border_width_px = border_width;
+        self.settings_panel.settings_site_button_text_color = chrome.text_primary;
+        self.settings_panel.settings_site_button_icon_color = chrome.text_secondary;
+        self.settings_panel.settings_site_button_border_color = chrome.border_primary;
+        self.settings_panel.settings_site_button_bg = chrome.bg_primary;
+        self.settings_panel.settings_site_button_hover_bg = chrome.bg_hover;
+        self.settings_panel.settings_option_button_text_color = chrome.text_primary;
+        self.settings_panel.settings_option_button_active_text_color = chrome.text_primary;
+        self.settings_panel.settings_option_button_border_color = chrome.border_primary;
+        self.settings_panel
+            .settings_option_button_active_border_color = chrome.border_primary;
+        self.settings_panel.settings_contrast_border_color = editor.text_primary;
+        self.settings_panel.settings_option_button_bg = chrome.bg_primary;
+        self.settings_panel.settings_option_button_hover_bg = chrome.bg_hover;
+        self.settings_panel.settings_option_button_active_bg = chrome.bg_selected;
+        self.settings_panel.settings_theme_option_hover_bg = chrome.bg_hover;
+        self.settings_panel.settings_theme_option_active_bg = chrome.bg_selected;
+        self.settings_panel.settings_theme_option_text_color = chrome.text_primary;
+        self.settings_panel.settings_theme_option_active_text_color = chrome.text_bright;
+        self.settings_panel.settings_theme_option_border_color = chrome.border_primary;
+
+        self.text_input.text_input_text_color = chrome.text_bright;
+        self.text_input.text_input_placeholder_color = chrome.text_secondary;
+        self.text_input.text_input_cursor_color = chrome.cursor;
+        self.text_input.text_input_selection_color = chrome.selection;
+        self.text_input.text_input_menu_border_width_px = border_width;
+        self.text_input.text_input_menu_text_color = chrome.text_primary;
+        self.search.search_match_border_width_px = border_width;
+    }
+
     /// `theme` drives editor content colors and follows the user's light/dark
     /// selection. `ui_theme` is the dark chrome palette (the user's selected
     /// dark theme) used for the window border, menus, and sidebar surfaces so
@@ -1555,9 +1682,7 @@ impl Styles {
                 sidebar_item_focus_border_color: with_alpha(sidebar_theme.text_accent, 0.3),
                 sidebar_item_active_border_color: with_alpha(sidebar_theme.text_accent, 0.2),
                 file_list_width_px: 240.0,
-                // Slightly lighter than the file tree background so the two
-                // panes read as separate layers (chrome palette is always dark).
-                file_list_bg: sidebar_theme.bg_tertiary,
+                file_list_bg: sidebar_theme.bg_secondary,
                 file_list_header_height_px: TOP_BAR_HEIGHT_PX,
                 file_list_header_padding_left_px: 12.0,
                 file_list_header_padding_right_px: 4.0,
@@ -2216,6 +2341,7 @@ impl Styles {
                 text_input_menu_bg: text_input_theme.bg_elevated,
                 text_input_menu_text_color: text_input_theme.text_primary,
                 text_input_menu_font_size_px: ui_font_size_sm_px,
+                text_input_menu_border_width_px: 1.0,
                 text_input_menu_border_color: text_input_theme.border_primary,
                 text_input_menu_radius_px: 8.0,
                 text_input_menu_padding_y_px: 6.0,
@@ -2405,6 +2531,7 @@ impl Styles {
                 settings_option_button_active_bg: settings_active_bg,
                 settings_option_button_border_color: settings_theme.border_primary,
                 settings_option_button_active_border_color: settings_active_bg,
+                settings_contrast_border_color: settings_theme.border_primary,
                 settings_input_height_px: 30.0,
                 settings_input_radius_px: 6.0,
                 settings_stepper_input_radius_px: 0.0,
@@ -2434,6 +2561,15 @@ impl Styles {
 mod tests {
     use super::Styles;
     use crate::theme::Theme;
+
+    #[test]
+    fn file_tree_and_file_list_share_the_same_background() {
+        let theme = Theme::one_dark();
+        let styles = Styles::from_theme(&theme, &theme);
+
+        assert_eq!(styles.sidebar.sidebar_bg, styles.sidebar.file_list_bg);
+        assert_eq!(styles.sidebar.sidebar_bg, styles.sidebar.file_list_item_bg);
+    }
 
     #[test]
     fn editor_body_is_one_point_smaller_without_changing_heading_sizes() {
@@ -2528,6 +2664,248 @@ mod tests {
             styles.outline.outline_rail_tick_color,
             crate::theme::with_alpha(light_theme.text_primary, 0.3)
         );
+    }
+
+    #[test]
+    fn moeka_print_settings_use_surface_text_and_dark_control_ink() {
+        let editor_theme = Theme::moeka_print_dark();
+        let paper = Theme::moeka_print_light();
+        let mut styles = Styles::from_theme(&editor_theme, &paper);
+        styles.apply_moeka_retro_chrome(&editor_theme, &paper);
+
+        assert_eq!(
+            styles.settings_panel.settings_primary_text_color,
+            editor_theme.text_primary
+        );
+        assert_eq!(
+            styles.settings_panel.settings_secondary_text_color,
+            editor_theme.text_secondary
+        );
+        assert_eq!(
+            styles.settings_panel.settings_option_button_text_color,
+            paper.text_primary
+        );
+        assert_eq!(
+            styles.settings_panel.settings_option_button_bg,
+            paper.bg_primary
+        );
+        assert_eq!(
+            styles.settings_panel.settings_option_button_hover_bg,
+            paper.bg_hover
+        );
+        assert_eq!(
+            styles.settings_panel.settings_option_button_active_bg,
+            paper.bg_selected
+        );
+        assert_eq!(
+            styles.settings_panel.settings_contrast_border_color,
+            paper.bg_primary
+        );
+        assert_ne!(
+            styles.settings_panel.settings_contrast_border_color,
+            styles.settings_panel.settings_option_button_border_color
+        );
+        assert_ne!(
+            styles.settings_panel.settings_option_button_bg,
+            editor_theme.bg_primary
+        );
+        assert_ne!(
+            styles.settings_panel.settings_option_button_active_bg,
+            editor_theme.bg_primary
+        );
+        assert_eq!(
+            styles.settings_panel.settings_theme_option_text_color,
+            paper.text_primary
+        );
+        assert_eq!(styles.text_input.text_input_text_color, paper.text_bright);
+        assert_eq!(
+            styles.text_input.text_input_placeholder_color,
+            paper.text_secondary
+        );
+        assert_eq!(styles.text_input.text_input_cursor_color, paper.cursor);
+    }
+
+    #[test]
+    fn moeka_print_ui_borders_are_two_pixels() {
+        let editor_theme = Theme::moeka_print_dark();
+        let paper = Theme::moeka_print_light();
+        let mut styles = Styles::from_theme(&editor_theme, &paper);
+        styles.apply_moeka_retro_chrome(&editor_theme, &paper);
+
+        let borders = [
+            ("window", styles.window.window_border_width_px),
+            ("path bar", styles.editor.editor_path_bar_border_width_px),
+            ("editor match", styles.editor.editor_match_border_width_px),
+            (
+                "sidebar input",
+                styles.sidebar.sidebar_edit_input_border_width_px,
+            ),
+            (
+                "sidebar empty button",
+                styles.sidebar.sidebar_empty_btn_border_width_px,
+            ),
+            (
+                "sidebar divider",
+                styles.sidebar.sidebar_resize_indicator_width_px,
+            ),
+            (
+                "sidebar active divider",
+                styles.sidebar.sidebar_resize_active_indicator_width_px,
+            ),
+            (
+                "file list header",
+                styles.sidebar.file_list_header_border_width_px,
+            ),
+            (
+                "file list separator",
+                styles.sidebar.file_list_item_separator_width_px,
+            ),
+            (
+                "utility panel",
+                styles.utility_panel.utility_panel_border_width_px,
+            ),
+            (
+                "utility button",
+                styles.utility_panel.utility_panel_button_border_width_px,
+            ),
+            (
+                "utility divider",
+                styles.utility_panel.utility_panel_resize_indicator_width_px,
+            ),
+            (
+                "utility active divider",
+                styles
+                    .utility_panel
+                    .utility_panel_resize_active_indicator_width_px,
+            ),
+            ("tab bar", styles.tab_bar.tab_bar_border_width_px),
+            ("tab item", styles.tab_bar.tab_item_border_width_px),
+            (
+                "tab history",
+                styles.tab_bar.tab_history_group_border_width_px,
+            ),
+            (
+                "whiteboard toolbar",
+                styles.toolbar.toolbar_whiteboard_border_width_px,
+            ),
+            ("tooltip", styles.tooltip.tooltip_border_width_px),
+            ("code block", styles.code_block.code_block_border_width_px),
+            (
+                "code block split",
+                styles.code_block.code_block_split_border_width_px,
+            ),
+            ("checkbox", styles.checkbox.checkbox_border_width_px),
+            (
+                "code copy button",
+                styles.code_block.code_block_copy_button_border_width_px,
+            ),
+            (
+                "preview action",
+                styles.code_block.generated_preview_action_border_width_px,
+            ),
+            (
+                "quote block",
+                styles.quote_block.quote_block_border_width_px,
+            ),
+            (
+                "diff revert button",
+                styles
+                    .selection
+                    .selection_diff_revert_button_border_width_px,
+            ),
+            ("table", styles.table.table_border_width_px),
+            (
+                "table selection",
+                styles.table.table_selection_border_width_px,
+            ),
+            (
+                "active image",
+                styles.image_preview.image_active_border_width_px,
+            ),
+            ("dialog", styles.dialog.dialog_border_width_px),
+            (
+                "notification",
+                styles.notification.notification_border_width_px,
+            ),
+            ("context menu", styles.context_menu.menu_border_width_px),
+            ("text input", styles.text_input.text_input_border_width_px),
+            (
+                "text input context menu",
+                styles.text_input.text_input_menu_border_width_px,
+            ),
+            ("search bar", styles.search.search_bar_border_width_px),
+            ("search match", styles.search.search_match_border_width_px),
+            (
+                "workspace search",
+                styles.workspace_search.ws_search_input_border_width_px,
+            ),
+            (
+                "workspace search header",
+                styles
+                    .workspace_search
+                    .ws_search_file_header_border_width_px,
+            ),
+            (
+                "settings site button",
+                styles.settings_panel.settings_site_button_border_width_px,
+            ),
+            (
+                "settings option",
+                styles.settings_panel.settings_option_button_border_width_px,
+            ),
+            (
+                "settings theme toggle",
+                styles.settings_panel.settings_theme_toggle_border_width_px,
+            ),
+            (
+                "settings theme option",
+                styles.settings_panel.settings_theme_option_border_width_px,
+            ),
+        ];
+
+        for (name, width) in borders {
+            assert_eq!(width, 2.0, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_moeka_retro_variant_uses_two_pixel_chrome() {
+        for kind in crate::theme::ThemeKind::dark_themes()
+            .iter()
+            .chain(crate::theme::ThemeKind::light_themes())
+            .copied()
+            .filter(|kind| kind.is_moeka_retro())
+        {
+            let editor = kind.build();
+            let chrome = kind.moeka_companion().unwrap().build();
+            let mut styles = Styles::from_theme(&editor, &chrome);
+            styles.apply_moeka_retro_chrome(&editor, &chrome);
+
+            assert_eq!(
+                styles.window.window_border_width_px,
+                2.0,
+                "{}",
+                kind.label()
+            );
+            assert_eq!(
+                styles.tab_bar.tab_item_border_width_px,
+                2.0,
+                "{}",
+                kind.label()
+            );
+            assert_eq!(
+                styles.settings_panel.settings_option_button_border_width_px,
+                2.0,
+                "{}",
+                kind.label()
+            );
+            assert_eq!(
+                styles.settings_panel.settings_contrast_border_color,
+                editor.text_primary,
+                "{}",
+                kind.label()
+            );
+        }
     }
 
     #[test]

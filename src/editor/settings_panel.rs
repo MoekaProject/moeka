@@ -83,6 +83,7 @@ impl EditorView {
             .track_scroll(&self.settings_scroll_handle)
             .bg(bg)
             .text_size(px(self.scaled(self.styles.ui_font_size_px)))
+            .text_color(sps.settings_primary_text_color)
             .child(
                 div()
                     .max_w(px(self.scaled(640.0)))
@@ -112,7 +113,7 @@ impl EditorView {
                                                 self.scaled(self.styles.ui_font_size_px + 9.0)
                                             ))
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(self.theme.text_bright)
+                                            .text_color(sps.settings_primary_text_color)
                                             .child(self.t(TextKey::SettingsPanelTitle)),
                                     )
                                     .child(
@@ -549,7 +550,8 @@ impl EditorView {
                 checked_hover_background: self.theme.text_bright,
                 unchecked_background: styles.settings_option_button_bg,
                 unchecked_hover_background: styles.settings_option_button_hover_bg,
-                unchecked_border: styles.settings_option_button_border_color,
+                unchecked_border: styles.settings_contrast_border_color,
+                border_width_px: self.styles.checkbox.checkbox_border_width_px,
                 thumb: self.theme.bg_primary,
                 description: styles.settings_theme_option_text_color,
             },
@@ -622,7 +624,7 @@ impl EditorView {
     // ── Section heading ─────────────────────────────────────────
 
     fn render_section_heading(&self, label: &str) -> AnyElement {
-        let border_color = self.theme.border_secondary;
+        let border_color = self.styles.settings_panel.settings_contrast_border_color;
         let heading_label = if self.ui_language == UiLanguage::English {
             label.to_uppercase()
         } else {
@@ -757,8 +759,8 @@ impl EditorView {
         } else {
             ThemeKind::light_themes()
         };
-        let text_secondary = settings_styles.settings_secondary_text_color;
-        let hover_bg = self.theme.bg_hover;
+        let text_secondary = settings_styles.settings_option_button_text_color;
+        let hover_bg = settings_styles.settings_option_button_hover_bg;
         let toggle_active_bg = settings_styles.settings_option_button_active_bg;
         let toggle_active_text = settings_styles.settings_option_button_active_text_color;
         let icon_size = self.scaled(settings_styles.settings_theme_toggle_icon_size_px);
@@ -813,13 +815,14 @@ impl EditorView {
                                     .id("theme-toggle-light")
                                     .rounded_l(px(toggle_radius))
                                     .border(px(toggle_border_width))
-                                    .border_color(self.theme.border_primary)
+                                    .border_color(option_border_color)
                                     .h(px(toggle_height))
                                     .px(px(toggle_padding_x))
                                     .flex()
                                     .items_center()
                                     .gap(px(toggle_gap))
                                     .text_size(px(option_font_size))
+                                    .bg(settings_styles.settings_option_button_bg)
                                     .cursor(CursorStyle::Arrow)
                                     .when(!is_dark_mode, |this| {
                                         this.bg(toggle_active_bg).text_color(toggle_active_text)
@@ -857,13 +860,14 @@ impl EditorView {
                                     .border_t(px(toggle_border_width))
                                     .border_r(px(toggle_border_width))
                                     .border_b(px(toggle_border_width))
-                                    .border_color(self.theme.border_primary)
+                                    .border_color(option_border_color)
                                     .h(px(toggle_height))
                                     .px(px(toggle_padding_x))
                                     .flex()
                                     .items_center()
                                     .gap(px(toggle_gap))
                                     .text_size(px(option_font_size))
+                                    .bg(settings_styles.settings_option_button_bg)
                                     .cursor(CursorStyle::Arrow)
                                     .when(is_dark_mode, |this| {
                                         this.bg(toggle_active_bg).text_color(toggle_active_text)
@@ -926,7 +930,7 @@ impl EditorView {
                                         .bg(if is_active {
                                             option_active_bg
                                         } else {
-                                            gpui::transparent_black()
+                                            settings_styles.settings_option_button_bg
                                         })
                                         .cursor(CursorStyle::Arrow)
                                         .when(!is_active, |this| {
@@ -1312,7 +1316,7 @@ impl EditorView {
     ) -> AnyElement {
         let settings = &self.styles.settings_panel;
         let hover_bg = settings.settings_option_button_hover_bg;
-        let text_primary = settings.settings_primary_text_color;
+        let text_primary = settings.settings_option_button_text_color;
         let border_color = settings.settings_option_button_border_color;
         let bg = settings.settings_option_button_bg;
         let current_value = current_value.to_string();
@@ -1402,7 +1406,7 @@ impl EditorView {
 
     fn render_ui_font_size_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let text_secondary = self.styles.settings_panel.settings_secondary_text_color;
-        let border_color = self.theme.border_primary;
+        let border_color = self.styles.settings_panel.settings_contrast_border_color;
 
         div()
             .flex()
@@ -1437,7 +1441,11 @@ impl EditorView {
                         div()
                             .w(px(self.scaled(50.0)))
                             .h(px(self.scaled(30.0)))
-                            .border_y(px(1.0))
+                            .border_y(px(self.scaled(
+                                self.styles
+                                    .settings_panel
+                                    .settings_option_button_border_width_px,
+                            )))
                             .border_color(border_color)
                             .flex()
                             .items_center()
@@ -1481,8 +1489,12 @@ impl EditorView {
             .justify_center()
             .when(increase, |this| this.rounded_r(px(self.scaled(6.0))))
             .when(!increase, |this| this.rounded_l(px(self.scaled(6.0))))
-            .border(px(1.0))
-            .border_color(self.theme.border_primary)
+            .border(px(self.scaled(
+                self.styles
+                    .settings_panel
+                    .settings_option_button_border_width_px,
+            )))
+            .border_color(self.styles.settings_panel.settings_contrast_border_color)
             .text_size(px(self.scaled(14.0)))
             .text_color(self.styles.settings_panel.settings_primary_text_color)
             .cursor(CursorStyle::Arrow)
@@ -1542,7 +1554,7 @@ impl EditorView {
     fn render_line_height_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_line_height_editor(cx);
         let text_secondary = self.styles.settings_panel.settings_secondary_text_color;
-        let border_color = self.theme.border_primary;
+        let border_color = self.styles.settings_panel.settings_contrast_border_color;
 
         div()
             .flex()
@@ -1577,7 +1589,11 @@ impl EditorView {
                         div()
                             .w(px(self.scaled(50.0)))
                             .h(px(self.scaled(30.0)))
-                            .border_y(px(1.0))
+                            .border_y(px(self.scaled(
+                                self.styles
+                                    .settings_panel
+                                    .settings_option_button_border_width_px,
+                            )))
                             .border_color(border_color)
                             .flex()
                             .items_center()
@@ -1643,7 +1659,7 @@ impl EditorView {
     fn render_letter_spacing_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_letter_spacing_editor(cx);
         let text_secondary = self.styles.settings_panel.settings_secondary_text_color;
-        let border_color = self.theme.border_primary;
+        let border_color = self.styles.settings_panel.settings_contrast_border_color;
 
         div()
             .flex()
@@ -1678,7 +1694,11 @@ impl EditorView {
                         div()
                             .w(px(self.scaled(50.0)))
                             .h(px(self.scaled(30.0)))
-                            .border_y(px(1.0))
+                            .border_y(px(self.scaled(
+                                self.styles
+                                    .settings_panel
+                                    .settings_option_button_border_width_px,
+                            )))
                             .border_color(border_color)
                             .flex()
                             .items_center()
@@ -1744,7 +1764,7 @@ impl EditorView {
     fn render_editor_content_width_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_editor_content_width_editor(cx);
         let text_secondary = self.styles.settings_panel.settings_secondary_text_color;
-        let border_color = self.theme.border_primary;
+        let border_color = self.styles.settings_panel.settings_contrast_border_color;
 
         div()
             .flex()
@@ -1779,7 +1799,11 @@ impl EditorView {
                         div()
                             .w(px(self.scaled(60.0)))
                             .h(px(self.scaled(30.0)))
-                            .border_y(px(1.0))
+                            .border_y(px(self.scaled(
+                                self.styles
+                                    .settings_panel
+                                    .settings_option_button_border_width_px,
+                            )))
                             .border_color(border_color)
                             .flex()
                             .items_center()

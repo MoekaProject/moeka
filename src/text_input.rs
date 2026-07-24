@@ -472,6 +472,7 @@ impl TextInput {
         let menu_bg = s.text_input_menu_bg;
         let text_color = s.text_input_menu_text_color;
         let menu_font_size = s.text_input_menu_font_size_px;
+        let border_width = s.text_input_menu_border_width_px;
         let border_color = s.text_input_menu_border_color;
         let radius = s.text_input_menu_radius_px;
         let padding_y = s.text_input_menu_padding_y_px;
@@ -525,7 +526,7 @@ impl TextInput {
         div()
             .w(px(menu_width))
             .bg(menu_bg)
-            .border_1()
+            .border(px(border_width))
             .border_color(border_color)
             .rounded(px(radius))
             .when(menu_shadow, |this| this.shadow_lg())

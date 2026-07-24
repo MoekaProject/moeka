@@ -380,7 +380,7 @@ impl EditorView {
             let square = div()
                 .w(px(self.scaled(14.0)))
                 .h(px(self.scaled(14.0)))
-                .border(px(self.scaled(1.5)))
+                .border(px(self.ui_border_width(1.5)))
                 .border_color(fg)
                 .rounded(px(preview_radius))
                 .into_any_element();
@@ -546,7 +546,7 @@ impl EditorView {
                     .w(px(self.scaled(14.0)))
                     .h(px(self.scaled(14.0)))
                     .rounded(px(self.scaled(4.0)))
-                    .border_1()
+                    .border(px(self.ui_border_width(1.0)))
                     .border_color(checker)
                     .bg(with_alpha(opacity_preview, value))
                     .into_any_element();
@@ -829,7 +829,7 @@ impl EditorView {
                     .flex()
                     .items_center()
                     .rounded(px(self.scaled(6.0)))
-                    .border_1()
+                    .border(px(self.ui_border_width(1.0)))
                     .border_color(border_color)
                     .text_size(px(self.scaled(12.0)))
                     .text_color(self.theme.text_primary)
@@ -864,7 +864,7 @@ impl EditorView {
         row.w_full()
             .flex()
             .rounded(px(self.scaled(6.0)))
-            .border_1()
+            .border(px(self.ui_border_width(1.0)))
             .border_color(self.theme.border_primary)
             .overflow_hidden()
             .into_any_element()
@@ -900,7 +900,8 @@ impl EditorView {
             .bg(bg)
             .cursor(CursorStyle::Arrow)
             .when(!first, |this| {
-                this.border_l_1().border_color(self.theme.border_primary)
+                this.border_l(px(self.ui_border_width(1.0)))
+                    .border_color(self.theme.border_primary)
             })
             .when(!active, |this| this.hover(move |style| style.bg(hover_bg)))
             .child(child)
@@ -935,7 +936,8 @@ impl EditorView {
             .text_color(self.theme.text_secondary)
             .cursor(CursorStyle::Arrow)
             .when(!first, |this| {
-                this.border_l_1().border_color(self.theme.border_primary)
+                this.border_l(px(self.ui_border_width(1.0)))
+                    .border_color(self.theme.border_primary)
             })
             .hover(move |style| style.bg(hover_bg))
             .child(label)
@@ -974,7 +976,8 @@ impl EditorView {
             .bg(bg)
             .cursor(CursorStyle::Arrow)
             .when(!first, |this| {
-                this.border_l_1().border_color(self.theme.border_primary)
+                this.border_l(px(self.ui_border_width(1.0)))
+                    .border_color(self.theme.border_primary)
             })
             .when(!active, |this| this.hover(move |style| style.bg(hover_bg)))
             .child(

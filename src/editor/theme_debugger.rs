@@ -66,8 +66,11 @@ impl EditorView {
         recreate_settings_editors: bool,
         cx: &mut Context<Self>,
     ) {
-        let ui_theme = self.app_settings.dark_theme_kind().build();
+        let ui_theme = self.app_settings.ui_theme_for(self.theme_kind);
         self.styles = crate::style::Styles::from_theme(&self.theme, &ui_theme);
+        if self.theme_kind.is_moeka_retro() {
+            self.styles.apply_moeka_retro_chrome(&self.theme, &ui_theme);
+        }
         self.styles.editor.editor_font_size_px = self.app_settings.effective_editor_font_size();
         self.styles.editor.editor_paragraph_line_height_factor = self.app_settings.line_height;
         self.styles.editor.editor_heading_line_height_factor = self.app_settings.line_height;
@@ -416,6 +419,7 @@ impl EditorView {
         let section_gap = self.scaled(12.0);
         let card_padding = self.scaled(12.0);
         let input_gap = self.scaled(8.0);
+        let ui_border_width = self.ui_border_width(1.0);
         let border_color = self.theme.border_secondary;
         let divider_color = self.theme.border_primary;
         let panel_bg = self.theme.bg_secondary;
@@ -517,7 +521,7 @@ impl EditorView {
                             .h(px(self.scaled(14.0)))
                             .rounded(px(self.scaled(4.0)))
                             .bg(row_color)
-                            .border(px(1.0))
+                            .border(px(ui_border_width))
                             .border_color(divider_color),
                     )
                     .child(
@@ -553,7 +557,7 @@ impl EditorView {
             .overflow_y_scroll()
             .track_scroll(&self.theme_debugger_scroll_handle)
             .bg(panel_bg)
-            .border_l(px(1.0))
+            .border_l(px(ui_border_width))
             .border_color(border_color)
             .on_mouse_move(cx.listener(Self::on_theme_debugger_mouse_move))
             .on_mouse_up(
@@ -590,7 +594,7 @@ impl EditorView {
                                     .flex()
                                     .flex_row()
                                     .rounded(px(self.scaled(6.0)))
-                                    .border(px(1.0))
+                                    .border(px(ui_border_width))
                                     .border_color(border_color)
                                     .overflow_hidden()
                                     .children([
@@ -620,7 +624,8 @@ impl EditorView {
                                             })
                                             .cursor(CursorStyle::Arrow)
                                             .when(index > 0, |this| {
-                                                this.border_l(px(1.0)).border_color(border_color)
+                                                this.border_l(px(ui_border_width))
+                                                    .border_color(border_color)
                                             })
                                             .when(!is_active, |this| {
                                                 this.hover(move |style| style.bg(hover_bg))
@@ -673,7 +678,7 @@ impl EditorView {
                     .flex_col()
                     .gap(px(section_gap))
                     .bg(card_bg)
-                    .border(px(1.0))
+                    .border(px(ui_border_width))
                     .border_color(divider_color)
                     .rounded(px(self.scaled(10.0)))
                     .child(
@@ -708,7 +713,7 @@ impl EditorView {
                                             .h_full()
                                             .overflow_hidden()
                                             .rounded(px(self.scaled(10.0)))
-                                            .border(px(1.0))
+                                            .border(px(ui_border_width))
                                             .border_color(divider_color)
                                             .cursor(CursorStyle::Crosshair)
                                             .on_mouse_move(
@@ -828,7 +833,7 @@ impl EditorView {
                                                     .h_full()
                                                     .overflow_hidden()
                                                     .rounded(px(slider_height * 0.5))
-                                                    .border(px(1.0))
+                                                    .border(px(ui_border_width))
                                                     .border_color(divider_color)
                                                     .cursor(CursorStyle::ResizeLeftRight)
                                                     .on_mouse_move(
@@ -887,7 +892,7 @@ impl EditorView {
                                                             .h_full()
                                                             .rounded(px(slider_height * 0.5))
                                                             .bg(gpui::white())
-                                                            .border(px(1.0))
+                                                            .border(px(ui_border_width))
                                                             .border_color(divider_color)
                                                             .shadow_sm(),
                                                     ),
@@ -926,7 +931,7 @@ impl EditorView {
                                                     .h_full()
                                                     .overflow_hidden()
                                                     .rounded(px(slider_height * 0.5))
-                                                    .border(px(1.0))
+                                                    .border(px(ui_border_width))
                                                     .border_color(divider_color)
                                                     .bg(panel_bg)
                                                     .cursor(CursorStyle::ResizeLeftRight)
@@ -993,7 +998,7 @@ impl EditorView {
                                                             .h_full()
                                                             .rounded(px(slider_height * 0.5))
                                                             .bg(gpui::white())
-                                                            .border(px(1.0))
+                                                            .border(px(ui_border_width))
                                                             .border_color(divider_color)
                                                             .shadow_sm(),
                                                     ),
