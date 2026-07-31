@@ -1940,15 +1940,17 @@ impl EditorView {
                             Some("⌘W"),
                         ))
                     })
-                    .child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .h(px(ts.tab_bar_border_width_px))
-                            .bg(ts.tab_bar_border_color),
-                    ),
+                    .when(!is_active, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .h(px(ts.tab_bar_border_width_px))
+                                .bg(ts.tab_bar_border_color),
+                        )
+                    }),
             )
             // Drag initiation: create ghost element
             .on_drag(

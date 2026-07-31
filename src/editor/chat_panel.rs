@@ -1627,6 +1627,11 @@ fn configure_chat_terminal_environment(command: &mut CommandBuilder) {
     command.env("LANG", chat_terminal_locale_env("LANG"));
     command.env("LC_ALL", chat_terminal_locale_env("LC_ALL"));
     command.env("LC_CTYPE", chat_terminal_locale_env("LC_CTYPE"));
+    command.env("SHELL", chat_terminal_default_shell_program());
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env("TERM_PROGRAM", "moeka");
+    command.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 }
 
 fn convert_terminal_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -4540,6 +4545,31 @@ mod tests {
 
         session.status = ChatTerminalStatus::Exited;
         assert!(!session.has_running_command());
+    }
+
+    #[test]
+    fn terminal_environment_declares_supported_terminal_type() {
+        let mut command = CommandBuilder::new("/bin/zsh");
+        command.env_clear();
+        configure_chat_terminal_environment(&mut command);
+
+        assert_eq!(
+            command.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        assert_eq!(
+            command.get_env("COLORTERM"),
+            Some(std::ffi::OsStr::new("truecolor"))
+        );
+        assert_eq!(
+            command.get_env("TERM_PROGRAM"),
+            Some(std::ffi::OsStr::new("moeka"))
+        );
+        assert_eq!(
+            command.get_env("TERM_PROGRAM_VERSION"),
+            Some(std::ffi::OsStr::new(env!("CARGO_PKG_VERSION")))
+        );
+        assert!(command.get_env("SHELL").is_some());
     }
 
     fn keystroke(spec: &str) -> gpui::Keystroke {

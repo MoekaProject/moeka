@@ -30,6 +30,9 @@ use gpui::*;
 use actions::*;
 use editor::EditorView;
 
+const MIN_WINDOW_WIDTH_PX: f32 = 480.0;
+const MIN_WINDOW_HEIGHT_PX: f32 = 320.0;
+
 struct FsAssets;
 
 impl AssetSource for FsAssets {
@@ -208,6 +211,7 @@ fn editor_window_options(cx: &App) -> WindowOptions {
             size(px(1024.0), px(768.0)),
             cx,
         ))),
+        window_min_size: Some(size(px(MIN_WINDOW_WIDTH_PX), px(MIN_WINDOW_HEIGHT_PX))),
         titlebar: Some(TitlebarOptions {
             title: Some(system_application_display_name().into()),
             appears_transparent: true,
@@ -246,6 +250,43 @@ fn configure_editor_window(window: &mut Window) {
             }
         }
     }
+}
+
+fn open_editor_window(cx: &mut App) -> anyhow::Result<Entity<EditorView>> {
+    let options = editor_window_options(cx);
+    let mut editor = None;
+    cx.open_window(options, |window, cx| {
+        configure_editor_window(window);
+        let view = cx.new(|cx| EditorView::new(cx));
+        window.focus(&view.focus_handle(cx));
+        editor = Some(view.clone());
+        view
+    })?;
+    Ok(editor.expect("editor view must be created with its window"))
+}
+
+fn restore_window(handle: AnyWindowHandle, cx: &mut App) {
+    let _ = handle.update(cx, |_, window, _| {
+        #[cfg(target_os = "macos")]
+        {
+            use objc::{msg_send, sel, sel_impl};
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+            if let Ok(handle) = window.window_handle()
+                && let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw()
+            {
+                unsafe {
+                    let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
+                    let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
+                    let is_minimized: bool = msg_send![ns_window, isMiniaturized];
+                    if is_minimized {
+                        let () = msg_send![ns_window, deminiaturize: std::ptr::null::<objc::runtime::Object>()];
+                    }
+                }
+            }
+        }
+        window.activate_window();
+    });
 }
 
 fn open_terminal_window(cx: &mut App) -> anyhow::Result<()> {
@@ -302,6 +343,26 @@ fn main() {
             } else {
                 pending_open_paths.borrow_mut().extend(paths);
             }
+        });
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let editor_for_reopen = editor_for_open_urls.clone();
+        application.on_reopen(move |cx| {
+            let existing_window = cx
+                .window_stack()
+                .and_then(|windows| windows.first().copied())
+                .or_else(|| cx.windows().first().copied());
+
+            if let Some(window) = existing_window {
+                restore_window(window, cx);
+            } else {
+                match open_editor_window(cx) {
+                    Ok(editor) => *editor_for_reopen.borrow_mut() = Some(editor),
+                    Err(error) => eprintln!("failed to reopen main window: {error:#}"),
+                }
+            }
+            cx.activate(true);
         });
     }
 
@@ -593,23 +654,15 @@ fn main() {
         let editor_for_window = editor_for_open_urls.clone();
         #[cfg(target_os = "macos")]
         let pending_paths_for_window = pending_open_paths.clone();
-        let options = editor_window_options(cx);
-
-        cx.open_window(options, |window, cx| {
-            configure_editor_window(window);
-            let view = cx.new(|cx| EditorView::new(cx));
-            window.focus(&view.focus_handle(cx));
-            #[cfg(target_os = "macos")]
-            {
-                *editor_for_window.borrow_mut() = Some(view.clone());
-                let pending_paths = std::mem::take(&mut *pending_paths_for_window.borrow_mut());
-                if !pending_paths.is_empty() {
-                    open_markdown_paths(&view, pending_paths, cx);
-                }
+        let view = open_editor_window(cx).expect("failed to open main window");
+        #[cfg(target_os = "macos")]
+        {
+            *editor_for_window.borrow_mut() = Some(view.clone());
+            let pending_paths = std::mem::take(&mut *pending_paths_for_window.borrow_mut());
+            if !pending_paths.is_empty() {
+                open_markdown_paths(&view, pending_paths, cx);
             }
-            view
-        })
-        .expect("failed to open main window");
+        }
     });
 }
 
