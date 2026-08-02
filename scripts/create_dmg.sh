@@ -11,6 +11,7 @@ dmg_path="$2"
 volume_name="$3"
 app_display_name="$4"
 background_image="$5"
+dmg_format="${DMG_FORMAT:-ULFO}"
 
 background_dir="$staging_dir/.background"
 background_name="install-bg.jpg"
@@ -59,7 +60,7 @@ osascript <<OSA
 tell application "Finder"
     tell disk "$volume_name"
         open
-        delay 0.5
+        delay 0.2
         set current view of container window to icon view
         set toolbar visible of container window to false
         set statusbar visible of container window to false
@@ -72,9 +73,9 @@ tell application "Finder"
         set position of item "$app_display_name.app" of container window to {165, 150}
         set position of item "Applications" of container window to {383, 150}
         update without registering applications
-        delay 1
+        delay 0.5
         close
-        delay 1
+        delay 0.5
     end tell
 end tell
 OSA
@@ -88,4 +89,4 @@ sync
 hdiutil detach "$device" -quiet
 device=""
 
-hdiutil convert "$rw_dmg" -format UDZO -imagekey zlib-level=9 -o "$dmg_path" >/dev/null
+hdiutil convert "$rw_dmg" -format "$dmg_format" -o "$dmg_path" >/dev/null

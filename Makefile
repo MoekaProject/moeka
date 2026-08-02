@@ -2,8 +2,8 @@ SHELL := /bin/bash
 
 APP_NAME := moeka
 APP_DISPLAY_NAME := Moeka
-TARGET ?= x86_64-apple-darwin
-PROFILE ?= dist
+TARGET ?= $(shell rustc -vV | awk '/^host:/ { print $$2 }')
+PROFILE := release
 VERSION := $(shell awk -F '"' '/^version = / { print $$2; exit }' Cargo.toml)
 BUNDLE_ID ?= app.moeka.moeka
 BUILD_VERSION ?= $(VERSION)
@@ -26,43 +26,36 @@ DMG_SCRIPT := scripts/create_dmg.sh
 VOLUME_NAME := $(APP_DISPLAY_NAME)
 TAG ?= $(firstword $(filter v%,$(MAKECMDGOALS)))
 RELEASE_REPO ?= MoekaProject/release
-DIST_SUFFIXES := arm64 universal
+DIST_SUFFIXES := arm64 amd64
 
-.PHONY: dmg app build-release clean-dmg clean-app tag dist dist-arm64 dist-universal publish
+.PHONY: dmg dmg-one dmg-arm64 dmg-amd64 app build-release clean-dmg clean-app tag dist publish publish-check
 
-dist: $(ICON_FILE)
+dmg: $(ICON_FILE)
 	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
-	@$(MAKE) -j2 dist-arm64 dist-universal
+	@$(MAKE) -j2 dmg-arm64 dmg-amd64
 	@ls -lh "$(DIST_DIR)"
 
-dist-arm64:
-	@$(MAKE) dmg \
+dmg-arm64:
+	@$(MAKE) dmg-one \
 		TARGET=aarch64-apple-darwin \
 		DMG_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-arm64.dmg" \
 		VOLUME_NAME="$(APP_DISPLAY_NAME)-arm64"
 
-dist-universal:
-	@$(MAKE) dmg \
-		TARGET=universal-apple-darwin \
-		DMG_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-universal.dmg" \
-		VOLUME_NAME="$(APP_DISPLAY_NAME)-universal"
+dmg-amd64:
+	@$(MAKE) dmg-one \
+		TARGET=x86_64-apple-darwin \
+		DMG_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-amd64.dmg" \
+		VOLUME_NAME="$(APP_DISPLAY_NAME)-amd64"
 
-publish: dist
-	@if [[ ! "$(TAG)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
-		echo "Usage: make publish vX.Y.Z (run 'make dist' first)"; \
-		exit 1; \
-	fi
-	@if [[ "$(TAG)" != "v$(VERSION)" ]]; then \
-		echo "Tag/version mismatch: TAG=$(TAG), Cargo.toml version=$(VERSION)."; \
-		echo "Please bump Cargo.toml version or publish with matching tag."; \
-		exit 1; \
-	fi
-	@command -v gh >/dev/null || { echo "gh CLI is required: brew install gh && gh auth login"; exit 1; }
+dist: dmg
+
+publish: publish-check
+	@$(MAKE) dmg
 	@set -euo pipefail; \
 	assets=(); \
 	for suffix in $(DIST_SUFFIXES); do \
 		asset="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-$$suffix.dmg"; \
-		[[ -f "$$asset" ]] || { echo "Missing $$asset — run 'make dist' first"; exit 1; }; \
+		[[ -f "$$asset" ]] || { echo "Missing $$asset"; exit 1; }; \
 		assets+=("$$asset"); \
 	done; \
 	notes="$$(git for-each-ref "refs/tags/$(TAG)" --format='%(contents)')"; \
@@ -77,6 +70,18 @@ publish: dist
 		--latest; \
 	gh release upload "$(TAG)" --repo "$(RELEASE_REPO)" --clobber "$${assets[@]}"
 
+publish-check:
+	@if [[ ! "$(TAG)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
+		echo "Usage: make publish vX.Y.Z"; \
+		exit 1; \
+	fi
+	@if [[ "$(TAG)" != "v$(VERSION)" ]]; then \
+		echo "Tag/version mismatch: TAG=$(TAG), Cargo.toml version=$(VERSION)."; \
+		echo "Please bump Cargo.toml version or publish with matching tag."; \
+		exit 1; \
+	fi
+	@command -v gh >/dev/null || { echo "gh CLI is required: brew install gh && gh auth login"; exit 1; }
+
 tag:
 	@if [[ ! "$(TAG)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
 		echo "Usage: make tag vX.Y.Z"; \
@@ -89,7 +94,7 @@ tag:
 v%:
 	@:
 
-dmg: $(DMG_PATH)
+dmg-one: $(DMG_PATH)
 
 $(DMG_PATH): app $(DMG_BACKGROUND) $(DMG_SCRIPT)
 	@mkdir -p "$(DIST_DIR)"
@@ -133,19 +138,8 @@ $(APP_DIR): build-release $(INFO_PLIST_TEMPLATE) $(ICON_FILE)
 	@echo "Created $(APP_DIR)"
 
 build-release:
-	@if [[ "$(TARGET)" == "universal-apple-darwin" ]]; then \
-		rustup target add aarch64-apple-darwin x86_64-apple-darwin; \
-		cargo build --profile "$(PROFILE)" --target aarch64-apple-darwin; \
-		cargo build --profile "$(PROFILE)" --target x86_64-apple-darwin; \
-		mkdir -p "target/$(TARGET)/$(PROFILE)"; \
-		lipo -create \
-			"target/aarch64-apple-darwin/$(PROFILE)/$(APP_NAME)" \
-			"target/x86_64-apple-darwin/$(PROFILE)/$(APP_NAME)" \
-			-output "$(BINARY_PATH)"; \
-	else \
-		rustup target add "$(TARGET)"; \
-		cargo build --profile "$(PROFILE)" --target "$(TARGET)"; \
-	fi
+	@rustup target add "$(TARGET)"
+	@cargo build --release --target "$(TARGET)"
 
 clean-dmg:
 	@rm -f "$(DMG_PATH)"

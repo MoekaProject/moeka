@@ -107,10 +107,7 @@ impl MermaidTheme {
             .unwrap_or_default()
     }
 
-    pub(crate) fn host_preset(
-        self,
-        is_dark: bool,
-    ) -> Option<merman::render::HostThemePreset> {
+    pub(crate) fn host_preset(self, is_dark: bool) -> Option<merman::render::HostThemePreset> {
         Some(match self {
             Self::Auto if is_dark => merman::render::HostThemePreset::EditorDark,
             Self::Auto | Self::EditorLight => merman::render::HostThemePreset::EditorLight,

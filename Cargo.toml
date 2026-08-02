@@ -73,7 +73,7 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 
-# Fast native builds for daily `cargo run --release` testing. Dependencies
+# Release builds are used for both daily runs and macOS packages. Dependencies
 # remain fully optimized; only the application crate favors compile speed.
 [profile.release]
 lto = false
@@ -84,18 +84,6 @@ strip = true
 [profile.release.package.moeka]
 opt-level = 1
 codegen-units = 256
-
-# Shipping builds keep the previous maximum-optimization settings.
-[profile.dist]
-inherits = "release"
-lto = "thin"
-codegen-units = 1
-incremental = false
-strip = true
-
-[profile.dist.package.moeka]
-opt-level = 3
-codegen-units = 1
 
 [profile.profiling]
 inherits = "release"

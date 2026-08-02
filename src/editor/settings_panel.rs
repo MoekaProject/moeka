@@ -41,8 +41,46 @@ pub(crate) struct PickerOption {
     pub value: String,
     pub label: String,
     pub search_text: String,
+    pub group: Option<PickerOptionGroup>,
     pub preview_font: Option<String>,
     pub icon_path: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PickerOptionGroup {
+    MermaidEditor,
+    MermaidNative,
+}
+
+impl PickerOptionGroup {
+    fn label(self, language: UiLanguage) -> &'static str {
+        match (self, language) {
+            (Self::MermaidEditor, UiLanguage::ChineseSimplified) => "编辑器风格",
+            (Self::MermaidNative, UiLanguage::ChineseSimplified) => "Mermaid 原生",
+            (Self::MermaidEditor, UiLanguage::ChineseTraditional) => "編輯器風格",
+            (Self::MermaidNative, UiLanguage::ChineseTraditional) => "Mermaid 原生",
+            (Self::MermaidEditor, UiLanguage::Japanese) => "エディタースタイル",
+            (Self::MermaidNative, UiLanguage::Japanese) => "Mermaid 標準",
+            (Self::MermaidEditor, UiLanguage::Korean) => "에디터 스타일",
+            (Self::MermaidNative, UiLanguage::Korean) => "Mermaid 기본",
+            (Self::MermaidEditor, UiLanguage::French) => "Styles de l'éditeur",
+            (Self::MermaidNative, UiLanguage::French) => "Styles Mermaid natifs",
+            (Self::MermaidEditor, UiLanguage::German) => "Editor-Stile",
+            (Self::MermaidNative, UiLanguage::German) => "Native Mermaid-Stile",
+            (Self::MermaidEditor, UiLanguage::Spanish) => "Estilos del editor",
+            (Self::MermaidNative, UiLanguage::Spanish) => "Estilos nativos de Mermaid",
+            (Self::MermaidEditor, UiLanguage::Portuguese) => "Estilos do editor",
+            (Self::MermaidNative, UiLanguage::Portuguese) => "Estilos nativos do Mermaid",
+            (Self::MermaidEditor, UiLanguage::Russian) => "Стили редактора",
+            (Self::MermaidNative, UiLanguage::Russian) => "Встроенные стили Mermaid",
+            (Self::MermaidEditor, UiLanguage::Arabic) => "أنماط المحرر",
+            (Self::MermaidNative, UiLanguage::Arabic) => "أنماط Mermaid الأصلية",
+            (Self::MermaidEditor, UiLanguage::Hindi) => "संपादक शैलियां",
+            (Self::MermaidNative, UiLanguage::Hindi) => "मूल Mermaid शैलियां",
+            (Self::MermaidEditor, UiLanguage::English) => "Editor Styles",
+            (Self::MermaidNative, UiLanguage::English) => "Native Mermaid Styles",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -611,6 +649,7 @@ impl EditorView {
                     value: (*format).to_string(),
                     label: preview.clone(),
                     search_text: format!("{preview} {format}").to_lowercase(),
+                    group: None,
                     preview_font: None,
                     icon_path: None,
                 }
@@ -1906,13 +1945,26 @@ impl EditorView {
             FontRole::MermaidTheme => (
                 MermaidTheme::ALL
                     .into_iter()
-                    .map(|theme| PickerOption {
-                        value: theme.settings_value().to_string(),
-                        label: theme.label().to_string(),
-                        search_text: format!("{} {}", theme.label(), theme.settings_value())
+                    .map(|theme| {
+                        let group = if theme.mermaid_theme_name().is_some() {
+                            PickerOptionGroup::MermaidNative
+                        } else {
+                            PickerOptionGroup::MermaidEditor
+                        };
+                        PickerOption {
+                            value: theme.settings_value().to_string(),
+                            label: theme.label().to_string(),
+                            search_text: format!(
+                                "{} {} {}",
+                                theme.label(),
+                                theme.settings_value(),
+                                group.label(self.ui_language)
+                            )
                             .to_lowercase(),
-                        preview_font: None,
-                        icon_path: None,
+                            group: Some(group),
+                            preview_font: None,
+                            icon_path: None,
+                        }
                     })
                     .collect(),
                 self.t(TextKey::SearchMermaidThemes).to_string(),
@@ -1931,6 +1983,7 @@ impl EditorView {
                             value: value.to_string(),
                             search_text: format!("{label} {value}").to_lowercase(),
                             label,
+                            group: None,
                             preview_font: None,
                             icon_path: None,
                         }
@@ -1951,6 +2004,7 @@ impl EditorView {
                             agent_cli.settings_value()
                         )
                         .to_lowercase(),
+                        group: None,
                         preview_font: None,
                         icon_path: Some(agent_cli.icon_path()),
                     })
@@ -1966,6 +2020,7 @@ impl EditorView {
                             value: value.to_string(),
                             search_text: label.to_lowercase(),
                             label,
+                            group: None,
                             preview_font: None,
                             icon_path: None,
                         }
@@ -1980,6 +2035,7 @@ impl EditorView {
                         value: option.language.code().to_string(),
                         label: option.label,
                         search_text: option.search_text,
+                        group: None,
                         preview_font: None,
                         icon_path: None,
                     })
@@ -2003,6 +2059,7 @@ impl EditorView {
                             value: name.clone(),
                             label: name.clone(),
                             search_text: name.to_lowercase(),
+                            group: None,
                             preview_font: Some(name),
                             icon_path: None,
                         })
@@ -2183,25 +2240,55 @@ impl EditorView {
             row_count: picker.filtered.len(),
         };
 
+        let mut previous_group = None;
         let rows = picker
             .filtered
             .iter()
             .take(picker.render_limit)
             .enumerate()
             .map(|(idx, option)| {
+                let show_group = option.group.is_some() && option.group != previous_group;
+                previous_group = option.group;
                 let value = option.value.clone();
                 let row = SearchMenuRow::new(option.label.clone())
                     .selected(idx == picker.selected_index)
                     .icon(option.icon_path)
                     .preview_font(option.preview_font.clone());
-                self.render_search_menu_row(
+                let option_row = self.render_search_menu_row(
                     SharedString::from(format!("fp-item-{idx}")),
                     row,
                     move |this, _, cx| {
                         this.apply_font_selection(value.clone(), cx);
                     },
                     cx,
-                )
+                );
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .when(show_group, |this| {
+                        let group = option.group.expect("visible group header");
+                        this.child(
+                            div()
+                                .h(px(self.scaled(22.0)))
+                                .px(px(self.scaled(
+                                    self.styles.quick_open.quick_open_result_padding_x_px,
+                                )))
+                                .flex()
+                                .items_center()
+                                .text_size(px(self.scaled(
+                                    self.styles.quick_open.quick_open_result_path_font_size_px,
+                                )))
+                                .text_color(
+                                    self.styles
+                                        .quick_open
+                                        .quick_open_result_secondary_text_color,
+                                )
+                                .child(group.label(self.ui_language)),
+                        )
+                    })
+                    .child(option_row)
+                    .into_any_element()
             })
             .collect();
 
