@@ -15,7 +15,7 @@ use crate::theme::{EditorThemeMode, ThemeKind};
 
 use super::{
     APP_VERSION, ChatAgentCli, DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH,
-    SITE_SVG_PATH, SearchMenuConfig, SearchMenuRow, THEME_DARK_MINI_SVG_PATH,
+    MermaidTheme, SITE_SVG_PATH, SearchMenuConfig, SearchMenuRow, THEME_DARK_MINI_SVG_PATH,
     THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape, attachments, tooltip,
 };
 
@@ -26,6 +26,7 @@ pub(crate) enum FontRole {
     UiFont,
     BodyFont,
     CodeFont,
+    MermaidTheme,
     InterfaceLanguage,
     DateTimeFormat,
     AttachmentLocation,
@@ -1184,6 +1185,13 @@ impl EditorView {
                 0,
                 cx,
             ))
+            .child(self.render_picker_row(
+                self.t(TextKey::MermaidTheme),
+                self.app_settings.mermaid_theme().label(),
+                FontRole::MermaidTheme,
+                0,
+                cx,
+            ))
             // Line height
             .child(self.render_line_height_row(cx))
             // Letter spacing
@@ -1895,6 +1903,20 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let (all_options, placeholder) = match role {
+            FontRole::MermaidTheme => (
+                MermaidTheme::ALL
+                    .into_iter()
+                    .map(|theme| PickerOption {
+                        value: theme.settings_value().to_string(),
+                        label: theme.label().to_string(),
+                        search_text: format!("{} {}", theme.label(), theme.settings_value())
+                            .to_lowercase(),
+                        preview_font: None,
+                        icon_path: None,
+                    })
+                    .collect(),
+                self.t(TextKey::SearchMermaidThemes).to_string(),
+            ),
             FontRole::DateTimeFormat => (
                 self.date_time_format_options(),
                 self.t(TextKey::SearchDateTimeFormats).to_string(),
@@ -1995,6 +2017,7 @@ impl EditorView {
             (FontRole::BodyFont, 0) => self.app_settings.body_latin_font.clone(),
             (FontRole::BodyFont, _) => self.app_settings.body_cjk_font.clone(),
             (FontRole::CodeFont, _) => self.app_settings.code_font.clone(),
+            (FontRole::MermaidTheme, _) => self.app_settings.mermaid_theme.clone(),
             (FontRole::InterfaceLanguage, _) => self.ui_language.code().to_string(),
             (FontRole::DateTimeFormat, _) => self.app_settings.date_time_format().to_string(),
             (FontRole::AttachmentLocation, _) => self.app_settings.attachment_location.clone(),
@@ -2232,6 +2255,11 @@ impl EditorView {
                     self.styles.editor.editor_monospace_font_family =
                         Box::leak(font_name.clone().into_boxed_str());
                     self.app_settings.code_font = font_name;
+                }
+                (FontRole::MermaidTheme, _) => {
+                    self.app_settings.mermaid_theme = MermaidTheme::from_settings(&font_name)
+                        .settings_value()
+                        .to_string();
                 }
                 (FontRole::InterfaceLanguage, _) => {
                     if let Some(language) = UiLanguage::from_code(&font_name) {

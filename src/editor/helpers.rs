@@ -152,11 +152,14 @@ const GENERATED_PREVIEW_DEFAULT_MONOSPACE_FONT_FAMILY: &str =
     "ui-monospace, Menlo, Monaco, Consolas, monospace";
 const GENERATED_PREVIEW_DEFAULT_CJK_FONT_FAMILY: &str =
     "PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, sans-serif";
+const GENERATED_PREVIEW_DEFAULT_EMOJI_FONT_FAMILY: &str =
+    "Apple Color Emoji, Noto Color Emoji, Segoe UI Emoji";
 
 #[derive(Clone, Copy)]
 pub(crate) struct GeneratedPreviewFontFamilies<'a> {
     pub monospace: &'a str,
     pub body_cjk: &'a str,
+    pub mermaid_theme: MermaidTheme,
 }
 
 pub(crate) fn generated_preview_raster_scale(kind: BlockPreviewKind) -> f32 {
@@ -2144,14 +2147,16 @@ mod tests {
 
     use gpui::{Bounds, FontStyle, FontWeight, TextRun, font, point, px, size};
 
+    use crate::editor::MermaidTheme;
     use crate::markdown;
     use crate::theme::Theme;
 
     use super::{
         AnchoredPopupVertical, GeneratedPreviewFontFamilies, anchored_popup_placement,
         build_display_text, build_generated_block_preview_svg, build_text_runs_for_display,
-        compute_display_prefix_bytes, compute_generated_preview_size, normalize_mermaid_svg_source,
-        prefix_is_folded, task_prefix_is_folded, wrap_segment_byte_ranges,
+        compute_display_prefix_bytes, compute_generated_preview_size,
+        load_generated_preview_image_from_svg, prefix_is_folded, task_prefix_is_folded,
+        wrap_segment_byte_ranges,
     };
 
     #[test]
@@ -2262,6 +2267,7 @@ mod tests {
         GeneratedPreviewFontFamilies {
             monospace: "Menlo",
             body_cjk: "Menlo",
+            mermaid_theme: MermaidTheme::Auto,
         }
     }
 
@@ -2795,7 +2801,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_mermaid_block_preview_renders_svg() {
+    fn generated_mermaid_block_preview_uses_builtin_dark_theme() {
         let theme = Theme::one_dark();
         let svg = build_generated_block_preview_svg(
             markdown::BlockPreviewKind::Mermaid,
@@ -2803,15 +2809,61 @@ mod tests {
             &theme,
             generated_preview_fonts(),
         );
-        let text_color = crate::theme::hsla_to_hex_rgba(theme.text_bright).to_lowercase();
+        let svg = svg.to_lowercase();
 
         assert!(svg.contains("<svg"));
-        assert!(!svg.contains("Mermaid preview failed"));
-        assert!(
-            !svg.to_lowercase()
-                .contains("<rect width=\"100%\" height=\"100%\" fill=")
+        assert!(!svg.contains("mermaid preview failed"));
+        assert!(!svg.contains("<rect width=\"100%\" height=\"100%\" fill="));
+        assert!(svg.contains("#e5e7eb"));
+        assert!(svg.contains("#111827"));
+        assert!(svg.contains("#94a3b8"));
+        assert!(svg.contains("background-color:transparent"));
+        assert!(!svg.contains("<foreignobject"));
+    }
+
+    #[test]
+    fn generated_mermaid_block_preview_uses_builtin_light_theme() {
+        let theme = Theme::one_light();
+        let svg = build_generated_block_preview_svg(
+            markdown::BlockPreviewKind::Mermaid,
+            "flowchart LR\n    A[Start] --> B{Decision}\n    B -->|Yes| C[OK]\n    B -->|No| D[Cancel]",
+            &theme,
+            generated_preview_fonts(),
         );
-        assert!(svg.to_lowercase().contains(&text_color));
+        let svg = svg.to_lowercase();
+
+        assert!(!svg.contains("mermaid preview failed"));
+        assert!(svg.contains("#0f172a"));
+        assert!(svg.contains("#f8fafc"));
+        assert!(svg.contains("#64748b"));
+        assert!(svg.contains("background-color:transparent"));
+        assert!(!svg.contains("<foreignobject"));
+    }
+
+    #[test]
+    fn generated_mermaid_all_theme_options_rasterize() {
+        let editor_theme = Theme::one_dark();
+        for mermaid_theme in MermaidTheme::ALL {
+            let svg = build_generated_block_preview_svg(
+                markdown::BlockPreviewKind::Mermaid,
+                "flowchart LR\n    A[Source] --> B{Valid?}\n    B -->|Yes| C[Render]\n    B -->|No| D[Error]",
+                &editor_theme,
+                GeneratedPreviewFontFamilies {
+                    monospace: "Menlo",
+                    body_cjk: "PingFang SC",
+                    mermaid_theme,
+                },
+            );
+            assert!(
+                !svg.contains("Mermaid preview failed"),
+                "{} failed to render",
+                mermaid_theme.label()
+            );
+            load_generated_preview_image_from_svg(&svg, markdown::BlockPreviewKind::Mermaid)
+                .unwrap_or_else(|error| {
+                    panic!("{} failed to rasterize: {error}", mermaid_theme.label())
+                });
+        }
     }
 
     #[test]
@@ -2925,14 +2977,17 @@ mod tests {
         for expected in [
             "白名单门控",
             "挂载 Shadow DOM",
-            "React Root",
+            "React",
+            "Root",
             "暂存",
             "preparedAnalysis",
             "返回同构",
             "events",
             "数组",
-            "POST /analyze/",
-            "bridge-fallback",
+            "POST",
+            "analyze",
+            "bridge",
+            "fallback",
         ] {
             assert!(
                 svg.contains(expected),
@@ -2942,28 +2997,111 @@ mod tests {
     }
 
     #[test]
-    fn normalize_mermaid_svg_source_wraps_long_node_labels() {
-        let source = r#"flowchart LR
-  A[一个非常非常长的中文节点标题会超出边框] --> B[Short]
-  B -->|this edge label is long enough to wrap| C[Done]"#;
-        let normalized = normalize_mermaid_svg_source(source);
+    fn generated_mermaid_block_preview_rasterizes_emoji_and_cjk() {
+        let theme = Theme::one_dark();
+        let svg = build_generated_block_preview_svg(
+            markdown::BlockPreviewKind::Mermaid,
+            "flowchart LR\n    A[\"✅ Ready 😀\"] --> B[\"🚀 发布\"]",
+            &theme,
+            generated_preview_fonts(),
+        );
 
-        assert!(normalized.contains("一个非常非常长的中"));
-        assert!(normalized.contains("文节点标题会超"));
-        assert!(normalized.contains("框"));
-        assert!(normalized.contains(r"\n"));
-        assert!(normalized.contains("this edge"));
-        assert!(normalized.contains("label"));
+        assert!(!svg.contains("Mermaid preview failed"));
+        for expected in ["✅", "😀", "🚀", "发布"] {
+            assert!(svg.contains(expected), "missing Mermaid label: {expected}");
+        }
+        load_generated_preview_image_from_svg(&svg, markdown::BlockPreviewKind::Mermaid)
+            .unwrap_or_else(|error| panic!("failed to rasterize Mermaid SVG: {error}"));
     }
 
     #[test]
-    fn normalize_mermaid_svg_source_preserves_explicit_label_breaks() {
-        let source = r#"flowchart LR
-  A[第一行<br/>第二行] --> B[Done]"#;
-        let normalized = normalize_mermaid_svg_source(source);
+    fn generated_mermaid_common_diagram_families_rasterize() {
+        let theme = Theme::one_dark();
+        let cases = [
+            (
+                "sequence",
+                "sequenceDiagram\n    participant U as 用户\n    U->>E: 打开编辑器 ✅\n    E-->>U: 显示预览",
+            ),
+            (
+                "class",
+                "classDiagram\n    Animal <|-- Dog\n    class Animal {\n        +String name\n    }",
+            ),
+            (
+                "state",
+                "stateDiagram-v2\n    [*] --> Editing\n    Editing --> Preview\n    Preview --> [*]",
+            ),
+            ("er", "erDiagram\n    USER ||--o{ NOTE : owns"),
+            (
+                "gantt",
+                "gantt\n    title Release\n    dateFormat YYYY-MM-DD\n    section Build\n    Compile :done, a1, 2026-08-01, 1d",
+            ),
+            ("pie", "pie showData\n    title Usage\n    \"Edit\" : 70\n    \"Preview\" : 30"),
+            ("mindmap", "mindmap\n  root((Moeka))\n    Editor\n    Preview"),
+        ];
 
-        assert!(normalized.contains(r"第一行\n第二行"));
-        assert!(!normalized.contains(r"第一行\n\n第二行"));
+        for (name, source) in cases {
+            let svg = build_generated_block_preview_svg(
+                markdown::BlockPreviewKind::Mermaid,
+                source,
+                &theme,
+                generated_preview_fonts(),
+            );
+            assert!(
+                !svg.contains("Mermaid preview failed"),
+                "{name} failed to render"
+            );
+            load_generated_preview_image_from_svg(&svg, markdown::BlockPreviewKind::Mermaid)
+                .unwrap_or_else(|error| panic!("{name} failed to rasterize: {error}"));
+        }
+    }
+
+    #[test]
+    fn generated_mermaid_help_examples_all_rasterize() {
+        let help = include_str!("../../docs/help-zh-cn.md");
+        let mut examples = Vec::new();
+        let mut current = String::new();
+        let mut inside_mermaid = false;
+
+        for line in help.lines() {
+            match (inside_mermaid, line.trim()) {
+                (false, "```mermaid") => inside_mermaid = true,
+                (true, "```") => {
+                    examples.push(std::mem::take(&mut current));
+                    inside_mermaid = false;
+                }
+                (true, _) => {
+                    current.push_str(line);
+                    current.push('\n');
+                }
+                _ => {}
+            }
+        }
+
+        assert!(!inside_mermaid, "unclosed Mermaid fence in help-zh-cn.md");
+        assert_eq!(examples.len(), 27, "unexpected Mermaid example count");
+
+        let theme = Theme::one_dark();
+        for (index, source) in examples.iter().enumerate() {
+            let diagram_type = source.lines().next().unwrap_or("unknown");
+            let svg = build_generated_block_preview_svg(
+                markdown::BlockPreviewKind::Mermaid,
+                source,
+                &theme,
+                generated_preview_fonts(),
+            );
+            assert!(
+                !svg.contains("Mermaid preview failed"),
+                "example {} ({diagram_type}) failed to render",
+                index + 1
+            );
+            load_generated_preview_image_from_svg(&svg, markdown::BlockPreviewKind::Mermaid)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "example {} ({diagram_type}) failed to rasterize: {error}",
+                        index + 1
+                    )
+                });
+        }
     }
 
     #[test]
@@ -2976,6 +3114,7 @@ mod tests {
             GeneratedPreviewFontFamilies {
                 monospace: "Fira Code",
                 body_cjk: "PingFang SC",
+                mermaid_theme: MermaidTheme::Auto,
             },
         );
 
@@ -2994,6 +3133,7 @@ mod tests {
             GeneratedPreviewFontFamilies {
                 monospace: ".SystemUIFont",
                 body_cjk: ".SystemUIFont",
+                mermaid_theme: MermaidTheme::Auto,
             },
         );
 
@@ -4668,253 +4808,41 @@ fn render_mermaid_block_preview_svg(
     theme: &Theme,
     font_families: GeneratedPreviewFontFamilies<'_>,
 ) -> anyhow::Result<String> {
-    let mermaid_svg_source = normalize_mermaid_svg_source(source_text);
-    // mermaid-svg sizes node boxes as `chars * 7.5px + padding`, a constant
-    // per-character budget that assumes narrow Latin glyphs. CJK glyphs render
-    // close to the full em, so at the default size they overflow the box (and
-    // the layout, which spaces nodes by those underestimated sizes, lets them
-    // overlap). Rendering a little smaller keeps wrapped CJK labels inside their
-    // boxes; the preview is scaled up for display, so readability is preserved.
-    let mermaid_theme = mermaid_svg::Theme::default().with_font_size(9.5);
-    mermaid_svg::render_with(&mermaid_svg_source, &mermaid_theme)
-        .map(|svg| shrink_mermaid_arrow_markers(&svg))
-        .map(|svg| apply_mermaid_svg_theme(&svg, theme, font_families))
-        .map_err(Into::into)
-}
-
-fn normalize_mermaid_svg_source(source_text: &str) -> String {
-    let normalized = source_text
-        .replace("<br/>", r"\n")
-        .replace("<br>", r"\n")
-        .replace("<br />", r"\n")
-        .replace("<BR/>", r"\n")
-        .replace("<BR>", r"\n")
-        .replace("<BR />", r"\n");
-    wrap_mermaid_svg_source_labels(&normalized, 18)
-}
-
-fn shrink_mermaid_arrow_markers(svg: &str) -> String {
-    svg.replace(
-        "<marker id=\"arrow-filled\" viewBox=\"0 0 10 10\" refX=\"10\" refY=\"5\" markerWidth=\"10\" markerHeight=\"10\" orient=\"auto-start-reverse\"><path d=\"M0 0 L10 5 L0 10 z\"",
-        "<marker id=\"arrow-filled\" viewBox=\"0 0 10 10\" refX=\"8\" refY=\"5\" markerWidth=\"7\" markerHeight=\"7\" orient=\"auto-start-reverse\"><path d=\"M1.5 2 L8 5 L1.5 8 z\"",
-    )
-}
-
-fn wrap_mermaid_svg_source_labels(source_text: &str, max_columns: usize) -> String {
-    let mut wrapped = String::with_capacity(source_text.len());
-    let mut index = 0;
-
-    while index < source_text.len() {
-        let Some(ch) = source_text[index..].chars().next() else {
-            break;
+    let font_family = build_generated_preview_font_family(font_families);
+    let renderer = merman::render::HeadlessRenderer::new().with_vendored_text_measurer();
+    let renderer = if let Some(preset) = font_families
+        .mermaid_theme
+        .host_preset(theme.bg_primary.l < 0.5)
+    {
+        let mut host_theme = merman::render::HostThemeProfile::from_preset(preset);
+        host_theme.font_family = Some(font_family);
+        host_theme.font_size = Some("14px".to_string());
+        host_theme.output = merman::render::HostThemeOutput {
+            pipeline: merman::render::HostThemePipelinePreset::ResvgSafe,
+            ..merman::render::HostThemeOutput::default()
         };
-        let next_index = index + ch.len_utf8();
-        let closing = match ch {
-            '[' => Some(']'),
-            '{' => Some('}'),
-            '(' => Some(')'),
-            _ => None,
-        };
-
-        let Some(closing) = closing else {
-            wrapped.push(ch);
-            index = next_index;
-            continue;
-        };
-        let Some(close_rel) = source_text[next_index..].find(closing) else {
-            wrapped.push(ch);
-            index = next_index;
-            continue;
-        };
-        let close_index = next_index + close_rel;
-        let segment = &source_text[next_index..close_index];
-        if segment.contains(r"\n") {
-            wrapped.push(ch);
-            wrapped.push_str(segment);
-            wrapped.push(closing);
-        } else {
-            wrapped.push(ch);
-            wrapped.push_str(&wrap_mermaid_label_segment(segment, max_columns));
-            wrapped.push(closing);
-        }
-        index = close_index + closing.len_utf8();
-    }
-
-    wrapped
-}
-
-fn wrap_mermaid_label_segment(segment: &str, max_columns: usize) -> String {
-    let (quote, content) = match segment.chars().next() {
-        Some(quote @ ('\'' | '"')) if segment.ends_with(quote) && segment.len() >= 2 => {
-            let start = quote.len_utf8();
-            let end = segment.len() - quote.len_utf8();
-            (Some(quote), &segment[start..end])
-        }
-        _ => (None, segment),
-    };
-    if content.contains(r"\n") {
-        return segment.to_string();
-    }
-    let max_columns = max_columns.max(4);
-    let wrapped_content = wrap_mermaid_label_content(content, max_columns);
-
-    if let Some(quote) = quote {
-        format!("{quote}{wrapped_content}{quote}")
+        renderer.with_host_theme(&host_theme)
     } else {
-        wrapped_content
-    }
-}
-
-fn wrap_mermaid_label_content(content: &str, max_columns: usize) -> String {
-    let mut result = String::with_capacity(content.len() + content.len() / max_columns.max(1) * 2);
-    let mut line_start = 0;
-    let mut current_columns = 0;
-    let mut last_break: Option<usize> = None;
-
-    for (offset, ch) in content.char_indices() {
-        if ch == '\\' && content[offset..].starts_with(r"\n") {
-            current_columns = 0;
-            last_break = None;
-            continue;
-        }
-
-        if ch.is_whitespace() || matches!(ch, '/' | '-' | '_' | ':' | '，' | '、') {
-            last_break = Some(offset + ch.len_utf8());
-        }
-
-        let ch_columns = if ch.is_ascii() { 1 } else { 2 };
-        if current_columns + ch_columns > max_columns && offset > line_start {
-            let break_at = last_break
-                .filter(|break_at| *break_at > line_start)
-                .unwrap_or(offset);
-            result.push_str(content[line_start..break_at].trim_end());
-            result.push_str(r"\n");
-            line_start = break_at;
-            while line_start < content.len() {
-                let Some(next_ch) = content[line_start..].chars().next() else {
-                    break;
-                };
-                if !next_ch.is_whitespace() {
-                    break;
-                }
-                line_start += next_ch.len_utf8();
-            }
-            current_columns = if line_start <= offset {
-                content[line_start..offset]
-                    .chars()
-                    .map(|ch| if ch.is_ascii() { 1 } else { 2 })
-                    .sum::<usize>()
-            } else {
-                0
-            };
-            last_break = None;
-        }
-        current_columns += ch_columns;
-    }
-
-    result.push_str(content[line_start..].trim_start());
-    result
-}
-
-fn apply_mermaid_svg_theme(
-    svg: &str,
-    theme: &Theme,
-    font_families: GeneratedPreviewFontFamilies<'_>,
-) -> String {
-    let font_family = escape_svg_text(&build_generated_preview_font_family(font_families));
-    let foreground = svg_color(generated_preview_foreground_color(theme));
-    let secondary = svg_color(theme.text_secondary);
-    let node_fill = svg_color(theme.bg_secondary);
-    let node_stroke = svg_color(theme.border_primary);
-    let subgraph_fill = svg_color(theme.bg_secondary);
-    let subgraph_stroke = svg_color(theme.border_secondary);
-
-    let mut themed = append_svg_root_style(
-        svg,
-        &format!(
-            "font-family:{font_family};text-rendering:geometricPrecision;shape-rendering:geometricPrecision;font-variant-ligatures:none;"
-        ),
-    );
-
-    for (from, to) in [
-        (
-            "font-family=\"sans-serif\"",
-            format!("font-family=\"{font_family}\""),
-        ),
-        ("fill=\"#333\"", format!("fill=\"{foreground}\"")),
-        ("fill=\"#222\"", format!("fill=\"{foreground}\"")),
-        ("fill=\"#666\"", format!("fill=\"{secondary}\"")),
-        ("fill=\"#777\"", format!("fill=\"{secondary}\"")),
-        ("stroke=\"#333\"", format!("stroke=\"{foreground}\"")),
-        ("stroke=\"#222\"", format!("stroke=\"{foreground}\"")),
-        ("stroke=\"#666\"", format!("stroke=\"{foreground}\"")),
-        ("stroke=\"#777\"", format!("stroke=\"{foreground}\"")),
-        ("fill=\"#ECECFF\"", format!("fill=\"{node_fill}\"")),
-        ("fill=\"#EEE\"", format!("fill=\"{node_fill}\"")),
-        ("stroke=\"#9370DB\"", format!("stroke=\"{node_stroke}\"")),
-        (
-            "stroke=\"#D0D0D0\"",
-            format!("stroke=\"{subgraph_stroke}\""),
-        ),
-        ("fill=\"#F9F9F9\"", format!("fill=\"{subgraph_fill}\"")),
-        (
-            "fill=\"#fff\"",
-            format!(
-                "fill=\"{theme_bg}\"",
-                theme_bg = svg_color(theme.bg_primary)
-            ),
-        ),
-    ] {
-        themed = themed.replace(from, &to);
-    }
-
-    themed = append_svg_style_block(
-        &themed,
-        concat!(
-            ".label,",
-            ".nodeLabel,",
-            ".edgeLabel,",
-            ".cluster-label{overflow:hidden !important;}\n",
-            ".label p,",
-            ".nodeLabel p,",
-            ".edgeLabel p,",
-            ".cluster-label p{",
-            "margin:0 !important;max-width:100% !important;",
-            "white-space:normal !important;",
-            "overflow-wrap:anywhere !important;word-break:break-word !important;",
-            "line-break:anywhere !important;}\n",
-            ".label foreignObject,",
-            ".nodeLabel foreignObject,",
-            ".edgeLabel foreignObject,",
-            ".cluster-label foreignObject{overflow:hidden !important;}\n",
-            ".label foreignObject div,",
-            ".label foreignObject span,",
-            ".nodeLabel foreignObject div,",
-            ".nodeLabel foreignObject span,",
-            ".edgeLabel foreignObject div,",
-            ".edgeLabel foreignObject span,",
-            ".cluster-label foreignObject div,",
-            ".cluster-label foreignObject span{",
-            "max-width:100% !important;box-sizing:border-box !important;",
-            "white-space:normal !important;",
-            "overflow-wrap:anywhere !important;word-break:break-word !important;",
-            "line-break:anywhere !important;}\n",
-            ".label text,",
-            ".nodeLabel text,",
-            ".edgeLabel text,",
-            ".cluster-label text,",
-            ".label tspan,",
-            ".nodeLabel tspan,",
-            ".edgeLabel tspan,",
-            ".cluster-label tspan{",
-            "text-overflow:ellipsis;",
-            "overflow:hidden !important;",
-            "paint-order:stroke fill;",
-            "font-size:0.92em !important;}",
-        ),
-    );
-
-    themed
+        let mermaid_theme = font_families
+            .mermaid_theme
+            .mermaid_theme_name()
+            .ok_or_else(|| anyhow::anyhow!("invalid Mermaid theme"))?;
+        renderer
+            .with_site_config(merman::MermaidConfig::from_value(serde_json::json!({
+                "theme": mermaid_theme,
+                "fontFamily": font_family,
+            })))
+            .with_svg_pipeline(merman::render::SvgPipeline::resvg_safe())
+    };
+    let svg = renderer
+        .render_svg_sync(source_text)?
+        .ok_or_else(|| anyhow::anyhow!("unsupported Mermaid diagram"))?;
+    // merman 0.8.0-alpha.3 omits this semicolon in fallback font-family attributes.
+    let svg = svg.replace("&apos\"", "&apos;\"");
+    Ok(append_svg_root_style(
+        &svg,
+        "background-color:transparent;text-rendering:geometricPrecision;shape-rendering:geometricPrecision;",
+    ))
 }
 
 fn build_generated_block_preview_error_svg(
@@ -4968,6 +4896,10 @@ fn build_generated_preview_font_family(font_families: GeneratedPreviewFontFamili
     push_generated_preview_font_families(
         &mut families,
         GENERATED_PREVIEW_DEFAULT_MONOSPACE_FONT_FAMILY,
+    );
+    push_generated_preview_font_families(
+        &mut families,
+        GENERATED_PREVIEW_DEFAULT_EMOJI_FONT_FAMILY,
     );
 
     families.join(", ")
@@ -5073,24 +5005,6 @@ fn append_svg_root_style(svg: &str, style_fragment: &str) -> String {
     let mut merged = String::with_capacity(svg.len() + style_fragment.len() + 9);
     merged.push_str(&svg[..tag_end]);
     merged.push_str(&format!(" style=\"{style_fragment}\""));
-    merged.push_str(&svg[tag_end..]);
-    merged
-}
-
-fn append_svg_style_block(svg: &str, style_css: &str) -> String {
-    let Some(svg_start) = svg.find("<svg") else {
-        return svg.to_string();
-    };
-    let Some(tag_end_rel) = svg[svg_start..].find('>') else {
-        return svg.to_string();
-    };
-    let tag_end = svg_start + tag_end_rel + 1;
-
-    let mut merged = String::with_capacity(svg.len() + style_css.len() + 32);
-    merged.push_str(&svg[..tag_end]);
-    merged.push_str("<style>");
-    merged.push_str(style_css);
-    merged.push_str("</style>");
     merged.push_str(&svg[tag_end..]);
     merged
 }

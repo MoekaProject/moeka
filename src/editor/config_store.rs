@@ -210,6 +210,7 @@ mod tests {
             body_latin_font: "IBM Plex Sans".to_string(),
             body_cjk_font: "PingFang SC".to_string(),
             code_font: "JetBrains Mono".to_string(),
+            mermaid_theme: "auto".to_string(),
             font_size: 17.0,
             line_height: 1.7,
             letter_spacing: 0.5,

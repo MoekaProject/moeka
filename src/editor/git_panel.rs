@@ -35,6 +35,14 @@ enum GitHistoryRow {
     CommitFilesLoading,
 }
 
+fn should_show_git_commit_area(
+    tab: GitPanelTab,
+    staged_count: usize,
+    conflicted_count: usize,
+) -> bool {
+    tab == GitPanelTab::Changes && staged_count > 0 && conflicted_count == 0
+}
+
 impl EditorView {
     fn git_change_kind_color(&self, kind: GitChangeKind) -> gpui::Hsla {
         match kind {
@@ -79,13 +87,16 @@ impl EditorView {
             GitPanelTab::History => self.render_git_history_body(cx),
         };
 
-        let commit_area = if self.git_panel_tab == GitPanelTab::Changes
-            && self.git_panel_repo_status().is_some()
-        {
-            Some(self.render_git_commit_area(cx))
-        } else {
-            None
-        };
+        let (staged_count, conflicted_count) =
+            self.git_panel_repo_status().map_or((0, 0), |status| {
+                (status.staged.len(), status.conflicted.len())
+            });
+        let commit_area =
+            if should_show_git_commit_area(self.git_panel_tab, staged_count, conflicted_count) {
+                Some(self.render_git_commit_area(cx))
+            } else {
+                None
+            };
 
         div()
             .id("git-panel")
@@ -675,15 +686,6 @@ impl EditorView {
                 }),
             ));
         } else {
-            let discard_entry = entry.clone();
-            actions.push(action_button(
-                "git-discard",
-                MENU_DELETE_SVG_PATH,
-                crate::i18n::TextKey::GitDiscardFile,
-                std::rc::Rc::new(move |this, cx| {
-                    this.request_git_discard_entry(&discard_entry, cx);
-                }),
-            ));
             let paths = entry_stage_paths(entry);
             actions.push(action_button(
                 "git-stage",
@@ -691,6 +693,15 @@ impl EditorView {
                 crate::i18n::TextKey::GitStageFile,
                 std::rc::Rc::new(move |this, cx| {
                     this.run_git_operation(GitOperation::StagePaths(paths.clone()), cx);
+                }),
+            ));
+            let discard_entry = entry.clone();
+            actions.push(action_button(
+                "git-discard",
+                MENU_DELETE_SVG_PATH,
+                crate::i18n::TextKey::GitDiscardFile,
+                std::rc::Rc::new(move |this, cx| {
+                    this.request_git_discard_entry(&discard_entry, cx);
                 }),
             ));
         }
@@ -1044,9 +1055,18 @@ impl EditorView {
                         GitHistoryRow::CommitFile(entry) => {
                             self.render_git_commit_file_row(entry, item_height, cx)
                         }
-                        GitHistoryRow::CommitFilesLoading => {
-                            div().h(px(item_height)).flex_shrink_0().into_any_element()
-                        }
+                        GitHistoryRow::CommitFilesLoading => div()
+                            .h(px(item_height))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .pl(px(
+                                self.scaled(ups.utility_panel_section_padding_x_px + 14.0)
+                            ))
+                            .text_size(px(empty_font_size))
+                            .text_color(ups.utility_panel_empty_text_color)
+                            .child("…")
+                            .into_any_element(),
                     });
                 }
                 if list_window.bottom_spacer_px > 0.0 {
@@ -1533,6 +1553,19 @@ impl EditorView {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commit_area_only_appears_for_staged_changes() {
+        assert!(!should_show_git_commit_area(GitPanelTab::Changes, 0, 0));
+        assert!(should_show_git_commit_area(GitPanelTab::Changes, 1, 0));
+        assert!(!should_show_git_commit_area(GitPanelTab::Changes, 1, 1));
+        assert!(!should_show_git_commit_area(GitPanelTab::History, 1, 0));
     }
 }
 

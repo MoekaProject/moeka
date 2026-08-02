@@ -611,12 +611,19 @@ fn stage_paths(repo_root: &Path, paths: &[String]) -> Result<GitOpOutcome, GitOp
 }
 
 fn unstage_paths(repo_root: &Path, paths: &[String]) -> Result<GitOpOutcome, GitOpError> {
-    // `git reset -q HEAD --` fails on repos without a commit; `git rm --cached`
-    // would drop the file, so use `git restore --staged` which handles both.
-    let mut args = vec!["restore", "--staged", "--"];
+    let has_head = run_git(repo_root, &["rev-parse", "--verify", "HEAD"]).is_ok();
+    let mut args = if has_head {
+        vec!["restore", "--staged", "--"]
+    } else {
+        vec!["rm", "-q", "-r", "--cached", "--ignore-unmatch", "--"]
+    };
     args.extend(paths.iter().map(String::as_str));
     run_git(repo_root, &args).map_err(GitOpError::Other)?;
     Ok(GitOpOutcome::Done)
+}
+
+fn unstage_all(repo_root: &Path) -> Result<GitOpOutcome, GitOpError> {
+    unstage_paths(repo_root, &[".".to_string()])
 }
 
 fn discard_paths(
@@ -754,10 +761,7 @@ pub(super) fn execute_git_operation(
             run_git(repo_root, &["add", "--all"]).map_err(GitOpError::Other)?;
             Ok(GitOpOutcome::Done)
         }
-        GitOperation::UnstageAll => {
-            run_git(repo_root, &["restore", "--staged", "--", "."]).map_err(GitOpError::Other)?;
-            Ok(GitOpOutcome::Done)
-        }
+        GitOperation::UnstageAll => unstage_all(repo_root),
         GitOperation::DiscardPaths { tracked, untracked } => {
             discard_paths(repo_root, tracked, untracked)
         }
@@ -1135,6 +1139,20 @@ mod tests {
         };
         assert_eq!(top_level.file_name(), "a.md");
         assert_eq!(top_level.parent_dir(), "");
+    }
+
+    #[test]
+    fn unstages_files_before_the_first_commit() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        run_git(directory.path(), &["init", "-q"]).expect("init repository");
+        std::fs::write(directory.path().join("note.md"), "draft\n").expect("write note");
+        run_git(directory.path(), &["add", "note.md"]).expect("stage note");
+
+        unstage_paths(directory.path(), &["note.md".to_string()]).expect("unstage note");
+
+        let status = run_git(directory.path(), &["status", "--short"]).expect("status");
+        assert_eq!(status, "?? note.md");
+        assert!(directory.path().join("note.md").exists());
     }
 
     #[test]

@@ -65,7 +65,7 @@ mod whiteboard_input;
 mod whiteboard_panel;
 mod workspace_search;
 
-pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
+pub(crate) use app_settings::{AppSettings, MermaidTheme, theme_kind_to_string};
 pub(crate) use assets::*;
 pub(crate) use attachments::AttachmentPolicy;
 pub(crate) use branch_picker::BranchPickerItem;
@@ -5222,6 +5222,7 @@ impl EditorView {
                 helpers::GeneratedPreviewFontFamilies {
                     monospace: self.styles.editor.editor_monospace_font_family,
                     body_cjk: self.styles.editor.editor_body_cjk_font_family,
+                    mermaid_theme: self.app_settings.mermaid_theme(),
                 },
             );
             // The SVG fully determines the rasterized image. On a forced refresh

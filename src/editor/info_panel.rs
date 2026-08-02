@@ -170,6 +170,7 @@ fn export_preview_font_families() -> helpers::GeneratedPreviewFontFamilies<'stat
     helpers::GeneratedPreviewFontFamilies {
         monospace: "SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace",
         body_cjk: "PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, sans-serif",
+        mermaid_theme: super::MermaidTheme::Auto,
     }
 }
 
