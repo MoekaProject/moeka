@@ -2,7 +2,8 @@ SHELL := /bin/bash
 
 APP_NAME := moeka
 APP_DISPLAY_NAME := Moeka
-TARGET ?= $(shell rustc -vV | awk '/^host:/ { print $$2 }')
+HOST_TARGET := $(shell rustc -vV | awk '/^host:/ { print $$2 }')
+TARGET ?= $(HOST_TARGET)
 PROFILE := release
 VERSION := $(shell awk -F '"' '/^version = / { print $$2; exit }' Cargo.toml)
 BUNDLE_ID ?= app.moeka.moeka
@@ -15,7 +16,13 @@ APP_DIR := $(MACOS_BUILD_DIR)/$(APP_DISPLAY_NAME).app
 CONTENTS_DIR := $(APP_DIR)/Contents
 MACOS_DIR := $(CONTENTS_DIR)/MacOS
 RESOURCES_DIR := $(CONTENTS_DIR)/Resources
+ifeq ($(TARGET),$(HOST_TARGET))
+BINARY_PATH := target/$(PROFILE)/$(APP_NAME)
+CARGO_TARGET_ARG :=
+else
 BINARY_PATH := target/$(TARGET)/$(PROFILE)/$(APP_NAME)
+CARGO_TARGET_ARG := --target "$(TARGET)"
+endif
 DMG_PATH := $(DIST_DIR)/$(APP_DISPLAY_NAME).dmg
 INFO_PLIST_TEMPLATE := packaging/macos/Info.plist
 ICON_FILE := packaging/macos/AppIcon.icns
@@ -32,7 +39,8 @@ DIST_SUFFIXES := arm64 amd64
 
 dmg: $(ICON_FILE)
 	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
-	@$(MAKE) -j2 dmg-arm64 dmg-amd64
+	@$(MAKE) dmg-arm64
+	@$(MAKE) dmg-amd64
 	@ls -lh "$(DIST_DIR)"
 
 dmg-arm64:
@@ -138,8 +146,8 @@ $(APP_DIR): build-release $(INFO_PLIST_TEMPLATE) $(ICON_FILE)
 	@echo "Created $(APP_DIR)"
 
 build-release:
-	@rustup target add "$(TARGET)"
-	@cargo build --release --target "$(TARGET)"
+	@if [[ "$(TARGET)" != "$(HOST_TARGET)" ]]; then rustup target add "$(TARGET)"; fi
+	@cargo build --release $(CARGO_TARGET_ARG)
 
 clean-dmg:
 	@rm -f "$(DMG_PATH)"
