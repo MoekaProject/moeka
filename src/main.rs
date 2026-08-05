@@ -245,7 +245,7 @@ fn configure_editor_window(window: &mut Window) {
                 let content_view: *mut objc::runtime::Object = msg_send![ns_window, contentView];
                 let () = msg_send![content_view, setWantsLayer: true];
                 let layer: *mut objc::runtime::Object = msg_send![content_view, layer];
-                let () = msg_send![layer, setCornerRadius: 15.0_f64];
+                let () = msg_send![layer, setCornerRadius: 10.0_f64];
                 let () = msg_send![layer, setMasksToBounds: true];
             }
         }

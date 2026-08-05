@@ -1212,6 +1212,12 @@ impl EditorView {
                 matches!(&self.sidebar_edit, Some(SidebarEditMode::CreateDir { .. }));
 
             let items = items.unwrap_or_default();
+            if self.sidebar_directory_loading.is_empty()
+                && !self.sidebar_directory_refresh_pending
+                && !self.sidebar_items_dirty
+            {
+                self.resolve_pending_sidebar_scroll_anchor(&items);
+            }
             let render_all_items = self.sidebar_edit.is_some() && !self.sidebar_edit_in_file_list;
 
             let mut next_at_depth: HashMap<usize, usize> = HashMap::new();
@@ -1273,7 +1279,10 @@ impl EditorView {
                 // filtering the tree (which shrinks the content) does not leave the
                 // list scrolled past its end, which would make items jump upward.
                 let viewport_height = f32::from(self.sidebar_scroll_handle.bounds().size.height);
-                if viewport_height > 0.0 {
+                let refresh_scroll_pending = self.pending_sidebar_scroll_top.get().is_some()
+                    || !self.sidebar_directory_loading.is_empty()
+                    || self.sidebar_directory_refresh_pending;
+                if viewport_height > 0.0 && !refresh_scroll_pending {
                     let scroll_y = -f32::from(self.sidebar_scroll_handle.offset().y);
                     let max_scroll = (content_height - viewport_height).max(0.0);
                     if scroll_y > max_scroll + 0.5 {
@@ -1417,6 +1426,7 @@ impl EditorView {
                             .track_scroll(&self.sidebar_scroll_handle)
                             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
                                 this.pending_sidebar_scroll_top.set(None);
+                                this.pending_sidebar_scroll_anchor = None;
                                 this.reveal_panel_scrollbar(PanelScrollbarKind::Sidebar, cx);
                             }))
                             .on_mouse_down(
@@ -1622,8 +1632,10 @@ impl EditorView {
                 if refresh_ready && let Some(scroll_top) = pending_scroll_top.take() {
                     let max_scroll = f32::from(sidebar_scroll_handle.max_offset().height);
                     let offset = sidebar_scroll_handle.offset();
-                    sidebar_scroll_handle
-                        .set_offset(gpui::point(offset.x, px(-scroll_top.min(max_scroll))));
+                    let target_y = -scroll_top.min(max_scroll);
+                    if (f32::from(offset.y) - target_y).abs() >= 0.5 {
+                        sidebar_scroll_handle.set_offset(gpui::point(offset.x, px(target_y)));
+                    }
                 }
             })
             .child(bar)

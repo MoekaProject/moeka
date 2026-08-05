@@ -34,11 +34,31 @@ fn load_sidebar_directory(path: &Path, sort_mode: SidebarSortMode) -> Vec<Sideba
 }
 
 impl EditorView {
-    fn capture_file_view_scroll_positions(&self) {
+    fn capture_file_view_scroll_positions(&mut self) {
         if self.pending_sidebar_scroll_top.get().is_none() {
-            self.pending_sidebar_scroll_top.set(Some(
-                (-f32::from(self.sidebar_scroll_handle.offset().y)).max(0.0),
-            ));
+            let scroll_top = (-f32::from(self.sidebar_scroll_handle.offset().y)).max(0.0);
+            self.pending_sidebar_scroll_top.set(Some(scroll_top));
+            let item_height = self.sidebar_item_height_px();
+            let prefix_height = self.sidebar_scroll_prefix_height(true);
+            let items = self.sidebar_items_cache.clone();
+            if !items.is_empty() && item_height > 0.0 {
+                let anchor_index = (((scroll_top - prefix_height).max(0.0) / item_height).floor()
+                    as usize)
+                    .min(items.len() - 1);
+                let mut candidate_indices = (anchor_index..items.len()).collect::<Vec<_>>();
+                candidate_indices.extend((0..anchor_index).rev());
+                let candidates = candidate_indices
+                    .into_iter()
+                    .map(|index| {
+                        let relative_y = prefix_height + index as f32 * item_height - scroll_top;
+                        (items[index].path.clone(), relative_y)
+                    })
+                    .collect();
+                self.pending_sidebar_scroll_anchor = Some(PendingSidebarScrollAnchor {
+                    candidates,
+                    fallback_scroll_top: scroll_top,
+                });
+            }
         }
         if self.pending_file_list_scroll_top.get().is_none() {
             self.pending_file_list_scroll_top.set(Some(
@@ -93,6 +113,7 @@ impl EditorView {
         }
         if paths.is_empty() {
             self.pending_sidebar_scroll_top.set(None);
+            self.pending_sidebar_scroll_anchor = None;
             return;
         }
 
@@ -130,6 +151,7 @@ impl EditorView {
     }
 
     pub(super) fn invalidate_sidebar_flattened_items(&mut self) {
+        self.capture_file_view_scroll_positions();
         self.sidebar_items_dirty = true;
     }
 
@@ -146,6 +168,7 @@ impl EditorView {
         path: PathBuf,
         cx: &mut Context<Self>,
     ) {
+        self.capture_file_view_scroll_positions();
         self.schedule_sidebar_directory_request(path, true, cx);
     }
 

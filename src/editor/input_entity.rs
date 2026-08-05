@@ -180,6 +180,7 @@ impl EntityInputHandler for EditorView {
             }
             return;
         }
+        self.capture_typing_scroll_guard();
         if ime_debug_enabled() {
             ime_debug_log(format!(
                 "replace_text_in_range start range_utf16={:?} new_text={:?} marked_before={:?} selection_before={:?}",
@@ -407,6 +408,7 @@ impl EntityInputHandler for EditorView {
         self.last_scroll_cursor_visual_x = None;
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
+        self.capture_typing_scroll_guard();
         self.clear_phantom_selection();
         if ime_debug_enabled() {
             ime_debug_log(format!(

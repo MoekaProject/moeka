@@ -21,6 +21,15 @@ fn caret_vertical_overflow(
     }
 }
 
+fn typing_stayed_on_visual_line(
+    before_line: usize,
+    before_visual_row: usize,
+    after_line: usize,
+    after_visual_row: usize,
+) -> bool {
+    before_line == after_line && before_visual_row == after_visual_row
+}
+
 impl EditorView {
     fn actual_visual_line_count(info: &LineDisplayInfo) -> usize {
         info.wrapped_line.wrap_boundaries().len() + 1
@@ -81,14 +90,20 @@ impl EditorView {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn sync_macos_traffic_light_position(&mut self, window: &mut Window) {
-        if self
+        let already_synced = self
             .traffic_light_ui_scale
-            .is_some_and(|scale| (scale - self.ui_scale).abs() < f32::EPSILON)
-        {
+            .is_some_and(|scale| (scale - self.ui_scale).abs() < f32::EPSILON);
+        if already_synced {
             return;
         }
         if apply_macos_traffic_light_position(window, self.ui_scale, self.tab_bar_height()) {
-            self.traffic_light_ui_scale = Some(self.ui_scale);
+            // AppKit may perform one more titlebar layout after the first content frame.
+            // Keep the cache empty once so the following frame confirms the final position.
+            if self.traffic_light_ui_scale.is_none() {
+                self.traffic_light_ui_scale = Some(f32::NAN);
+            } else {
+                self.traffic_light_ui_scale = Some(self.ui_scale);
+            }
         }
     }
 
@@ -571,6 +586,39 @@ impl EditorView {
         }
     }
 
+    pub(crate) fn capture_typing_scroll_guard(&mut self) {
+        let line = self.cursor_line();
+        let visual_row = self
+            .cursor_visual_position(self.cursor.offset)
+            .map(|(row, _)| row)
+            .unwrap_or(0);
+        self.pending_typing_scroll_guard = Some(PendingTypingScrollGuard {
+            line,
+            visual_row,
+            scroll_offset: self.scroll_offset,
+        });
+    }
+
+    pub(crate) fn restore_scroll_if_typing_stayed_on_visual_line(&mut self) -> bool {
+        let Some(guard) = self.pending_typing_scroll_guard.take() else {
+            return false;
+        };
+        let line = self.cursor_line();
+        let visual_row = self
+            .cursor_visual_position(self.cursor.offset)
+            .map(|(row, _)| row)
+            .unwrap_or(0);
+        if !typing_stayed_on_visual_line(guard.line, guard.visual_row, line, visual_row) {
+            return false;
+        }
+
+        self.pending_scroll_to_cursor = false;
+        self.pending_center_cursor_in_view = false;
+        self.scroll_offset = guard.scroll_offset;
+        self.clamp_scroll();
+        true
+    }
+
     fn animate_scroll_to(&mut self, target_scroll: f32, cx: &mut Context<Self>) {
         let start_scroll = self.scroll_offset;
         self.scroll_offset = target_scroll;
@@ -876,9 +924,10 @@ fn traffic_light_offsets_for_layout(
     button_height: f32,
 ) -> gpui::Point<gpui::Pixels> {
     const BASE_LEFT_PX: f32 = 10.0;
+    const OPTICAL_OFFSET_Y_PX: f32 = 2.0;
     point(
         px(BASE_LEFT_PX * ui_scale),
-        px(((tab_bar_height - button_height) * 0.5).max(0.0)),
+        px(((tab_bar_height - button_height) * 0.5 + OPTICAL_OFFSET_Y_PX * ui_scale).max(0.0)),
     )
 }
 
@@ -945,22 +994,21 @@ fn apply_macos_traffic_light_position(
 
 #[cfg(test)]
 mod tests {
-    use super::caret_vertical_overflow;
     #[cfg(target_os = "macos")]
     use super::{EditorView, traffic_light_offsets_for_layout};
+    use super::{caret_vertical_overflow, typing_stayed_on_visual_line};
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn traffic_light_stays_centered_in_scaled_tab_bar() {
+    fn traffic_light_uses_scaled_optical_center_in_tab_bar() {
         let button_height = 14.0;
         for ui_scale in [0.8, 1.0, 1.4] {
             let tab_bar_height = crate::style::TOP_BAR_HEIGHT_PX * ui_scale;
             let offsets = traffic_light_offsets_for_layout(ui_scale, tab_bar_height, button_height);
             assert_eq!(f32::from(offsets.x), 10.0 * ui_scale);
-            assert_eq!(
-                f32::from(offsets.y) + button_height * 0.5,
-                tab_bar_height * 0.5
-            );
+            let actual_center = f32::from(offsets.y) + button_height * 0.5;
+            let expected_center = tab_bar_height * 0.5 + 2.0 * ui_scale;
+            assert!((actual_center - expected_center).abs() < 0.0001);
 
             let initial = EditorView::traffic_light_position_for_ui_scale(ui_scale);
             assert_eq!(initial, offsets);
@@ -975,5 +1023,12 @@ mod tests {
         assert_eq!(caret_vertical_overflow(180.0, 200.0, 100.0, 200.0), Equal);
         assert_eq!(caret_vertical_overflow(99.9, 119.9, 100.0, 200.0), Less);
         assert_eq!(caret_vertical_overflow(180.1, 200.1, 100.0, 200.0), Greater);
+    }
+
+    #[test]
+    fn typing_scroll_guard_releases_only_for_hard_or_soft_wraps() {
+        assert!(typing_stayed_on_visual_line(8, 2, 8, 2));
+        assert!(!typing_stayed_on_visual_line(8, 2, 9, 0));
+        assert!(!typing_stayed_on_visual_line(8, 2, 8, 3));
     }
 }

@@ -16,6 +16,66 @@ enum TabDropTarget<'a> {
 }
 
 impl EditorView {
+    pub(super) fn stash_active_tab_generated_preview_cache(&mut self) {
+        let Some(active_tab_id) = self.active_tab_id.clone() else {
+            return;
+        };
+
+        // A delayed rebuild belongs to the tab that scheduled it. Dropping the
+        // task prevents it from rebuilding whichever tab becomes active next.
+        self.generated_preview_rerender_task = None;
+        let keys = std::mem::take(&mut self.generated_preview_keys);
+        let mut cache = GeneratedPreviewTabCache {
+            code_mode_preview_key: self.code_mode_preview_key.take(),
+            rerender_pending: std::mem::take(&mut self.generated_preview_rerender_pending),
+            ..GeneratedPreviewTabCache::default()
+        };
+        for key in &keys {
+            if let Some(image) = self.image_cache.remove(key) {
+                cache.images.insert(key.clone(), image);
+            }
+            if let Some(svg) = self.generated_preview_svg_cache.remove(key) {
+                cache.svgs.insert(key.clone(), svg);
+            }
+            if let Some(overlay) = self.generated_preview_overlay_cache.remove(key) {
+                cache.overlays.insert(key.clone(), overlay);
+            }
+            if let Some(view) = self.generated_preview_views.remove(key) {
+                cache.views.insert(key.clone(), view);
+            }
+        }
+        cache.keys = keys;
+
+        if cache.keys.is_empty()
+            && cache.images.is_empty()
+            && cache.svgs.is_empty()
+            && cache.overlays.is_empty()
+            && cache.views.is_empty()
+        {
+            self.tab_generated_preview_cache.remove(&active_tab_id);
+        } else {
+            self.tab_generated_preview_cache
+                .insert(active_tab_id, cache);
+        }
+    }
+
+    fn restore_generated_preview_cache_for_tab(&mut self, tab_id: &str) {
+        let Some(cache) = self.tab_generated_preview_cache.remove(tab_id) else {
+            self.generated_preview_keys.clear();
+            self.code_mode_preview_key = None;
+            self.generated_preview_rerender_pending = false;
+            return;
+        };
+
+        self.generated_preview_keys = cache.keys;
+        self.image_cache.extend(cache.images);
+        self.generated_preview_svg_cache.extend(cache.svgs);
+        self.generated_preview_overlay_cache.extend(cache.overlays);
+        self.generated_preview_views.extend(cache.views);
+        self.code_mode_preview_key = cache.code_mode_preview_key;
+        self.generated_preview_rerender_pending = cache.rerender_pending;
+    }
+
     pub(super) fn stash_active_tab_layout_cache(&mut self) {
         let Some(active_tab_id) = self.active_tab_id.clone() else {
             return;
@@ -641,12 +701,19 @@ impl EditorView {
             return;
         }
         let tab = self.tabs[index].clone();
+        let switching_tabs = self.active_tab_id.as_deref() != Some(tab.id.as_str());
+        if switching_tabs {
+            self.stash_active_tab_generated_preview_cache();
+        }
         self.invalidate_active_file_panel_caches();
         self.active_tab_id = Some(tab.id.clone());
         self.active_tab_index_cache.set(Some(index));
         self.active_file_kind_cache = tab.file_kind.clone();
         self.current_file_path = tab.path.clone();
         self.editor_left_aligned = tab.editor_left_aligned;
+        if switching_tabs {
+            self.restore_generated_preview_cache_for_tab(&tab.id);
+        }
         if tab.kind.is_terminal() {
             self.hide_right_panels_for_terminal(cx);
             self.pending_terminal_focus = Some(tab.id.clone());
@@ -737,6 +804,11 @@ impl EditorView {
             }
         }
         if self.tabs.is_empty() {
+            if was_active {
+                self.stash_active_tab_generated_preview_cache();
+            }
+            self.tab_generated_preview_cache.remove(tab_id);
+            self.tab_layout_cache.remove(tab_id);
             self.active_tab_id = None;
             self.active_tab_index_cache.set(None);
             self.active_file_kind_cache = None;
@@ -753,6 +825,8 @@ impl EditorView {
         } else {
             cx.notify();
         }
+        self.tab_generated_preview_cache.remove(tab_id);
+        self.tab_layout_cache.remove(tab_id);
         self.process_pending_close_queue(cx);
         session_store::persist_session(self);
     }

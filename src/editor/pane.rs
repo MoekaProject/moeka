@@ -30,6 +30,11 @@ use super::*;
 
 pub(crate) type PaneId = usize;
 
+struct TakenTab {
+    tab: OpenTab,
+    generated_preview_cache: Option<GeneratedPreviewTabCache>,
+}
+
 // ─── Pane layout tree ───────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -339,6 +344,7 @@ pane_state! {
     (pending_center_cursor_in_view, bool, false),
     (pending_center_cursor_in_view_immediately, bool, false),
     (pending_preview_reveal, Option<PendingPreviewReveal>, None),
+    (pending_typing_scroll_guard, Option<PendingTypingScrollGuard>, None),
     (pending_click_anchor, Option<ClickScrollAnchor>, None),
     (code_mode_preview_key, Option<String>, None),
     (generated_preview_rerender_task, Option<Task<()>>, None),
@@ -393,6 +399,7 @@ pane_state! {
     // ── Tabs owned by this pane ──
     (current_file_path, Option<PathBuf>, None),
     (tabs, Vec<OpenTab>, Vec::new()),
+    (tab_generated_preview_cache, HashMap<String, GeneratedPreviewTabCache>, HashMap::new()),
     (active_tab_id, Option<String>, None),
     (active_tab_index_cache, Cell<Option<usize>>, Cell::new(None)),
     (active_file_kind_cache, Option<FileKind>, None),
@@ -765,18 +772,20 @@ impl EditorView {
     /// Removes `tab_id` from the pane whose state currently occupies the root
     /// fields, persisting live editor state into the tab snapshot first and
     /// activating a neighbouring tab when the active one is taken.
-    pub(super) fn take_tab_from_current_pane(
+    fn take_tab_from_current_pane(
         &mut self,
         tab_id: &str,
         cx: &mut Context<Self>,
-    ) -> Option<OpenTab> {
+    ) -> Option<TakenTab> {
         let index = self.tabs.iter().position(|tab| tab.id == tab_id)?;
         let was_active = self.active_tab_id.as_deref() == Some(tab_id);
         if was_active {
             self.persist_active_tab_state();
             self.stash_active_tab_layout_cache();
+            self.stash_active_tab_generated_preview_cache();
         }
         let tab = self.tabs.remove(index);
+        let generated_preview_cache = self.tab_generated_preview_cache.remove(tab_id);
         self.active_tab_index_cache.set(None);
         if was_active {
             if self.tabs.is_empty() {
@@ -788,7 +797,10 @@ impl EditorView {
                 self.activate_tab_by_index_without_persist(fallback, cx);
             }
         }
-        Some(tab)
+        Some(TakenTab {
+            tab,
+            generated_preview_cache,
+        })
     }
 
     /// Moves a tab into `target` pane (at `insert_index`, or appended),
@@ -808,13 +820,17 @@ impl EditorView {
             return;
         }
         let tab_id = tab_id.to_string();
-        let Some(tab) = self.with_pane(source, |this| this.take_tab_from_current_pane(&tab_id, cx))
+        let Some(taken) = self.with_pane(source, |this| this.take_tab_from_current_pane(&tab_id, cx))
         else {
             return;
         };
         self.with_pane(target, |this| {
             let index = insert_index.unwrap_or(this.tabs.len()).min(this.tabs.len());
-            this.tabs.insert(index, tab);
+            this.tabs.insert(index, taken.tab);
+            if let Some(cache) = taken.generated_preview_cache {
+                this.tab_generated_preview_cache
+                    .insert(tab_id.clone(), cache);
+            }
             this.ensure_settings_tab_first();
             this.active_tab_index_cache.set(None);
         });
@@ -845,7 +861,7 @@ impl EditorView {
             return;
         }
         let tab_id = tab_id.to_string();
-        let Some(tab) = self.with_pane(source, |this| this.take_tab_from_current_pane(&tab_id, cx))
+        let Some(taken) = self.with_pane(source, |this| this.take_tab_from_current_pane(&tab_id, cx))
         else {
             return;
         };
@@ -857,19 +873,29 @@ impl EditorView {
         pane.state.editor_scrollbar_opacity_target = pane.state.editor_scrollbar_opacity;
         pane.state.editor_scrollbar_width = self.styles.editor.editor_scrollbar_width_px;
         pane.state.editor_scrollbar_width_target = pane.state.editor_scrollbar_width;
-        pane.state.tabs.push(tab);
+        pane.state.tabs.push(taken.tab);
+        if let Some(cache) = taken.generated_preview_cache {
+            pane.state
+                .tab_generated_preview_cache
+                .insert(tab_id.clone(), cache);
+        }
         self.panes.push(pane);
         if !self.pane_layout.split(target, new_id, direction) {
             // Should not happen; restore the tab into the source pane.
-            let pane = self.panes.pop().expect("pane was just pushed");
+            let mut pane = self.panes.pop().expect("pane was just pushed");
             let tab = pane
                 .state
                 .tabs
                 .into_iter()
                 .next()
                 .expect("tab was just pushed");
+            let generated_preview_cache = pane.state.tab_generated_preview_cache.remove(&tab_id);
             self.with_pane(source, |this| {
                 this.tabs.push(tab);
+                if let Some(cache) = generated_preview_cache {
+                    this.tab_generated_preview_cache
+                        .insert(tab_id.clone(), cache);
+                }
                 this.active_tab_index_cache.set(None);
             });
             return;

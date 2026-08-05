@@ -7,6 +7,106 @@ use gpui::{Context, Pixels, px};
 
 use super::*;
 
+fn minimal_scroll_top_for_item(
+    scroll_top: f32,
+    viewport_height: f32,
+    item_top: f32,
+    item_bottom: f32,
+    max_scroll_top: f32,
+) -> Option<f32> {
+    let visible_bottom = scroll_top + viewport_height;
+    let desired_top = if item_top < scroll_top {
+        item_top
+    } else if item_bottom > visible_bottom {
+        item_bottom - viewport_height
+    } else {
+        return None;
+    }
+    .clamp(0.0, max_scroll_top.max(0.0));
+
+    ((desired_top - scroll_top).abs() >= 0.5).then_some(desired_top)
+}
+
+fn scroll_top_for_sidebar_anchor(
+    anchor: &PendingSidebarScrollAnchor,
+    items: &[SidebarItem],
+    prefix_height: f32,
+    item_height: f32,
+    max_scroll_top: f32,
+) -> f32 {
+    anchor
+        .candidates
+        .iter()
+        .find_map(|(path, relative_y)| {
+            items
+                .iter()
+                .position(|item| &item.path == path)
+                .map(|index| prefix_height + index as f32 * item_height - relative_y)
+        })
+        .unwrap_or(anchor.fallback_scroll_top)
+        .clamp(0.0, max_scroll_top.max(0.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{
+        PendingSidebarScrollAnchor, SidebarItem, minimal_scroll_top_for_item,
+        scroll_top_for_sidebar_anchor,
+    };
+
+    fn item(path: &str) -> SidebarItem {
+        SidebarItem {
+            path: PathBuf::from(path),
+            name: path.to_string(),
+            depth: 1,
+            is_dir: false,
+            is_expanded: false,
+        }
+    }
+
+    #[test]
+    fn file_tree_scrolls_only_enough_to_reveal_an_offscreen_item() {
+        assert_eq!(
+            minimal_scroll_top_for_item(100.0, 200.0, 120.0, 144.0, 500.0),
+            None
+        );
+        assert_eq!(
+            minimal_scroll_top_for_item(100.0, 200.0, 76.0, 100.0, 500.0),
+            Some(76.0)
+        );
+        assert_eq!(
+            minimal_scroll_top_for_item(100.0, 200.0, 300.0, 324.0, 500.0),
+            Some(124.0)
+        );
+    }
+
+    #[test]
+    fn file_tree_refresh_keeps_a_path_anchor_stable_across_insert_and_delete() {
+        let anchor = PendingSidebarScrollAnchor {
+            candidates: vec![
+                (PathBuf::from("b"), 0.0),
+                (PathBuf::from("c"), 24.0),
+                (PathBuf::from("a"), -24.0),
+            ],
+            fallback_scroll_top: 24.0,
+        };
+
+        let inserted = [item("new"), item("a"), item("b"), item("c")];
+        assert_eq!(
+            scroll_top_for_sidebar_anchor(&anchor, &inserted, 0.0, 24.0, 200.0),
+            48.0
+        );
+
+        let anchor_deleted = [item("a"), item("c")];
+        assert_eq!(
+            scroll_top_for_sidebar_anchor(&anchor, &anchor_deleted, 0.0, 24.0, 200.0),
+            0.0
+        );
+    }
+}
+
 fn sidebar_git_repo_root_for_path(sidebar_root: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
@@ -198,21 +298,23 @@ impl EditorView {
         }
     }
 
-    pub(super) fn ensure_sidebar_item_visible(&self, index: usize, item_count: usize) -> bool {
+    pub(super) fn ensure_sidebar_item_minimally_visible(
+        &self,
+        index: usize,
+        item_count: usize,
+    ) -> bool {
         if item_count == 0 {
             return false;
         }
 
         let bounds = self.sidebar_scroll_handle.bounds();
         let viewport_height = f32::from(bounds.size.height);
-        let viewport_height = if viewport_height > 0.0 {
-            viewport_height
-        } else {
-            self.last_window_height.max(self.sidebar_item_height_px())
-        };
+        if viewport_height <= 0.0 {
+            return false;
+        }
 
         let offset = self.sidebar_scroll_handle.offset();
-        let scroll_y = -f32::from(offset.y);
+        let scroll_top = -f32::from(offset.y);
         let item_height = self.sidebar_item_height_px();
         let prefix_height = self.sidebar_scroll_prefix_height(true);
         let item_top = prefix_height + index as f32 * item_height;
@@ -220,17 +322,44 @@ impl EditorView {
         let bottom_spacer_height = self.scaled(self.styles.sidebar.sidebar_bottom_spacer_height_px);
         let content_height = prefix_height + item_count as f32 * item_height + bottom_spacer_height;
         let max_scroll_top = (content_height - viewport_height).max(0.0);
-        let desired_top = ((item_top + item_bottom) * 0.5 - viewport_height * 0.5)
-            .max(0.0)
-            .min(max_scroll_top);
-
-        if (desired_top - scroll_y).abs() < 0.5 {
+        let Some(desired_top) = minimal_scroll_top_for_item(
+            scroll_top,
+            viewport_height,
+            item_top,
+            item_bottom,
+            max_scroll_top,
+        ) else {
             return false;
-        }
-
+        };
         self.sidebar_scroll_handle
             .set_offset(gpui::point(offset.x, px(-desired_top)));
         true
+    }
+
+    pub(super) fn resolve_pending_sidebar_scroll_anchor(&mut self, items: &[SidebarItem]) {
+        let Some(anchor) = self.pending_sidebar_scroll_anchor.take() else {
+            return;
+        };
+        let viewport_height = f32::from(self.sidebar_scroll_handle.bounds().size.height);
+        if viewport_height <= 0.0 {
+            self.pending_sidebar_scroll_anchor = Some(anchor);
+            return;
+        }
+
+        let item_height = self.sidebar_item_height_px();
+        let prefix_height = self.sidebar_scroll_prefix_height(true);
+        let bottom_spacer_height = self.scaled(self.styles.sidebar.sidebar_bottom_spacer_height_px);
+        let content_height =
+            prefix_height + items.len() as f32 * item_height + bottom_spacer_height;
+        let max_scroll_top = (content_height - viewport_height).max(0.0);
+        let target_scroll_top = scroll_top_for_sidebar_anchor(
+            &anchor,
+            items,
+            prefix_height,
+            item_height,
+            max_scroll_top,
+        );
+        self.pending_sidebar_scroll_top.set(Some(target_scroll_top));
     }
 
     pub(super) fn sidebar_drag_position_key(position: gpui::Point<Pixels>) -> (f32, f32) {
@@ -570,6 +699,7 @@ impl EditorView {
         // Explicit navigation wins over passive refresh scroll restoration;
         // clear after a possible workspace switch, which invalidates caches.
         self.pending_sidebar_scroll_top.set(None);
+        self.pending_sidebar_scroll_anchor = None;
         self.pending_file_list_scroll_top.set(None);
 
         let mut expanded_changed = switched_workspace;
@@ -599,56 +729,58 @@ impl EditorView {
         self.invalidate_sidebar_flattened_items();
         let items = self.sidebar_items();
         let item_count = items.len();
-        if let Some(index) = items.iter().position(|item| item.path == path) {
-            let sidebar_is_available = show_sidebar || self.sidebar_visible;
-            if sidebar_is_available {
-                self.focused_sidebar_path = Some(path.clone());
-                let immediate_scrolled = self.ensure_sidebar_item_visible(index, item_count);
-                let needs_deferred_reveal =
-                    switched_workspace || expanded_changed || immediate_scrolled;
-                let reveal_path = self.focused_sidebar_path.clone();
-                cx.spawn(async move |this, cx| {
-                    let retry_count = if needs_deferred_reveal { 6 } else { 4 };
-                    for _ in 0..retry_count {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(16))
-                            .await;
+        let sidebar_is_available = show_sidebar || self.sidebar_visible;
+        if sidebar_is_available {
+            self.focused_sidebar_path = Some(path.clone());
+            let current_index = items.iter().position(|item| item.path == path);
+            let immediate_scrolled = current_index
+                .is_some_and(|index| self.ensure_sidebar_item_minimally_visible(index, item_count));
+            let needs_deferred_reveal = switched_workspace
+                || expanded_changed
+                || immediate_scrolled
+                || current_index.is_none();
+            let reveal_path = self.focused_sidebar_path.clone();
+            cx.spawn(async move |this, cx| {
+                let retry_count = if needs_deferred_reveal { 6 } else { 4 };
+                for _ in 0..retry_count {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(16))
+                        .await;
 
-                        let done = this
-                            .update(cx, |editor, cx| {
-                                let Some(path) = reveal_path.as_ref() else {
-                                    return true;
-                                };
+                    let done = this
+                        .update(cx, |editor, cx| {
+                            let Some(path) = reveal_path.as_ref() else {
+                                return true;
+                            };
 
-                                let items = editor.sidebar_items();
-                                let item_count = items.len();
-                                let Some(index) = items.iter().position(|item| &item.path == path)
-                                else {
-                                    return false;
-                                };
+                            let items = editor.sidebar_items();
+                            let item_count = items.len();
+                            let Some(index) = items.iter().position(|item| &item.path == path)
+                            else {
+                                return false;
+                            };
 
-                                let bounds = editor.sidebar_scroll_handle.bounds();
-                                let viewport_height = f32::from(bounds.size.height);
-                                if viewport_height <= 0.0 {
-                                    return false;
-                                }
+                            let bounds = editor.sidebar_scroll_handle.bounds();
+                            let viewport_height = f32::from(bounds.size.height);
+                            if viewport_height <= 0.0 {
+                                return false;
+                            }
 
-                                if editor.ensure_sidebar_item_visible(index, item_count) {
-                                    cx.notify();
-                                }
-                                true
-                            })
-                            .unwrap_or(true);
+                            if editor.ensure_sidebar_item_minimally_visible(index, item_count) {
+                                cx.notify();
+                            }
+                            true
+                        })
+                        .unwrap_or(true);
 
-                        if done {
-                            break;
-                        }
+                    if done {
+                        break;
                     }
-                })
-                .detach();
-            } else {
-                self.focused_sidebar_path = None;
-            }
+                }
+            })
+            .detach();
+        } else {
+            self.focused_sidebar_path = None;
         }
 
         cx.notify();

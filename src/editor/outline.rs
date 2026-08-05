@@ -88,39 +88,38 @@ fn outline_chars_per_line(available_width: f32, font_size: f32, fallback: usize)
     }
 }
 
-fn outline_heading_line_count(text: &str, chars_per_line: usize) -> usize {
-    let columns = outline_text_columns(text).max(1);
-    columns.div_ceil(chars_per_line.max(1)).max(1)
-}
-
-fn outline_soft_wrappable_text(text: &str, chars_per_line: usize) -> SharedString {
+fn outline_wrapped_text(
+    text: &str,
+    chars_per_line: usize,
+    max_lines: usize,
+) -> (SharedString, usize) {
     let break_after_columns = chars_per_line.max(8);
+    let max_lines = max_lines.max(1);
     let mut out = String::with_capacity(text.len());
-    let mut run_columns = 0usize;
-    let mut changed = false;
+    let mut line_columns = 0usize;
+    let mut line_count = 1usize;
+    let mut truncated = false;
     for ch in text.chars() {
+        let columns = if ch.is_ascii() { 1 } else { 2 };
+        if line_columns > 0 && line_columns + columns > break_after_columns {
+            if line_count == max_lines {
+                truncated = true;
+                break;
+            }
+            out.push('\n');
+            line_count += 1;
+            line_columns = 0;
+        }
         out.push(ch);
-        if ch.is_whitespace()
-            || matches!(
-                ch,
-                '-' | '_' | '/' | '\\' | '.' | ':' | ',' | ';' | '，' | '、' | '。'
-            )
-        {
-            run_columns = 0;
-            continue;
-        }
-        run_columns += if ch.is_ascii() { 1 } else { 2 };
-        if run_columns >= break_after_columns {
-            out.push('\u{200b}');
-            run_columns = 0;
-            changed = true;
-        }
+        line_columns += columns;
     }
-    if changed {
-        SharedString::from(out)
-    } else {
-        SharedString::from(text.to_string())
+    if truncated {
+        while out.ends_with(char::is_whitespace) {
+            out.pop();
+        }
+        out.push('…');
     }
+    (SharedString::from(out), line_count)
 }
 
 fn normalized_outline_width_bounds(min_width: f32, max_width: f32) -> (f32, f32) {
@@ -140,7 +139,9 @@ fn normalized_outline_width_bounds(min_width: f32, max_width: f32) -> (f32, f32)
 #[cfg(test)]
 mod tests {
     use super::{
-        normalized_outline_width_bounds, outline_heading_line_count, outline_soft_wrappable_text,
+        animated_outline_tick_influence, normalized_outline_width_bounds, outline_has_later_peer,
+        outline_has_prior_expanded_peer, outline_hover_animation_value,
+        outline_nearest_guide_ranges, outline_tick_influence, outline_wrapped_text,
     };
 
     #[test]
@@ -160,19 +161,120 @@ mod tests {
     }
 
     #[test]
-    fn outline_heading_line_count_tracks_visual_columns() {
-        assert_eq!(outline_heading_line_count("short", 24), 1);
-        assert_eq!(
-            outline_heading_line_count("abcdefghijklmnopqrstuvwxyz", 12),
-            3
-        );
-        assert_eq!(outline_heading_line_count("中文中文中文", 6), 2);
+    fn outline_wrapping_and_height_share_the_same_lines() {
+        let (short, short_lines) = outline_wrapped_text("short", 24, 3);
+        assert_eq!(short.as_ref(), "short");
+        assert_eq!(short_lines, 1);
+
+        let (wrapped, wrapped_lines) = outline_wrapped_text("abcdefghijklmnopqrstuvwxyz", 12, 3);
+        assert_eq!(wrapped.as_ref().matches('\n').count() + 1, wrapped_lines);
+        assert_eq!(wrapped_lines, 3);
+
+        let (truncated, truncated_lines) = outline_wrapped_text("abcdefghijklmnopqrstuvwxyz", 8, 2);
+        assert_eq!(truncated_lines, 2);
+        assert!(truncated.as_ref().ends_with('…'));
     }
 
     #[test]
-    fn outline_soft_wrap_inserts_breaks_for_long_runs() {
-        let wrapped = outline_soft_wrappable_text("abcdefghijklmnopqrstuvwxyz", 8);
-        assert!(wrapped.as_ref().contains('\u{200b}'));
+    fn outline_guides_continue_only_to_later_peers() {
+        let visible = [(0, 0), (1, 1), (2, 1), (3, 2), (4, 2), (5, 1)];
+        assert!(outline_has_later_peer(&visible, 1, 1));
+        assert!(outline_has_later_peer(&visible, 3, 2));
+        assert!(!outline_has_later_peer(&visible, 4, 2));
+        assert!(!outline_has_later_peer(&visible, 5, 1));
+    }
+
+    #[test]
+    fn expanded_outline_item_hands_guide_to_the_child_column() {
+        assert_eq!(
+            outline_nearest_guide_ranges(24.0, 7.0, 2.0, true, true),
+            vec![(0.0, 5.0)]
+        );
+        assert_eq!(
+            outline_nearest_guide_ranges(24.0, 7.0, 2.0, false, true),
+            vec![(0.0, 12.0), (12.0, 24.0)]
+        );
+        assert_eq!(
+            outline_nearest_guide_ranges(24.0, 7.0, 2.0, false, false),
+            vec![(0.0, 12.0)]
+        );
+    }
+
+    #[test]
+    fn old_guide_does_not_restart_after_an_expanded_peer() {
+        let visible = [
+            (0, 0),
+            (1, 1),
+            (2, 1),
+            (3, 2),
+            (4, 2),
+            (5, 1),
+            (6, 0),
+            (7, 1),
+        ];
+        let expanded = [true, false, true, false, false, false, true, false];
+
+        assert!(!outline_has_prior_expanded_peer(&visible, &expanded, 2, 1));
+        assert!(outline_has_prior_expanded_peer(&visible, &expanded, 5, 1));
+        assert!(!outline_has_prior_expanded_peer(&visible, &expanded, 7, 1));
+    }
+
+    #[test]
+    fn outline_tick_influence_spans_center_and_five_neighbors_per_side() {
+        let weights = (4..=16)
+            .map(|index| outline_tick_influence(index, Some(10), 5, 2.2))
+            .collect::<Vec<_>>();
+        assert_eq!(weights[0], 0.0);
+        assert!(weights[1] < 0.02);
+        assert_eq!(weights[6], 1.0);
+        assert!(weights[11] < 0.02);
+        assert_eq!(weights[12], 0.0);
+    }
+
+    #[test]
+    fn outline_tick_influence_animates_old_center_down_and_new_center_up() {
+        assert_eq!(
+            animated_outline_tick_influence(10, Some(10), Some(20), 5, 2.2, 0.0),
+            1.0
+        );
+        assert_eq!(
+            animated_outline_tick_influence(10, Some(10), Some(20), 5, 2.2, 1.0),
+            0.0
+        );
+        assert_eq!(
+            animated_outline_tick_influence(20, Some(10), Some(20), 5, 2.2, 0.0),
+            0.0
+        );
+        assert_eq!(
+            animated_outline_tick_influence(20, Some(10), Some(20), 5, 2.2, 1.0),
+            1.0
+        );
+    }
+
+    #[test]
+    fn outline_tick_color_uses_the_same_animation_weight_as_length() {
+        let resting = gpui::Hsla {
+            h: 0.1,
+            s: 0.2,
+            l: 0.3,
+            a: 0.4,
+        };
+        let active = gpui::Hsla {
+            h: 0.6,
+            s: 0.7,
+            l: 0.8,
+            a: 0.9,
+        };
+        assert_eq!(super::lerp_hsla(resting, active, 0.0), resting);
+        assert_eq!(super::lerp_hsla(resting, active, 1.0), active);
+    }
+
+    #[test]
+    fn outline_hover_animation_fades_in_and_out() {
+        assert_eq!(outline_hover_animation_value(0.0, 1.0, 0.0, 0.2), 0.0);
+        assert_eq!(outline_hover_animation_value(0.0, 1.0, 0.2, 0.2), 1.0);
+        assert_eq!(outline_hover_animation_value(1.0, 0.0, 0.0, 0.2), 1.0);
+        assert_eq!(outline_hover_animation_value(1.0, 0.0, 0.2, 0.2), 0.0);
     }
 }
 
@@ -211,6 +313,83 @@ fn outline_heading_has_children(headings: &[OutlineHeading], heading_index: usiz
         .is_some_and(|next| next.level > current.level)
 }
 
+fn outline_has_later_peer(
+    visible_headings: &[(usize, usize)],
+    current_index: usize,
+    depth: usize,
+) -> bool {
+    visible_headings
+        .iter()
+        .skip(current_index + 1)
+        .map(|(_, next_depth)| *next_depth)
+        .take_while(|next_depth| *next_depth >= depth)
+        .any(|next_depth| next_depth == depth)
+}
+
+fn outline_has_prior_expanded_peer(
+    visible_headings: &[(usize, usize)],
+    expanded: &[bool],
+    current_index: usize,
+    depth: usize,
+) -> bool {
+    visible_headings
+        .iter()
+        .zip(expanded)
+        .take(current_index)
+        .rev()
+        .take_while(|((_, previous_depth), _)| *previous_depth >= depth)
+        .any(|((_, previous_depth), has_children)| *previous_depth == depth && *has_children)
+}
+
+fn outline_dashed_guide_segments(
+    x: f32,
+    start_y: f32,
+    end_y: f32,
+    width: f32,
+    dash_length: f32,
+    gap_length: f32,
+    color: gpui::Hsla,
+) -> Vec<AnyElement> {
+    let height = (end_y - start_y).max(0.0);
+    let step = (dash_length + gap_length).max(1.0);
+    let count = (height / step).ceil() as usize;
+    (0..count)
+        .filter_map(|index| {
+            let top = start_y + index as f32 * step;
+            let segment_height = dash_length.min(end_y - top);
+            (segment_height > 0.0).then(|| {
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(top))
+                    .w(px(width))
+                    .h(px(segment_height))
+                    .bg(color)
+                    .into_any_element()
+            })
+        })
+        .collect()
+}
+
+fn outline_nearest_guide_ranges(
+    row_height: f32,
+    icon_top: f32,
+    icon_clearance: f32,
+    has_children: bool,
+    has_later_peer: bool,
+) -> Vec<(f32, f32)> {
+    let upper_end = if has_children {
+        (icon_top - icon_clearance).max(0.0)
+    } else {
+        row_height * 0.5
+    };
+    let mut ranges = vec![(0.0, upper_end)];
+    if has_later_peer && !has_children {
+        ranges.push((row_height * 0.5, row_height));
+    }
+    ranges
+}
+
 fn multiply_alpha(color: gpui::Hsla, factor: f32) -> gpui::Hsla {
     gpui::Hsla {
         a: color.a * factor.clamp(0.0, 1.0),
@@ -231,6 +410,52 @@ fn lerp_hsla(from: gpui::Hsla, to: gpui::Hsla, t: f32) -> gpui::Hsla {
 fn heading_level_opacity(level: u8, level_opacities: [f32; 6]) -> f32 {
     let index = level.saturating_sub(1).min(5) as usize;
     level_opacities[index].clamp(0.0, 1.0)
+}
+
+fn outline_tick_influence(
+    row_index: usize,
+    active_index: Option<usize>,
+    neighbor_count: usize,
+    falloff_power: f32,
+) -> f32 {
+    let Some(active_index) = active_index else {
+        return 0.0;
+    };
+    let distance = row_index.abs_diff(active_index);
+    if distance > neighbor_count {
+        return 0.0;
+    }
+    let linear = (neighbor_count + 1 - distance) as f32 / (neighbor_count + 1) as f32;
+    linear.powf(falloff_power.max(0.01))
+}
+
+fn animated_outline_tick_influence(
+    row_index: usize,
+    previous_active_index: Option<usize>,
+    active_index: Option<usize>,
+    neighbor_count: usize,
+    falloff_power: f32,
+    progress: f32,
+) -> f32 {
+    let from = outline_tick_influence(
+        row_index,
+        previous_active_index,
+        neighbor_count,
+        falloff_power,
+    );
+    let to = outline_tick_influence(row_index, active_index, neighbor_count, falloff_power);
+    from + (to - from) * progress.clamp(0.0, 1.0)
+}
+
+fn outline_hover_animation_value(
+    from: f32,
+    target: f32,
+    elapsed_seconds: f32,
+    duration_seconds: f32,
+) -> f32 {
+    let progress = (elapsed_seconds / duration_seconds.max(0.001)).clamp(0.0, 1.0);
+    let eased = super::ease_in_out_cubic(progress);
+    from + (target - from) * eased
 }
 
 impl EditorView {
@@ -375,15 +600,29 @@ impl EditorView {
             // even though the cursor is on the rail.
             self.toolbar_corner_hide_task = None;
         }
-        if rail_changed && hovered {
-            // Start the hover highlight fade-in animation.
-            self.outline_rail_hover_since
-                .set(Some(std::time::Instant::now()));
+        if rail_changed {
             let anim_seconds = self
                 .styles
                 .outline
                 .outline_rail_hover_animation_seconds
                 .max(0.001);
+            let now = std::time::Instant::now();
+            let current = self
+                .outline_rail_hover_since
+                .get()
+                .map(|started| {
+                    outline_hover_animation_value(
+                        self.outline_rail_hover_from.get(),
+                        self.outline_rail_hover_target.get(),
+                        started.elapsed().as_secs_f32(),
+                        anim_seconds,
+                    )
+                })
+                .unwrap_or(self.outline_rail_hover_target.get());
+            let target = if hovered { 1.0 } else { 0.0 };
+            self.outline_rail_hover_from.set(current);
+            self.outline_rail_hover_target.set(target);
+            self.outline_rail_hover_since.set(Some(now));
             cx.spawn(async move |this, cx| {
                 let frames = ((anim_seconds / 0.016).ceil() as usize).max(1) + 1;
                 for _ in 0..frames {
@@ -392,7 +631,7 @@ impl EditorView {
                         .await;
                     let keep = this
                         .update(cx, |this, cx| {
-                            if !this.outline_rail_hovered {
+                            if this.outline_rail_hover_since.get() != Some(now) {
                                 return false;
                             }
                             cx.notify();
@@ -484,51 +723,78 @@ impl EditorView {
     }
 
     pub(crate) fn scroll_to_line(&mut self, target_line: usize, cx: &mut Context<Self>) {
-        let target_y = self.line_y_offset(target_line);
-        let target_scroll = (target_y - self.padding_top()).max(0.0);
         let line_end = self.buffer.line_end(target_line);
         self.cursor.offset = line_end;
         self.cursor.anchor = line_end;
 
-        // Animated smooth scroll
+        let target_scroll = (self.line_y_offset(target_line) - self.padding_top())
+            .max(0.0)
+            .min(self.max_scroll_offset());
         let start_scroll = self.scroll_offset;
         let delta = target_scroll - start_scroll;
-        if delta.abs() < 1.0 {
+        let should_animate = delta.abs() >= 1.0;
+        if !should_animate {
             self.scroll_offset = target_scroll;
             self.clamp_scroll();
-            cx.notify();
-            return;
         }
         let total_steps = 20u32;
         let step_ms = 8u64;
         self.scroll_anim_epoch += 1;
         let epoch = self.scroll_anim_epoch;
-        self.scroll_offset = target_scroll;
-        self.clamp_scroll();
-        let final_scroll = self.scroll_offset;
-        self.scroll_offset = start_scroll;
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            for step in 1..=total_steps {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(step_ms))
-                    .await;
-                let result = this.update(cx, |this, cx| {
-                    if this.scroll_anim_epoch != epoch {
-                        return false;
+            if should_animate {
+                for step in 1..=total_steps {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(step_ms))
+                        .await;
+                    let result = this.update(cx, |this, cx| {
+                        if this.scroll_anim_epoch != epoch {
+                            return false;
+                        }
+                        // Offscreen wrapping and generated previews refine line geometry as the
+                        // target enters view. Recompute the destination instead of animating to
+                        // the estimate captured on the click frame.
+                        let latest_target = (this.line_y_offset(target_line) - this.padding_top())
+                            .max(0.0)
+                            .min(this.max_scroll_offset());
+                        let t = step as f32 / total_steps as f32;
+                        let ease = 1.0 - (1.0 - t).powi(3);
+                        this.scroll_offset = start_scroll + (latest_target - start_scroll) * ease;
+                        this.clamp_scroll();
+                        cx.notify();
+                        true
+                    });
+                    match result {
+                        Ok(true) => {}
+                        _ => return,
                     }
-                    let t = step as f32 / total_steps as f32;
-                    // ease-out cubic
-                    let ease = 1.0 - (1.0 - t).powi(3);
-                    this.scroll_offset = start_scroll + (final_scroll - start_scroll) * ease;
-                    this.clamp_scroll();
-                    cx.notify();
-                    true
-                });
-                match result {
-                    Ok(true) => {}
-                    _ => break,
+                }
+            }
+
+            // The last animation step can itself expose the target line and trigger its first
+            // accurate layout. Confirm on two following frames so the heading is never left just
+            // outside the viewport on the first few outline clicks.
+            for _ in 0..2 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+                let keep = this
+                    .update(cx, |this, cx| {
+                        if this.scroll_anim_epoch != epoch {
+                            return false;
+                        }
+                        this.scroll_offset = (this.line_y_offset(target_line) - this.padding_top())
+                            .max(0.0)
+                            .min(this.max_scroll_offset());
+                        this.clamp_scroll();
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    return;
                 }
             }
         })
@@ -572,16 +838,21 @@ impl EditorView {
         let tick_active_color = os.outline_rail_tick_active_color;
         let tick_level_opacities = os.outline_rail_tick_level_opacities;
         let active_extra_width = self.scaled(os.outline_rail_tick_active_extra_width_px);
+        let active_neighbor_count = os.outline_rail_tick_active_neighbor_count;
+        let active_falloff_power = os.outline_rail_tick_active_falloff_power;
         let active_anim_seconds = os.outline_rail_tick_active_animation_seconds.max(0.001);
 
         let previous_active_line = self.outline_rail_last_active_line.get();
         if previous_active_line != active_line {
+            self.outline_rail_previous_active_line
+                .set(previous_active_line);
             self.outline_rail_last_active_line.set(active_line);
             self.outline_rail_active_since
-                .set(active_line.map(|_| std::time::Instant::now()));
+                .set(Some(std::time::Instant::now()));
             let target_active_line = active_line;
+            let animation_frames = ((active_anim_seconds / 0.016).ceil() as usize).max(1) + 1;
             cx.spawn(async move |this, cx| {
-                for _ in 0..14 {
+                for _ in 0..animation_frames {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(16))
                         .await;
@@ -665,41 +936,43 @@ impl EditorView {
             );
         }
         let edge_fade = self.scaled(os.outline_rail_edge_fade_px).max(1.0);
-        let rail_hovered = self.outline_rail_hovered;
-        // Hover highlight fade-in progress (0..1), eased.
-        let hover_progress = if rail_hovered {
-            self.outline_rail_hover_since
-                .get()
-                .map(|started| {
-                    (started.elapsed().as_secs_f32()
-                        / os.outline_rail_hover_animation_seconds.max(0.001))
-                    .clamp(0.0, 1.0)
-                })
-                .unwrap_or(1.0)
-        } else {
-            0.0
-        };
-        let hover_ease = super::ease_in_out_cubic(hover_progress);
+        let hover_ease = self
+            .outline_rail_hover_since
+            .get()
+            .map(|started| {
+                outline_hover_animation_value(
+                    self.outline_rail_hover_from.get(),
+                    self.outline_rail_hover_target.get(),
+                    started.elapsed().as_secs_f32(),
+                    os.outline_rail_hover_animation_seconds,
+                )
+            })
+            .unwrap_or(self.outline_rail_hover_target.get());
+        let active_index =
+            active_line.and_then(|line| headings.iter().position(|heading| heading.line == line));
+        let previous_active_index = self
+            .outline_rail_previous_active_line
+            .get()
+            .and_then(|line| headings.iter().position(|heading| heading.line == line));
+        let active_progress = self
+            .outline_rail_active_since
+            .get()
+            .map(|started| (started.elapsed().as_secs_f32() / active_anim_seconds).clamp(0.0, 1.0))
+            .unwrap_or(1.0);
+        let active_ease = super::ease_in_out_cubic(active_progress);
         for row_index in visible_start..visible_end {
             let heading = &headings[row_index];
             let line = heading.line;
             let level_opacity = heading_level_opacity(heading.level, tick_level_opacities);
-            let is_active = Some(line) == active_line;
-            // Only the active tick animates its width; hovering brightens every
-            // tick uniformly rather than singling one out and lengthening it.
-            let animated_tick_width = if is_active {
-                let progress = self
-                    .outline_rail_active_since
-                    .get()
-                    .map(|started| {
-                        (started.elapsed().as_secs_f32() / active_anim_seconds).clamp(0.0, 1.0)
-                    })
-                    .unwrap_or(1.0);
-                let ease = super::ease_in_out_cubic(progress);
-                tick_width + active_extra_width * ease
-            } else {
-                tick_width
-            };
+            let tick_influence = animated_outline_tick_influence(
+                row_index,
+                previous_active_index,
+                active_index,
+                active_neighbor_count,
+                active_falloff_power,
+                active_ease,
+            );
+            let animated_tick_width = tick_width + active_extra_width * tick_influence;
             // Fade ticks within `edge_fade` of the top and bottom edges of the
             // visible rail viewport, giving a soft gradient at the viewport edges
             // (off-screen ticks clamp to fully transparent).
@@ -710,12 +983,8 @@ impl EditorView {
                 1.0
             };
             let resting_color = multiply_alpha(tick_color, level_opacity);
-            let base_tick_color = if is_active {
-                tick_active_color
-            } else {
-                // Animate from the resting colour to the active colour on hover.
-                lerp_hsla(resting_color, tick_active_color, hover_ease)
-            };
+            let hover_color = lerp_hsla(resting_color, tick_active_color, hover_ease);
+            let base_tick_color = lerp_hsla(hover_color, tick_active_color, tick_influence);
             let row_tick_color = multiply_alpha(base_tick_color, edge_opacity);
             row_elements.push(
                 div()
@@ -885,6 +1154,12 @@ impl EditorView {
         let fold_icon_size = self.scaled(os.outline_rail_label_fold_icon_size_px);
         let fold_icon_hit_size = (fold_icon_size + self.scaled(8.0)).round();
         let fold_icon_gap = self.scaled(os.outline_rail_label_fold_icon_gap_px);
+        let indent_guide_width = self.scaled(os.outline_rail_label_indent_guide_width_px);
+        let indent_guide_dash_length =
+            self.scaled(os.outline_rail_label_indent_guide_dash_length_px);
+        let indent_guide_gap_length = self.scaled(os.outline_rail_label_indent_guide_gap_length_px);
+        let indent_guide_color = multiply_alpha(os.outline_rail_label_indent_guide_color, 0.45);
+        let max_lines = os.outline_rail_label_max_lines.max(1);
         let panel_width = self
             .utility_panel_width()
             .max(f32::from(
@@ -910,7 +1185,8 @@ impl EditorView {
                 .max(font_size * fallback_chars_per_line as f32 * 0.35);
             let chars_per_line =
                 outline_chars_per_line(text_width, font_size, fallback_chars_per_line);
-            let line_count = outline_heading_line_count(heading.text.as_ref(), chars_per_line);
+            let line_count =
+                outline_wrapped_text(heading.text.as_ref(), chars_per_line, max_lines).1;
             let height =
                 (item_padding_y * 2.0 + line_height * line_count as f32).max(item_min_height);
             (height, chars_per_line)
@@ -950,6 +1226,16 @@ impl EditorView {
                 .map(|(heading_index, depth)| {
                     let heading = &headings[*heading_index];
                     outline_row_metrics(heading, *depth).0
+                })
+                .collect::<Vec<_>>();
+            let visible_expanded = visible_heading_indices
+                .iter()
+                .map(|(heading_index, _)| {
+                    let heading = &headings[*heading_index];
+                    outline_heading_has_children(&headings, *heading_index)
+                        && !self
+                            .outline_rail_collapsed_heading_lines
+                            .contains(&heading.line)
                 })
                 .collect::<Vec<_>>();
             let list_window = super::list_viewport::variable_list_window(
@@ -994,6 +1280,44 @@ impl EditorView {
                 let (row_height, chars_per_line) = (item_heights[render_start + visible_offset], {
                     outline_row_metrics(heading, depth).1
                 });
+                let wrapped_text =
+                    outline_wrapped_text(heading.text.as_ref(), chars_per_line, max_lines).0;
+                let visible_index = render_start + visible_offset;
+                let icon_clearance = self.scaled(2.0);
+                let icon_top = ((row_height - fold_icon_size) * 0.5).max(0.0);
+                let mut guide_segments = Vec::new();
+                let guide_was_handed_off = outline_has_prior_expanded_peer(
+                    &visible_heading_indices,
+                    &visible_expanded,
+                    visible_index,
+                    depth,
+                );
+                if depth > 0 && !guide_was_handed_off {
+                    let guide_depth = depth - 1;
+                    let guide_x = section_padding_x
+                        + guide_depth as f32 * indent_step.max(0.0)
+                        + fold_icon_hit_size
+                        + fold_icon_gap;
+                    let has_later_peer =
+                        outline_has_later_peer(&visible_heading_indices, visible_index, depth);
+                    for (start_y, end_y) in outline_nearest_guide_ranges(
+                        row_height,
+                        icon_top,
+                        icon_clearance,
+                        has_children,
+                        has_later_peer,
+                    ) {
+                        guide_segments.extend(outline_dashed_guide_segments(
+                            guide_x,
+                            start_y,
+                            end_y,
+                            indent_guide_width,
+                            indent_guide_dash_length,
+                            indent_guide_gap_length,
+                            indent_guide_color,
+                        ));
+                    }
+                }
                 let icon_path = if is_collapsed {
                     FOLD_SVG_PATH
                 } else {
@@ -1004,6 +1328,7 @@ impl EditorView {
                     div()
                         .min_h(px(row_height))
                         .flex_shrink_0()
+                        .relative()
                         .pl(px(inner_padding_left))
                         .pr(px(section_padding_x))
                         .py(px(item_padding_y))
@@ -1016,6 +1341,7 @@ impl EditorView {
                         .cursor(CursorStyle::Arrow)
                         .when(is_active, |this| this.bg(active_bg))
                         .hover(move |style| style.bg(active_bg))
+                        .children(guide_segments)
                         .when(has_children, |this| {
                             this.child(
                                 div()
@@ -1050,9 +1376,13 @@ impl EditorView {
                         .when(!has_children, |this| {
                             this.child(div().w(px(fold_icon_hit_size)).flex_none())
                         })
-                        .child(div().min_w(px(0.0)).flex_1().whitespace_normal().child(
-                            outline_soft_wrappable_text(heading.text.as_ref(), chars_per_line),
-                        ))
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .flex_1()
+                                .whitespace_normal()
+                                .child(wrapped_text),
+                        )
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _: &MouseDownEvent, _, cx| {

@@ -39,8 +39,7 @@ DIST_SUFFIXES := arm64 amd64
 
 dmg: $(ICON_FILE)
 	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
-	@$(MAKE) dmg-arm64
-	@$(MAKE) dmg-amd64
+	@$(MAKE) -j2 dmg-arm64 dmg-amd64
 	@ls -lh "$(DIST_DIR)"
 
 dmg-arm64:

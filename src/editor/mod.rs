@@ -114,6 +114,17 @@ const SIDEBAR_GIT_STATUS_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 const GIT_HISTORY_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 const GENERATED_PREVIEW_RENDER_BUDGET: usize = 24;
 const GENERATED_PREVIEW_CACHE_RETAIN: usize = 96;
+
+#[derive(Default)]
+pub(crate) struct GeneratedPreviewTabCache {
+    keys: HashSet<String>,
+    images: HashMap<String, Option<Arc<RenderImage>>>,
+    svgs: HashMap<String, Arc<str>>,
+    overlays: HashMap<String, (u16, Arc<RenderImage>)>,
+    views: HashMap<String, ImageViewState>,
+    code_mode_preview_key: Option<String>,
+    rerender_pending: bool,
+}
 const LINE_DISPLAY_CACHE_TRIM_MIN_LINES: usize = 20_000;
 const LINE_DISPLAY_CACHE_MAX_CACHED_LINES: usize = 2_000;
 const LINE_DISPLAY_CACHE_VISIBLE_MARGIN_LINES: usize = 600;
@@ -1225,6 +1236,13 @@ pub(crate) struct PendingPreviewReveal {
     pub(crate) scroll_offset: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingTypingScrollGuard {
+    pub(crate) line: usize,
+    pub(crate) visual_row: usize,
+    pub(crate) scroll_offset: f32,
+}
+
 /// Anchors a clicked line to its current on-screen position so that a focus
 /// change which re-folds/expands content above it does not make the view jump.
 /// Captured at click time (old layout) and reconciled after the next layout.
@@ -1376,6 +1394,7 @@ pub struct EditorView {
     pub(crate) pending_center_cursor_in_view: bool,
     pub(crate) pending_center_cursor_in_view_immediately: bool,
     pub(crate) pending_preview_reveal: Option<PendingPreviewReveal>,
+    pub(crate) pending_typing_scroll_guard: Option<PendingTypingScrollGuard>,
     pub(crate) pending_click_anchor: Option<ClickScrollAnchor>,
     /// Cache key of the generated preview currently shown in code (edit) mode,
     /// tracked so the rendered view (zoom/pan) can be reset whenever the cursor
@@ -1466,6 +1485,7 @@ pub struct EditorView {
     pub(crate) sidebar_error: Option<String>,
     pub(crate) tabs: Vec<OpenTab>,
     pub(crate) tab_layout_cache: HashMap<String, (LineDisplayCache, f32)>,
+    pub(crate) tab_generated_preview_cache: HashMap<String, GeneratedPreviewTabCache>,
     pub(crate) active_tab_id: Option<String>,
     pub(crate) active_tab_index_cache: Cell<Option<usize>>,
     pub(crate) active_file_kind_cache: Option<FileKind>,
@@ -1620,6 +1640,7 @@ pub struct EditorView {
     pub(crate) sidebar_directory_refresh_pending: bool,
     pub(crate) sidebar_scroll_handle: ScrollHandle,
     pub(crate) pending_sidebar_scroll_top: Rc<Cell<Option<f32>>>,
+    pub(crate) pending_sidebar_scroll_anchor: Option<PendingSidebarScrollAnchor>,
     pub(crate) tab_bar_scroll_handle: ScrollHandle,
     /// FileList pane (right of the file tree): current directory and cached items.
     pub(crate) file_list_dir: PathBuf,
@@ -1665,8 +1686,11 @@ pub struct EditorView {
     pub(crate) outline_rail_collapsed_heading_lines: HashSet<usize>,
     pub(crate) outline_headings_cache: RefCell<Vec<outline::OutlineHeading>>,
     pub(crate) outline_headings_cache_dirty: Cell<bool>,
+    pub(crate) outline_rail_previous_active_line: Cell<Option<usize>>,
     pub(crate) outline_rail_last_active_line: Cell<Option<usize>>,
     pub(crate) outline_rail_active_since: Cell<Option<Instant>>,
+    pub(crate) outline_rail_hover_from: Cell<f32>,
+    pub(crate) outline_rail_hover_target: Cell<f32>,
     pub(crate) outline_rail_hover_since: Cell<Option<Instant>>,
     /// Width (px, from the right viewport edge) occupied by the outline rail's
     /// interactive zone this frame, so toolbar-hover logic can treat hovering it
@@ -2054,6 +2078,7 @@ impl EditorView {
             pending_center_cursor_in_view: false,
             pending_center_cursor_in_view_immediately: false,
             pending_preview_reveal: None,
+            pending_typing_scroll_guard: None,
             pending_click_anchor: None,
             code_mode_preview_key: None,
             generated_preview_rerender_task: None,
@@ -2118,6 +2143,7 @@ impl EditorView {
             sidebar_error,
             tabs: vec![welcome_tab],
             tab_layout_cache: HashMap::new(),
+            tab_generated_preview_cache: HashMap::new(),
             active_tab_id: Some(WELCOME_TAB_ID.to_string()),
             active_tab_index_cache: Cell::new(Some(0)),
             active_file_kind_cache: welcome_file_kind,
@@ -2253,6 +2279,7 @@ impl EditorView {
             sidebar_directory_refresh_pending: false,
             sidebar_scroll_handle: ScrollHandle::new(),
             pending_sidebar_scroll_top: Rc::new(Cell::new(None)),
+            pending_sidebar_scroll_anchor: None,
             tab_bar_scroll_handle: ScrollHandle::new(),
             file_list_dir: PathBuf::new(),
             file_list_items: Vec::new(),
@@ -2291,8 +2318,11 @@ impl EditorView {
             outline_rail_collapsed_heading_lines: HashSet::new(),
             outline_headings_cache: RefCell::new(Vec::new()),
             outline_headings_cache_dirty: Cell::new(true),
+            outline_rail_previous_active_line: Cell::new(None),
             outline_rail_last_active_line: Cell::new(None),
             outline_rail_active_since: Cell::new(None),
+            outline_rail_hover_from: Cell::new(0.0),
+            outline_rail_hover_target: Cell::new(0.0),
             outline_rail_hover_since: Cell::new(None),
             outline_rail_zone_from_right: Cell::new(0.0),
             info_panel_scroll_handle: ScrollHandle::new(),
@@ -5063,6 +5093,9 @@ impl EditorView {
     }
 
     pub(crate) fn rerender_generated_block_previews(&mut self) {
+        self.pending_preview_reveal = Some(PendingPreviewReveal {
+            scroll_offset: self.scroll_offset,
+        });
         self.refresh_generated_block_previews_with_mode(true);
     }
 
@@ -5071,6 +5104,15 @@ impl EditorView {
             self.image_cache.remove(&cache_key);
             self.generated_preview_svg_cache.remove(&cache_key);
             self.generated_preview_overlay_cache.remove(&cache_key);
+        }
+        self.tab_generated_preview_cache.clear();
+        for pane in &mut self.panes {
+            pane.state.tab_generated_preview_cache.clear();
+            for cache_key in pane.state.generated_preview_keys.clone() {
+                self.image_cache.remove(&cache_key);
+                self.generated_preview_svg_cache.remove(&cache_key);
+                self.generated_preview_overlay_cache.remove(&cache_key);
+            }
         }
     }
 

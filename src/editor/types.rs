@@ -401,3 +401,9 @@ pub(crate) struct SidebarItem {
     pub is_dir: bool,
     pub is_expanded: bool,
 }
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingSidebarScrollAnchor {
+    pub candidates: Vec<(PathBuf, f32)>,
+    pub fallback_scroll_top: f32,
+}

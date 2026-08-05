@@ -1028,7 +1028,22 @@ impl Render for EditorView {
                                     .child(self.render_tab_bar_toggle_actions(cx)),
                             )
                         },
-                    ),
+                    )
+                    .when(show_empty_workspace, |this| {
+                        this.child(
+                            div()
+                                .id("empty-workspace-titlebar-drag-region")
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(px(self.tab_bar_height()))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+                                ),
+                        )
+                    }),
             )
             .when(resizing, |this| {
                 let indicator_line = if self.sidebar_resizing {

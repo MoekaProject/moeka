@@ -7669,35 +7669,6 @@ impl Element for EditorElement {
             if deferred_offscreen_wrap_lines {
                 cx.notify();
             }
-            // Reset the rendered view (zoom/pan) whenever the cursor enters or
-            // leaves a preview's source, so every edit↔render switch starts the
-            // render fresh at its fitted, centred default.
-            let focused_code_mode = editor.focused_code_mode_preview_key();
-            if focused_code_mode != editor.code_mode_preview_key {
-                let leaving_code_view = editor.code_mode_preview_key.is_some();
-                if let Some(old_key) = editor.code_mode_preview_key.take() {
-                    editor.reset_generated_preview_view(&old_key);
-                }
-                if let Some(new_key) = focused_code_mode.clone() {
-                    editor.reset_generated_preview_view(&new_key);
-                }
-                editor.code_mode_preview_key = focused_code_mode;
-                // Leaving code view: cancel the pending debounce and rebuild now
-                // so the rendered chart reflects the final edited source instead
-                // of the frozen in-edit raster.
-                if leaving_code_view {
-                    editor.generated_preview_rerender_task = None;
-                    editor.generated_preview_rerender_pending = false;
-                    editor.rerender_generated_block_previews();
-                }
-                cx.notify();
-            }
-            // A keystroke froze the in-edit chart; (re)schedule its debounced
-            // live rebuild so it refreshes once typing settles.
-            if editor.generated_preview_rerender_pending {
-                editor.generated_preview_rerender_pending = false;
-                editor.schedule_generated_preview_rerender(cx);
-            }
             editor.ensure_visible_generated_block_previews(cx);
             let mut did_adjust_click_anchor = false;
             if let Some(anchor) = editor.pending_click_anchor.take() {
@@ -7713,6 +7684,8 @@ impl Element for EditorElement {
                     did_adjust_click_anchor = true;
                 }
             }
+            let did_preserve_typing_scroll =
+                editor.restore_scroll_if_typing_stayed_on_visual_line();
             let mut did_adjust_preview_reveal = false;
             if let Some(pending) = editor.pending_preview_reveal.take() {
                 editor.pending_scroll_to_cursor = false;
@@ -7726,8 +7699,35 @@ impl Element for EditorElement {
             } else if editor.pending_scroll_to_cursor {
                 editor.scroll_to_cursor();
                 cx.notify();
-            } else if did_adjust_preview_reveal || did_adjust_click_anchor {
+            } else if did_adjust_preview_reveal
+                || did_adjust_click_anchor
+                || did_preserve_typing_scroll
+            {
                 cx.notify();
+            }
+            // Reset the rendered view (zoom/pan) whenever the cursor enters or
+            // leaves a preview's source. Run this after consuming existing scroll
+            // guards so a forced rerender's new guard survives until its layout.
+            let focused_code_mode = editor.focused_code_mode_preview_key();
+            if focused_code_mode != editor.code_mode_preview_key {
+                let leaving_code_view = editor.code_mode_preview_key.is_some();
+                if let Some(old_key) = editor.code_mode_preview_key.take() {
+                    editor.reset_generated_preview_view(&old_key);
+                }
+                if let Some(new_key) = focused_code_mode.clone() {
+                    editor.reset_generated_preview_view(&new_key);
+                }
+                editor.code_mode_preview_key = focused_code_mode;
+                if leaving_code_view {
+                    editor.generated_preview_rerender_task = None;
+                    editor.generated_preview_rerender_pending = false;
+                    editor.rerender_generated_block_previews();
+                }
+                cx.notify();
+            }
+            if editor.generated_preview_rerender_pending {
+                editor.generated_preview_rerender_pending = false;
+                editor.schedule_generated_preview_rerender(cx);
             }
         });
 

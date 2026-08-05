@@ -21,6 +21,13 @@ impl EditorView {
         } else {
             items.last().map(|item| item.path.clone())
         };
+        if let Some(index) = new_path
+            .as_ref()
+            .and_then(|path| items.iter().position(|item| &item.path == path))
+            && self.ensure_sidebar_item_minimally_visible(index, items.len())
+        {
+            cx.notify();
+        }
         self.focused_sidebar_path = new_path;
         cx.notify();
     }
@@ -39,6 +46,13 @@ impl EditorView {
         } else {
             Some(items[0].path.clone())
         };
+        if let Some(index) = new_path
+            .as_ref()
+            .and_then(|path| items.iter().position(|item| &item.path == path))
+            && self.ensure_sidebar_item_minimally_visible(index, items.len())
+        {
+            cx.notify();
+        }
         self.focused_sidebar_path = new_path;
         cx.notify();
     }
@@ -57,6 +71,12 @@ impl EditorView {
             && parent.starts_with(&self.sidebar_root)
         {
             self.focused_sidebar_path = Some(parent.to_path_buf());
+            let items = self.sidebar_items();
+            if let Some(index) = items.iter().position(|item| item.path == parent)
+                && self.ensure_sidebar_item_minimally_visible(index, items.len())
+            {
+                cx.notify();
+            }
             cx.notify();
         }
     }
@@ -76,6 +96,11 @@ impl EditorView {
                 let items = self.sidebar_items();
                 if let Some(child) = items.iter().find(|item| item.path.parent() == Some(&path)) {
                     self.focused_sidebar_path = Some(child.path.clone());
+                    if let Some(index) = items.iter().position(|item| item.path == child.path)
+                        && self.ensure_sidebar_item_minimally_visible(index, items.len())
+                    {
+                        cx.notify();
+                    }
                     cx.notify();
                 }
             }

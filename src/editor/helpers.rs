@@ -3035,8 +3035,14 @@ mod tests {
                 "gantt",
                 "gantt\n    title Release\n    dateFormat YYYY-MM-DD\n    section Build\n    Compile :done, a1, 2026-08-01, 1d",
             ),
-            ("pie", "pie showData\n    title Usage\n    \"Edit\" : 70\n    \"Preview\" : 30"),
-            ("mindmap", "mindmap\n  root((Moeka))\n    Editor\n    Preview"),
+            (
+                "pie",
+                "pie showData\n    title Usage\n    \"Edit\" : 70\n    \"Preview\" : 30",
+            ),
+            (
+                "mindmap",
+                "mindmap\n  root((Moeka))\n    Editor\n    Preview",
+            ),
         ];
 
         for (name, source) in cases {

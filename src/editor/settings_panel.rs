@@ -2319,6 +2319,7 @@ impl EditorView {
 
     fn apply_font_selection(&mut self, font_name: String, cx: &mut Context<Self>) {
         if let Some(picker) = self.settings_font_picker.take() {
+            let rerender_generated_previews = picker.role == FontRole::MermaidTheme;
             self.settings_font_picker_editor = None;
             self.font_picker_trigger_position = None;
             match (picker.role, picker.option_index) {
@@ -2384,6 +2385,10 @@ impl EditorView {
             }
             self.app_settings.save();
             self.clear_all_tab_layout_caches();
+            if rerender_generated_previews {
+                self.invalidate_generated_block_preview_render_caches();
+                self.rerender_generated_block_previews();
+            }
             cx.notify();
         }
     }

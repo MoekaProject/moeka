@@ -6,6 +6,52 @@ use gpui::{AppContext, Context, Window};
 use super::*;
 
 impl EditorView {
+    fn reveal_sidebar_create_row(&mut self, parent: PathBuf, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            for _ in 0..6 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+
+                let should_continue = this
+                    .update(cx, |editor, cx| {
+                        let items = editor.sidebar_items();
+                        if parent == editor.sidebar_root {
+                            editor.pending_sidebar_scroll_top.set(None);
+                            editor.pending_sidebar_scroll_anchor = None;
+                            let offset = editor.sidebar_scroll_handle.offset();
+                            if f32::from(offset.y).abs() >= 0.5 {
+                                editor
+                                    .sidebar_scroll_handle
+                                    .set_offset(gpui::point(offset.x, gpui::px(0.0)));
+                                cx.notify();
+                            }
+                            return editor.sidebar_edit.is_some();
+                        }
+                        let create_index = items
+                            .iter()
+                            .position(|item| item.is_dir && item.path == parent)
+                            .map(|index| index + 1);
+                        let Some(create_index) = create_index else {
+                            return true;
+                        };
+                        if editor
+                            .ensure_sidebar_item_minimally_visible(create_index, items.len() + 1)
+                        {
+                            cx.notify();
+                        }
+                        editor.sidebar_edit.is_some()
+                    })
+                    .unwrap_or(false);
+
+                if !should_continue {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn begin_sidebar_rename(
         &mut self,
         path: PathBuf,
@@ -225,14 +271,20 @@ impl EditorView {
         .detach();
         let focus_handle = editor.read(cx).focus_handle.clone();
         let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
-            this.cancel_sidebar_edit(cx);
+            this.commit_sidebar_edit(cx);
         });
         window.focus(&focus_handle);
-        self.sidebar_edit = Some(SidebarEditMode::CreateFile { parent, editor });
+        self.sidebar_edit = Some(SidebarEditMode::CreateFile {
+            parent: parent.clone(),
+            editor,
+        });
         self.sidebar_edit_in_file_list = create_in_file_list;
         self.file_list_menu_origin = false;
         self.sidebar_edit_blur_sub = Some(blur_sub);
         self.context_menu = None;
+        if !create_in_file_list {
+            self.reveal_sidebar_create_row(parent, cx);
+        }
         cx.notify();
     }
 
@@ -261,13 +313,17 @@ impl EditorView {
         .detach();
         let focus_handle = editor.read(cx).focus_handle.clone();
         let blur_sub = cx.on_blur(&focus_handle, window, |this, _window, cx| {
-            this.cancel_sidebar_edit(cx);
+            this.commit_sidebar_edit(cx);
         });
         window.focus(&focus_handle);
-        self.sidebar_edit = Some(SidebarEditMode::CreateDir { parent, editor });
+        self.sidebar_edit = Some(SidebarEditMode::CreateDir {
+            parent: parent.clone(),
+            editor,
+        });
         self.sidebar_edit_in_file_list = false;
         self.sidebar_edit_blur_sub = Some(blur_sub);
         self.context_menu = None;
+        self.reveal_sidebar_create_row(parent, cx);
         cx.notify();
     }
 
@@ -279,6 +335,7 @@ impl EditorView {
         let value = edit.text(cx);
         match &edit {
             SidebarEditMode::Rename { path, .. } | SidebarEditMode::RenameStarred { path, .. } => {
+                let reveal_in_file_tree = matches!(&edit, SidebarEditMode::Rename { .. });
                 let trimmed = value.trim();
                 if !trimmed.is_empty()
                     && trimmed
@@ -328,6 +385,9 @@ impl EditorView {
                         }
                         let mapping = attachments::PathMapping::new(path.clone(), new_path.clone());
                         self.apply_workspace_link_rewrites(rewrite_context, &[mapping], cx);
+                        if reveal_in_file_tree {
+                            self.reveal_path_in_sidebar(new_path, cx);
+                        }
                     }
                 }
             }
@@ -361,6 +421,7 @@ impl EditorView {
                         self.selected_sidebar_paths.clear();
                         self.selected_sidebar_paths.insert(new_path.clone());
                         self.sidebar_selection_anchor = Some(new_path.clone());
+                        self.reveal_path_in_sidebar(new_path.clone(), cx);
                         self.open_sidebar_file(new_path, cx);
                         return;
                     }
@@ -642,6 +703,7 @@ impl EditorView {
         self.sidebar_items_dirty = true;
         self.invalidate_sidebar_items_cache();
         self.pending_sidebar_scroll_top.set(None);
+        self.pending_sidebar_scroll_anchor = None;
         self.pending_file_list_scroll_top.set(None);
         self.sidebar_scroll_handle
             .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));

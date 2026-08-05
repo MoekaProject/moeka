@@ -548,7 +548,7 @@ impl EditorView {
     fn reveal_file_list_dir_in_sidebar(&mut self, dir: &Path, cx: &mut Context<Self>) {
         let items = self.sidebar_items();
         if let Some(index) = items.iter().position(|item| item.path == dir) {
-            if self.ensure_sidebar_item_visible(index, items.len()) {
+            if self.ensure_sidebar_item_minimally_visible(index, items.len()) {
                 cx.notify();
             }
         }
