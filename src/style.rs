@@ -1876,7 +1876,7 @@ impl Styles {
                 tab_overflow_text_color: theme.text_secondary,
                 tab_overflow_bg: theme.bg_tab,
                 tab_overflow_padding_x_px: 4.0,
-                tab_history_hidden_sidebar_margin_px: 76.0,
+                tab_history_hidden_sidebar_margin_px: 72.0,
                 tab_history_padding_x_px: 0.0,
                 tab_history_gap_px: 4.0,
                 tab_history_group_border_width_px: 1.0,
@@ -2026,7 +2026,7 @@ impl Styles {
                 generated_preview_padding_y_px: 12.0,
             },
             quote_block: QuoteBlockStyles {
-                quote_block_border_width_px: 3.0,
+                quote_block_border_width_px: 4.0,
                 quote_block_radius_px: 0.0,
                 quote_block_padding_top_px: 0.0,
                 quote_block_padding_bottom_px: 0.0,

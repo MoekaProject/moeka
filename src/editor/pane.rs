@@ -820,7 +820,8 @@ impl EditorView {
             return;
         }
         let tab_id = tab_id.to_string();
-        let Some(taken) = self.with_pane(source, |this| this.take_tab_from_current_pane(&tab_id, cx))
+        let Some(taken) =
+            self.with_pane(source, |this| this.take_tab_from_current_pane(&tab_id, cx))
         else {
             return;
         };
@@ -861,7 +862,8 @@ impl EditorView {
             return;
         }
         let tab_id = tab_id.to_string();
-        let Some(taken) = self.with_pane(source, |this| this.take_tab_from_current_pane(&tab_id, cx))
+        let Some(taken) =
+            self.with_pane(source, |this| this.take_tab_from_current_pane(&tab_id, cx))
         else {
             return;
         };

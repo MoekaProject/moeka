@@ -1369,12 +1369,12 @@ impl EditorView {
             && self.file_list_task.is_none()
             && self.file_list_loaded_dir.as_deref() == Some(dir.as_path())
         {
-            self.file_list_pending_reveal_path = None;
             if let Some(index) = self
                 .file_list_items
                 .iter()
                 .position(|item| item.path == reveal_path)
             {
+                self.file_list_pending_reveal_path = None;
                 let viewport_height = f32::from(self.file_list_scroll_handle.bounds().size.height);
                 let current_scroll_y =
                     (-f32::from(self.file_list_scroll_handle.offset().y)).max(0.0);

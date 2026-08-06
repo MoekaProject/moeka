@@ -881,6 +881,63 @@ pub(crate) fn active_table_cell_ranges(
     active_ranges
 }
 
+pub(crate) fn table_cell_decoration(
+    row_decoration: &markdown::LineDecoration,
+    cell_content: &str,
+    cell_range: &Range<usize>,
+) -> markdown::LineDecoration {
+    let mut cell_decoration = markdown::parse_decorations(cell_content)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let project = |range: &Range<usize>| {
+        (range.start >= cell_range.start && range.end <= cell_range.end)
+            .then(|| range.start - cell_range.start..range.end - cell_range.start)
+    };
+
+    for span in row_decoration.inline_spans.iter().filter(|span| {
+        matches!(
+            span.kind,
+            markdown::InlineKind::Link | markdown::InlineKind::Image
+        )
+    }) {
+        let Some(range) = project(&span.range) else {
+            continue;
+        };
+        if !cell_decoration
+            .inline_spans
+            .iter()
+            .any(|existing| existing.kind == span.kind && existing.range == range)
+        {
+            cell_decoration.inline_spans.push(markdown::InlineSpan {
+                range,
+                kind: span.kind.clone(),
+                target: span.target.clone(),
+            });
+        }
+    }
+
+    for syntax in &row_decoration.syntax_ranges {
+        let (Some(range), Some(trigger_range)) =
+            (project(&syntax.range), project(&syntax.trigger_range))
+        else {
+            continue;
+        };
+        if !cell_decoration
+            .syntax_ranges
+            .iter()
+            .any(|existing| existing.range == range && existing.trigger_range == trigger_range)
+        {
+            cell_decoration.syntax_ranges.push(markdown::SyntaxRange {
+                range,
+                trigger_range,
+            });
+        }
+    }
+
+    cell_decoration
+}
+
 pub(crate) fn compute_table_render_widths(
     info: &TableLineInfo,
     available_chars: Option<usize>,
@@ -1163,10 +1220,8 @@ pub(crate) fn compute_table_layout(
             let cell_range = ti.cell_ranges.get(ci).cloned().unwrap_or(0..0);
 
             // Build display text for cell with inline markdown folding
-            let cell_decoration = markdown::parse_decorations(&cell_content)
-                .into_iter()
-                .next()
-                .unwrap_or_default();
+            let cell_decoration =
+                table_cell_decoration(&decorations[*line_idx], &cell_content, &cell_range);
             let (folded_raw, d2b_raw, b2d_raw, _) = build_display_text(
                 &cell_content,
                 &cell_decoration,
@@ -2155,8 +2210,8 @@ mod tests {
         AnchoredPopupVertical, GeneratedPreviewFontFamilies, anchored_popup_placement,
         build_display_text, build_generated_block_preview_svg, build_text_runs_for_display,
         compute_display_prefix_bytes, compute_generated_preview_size,
-        load_generated_preview_image_from_svg, prefix_is_folded, task_prefix_is_folded,
-        wrap_segment_byte_ranges,
+        load_generated_preview_image_from_svg, prefix_is_folded, table_cell_decoration,
+        task_prefix_is_folded, wrap_segment_byte_ranges,
     };
 
     #[test]
@@ -3818,6 +3873,39 @@ mod tests {
         assert_eq!(display_text, "plain quote");
         assert!(runs.iter().any(|run| run.color == theme.text_primary));
         assert!(runs.iter().all(|run| run.color != theme.syntax_marker));
+    }
+
+    #[test]
+    fn table_cells_keep_inline_syntax_and_document_reference_targets() {
+        let source = "| inline | references |\n| --- | --- |\n| **bold** *italic* ~~gone~~ `code` [link](https://inline.test) ![img](inline.png) | [reference][ref] ![photo][pic] |\n\n[ref]: https://reference.test\n[pic]: photo.png\n";
+        let decorations = markdown::parse_decorations(source);
+        let row = &decorations[2];
+        let table_info = row.table_info.as_ref().expect("table row");
+
+        let inline = table_cell_decoration(row, &table_info.cells[0], &table_info.cell_ranges[0]);
+        for kind in [
+            markdown::InlineKind::Bold,
+            markdown::InlineKind::Italic,
+            markdown::InlineKind::Strikethrough,
+            markdown::InlineKind::InlineCode,
+            markdown::InlineKind::Link,
+            markdown::InlineKind::Image,
+        ] {
+            assert!(
+                inline.inline_spans.iter().any(|span| span.kind == kind),
+                "missing inline kind: {kind:?}"
+            );
+        }
+
+        let references =
+            table_cell_decoration(row, &table_info.cells[1], &table_info.cell_ranges[1]);
+        assert!(references.inline_spans.iter().any(|span| {
+            span.kind == markdown::InlineKind::Link
+                && span.target.as_deref() == Some("https://reference.test")
+        }));
+        assert!(references.inline_spans.iter().any(|span| {
+            span.kind == markdown::InlineKind::Image && span.target.as_deref() == Some("photo.png")
+        }));
     }
 
     #[test]

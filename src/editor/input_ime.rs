@@ -107,6 +107,18 @@ pub(crate) fn code_block_autocomplete_range(
     Some(cursor_offset - 2..cursor_offset)
 }
 
+pub(crate) fn missing_wiki_link_closer(text: &str, cursor_offset: usize) -> &'static str {
+    let existing = text
+        .get(cursor_offset..)
+        .map(|suffix| suffix.chars().take_while(|ch| *ch == ']').take(2).count())
+        .unwrap_or(0);
+    match existing {
+        0 => "]]",
+        1 => "]",
+        _ => "",
+    }
+}
+
 fn is_auto_closing_delimiter(input: &str) -> bool {
     matches!(
         input,
@@ -362,7 +374,10 @@ impl EditorView {
 mod tests {
     use crate::buffer::Buffer;
 
-    use super::{clamp_ime_offset, code_block_autocomplete_range, paired_delimiter_at};
+    use super::{
+        clamp_ime_offset, code_block_autocomplete_range, missing_wiki_link_closer,
+        paired_delimiter_at,
+    };
 
     #[test]
     fn third_backtick_triggers_code_block_autocomplete() {
@@ -372,6 +387,13 @@ mod tests {
     #[test]
     fn fourth_backtick_does_not_retrigger_code_block_autocomplete() {
         assert_eq!(code_block_autocomplete_range("```", 3, "`"), None);
+    }
+
+    #[test]
+    fn wiki_link_closer_only_fills_missing_brackets() {
+        assert_eq!(missing_wiki_link_closer("[[", 2), "]]");
+        assert_eq!(missing_wiki_link_closer("[[]", 2), "]");
+        assert_eq!(missing_wiki_link_closer("[[]]", 2), "");
     }
 
     #[test]

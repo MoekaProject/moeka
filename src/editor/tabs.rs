@@ -2594,7 +2594,7 @@ impl EditorView {
         let leading_left_margin = if self.sidebar_visible || !is_top_left_pane {
             0.0
         } else {
-            self.scaled(ts.tab_history_hidden_sidebar_margin_px)
+            self.traffic_light_safe_left_inset()
         };
         let left_controls_group = div()
             .id("tab-bar-left-group")

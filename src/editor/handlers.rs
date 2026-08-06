@@ -308,7 +308,7 @@ impl EditorView {
         let removes_line_break = if self.cursor.has_selection() {
             let selection =
                 self.buffer.clamp_offset(selection.start)..self.buffer.clamp_offset(selection.end);
-            self.buffer.text()[selection].contains('\n')
+            self.buffer.text_for_range(selection).contains('\n')
         } else {
             self.cursor.offset > 0
                 && self.buffer.text().as_bytes().get(self.cursor.offset - 1) == Some(&b'\n')
@@ -516,7 +516,7 @@ impl EditorView {
         let removes_line_break = if self.cursor.has_selection() {
             let selection =
                 self.buffer.clamp_offset(selection.start)..self.buffer.clamp_offset(selection.end);
-            self.buffer.text()[selection].contains('\n')
+            self.buffer.text_for_range(selection).contains('\n')
         } else {
             self.buffer.text().as_bytes().get(self.cursor.offset) == Some(&b'\n')
         };
@@ -2686,7 +2686,7 @@ impl EditorView {
     ) {
         let search_text = if self.cursor.has_selection() {
             let range = self.cursor.selection_range();
-            self.buffer.text()[range.clone()].to_string()
+            self.buffer.text_for_range(range.clone()).to_string()
         } else {
             // Select the word under cursor first
             let offset = self.cursor.offset;
@@ -2695,7 +2695,7 @@ impl EditorView {
                 return;
             }
             let range = self.cursor.selection_range();
-            self.buffer.text()[range.clone()].to_string()
+            self.buffer.text_for_range(range.clone()).to_string()
         };
         if search_text.is_empty() {
             return;
@@ -2731,7 +2731,7 @@ impl EditorView {
     ) {
         let search_text = if self.cursor.has_selection() {
             let range = self.cursor.selection_range();
-            self.buffer.text()[range.clone()].to_string()
+            self.buffer.text_for_range(range.clone()).to_string()
         } else {
             let offset = self.cursor.offset;
             self.select_word_at_offset(offset);
@@ -2739,7 +2739,7 @@ impl EditorView {
                 return;
             }
             let range = self.cursor.selection_range();
-            self.buffer.text()[range.clone()].to_string()
+            self.buffer.text_for_range(range.clone()).to_string()
         };
         if search_text.is_empty() {
             return;

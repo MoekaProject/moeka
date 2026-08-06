@@ -6,6 +6,70 @@ use gpui::Context;
 use super::*;
 
 impl EditorView {
+    fn rewrite_moved_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+        let normalized = Self::normalize_sidebar_path(path);
+        let relative = normalized.strip_prefix(from).ok()?;
+        Some(to.join(relative))
+    }
+
+    pub(super) fn rewrite_open_tab_paths_after_move(&mut self, from: &Path, to: &Path) {
+        let from = Self::normalize_sidebar_path(from);
+        let to = Self::normalize_sidebar_path(to);
+        for tab in self.all_tabs_mut() {
+            let previous_source = tab
+                .recovery
+                .source_path
+                .clone()
+                .or_else(|| tab.path.clone());
+            if let Some(path) = tab.path.as_deref()
+                && let Some(new_path) = Self::rewrite_moved_path(path, &from, &to)
+            {
+                tab.title = Self::title_for_path(&new_path);
+                tab.path = Some(new_path);
+                tab.is_deleted = false;
+            }
+            if let Some(source_path) = tab.recovery.source_path.as_deref()
+                && let Some(new_source) = Self::rewrite_moved_path(source_path, &from, &to)
+            {
+                tab.recovery.source_path = Some(new_source);
+            }
+            if let Some(temp_path) = tab.recovery.temp_path.as_deref() {
+                if let Some(new_temp) = Self::rewrite_moved_path(temp_path, &from, &to) {
+                    // Directory moves carry the temp file physically; only its recorded path changes.
+                    tab.recovery.temp_path = Some(new_temp);
+                } else if previous_source
+                    .as_deref()
+                    .is_some_and(|source| Self::rewrite_moved_path(source, &from, &to).is_some())
+                {
+                    let new_source = tab.recovery.source_path.as_deref().or(tab.path.as_deref());
+                    if let Some(new_source) = new_source {
+                        let mut new_temp = super::config_paths::hidden_temp_file_path(new_source);
+                        if new_temp != temp_path && new_temp.exists() {
+                            new_temp =
+                                super::config_paths::hidden_temp_file_path_with_hash(new_source);
+                        }
+                        if temp_path.exists() {
+                            if let Some(parent) = new_temp.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            if std::fs::rename(temp_path, &new_temp).is_ok() {
+                                tab.recovery.temp_path = Some(new_temp);
+                            }
+                        } else {
+                            tab.recovery.temp_path = Some(new_temp);
+                        }
+                    }
+                }
+            }
+            if let Some(identity) = tab.history.source_identity.as_deref() {
+                let identity_path = Path::new(identity);
+                if let Some(new_identity) = Self::rewrite_moved_path(identity_path, &from, &to) {
+                    tab.history.source_identity = Some(new_identity.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+
     pub(super) fn is_sidebar_item_selected(&self, item_path: &Path) -> bool {
         self.selected_sidebar_paths.contains(item_path)
     }
@@ -125,19 +189,7 @@ impl EditorView {
                 first_revealed_path = Some(dst.clone());
             }
 
-            for tab in self.all_tabs_mut() {
-                if let Some(ref tab_path) = tab.path {
-                    let normalized_tab_path = Self::normalize_sidebar_path(tab_path);
-                    if normalized_tab_path.starts_with(&src) {
-                        let relative = normalized_tab_path
-                            .strip_prefix(&src)
-                            .unwrap_or(normalized_tab_path.as_path());
-                        let new_tab_path = dst.join(relative);
-                        tab.title = Self::title_for_path(&new_tab_path);
-                        tab.path = Some(new_tab_path);
-                    }
-                }
-            }
+            self.rewrite_open_tab_paths_after_move(&src, &dst);
 
             let old_selected: Vec<PathBuf> = self
                 .selected_sidebar_paths
@@ -199,5 +251,32 @@ impl EditorView {
             self.sidebar_selection_anchor = Some(reveal_path);
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::EditorView;
+
+    #[test]
+    fn moved_directory_rewrites_nested_source_and_temp_paths() {
+        assert_eq!(
+            EditorView::rewrite_moved_path(
+                Path::new("/workspace/docs/.note.md.temp"),
+                Path::new("/workspace/docs"),
+                Path::new("/workspace/archive/docs"),
+            ),
+            Some("/workspace/archive/docs/.note.md.temp".into())
+        );
+        assert_eq!(
+            EditorView::rewrite_moved_path(
+                Path::new("/workspace/docs/note.md"),
+                Path::new("/workspace/docs"),
+                Path::new("/workspace/archive/docs"),
+            ),
+            Some("/workspace/archive/docs/note.md".into())
+        );
     }
 }

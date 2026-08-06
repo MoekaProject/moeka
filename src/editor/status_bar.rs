@@ -474,14 +474,7 @@ impl EditorView {
         let text = self.buffer.text();
         std::iter::once(self.cursor)
             .chain(self.extra_cursors.iter().copied())
-            .map(|cursor| {
-                let range = cursor.selection_range();
-                if range.is_empty() || range.end > text.len() {
-                    0
-                } else {
-                    text[range].chars().count()
-                }
-            })
+            .map(|cursor| safe_selected_character_count(text, cursor.selection_range()))
             .sum()
     }
 
@@ -510,6 +503,16 @@ impl EditorView {
             None => String::new(),
         }
     }
+}
+
+fn safe_selected_character_count(text: &str, range: std::ops::Range<usize>) -> usize {
+    if range.is_empty() || range.start >= text.len() {
+        return 0;
+    }
+    let start = crate::buffer::clamp_grapheme_boundary(text, range.start);
+    let end = crate::buffer::clamp_grapheme_boundary(text, range.end.min(text.len()));
+    text.get(start.min(end)..end)
+        .map_or(0, |selection| selection.chars().count())
 }
 
 #[derive(Clone, Copy)]
@@ -564,5 +567,13 @@ mod tests {
             ),
             "   1. child\n      1. grandchild"
         );
+    }
+
+    #[test]
+    fn selected_character_count_snaps_invalid_cjk_byte_offsets() {
+        let text = "ab。中文";
+        assert_eq!(safe_selected_character_count(text, 2..5), 1);
+        assert_eq!(safe_selected_character_count(text, 3..8), 2);
+        assert_eq!(safe_selected_character_count(text, 999..1000), 0);
     }
 }

@@ -1201,13 +1201,12 @@ fn markdown_decoration_is_plain_text(decoration: &LineDecoration) -> bool {
 }
 
 fn markdown_plain_edit_can_change_inline_delimiter_flanking(
-    inserted_text: &str,
+    _inserted_text: &str,
     line_before_edit: &str,
 ) -> bool {
-    inserted_text.chars().any(char::is_whitespace)
-        && line_before_edit
-            .chars()
-            .any(|ch| matches!(ch, '*' | '_' | '~'))
+    line_before_edit
+        .chars()
+        .any(|ch| matches!(ch, '*' | '_' | '~' | '+' | '=' | '[' | ']' | '`' | '^'))
 }
 
 fn finalize_multi_cursor_edits(
@@ -7487,7 +7486,7 @@ impl EditorView {
 
     fn insert_link_or_image_single(&mut self, prefix: &str, suffix: &str, placeholder: &str) {
         let range = self.cursor.selection_range();
-        let selected = self.buffer.text()[range.clone()].to_string();
+        let selected = self.buffer.text_for_range(range.clone()).to_string();
         let replacement = if selected.is_empty() {
             format!("{}{placeholder}{}", prefix, suffix)
         } else {
@@ -9292,14 +9291,16 @@ mod tests {
     }
 
     #[test]
-    fn markdown_plain_transfer_rejects_whitespace_that_can_close_emphasis() {
+    fn markdown_plain_transfer_rejects_edits_on_lines_with_inline_delimiters() {
         assert!(
             super::markdown_plain_edit_can_change_inline_delimiter_flanking(" ", "**生态改进：**")
         );
+        assert!(super::markdown_plain_edit_can_change_inline_delimiter_flanking("内容", "~~~~"));
+        assert!(super::markdown_plain_edit_can_change_inline_delimiter_flanking("text", "**"));
         assert!(super::markdown_plain_edit_can_change_inline_delimiter_flanking(" ", "*重点：*"));
         assert!(super::markdown_plain_edit_can_change_inline_delimiter_flanking(" ", "~~删除：~~"));
         assert!(
-            !super::markdown_plain_edit_can_change_inline_delimiter_flanking(
+            super::markdown_plain_edit_can_change_inline_delimiter_flanking(
                 "高",
                 "**生态改进：** "
             )

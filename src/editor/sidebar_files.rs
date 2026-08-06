@@ -359,18 +359,7 @@ impl EditorView {
                             self.app_settings.save();
                         }
                         self.invalidate_sidebar_items_cache();
-                        for tab in self.all_tabs_mut() {
-                            if let Some(tab_path) = tab.path.as_ref()
-                                && tab_path.starts_with(path)
-                            {
-                                let relative = tab_path
-                                    .strip_prefix(path)
-                                    .unwrap_or_else(|_| Path::new(""));
-                                let renamed_tab_path = new_path.join(relative);
-                                tab.title = Self::title_for_path(&renamed_tab_path);
-                                tab.path = Some(renamed_tab_path);
-                            }
-                        }
+                        self.rewrite_open_tab_paths_after_move(path, &new_path);
                         if self.selected_sidebar_paths.contains(path) {
                             self.selected_sidebar_paths.remove(path);
                             self.selected_sidebar_paths.insert(new_path.clone());
@@ -539,19 +528,7 @@ impl EditorView {
                 } else {
                     pasted_paths.push(dst.clone());
                     starred_changed |= self.app_settings.rename_starred_prefix(&src, &dst);
-                    for tab in self.all_tabs_mut() {
-                        if let Some(ref tab_path) = tab.path {
-                            let normalized_tab_path = Self::normalize_sidebar_path(tab_path);
-                            if normalized_tab_path.starts_with(&src) {
-                                let relative = normalized_tab_path
-                                    .strip_prefix(&src)
-                                    .unwrap_or(normalized_tab_path.as_path());
-                                let new_tab_path = dst.join(relative);
-                                tab.title = Self::title_for_path(&new_tab_path);
-                                tab.path = Some(new_tab_path);
-                            }
-                        }
-                    }
+                    self.rewrite_open_tab_paths_after_move(&src, &dst);
 
                     let old_selected: Vec<PathBuf> = self
                         .selected_sidebar_paths

@@ -68,6 +68,15 @@ impl EditorView {
         value * self.ui_scale
     }
 
+    pub(crate) fn traffic_light_safe_left_inset(&self) -> f32 {
+        let inset = self.styles.tab_bar.tab_history_hidden_sidebar_margin_px;
+        if cfg!(target_os = "macos") {
+            inset
+        } else {
+            self.scaled(inset)
+        }
+    }
+
     /// Preserve existing border metrics outside the Moeka retro theme family,
     /// whose chrome uses a uniform two-pixel rule.
     pub(crate) fn ui_border_width(&self, default_width: f32) -> f32 {
@@ -93,7 +102,9 @@ impl EditorView {
         let already_synced = self
             .traffic_light_ui_scale
             .is_some_and(|scale| (scale - self.ui_scale).abs() < f32::EPSILON);
-        if already_synced {
+        if already_synced
+            && macos_traffic_light_position_matches(window, self.ui_scale, self.tab_bar_height())
+        {
             return;
         }
         if apply_macos_traffic_light_position(window, self.ui_scale, self.tab_bar_height()) {
@@ -918,16 +929,57 @@ impl EditorView {
 }
 
 #[cfg(target_os = "macos")]
+fn macos_traffic_light_position_matches(
+    window: &mut Window,
+    ui_scale: f32,
+    tab_bar_height: f32,
+) -> bool {
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() else {
+        return false;
+    };
+
+    unsafe {
+        let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
+        let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return false;
+        }
+        let close_button: *mut objc::runtime::Object =
+            msg_send![ns_window, standardWindowButton: 0u64];
+        if close_button.is_null() {
+            return false;
+        }
+
+        let frame: core_graphics::geometry::CGRect = msg_send![close_button, frame];
+        let window_frame: core_graphics::geometry::CGRect = msg_send![ns_window, frame];
+        let content_layout_rect: core_graphics::geometry::CGRect =
+            msg_send![ns_window, contentLayoutRect];
+        let titlebar_height = window_frame.size.height - content_layout_rect.size.height;
+        let expected =
+            traffic_light_offsets_for_layout(ui_scale, tab_bar_height, frame.size.height as f32);
+        let actual_left = frame.origin.x;
+        let actual_top = titlebar_height - frame.origin.y - frame.size.height;
+        (actual_left - f32::from(expected.x) as f64).abs() < 0.25
+            && (actual_top - f32::from(expected.y) as f64).abs() < 0.25
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn traffic_light_offsets_for_layout(
     ui_scale: f32,
     tab_bar_height: f32,
     button_height: f32,
 ) -> gpui::Point<gpui::Pixels> {
     const BASE_LEFT_PX: f32 = 10.0;
-    const OPTICAL_OFFSET_Y_PX: f32 = 2.0;
     point(
         px(BASE_LEFT_PX * ui_scale),
-        px(((tab_bar_height - button_height) * 0.5 + OPTICAL_OFFSET_Y_PX * ui_scale).max(0.0)),
+        px(((tab_bar_height - button_height) * 0.5).max(0.0)),
     )
 }
 
@@ -1000,14 +1052,14 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn traffic_light_uses_scaled_optical_center_in_tab_bar() {
+    fn traffic_light_stays_centered_in_scaled_tab_bar() {
         let button_height = 14.0;
         for ui_scale in [0.8, 1.0, 1.4] {
             let tab_bar_height = crate::style::TOP_BAR_HEIGHT_PX * ui_scale;
             let offsets = traffic_light_offsets_for_layout(ui_scale, tab_bar_height, button_height);
             assert_eq!(f32::from(offsets.x), 10.0 * ui_scale);
             let actual_center = f32::from(offsets.y) + button_height * 0.5;
-            let expected_center = tab_bar_height * 0.5 + 2.0 * ui_scale;
+            let expected_center = tab_bar_height * 0.5;
             assert!((actual_center - expected_center).abs() < 0.0001);
 
             let initial = EditorView::traffic_light_position_for_ui_scale(ui_scale);

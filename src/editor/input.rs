@@ -1812,10 +1812,7 @@ impl EditorView {
             &cursor_offsets,
             self.marked_range.as_ref(),
         );
-        let cell_decoration = crate::markdown::parse_decorations(&cell_content)
-            .into_iter()
-            .next()
-            .unwrap_or_default();
+        let cell_decoration = helpers::table_cell_decoration(dec, &cell_content, &cell_range);
         let (folded_raw, d2b_raw, b2d_raw, _) = helpers::build_display_text(
             &cell_content,
             &cell_decoration,

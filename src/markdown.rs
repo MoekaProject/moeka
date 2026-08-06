@@ -611,7 +611,23 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
         | Options::ENABLE_MATH
         | Options::ENABLE_TABLES;
 
-    let parser = Parser::new_ext(text, opts);
+    let mut parser_source = text.to_string();
+    let mut open_tilde_fence: Option<std::ops::Range<usize>> = None;
+    for (line, start) in line_starts.iter().copied().enumerate() {
+        let content = get_line_content(text, &line_starts, line, decorations.len());
+        let leading = content.len() - content.trim_start_matches([' ', '\t']).len();
+        if content[leading..].trim_end() != "~~~~" {
+            continue;
+        }
+        let range = start + leading..start + leading + 4;
+        if open_tilde_fence.take().is_none() {
+            open_tilde_fence = Some(range);
+        }
+    }
+    if let Some(unpaired) = open_tilde_fence {
+        parser_source.replace_range(unpaired, "text");
+    }
+    let parser = Parser::new_ext(&parser_source, opts);
 
     let mut in_code_block = false;
     let mut in_fenced_code_block = false;
@@ -1429,6 +1445,7 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
             );
         }
     }
+
     decorations
 }
 
@@ -4216,6 +4233,15 @@ mod tests {
     fn block_markers_render_immediately_while_typing() {
         assert_eq!(parse_decorations("# ")[0].block_type, BlockType::Heading(1));
         assert_eq!(parse_decorations("> ")[0].block_type, BlockType::Blockquote);
+        assert_eq!(parse_decorations(">")[0].block_type, BlockType::Blockquote);
+        assert_eq!(
+            parse_decorations(">quoted")[0].block_type,
+            BlockType::Blockquote
+        );
+        assert_eq!(
+            parse_decorations(">>nested")[0].block_type,
+            BlockType::Blockquote
+        );
         assert_eq!(
             parse_decorations("1. ")[0].block_type,
             BlockType::OrderedList
@@ -4254,6 +4280,23 @@ mod tests {
 
         assert_eq!(decorations[0].block_type, BlockType::CodeBlockFence);
         assert_eq!(decorations[1].block_type, BlockType::CodeBlock);
+    }
+
+    #[test]
+    fn empty_strikethrough_marker_is_not_an_unclosed_tilde_fence() {
+        let decorations = parse_decorations("before\n\n~~~~\n\nafter *italic*");
+        assert_eq!(decorations[2].block_type, BlockType::Normal);
+        assert_eq!(decorations[4].block_type, BlockType::Normal);
+        assert!(
+            decorations[4]
+                .inline_spans
+                .iter()
+                .any(|span| span.kind == InlineKind::Italic)
+        );
+
+        let fenced = parse_decorations("~~~~\ncode\n~~~~");
+        assert_eq!(fenced[0].block_type, BlockType::CodeBlockFence);
+        assert_eq!(fenced[1].block_type, BlockType::CodeBlock);
     }
 
     #[test]

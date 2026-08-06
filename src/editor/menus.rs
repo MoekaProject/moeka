@@ -361,8 +361,7 @@ impl EditorView {
     }
 
     fn current_markdown_image_path(&self) -> Option<PathBuf> {
-        let target = self.current_image_menu_target()?;
-        let raw_path = self.decorations.get(target.line)?.image_path.as_ref()?;
+        let raw_path = self.current_markdown_image_source()?;
         if helpers::is_remote_image_url(raw_path) {
             return None;
         }
@@ -375,6 +374,58 @@ impl EditorView {
             roots.push(self.sidebar_root.clone());
         }
         helpers::resolve_image_to_path(raw_path, file_dir.as_ref(), &roots)
+    }
+
+    fn current_markdown_image_source(&self) -> Option<&str> {
+        let target = self.current_image_menu_target()?;
+        self.decorations.get(target.line)?.image_path.as_deref()
+    }
+
+    fn copy_markdown_image_to_clipboard(&mut self, source: String, cx: &mut Context<Self>) {
+        if !helpers::is_remote_image_url(&source) {
+            if let Some(path) = self.current_markdown_image_path() {
+                self.copy_image_path_to_clipboard(&path, cx);
+            } else {
+                self.copy_text_to_clipboard(source, cx);
+            }
+            return;
+        }
+
+        self.context_menu = None;
+        cx.spawn(async move |this, cx| {
+            let source_for_download = source.clone();
+            let image = cx
+                .background_executor()
+                .spawn(async move {
+                    let response = ureq::get(&source_for_download).call().ok()?;
+                    let mut bytes = Vec::new();
+                    std::io::Read::read_to_end(&mut response.into_reader(), &mut bytes).ok()?;
+                    let path = source_for_download
+                        .split(['?', '#'])
+                        .next()
+                        .unwrap_or(source_for_download.as_str());
+                    if path.to_ascii_lowercase().ends_with(".svg") {
+                        return Some(Image::from_bytes(ImageFormat::Svg, bytes));
+                    }
+                    let decoded = image::load_from_memory(&bytes).ok()?;
+                    let mut png = Cursor::new(Vec::new());
+                    decoded.write_to(&mut png, image::ImageFormat::Png).ok()?;
+                    Some(Image::from_bytes(ImageFormat::Png, png.into_inner()))
+                })
+                .await;
+
+            let _ = this.update(cx, |editor, cx| {
+                if let Some(image) = image {
+                    cx.write_to_clipboard(ClipboardItem::new_image(&image));
+                } else {
+                    cx.write_to_clipboard(ClipboardItem::new_string(source));
+                }
+                editor.context_menu = None;
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn context_menu_icon_path(&self, label: &str) -> Option<&'static str> {
@@ -1302,7 +1353,7 @@ impl EditorView {
             FormatMenuAction::WikiLink => {
                 self.checkpoint();
                 let range = self.cursor.selection_range();
-                let selected_text = self.buffer.text()[range.clone()].to_string();
+                let selected_text = self.buffer.text_for_range(range.clone()).to_string();
                 let replacement = format!("[[{}]]", selected_text);
                 self.buffer.replace(range.clone(), &replacement);
                 let cursor_offset = range.start + 2 + selected_text.len();
@@ -1366,7 +1417,7 @@ impl EditorView {
                     self.cursor.anchor = select_start;
                     self.cursor.offset = select_end;
                 } else {
-                    let selected_text = self.buffer.text()[range.clone()].to_string();
+                    let selected_text = self.buffer.text_for_range(range.clone()).to_string();
                     let replacement = format!("[^{}]", selected_text);
                     self.buffer.replace(range.clone(), &replacement);
                     self.cursor
@@ -1652,7 +1703,15 @@ impl EditorView {
             .child(label.to_string())
             .on_mouse_down(
                 MouseButton::Left,
+                cx.listener(|_this, _event, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
+                    window.prevent_default();
                     cx.stop_propagation();
                     this.close_context_menu(cx);
                     handler(this, window, cx);
@@ -1719,7 +1778,15 @@ impl EditorView {
             .child(label.to_string())
             .on_mouse_down(
                 MouseButton::Left,
+                cx.listener(|_this, _event, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
+                    window.prevent_default();
                     cx.stop_propagation();
                     this.close_context_menu(cx);
                     handler(this, window, cx);
@@ -1772,7 +1839,15 @@ impl EditorView {
             .child(label.to_string())
             .on_mouse_down(
                 MouseButton::Left,
+                cx.listener(|_this, _event, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
+                    window.prevent_default();
                     cx.stop_propagation();
                     this.close_context_menu(cx);
                     handler(this, window, cx);
@@ -1913,7 +1988,15 @@ impl EditorView {
             )
             .on_mouse_down(
                 MouseButton::Left,
+                cx.listener(|_this, _event, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
+                    window.prevent_default();
                     cx.stop_propagation();
                     handler(this, window, cx);
                 }),
@@ -2736,6 +2819,22 @@ impl EditorView {
         })
         .collect();
 
+        if let Some(image_source) = self.current_markdown_image_source() {
+            let image_source = image_source.to_string();
+            let label = self.t(crate::i18n::TextKey::CopyToClipboard).to_string();
+            items.push(self.render_format_context_menu_item(
+                &label,
+                Some(MENU_COPY_SVG_PATH),
+                None,
+                false,
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.copy_markdown_image_to_clipboard(image_source.clone(), cx);
+                },
+            ));
+        }
+
         if let Some(image_path) = self.current_markdown_image_path() {
             if self.workspace_root_for_path(&image_path).is_some() {
                 let reveal_path = image_path.clone();
@@ -2750,22 +2849,6 @@ impl EditorView {
                     move |this, _, cx| {
                         this.close_context_menu(cx);
                         this.reveal_path_in_sidebar(reveal_path.clone(), cx);
-                    },
-                ));
-            }
-
-            {
-                let copy_path = image_path.clone();
-                let label = self.t(crate::i18n::TextKey::CopyToClipboard).to_string();
-                items.push(self.render_format_context_menu_item(
-                    &label,
-                    Some(MENU_COPY_SVG_PATH),
-                    None,
-                    false,
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.copy_image_path_to_clipboard(&copy_path, cx);
                     },
                 ));
             }
@@ -2793,7 +2876,14 @@ impl EditorView {
     }
 
     fn render_format_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        if self.current_image_menu_target().is_some() {
+        let table_submenu_kind = self
+            .context_menu
+            .as_ref()
+            .and_then(|menu| match &menu.kind {
+                ContextMenuKind::Table { .. } => Some(menu.kind.clone()),
+                _ => None,
+            });
+        if table_submenu_kind.is_none() && self.current_image_menu_target().is_some() {
             return self.render_image_context_menu(cx);
         }
 
@@ -2898,6 +2988,14 @@ impl EditorView {
                 ContextMenuKind::FormatHeading,
                 cx,
             ));
+            if let Some(table_submenu_kind) = table_submenu_kind {
+                items.push(self.render_format_submenu_trigger_item(
+                    &self.t(crate::i18n::TextKey::Table).to_string(),
+                    Some(FMT_TABLE_SVG),
+                    table_submenu_kind,
+                    cx,
+                ));
+            }
 
             for (label, icon, shortcut, action) in [
                 (
@@ -3514,7 +3612,11 @@ impl EditorView {
         menu: &ContextMenu,
         submenu_kind: &ContextMenuKind,
     ) -> Option<ContextMenuPanelLayout> {
-        if !matches!(menu.kind, ContextMenuKind::Format) || !self.can_render_format_submenu() {
+        if !matches!(
+            menu.kind,
+            ContextMenuKind::Format | ContextMenuKind::Table { .. }
+        ) || !self.can_render_format_submenu()
+        {
             return None;
         }
 
@@ -3544,6 +3646,7 @@ impl EditorView {
                 0.0
             }
             + separator_height;
+        let table_trigger_top = heading_trigger_top + item_height;
         let more_trigger_bottom = main_menu_bottom - padding_y;
         let measured_trigger = match submenu_kind {
             ContextMenuKind::FormatHeading => self.format_heading_trigger_bounds.get(),
@@ -3572,6 +3675,7 @@ impl EditorView {
         } else {
             match submenu_kind {
                 ContextMenuKind::FormatHeading => heading_trigger_top,
+                ContextMenuKind::Table { .. } => table_trigger_top,
                 ContextMenuKind::FormatMore => more_trigger_bottom - submenu_visible_height,
                 _ => main_menu_bottom - submenu_visible_height,
             }
@@ -3598,7 +3702,11 @@ impl EditorView {
         let Some(menu) = &self.context_menu else {
             return false;
         };
-        if !matches!(menu.kind, ContextMenuKind::Format) || self.context_submenu.is_none() {
+        if !matches!(
+            menu.kind,
+            ContextMenuKind::Format | ContextMenuKind::Table { .. }
+        ) || self.context_submenu.is_none()
+        {
             return false;
         }
 
@@ -3729,7 +3837,12 @@ impl EditorView {
     }
 
     fn can_render_format_submenu(&self) -> bool {
-        self.slash_menu_start.is_none() && self.current_image_menu_target().is_none()
+        let table_context = self
+            .context_menu
+            .as_ref()
+            .is_some_and(|menu| matches!(menu.kind, ContextMenuKind::Table { .. }));
+        self.slash_menu_start.is_none()
+            && (table_context || self.current_image_menu_target().is_none())
     }
 
     fn context_menu_separator_block_height(&self) -> f32 {
@@ -3752,8 +3865,13 @@ impl EditorView {
         } else {
             3.0
         };
+        let table_rows = self
+            .context_menu
+            .as_ref()
+            .is_some_and(|menu| matches!(menu.kind, ContextMenuKind::Table { .. }))
+            as u8 as f32;
         padding
-            + item_height * (3.0 + chat_rows + 5.0 + 2.0 + 1.0)
+            + item_height * (3.0 + chat_rows + 5.0 + 2.0 + 1.0 + table_rows)
             + separator_height * separator_count
     }
 
@@ -3776,8 +3894,89 @@ impl EditorView {
         match submenu_kind {
             ContextMenuKind::FormatHeading => self.format_heading_menu_height(),
             ContextMenuKind::FormatMore => self.format_more_menu_height(),
+            ContextMenuKind::Table {
+                table_start_line, ..
+            } => {
+                let is_front_matter = self
+                    .decorations
+                    .get(*table_start_line)
+                    .and_then(|dec| dec.table_info.as_ref())
+                    .is_some_and(|info| info.is_front_matter);
+                let item_count = if is_front_matter { 4.0 } else { 7.0 };
+                self.scaled(self.styles.context_menu.menu_padding_y_px) * 2.0
+                    + self.scaled(self.styles.context_menu.menu_item_height_px) * item_count
+                    + self.context_menu_separator_block_height() * 2.0
+            }
             _ => self.format_more_menu_height(),
         }
+    }
+
+    fn render_table_context_submenu(
+        &self,
+        table_start_line: usize,
+        row: usize,
+        col: usize,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut items = Vec::new();
+        let is_front_matter = self
+            .decorations
+            .get(table_start_line)
+            .and_then(|dec| dec.table_info.as_ref())
+            .is_some_and(|info| info.is_front_matter);
+        items.push(self.render_context_menu_item(
+            self.t(crate::i18n::TextKey::AddRowAbove),
+            false,
+            cx,
+            move |this, _, cx| this.table_insert_row(table_start_line, row, true, cx),
+        ));
+        items.push(self.render_context_menu_item(
+            self.t(crate::i18n::TextKey::AddRowBelow),
+            false,
+            cx,
+            move |this, _, cx| this.table_insert_row(table_start_line, row, false, cx),
+        ));
+        if !is_front_matter {
+            items.push(self.render_context_menu_item(
+                self.t(crate::i18n::TextKey::AddColumnLeft),
+                false,
+                cx,
+                move |this, _, cx| this.table_insert_column(table_start_line, col, true, cx),
+            ));
+            items.push(self.render_context_menu_item(
+                self.t(crate::i18n::TextKey::AddColumnRight),
+                false,
+                cx,
+                move |this, _, cx| this.table_insert_column(table_start_line, col, false, cx),
+            ));
+        }
+        items.push(self.render_context_menu_separator());
+        items.push(self.render_context_menu_item(
+            self.t(crate::i18n::TextKey::DeleteRow),
+            false,
+            cx,
+            move |this, _, cx| this.table_delete_row(table_start_line, row, cx),
+        ));
+        if !is_front_matter {
+            items.push(self.render_context_menu_item(
+                self.t(crate::i18n::TextKey::DeleteColumn),
+                false,
+                cx,
+                move |this, _, cx| this.table_delete_column(table_start_line, col, cx),
+            ));
+        }
+        items.push(self.render_context_menu_separator());
+        items.push(self.render_context_menu_item(
+            if is_front_matter {
+                self.t(crate::i18n::TextKey::DeleteFrontMatter)
+            } else {
+                self.t(crate::i18n::TextKey::DeleteTable)
+            },
+            false,
+            cx,
+            move |this, _, cx| this.table_delete_table(table_start_line, cx),
+        ));
+        items
     }
 
     pub(crate) fn render_context_menu(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -4378,6 +4577,13 @@ impl EditorView {
                                     .child("✕")
                                     .on_mouse_down(
                                         MouseButton::Left,
+                                        cx.listener(|_, _, window, cx| {
+                                            window.prevent_default();
+                                            cx.stop_propagation();
+                                        }),
+                                    )
+                                    .on_mouse_up(
+                                        MouseButton::Left,
                                         cx.listener(move |this, _, window, cx| {
                                             window.prevent_default();
                                             cx.stop_propagation();
@@ -4387,7 +4593,15 @@ impl EditorView {
                             )
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
+                                cx.listener(|_, _, window, cx| {
+                                    window.prevent_default();
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    window.prevent_default();
                                     cx.stop_propagation();
                                     this.switch_workspace(ws_switch.clone(), cx);
                                 }),
@@ -4428,117 +4642,13 @@ impl EditorView {
                 (items, self.scaled(wss.ws_menu_width_px))
             }
             ContextMenuKind::Table {
-                table_start_line,
-                row,
-                col,
-            } => {
-                let mut items = Vec::new();
-                let tsl = *table_start_line;
-                let r = *row;
-                let c = *col;
-                let is_front_matter = self
-                    .decorations
-                    .get(tsl)
-                    .and_then(|dec| dec.table_info.as_ref())
-                    .is_some_and(|ti| ti.is_front_matter);
-                {
-                    let tsl = tsl;
-                    let r = r;
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::AddRowAbove),
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.table_insert_row(tsl, r, true, cx);
-                        },
-                    ));
-                }
-                {
-                    let tsl = tsl;
-                    let r = r;
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::AddRowBelow),
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.table_insert_row(tsl, r, false, cx);
-                        },
-                    ));
-                }
-                if !is_front_matter {
-                    {
-                        let tsl = tsl;
-                        let c = c;
-                        items.push(self.render_context_menu_item(
-                            self.t(crate::i18n::TextKey::AddColumnLeft),
-                            false,
-                            cx,
-                            move |this, _, cx| {
-                                this.table_insert_column(tsl, c, true, cx);
-                            },
-                        ));
-                    }
-                    {
-                        let tsl = tsl;
-                        let c = c;
-                        items.push(self.render_context_menu_item(
-                            self.t(crate::i18n::TextKey::AddColumnRight),
-                            false,
-                            cx,
-                            move |this, _, cx| {
-                                this.table_insert_column(tsl, c, false, cx);
-                            },
-                        ));
-                    }
-                }
-                items.push(self.render_context_menu_separator());
-                {
-                    let tsl = tsl;
-                    let r = r;
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::DeleteRow),
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.table_delete_row(tsl, r, cx);
-                        },
-                    ));
-                }
-                if !is_front_matter {
-                    {
-                        let tsl = tsl;
-                        let c = c;
-                        items.push(self.render_context_menu_item(
-                            self.t(crate::i18n::TextKey::DeleteColumn),
-                            false,
-                            cx,
-                            move |this, _, cx| {
-                                this.table_delete_column(tsl, c, cx);
-                            },
-                        ));
-                    }
-                }
-                items.push(self.render_context_menu_separator());
-                {
-                    let tsl = tsl;
-                    items.push(self.render_context_menu_item(
-                        if is_front_matter {
-                            self.t(crate::i18n::TextKey::DeleteFrontMatter)
-                        } else {
-                            self.t(crate::i18n::TextKey::DeleteTable)
-                        },
-                        false,
-                        cx,
-                        move |this, _, cx| {
-                            this.table_delete_table(tsl, cx);
-                        },
-                    ));
-                }
-                (
-                    items,
-                    self.scaled(self.styles.context_menu.menu_format_width_px),
-                )
-            }
+                table_start_line: _,
+                row: _,
+                col: _,
+            } => (
+                self.render_format_context_menu(cx),
+                self.scaled(self.styles.context_menu.menu_format_width_px),
+            ),
         };
 
         let estimated_menu_height = self.estimated_context_menu_height(items.len());
@@ -4567,14 +4677,21 @@ impl EditorView {
         };
         let main_menu = self.render_context_menu_panel("context-menu", layout, width, items, cx);
 
-        let submenu = if matches!(menu.kind, ContextMenuKind::Format)
-            && self.context_submenu.is_some()
+        let submenu = if matches!(
+            menu.kind,
+            ContextMenuKind::Format | ContextMenuKind::Table { .. }
+        ) && self.context_submenu.is_some()
             && self.can_render_format_submenu()
         {
             let submenu_kind = self.context_submenu.as_ref().cloned();
             let submenu_items = match submenu_kind.as_ref() {
                 Some(ContextMenuKind::FormatHeading) => self.render_heading_context_menu(cx),
                 Some(ContextMenuKind::FormatMore) => self.render_format_more_context_menu(cx),
+                Some(ContextMenuKind::Table {
+                    table_start_line,
+                    row,
+                    col,
+                }) => self.render_table_context_submenu(*table_start_line, *row, *col, cx),
                 _ => Vec::new(),
             };
             let submenu_width = self.scaled(self.styles.context_menu.menu_format_width_px);

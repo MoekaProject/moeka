@@ -1033,10 +1033,7 @@ impl EditorView {
             .items_center()
             .justify_start()
             .when(ss.sidebar_top_buttons_visible, |this| {
-                this.pl(px(self.scaled(
-                    self.styles.tab_bar.tab_history_hidden_sidebar_margin_px,
-                )))
-                .child(
+                this.pl(px(self.traffic_light_safe_left_inset())).child(
                     div()
                         .flex()
                         .items_center()
@@ -1085,27 +1082,23 @@ impl EditorView {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(
-                            div()
-                                .pl(px(self.scaled(
-                                    self.styles.tab_bar.tab_history_hidden_sidebar_margin_px,
-                                )))
-                                .child(self.render_sidebar_top_button(
-                                    "sidebar-top-file-tree-toggle",
-                                    "assets/icons/file-tree-toggle.svg",
-                                    self.sidebar_visible,
-                                    sidebar_tooltip,
-                                    Some("⌘⇧S"),
-                                    cx,
-                                    |this, _event, _window, cx| {
-                                        if this.workspaces.is_empty() {
-                                            this.pick_workspace_folder(cx);
-                                        } else {
-                                            this.toggle_sidebar_visibility(cx);
-                                        }
-                                    },
-                                )),
-                        )
+                        .child(div().pl(px(self.traffic_light_safe_left_inset())).child(
+                            self.render_sidebar_top_button(
+                                "sidebar-top-file-tree-toggle",
+                                "assets/icons/file-tree-toggle.svg",
+                                self.sidebar_visible,
+                                sidebar_tooltip,
+                                Some("⌘⇧S"),
+                                cx,
+                                |this, _event, _window, cx| {
+                                    if this.workspaces.is_empty() {
+                                        this.pick_workspace_folder(cx);
+                                    } else {
+                                        this.toggle_sidebar_visibility(cx);
+                                    }
+                                },
+                            ),
+                        ))
                         .child(
                             div()
                                 .pr(px(self.scaled(ss.sidebar_top_button_padding_right_px)))

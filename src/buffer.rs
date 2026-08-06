@@ -96,6 +96,12 @@ impl Buffer {
         &self.text[start..end]
     }
 
+    pub fn text_for_range(&self, range: std::ops::Range<usize>) -> &str {
+        let start = self.clamp_offset(range.start);
+        let end = self.clamp_offset(range.end);
+        &self.text[start.min(end)..end]
+    }
+
     pub fn offset_to_line_col(&self, offset: usize) -> (usize, usize) {
         let offset = offset.min(self.text.len());
         let line = match self.line_starts.binary_search(&offset) {
@@ -343,6 +349,13 @@ pub fn next_grapheme_boundary(text: &str, offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{Buffer, clamp_grapheme_boundary, next_grapheme_boundary, prev_grapheme_boundary};
+
+    #[test]
+    fn text_for_range_snaps_non_boundary_offsets() {
+        let buffer = Buffer::from_text("ab。中文");
+        assert_eq!(buffer.text_for_range(3..8), "。中");
+        assert_eq!(buffer.text_for_range(999..1000), "");
+    }
 
     #[test]
     fn grapheme_helpers_treat_combining_sequence_as_single_cursor_stop() {

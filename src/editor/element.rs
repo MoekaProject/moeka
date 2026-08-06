@@ -896,10 +896,11 @@ fn build_precise_table_layout(
                     cursor_offsets,
                     marked_range,
                 );
-                let cell_decoration = crate::markdown::parse_decorations(&cell_content)
-                    .into_iter()
-                    .next()
-                    .unwrap_or_default();
+                let cell_decoration = helpers::table_cell_decoration(
+                    &decorations[source_line],
+                    &cell_content,
+                    &cell_layout.cell_range,
+                );
                 let (folded_raw, d2b_raw, b2d_raw, _) = helpers::build_display_text(
                     &cell_content,
                     &cell_decoration,
@@ -1433,7 +1434,7 @@ fn push_rendered_inline_overlays(
                 editor.scaled(quote_styles.quote_block_callout_icon_min_px),
                 quote_styles.quote_block_callout_icon_max_line_height_factor,
             );
-            let icon_x = content_x + indent_start + f32::from(pos_start.x);
+            let icon_x = content_x + indent_start + f32::from(pos_end.x) - callout_gap - icon_size;
             let icon_y = text_line_top + f32::from(pos_start.y) + (line_height - icon_size) / 2.0;
             inline_svgs.push((
                 Bounds::new(
@@ -1999,8 +2000,11 @@ impl Element for EditorElement {
         italic_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_italic_latin_font_family);
 
         let mut italic_cjk_font = text_style.font();
-        italic_cjk_font.family = configured_font_family(editor_styles.editor_body_cjk_font_family);
-        italic_cjk_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_body_cjk_font_family);
+        italic_cjk_font.family =
+            configured_font_family(editor_styles.editor_italic_cjk_font_family);
+        italic_cjk_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+            editor_styles.editor_body_cjk_font_family.to_string(),
+        ]));
 
         let base_char_width = {
             let test_run = TextRun {
@@ -2866,76 +2870,74 @@ impl Element for EditorElement {
                     ));
                 }
 
-                for sr in &all_sel_ranges {
-                    if sr.start == sr.end {
-                        continue;
-                    }
-                    let sel_start_on_line = sr.start.max(line_start_offset);
-                    let sel_end_on_line = sr.end.min(line_end_offset);
+                if decoration.table_info.is_none() {
+                    for sr in &all_sel_ranges {
+                        if sr.start == sr.end {
+                            continue;
+                        }
+                        let sel_start_on_line = sr.start.max(line_start_offset);
+                        let sel_end_on_line = sr.end.min(line_end_offset);
 
-                    if sel_start_on_line < sel_end_on_line {
-                        let buf_start_col = sel_start_on_line - line_start_offset;
-                        let buf_end_col = sel_end_on_line - line_start_offset;
-                        let disp_start = helpers::buffer_to_display_offset(
-                            &cached.buffer_to_display,
-                            buf_start_col,
-                        );
-                        let disp_end = helpers::buffer_to_display_offset(
-                            &cached.buffer_to_display,
-                            buf_end_col,
-                        );
-                        let selection_spans_line =
-                            sr.start < line_start_offset || sr.end > line_end_offset;
-                        let selection_leading_padding_left_px =
-                            if matches!(
-                                block_type,
-                                BlockType::CodeBlock | BlockType::CodeBlockFence
-                            ) || decoration.block_preview.is_some()
-                                || decoration
-                                    .table_info
-                                    .as_ref()
-                                    .is_some_and(|table_info| table_info.is_front_matter)
-                            {
-                                0.0
-                            } else {
-                                cached.selection_padding_left_px
-                            };
-                        if matches!(block_type, BlockType::Heading(_)) && selection_spans_line {
-                            push_cursor_aligned_highlight_quads(
-                                &mut selection_quads,
-                                editor,
-                                &cached.display_text,
-                                &runs,
-                                &cached.wrapped_line,
-                                disp_start,
-                                disp_end,
-                                content_x,
-                                text_line_top,
-                                line_height,
-                                font_size,
-                                cached.indent_px,
-                                selection_leading_padding_left_px,
-                                theme.selection,
-                                editor_styles.editor_letter_spacing_px,
-                                window,
+                        if sel_start_on_line < sel_end_on_line {
+                            let buf_start_col = sel_start_on_line - line_start_offset;
+                            let buf_end_col = sel_end_on_line - line_start_offset;
+                            let disp_start = helpers::buffer_to_display_offset(
+                                &cached.buffer_to_display,
+                                buf_start_col,
                             );
-                        } else {
-                            selection_quads.extend(helpers::build_selection_quads(
-                                &cached.display_text,
-                                &runs,
-                                &cached.wrapped_line,
-                                disp_start,
-                                disp_end,
-                                content_x,
-                                text_line_top,
-                                line_height,
-                                font_size,
-                                cached.indent_px,
-                                selection_leading_padding_left_px,
-                                theme.selection,
-                                editor_styles.editor_letter_spacing_px,
-                                window,
-                            ));
+                            let disp_end = helpers::buffer_to_display_offset(
+                                &cached.buffer_to_display,
+                                buf_end_col,
+                            );
+                            let selection_spans_line =
+                                sr.start < line_start_offset || sr.end > line_end_offset;
+                            let selection_leading_padding_left_px =
+                                if matches!(
+                                    block_type,
+                                    BlockType::CodeBlock | BlockType::CodeBlockFence
+                                ) || decoration.block_preview.is_some()
+                                {
+                                    0.0
+                                } else {
+                                    cached.selection_padding_left_px
+                                };
+                            if matches!(block_type, BlockType::Heading(_)) && selection_spans_line {
+                                push_cursor_aligned_highlight_quads(
+                                    &mut selection_quads,
+                                    editor,
+                                    &cached.display_text,
+                                    &runs,
+                                    &cached.wrapped_line,
+                                    disp_start,
+                                    disp_end,
+                                    content_x,
+                                    text_line_top,
+                                    line_height,
+                                    font_size,
+                                    cached.indent_px,
+                                    selection_leading_padding_left_px,
+                                    theme.selection,
+                                    editor_styles.editor_letter_spacing_px,
+                                    window,
+                                );
+                            } else {
+                                selection_quads.extend(helpers::build_selection_quads(
+                                    &cached.display_text,
+                                    &runs,
+                                    &cached.wrapped_line,
+                                    disp_start,
+                                    disp_end,
+                                    content_x,
+                                    text_line_top,
+                                    line_height,
+                                    font_size,
+                                    cached.indent_px,
+                                    selection_leading_padding_left_px,
+                                    theme.selection,
+                                    editor_styles.editor_letter_spacing_px,
+                                    window,
+                                ));
+                            }
                         }
                     }
                 }
@@ -4187,11 +4189,11 @@ impl Element for EditorElement {
                                             cell_layout.display_text.clone().into()
                                         };
 
-                                    let cell_decoration =
-                                        crate::markdown::parse_decorations(&cell_content)
-                                            .into_iter()
-                                            .next()
-                                            .unwrap_or_default();
+                                    let cell_decoration = helpers::table_cell_decoration(
+                                        &decorations[source_line],
+                                        &cell_content,
+                                        &cell_layout.cell_range,
+                                    );
 
                                     let mut cell_runs = helpers::build_text_runs_for_display(
                                         &cell_layout.display_text,
@@ -5048,7 +5050,8 @@ impl Element for EditorElement {
                         editor.scaled(quote_block_styles.quote_block_callout_icon_min_px),
                         quote_block_styles.quote_block_callout_icon_max_line_height_factor,
                     );
-                    let icon_x = content_x + indent_start + f32::from(pos_start.x);
+                    let icon_x =
+                        content_x + indent_start + f32::from(pos_end.x) - callout_gap - icon_size;
                     let icon_y =
                         text_line_top + f32::from(pos_start.y) + (line_height - icon_size) / 2.0;
                     inline_svgs.push((

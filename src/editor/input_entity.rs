@@ -376,8 +376,9 @@ impl EntityInputHandler for EditorView {
         } else if new_text == "[" && new_offset >= 2 {
             let text = self.buffer.text();
             if text.get(new_offset - 2..new_offset) == Some("[[") {
-                if text.get(new_offset..new_offset + 2) != Some("]]") {
-                    self.buffer.replace(new_offset..new_offset, "]]");
+                let closer = input_ime::missing_wiki_link_closer(text, new_offset);
+                if !closer.is_empty() {
+                    self.buffer.replace(new_offset..new_offset, closer);
                     self.reparse();
                 }
                 self.cursor.move_to(new_offset, &self.buffer);

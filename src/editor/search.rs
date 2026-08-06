@@ -157,7 +157,7 @@ impl EditorView {
                 let selection = self.buffer.clamp_offset(selection.start)
                     ..self.buffer.clamp_offset(selection.end);
                 if !selection.is_empty() && selection.len() < 200 {
-                    let selected_text = self.buffer.text()[selection].to_string();
+                    let selected_text = self.buffer.text_for_range(selection).to_string();
                     if !selected_text.contains('\n') {
                         self.search_query = selected_text;
                         self.run_search(cx);
