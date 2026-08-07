@@ -34,8 +34,11 @@ VOLUME_NAME := $(APP_DISPLAY_NAME)
 TAG ?= $(firstword $(filter v%,$(MAKECMDGOALS)))
 RELEASE_REPO ?= MoekaProject/release
 DIST_SUFFIXES := arm64 amd64
+ZIP_PATHS := \
+	$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-arm64.zip \
+	$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-x86_64.zip
 
-.PHONY: dmg dmg-one dmg-arm64 dmg-amd64 app build-release clean-dmg clean-app tag dist publish publish-check
+.PHONY: dmg dmg-one dmg-arm64 dmg-amd64 zip zip-arm64 zip-x86_64 zip-one app build-release clean-dmg clean-app tag dist publish publish-check
 
 dmg: $(ICON_FILE)
 	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -58,10 +61,15 @@ dist: dmg
 
 publish: publish-check
 	@$(MAKE) dmg
+	@$(MAKE) zip
 	@set -euo pipefail; \
 	assets=(); \
 	for suffix in $(DIST_SUFFIXES); do \
 		asset="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-$$suffix.dmg"; \
+		[[ -f "$$asset" ]] || { echo "Missing $$asset"; exit 1; }; \
+		assets+=("$$asset"); \
+	done; \
+	for asset in $(ZIP_PATHS); do \
 		[[ -f "$$asset" ]] || { echo "Missing $$asset"; exit 1; }; \
 		assets+=("$$asset"); \
 	done; \
@@ -100,6 +108,25 @@ tag:
 
 v%:
 	@:
+
+zip:
+	@$(MAKE) -j2 zip-arm64 zip-x86_64
+
+zip-arm64:
+	@$(MAKE) zip-one \
+		TARGET=aarch64-apple-darwin \
+		ZIP_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-arm64.zip"
+
+zip-x86_64:
+	@$(MAKE) zip-one \
+		TARGET=x86_64-apple-darwin \
+		ZIP_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-x86_64.zip"
+
+zip-one: app
+	@mkdir -p "$(DIST_DIR)"
+	@rm -f "$(ZIP_PATH)"
+	@ditto -c -k --sequesterRsrc --keepParent "$(APP_DIR)" "$(ZIP_PATH)"
+	@echo "Created $(ZIP_PATH)"
 
 dmg-one: $(DMG_PATH)
 

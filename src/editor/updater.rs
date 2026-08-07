@@ -144,8 +144,12 @@ fn check_and_download_update() -> Result<Option<PreparedUpdate>, String> {
         return Ok(None);
     }
 
-    let asset = select_update_asset(&release.assets)
-        .ok_or_else(|| format!("no macOS update zip found in release {}", release.tag_name))?;
+    let asset = select_update_asset(&release.assets).ok_or_else(|| {
+        format!(
+            "no compatible macOS update DMG found in release {}",
+            release.tag_name
+        )
+    })?;
     let update_dir = config_paths::cache_dir()
         .join("updates")
         .join(safe_file_name(&release.tag_name));
@@ -198,12 +202,18 @@ fn parse_version(value: &str) -> Vec<u64> {
 }
 
 fn select_update_asset(assets: &[GitHubAsset]) -> Option<&GitHubAsset> {
-    let preferred = if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-        ["macos-arm64.zip", "macos-universal.zip", ".zip"]
-    } else {
-        ["macos-universal.zip", "macos-x86_64.zip", ".zip"]
-    };
+    select_update_asset_for_arch(assets, std::env::consts::ARCH)
+}
 
+fn select_update_asset_for_arch<'a>(
+    assets: &'a [GitHubAsset],
+    architecture: &str,
+) -> Option<&'a GitHubAsset> {
+    let preferred: &[&str] = match architecture {
+        "aarch64" => &["macos-arm64.dmg", "macos-universal.dmg"],
+        "x86_64" => &["macos-amd64.dmg", "macos-x86_64.dmg", "macos-universal.dmg"],
+        _ => return None,
+    };
     preferred.iter().find_map(|suffix| {
         assets.iter().find(|asset| {
             let name = asset.name.to_ascii_lowercase();
@@ -255,6 +265,12 @@ fn install_update(update: PreparedUpdate) -> Result<(), String> {
     };
 
     let pid = std::process::id();
+    let expected_arch = lipo_arch_for_rust_arch(std::env::consts::ARCH).ok_or_else(|| {
+        format!(
+            "unsupported update architecture: {}",
+            std::env::consts::ARCH
+        )
+    })?;
     let log_path = config_paths::cache_dir()
         .join("updates")
         .join("install.log");
@@ -268,16 +284,21 @@ fn install_update(update: PreparedUpdate) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let log_file_for_stderr = log_file.try_clone().map_err(|error| error.to_string())?;
     let script = r#"set -e
-zip_path="$1"
+dmg_path="$1"
 bundle_path="$2"
 pid="$3"
-work_dir=""
+expected_arch="$4"
 staging_dir=""
 backup_path=""
+device=""
+mount_dir=""
 
 cleanup() {
   status=$?
   trap - EXIT
+    if [ -n "$device" ]; then
+        hdiutil detach "$device" -quiet >/dev/null 2>&1 || true
+    fi
   if [ "$status" -ne 0 ]; then
     if [ -n "$backup_path" ] && [ -d "$backup_path" ] && [ ! -d "$bundle_path" ]; then
       mv "$backup_path" "$bundle_path" || true
@@ -286,28 +307,47 @@ cleanup() {
       open "$bundle_path" || true
     fi
   fi
-  if [ -n "$work_dir" ]; then rm -rf "$work_dir"; fi
   if [ -n "$staging_dir" ]; then rm -rf "$staging_dir"; fi
   if [ "$status" -eq 0 ] && [ -n "$backup_path" ]; then rm -rf "$backup_path"; fi
   exit "$status"
 }
 trap cleanup EXIT
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') Installing Moeka update from $zip_path into $bundle_path"
+echo "$(date '+%Y-%m-%d %H:%M:%S') Installing Moeka update from $dmg_path into $bundle_path"
 parent_dir="$(dirname "$bundle_path")"
 bundle_name="$(basename "$bundle_path")"
-work_dir="$(mktemp -d "${TMPDIR:-/tmp}/moeka-update.XXXXXX")"
 staging_dir="$(mktemp -d "$parent_dir/.moeka-update.XXXXXX")"
 staged_app="$staging_dir/$bundle_name"
 backup_path="$parent_dir/.${bundle_name}.previous-update"
 
-ditto -x -k "$zip_path" "$work_dir"
-new_app="$(find "$work_dir" -maxdepth 4 -name 'Moeka.app' -type d -print -quit)"
+hdiutil verify "$dmg_path" >/dev/null
+attach_output="$(hdiutil attach "$dmg_path" -readonly -noverify -noautoopen)"
+attach_line="$(printf '%s\n' "$attach_output" | awk '/\/Volumes\// { print; exit }')"
+device="$(printf '%s\n' "$attach_line" | awk '{ print $1 }')"
+mount_dir="$(printf '%s\n' "$attach_line" | sed -E 's|^.*[[:space:]](/Volumes/.*)$|\1|')"
+if [ -z "$device" ] || [ -z "$mount_dir" ] || [ ! -d "$mount_dir" ]; then
+    printf '%s\n' "$attach_output" >&2
+    echo "Failed to mount update DMG: $dmg_path" >&2
+    exit 1
+fi
+new_app="$(find "$mount_dir" -maxdepth 2 -name 'Moeka.app' -type d -print -quit)"
 if [ -z "$new_app" ] || [ ! -d "$new_app/Contents" ]; then
-  echo "Moeka.app was not found in update archive: $zip_path" >&2
+    echo "Moeka.app was not found in update DMG: $dmg_path" >&2
   exit 1
 fi
 ditto "$new_app" "$staged_app"
+staged_executable="$staged_app/Contents/MacOS/moeka"
+if [ ! -x "$staged_executable" ]; then
+    echo "Moeka executable was not found in staged update: $staged_executable" >&2
+    exit 1
+fi
+if ! lipo "$staged_executable" -verify_arch "$expected_arch"; then
+    echo "Update architecture does not match this application: $expected_arch" >&2
+    exit 1
+fi
+hdiutil detach "$device" -quiet
+device=""
+mount_dir=""
 
 while kill -0 "$pid" >/dev/null 2>&1; do sleep 0.2; done
 rm -rf "$backup_path"
@@ -326,12 +366,21 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') Moeka update installed and relaunched"
         .arg(&update.path)
         .arg(bundle_path)
         .arg(pid.to_string())
+        .arg(expected_arch)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_file_for_stderr))
         .spawn()
         .map_err(|error| error.to_string())?;
     std::process::exit(0);
+}
+
+fn lipo_arch_for_rust_arch(architecture: &str) -> Option<&'static str> {
+    match architecture {
+        "aarch64" => Some("arm64"),
+        "x86_64" => Some("x86_64"),
+        _ => None,
+    }
 }
 
 fn current_app_bundle_path() -> Option<PathBuf> {
@@ -360,4 +409,48 @@ fn safe_file_name(value: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GitHubAsset, lipo_arch_for_rust_arch, select_update_asset_for_arch};
+
+    fn asset(name: &str) -> GitHubAsset {
+        GitHubAsset {
+            name: name.to_string(),
+            browser_download_url: format!("https://example.invalid/{name}"),
+        }
+    }
+
+    #[test]
+    fn update_assets_select_architecture_specific_dmgs() {
+        let assets = [
+            asset("Moeka-macos-arm64.zip"),
+            asset("Moeka-macos-amd64.dmg"),
+            asset("Moeka-macos-arm64.dmg"),
+        ];
+
+        assert_eq!(
+            select_update_asset_for_arch(&assets, "aarch64").map(|asset| asset.name.as_str()),
+            Some("Moeka-macos-arm64.dmg")
+        );
+        assert_eq!(
+            select_update_asset_for_arch(&assets, "x86_64").map(|asset| asset.name.as_str()),
+            Some("Moeka-macos-amd64.dmg")
+        );
+        assert!(select_update_asset_for_arch(&assets, "riscv64").is_none());
+    }
+
+    #[test]
+    fn update_assets_ignore_zip_only_releases() {
+        let assets = [asset("Moeka-macos-arm64.zip")];
+        assert!(select_update_asset_for_arch(&assets, "aarch64").is_none());
+    }
+
+    #[test]
+    fn rust_architectures_map_to_lipo_names() {
+        assert_eq!(lipo_arch_for_rust_arch("aarch64"), Some("arm64"));
+        assert_eq!(lipo_arch_for_rust_arch("x86_64"), Some("x86_64"));
+        assert_eq!(lipo_arch_for_rust_arch("riscv64"), None);
+    }
 }
