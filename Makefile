@@ -33,16 +33,16 @@ DMG_SCRIPT := scripts/create_dmg.sh
 VOLUME_NAME := $(APP_DISPLAY_NAME)
 TAG ?= $(firstword $(filter v%,$(MAKECMDGOALS)))
 RELEASE_REPO ?= MoekaProject/release
-DIST_SUFFIXES := arm64 amd64
+DIST_SUFFIXES := arm64 x86_64
 ZIP_PATHS := \
 	$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-arm64.zip \
 	$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-x86_64.zip
 
-.PHONY: dmg dmg-one dmg-arm64 dmg-amd64 zip zip-arm64 zip-x86_64 zip-one app build-release clean-dmg clean-app tag dist publish publish-check
+.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one app build-release clean-dmg clean-app tag dist publish publish-check
 
 dmg: $(ICON_FILE)
 	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
-	@$(MAKE) -j2 dmg-arm64 dmg-amd64
+	@$(MAKE) -j2 dmg-arm64 dmg-x86_64
 	@ls -lh "$(DIST_DIR)"
 
 dmg-arm64:
@@ -51,11 +51,11 @@ dmg-arm64:
 		DMG_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-arm64.dmg" \
 		VOLUME_NAME="$(APP_DISPLAY_NAME)-arm64"
 
-dmg-amd64:
+dmg-x86_64:
 	@$(MAKE) dmg-one \
 		TARGET=x86_64-apple-darwin \
-		DMG_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-amd64.dmg" \
-		VOLUME_NAME="$(APP_DISPLAY_NAME)-amd64"
+		DMG_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-x86_64.dmg" \
+		VOLUME_NAME="$(APP_DISPLAY_NAME)-x86_64"
 
 dist: dmg
 

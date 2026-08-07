@@ -211,7 +211,7 @@ fn select_update_asset_for_arch<'a>(
 ) -> Option<&'a GitHubAsset> {
     let preferred: &[&str] = match architecture {
         "aarch64" => &["macos-arm64.dmg", "macos-universal.dmg"],
-        "x86_64" => &["macos-amd64.dmg", "macos-x86_64.dmg", "macos-universal.dmg"],
+        "x86_64" => &["macos-x86_64.dmg", "macos-amd64.dmg", "macos-universal.dmg"],
         _ => return None,
     };
     preferred.iter().find_map(|suffix| {
@@ -427,6 +427,7 @@ mod tests {
         let assets = [
             asset("Moeka-macos-arm64.zip"),
             asset("Moeka-macos-amd64.dmg"),
+            asset("Moeka-macos-x86_64.dmg"),
             asset("Moeka-macos-arm64.dmg"),
         ];
 
@@ -436,7 +437,7 @@ mod tests {
         );
         assert_eq!(
             select_update_asset_for_arch(&assets, "x86_64").map(|asset| asset.name.as_str()),
-            Some("Moeka-macos-amd64.dmg")
+            Some("Moeka-macos-x86_64.dmg")
         );
         assert!(select_update_asset_for_arch(&assets, "riscv64").is_none());
     }
