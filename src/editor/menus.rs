@@ -4607,7 +4607,9 @@ impl EditorView {
                                         cx.listener(move |this, _, window, cx| {
                                             window.prevent_default();
                                             cx.stop_propagation();
-                                            this.suppress_editor_mouse_up_for_current_menu_event(cx);
+                                            this.suppress_editor_mouse_up_for_current_menu_event(
+                                                cx,
+                                            );
                                             this.close_workspace(&ws_close, cx);
                                         }),
                                     ),

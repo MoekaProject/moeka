@@ -15,7 +15,8 @@ dmg_format="${DMG_FORMAT:-ULFO}"
 
 background_dir="$staging_dir/.background"
 background_name="install-bg.jpg"
-rw_dmg="$(mktemp "${TMPDIR:-/tmp}/moeka-dmg.XXXXXX.rw.dmg")"
+temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/moeka-dmg.XXXXXX")"
+rw_dmg="$temp_dir/writable.dmg"
 mount_dir=""
 device=""
 window_left=120
@@ -29,7 +30,7 @@ cleanup() {
   if [[ -n "$device" ]]; then
     hdiutil detach "$device" -quiet >/dev/null 2>&1 || true
   fi
-  rm -f "$rw_dmg"
+  rm -rf "$temp_dir"
 }
 trap cleanup EXIT
 
@@ -47,44 +48,50 @@ hdiutil create \
   "$rw_dmg" >/dev/null
 
 attach_output="$(hdiutil attach "$rw_dmg" -readwrite -noverify -noautoopen)"
-device="$(awk '/Apple_HFS/ { print $1; exit }' <<<"$attach_output")"
-mount_dir="$(awk '/Apple_HFS/ { print $3; exit }' <<<"$attach_output")"
-if [[ -z "$device" || -z "$mount_dir" ]]; then
+attach_line="$(awk '/Apple_HFS/ && /\/Volumes\// { print; exit }' <<<"$attach_output")"
+device="$(awk '{ print $1 }' <<<"$attach_line")"
+mount_dir="$(sed -E 's|^.*[[:space:]](/Volumes/.*)$|\1|' <<<"$attach_line")"
+if [[ -z "$device" || -z "$mount_dir" || ! -d "$mount_dir" ]]; then
+  printf '%s\n' "$attach_output" >&2
   echo "failed to mount writable DMG" >&2
   exit 1
 fi
 
 chflags hidden "$mount_dir/.background" || true
 
-osascript <<OSA
-tell application "Finder"
-    tell disk "$volume_name"
-        open
-        delay 0.2
-        set current view of container window to icon view
-        set toolbar visible of container window to false
-        set statusbar visible of container window to false
-        set the bounds of container window to {$window_left, $window_top, $window_right, $window_bottom}
-        set viewOptions to the icon view options of container window
+osascript - "$mount_dir" "$app_display_name" "$background_name" <<OSA
+on run argv
+    set mountDir to item 1 of argv
+    set appName to (item 2 of argv) & ".app"
+    set backgroundName to item 3 of argv
+    set mountedVolume to POSIX file mountDir as alias
+    set backgroundPicture to POSIX file (mountDir & "/.background/" & backgroundName) as alias
+    tell application "Finder"
+        set volumeWindow to make new Finder window to mountedVolume
+        delay 0.5
+        set current view of volumeWindow to icon view
+        set toolbar visible of volumeWindow to false
+        set statusbar visible of volumeWindow to false
+        set the bounds of volumeWindow to {$window_left, $window_top, $window_right, $window_bottom}
+        set viewOptions to the icon view options of volumeWindow
         set arrangement of viewOptions to not arranged
         set icon size of viewOptions to 128
-        set backgroundPicture to POSIX file "$mount_dir/.background/$background_name" as alias
         set background picture of viewOptions to backgroundPicture
-        set position of item "$app_display_name.app" of container window to {165, 150}
-        set position of item "Applications" of container window to {383, 150}
-        update without registering applications
+        set position of item appName of mountedVolume to {165, 150}
+        set position of item "Applications" of mountedVolume to {383, 150}
+        update mountedVolume without registering applications
         delay 0.5
-        close
+        close volumeWindow
         delay 0.5
     end tell
-end tell
+end run
 OSA
 
 sync
-      if [[ ! -f "$mount_dir/.DS_Store" ]]; then
-        echo "Finder did not write $mount_dir/.DS_Store; DMG layout was not persisted" >&2
-        exit 1
-      fi
+if [[ ! -f "$mount_dir/.DS_Store" ]]; then
+  echo "Finder did not write $mount_dir/.DS_Store; DMG layout was not persisted" >&2
+  exit 1
+fi
 
 hdiutil detach "$device" -quiet
 device=""
