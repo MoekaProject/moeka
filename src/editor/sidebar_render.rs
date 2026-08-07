@@ -1205,6 +1205,14 @@ impl EditorView {
                 matches!(&self.sidebar_edit, Some(SidebarEditMode::CreateDir { .. }));
 
             let items = items.unwrap_or_default();
+            if let Some(reveal_path) = self.pending_sidebar_reveal_path.clone()
+                && let Some(index) = items.iter().position(|item| item.path == reveal_path)
+            {
+                if self.ensure_sidebar_item_minimally_visible(index, items.len()) {
+                    cx.notify();
+                }
+                self.pending_sidebar_reveal_path = None;
+            }
             if self.sidebar_directory_loading.is_empty()
                 && !self.sidebar_directory_refresh_pending
                 && !self.sidebar_items_dirty
@@ -1420,6 +1428,7 @@ impl EditorView {
                             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
                                 this.pending_sidebar_scroll_top.set(None);
                                 this.pending_sidebar_scroll_anchor = None;
+                                this.pending_sidebar_reveal_path = None;
                                 this.reveal_panel_scrollbar(PanelScrollbarKind::Sidebar, cx);
                             }))
                             .on_mouse_down(

@@ -3335,6 +3335,67 @@ mod tests {
     }
 
     #[test]
+    fn folded_cjk_italic_keeps_cjk_family_and_uses_oblique_style() {
+        let line = "普通 *中文斜体* 文本";
+        let decoration = markdown::parse_decorations(line)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let active_ranges: [Range<usize>; 0] = [];
+        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
+            line,
+            &decoration,
+            &active_ranges,
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let runs = build_text_runs_for_display(
+            &display_text,
+            line,
+            &display_to_buffer,
+            &decoration,
+            &active_ranges,
+            false,
+            prefix_collapsed,
+            &font("Menlo"),
+            &font("PingFang SC"),
+            &font("Menlo"),
+            &font("PingFang SC"),
+            &font("Menlo"),
+            &font("Menlo"),
+            &font("PingFang SC"),
+            0,
+            16.0,
+            &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            None,
+            false,
+        );
+
+        assert_eq!(display_text, "普通 中文斜体 文本");
+        assert!(runs.iter().any(|run| {
+            run.font.family.as_ref() == "PingFang SC"
+                && run.font.style == FontStyle::Oblique
+                && run.color == theme.text_primary
+        }));
+    }
+
+    #[test]
     fn folded_inline_code_uses_inline_code_background() {
         let line = "use `code` here";
         let decoration = markdown::parse_decorations(line)

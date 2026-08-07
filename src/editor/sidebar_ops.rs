@@ -9,7 +9,11 @@ impl EditorView {
     fn rewrite_moved_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
         let normalized = Self::normalize_sidebar_path(path);
         let relative = normalized.strip_prefix(from).ok()?;
-        Some(to.join(relative))
+        if relative.as_os_str().is_empty() {
+            Some(to.to_path_buf())
+        } else {
+            Some(to.join(relative))
+        }
     }
 
     pub(super) fn rewrite_open_tab_paths_after_move(&mut self, from: &Path, to: &Path) {
@@ -67,6 +71,35 @@ impl EditorView {
                     tab.history.source_identity = Some(new_identity.to_string_lossy().into_owned());
                 }
             }
+        }
+
+        if let Some(path) = self.current_file_path.as_deref()
+            && let Some(new_path) = Self::rewrite_moved_path(path, &from, &to)
+        {
+            self.current_file_path = Some(new_path);
+        }
+        if let Some(path) = self.focused_sidebar_path.as_deref()
+            && let Some(new_path) = Self::rewrite_moved_path(path, &from, &to)
+        {
+            self.focused_sidebar_path = Some(new_path);
+        }
+        if let Some(path) = self.sidebar_selection_anchor.as_deref()
+            && let Some(new_path) = Self::rewrite_moved_path(path, &from, &to)
+        {
+            self.sidebar_selection_anchor = Some(new_path);
+        }
+        self.selected_sidebar_paths = self
+            .selected_sidebar_paths
+            .iter()
+            .map(|path| Self::rewrite_moved_path(path, &from, &to).unwrap_or_else(|| path.clone()))
+            .collect();
+        self.expanded_dirs = self
+            .expanded_dirs
+            .iter()
+            .map(|path| Self::rewrite_moved_path(path, &from, &to).unwrap_or_else(|| path.clone()))
+            .collect();
+        if self.app_settings.rename_starred_prefix(&from, &to) {
+            self.app_settings.save();
         }
     }
 
@@ -262,6 +295,14 @@ mod tests {
 
     #[test]
     fn moved_directory_rewrites_nested_source_and_temp_paths() {
+        assert_eq!(
+            EditorView::rewrite_moved_path(
+                Path::new("/workspace/note.md"),
+                Path::new("/workspace/note.md"),
+                Path::new("/workspace/archive/note.md"),
+            ),
+            Some("/workspace/archive/note.md".into())
+        );
         assert_eq!(
             EditorView::rewrite_moved_path(
                 Path::new("/workspace/docs/.note.md.temp"),

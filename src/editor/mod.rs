@@ -1526,6 +1526,7 @@ pub struct EditorView {
     pub(crate) last_mouse_down_target: Option<(Point<Pixels>, usize)>,
     pub(crate) selection_drag_has_moved: bool,
     pub(crate) context_menu: Option<ContextMenu>,
+    pub(crate) suppress_next_editor_mouse_up: bool,
     pub(crate) context_submenu: Option<ContextMenuKind>,
     pub(crate) context_submenu_aim: Option<ContextSubmenuAim>,
     pub(crate) context_submenu_hovered: bool,
@@ -1640,6 +1641,7 @@ pub struct EditorView {
     pub(crate) sidebar_scroll_handle: ScrollHandle,
     pub(crate) pending_sidebar_scroll_top: Rc<Cell<Option<f32>>>,
     pub(crate) pending_sidebar_scroll_anchor: Option<PendingSidebarScrollAnchor>,
+    pub(crate) pending_sidebar_reveal_path: Option<PathBuf>,
     pub(crate) tab_bar_scroll_handle: ScrollHandle,
     /// FileList pane (right of the file tree): current directory and cached items.
     pub(crate) file_list_dir: PathBuf,
@@ -2170,6 +2172,7 @@ impl EditorView {
             last_mouse_down_target: None,
             selection_drag_has_moved: false,
             context_menu: None,
+            suppress_next_editor_mouse_up: false,
             context_submenu: None,
             context_submenu_aim: None,
             context_submenu_hovered: false,
@@ -2279,6 +2282,7 @@ impl EditorView {
             sidebar_scroll_handle: ScrollHandle::new(),
             pending_sidebar_scroll_top: Rc::new(Cell::new(None)),
             pending_sidebar_scroll_anchor: None,
+            pending_sidebar_reveal_path: None,
             tab_bar_scroll_handle: ScrollHandle::new(),
             file_list_dir: PathBuf::new(),
             file_list_items: Vec::new(),
@@ -3700,16 +3704,16 @@ impl EditorView {
             return;
         }
 
-        let pending = Arc::new(std::sync::Mutex::new(HashSet::<PathBuf>::new()));
+        let pending = Arc::new(std::sync::Mutex::new(Vec::<notify::Event>::new()));
         let pending_writer = pending.clone();
 
         let mut watcher = match notify::recommended_watcher(
             move |result: Result<notify::Event, notify::Error>| {
                 if let Ok(event) = result {
-                    if !event.paths.is_empty() {
-                        if let Ok(mut guard) = pending_writer.lock() {
-                            guard.extend(event.paths);
-                        }
+                    if !event.paths.is_empty()
+                        && let Ok(mut guard) = pending_writer.lock()
+                    {
+                        guard.push(event);
                     }
                 }
             },
@@ -3730,20 +3734,20 @@ impl EditorView {
                     .timer(std::time::Duration::from_millis(500))
                     .await;
 
-                let changed_paths: Vec<PathBuf> = {
+                let events: Vec<notify::Event> = {
                     let mut guard = match pending.lock() {
                         Ok(g) => g,
                         Err(_) => break,
                     };
-                    guard.drain().collect()
+                    guard.drain(..).collect()
                 };
 
-                if changed_paths.is_empty() {
+                if events.is_empty() {
                     continue;
                 }
 
                 let result = this.update(cx, |editor, cx| {
-                    editor.handle_fs_events(&changed_paths, cx);
+                    editor.handle_fs_notify_events(&events, cx);
                 });
                 if result.is_err() {
                     break;
@@ -3856,6 +3860,53 @@ impl EditorView {
             Ok(metadata) => !metadata.is_dir(),
             Err(_) => true,
         }
+    }
+
+    fn fs_rename_mappings(events: &[notify::Event]) -> Vec<(PathBuf, PathBuf)> {
+        use notify::EventKind;
+        use notify::event::{ModifyKind, RenameMode};
+
+        let mut mappings = Vec::new();
+        let mut pending_from = std::collections::HashMap::<usize, PathBuf>::new();
+        for event in events {
+            match &event.kind {
+                EventKind::Modify(ModifyKind::Name(RenameMode::Both | RenameMode::Any))
+                    if event.paths.len() >= 2 =>
+                {
+                    mappings.push((event.paths[0].clone(), event.paths[1].clone()));
+                }
+                EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+                    if let (Some(tracker), Some(path)) =
+                        (event.attrs.tracker(), event.paths.first())
+                    {
+                        pending_from.insert(tracker, path.clone());
+                    }
+                }
+                EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+                    if let (Some(tracker), Some(path)) =
+                        (event.attrs.tracker(), event.paths.first())
+                        && let Some(from) = pending_from.remove(&tracker)
+                    {
+                        mappings.push((from, path.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        mappings
+    }
+
+    fn handle_fs_notify_events(&mut self, events: &[notify::Event], cx: &mut Context<Self>) {
+        for (from, to) in Self::fs_rename_mappings(events) {
+            if from.starts_with(&self.sidebar_root) {
+                self.rewrite_open_tab_paths_after_move(&from, &to);
+            }
+        }
+        let changed_paths = events
+            .iter()
+            .flat_map(|event| event.paths.iter().cloned())
+            .collect::<Vec<_>>();
+        self.handle_fs_events(&changed_paths, cx);
     }
 
     pub(crate) fn handle_fs_events(&mut self, changed_paths: &[PathBuf], cx: &mut Context<Self>) {
@@ -7750,9 +7801,8 @@ impl EditorView {
 
         let policy = self.app_settings.attachment_policy();
         let index = attachments::WorkspaceLinkIndex::build(&self.sidebar_root);
-        let Some(current_file) = self.current_file_path.as_deref() else {
-            return;
-        };
+        let unsaved_source = self.sidebar_root.join(".untitled.md");
+        let current_file = self.current_file_path.as_deref().unwrap_or(&unsaved_source);
         let links: Vec<String> = paths
             .iter()
             .filter_map(|path| {
@@ -9198,13 +9248,38 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        classify_file_kind_for_bytes, compute_incremental_markdown_decorations,
+        EditorView, classify_file_kind_for_bytes, compute_incremental_markdown_decorations,
         generated_preview_intersects_range, heading_matches_anchor,
         line_display_transfer_line_bounds, normalize_ordered_list_numbers_in_buffer,
         resolve_markdown_target_path, split_markdown_target, text_tab_is_dirty, unique_import_path,
     };
     use crate::buffer::Buffer;
     use crate::markdown::parse_decorations;
+
+    #[test]
+    fn fs_rename_events_preserve_old_and_new_paths() {
+        use notify::EventKind;
+        use notify::event::{ModifyKind, RenameMode};
+
+        let both = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path("/workspace/old.md".into())
+            .add_path("/workspace/new.md".into());
+        assert_eq!(
+            EditorView::fs_rename_mappings(&[both]),
+            vec![("/workspace/old.md".into(), "/workspace/new.md".into())]
+        );
+
+        let from = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+            .add_path("/workspace/old-dir".into())
+            .set_tracker(7);
+        let to = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+            .add_path("/workspace/new-dir".into())
+            .set_tracker(7);
+        assert_eq!(
+            EditorView::fs_rename_mappings(&[from, to]),
+            vec![("/workspace/old-dir".into(), "/workspace/new-dir".into())]
+        );
+    }
 
     #[test]
     fn markdown_extensions_include_mdx() {

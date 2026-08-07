@@ -100,6 +100,16 @@ pub(super) struct ImageMenuTarget {
 }
 
 impl EditorView {
+    fn suppress_editor_mouse_up_for_current_menu_event(&mut self, cx: &mut Context<Self>) {
+        self.suppress_next_editor_mouse_up = true;
+        let editor = cx.entity().clone();
+        cx.defer(move |cx| {
+            editor.update(cx, |this, _| {
+                this.suppress_next_editor_mouse_up = false;
+            });
+        });
+    }
+
     pub(crate) fn open_context_menu(
         &mut self,
         menu: ContextMenu,
@@ -1713,6 +1723,7 @@ impl EditorView {
                 cx.listener(move |this, _event, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
+                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
                     this.close_context_menu(cx);
                     handler(this, window, cx);
                 }),
@@ -1788,6 +1799,7 @@ impl EditorView {
                 cx.listener(move |this, _event, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
+                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
                     this.close_context_menu(cx);
                     handler(this, window, cx);
                 }),
@@ -1807,7 +1819,6 @@ impl EditorView {
         let hover_bg = ms.menu_item_hover_bg;
         let icon_size = self.scaled(wss.ws_menu_item_check_size_px);
         let gap = self.scaled(wss.ws_menu_item_action_icon_gap_px);
-
         div()
             .w_full()
             .h(px(self.scaled(ms.menu_item_height_px)))
@@ -1849,6 +1860,7 @@ impl EditorView {
                 cx.listener(move |this, _event, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
+                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
                     this.close_context_menu(cx);
                     handler(this, window, cx);
                 }),
@@ -1998,6 +2010,7 @@ impl EditorView {
                 cx.listener(move |this, _event, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
+                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
                     handler(this, window, cx);
                 }),
             )
@@ -3924,54 +3937,61 @@ impl EditorView {
             .get(table_start_line)
             .and_then(|dec| dec.table_info.as_ref())
             .is_some_and(|info| info.is_front_matter);
-        items.push(self.render_context_menu_item(
+        items.push(self.render_context_menu_item_with_icon(
             self.t(crate::i18n::TextKey::AddRowAbove),
+            TABLE_ROWS_SVG,
             false,
             cx,
             move |this, _, cx| this.table_insert_row(table_start_line, row, true, cx),
         ));
-        items.push(self.render_context_menu_item(
+        items.push(self.render_context_menu_item_with_icon(
             self.t(crate::i18n::TextKey::AddRowBelow),
+            TABLE_ROWS_SVG,
             false,
             cx,
             move |this, _, cx| this.table_insert_row(table_start_line, row, false, cx),
         ));
         if !is_front_matter {
-            items.push(self.render_context_menu_item(
+            items.push(self.render_context_menu_item_with_icon(
                 self.t(crate::i18n::TextKey::AddColumnLeft),
+                TABLE_COLUMNS_SVG,
                 false,
                 cx,
                 move |this, _, cx| this.table_insert_column(table_start_line, col, true, cx),
             ));
-            items.push(self.render_context_menu_item(
+            items.push(self.render_context_menu_item_with_icon(
                 self.t(crate::i18n::TextKey::AddColumnRight),
+                TABLE_COLUMNS_SVG,
                 false,
                 cx,
                 move |this, _, cx| this.table_insert_column(table_start_line, col, false, cx),
             ));
         }
         items.push(self.render_context_menu_separator());
-        items.push(self.render_context_menu_item(
+        items.push(self.render_context_menu_item_with_icon(
             self.t(crate::i18n::TextKey::DeleteRow),
+            TABLE_DELETE_SVG,
             false,
             cx,
             move |this, _, cx| this.table_delete_row(table_start_line, row, cx),
         ));
         if !is_front_matter {
-            items.push(self.render_context_menu_item(
+            items.push(self.render_context_menu_item_with_icon(
                 self.t(crate::i18n::TextKey::DeleteColumn),
+                TABLE_DELETE_SVG,
                 false,
                 cx,
                 move |this, _, cx| this.table_delete_column(table_start_line, col, cx),
             ));
         }
         items.push(self.render_context_menu_separator());
-        items.push(self.render_context_menu_item(
+        items.push(self.render_context_menu_item_with_icon(
             if is_front_matter {
                 self.t(crate::i18n::TextKey::DeleteFrontMatter)
             } else {
                 self.t(crate::i18n::TextKey::DeleteTable)
             },
+            TABLE_GRID_SVG,
             false,
             cx,
             move |this, _, cx| this.table_delete_table(table_start_line, cx),
@@ -4587,6 +4607,7 @@ impl EditorView {
                                         cx.listener(move |this, _, window, cx| {
                                             window.prevent_default();
                                             cx.stop_propagation();
+                                            this.suppress_editor_mouse_up_for_current_menu_event(cx);
                                             this.close_workspace(&ws_close, cx);
                                         }),
                                     ),
@@ -4603,6 +4624,7 @@ impl EditorView {
                                 cx.listener(move |this, _, window, cx| {
                                     window.prevent_default();
                                     cx.stop_propagation();
+                                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
                                     this.switch_workspace(ws_switch.clone(), cx);
                                 }),
                             )
@@ -4725,6 +4747,35 @@ impl EditorView {
             .top(px(0.0))
             .w_full()
             .h_full()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|_, _, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_, _, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|_, _, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
+            )
             .child(main_menu)
             .when_some(submenu, |this, submenu| this.child(submenu))
             .into_any_element()

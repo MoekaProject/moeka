@@ -1477,7 +1477,7 @@ impl Styles {
                 editor_heading_latin_font_family: "Menlo",
                 editor_heading_cjk_font_family: "PingFang SC",
                 editor_italic_latin_font_family: "Menlo",
-                editor_italic_cjk_font_family: "Kaiti SC",
+                editor_italic_cjk_font_family: "Maple Mono NF CN",
                 editor_monospace_font_family: "Menlo",
                 editor_paragraph_padding_top_px: 0.0,
                 editor_paragraph_padding_bottom_px: 0.0,

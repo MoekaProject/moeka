@@ -1731,13 +1731,13 @@ fn parse_callout_kind(label: &str) -> Option<CalloutKind> {
 }
 
 fn callout_replacement_text(kind: CalloutKind) -> &'static str {
-    // Four em-spaces reserve enough shaped width for the enlarged icon and label gap.
+    // One em plus one thin space reserves approximately a 1em icon and its label gap.
     match kind {
-        CalloutKind::Note => "\u{2003}\u{2003}\u{2003}\u{2003}",
-        CalloutKind::Tip => "\u{2003}\u{2003}\u{2003}\u{2003}",
-        CalloutKind::Important => "\u{2003}\u{2003}\u{2003}\u{2003}",
-        CalloutKind::Warning => "\u{2003}\u{2003}\u{2003}\u{2003}",
-        CalloutKind::Caution => "\u{2003}\u{2003}\u{2003}\u{2003}",
+        CalloutKind::Note => "\u{2003}\u{2009}",
+        CalloutKind::Tip => "\u{2003}\u{2009}",
+        CalloutKind::Important => "\u{2003}\u{2009}",
+        CalloutKind::Warning => "\u{2003}\u{2009}",
+        CalloutKind::Caution => "\u{2003}\u{2009}",
     }
 }
 

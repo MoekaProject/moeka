@@ -190,6 +190,11 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.context_menu.is_some() {
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
         if self.active_tab_is_whiteboard() {
             self.whiteboard_on_mouse_down(event, window, cx);
             return;
@@ -370,10 +375,6 @@ impl EditorView {
                 cx.notify();
                 return;
             }
-        }
-
-        if self.context_menu.is_some() {
-            return;
         }
 
         if let Some(&(_, start_line)) = self
@@ -1181,6 +1182,46 @@ impl EditorView {
             return;
         }
 
+        if let Some(&(_, table_start, col)) = self
+            .table_col_handle_areas
+            .iter()
+            .find(|(bounds, _, _)| bounds.contains(&event.position))
+        {
+            self.open_context_menu(
+                ContextMenu {
+                    position: event.position,
+                    kind: ContextMenuKind::Table {
+                        table_start_line: table_start,
+                        row: 0,
+                        col,
+                    },
+                },
+                true,
+                cx,
+            );
+            return;
+        }
+
+        if let Some(&(_, table_start, row)) = self
+            .table_row_handle_areas
+            .iter()
+            .find(|(bounds, _, _)| bounds.contains(&event.position))
+        {
+            self.open_context_menu(
+                ContextMenu {
+                    position: event.position,
+                    kind: ContextMenuKind::Table {
+                        table_start_line: table_start,
+                        row,
+                        col: 0,
+                    },
+                },
+                true,
+                cx,
+            );
+            return;
+        }
+
         if let Some(&(bounds, table_start, visual_row, col)) = self
             .table_click_areas
             .iter()
@@ -1312,9 +1353,15 @@ impl EditorView {
     pub(crate) fn on_mouse_up(
         &mut self,
         event: &MouseUpEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.suppress_next_editor_mouse_up || self.context_menu.is_some() {
+            self.suppress_next_editor_mouse_up = false;
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
         if self.active_tab_is_whiteboard() {
             self.whiteboard_on_mouse_up(event, cx);
             return;

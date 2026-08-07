@@ -1434,7 +1434,7 @@ fn push_rendered_inline_overlays(
                 editor.scaled(quote_styles.quote_block_callout_icon_min_px),
                 quote_styles.quote_block_callout_icon_max_line_height_factor,
             );
-            let icon_x = content_x + indent_start + f32::from(pos_end.x) - callout_gap - icon_size;
+            let icon_x = content_x + indent_start + f32::from(pos_start.x);
             let icon_y = text_line_top + f32::from(pos_start.y) + (line_height - icon_size) / 2.0;
             inline_svgs.push((
                 Bounds::new(
@@ -5050,8 +5050,7 @@ impl Element for EditorElement {
                         editor.scaled(quote_block_styles.quote_block_callout_icon_min_px),
                         quote_block_styles.quote_block_callout_icon_max_line_height_factor,
                     );
-                    let icon_x =
-                        content_x + indent_start + f32::from(pos_end.x) - callout_gap - icon_size;
+                    let icon_x = content_x + indent_start + f32::from(pos_start.x);
                     let icon_y =
                         text_line_top + f32::from(pos_start.y) + (line_height - icon_size) / 2.0;
                     inline_svgs.push((

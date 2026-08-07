@@ -701,6 +701,7 @@ impl EditorView {
         self.pending_sidebar_scroll_top.set(None);
         self.pending_sidebar_scroll_anchor = None;
         self.pending_file_list_scroll_top.set(None);
+        self.pending_sidebar_reveal_path = Some(path.clone());
 
         let mut expanded_changed = switched_workspace;
         let mut directories_to_load = Vec::new();
@@ -768,6 +769,9 @@ impl EditorView {
 
                             if editor.ensure_sidebar_item_minimally_visible(index, item_count) {
                                 cx.notify();
+                            }
+                            if editor.pending_sidebar_reveal_path.as_ref() == Some(path) {
+                                editor.pending_sidebar_reveal_path = None;
                             }
                             true
                         })

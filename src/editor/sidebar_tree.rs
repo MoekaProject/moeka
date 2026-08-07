@@ -35,6 +35,9 @@ fn load_sidebar_directory(path: &Path, sort_mode: SidebarSortMode) -> Vec<Sideba
 
 impl EditorView {
     fn capture_file_view_scroll_positions(&mut self) {
+        if self.pending_sidebar_reveal_path.is_some() {
+            return;
+        }
         if self.pending_sidebar_scroll_top.get().is_none() {
             let scroll_top = (-f32::from(self.sidebar_scroll_handle.offset().y)).max(0.0);
             self.pending_sidebar_scroll_top.set(Some(scroll_top));
