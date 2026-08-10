@@ -1713,13 +1713,6 @@ impl EditorView {
             .child(label.to_string())
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_this, _event, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
@@ -1789,13 +1782,6 @@ impl EditorView {
             .child(label.to_string())
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_this, _event, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
@@ -1849,13 +1835,6 @@ impl EditorView {
             )
             .child(label.to_string())
             .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_this, _event, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                }),
-            )
-            .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
                     window.prevent_default();
@@ -1999,13 +1978,6 @@ impl EditorView {
                 },
             )
             .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_this, _event, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                }),
-            )
-            .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
                     window.prevent_default();
@@ -3820,14 +3792,6 @@ impl EditorView {
                 cx.stop_propagation();
             }));
 
-        let menu_div = if panel_id == "context-menu" {
-            menu_div.on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                this.close_context_menu(cx);
-            }))
-        } else {
-            menu_div
-        };
-
         let menu_div = if panel_id == "context-submenu" {
             menu_div.on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
                 if *hovered {
@@ -4752,9 +4716,10 @@ impl EditorView {
             .occlude()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_, _, window, cx| {
+                cx.listener(|this, _, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
+                    this.close_context_menu(cx);
                 }),
             )
             .on_mouse_up(

@@ -533,7 +533,7 @@ impl Render for EditorView {
                                 return;
                             }
                             editor.update(cx, |this, cx| {
-                                if this.panes.len() < 2 {
+                                if this.context_menu.is_some() || this.panes.len() < 2 {
                                     return;
                                 }
                                 let target =

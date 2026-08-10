@@ -2,7 +2,8 @@ SHELL := /bin/bash
 
 APP_NAME := moeka
 APP_DISPLAY_NAME := Moeka
-HOST_TARGET := $(shell rustc -vV | awk '/^host:/ { print $$2 }')
+RUSTC ?= $(shell command -v rustc 2>/dev/null || printf '%s/.cargo/bin/rustc' "$$HOME")
+HOST_TARGET := $(shell "$(RUSTC)" -vV | awk '/^host:/ { print $$2 }')
 TARGET ?= $(HOST_TARGET)
 PROFILE := release
 VERSION := $(shell awk -F '"' '/^version = / { print $$2; exit }' Cargo.toml)
@@ -30,15 +31,19 @@ ICON_SOURCE := packaging/macos/AppIcon-1024.png
 ICON_SCRIPT := scripts/generate_app_icon.sh
 DMG_BACKGROUND := install-bg.jpg
 DMG_SCRIPT := scripts/create_dmg.sh
+SIGNED_PACKAGE_SCRIPT := scripts/sign_notarize_package.sh
 VOLUME_NAME := $(APP_DISPLAY_NAME)
 TAG ?= $(firstword $(filter v%,$(MAKECMDGOALS)))
 RELEASE_REPO ?= MoekaProject/release
+DEVELOPER_ID_APPLICATION ?= $(shell security find-identity -v -p codesigning 2>/dev/null | sed -nE 's/.*"(Developer ID Application:[^"]+)".*/\1/p' | head -1)
+TEAM_ID ?= $(shell printf '%s\n' '$(DEVELOPER_ID_APPLICATION)' | sed -nE 's/.*\(([A-Z0-9]{10})\)$$/\1/p')
+NOTARY_PROFILE ?= moeka-notary
 DIST_SUFFIXES := arm64 x86_64
 ZIP_PATHS := \
 	$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-arm64.zip \
 	$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-x86_64.zip
 
-.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one app build-release clean-dmg clean-app tag dist publish publish-check
+.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check
 
 dmg: $(ICON_FILE)
 	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -60,8 +65,7 @@ dmg-x86_64:
 dist: dmg
 
 publish: publish-check
-	@$(MAKE) dmg
-	@$(MAKE) zip
+	@$(MAKE) signed-release
 	@set -euo pipefail; \
 	assets=(); \
 	for suffix in $(DIST_SUFFIXES); do \
@@ -96,6 +100,27 @@ publish-check:
 		exit 1; \
 	fi
 	@command -v gh >/dev/null || { echo "gh CLI is required: brew install gh && gh auth login"; exit 1; }
+	@test -n "$(DEVELOPER_ID_APPLICATION)" || { \
+		echo "No Developer ID Application identity found in Keychain."; \
+		echo "Create it in Xcode > Settings > Accounts > Manage Certificates."; \
+		exit 1; \
+	}
+	@security find-identity -v -p codesigning | grep -F '"$(DEVELOPER_ID_APPLICATION)"' >/dev/null || { \
+		echo "Signing identity not available: $(DEVELOPER_ID_APPLICATION)"; \
+		exit 1; \
+	}
+	@xcrun notarytool history --keychain-profile "$(NOTARY_PROFILE)" >/dev/null 2>&1 || { \
+		echo "Notary credentials not found: $(NOTARY_PROFILE)"; \
+		echo "Run: make notary-setup APPLE_ID=your-apple-id@example.com"; \
+		exit 1; \
+	}
+
+notary-setup:
+	@test -n "$(APPLE_ID)" || { echo "Usage: make notary-setup APPLE_ID=your-apple-id@example.com"; exit 1; }
+	@test -n "$(TEAM_ID)" || { echo "Unable to detect Team ID from signing identity."; exit 1; }
+	@xcrun notarytool store-credentials "$(NOTARY_PROFILE)" \
+		--apple-id "$(APPLE_ID)" \
+		--team-id "$(TEAM_ID)"
 
 tag:
 	@if [[ ! "$(TAG)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
@@ -127,6 +152,37 @@ zip-one: app
 	@rm -f "$(ZIP_PATH)"
 	@ditto -c -k --sequesterRsrc --keepParent "$(APP_DIR)" "$(ZIP_PATH)"
 	@echo "Created $(ZIP_PATH)"
+
+signed-release:
+	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
+	@$(MAKE) -j2 signed-release-arm64 signed-release-x86_64
+	@ls -lh "$(DIST_DIR)"
+
+signed-release-arm64:
+	@$(MAKE) signed-release-one \
+		TARGET=aarch64-apple-darwin \
+		DMG_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-arm64.dmg" \
+		ZIP_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-arm64.zip" \
+		VOLUME_NAME="$(APP_DISPLAY_NAME)-arm64"
+
+signed-release-x86_64:
+	@$(MAKE) signed-release-one \
+		TARGET=x86_64-apple-darwin \
+		DMG_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-x86_64.dmg" \
+		ZIP_PATH="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-x86_64.zip" \
+		VOLUME_NAME="$(APP_DISPLAY_NAME)-x86_64"
+
+signed-release-one: app $(DMG_BACKGROUND) $(DMG_SCRIPT) $(SIGNED_PACKAGE_SCRIPT)
+	@bash "$(SIGNED_PACKAGE_SCRIPT)" \
+		"$(APP_DIR)" \
+		"$(DMG_STAGING_DIR)" \
+		"$(DMG_PATH)" \
+		"$(ZIP_PATH)" \
+		"$(VOLUME_NAME)" \
+		"$(APP_DISPLAY_NAME)" \
+		"$(DMG_BACKGROUND)" \
+		"$(DEVELOPER_ID_APPLICATION)" \
+		"$(NOTARY_PROFILE)"
 
 dmg-one: $(DMG_PATH)
 
