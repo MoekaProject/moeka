@@ -3508,6 +3508,15 @@ impl Element for EditorElement {
             };
             let quote_inner_left_padding = quote_border_width + quote_padding_left;
             let quote_horizontal_padding = quote_inner_left_padding + quote_padding_right;
+            // A quote nested in a list keeps that list's indentation, which the
+            // concealed `>` prefix would otherwise collapse to the left margin.
+            let quote_indent_px = if is_quote_line {
+                let leading_ws =
+                    line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+                leading_ws as f32 * body_space_width
+            } else {
+                0.0
+            };
 
             let code_mode_split_gap = editor.scaled(14.0);
             let code_mode_text_width = ((text_width - code_mode_split_gap) * 0.5).max(80.0);
@@ -3526,6 +3535,7 @@ impl Element for EditorElement {
             } else if is_quote_line {
                 (text_width
                     - quote_horizontal_padding
+                    - quote_indent_px
                     - editor.scaled(editor.styles.editor.editor_wrap_right_padding_px))
                 .max(editor.scaled(80.0))
             } else {
@@ -3743,10 +3753,11 @@ impl Element for EditorElement {
                 if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
                     editor_left
                         + editor.padding_left()
+                        + quote_indent_px
                         + quote_inner_left_padding
                         + editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
                 } else if is_quote_line {
-                    editor_left + editor.padding_left() + quote_inner_left_padding
+                    editor_left + editor.padding_left() + quote_indent_px + quote_inner_left_padding
                 } else {
                     editor_left + editor.padding_left()
                 };
@@ -3936,8 +3947,8 @@ impl Element for EditorElement {
                     .get(group_start)
                     .and_then(|decoration| decoration.callout_kind);
                 let (quote_bg, quote_border_color) = quote_block_colors(editor, callout_kind);
-                let background_left = editor_left + editor.padding_left();
-                let background_width = text_width.max(0.0);
+                let background_left = editor_left + editor.padding_left() + quote_indent_px;
+                let background_width = (text_width - quote_indent_px).max(0.0);
                 if background_width > 0.0 {
                     quote_block_bgs.push(quad(
                         Bounds::new(

@@ -905,6 +905,32 @@ impl EditorView {
         self.finish_horizontal_cursor_move(cx);
     }
 
+    /// Enter on an empty nested list item steps out one level instead of
+    /// dropping the marker outright. Reports whether the outdent applied.
+    fn outdent_empty_list_item(
+        &mut self,
+        line_start: usize,
+        line_end: usize,
+        line_content: &str,
+        leading_ws: usize,
+        indent_step: usize,
+    ) -> bool {
+        if leading_ws == 0 {
+            return false;
+        }
+        let step = indent_step.clamp(1, leading_ws);
+        let outdented = format!(
+            "{}{}",
+            " ".repeat(leading_ws - step),
+            &line_content[leading_ws..]
+        );
+        self.queue_non_markdown_line_display_transfer(&(line_start..line_end), &outdented);
+        self.buffer.replace(line_start..line_end, &outdented);
+        self.cursor
+            .move_to(line_start + outdented.len(), &self.buffer);
+        true
+    }
+
     pub(crate) fn on_enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
         if self.focused_sidebar_path.is_some() {
             if self.sidebar_edit.is_some() {
@@ -967,13 +993,21 @@ impl EditorView {
                 if marker_len > 0 && self.cursor.offset >= line_start + leading_ws + marker_len {
                     let text_after_marker = &line_content[leading_ws + marker_len..];
                     if text_after_marker.trim().is_empty() {
-                        self.queue_non_markdown_line_display_transfer(
-                            &(line_start..line_end),
-                            "\n",
-                        );
-                        self.buffer.replace(line_start..line_end, "");
-                        self.cursor.move_to(line_start, &self.buffer);
-                        self.cursor.insert(&mut self.buffer, "\n");
+                        if !self.outdent_empty_list_item(
+                            line_start,
+                            line_end,
+                            &line_content,
+                            leading_ws,
+                            2,
+                        ) {
+                            self.queue_non_markdown_line_display_transfer(
+                                &(line_start..line_end),
+                                "\n",
+                            );
+                            self.buffer.replace(line_start..line_end, "");
+                            self.cursor.move_to(line_start, &self.buffer);
+                            self.cursor.insert(&mut self.buffer, "\n");
+                        }
                     } else {
                         let marker = &trimmed[..marker_len];
                         let continuation = format!("\n{}{}", ws_str, marker);
@@ -994,13 +1028,21 @@ impl EditorView {
                 if prefix_len > 0 && self.cursor.offset >= line_start + leading_ws + prefix_len {
                     let text_after_marker = &line_content[leading_ws + prefix_len..];
                     if text_after_marker.trim().is_empty() {
-                        self.queue_non_markdown_line_display_transfer(
-                            &(line_start..line_end),
-                            "\n",
-                        );
-                        self.buffer.replace(line_start..line_end, "");
-                        self.cursor.move_to(line_start, &self.buffer);
-                        self.cursor.insert(&mut self.buffer, "\n");
+                        if !self.outdent_empty_list_item(
+                            line_start,
+                            line_end,
+                            &line_content,
+                            leading_ws,
+                            2,
+                        ) {
+                            self.queue_non_markdown_line_display_transfer(
+                                &(line_start..line_end),
+                                "\n",
+                            );
+                            self.buffer.replace(line_start..line_end, "");
+                            self.cursor.move_to(line_start, &self.buffer);
+                            self.cursor.insert(&mut self.buffer, "\n");
+                        }
                     } else {
                         let bullet = if trimmed.starts_with("- ") {
                             "- "
@@ -1028,13 +1070,21 @@ impl EditorView {
                     let number: u32 = trimmed[..prefix_len.saturating_sub(2)].parse().unwrap_or(1);
                     let text_after_marker = &line_content[leading_ws + prefix_len..];
                     if text_after_marker.trim().is_empty() {
-                        self.queue_non_markdown_line_display_transfer(
-                            &(line_start..line_end),
-                            "\n",
-                        );
-                        self.buffer.replace(line_start..line_end, "");
-                        self.cursor.move_to(line_start, &self.buffer);
-                        self.cursor.insert(&mut self.buffer, "\n");
+                        if !self.outdent_empty_list_item(
+                            line_start,
+                            line_end,
+                            &line_content,
+                            leading_ws,
+                            3,
+                        ) {
+                            self.queue_non_markdown_line_display_transfer(
+                                &(line_start..line_end),
+                                "\n",
+                            );
+                            self.buffer.replace(line_start..line_end, "");
+                            self.cursor.move_to(line_start, &self.buffer);
+                            self.cursor.insert(&mut self.buffer, "\n");
+                        }
                         self.reparse();
                         self.normalize_ordered_list_near_line(cursor_line, false);
                     } else {

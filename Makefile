@@ -65,6 +65,8 @@ dmg-x86_64:
 dist: dmg
 
 publish: publish-check
+	@git push origin HEAD:main
+	@$(MAKE) tag
 	@$(MAKE) signed-release
 	@set -euo pipefail; \
 	assets=(); \
@@ -97,6 +99,10 @@ publish-check:
 	@if [[ "$(TAG)" != "v$(VERSION)" ]]; then \
 		echo "Tag/version mismatch: TAG=$(TAG), Cargo.toml version=$(VERSION)."; \
 		echo "Please bump Cargo.toml version or publish with matching tag."; \
+		exit 1; \
+	fi
+	@if [[ -n "$$(git status --porcelain)" ]]; then \
+		echo "Working tree is dirty; commit or stash before publishing $(TAG)."; \
 		exit 1; \
 	fi
 	@command -v gh >/dev/null || { echo "gh CLI is required: brew install gh && gh auth login"; exit 1; }

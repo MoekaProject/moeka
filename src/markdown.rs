@@ -273,6 +273,26 @@ fn empty_unordered_list_item_prefix_len(content: &str) -> Option<(usize, usize)>
     (prefix_len > 0 && trimmed[prefix_len..].is_empty()).then_some((leading_ws, prefix_len))
 }
 
+/// A `-` marker with nothing but whitespace after it, as typed while starting a
+/// list. Returns the leading indent and the concealable prefix length, which is
+/// zero until the separating space is typed.
+fn in_progress_unordered_marker(content: &str) -> Option<(usize, usize)> {
+    let leading_ws = content.len() - content.trim_start_matches([' ', '\t']).len();
+    let trimmed = &content[leading_ws..];
+    let rest = trimmed.strip_prefix('-')?;
+    if !rest.trim_matches([' ', '\t']).is_empty() {
+        return None;
+    }
+    Some((leading_ws, unordered_list_prefix_len(trimmed)))
+}
+
+/// Setext underlines only retroactively promote the paragraph above them, so a
+/// short run is treated as text still being typed: `-` starts a list and `=`/`==`
+/// starts a `==highlight==`. Runs of three or more still form headings.
+fn is_in_progress_setext_underline(content: &str) -> bool {
+    content.trim_matches([' ', '\t']).chars().count() < 3
+}
+
 fn blockquote_prefix_len(content: &str) -> usize {
     let leading_spaces = content.bytes().take_while(|&byte| byte == b' ').count();
     if leading_spaces > 3 {
@@ -716,15 +736,32 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                             });
 
                         if let Some(underline_line) = underline_line {
-                            for heading_line in line..underline_line {
-                                decorations[heading_line].block_type = BlockType::Heading(lvl);
-                            }
                             let underline_content = get_line_content(
                                 text,
                                 &line_starts,
                                 underline_line,
                                 decorations.len(),
                             );
+                            // A short `-`/`=` run under a paragraph is still being
+                            // typed, so it must not promote that paragraph to a
+                            // heading; `-` additionally starts a list.
+                            if is_in_progress_setext_underline(underline_content) {
+                                if let Some((marker_ws, marker_len)) =
+                                    in_progress_unordered_marker(underline_content)
+                                    && marker_len > 0
+                                {
+                                    decorations[underline_line].block_type =
+                                        BlockType::UnorderedList;
+                                    decorations[underline_line].syntax_ranges.push(SyntaxRange {
+                                        range: marker_ws..marker_ws + marker_len,
+                                        trigger_range: marker_ws..marker_ws + marker_len,
+                                    });
+                                }
+                                continue;
+                            }
+                            for heading_line in line..underline_line {
+                                decorations[heading_line].block_type = BlockType::Heading(lvl);
+                            }
                             if let Some(underline_len) =
                                 setext_heading_underline_len(underline_content)
                             {
@@ -4213,6 +4250,52 @@ mod tests {
         let decorations = parse_decorations("Title\n---\n");
 
         assert_eq!(decorations[0].block_type, BlockType::Heading(2));
+    }
+
+    #[test]
+    fn lone_dash_under_paragraph_starts_a_list_instead_of_a_setext_heading() {
+        let typing_marker = parse_decorations("text\n-");
+        assert_eq!(typing_marker[0].block_type, BlockType::Normal);
+        assert_eq!(typing_marker[1].block_type, BlockType::Normal);
+        assert!(typing_marker[1].syntax_ranges.is_empty());
+
+        let with_space = parse_decorations("text\n- ");
+        assert_eq!(with_space[0].block_type, BlockType::Normal);
+        assert_eq!(with_space[1].block_type, BlockType::UnorderedList);
+        assert_eq!(with_space[1].syntax_ranges[0].range, 0..2);
+
+        let nested = parse_decorations("text\n  - ");
+        assert_eq!(nested[0].block_type, BlockType::Normal);
+        assert_eq!(nested[1].block_type, BlockType::UnorderedList);
+        assert_eq!(nested[1].syntax_ranges[0].range, 2..4);
+    }
+
+    #[test]
+    fn short_underlines_do_not_promote_the_paragraph_above_while_typing() {
+        for underline in ["-", "--", "=", "=="] {
+            let decorations = parse_decorations(&format!("text\n{underline}"));
+            assert_eq!(
+                decorations[0].block_type,
+                BlockType::Normal,
+                "{underline:?} should not promote the paragraph above"
+            );
+        }
+
+        let highlight = parse_decorations("text\n==marked==");
+        assert_eq!(highlight[0].block_type, BlockType::Normal);
+        assert_eq!(highlight[1].highlight_spans, vec![2..8]);
+    }
+
+    #[test]
+    fn full_length_underlines_still_form_setext_headings() {
+        assert_eq!(
+            parse_decorations("Title\n---")[0].block_type,
+            BlockType::Heading(2)
+        );
+        assert_eq!(
+            parse_decorations("Title\n===")[0].block_type,
+            BlockType::Heading(1)
+        );
     }
 
     #[test]

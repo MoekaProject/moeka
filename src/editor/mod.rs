@@ -8866,6 +8866,13 @@ impl EditorView {
             return false;
         }
 
+        // A bare `-`/`*`/`+` stays plain text until its separating space arrives,
+        // and a space trips none of the blocklist above, so the marker line has to
+        // be re-parsed explicitly for the list to appear as soon as it is typed.
+        if matches!(trimmed, "-" | "*" | "+") {
+            return false;
+        }
+
         if markdown_plain_edit_can_change_inline_delimiter_flanking(inserted_text, line_before_edit)
         {
             return false;
