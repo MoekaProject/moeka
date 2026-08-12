@@ -1927,6 +1927,7 @@ pub struct EditorView {
     pub(crate) cached_font_names: Option<Vec<String>>,
     pub(crate) update_state: UpdateState,
     pub(crate) update_task: Option<Task<()>>,
+    pub(crate) update_poll_task: Option<Task<()>>,
     pub(crate) ui_language: UiLanguage,
     pub(crate) app_settings: AppSettings,
     pub(crate) runtime_profiler: Option<profiler::RuntimeProfiler>,
@@ -2516,6 +2517,7 @@ impl EditorView {
             cached_font_names: None,
             update_state: UpdateState::Idle,
             update_task: None,
+            update_poll_task: None,
             ui_language,
             app_settings,
             runtime_profiler,
@@ -2527,7 +2529,7 @@ impl EditorView {
             session_store::restore_session(&mut this);
             this.refresh_builtin_tab_titles();
             this.sync_panel_display_state();
-            this.start_update_check(cx);
+            this.start_update_polling(cx);
         } else {
             this.editor_left_aligned = true;
             this.cursor.offset = this.buffer.len();
@@ -4831,6 +4833,19 @@ impl EditorView {
         self.apply_multi_cursor_resolved_edits(edits);
     }
 
+    /// Any overlay that owns the pointer while it is open, so window-level
+    /// capture handlers must not act on what is painted underneath it.
+    pub(crate) fn modal_overlay_is_open(&self) -> bool {
+        self.context_menu.is_some()
+            || self.dialog.is_some()
+            || self.settings_font_picker.is_some()
+            || self.quick_open_visible
+            || self.command_palette_visible
+            || self.language_picker_visible
+            || self.branch_picker_visible
+            || self.git_remote_input_visible
+    }
+
     pub(crate) fn render_dialog(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui::{CursorStyle, FontWeight, MouseButton, SharedString, div, prelude::*, px};
 
@@ -4865,11 +4880,25 @@ impl EditorView {
             .justify_center()
             .bg(backdrop_color)
             .cursor(CursorStyle::Arrow)
-            .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, _| {}))
-            .on_mouse_up(MouseButton::Left, cx.listener(|_, _, _, _| {}))
-            .on_mouse_down(MouseButton::Right, cx.listener(|_, _, _, _| {}))
-            .on_mouse_move(cx.listener(|_, _, _, _| {}))
-            .on_scroll_wheel(cx.listener(|_, _, _, _| {}))
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .on_mouse_move(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .child(
                 div()
                     .w(px(self.scaled(ds.dialog_width_px)))

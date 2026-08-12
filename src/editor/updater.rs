@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use gpui::Context;
 use serde::Deserialize;
@@ -11,6 +12,7 @@ use super::{Dialog, DialogAction, EditorView, config_paths};
 const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/MoekaProject/community/releases/latest";
 const USER_AGENT: &str = "MoekaUpdater/1.0";
+const UPDATE_POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const GIT_COMMIT: &str = env!("MOEKA_GIT_COMMIT");
@@ -77,6 +79,27 @@ struct GitHubAsset {
 }
 
 impl EditorView {
+    /// Checks on launch and then once a day, so a release published while the
+    /// app stays open is still picked up.
+    pub(crate) fn start_update_polling(&mut self, cx: &mut Context<Self>) {
+        if self.update_poll_task.is_some() {
+            return;
+        }
+
+        self.start_update_check(cx);
+        self.update_poll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(UPDATE_POLL_INTERVAL).await;
+                if this
+                    .update(cx, |this, cx| this.start_update_check(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
     pub(crate) fn start_update_check(&mut self, cx: &mut Context<Self>) {
         if self.update_task.is_some() || self.update_state.is_ready() {
             return;

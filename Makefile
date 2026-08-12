@@ -65,8 +65,8 @@ dmg-x86_64:
 dist: dmg
 
 publish: publish-check
-	@git push origin HEAD:main
-	@$(MAKE) tag
+	@git push --force-with-lease origin HEAD:main
+	@$(MAKE) tag TAG="$(TAG)"
 	@$(MAKE) signed-release
 	@set -euo pipefail; \
 	assets=(); \

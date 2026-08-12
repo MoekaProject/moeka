@@ -533,7 +533,7 @@ impl Render for EditorView {
                                 return;
                             }
                             editor.update(cx, |this, cx| {
-                                if this.context_menu.is_some() || this.panes.len() < 2 {
+                                if this.modal_overlay_is_open() || this.panes.len() < 2 {
                                     return;
                                 }
                                 let target =
@@ -1223,7 +1223,7 @@ impl Render for EditorView {
                 this.child(deferred(self.render_git_remote_input_overlay(window, cx)))
             })
             .when(self.dialog.is_some(), |this| {
-                this.child(self.render_dialog(cx))
+                this.child(deferred(self.render_dialog(cx)))
             })
             .when(!self.notifications.is_empty(), |this| {
                 this.child(deferred(self.render_notifications(cx)))
