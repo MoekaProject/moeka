@@ -67,7 +67,11 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let ui_theme = self.app_settings.ui_theme_for(self.theme_kind);
-        self.styles = crate::style::Styles::from_theme(&self.theme, &ui_theme);
+        self.styles = crate::style::Styles::from_theme_with_options(
+            &self.theme,
+            &ui_theme,
+            self.app_settings.sidebar_always_dark,
+        );
         if self.theme_kind.is_moeka_retro() {
             self.styles.apply_moeka_retro_chrome(&self.theme, &ui_theme);
         }

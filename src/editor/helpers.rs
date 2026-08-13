@@ -5403,7 +5403,10 @@ pub(crate) fn build_text_runs_for_display(
     let is_heading = matches!(decoration.block_type, BlockType::Heading(_));
 
     if is_code_line {
-        assign_font_roles(0..buf_len, FontRole::Monospace, FontRole::BodyCjk);
+        // CJK in code must use the configured code font too (glyph-level
+        // fallback covers missing CJK glyphs); routing it to the body CJK
+        // font broke monospaced alignment for mixed-script code.
+        assign_font_roles(0..buf_len, FontRole::Monospace, FontRole::Monospace);
     } else {
         let has_latin_text = line_content
             .chars()
@@ -5548,7 +5551,7 @@ pub(crate) fn build_text_runs_for_display(
         }
 
         if matches!(span.kind, InlineKind::InlineCode) {
-            assign_font_roles(start..end, FontRole::Monospace, FontRole::BodyCjk);
+            assign_font_roles(start..end, FontRole::Monospace, FontRole::Monospace);
             for syntax_range in decoration.syntax_ranges.iter().filter(|syntax_range| {
                 syntax_range.trigger_range.start <= span.range.start
                     && syntax_range.trigger_range.end >= span.range.end
@@ -5561,7 +5564,7 @@ pub(crate) fn build_text_runs_for_display(
                 assign_font_roles(
                     syntax_start..syntax_end,
                     FontRole::Monospace,
-                    FontRole::BodyCjk,
+                    FontRole::Monospace,
                 );
             }
         } else if matches!(span.kind, InlineKind::Italic) && !is_code_line {
@@ -5594,7 +5597,7 @@ pub(crate) fn build_text_runs_for_display(
             buf_colors[index] = theme.inline_code;
             buf_bg_colors[index] = Some(theme.inline_code_bg);
         }
-        assign_font_roles(start..end, FontRole::Monospace, FontRole::BodyCjk);
+        assign_font_roles(start..end, FontRole::Monospace, FontRole::Monospace);
     }
 
     for superscript_range in &decoration.superscript_spans {
@@ -5695,7 +5698,7 @@ pub(crate) fn build_text_runs_for_display(
                             buf_weights[i] = list_marker_font_weight;
                         }
                     }
-                    assign_font_roles(start..end, FontRole::Monospace, FontRole::BodyCjk);
+                    assign_font_roles(start..end, FontRole::Monospace, FontRole::Monospace);
                 }
             }
         }
@@ -5707,7 +5710,7 @@ pub(crate) fn build_text_runs_for_display(
             for i in start..end {
                 buf_colors[i] = theme.syntax_marker;
             }
-            assign_font_roles(start..end, FontRole::Monospace, FontRole::BodyCjk);
+            assign_font_roles(start..end, FontRole::Monospace, FontRole::Monospace);
         }
     }
 

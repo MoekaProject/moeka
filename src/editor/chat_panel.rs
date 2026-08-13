@@ -1587,11 +1587,57 @@ fn agent_cli_command_exists(agent_cli: ChatAgentCli) -> bool {
         .any(|path| path.is_file())
 }
 
-fn chat_terminal_path_env() -> OsString {
-    let mut paths: Vec<PathBuf> = env::var_os("PATH")
-        .map(|paths| env::split_paths(&paths).collect())
-        .unwrap_or_default();
+/// PATH reported by the user's login shell. Finder-launched apps inherit a
+/// minimal PATH that misses user-level tool directories (cargo, npm, nvm...),
+/// which made installed CLIs look missing and left PTY commands unresolvable.
+static LOGIN_SHELL_PATH: std::sync::OnceLock<Option<OsString>> = std::sync::OnceLock::new();
+static LOGIN_SHELL_PATH_PREFETCH: std::sync::Once = std::sync::Once::new();
 
+pub(crate) fn prefetch_login_shell_path() {
+    LOGIN_SHELL_PATH_PREFETCH.call_once(|| {
+        std::thread::spawn(|| {
+            let value = query_login_shell_path();
+            let _ = LOGIN_SHELL_PATH.set(value);
+        });
+    });
+}
+
+fn query_login_shell_path() -> Option<OsString> {
+    let output = std::process::Command::new(chat_terminal_default_shell_program())
+        .args(["-lc", "printf '%s' \"$PATH\""])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout);
+    let trimmed = path.trim();
+    (!trimmed.is_empty()).then(|| OsString::from(trimmed))
+}
+
+fn chat_terminal_path_env() -> OsString {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let push_unique = |paths: &mut Vec<PathBuf>, candidate: PathBuf| {
+        if !paths.contains(&candidate) {
+            paths.push(candidate);
+        }
+    };
+
+    if let Some(Some(login_path)) = LOGIN_SHELL_PATH.get() {
+        for path in env::split_paths(login_path) {
+            push_unique(&mut paths, path);
+        }
+    }
+    if let Some(process_path) = env::var_os("PATH") {
+        for path in env::split_paths(&process_path) {
+            push_unique(&mut paths, path);
+        }
+    }
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        for candidate in [".local/bin", ".cargo/bin", "bin"] {
+            push_unique(&mut paths, home.join(candidate));
+        }
+    }
     for candidate in [
         "/opt/homebrew/bin",
         "/opt/homebrew/sbin",
@@ -1602,10 +1648,7 @@ fn chat_terminal_path_env() -> OsString {
         "/usr/sbin",
         "/sbin",
     ] {
-        let candidate = PathBuf::from(candidate);
-        if !paths.iter().any(|path| path == &candidate) {
-            paths.push(candidate);
-        }
+        push_unique(&mut paths, PathBuf::from(candidate));
     }
 
     env::join_paths(paths).unwrap_or_else(|_| env::var_os("PATH").unwrap_or_default())
@@ -2083,31 +2126,34 @@ impl EditorView {
     fn chat_terminal_font(&self, window: &Window) -> Font {
         let text_style = window.text_style();
         let editor_styles = &self.styles.editor;
-        let configured_font_family = |configured: &'static str| {
-            if configured == ".SystemUIFont" {
-                text_style.font().family.clone()
-            } else {
-                configured.into()
-            }
+        // Empty terminal_font means "follow the editor code font".
+        let configured: &str = if self.app_settings.terminal_font.is_empty() {
+            editor_styles.editor_monospace_font_family
+        } else {
+            self.app_settings.terminal_font.as_str()
         };
-        let body_cjk_fallbacks = |configured: &'static str| {
-            (configured != editor_styles.editor_body_cjk_font_family).then(|| {
-                FontFallbacks::from_fonts(vec![
-                    editor_styles.editor_body_cjk_font_family.to_string(),
-                ])
-            })
+        let family: SharedString = if configured == ".SystemUIFont" {
+            text_style.font().family.clone()
+        } else {
+            configured.to_string().into()
         };
+        let fallbacks = (configured != editor_styles.editor_body_cjk_font_family).then(|| {
+            FontFallbacks::from_fonts(vec![editor_styles.editor_body_cjk_font_family.to_string()])
+        });
 
         let mut monospace_font = text_style.font();
-        monospace_font.family = configured_font_family(editor_styles.editor_monospace_font_family);
-        monospace_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_monospace_font_family);
+        monospace_font.family = family;
+        monospace_font.fallbacks = fallbacks;
         monospace_font
     }
 
+    fn chat_terminal_font_size(&self) -> f32 {
+        self.scaled(self.app_settings.effective_terminal_font_size())
+            .max(8.0)
+    }
+
     pub(crate) fn refresh_chat_terminal_metrics(&mut self, window: &Window, cx: &App) {
-        let body_font_size = self
-            .scaled(self.styles.utility_panel.utility_panel_item_font_size_px)
-            .max(11.0);
+        let body_font_size = self.chat_terminal_font_size();
         let fallback_cell_width = (body_font_size * 0.62).max(7.0);
         let fallback_cell_height = (body_font_size * 1.5).max(body_font_size + self.scaled(4.0));
 
@@ -2129,9 +2175,7 @@ impl EditorView {
     }
 
     fn chat_terminal_metrics(&self) -> (f32, f32, f32) {
-        let body_font_size = self
-            .scaled(self.styles.utility_panel.utility_panel_item_font_size_px)
-            .max(11.0);
+        let body_font_size = self.chat_terminal_font_size();
         let fallback_cell_width = (body_font_size * 0.62).max(7.0);
         let fallback_cell_height = (body_font_size * 1.5).max(body_font_size + self.scaled(4.0));
         let cell_width = if self.chat_terminal_cell_width_px > 0.0 {
@@ -2657,6 +2701,12 @@ impl EditorView {
             .or_else(|| {
                 (!self.sidebar_root.as_os_str().is_empty()).then(|| self.sidebar_root.clone())
             })
+            // Without a workspace, behave like a regular terminal app.
+            .or_else(|| {
+                env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_dir())
+            })
     }
 
     /// Lazily spawns the PTY session for a terminal tab (no-op when already
@@ -2673,8 +2723,16 @@ impl EditorView {
         let Some(state) = self.terminal_tab_states.get(tab_id) else {
             return;
         };
-        if state.session.is_some() {
-            return;
+        if let Some(session) = &state.session {
+            // Retry once the login-shell PATH prefetch makes a previously
+            // "missing" CLI resolvable.
+            let missing_command_retry = matches!(
+                &session.status,
+                ChatTerminalStatus::Unavailable(message) if message.contains("command not found")
+            ) && agent_cli_command_exists(agent_cli);
+            if !missing_command_retry {
+                return;
+            }
         }
 
         let session = self.build_chat_terminal_session(agent_cli);
@@ -3961,6 +4019,13 @@ impl EditorView {
             self.search_current_index
         };
         let missing_agent_cli_install_target = self.missing_agent_cli_install_target(&tab_id);
+        let unavailable_message = self
+            .terminal_session(&tab_id)
+            .and_then(|session| match &session.status {
+                ChatTerminalStatus::Unavailable(message) => Some(message.clone()),
+                _ => None,
+            })
+            .filter(|_| missing_agent_cli_install_target.is_none());
         let terminal_scrollbar = {
             let viewport_height = input_bounds
                 .map(|bounds| f32::from(bounds.size.height))
@@ -4258,6 +4323,21 @@ impl EditorView {
                         .child(ChatTerminalInputElement {
                             editor: cx.entity().clone(),
                             tab_id: tab_id.clone(),
+                        })
+                        .when_some(unavailable_message, |this, message| {
+                            // A failed spawn must never leave the panel blank.
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .px(px(self.scaled(24.0)))
+                                    .text_color(ups.utility_panel_button_text_color)
+                                    .text_size(px(body_font_size))
+                                    .child(message),
+                            )
                         })
                         .when_some(
                             missing_agent_cli_install_target,

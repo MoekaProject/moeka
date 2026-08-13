@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use crate::i18n::{UiLanguage, default_language_code};
 use crate::theme::{EditorThemeMode, Theme, ThemeKind};
 
-use super::{ChatAgentCli, SidebarSortMode, TerminalCursorShape, config_store};
+use super::{
+    ChatAgentCli, FileListDisplayMode, SidebarSortMode, TerminalCursorShape, config_store,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum MermaidTheme {
@@ -177,6 +179,8 @@ pub(crate) struct AppSettings {
     pub editor_content_width: f32,
     #[serde(default = "default_sidebar_sort_mode")]
     pub sidebar_sort_mode: String,
+    #[serde(default = "default_file_list_display_mode")]
+    pub file_list_display_mode: String,
     #[serde(default)]
     pub file_list_width: Option<f32>,
     #[serde(default = "default_file_list_visible")]
@@ -205,6 +209,13 @@ pub(crate) struct AppSettings {
     pub terminal_launch_command: String,
     #[serde(default = "default_terminal_command_args")]
     pub terminal_command_args: String,
+    /// Terminal font family; empty means "follow the editor code font".
+    #[serde(default)]
+    pub terminal_font: String,
+    #[serde(default = "default_terminal_font_size")]
+    pub terminal_font_size: f32,
+    #[serde(default = "default_sidebar_always_dark")]
+    pub sidebar_always_dark: bool,
     /// User keybinding overrides: command id (see `CommandId::config_key`) to
     /// gpui keystroke string, e.g. `save: cmd-shift-s`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -283,6 +294,10 @@ fn default_sidebar_sort_mode() -> String {
     "created_desc".to_string()
 }
 
+fn default_file_list_display_mode() -> String {
+    "title".to_string()
+}
+
 fn default_date_time_format() -> String {
     "%Y-%m-%d %H:%M".to_string()
 }
@@ -331,6 +346,14 @@ fn default_terminal_command_args() -> String {
     ChatAgentCli::Terminal.command_name().to_string()
 }
 
+fn default_terminal_font_size() -> f32 {
+    12.0
+}
+
+fn default_sidebar_always_dark() -> bool {
+    true
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -352,6 +375,7 @@ impl Default for AppSettings {
             letter_spacing: default_letter_spacing(),
             editor_content_width: default_editor_content_width(),
             sidebar_sort_mode: default_sidebar_sort_mode(),
+            file_list_display_mode: default_file_list_display_mode(),
             file_list_width: None,
             file_list_visible: default_file_list_visible(),
             date_time_format: default_date_time_format(),
@@ -366,6 +390,9 @@ impl Default for AppSettings {
             terminal_copy_on_select: default_terminal_copy_on_select(),
             terminal_launch_command: default_terminal_launch_command(),
             terminal_command_args: default_terminal_command_args(),
+            terminal_font: String::new(),
+            terminal_font_size: default_terminal_font_size(),
+            sidebar_always_dark: default_sidebar_always_dark(),
             keybindings: std::collections::BTreeMap::new(),
         }
     }
@@ -378,6 +405,10 @@ impl AppSettings {
 
     pub(crate) fn effective_editor_font_size(&self) -> f32 {
         (self.font_size - 1.0).clamp(9.0, 29.0)
+    }
+
+    pub(crate) fn effective_terminal_font_size(&self) -> f32 {
+        self.terminal_font_size.clamp(8.0, 32.0)
     }
 
     pub(crate) fn effective_editor_content_width(&self) -> f32 {
@@ -549,6 +580,21 @@ impl AppSettings {
             SidebarSortMode::NameAsc => "name_asc",
             SidebarSortMode::NameDesc => "name_desc",
             SidebarSortMode::Type => "type",
+        }
+        .to_string();
+    }
+
+    pub(crate) fn file_list_display_mode(&self) -> FileListDisplayMode {
+        match self.file_list_display_mode.as_str() {
+            "file_name" => FileListDisplayMode::FileName,
+            _ => FileListDisplayMode::Title,
+        }
+    }
+
+    pub(crate) fn set_file_list_display_mode(&mut self, mode: FileListDisplayMode) {
+        self.file_list_display_mode = match mode {
+            FileListDisplayMode::Title => "title",
+            FileListDisplayMode::FileName => "file_name",
         }
         .to_string();
     }

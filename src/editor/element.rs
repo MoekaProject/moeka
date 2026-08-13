@@ -1619,6 +1619,12 @@ impl Element for EditorElement {
             if !editor.pending_scroll_to_cursor
                 || editor.pending_center_cursor_in_view
                 || editor.pending_preview_reveal.is_some()
+                // A live typing guard means the end-of-prepaint restore will
+                // cancel this scroll when the cursor stays on its visual
+                // line; resolving it here first would snap the view to the
+                // viewport edge and then bounce back, jittering every
+                // keystroke typed near the top/bottom edge bands.
+                || editor.pending_typing_scroll_guard.is_some()
             {
                 return;
             }
@@ -7708,9 +7714,32 @@ impl Element for EditorElement {
                 did_adjust_preview_reveal = true;
             }
             if editor.pending_center_cursor_in_view {
-                editor.center_cursor_in_view(cx);
+                if editor.pending_center_cursor_in_view_immediately {
+                    editor.pending_center_cursor_in_view_immediately = false;
+                    editor.center_cursor_in_view_immediately(cx);
+                } else {
+                    editor.center_cursor_in_view(cx);
+                }
             } else if editor.pending_scroll_to_cursor {
                 editor.scroll_to_cursor();
+                cx.notify();
+            } else if editor.center_cursor_confirm_frames > 0 {
+                editor.center_cursor_confirm_frames -= 1;
+                if !did_preserve_typing_scroll
+                    && !did_adjust_click_anchor
+                    && !did_adjust_preview_reveal
+                {
+                    let cursor_line = editor.cursor_line();
+                    let cursor_y = editor.line_y_offset(cursor_line);
+                    let cursor_line_height = editor.visual_height_for_line(cursor_line);
+                    let target = (cursor_y + cursor_line_height * 0.5
+                        - editor.last_viewport_height * 0.5)
+                        .max(0.0);
+                    if (target - editor.scroll_offset).abs() > 0.5 {
+                        editor.scroll_offset = target;
+                        editor.clamp_scroll();
+                    }
+                }
                 cx.notify();
             } else if did_adjust_preview_reveal
                 || did_adjust_click_anchor

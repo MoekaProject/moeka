@@ -412,7 +412,15 @@ impl EditorView {
                 &BlockType::Normal
             };
             let (padding_top, padding_bottom) = self.block_padding_for_line(line);
-            self.line_height_for_block(block_type) + padding_top + padding_bottom
+            // A reparse can drop a line's shaping info while its image preview
+            // is still rendered; excluding the preview height here made every
+            // scroll computation between reparse and the next prepaint short
+            // by the image height, which jittered the view while typing near
+            // image lines.
+            self.line_height_for_block(block_type)
+                + padding_top
+                + padding_bottom
+                + self.image_preview_extra_height_for_line(line)
         }
     }
 
@@ -702,6 +710,7 @@ impl EditorView {
         }
         if self.layout_dirty {
             self.pending_center_cursor_in_view = true;
+            self.pending_center_cursor_in_view_immediately = true;
             self.pending_scroll_to_cursor = false;
             return;
         }
@@ -714,6 +723,10 @@ impl EditorView {
         self.scroll_offset =
             (cursor_y + cursor_line_height * 0.5 - self.last_viewport_height * 0.5).max(0.0);
         self.clamp_scroll();
+        // Line geometry can still shift while wrap layout and generated
+        // previews settle after a fresh tab activation; re-affirm the
+        // centered target for a couple of frames.
+        self.center_cursor_confirm_frames = self.center_cursor_confirm_frames.max(2);
         cx.notify();
     }
 

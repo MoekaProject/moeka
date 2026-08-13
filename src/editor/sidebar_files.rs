@@ -247,6 +247,11 @@ impl EditorView {
         let create_in_file_list = self.file_list_menu_origin;
         if create_in_file_list {
             self.file_list_pending_reveal_path = None;
+            // The filename input row renders at the top of the FileList.
+            self.pending_file_list_scroll_top.set(None);
+            let offset = self.file_list_scroll_handle.offset();
+            self.file_list_scroll_handle
+                .set_offset(gpui::point(offset.x, gpui::px(0.0)));
         } else {
             let expanded_changed = self.expanded_dirs.insert(parent.clone());
             self.schedule_sidebar_directory_load(parent.clone(), cx);

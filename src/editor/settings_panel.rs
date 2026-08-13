@@ -32,6 +32,7 @@ pub(crate) enum FontRole {
     AttachmentLocation,
     TerminalCursorShape,
     TerminalLaunchCommand,
+    TerminalFont,
     /// Font family for selected whiteboard elements (whiteboard panel).
     WhiteboardFont,
 }
@@ -99,6 +100,7 @@ enum SettingsOptionAction {
     ShowWhitespace(bool),
     HighlightLine(bool),
     SimpleMode(bool),
+    SidebarAlwaysDark(bool),
     TerminalCopyOnSelect(bool),
 }
 
@@ -325,9 +327,15 @@ impl EditorView {
 
     fn render_terminal_settings_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_terminal_command_args_editor(cx);
+        self.ensure_terminal_font_size_editor(cx);
         let cursor_shape = self.app_settings.terminal_cursor_shape();
         let current = terminal_settings_label(self.ui_language, cursor_shape.as_str());
         let launch_cli = self.app_settings.terminal_launch_cli();
+        let terminal_font = if self.app_settings.terminal_font.is_empty() {
+            self.app_settings.code_font.clone()
+        } else {
+            self.app_settings.terminal_font.clone()
+        };
 
         div()
             .flex()
@@ -344,6 +352,14 @@ impl EditorView {
                 cx,
             ))
             .child(self.render_terminal_command_args_row())
+            .child(self.render_picker_row(
+                terminal_settings_label(self.ui_language, "font"),
+                &terminal_font,
+                FontRole::TerminalFont,
+                0,
+                cx,
+            ))
+            .child(self.render_terminal_font_size_row(cx))
             .child(self.render_picker_row(
                 terminal_settings_label(self.ui_language, "cursor_shape"),
                 current,
@@ -620,6 +636,10 @@ impl EditorView {
             SettingsOptionAction::SimpleMode(value) => {
                 self.app_settings.simple_mode = value;
             }
+            SettingsOptionAction::SidebarAlwaysDark(value) => {
+                self.app_settings.sidebar_always_dark = value;
+                self.refresh_theme_styles(false, cx);
+            }
             SettingsOptionAction::TerminalCopyOnSelect(value) => {
                 self.app_settings.terminal_copy_on_select = value;
             }
@@ -730,6 +750,7 @@ impl EditorView {
             self.settings_line_height_editor.as_ref(),
             self.settings_letter_spacing_editor.as_ref(),
             self.settings_editor_content_width_editor.as_ref(),
+            self.settings_terminal_font_size_editor.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -834,6 +855,16 @@ impl EditorView {
                     self.app_settings.simple_mode,
                     SettingsOptionAction::SimpleMode(false),
                     SettingsOptionAction::SimpleMode(true),
+                    cx,
+                ),
+            ))
+            .child(self.render_attachment_settings_row(
+                crate::i18n::settings_label(self.ui_language, "sidebar_always_dark"),
+                self.render_boolean_settings_checkbox(
+                    "settings-sidebar-always-dark",
+                    self.app_settings.sidebar_always_dark,
+                    SettingsOptionAction::SidebarAlwaysDark(false),
+                    SettingsOptionAction::SidebarAlwaysDark(true),
                     cx,
                 ),
             ))
@@ -1224,6 +1255,8 @@ impl EditorView {
                 0,
                 cx,
             ))
+            // Editor font size
+            .child(self.render_editor_font_size_row(cx))
             .child(self.render_picker_row(
                 self.t(TextKey::MermaidTheme),
                 self.app_settings.mermaid_theme().label(),
@@ -1719,6 +1752,179 @@ impl EditorView {
         self.settings_line_height_editor = Some(editor);
     }
 
+    // ── Editor font size stepper ────────────────────────────────
+
+    fn render_editor_font_size_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.ensure_font_size_editor(cx);
+        let text_secondary = self.styles.settings_panel.settings_secondary_text_color;
+        let border_color = self.styles.settings_panel.settings_contrast_border_color;
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(self.scaled(12.0)))
+            .child(
+                div()
+                    .w(px(self.scaled(120.0)))
+                    .text_size(px(self.scaled(13.0)))
+                    .text_color(text_secondary)
+                    .child(self.t(TextKey::EditorFontSize)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(0.0))
+                    .child(self.render_settings_stepper_button(
+                        "editor-font-size-dec",
+                        "−",
+                        false,
+                        None,
+                        cx,
+                        |this, cx| {
+                            let current = this.app_settings.font_size;
+                            this.apply_font_size(current - 1.0, cx);
+                        },
+                    ))
+                    .child(
+                        div()
+                            .w(px(self.scaled(50.0)))
+                            .h(px(self.scaled(30.0)))
+                            .border_y(px(self.scaled(
+                                self.styles
+                                    .settings_panel
+                                    .settings_option_button_border_width_px,
+                            )))
+                            .border_color(border_color)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when_some(self.settings_font_size_editor.clone(), |this, editor| {
+                                this.child(editor)
+                            }),
+                    )
+                    .child(self.render_settings_stepper_button(
+                        "editor-font-size-inc",
+                        "+",
+                        true,
+                        None,
+                        cx,
+                        |this, cx| {
+                            let current = this.app_settings.font_size;
+                            this.apply_font_size(current + 1.0, cx);
+                        },
+                    )),
+            )
+            .into_any_element()
+    }
+
+    // ── Terminal font size stepper ──────────────────────────────
+
+    fn render_terminal_font_size_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let text_secondary = self.styles.settings_panel.settings_secondary_text_color;
+        let border_color = self.styles.settings_panel.settings_contrast_border_color;
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(self.scaled(12.0)))
+            .child(
+                div()
+                    .w(px(self.scaled(120.0)))
+                    .text_size(px(self.scaled(13.0)))
+                    .text_color(text_secondary)
+                    .child(terminal_settings_label(self.ui_language, "font_size").to_string()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(0.0))
+                    .child(self.render_settings_stepper_button(
+                        "terminal-font-size-dec",
+                        "−",
+                        false,
+                        None,
+                        cx,
+                        |this, cx| {
+                            let current = this.app_settings.terminal_font_size;
+                            this.apply_terminal_font_size(current - 1.0, cx);
+                        },
+                    ))
+                    .child(
+                        div()
+                            .w(px(self.scaled(50.0)))
+                            .h(px(self.scaled(30.0)))
+                            .border_y(px(self.scaled(
+                                self.styles
+                                    .settings_panel
+                                    .settings_option_button_border_width_px,
+                            )))
+                            .border_color(border_color)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when_some(
+                                self.settings_terminal_font_size_editor.clone(),
+                                |this, editor| this.child(editor),
+                            ),
+                    )
+                    .child(self.render_settings_stepper_button(
+                        "terminal-font-size-inc",
+                        "+",
+                        true,
+                        None,
+                        cx,
+                        |this, cx| {
+                            let current = this.app_settings.terminal_font_size;
+                            this.apply_terminal_font_size(current + 1.0, cx);
+                        },
+                    )),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn apply_terminal_font_size(&mut self, value: f32, cx: &mut Context<Self>) {
+        let value = value.round().clamp(8.0, 32.0);
+        self.app_settings.terminal_font_size = value;
+        if let Some(editor) = &self.settings_terminal_font_size_editor {
+            self.sync_inline_stepper_editor(editor, format!("{value:.0}"), cx);
+        }
+        self.finalize_settings_change(cx);
+    }
+
+    fn ensure_terminal_font_size_editor(&mut self, cx: &mut Context<Self>) {
+        if self.settings_terminal_font_size_editor.is_some() {
+            return;
+        }
+        let editor = self.build_inline_stepper_editor(
+            format!("{:.0}", self.app_settings.terminal_font_size),
+            cx,
+        );
+        cx.subscribe(
+            &editor,
+            |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Submit => {
+                    let text = editor.read(cx).text().to_string();
+                    if let Some(val) = text.parse::<f32>().ok().filter(|value| value.is_finite()) {
+                        this.apply_terminal_font_size(val, cx);
+                    }
+                }
+                crate::text_input::TextInputEvent::Escape => {
+                    let current = this.app_settings.terminal_font_size;
+                    this.sync_inline_stepper_editor(&editor, format!("{current:.0}"), cx);
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        self.settings_terminal_font_size_editor = Some(editor);
+    }
+
     // ── Letter spacing stepper ──────────────────────────────────
 
     fn render_letter_spacing_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -2074,6 +2280,13 @@ impl EditorView {
             (FontRole::BodyFont, 0) => self.app_settings.body_latin_font.clone(),
             (FontRole::BodyFont, _) => self.app_settings.body_cjk_font.clone(),
             (FontRole::CodeFont, _) => self.app_settings.code_font.clone(),
+            (FontRole::TerminalFont, _) => {
+                if self.app_settings.terminal_font.is_empty() {
+                    self.app_settings.code_font.clone()
+                } else {
+                    self.app_settings.terminal_font.clone()
+                }
+            }
             (FontRole::MermaidTheme, _) => self.app_settings.mermaid_theme.clone(),
             (FontRole::InterfaceLanguage, _) => self.ui_language.code().to_string(),
             (FontRole::DateTimeFormat, _) => self.app_settings.date_time_format().to_string(),
@@ -2343,6 +2556,9 @@ impl EditorView {
                     self.styles.editor.editor_monospace_font_family =
                         Box::leak(font_name.clone().into_boxed_str());
                     self.app_settings.code_font = font_name;
+                }
+                (FontRole::TerminalFont, _) => {
+                    self.app_settings.terminal_font = font_name;
                 }
                 (FontRole::MermaidTheme, _) => {
                     self.app_settings.mermaid_theme = MermaidTheme::from_settings(&font_name)

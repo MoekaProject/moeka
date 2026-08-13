@@ -119,18 +119,46 @@ fn macos_markdown_path_from_url(url: &str) -> Option<PathBuf> {
         .decode_utf8()
         .ok()?;
     let path = PathBuf::from(decoded.as_ref());
-    if !editor::is_markdown_file(&path) || !path.is_file() {
+    // Directories become workspace roots; files must be markdown documents.
+    if !path.is_dir() && !(editor::is_markdown_file(&path) && path.is_file()) {
         return None;
     }
     std::fs::canonicalize(&path).ok().or(Some(path))
 }
 
-#[cfg(target_os = "macos")]
-fn open_markdown_paths(editor: &Entity<EditorView>, paths: Vec<PathBuf>, cx: &mut App) {
-    let path_count = paths.len();
+/// Resolves launch arguments to existing absolute paths (files or dirs).
+fn launch_paths_from_args() -> Vec<PathBuf> {
+    std::env::args()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .filter_map(|arg| {
+            let path = PathBuf::from(&arg);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir().ok()?.join(path)
+            };
+            std::fs::canonicalize(&path).ok()
+        })
+        .filter(|path| path.is_dir() || path.is_file())
+        .collect()
+}
+
+/// Opens launch paths: directories are added as workspaces (the last one
+/// becomes active), files open in permanent tabs.
+fn open_launch_paths(editor: &Entity<EditorView>, paths: Vec<PathBuf>, cx: &mut App) {
+    let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) =
+        paths.into_iter().partition(|path| path.is_dir());
+    let file_count = files.len();
     editor.update(cx, |editor, cx| {
-        for (index, path) in paths.into_iter().enumerate() {
-            editor.open_path_in_permanent_tab(path, index + 1 == path_count, cx);
+        for dir in dirs {
+            if !editor.workspaces.contains(&dir) {
+                editor.workspaces.push(dir.clone());
+            }
+            editor.switch_workspace(dir, cx);
+        }
+        for (index, path) in files.into_iter().enumerate() {
+            editor.open_path_in_permanent_tab(path, index + 1 == file_count, cx);
         }
     });
 }
@@ -337,7 +365,7 @@ fn main() {
             if let (Some(editor), Some(async_app)) = (editor, async_app) {
                 async_app
                     .spawn(async move |cx| {
-                        let _ = cx.update(|cx| open_markdown_paths(&editor, paths, cx));
+                        let _ = cx.update(|cx| open_launch_paths(&editor, paths, cx));
                     })
                     .detach();
             } else {
@@ -425,6 +453,20 @@ fn main() {
                 Some("MarkdownEditor && !Sidebar"),
             ),
             KeyBinding::new("cmd-delete", DeleteToLineEnd, Some("MarkdownEditor")),
+            // macOS/emacs-style ctrl navigation & editing
+            KeyBinding::new("ctrl-a", Home, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-e", End, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-f", Right, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-b", Left, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-p", Up, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-n", Down, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-d", Delete, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-h", Backspace, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-k", KillToLineEnd, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-y", Yank, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-o", OpenLine, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-t", TransposeChars, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-v", MovePageDown, Some("MarkdownEditor")),
             KeyBinding::new("cmd-/", ToggleLineComment, Some("MarkdownEditor")),
             KeyBinding::new("cmd-alt-[", Fold, Some("MarkdownEditor")),
             KeyBinding::new("cmd-alt-]", Unfold, Some("MarkdownEditor")),
@@ -655,12 +697,16 @@ fn main() {
         #[cfg(target_os = "macos")]
         let pending_paths_for_window = pending_open_paths.clone();
         let view = open_editor_window(cx).expect("failed to open main window");
+        let launch_paths = launch_paths_from_args();
+        if !launch_paths.is_empty() {
+            open_launch_paths(&view, launch_paths, cx);
+        }
         #[cfg(target_os = "macos")]
         {
             *editor_for_window.borrow_mut() = Some(view.clone());
             let pending_paths = std::mem::take(&mut *pending_paths_for_window.borrow_mut());
             if !pending_paths.is_empty() {
-                open_markdown_paths(&view, pending_paths, cx);
+                open_launch_paths(&view, pending_paths, cx);
             }
         }
     });
@@ -699,6 +745,16 @@ mod macos_file_open_tests {
         assert_eq!(
             macos_markdown_path_from_url("https://example.com/a.md"),
             None
+        );
+    }
+
+    #[test]
+    fn accepts_directory_urls_as_workspace_candidates() {
+        let directory = tempfile::tempdir().expect("tempdir");
+
+        assert_eq!(
+            macos_markdown_path_from_url(&format!("file://{}", directory.path().display())),
+            std::fs::canonicalize(directory.path()).ok(),
         );
     }
 }

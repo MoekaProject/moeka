@@ -12,7 +12,7 @@ use super::{Dialog, DialogAction, EditorView, config_paths};
 const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/MoekaProject/community/releases/latest";
 const USER_AGENT: &str = "MoekaUpdater/1.0";
-const UPDATE_POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const UPDATE_POLL_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
 
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const GIT_COMMIT: &str = env!("MOEKA_GIT_COMMIT");

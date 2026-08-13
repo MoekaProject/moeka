@@ -1361,6 +1361,10 @@ impl EditorView {
     }
 
     fn delete_to_line_boundary(&mut self, to_start: bool, cx: &mut Context<Self>) {
+        self.delete_to_line_boundary_impl(to_start, false, cx);
+    }
+
+    fn delete_to_line_boundary_impl(&mut self, to_start: bool, kill: bool, cx: &mut Context<Self>) {
         if self.active_tab_is_read_only() {
             return;
         }
@@ -1368,6 +1372,7 @@ impl EditorView {
         let mut targets = self.cursor_states_with_primary_flag();
         targets.sort_by_key(|(cursor, _)| std::cmp::Reverse(cursor.selection_range().start));
         let mut edits = Vec::with_capacity(targets.len());
+        let mut killed: Vec<String> = Vec::new();
         for (cursor, is_primary) in targets {
             let range = if cursor.has_selection() {
                 cursor.selection_range()
@@ -1376,9 +1381,18 @@ impl EditorView {
                 if to_start {
                     self.buffer.line_start(line)..cursor.offset
                 } else {
-                    cursor.offset..self.buffer.line_end(line)
+                    let line_end = self.buffer.line_end(line);
+                    // Emacs kill semantics: at line end, kill the newline.
+                    if kill && cursor.offset >= line_end && line_end < self.buffer.len() {
+                        cursor.offset..(line_end + 1).min(self.buffer.len())
+                    } else {
+                        cursor.offset..line_end
+                    }
                 }
             };
+            if kill {
+                killed.push(self.buffer.text_for_range(range.clone()).to_string());
+            }
             let start = range.start;
             let removed = range.end.saturating_sub(range.start);
             self.buffer.delete(range);
@@ -1389,6 +1403,14 @@ impl EditorView {
                 is_primary,
                 ordered_list_update: None,
             });
+        }
+        if kill {
+            // Targets iterate in reverse document order; restore it.
+            killed.reverse();
+            let text = killed.join("\n");
+            if !text.is_empty() {
+                self.kill_ring = Some(text);
+            }
         }
         self.apply_multi_cursor_resolved_edits(edits);
         self.reparse();
@@ -1412,6 +1434,111 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.delete_to_line_boundary(false, cx);
+    }
+
+    pub(crate) fn on_kill_to_line_end(
+        &mut self,
+        _: &KillToLineEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_to_line_boundary_impl(false, true, cx);
+    }
+
+    pub(crate) fn on_yank(&mut self, _: &Yank, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_read_only() || self.active_tab_is_whiteboard() {
+            return;
+        }
+        let Some(text) = self.kill_ring.clone() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        self.insert_pasted_text(&text, cx);
+    }
+
+    /// Inserts a line break after the cursor without moving it (emacs ctrl-o).
+    pub(crate) fn on_open_line(&mut self, _: &OpenLine, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_read_only() || self.active_tab_is_whiteboard() {
+            return;
+        }
+        self.checkpoint();
+        self.clear_extra_cursors();
+        if self.cursor.has_selection() {
+            let range = self.cursor.selection_range();
+            self.cursor.move_to(range.start, &self.buffer);
+            self.buffer.delete(range);
+        }
+        let offset = self.cursor.offset;
+        self.buffer.insert(offset, "\n");
+        self.cursor.move_to(offset, &self.buffer);
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    /// Swaps the graphemes around the cursor and advances it (emacs ctrl-t).
+    pub(crate) fn on_transpose_chars(
+        &mut self,
+        _: &TransposeChars,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab_is_read_only() || self.active_tab_is_whiteboard() {
+            return;
+        }
+        self.clear_extra_cursors();
+        if self.cursor.has_selection() {
+            return;
+        }
+        let offset = self.cursor.offset;
+        let (line, _) = self.buffer.offset_to_line_col(offset);
+        let line_start = self.buffer.line_start(line);
+        let line_end = self.buffer.line_end(line);
+        // At line end, transpose the last two graphemes instead.
+        let pivot = if offset >= line_end {
+            self.buffer.prev_grapheme_boundary(offset.min(line_end))
+        } else {
+            offset
+        };
+        let left_start = self.buffer.prev_grapheme_boundary(pivot);
+        let right_end = self.buffer.next_grapheme_boundary(pivot);
+        if left_start >= pivot
+            || pivot >= right_end
+            || left_start < line_start
+            || right_end > line_end
+        {
+            return;
+        }
+        self.checkpoint();
+        let left = self.buffer.text_for_range(left_start..pivot).to_string();
+        let right = self.buffer.text_for_range(pivot..right_end).to_string();
+        let swapped = format!("{right}{left}");
+        self.buffer.replace(left_start..right_end, &swapped);
+        self.cursor.move_to(right_end, &self.buffer);
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+    }
+
+    /// Moves the cursor down one viewport page (emacs/macOS ctrl-v).
+    pub(crate) fn on_move_page_down(
+        &mut self,
+        _: &MovePageDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab_is_whiteboard() {
+            return;
+        }
+        let line_height = (self.base_font_size()
+            * self.styles.editor.editor_paragraph_line_height_factor)
+            .max(1.0);
+        let steps = ((self.last_viewport_height / line_height).floor() as usize).max(1);
+        for _ in 0..steps {
+            self.on_down(&Down, window, cx);
+        }
     }
 
     pub(crate) fn on_delete_word_left(

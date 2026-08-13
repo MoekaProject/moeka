@@ -2609,6 +2609,8 @@ impl EditorView {
         let scroll_offset_before_wheel = self.scroll_offset;
         self.scroll_offset -= delta_y;
         self.clamp_scroll();
+        // User scrolling overrides any pending centered-cursor confirmation.
+        self.center_cursor_confirm_frames = 0;
         if self.embedded_editor && self.embedded_read_only {
             // A pending streaming-update anchor stores the scroll offset it
             // was captured at; fold the user's wheel delta into it so the

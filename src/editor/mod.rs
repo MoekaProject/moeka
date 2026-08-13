@@ -548,6 +548,22 @@ impl SidebarSortMode {
     }
 }
 
+/// Whether FileList items show the extracted document title or the file name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileListDisplayMode {
+    Title,
+    FileName,
+}
+
+impl FileListDisplayMode {
+    pub(crate) fn label_key(self) -> crate::i18n::TextKey {
+        match self {
+            Self::Title => crate::i18n::TextKey::FileListShowTitle,
+            Self::FileName => crate::i18n::TextKey::FileListShowFileName,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum FormatMenuAction {
     Cut,
@@ -1392,6 +1408,10 @@ pub struct EditorView {
     pub(crate) pending_scroll_to_cursor: bool,
     pub(crate) pending_center_cursor_in_view: bool,
     pub(crate) pending_center_cursor_in_view_immediately: bool,
+    /// Frames left to re-affirm a centered cursor while geometry settles.
+    pub(crate) center_cursor_confirm_frames: u8,
+    /// Last text removed by KillToLineEnd (ctrl-k); pasted back by Yank.
+    pub(crate) kill_ring: Option<String>,
     pub(crate) pending_preview_reveal: Option<PendingPreviewReveal>,
     pub(crate) pending_typing_scroll_guard: Option<PendingTypingScrollGuard>,
     pub(crate) pending_click_anchor: Option<ClickScrollAnchor>,
@@ -1615,6 +1635,7 @@ pub struct EditorView {
     /// 多选锚点（shift 连续选择的起点）
     pub(crate) sidebar_selection_anchor: Option<PathBuf>,
     pub(crate) sidebar_sort_mode: SidebarSortMode,
+    pub(crate) file_list_display_mode: FileListDisplayMode,
     pub(crate) sidebar_starred_collapsed: bool,
     /// 拖拽悬停的目标目录（仅用于高亮）
     pub(crate) sidebar_drag_hover_target: Option<PathBuf>,
@@ -1919,6 +1940,8 @@ pub struct EditorView {
         Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) settings_terminal_command_args_editor:
         Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) settings_terminal_font_size_editor:
+        Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) font_picker_trigger_position: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) font_picker_button_bounds: std::collections::HashMap<
         (crate::editor::settings_panel::FontRole, usize),
@@ -1976,6 +1999,9 @@ impl EditorView {
         };
         if !embedded_editor {
             settings_panel::apply_app_icon_to_dock();
+            // Resolve the login-shell PATH early so terminal CLI detection
+            // works even when the app was launched from Finder.
+            chat_panel::prefetch_login_shell_path();
         }
         let ui_language = app_settings.ui_language();
         let mut welcome_tab = builtin_welcome_tab(ui_language);
@@ -1995,7 +2021,11 @@ impl EditorView {
             theme_kind.is_dark(),
         );
         let ui_theme = app_settings.ui_theme_for(theme_kind);
-        let mut styles = crate::style::Styles::from_theme(&theme, &ui_theme);
+        let mut styles = crate::style::Styles::from_theme_with_options(
+            &theme,
+            &ui_theme,
+            app_settings.sidebar_always_dark,
+        );
         if theme_kind.is_moeka_retro() {
             styles.apply_moeka_retro_chrome(&theme, &ui_theme);
         }
@@ -2079,6 +2109,8 @@ impl EditorView {
             pending_scroll_to_cursor: false,
             pending_center_cursor_in_view: false,
             pending_center_cursor_in_view_immediately: false,
+            center_cursor_confirm_frames: 0,
+            kill_ring: None,
             pending_preview_reveal: None,
             pending_typing_scroll_guard: None,
             pending_click_anchor: None,
@@ -2264,6 +2296,7 @@ impl EditorView {
             suppress_next_sidebar_sync_path: None,
             sidebar_selection_anchor: None,
             sidebar_sort_mode: app_settings.sidebar_sort_mode(),
+            file_list_display_mode: app_settings.file_list_display_mode(),
             sidebar_starred_collapsed: false,
             sidebar_drag_hover_target: None,
             sidebar_drag_expand_hover_dir: None,
@@ -2512,6 +2545,7 @@ impl EditorView {
             settings_stepper_blur_subscriptions: Vec::new(),
             settings_attachment_folder_editor: None,
             settings_terminal_command_args_editor: None,
+            settings_terminal_font_size_editor: None,
             font_picker_trigger_position: None,
             font_picker_button_bounds: std::collections::HashMap::new(),
             cached_font_names: None,
@@ -4920,6 +4954,9 @@ impl EditorView {
                     )
                     .child(
                         div()
+                            .id("dialog-message")
+                            .max_h(px(self.scaled(320.0)))
+                            .overflow_y_scroll()
                             .text_size(px(self.scaled(ds.dialog_message_font_size_px)))
                             .text_color(ds.dialog_message_text_color)
                             .child(SharedString::from(dialog.message.clone())),

@@ -4010,6 +4010,24 @@ impl EditorView {
                         },
                     ));
                 }
+                items.push(self.render_context_menu_separator());
+                for mode in [
+                    super::FileListDisplayMode::Title,
+                    super::FileListDisplayMode::FileName,
+                ] {
+                    items.push(self.render_context_menu_choice_item(
+                        self.t(mode.label_key()),
+                        self.file_list_display_mode == mode,
+                        cx,
+                        move |this, _, cx| {
+                            this.file_list_display_mode = mode;
+                            this.app_settings.set_file_list_display_mode(mode);
+                            this.app_settings.save();
+                            this.context_menu = None;
+                            cx.notify();
+                        },
+                    ));
+                }
                 (
                     items,
                     self.scaled(self.styles.context_menu.menu_sidebar_width_px),
@@ -4561,13 +4579,6 @@ impl EditorView {
                                     .child("✕")
                                     .on_mouse_down(
                                         MouseButton::Left,
-                                        cx.listener(|_, _, window, cx| {
-                                            window.prevent_default();
-                                            cx.stop_propagation();
-                                        }),
-                                    )
-                                    .on_mouse_up(
-                                        MouseButton::Left,
                                         cx.listener(move |this, _, window, cx| {
                                             window.prevent_default();
                                             cx.stop_propagation();
@@ -4576,22 +4587,30 @@ impl EditorView {
                                             );
                                             this.close_workspace(&ws_close, cx);
                                         }),
+                                    )
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|_, _, window, cx| {
+                                            window.prevent_default();
+                                            cx.stop_propagation();
+                                        }),
                                     ),
                             )
                             .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|_, _, window, cx| {
-                                    window.prevent_default();
-                                    cx.stop_propagation();
-                                }),
-                            )
-                            .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, window, cx| {
                                     window.prevent_default();
                                     cx.stop_propagation();
                                     this.suppress_editor_mouse_up_for_current_menu_event(cx);
+                                    this.close_context_menu(cx);
                                     this.switch_workspace(ws_switch.clone(), cx);
+                                }),
+                            )
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|_, _, window, cx| {
+                                    window.prevent_default();
+                                    cx.stop_propagation();
                                 }),
                             )
                             .into_any_element(),

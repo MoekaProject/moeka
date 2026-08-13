@@ -343,6 +343,7 @@ pane_state! {
     (pending_scroll_to_cursor, bool, false),
     (pending_center_cursor_in_view, bool, false),
     (pending_center_cursor_in_view_immediately, bool, false),
+    (center_cursor_confirm_frames, u8, 0),
     (pending_preview_reveal, Option<PendingPreviewReveal>, None),
     (pending_typing_scroll_guard, Option<PendingTypingScrollGuard>, None),
     (pending_click_anchor, Option<ClickScrollAnchor>, None),

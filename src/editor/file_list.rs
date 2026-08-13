@@ -21,25 +21,26 @@ const FILE_LIST_READ_LIMIT: usize = 16 * 1024;
 /// Preview length in characters (markdown syntax stripped).
 const FILE_LIST_PREVIEW_CHARS: usize = 120;
 
-fn scroll_y_to_reveal_uniform_item(
+/// Centers an out-of-view item vertically; keeps fully visible items put.
+fn scroll_y_to_center_uniform_item(
     current_scroll_y: f32,
     viewport_height: f32,
     prefix_height: f32,
     item_height: f32,
     index: usize,
+    item_count: usize,
 ) -> Option<f32> {
     if viewport_height <= 0.0 || item_height <= 0.0 {
         return None;
     }
     let item_top = prefix_height + index as f32 * item_height;
     let item_bottom = item_top + item_height;
-    if item_top < current_scroll_y {
-        Some(item_top.max(0.0))
-    } else if item_bottom > current_scroll_y + viewport_height {
-        Some((item_bottom - viewport_height).max(0.0))
-    } else {
-        None
+    if item_top >= current_scroll_y && item_bottom <= current_scroll_y + viewport_height {
+        return None;
     }
+    let content_height = prefix_height + item_count as f32 * item_height;
+    let max_scroll = (content_height - viewport_height).max(0.0);
+    Some((item_top + item_height * 0.5 - viewport_height * 0.5).clamp(0.0, max_scroll))
 }
 
 #[derive(Clone, Debug)]
@@ -341,20 +342,41 @@ fn read_file_head(path: &Path) -> String {
     text
 }
 
-/// Extracts the first ATX heading as the title and builds a plain-text preview
-/// (markdown syntax stripped) of up to `FILE_LIST_PREVIEW_CHARS` characters.
+/// Extracts the document title and builds a plain-text preview (markdown
+/// syntax stripped) of up to `FILE_LIST_PREVIEW_CHARS` characters. A `title`
+/// entry in the YAML front matter wins over the first ATX heading.
 pub(crate) fn extract_title_and_preview(text: &str) -> (Option<String>, String) {
     let mut title: Option<String> = None;
     let mut preview = String::new();
     let mut preview_chars = 0usize;
     let mut lines = text.lines().peekable();
 
-    // Skip YAML front matter.
-    if lines.peek().map(|line| line.trim()) == Some("---") {
+    // Skip YAML front matter (standard `---` or compact `-` delimiters),
+    // capturing its `title:` value if present.
+    let opening = lines
+        .peek()
+        .map(|line| line.trim_start_matches('\u{feff}').trim());
+    let compact_delimiter = match opening {
+        Some("---") => Some(false),
+        Some("-") => Some(true),
+        _ => None,
+    };
+    if let Some(compact) = compact_delimiter {
         lines.next();
         for line in lines.by_ref() {
-            if line.trim() == "---" {
+            let trimmed = line.trim();
+            let closed = if compact {
+                trimmed == "-"
+            } else {
+                matches!(trimmed, "---" | "...")
+            };
+            if closed {
                 break;
+            }
+            if title.is_none()
+                && let Some(value) = front_matter_title_value(line)
+            {
+                title = Some(value);
             }
         }
     }
@@ -407,6 +429,27 @@ pub(crate) fn extract_title_and_preview(text: &str) -> (Option<String>, String) 
     }
 
     (title, preview)
+}
+
+/// Returns the value of a `title:` mapping entry in YAML front matter.
+fn front_matter_title_value(line: &str) -> Option<String> {
+    let content = line.trim();
+    let colon = content.find(':')?;
+    if !content[..colon].trim().eq_ignore_ascii_case("title") {
+        return None;
+    }
+    let value = content[colon + 1..].trim();
+    let value = value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|rest| rest.strip_suffix('\''))
+        })
+        .unwrap_or(value)
+        .trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// Returns the text of an ATX heading line (`# ` .. `###### `), if it is one.
@@ -1096,12 +1139,14 @@ impl EditorView {
         } else {
             ss.file_list_item_title_color
         };
-        let title = item
-            .details
-            .as_ref()
-            .and_then(|details| details.title.clone())
-            .clone()
-            .unwrap_or_else(|| split_file_name_for_display(&item.name).0.to_string());
+        let title = if self.file_list_display_mode == super::FileListDisplayMode::FileName {
+            split_file_name_for_display(&item.name).0.to_string()
+        } else {
+            item.details
+                .as_ref()
+                .and_then(|details| details.title.clone())
+                .unwrap_or_else(|| split_file_name_for_display(&item.name).0.to_string())
+        };
         let modified_time_label =
             crate::i18n::format_relative_time(self.ui_language, item.modified);
         let created_time_label = self.file_list_created_time_label(item.created);
@@ -1378,12 +1423,13 @@ impl EditorView {
                 let viewport_height = f32::from(self.file_list_scroll_handle.bounds().size.height);
                 let current_scroll_y =
                     (-f32::from(self.file_list_scroll_handle.offset().y)).max(0.0);
-                if let Some(next_scroll_y) = scroll_y_to_reveal_uniform_item(
+                if let Some(next_scroll_y) = scroll_y_to_center_uniform_item(
                     current_scroll_y,
                     viewport_height,
                     prefix_height,
                     item_height,
                     index,
+                    self.file_list_items.len(),
                 ) {
                     let offset = self.file_list_scroll_handle.offset();
                     self.file_list_scroll_handle
@@ -1505,7 +1551,7 @@ mod tests {
 
     use super::{
         FileListDetails, FileListItem, extract_image_paths, extract_title_and_preview,
-        load_file_list_items, preserve_file_list_details, scroll_y_to_reveal_uniform_item,
+        load_file_list_items, preserve_file_list_details, scroll_y_to_center_uniform_item,
     };
     use crate::editor::SidebarSortMode;
 
@@ -1538,12 +1584,12 @@ mod tests {
     #[test]
     fn reveal_does_not_scroll_an_already_visible_item() {
         assert_eq!(
-            scroll_y_to_reveal_uniform_item(100.0, 200.0, 0.0, 50.0, 3),
+            scroll_y_to_center_uniform_item(100.0, 200.0, 0.0, 50.0, 3, 20),
             None
         );
         assert_eq!(
-            scroll_y_to_reveal_uniform_item(100.0, 200.0, 0.0, 50.0, 6),
-            Some(150.0)
+            scroll_y_to_center_uniform_item(100.0, 200.0, 0.0, 50.0, 6, 20),
+            Some(225.0)
         );
     }
 
@@ -1577,10 +1623,22 @@ mod tests {
 
     #[test]
     fn extracts_first_heading_and_strips_syntax() {
-        let text = "---\ntitle: meta\n---\n# 小语文稿 **指南**\n\n这是一个 *优雅* 的 [写作](https://example.com) 工具，`Markdown` ~~删除~~ ==高亮==。";
+        let text = "---\ndate: 2026-01-01\n---\n# 小语文稿 **指南**\n\n这是一个 *优雅* 的 [写作](https://example.com) 工具，`Markdown` ~~删除~~ ==高亮==。";
         let (title, preview) = extract_title_and_preview(text);
         assert_eq!(title.as_deref(), Some("小语文稿 指南"));
         assert_eq!(preview, "这是一个 优雅 的 写作 工具，Markdown 删除 高亮。");
+    }
+
+    #[test]
+    fn front_matter_title_overrides_first_heading() {
+        let text = "---\ndate: 2026-01-01\ntitle: \"元数据标题\"\n---\n# 正文标题\n\n正文内容。";
+        let (title, preview) = extract_title_and_preview(text);
+        assert_eq!(title.as_deref(), Some("元数据标题"));
+        assert_eq!(preview, "正文内容。");
+
+        let compact = "-\ntitle: 紧凑标题\n-\n# 正文标题\n";
+        let (title, _) = extract_title_and_preview(compact);
+        assert_eq!(title.as_deref(), Some("紧凑标题"));
     }
 
     #[test]

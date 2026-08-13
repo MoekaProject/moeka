@@ -1399,6 +1399,17 @@ impl Styles {
     /// dark theme) used for the window border, menus, and sidebar surfaces so
     /// those surfaces stay dark even when the editor content uses a light theme.
     pub fn from_theme(theme: &Theme, ui_theme: &Theme) -> Self {
+        Self::from_theme_with_options(theme, ui_theme, true)
+    }
+
+    /// `sidebar_always_dark = false` renders sidebar surfaces (FileTree,
+    /// FileList, workspace search) with the editor theme instead of the dark
+    /// chrome palette.
+    pub fn from_theme_with_options(
+        theme: &Theme,
+        ui_theme: &Theme,
+        sidebar_always_dark: bool,
+    ) -> Self {
         let ui_font_size_px = 13.0;
         let ui_font_size_sm_px = ui_font_size_px - 1.0;
         let ui_font_size_xs_px = ui_font_size_px - 2.0;
@@ -1407,7 +1418,7 @@ impl Styles {
         let editor_heading_base_font_size_px = 15.0;
 
         let is_light = theme.bg_primary.l >= 0.5;
-        let sidebar_theme = ui_theme;
+        let sidebar_theme = if sidebar_always_dark { ui_theme } else { theme };
         let is_light_monochrome = is_light && theme.heading == theme.text_primary;
         let light_monochrome_heading_color = if is_light_monochrome {
             theme.heading
@@ -1718,7 +1729,15 @@ impl Styles {
                 file_list_item_thumbnail_border_color: sidebar_theme.border_primary,
                 file_list_item_bg: sidebar_theme.bg_secondary,
                 file_list_item_hover_bg: sidebar_theme.bg_primary,
-                file_list_item_selected_bg: sidebar_theme.bg_primary,
+                // Dark sidebars deepen the selected row beyond bg_primary so
+                // the active document stands out from hover.
+                file_list_item_selected_bg: if sidebar_theme.bg_primary.l < 0.5 {
+                    let mut selected = sidebar_theme.bg_primary;
+                    selected.l = (selected.l * 0.6).max(0.0);
+                    selected
+                } else {
+                    sidebar_theme.bg_primary
+                },
                 file_list_item_separator_width_px: 1.0,
                 file_list_item_separator_color: with_alpha(sidebar_theme.border_secondary, 0.35),
                 file_list_empty_font_size_px: ui_font_size_sm_px,
@@ -2534,7 +2553,9 @@ impl Styles {
                 settings_option_button_border_width_px: 1.0,
                 settings_option_button_gap_px: 8.0,
                 settings_option_button_font_size_px: ui_font_size_sm_px,
-                settings_option_button_text_color: settings_theme.text_secondary,
+                // Match the settings text-input text color so picker trigger
+                // buttons don't read lighter than typed values.
+                settings_option_button_text_color: settings_theme.text_bright,
                 settings_option_button_active_text_color: settings_active_text_color,
                 settings_option_button_bg: settings_theme.bg_secondary,
                 settings_option_button_hover_bg: settings_theme.bg_hover,
