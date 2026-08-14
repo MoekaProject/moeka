@@ -1229,11 +1229,14 @@ impl ChatTerminalSession {
         if self.warn_on_close {
             return true;
         }
-        let Some(runtime) = self.runtime.as_ref() else {
-            return false;
-        };
+
+        // ConPTY exposes no foreground process group, so Windows cannot tell an
+        // idle shell apart from one running a command.
         #[cfg(unix)]
         {
+            let Some(runtime) = self.runtime.as_ref() else {
+                return false;
+            };
             let foreground = runtime
                 .master
                 .process_group_leader()

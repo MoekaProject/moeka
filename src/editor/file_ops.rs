@@ -33,21 +33,15 @@ pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        return fs::write(path, content);
-    }
-
-    #[cfg(not(target_os = "windows"))]
+    // `fs::rename` maps to MoveFileExW(MOVEFILE_REPLACE_EXISTING) on Windows,
+    // so the same temp-file-then-replace sequence works on every platform.
     atomic_write_by_rename(path, content)
 }
 
-#[cfg(not(target_os = "windows"))]
 fn atomic_write_by_rename(path: &Path, content: &[u8]) -> io::Result<()> {
     atomic_write_by_rename_with(path, content, |from, to| fs::rename(from, to))
 }
 
-#[cfg(not(target_os = "windows"))]
 fn atomic_write_by_rename_with(
     path: &Path,
     content: &[u8],
@@ -84,7 +78,6 @@ fn atomic_write_by_rename_with(
     result
 }
 
-#[cfg(not(target_os = "windows"))]
 fn write_existing_file_in_place(path: &Path, content: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).open(path)?;
     file.write_all(content)?;
@@ -92,7 +85,6 @@ fn write_existing_file_in_place(path: &Path, content: &[u8]) -> io::Result<()> {
     sync_file_if_supported(&file)
 }
 
-#[cfg(not(target_os = "windows"))]
 fn write_without_atomic_replace(path: &Path, content: &[u8]) -> io::Result<()> {
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut file) => {
@@ -112,12 +104,10 @@ fn write_without_atomic_replace(path: &Path, content: &[u8]) -> io::Result<()> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 fn sync_file_if_supported(file: &fs::File) -> io::Result<()> {
     accept_unsupported_sync(file.sync_all())
 }
 
-#[cfg(not(target_os = "windows"))]
 fn accept_unsupported_sync(result: io::Result<()>) -> io::Result<()> {
     match result {
         Ok(()) => Ok(()),
@@ -187,7 +177,6 @@ mod tests {
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn falls_back_to_in_place_write_when_replace_is_unsupported() {
         let dir = tempdir().unwrap();
@@ -206,7 +195,6 @@ mod tests {
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn creates_final_file_directly_when_new_file_rename_is_unsupported() {
         let dir = tempdir().unwrap();
@@ -224,7 +212,6 @@ mod tests {
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn accepts_unsupported_sync_but_preserves_other_errors() {
         assert!(accept_unsupported_sync(Err(io::Error::from_raw_os_error(45))).is_ok());
