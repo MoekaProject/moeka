@@ -66,6 +66,14 @@ block = "0.1"
 core-graphics = "0.24"
 raw-window-handle = "0.6"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_DataExchange",
+  "Win32_System_Ole",
+  "Win32_UI_Shell",
+] }
+
 # Optimize all dependencies in dev mode for better performance
 # while keeping the app itself at opt-level 1 for faster compile times
 [profile.dev]

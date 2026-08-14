@@ -100,35 +100,6 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(super) fn move_path_to_trash(path: &Path) -> anyhow::Result<()> {
-        #[cfg(target_os = "macos")]
-        {
-            use trash::TrashContext;
-            use trash::macos::{DeleteMethod, TrashContextExtMacos};
-
-            let mut trash_context = TrashContext::new();
-            trash_context.set_delete_method(DeleteMethod::NsFileManager);
-            match trash_context.delete(path) {
-                Ok(()) => Ok(()),
-                Err(file_manager_error) => {
-                    // Finder can trash files on SMB volumes that reject trashItemAtURL.
-                    let mut finder_context = TrashContext::new();
-                    finder_context.set_delete_method(DeleteMethod::Finder);
-                    finder_context.delete(path).map_err(|finder_error| {
-                        anyhow::anyhow!(
-                            "NSFileManager: {file_manager_error}; Finder: {finder_error}"
-                        )
-                    })
-                }
-            }
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            trash::delete(path).map_err(anyhow::Error::from)
-        }
-    }
-
     fn remove_copied_path(path: &Path) -> std::io::Result<()> {
         if path.is_dir() {
             std::fs::remove_dir_all(path)
@@ -181,14 +152,14 @@ impl EditorView {
             src,
             dst,
             |from, to| std::fs::rename(from, to),
-            Self::move_path_to_trash,
+            crate::platform::trash::move_to_trash,
         )
     }
 
     pub(crate) fn delete_paths_to_trash(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         let mut deleted_any = false;
         for path in paths {
-            match Self::move_path_to_trash(path) {
+            match crate::platform::trash::move_to_trash(path) {
                 Ok(()) => deleted_any = true,
                 Err(error) => {
                     let message = format!(
@@ -562,7 +533,8 @@ impl EditorView {
     }
 
     fn copy_path_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
-        if src.is_dir() {
+        // `symlink_metadata` keeps a symlinked directory from being walked into.
+        if std::fs::symlink_metadata(src)?.is_dir() {
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent)?;
             }

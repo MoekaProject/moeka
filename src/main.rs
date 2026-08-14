@@ -78,50 +78,13 @@ fn runtime_search_roots() -> Vec<PathBuf> {
     static RUNTIME_SEARCH_ROOTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
 
     RUNTIME_SEARCH_ROOTS
-        .get_or_init(build_runtime_search_roots)
+        .get_or_init(platform::paths::asset_search_roots)
         .clone()
-}
-
-fn build_runtime_search_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-
-    if let Ok(executable_path) = std::env::current_exe() {
-        if let Some(executable_dir) = executable_path.parent() {
-            roots.push(executable_dir.to_path_buf());
-
-            if let Some(contents_dir) = executable_dir.parent() {
-                roots.push(contents_dir.join("Resources"));
-            }
-        }
-    }
-
-    if let Ok(current_dir) = std::env::current_dir() {
-        roots.push(current_dir.clone());
-        roots.push(current_dir.join("editor"));
-    }
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    roots.push(manifest_dir.clone());
-    if let Some(parent) = manifest_dir.parent() {
-        roots.push(parent.to_path_buf());
-    }
-
-    roots
 }
 
 #[cfg(target_os = "macos")]
 fn macos_markdown_path_from_url(url: &str) -> Option<PathBuf> {
-    let encoded_path = url.strip_prefix("file://")?;
-    let encoded_path = encoded_path
-        .strip_prefix("localhost")
-        .unwrap_or(encoded_path);
-    if !encoded_path.starts_with('/') {
-        return None;
-    }
-    let decoded = percent_encoding::percent_decode_str(encoded_path)
-        .decode_utf8()
-        .ok()?;
-    let path = PathBuf::from(decoded.as_ref());
+    let path = platform::paths::path_from_file_url(url)?;
     // Directories become workspace roots; files must be markdown documents.
     if !path.is_dir() && !(editor::is_markdown_file(&path) && path.is_file()) {
         return None;

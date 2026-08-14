@@ -327,123 +327,12 @@ fn unique_import_path(directory: &Path, stem: &str, extension: Option<&str>) -> 
     }
 }
 
-fn decode_percent_escapes(text: &str) -> String {
-    let mut decoded = String::with_capacity(text.len());
-    let bytes = text.as_bytes();
-    let mut index = 0usize;
-
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&text[index + 1..index + 3], 16) {
-                decoded.push(byte as char);
-                index += 3;
-                continue;
-            }
-        }
-        decoded.push(bytes[index] as char);
-        index += 1;
-    }
-
-    decoded
-}
-
 fn parse_file_urls_from_text(text: &str) -> Vec<PathBuf> {
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .filter_map(|line| {
-            let path = line.strip_prefix("file://")?;
-            let decoded = decode_percent_escapes(path);
-            #[cfg(target_os = "windows")]
-            let decoded = decoded.trim_start_matches('/').to_string();
-            Some(PathBuf::from(decoded))
-        })
+        .filter_map(crate::platform::paths::path_from_file_url)
         .collect()
-}
-
-#[cfg(target_os = "macos")]
-fn macos_nsstring(text: &str) -> *mut objc::runtime::Object {
-    use objc::{class, msg_send, sel, sel_impl};
-
-    unsafe {
-        let c_string = std::ffi::CString::new(text).expect("NSString input contains interior NUL");
-        msg_send![class!(NSString), stringWithUTF8String: c_string.as_ptr()]
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn macos_path_from_nsstring(value: *mut objc::runtime::Object) -> Option<PathBuf> {
-    use objc::{msg_send, sel, sel_impl};
-
-    if value.is_null() {
-        return None;
-    }
-
-    unsafe {
-        let utf8: *const std::os::raw::c_char = msg_send![value, UTF8String];
-        if utf8.is_null() {
-            None
-        } else {
-            Some(PathBuf::from(
-                std::ffi::CStr::from_ptr(utf8)
-                    .to_string_lossy()
-                    .into_owned(),
-            ))
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn macos_clipboard_file_paths() -> Vec<PathBuf> {
-    use objc::{class, msg_send, sel, sel_impl};
-
-    unsafe {
-        let pasteboard: *mut objc::runtime::Object =
-            msg_send![class!(NSPasteboard), generalPasteboard];
-        if pasteboard.is_null() {
-            return Vec::new();
-        }
-
-        let items: *mut objc::runtime::Object = msg_send![pasteboard, pasteboardItems];
-        if items.is_null() {
-            return Vec::new();
-        }
-
-        let count: usize = msg_send![items, count];
-        let file_url_type = macos_nsstring("public.file-url");
-        let mut paths = Vec::new();
-
-        for index in 0..count {
-            let item: *mut objc::runtime::Object = msg_send![items, objectAtIndex: index];
-            if item.is_null() {
-                continue;
-            }
-
-            let url_string: *mut objc::runtime::Object =
-                msg_send![item, stringForType: file_url_type];
-            if url_string.is_null() {
-                continue;
-            }
-
-            let url: *mut objc::runtime::Object =
-                msg_send![class!(NSURL), URLWithString: url_string];
-            if url.is_null() {
-                continue;
-            }
-
-            let path_string: *mut objc::runtime::Object = msg_send![url, path];
-            if let Some(path) = macos_path_from_nsstring(path_string) {
-                paths.push(path);
-            }
-        }
-
-        paths
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn macos_clipboard_file_paths() -> Vec<PathBuf> {
-    Vec::new()
 }
 
 // ── Layout constants ────────────────────────────────────────────────
@@ -4378,7 +4267,7 @@ impl EditorView {
             .text()
             .map(|text| parse_file_urls_from_text(&text))
             .unwrap_or_default();
-        file_paths.extend(macos_clipboard_file_paths());
+        file_paths.extend(crate::platform::clipboard::file_paths());
         file_paths.retain(|path| path.is_file());
         if !images.is_empty() {
             file_paths.retain(|path| !is_image_path(path));

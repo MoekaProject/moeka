@@ -639,7 +639,7 @@ fn discard_paths(
     for rel_path in untracked {
         let absolute = repo_root.join(rel_path);
         if absolute.exists() {
-            EditorView::move_path_to_trash(&absolute)
+            crate::platform::trash::move_to_trash(&absolute)
                 .map_err(|error| GitOpError::Other(error.to_string()))?;
         }
     }

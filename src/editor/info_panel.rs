@@ -2525,11 +2525,7 @@ impl EditorView {
             return None;
         }
 
-        let expanded = if let Some(rest) = raw.strip_prefix("~/") {
-            PathBuf::from(std::env::var("HOME").ok()?).join(rest)
-        } else {
-            PathBuf::from(raw)
-        };
+        let expanded = crate::platform::paths::expand_tilde(raw)?;
 
         if expanded.is_absolute() {
             return Some(expanded);

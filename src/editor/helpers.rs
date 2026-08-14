@@ -4698,15 +4698,7 @@ pub(crate) fn resolve_image_to_path(
     let path_str = path_str.as_str();
 
     // Expand ~/
-    let expanded = if let Some(rest) = path_str.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            PathBuf::from(home).join(rest)
-        } else {
-            return None;
-        }
-    } else {
-        PathBuf::from(path_str)
-    };
+    let expanded = crate::platform::paths::expand_tilde(path_str)?;
 
     // If the path happens to be absolute (e.g. from file:// or ~/ expansion),
     // just check existence.
