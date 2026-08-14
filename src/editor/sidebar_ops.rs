@@ -56,7 +56,7 @@ impl EditorView {
                             if let Some(parent) = new_temp.parent() {
                                 let _ = std::fs::create_dir_all(parent);
                             }
-                            if std::fs::rename(temp_path, &new_temp).is_ok() {
+                            if Self::move_path_compat(temp_path, &new_temp).is_ok() {
                                 tab.recovery.temp_path = Some(new_temp);
                             }
                         } else {
@@ -209,7 +209,7 @@ impl EditorView {
             let Some(dst) = Self::sidebar_drop_destination(&src, &target_dir) else {
                 continue;
             };
-            if let Err(error) = std::fs::rename(&src, &dst) {
+            if let Err(error) = Self::move_path_compat(&src, &dst) {
                 let message = format!(
                     "{}: {error}",
                     self.t(crate::i18n::TextKey::FileOperationFailed)

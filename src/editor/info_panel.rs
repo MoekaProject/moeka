@@ -28,6 +28,31 @@ unsafe extern "C" {}
 
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(crate) enum ExportFormat {
+    Markdown,
+    Html,
+    Pdf,
+}
+
+impl ExportFormat {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Markdown => "Markdown",
+            Self::Html => "HTML",
+            Self::Pdf => "PDF",
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Markdown => "md",
+            Self::Html => "html",
+            Self::Pdf => "pdf",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct PendingGitDiffRow {
     kind: GitDiffRowKind,
@@ -2836,9 +2861,8 @@ impl EditorView {
         })
     }
 
-    fn export_default_name(&self, extension: &str) -> String {
-        let title = self
-            .current_file_path
+    fn export_default_name_for_path(&self, source_path: Option<&Path>, extension: &str) -> String {
+        let title = source_path
             .as_deref()
             .and_then(Path::file_stem)
             .and_then(|stem| stem.to_str())
@@ -2847,143 +2871,150 @@ impl EditorView {
         format!("{}.{}", title, extension)
     }
 
-    fn export_current_markdown(&mut self, cx: &mut Context<Self>) {
-        let default_name = self.export_default_name("md");
-        let text = self.buffer.text().to_string();
-        let ui_language = self.ui_language;
+    fn open_export_text_for_path(&self, path: &Path) -> Option<std::io::Result<String>> {
+        if self.current_file_path.as_deref() == Some(path) && self.active_tab_supports_text_buffer()
+        {
+            return Some(Ok(self.buffer.text().to_string()));
+        }
+        if let Some(tab) = self
+            .all_tabs()
+            .find(|tab| tab.path.as_deref() == Some(path))
+        {
+            if tab
+                .file_kind
+                .as_ref()
+                .is_some_and(FileKind::supports_text_buffer)
+            {
+                return Some(Ok(tab.snapshot.text.clone()));
+            }
+            return Some(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file does not contain exportable text",
+            )));
+        }
+        None
+    }
+
+    pub(crate) fn export_path(
+        &mut self,
+        path: PathBuf,
+        format: ExportFormat,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(result) = self.open_export_text_for_path(&path) {
+            self.finish_loading_export_path(path, format, result, cx);
+            return;
+        }
 
         cx.spawn(async move |this, cx| {
-            let maybe_path = cx
+            let read_path = path.clone();
+            let result = cx
                 .background_executor()
-                .spawn(async move {
-                    let title = crate::i18n::export_dialog_title(ui_language, "Markdown");
-                    export_dialog_path(&default_name, &title)
-                })
+                .spawn(async move { fs::read_to_string(&read_path) })
                 .await;
-            if let Some(path) = maybe_path {
-                match fs::write(&path, text) {
-                    Ok(()) => {
-                        this.update(cx, |editor, cx| {
-                            let message = format!(
-                                "{}: {}",
-                                editor.t(crate::i18n::TextKey::ExportCompleted),
-                                path.display()
-                            );
-                            editor.notify_info(message, cx);
-                        })
-                        .ok();
-                    }
-                    Err(error) => {
-                        this.update(cx, |editor, cx| {
-                            let message = format!(
-                                "{}: {error}",
-                                editor.t(crate::i18n::TextKey::ExportFailed)
-                            );
-                            editor.notify_error(message, cx);
-                        })
-                        .ok();
-                    }
-                }
-            }
+            this.update(cx, |editor, cx| {
+                editor.finish_loading_export_path(path, format, result, cx);
+            })
+            .ok();
         })
         .detach();
+    }
+
+    fn finish_loading_export_path(
+        &mut self,
+        path: PathBuf,
+        format: ExportFormat,
+        result: std::io::Result<String>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(text) => self.export_document(Some(path), text, format, cx),
+            Err(error) => self.notify_error(
+                format!("{}: {error}", self.t(crate::i18n::TextKey::ExportFailed)),
+                cx,
+            ),
+        }
+    }
+
+    fn export_current(&mut self, format: ExportFormat, cx: &mut Context<Self>) {
+        self.export_document(
+            self.current_file_path.clone(),
+            self.buffer.text().to_string(),
+            format,
+            cx,
+        );
+    }
+
+    fn export_current_markdown(&mut self, cx: &mut Context<Self>) {
+        self.export_current(ExportFormat::Markdown, cx);
     }
 
     fn export_current_html(&mut self, cx: &mut Context<Self>) {
-        let title = self
-            .current_file_path
-            .as_deref()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            .unwrap_or(self.t(crate::i18n::TextKey::Untitled))
-            .to_string();
-        let default_name = self.export_default_name("html");
-        let document = build_html_document(
-            &title,
-            self.buffer.text(),
-            self.current_file_path.as_deref(),
-        );
-        let ui_language = self.ui_language;
-
-        cx.spawn(async move |this, cx| {
-            let maybe_path = cx
-                .background_executor()
-                .spawn(async move {
-                    let title = crate::i18n::export_dialog_title(ui_language, "HTML");
-                    export_dialog_path(&default_name, &title)
-                })
-                .await;
-            if let Some(path) = maybe_path {
-                match fs::write(&path, document) {
-                    Ok(()) => {
-                        this.update(cx, |editor, cx| {
-                            let message = format!(
-                                "{}: {}",
-                                editor.t(crate::i18n::TextKey::ExportCompleted),
-                                path.display()
-                            );
-                            editor.notify_info(message, cx);
-                        })
-                        .ok();
-                    }
-                    Err(error) => {
-                        this.update(cx, |editor, cx| {
-                            let message = format!(
-                                "{}: {error}",
-                                editor.t(crate::i18n::TextKey::ExportFailed)
-                            );
-                            editor.notify_error(message, cx);
-                        })
-                        .ok();
-                    }
-                }
-            }
-        })
-        .detach();
+        self.export_current(ExportFormat::Html, cx);
     }
 
     fn export_current_pdf(&mut self, cx: &mut Context<Self>) {
-        let title = self
-            .current_file_path
+        self.export_current(ExportFormat::Pdf, cx);
+    }
+
+    fn export_document(
+        &mut self,
+        source_file_path: Option<PathBuf>,
+        text: String,
+        format: ExportFormat,
+        cx: &mut Context<Self>,
+    ) {
+        let title = source_file_path
             .as_deref()
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
             .unwrap_or(self.t(crate::i18n::TextKey::Untitled))
             .to_string();
-        let default_name = self.export_default_name("pdf");
-        let markdown = self.buffer.text().to_string();
-        let source_file_path = self.current_file_path.clone();
+        let default_name =
+            self.export_default_name_for_path(source_file_path.as_deref(), format.extension());
         let ui_language = self.ui_language;
+        let immediate_bytes = match format {
+            ExportFormat::Markdown => Some(text.as_bytes().to_vec()),
+            ExportFormat::Html => {
+                Some(build_html_document(&title, &text, source_file_path.as_deref()).into_bytes())
+            }
+            ExportFormat::Pdf => None,
+        };
 
         cx.spawn(async move |this, cx| {
             let maybe_path = cx
                 .background_executor()
                 .spawn(async move {
-                    let title = crate::i18n::export_dialog_title(ui_language, "PDF");
-                    export_dialog_path(&default_name, &title)
+                    let dialog_title =
+                        crate::i18n::export_dialog_title(ui_language, format.label());
+                    export_dialog_path(&default_name, &dialog_title)
                 })
                 .await;
             let Some(path) = maybe_path else {
                 return;
             };
 
-            #[cfg(target_os = "macos")]
-            let export_result = {
-                let html = build_html_document(&title, &markdown, source_file_path.as_deref());
-                build_pdf_document_from_html_macos(&html, source_file_path.as_deref(), cx).await
-            };
+            let export_error = if let Some(bytes) = immediate_bytes {
+                fs::write(&path, bytes).err().map(|error| error.to_string())
+            } else {
+                #[cfg(target_os = "macos")]
+                let export_result = {
+                    let html = build_html_document(&title, &text, source_file_path.as_deref());
+                    build_pdf_document_from_html_macos(&html, source_file_path.as_deref(), cx).await
+                };
 
-            #[cfg(not(target_os = "macos"))]
-            let export_result =
-                cx.background_executor()
-                    .spawn(async move {
-                        build_pdf_document(&title, &markdown, source_file_path.as_deref())
-                    })
-                    .await;
+                #[cfg(not(target_os = "macos"))]
+                let export_result =
+                    cx.background_executor()
+                        .spawn(async move {
+                            build_pdf_document(&title, &text, source_file_path.as_deref())
+                        })
+                        .await;
 
-            let export_error = match export_result {
-                Ok(bytes) => fs::write(&path, bytes).err().map(|error| error.to_string()),
-                Err(error) => Some(error.to_string()),
+                match export_result {
+                    Ok(bytes) => fs::write(&path, bytes).err().map(|error| error.to_string()),
+                    Err(error) => Some(error.to_string()),
+                }
             };
             match export_error {
                 Some(error) => {
@@ -3479,8 +3510,10 @@ mod tests {
 
         let doc = super::build_html_document("T", md, None);
         assert!(
-            doc.contains(".markdown-body table{display:table;width:100%"),
-            "full-width tables: missing rule"
+            doc.contains(
+                ".markdown-body table{display:block;width:max-content;max-width:100%;overflow:auto"
+            ),
+            "overflow-safe tables: missing rule"
         );
         assert!(
             doc.contains("li:has(>input[type=checkbox]){list-style:none;}"),

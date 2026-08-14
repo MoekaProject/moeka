@@ -32,6 +32,8 @@ use editor::EditorView;
 
 const MIN_WINDOW_WIDTH_PX: f32 = 480.0;
 const MIN_WINDOW_HEIGHT_PX: f32 = 320.0;
+#[cfg(target_os = "macos")]
+const MAIN_WINDOW_FRAME_AUTOSAVE_NAME: &str = "MoekaMainWindow";
 
 struct FsAssets;
 
@@ -250,7 +252,7 @@ fn editor_window_options(cx: &App) -> WindowOptions {
     }
 }
 
-fn configure_editor_window(window: &mut Window) {
+fn configure_editor_window(window: &mut Window, remember_main_window_frame: bool) {
     window.set_background_appearance(WindowBackgroundAppearance::Transparent);
     #[cfg(target_os = "macos")]
     {
@@ -264,6 +266,18 @@ fn configure_editor_window(window: &mut Window) {
                 let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
                 disable_gpui_content_view_window_drag(ns_view);
                 let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
+                if remember_main_window_frame {
+                    let autosave_name = std::ffi::CString::new(MAIN_WINDOW_FRAME_AUTOSAVE_NAME)
+                        .expect("window frame autosave name");
+                    let autosave_name: *mut objc::runtime::Object = msg_send![
+                        class!(NSString),
+                        stringWithUTF8String: autosave_name.as_ptr()
+                    ];
+                    // Ignore saved frames whose display is no longer connected.
+                    let _: bool =
+                        msg_send![ns_window, setFrameUsingName: autosave_name force: false];
+                    let _: bool = msg_send![ns_window, setFrameAutosaveName: autosave_name];
+                }
                 let () = msg_send![ns_window, setTitlebarSeparatorStyle: 0i64];
                 let clear_color: *mut objc::runtime::Object =
                     msg_send![class!(NSColor), clearColor];
@@ -284,12 +298,14 @@ fn open_editor_window(cx: &mut App) -> anyhow::Result<Entity<EditorView>> {
     let options = editor_window_options(cx);
     let mut editor = None;
     cx.open_window(options, |window, cx| {
-        configure_editor_window(window);
+        configure_editor_window(window, true);
         let view = cx.new(|cx| EditorView::new(cx));
         window.focus(&view.focus_handle(cx));
+        window.activate_window();
         editor = Some(view.clone());
         view
     })?;
+    cx.activate(true);
     Ok(editor.expect("editor view must be created with its window"))
 }
 
@@ -320,7 +336,7 @@ fn restore_window(handle: AnyWindowHandle, cx: &mut App) {
 fn open_terminal_window(cx: &mut App) -> anyhow::Result<()> {
     let options = editor_window_options(cx);
     cx.open_window(options, |window, cx| {
-        configure_editor_window(window);
+        configure_editor_window(window, false);
         let view = cx.new(|cx| {
             let mut view = EditorView::new(cx);
             let launch_cli = view.app_settings.terminal_launch_cli();

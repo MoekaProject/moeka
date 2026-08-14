@@ -6,7 +6,7 @@ use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_enco
 
 use crate::markdown::{LocalLinkSyntax, parse_local_link_targets};
 
-use super::should_skip_path;
+use super::{file_ops, should_skip_path};
 
 const MARKDOWN_PATH_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -275,21 +275,8 @@ impl WorkspaceRewriteContext {
 }
 
 pub(crate) fn write_text_atomically(path: &Path, text: &str) -> Result<()> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("document.md");
-    let temp_path = path.with_file_name(format!(".{file_name}.links.temp"));
-    std::fs::write(&temp_path, text)
-        .with_context(|| format!("failed to write {}", temp_path.display()))?;
-    if let Ok(metadata) = std::fs::metadata(path) {
-        let _ = std::fs::set_permissions(&temp_path, metadata.permissions());
-    }
-    if let Err(error) = std::fs::rename(&temp_path, path) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(error).with_context(|| format!("failed to replace {}", path.display()));
-    }
-    Ok(())
+    file_ops::atomic_write(path, text.as_bytes())
+        .with_context(|| format!("failed to replace {}", path.display()))
 }
 
 impl WorkspaceLinkIndex {

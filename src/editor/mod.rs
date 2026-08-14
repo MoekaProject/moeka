@@ -487,6 +487,9 @@ pub(crate) enum ContextMenuKind {
     Format,
     FormatHeading,
     FormatMore,
+    Export {
+        path: PathBuf,
+    },
     WikiLink,
     Tab {
         tab_id: String,
@@ -1552,6 +1555,7 @@ pub struct EditorView {
     pub(crate) context_submenu_hovered: bool,
     pub(crate) format_heading_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) format_more_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    pub(crate) export_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) context_menu_opacity: f32,
     pub(crate) context_menu_opacity_target: f32,
     pub(crate) context_menu_opacity_epoch: usize,
@@ -2211,6 +2215,7 @@ impl EditorView {
             context_submenu_hovered: false,
             format_heading_trigger_bounds: Rc::new(Cell::new(None)),
             format_more_trigger_bounds: Rc::new(Cell::new(None)),
+            export_trigger_bounds: Rc::new(Cell::new(None)),
             context_menu_opacity: 0.0,
             context_menu_opacity_target: 0.0,
             context_menu_opacity_epoch: 0,
@@ -7416,6 +7421,7 @@ impl EditorView {
             *w = *w * (clamped / self.ui_scale);
         }
         self.ui_scale = clamped;
+        self.app_settings.ui_scale = clamped;
         self.sync_panel_display_state();
         self.sync_overlay_text_input_styles(cx);
         // Zooming changes the scaled font sizes, so the cached per-line layout

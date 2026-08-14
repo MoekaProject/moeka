@@ -1613,7 +1613,6 @@ impl EditorView {
     pub(crate) fn apply_ui_scale(&mut self, scale: f32, cx: &mut Context<Self>) {
         let scale = (scale * 10.0).round() / 10.0; // Round to 0.1
         self.set_ui_scale(scale, cx);
-        self.app_settings.ui_scale = self.ui_scale;
         if let Some(editor) = &self.settings_ui_font_size_editor {
             self.sync_inline_stepper_editor(editor, format!("{:.1}", self.ui_scale), cx);
         }

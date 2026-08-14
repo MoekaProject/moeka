@@ -922,9 +922,6 @@ pub struct NotificationStyles {
     pub notification_border_color: Hsla,
     pub notification_text_color: Hsla,
     pub notification_font_size_px: f32,
-    pub notification_accent_width_px: f32,
-    pub notification_error_accent: Hsla,
-    pub notification_info_accent: Hsla,
     pub notification_hover_opacity: f32,
     pub notification_dismiss_after_ms: u64,
     pub notification_max_visible: usize,
@@ -974,6 +971,7 @@ pub struct ContextMenuStyles {
     // Widths per menu kind
     pub menu_sidebar_width_px: f32,
     pub menu_format_width_px: f32,
+    pub menu_export_width_px: f32,
     pub menu_tab_width_px: f32,
 }
 
@@ -2277,6 +2275,7 @@ impl Styles {
                 menu_separator_color: ui_theme.border_primary,
                 menu_sidebar_width_px: 180.0,
                 menu_format_width_px: 210.0,
+                menu_export_width_px: 148.0,
                 menu_tab_width_px: 180.0,
             },
             dialog: DialogStyles {
@@ -2322,9 +2321,6 @@ impl Styles {
                 notification_border_color: ui_theme.border_primary,
                 notification_text_color: ui_theme.text_primary,
                 notification_font_size_px: ui_font_size_px,
-                notification_accent_width_px: 3.0,
-                notification_error_accent: ui_theme.text_danger,
-                notification_info_accent: ui_theme.text_accent,
                 notification_hover_opacity: 0.9,
                 notification_dismiss_after_ms: 5000,
                 notification_max_visible: 4,

@@ -214,7 +214,9 @@ enum ChatTerminalEvent {
 }
 
 #[derive(Clone)]
-struct ChatTerminalListener;
+struct ChatTerminalListener {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+}
 
 #[derive(Clone, Copy)]
 struct ChatTerminalSize {
@@ -973,7 +975,16 @@ impl InputHandler for ChatTerminalInputHandler {
 }
 
 impl EventListener for ChatTerminalListener {
-    fn send_event(&self, _event: AlacTermEvent) {}
+    fn send_event(&self, event: AlacTermEvent) {
+        let AlacTermEvent::PtyWrite(text) = event else {
+            return;
+        };
+        let Ok(mut writer) = self.writer.lock() else {
+            return;
+        };
+        let _ = writer.write_all(text.as_bytes());
+        let _ = writer.flush();
+    }
 }
 
 impl Dimensions for ChatTerminalSize {
@@ -1144,7 +1155,9 @@ impl ChatTerminalSession {
                 rows: CHAT_PANEL_DEFAULT_ROWS as usize,
                 cols: CHAT_PANEL_DEFAULT_COLS as usize,
             },
-            ChatTerminalListener,
+            ChatTerminalListener {
+                writer: writer.clone(),
+            },
         )));
 
         let (sender, receiver) = mpsc::channel();
@@ -4421,6 +4434,37 @@ impl EditorView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn terminal_parser_answers_primary_device_attributes_query() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let listener = ChatTerminalListener {
+            writer: Arc::new(Mutex::new(Box::new(SharedWriter(output.clone())))),
+        };
+        let mut term = Term::new(
+            terminal_config(TerminalCursorShape::default()),
+            &ChatTerminalSize { rows: 24, cols: 80 },
+            listener,
+        );
+        let mut processor = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+
+        processor.advance(&mut term, b"\x1b[c");
+
+        assert_eq!(&*output.lock().unwrap(), b"\x1b[?6c");
+    }
 
     #[test]
     fn terminal_title_uses_working_directory_and_current_command() {

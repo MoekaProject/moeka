@@ -44,6 +44,15 @@ pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
 
 #[cfg(not(target_os = "windows"))]
 fn atomic_write_by_rename(path: &Path, content: &[u8]) -> io::Result<()> {
+    atomic_write_by_rename_with(path, content, |from, to| fs::rename(from, to))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn atomic_write_by_rename_with(
+    path: &Path,
+    content: &[u8],
+    rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     let temp_path = unique_temp_path(path);
     let result = (|| {
         let mut file = OpenOptions::new()
@@ -51,19 +60,74 @@ fn atomic_write_by_rename(path: &Path, content: &[u8]) -> io::Result<()> {
             .create_new(true)
             .open(&temp_path)?;
         if let Ok(metadata) = fs::metadata(path) {
-            file.set_permissions(metadata.permissions())?;
+            let _ = file.set_permissions(metadata.permissions());
         }
         file.write_all(content)?;
-        file.sync_all()?;
+        sync_file_if_supported(&file)?;
         drop(file);
 
-        fs::rename(&temp_path, path)
+        rename(&temp_path, path)
     })();
 
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_path);
-    }
+    let result = result.or_else(|atomic_error| {
+        write_without_atomic_replace(path, content).map_err(|fallback_error| {
+            io::Error::new(
+                fallback_error.kind(),
+                format!(
+                    "atomic write failed ({atomic_error}); direct-write fallback failed ({fallback_error})"
+                ),
+            )
+        })
+    });
+
+    let _ = fs::remove_file(&temp_path);
     result
+}
+
+#[cfg(not(target_os = "windows"))]
+fn write_existing_file_in_place(path: &Path, content: &[u8]) -> io::Result<()> {
+    let mut file = OpenOptions::new().write(true).open(path)?;
+    file.write_all(content)?;
+    file.set_len(content.len() as u64)?;
+    sync_file_if_supported(&file)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn write_without_atomic_replace(path: &Path, content: &[u8]) -> io::Result<()> {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            let result = file
+                .write_all(content)
+                .and_then(|()| sync_file_if_supported(&file));
+            drop(file);
+            if result.is_err() {
+                let _ = fs::remove_file(path);
+            }
+            result
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_file() => {
+            write_existing_file_in_place(path, content)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn sync_file_if_supported(file: &fs::File) -> io::Result<()> {
+    accept_unsupported_sync(file.sync_all())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn accept_unsupported_sync(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error.kind() == io::ErrorKind::Unsupported || error.raw_os_error() == Some(45) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn content_hash(content: &[u8]) -> String {
@@ -121,6 +185,57 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "after");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn falls_back_to_in_place_write_when_replace_is_unsupported() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("network-note.md");
+        fs::write(&path, "old content that is longer").unwrap();
+
+        atomic_write_by_rename_with(&path, b"new", |_, _| {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "network filesystem does not support atomic replace",
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn creates_final_file_directly_when_new_file_rename_is_unsupported() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("new-network-note.md");
+
+        atomic_write_by_rename_with(&path, b"new", |_, _| {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "network filesystem does not support rename",
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn accepts_unsupported_sync_but_preserves_other_errors() {
+        assert!(accept_unsupported_sync(Err(io::Error::from_raw_os_error(45))).is_ok());
+
+        let permission_error = io::Error::new(io::ErrorKind::PermissionDenied, "denied");
+        assert_eq!(
+            accept_unsupported_sync(Err(permission_error))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]

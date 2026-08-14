@@ -122,6 +122,7 @@ impl EditorView {
         self.context_submenu_hovered = false;
         self.format_heading_trigger_bounds.set(None);
         self.format_more_trigger_bounds.set(None);
+        self.export_trigger_bounds.set(None);
         // Menus opened from the FileList set this back to true right after.
         self.file_list_menu_origin = false;
         if clear_sidebar_edit {
@@ -1711,6 +1712,9 @@ impl EditorView {
                     .justify_center(),
             )
             .child(label.to_string())
+            .on_mouse_move(cx.listener(|this, _, _, cx| {
+                this.dismiss_export_submenu(cx);
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
@@ -1729,6 +1733,25 @@ impl EditorView {
         label: &str,
         icon_path: &'static str,
         is_destructive: bool,
+        cx: &mut Context<Self>,
+        handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        self.render_context_menu_item_with_icon_behavior(
+            label,
+            icon_path,
+            is_destructive,
+            true,
+            cx,
+            handler,
+        )
+    }
+
+    fn render_context_menu_item_with_icon_behavior(
+        &self,
+        label: &str,
+        icon_path: &'static str,
+        is_destructive: bool,
+        dismiss_export_submenu: bool,
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
@@ -1780,6 +1803,11 @@ impl EditorView {
                     ),
             )
             .child(label.to_string())
+            .when(dismiss_export_submenu, |this| {
+                this.on_mouse_move(cx.listener(|this, _, _, cx| {
+                    this.dismiss_export_submenu(cx);
+                }))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
@@ -1791,6 +1819,15 @@ impl EditorView {
                 }),
             )
             .into_any_element()
+    }
+
+    fn dismiss_export_submenu(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.context_submenu, Some(ContextMenuKind::Export { .. })) {
+            self.context_submenu = None;
+            self.context_submenu_aim = None;
+            self.context_submenu_hovered = false;
+            cx.notify();
+        }
     }
 
     fn render_context_menu_choice_item(
@@ -1997,9 +2034,16 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ms = &self.styles.context_menu;
+        let wss = &self.styles.workspace_switcher;
         let is_open = self.context_submenu.as_ref() == Some(&submenu_kind);
         let icon_size = self.scaled(ms.menu_format_icon_size_px);
-        let icon_gap = self.scaled(ms.menu_format_icon_gap_px);
+        let (icon_col_w, icon_gap) = menu_icon_column_metrics(
+            ms.menu_format_icon_size_px,
+            wss.ws_menu_item_check_size_px,
+            wss.ws_menu_item_action_icon_gap_px,
+        );
+        let icon_col_w = self.scaled(icon_col_w);
+        let icon_gap = self.scaled(icon_gap);
         let arrow_size = (icon_size - self.scaled(2.0)).max(self.scaled(10.0));
         let hover_bg = ms.menu_item_hover_bg;
         let text_color = ms.menu_item_primary_text_color;
@@ -2012,6 +2056,7 @@ impl EditorView {
         let trigger_bounds = match submenu_kind {
             ContextMenuKind::FormatHeading => self.format_heading_trigger_bounds.clone(),
             ContextMenuKind::FormatMore => self.format_more_trigger_bounds.clone(),
+            ContextMenuKind::Export { .. } => self.export_trigger_bounds.clone(),
             _ => Rc::new(Cell::new(None)),
         };
 
@@ -2034,8 +2079,8 @@ impl EditorView {
                     .gap(px(icon_gap))
                     .child(
                         div()
-                            .w(px(icon_size))
-                            .h(px(icon_size))
+                            .w(px(icon_col_w))
+                            .h(px(icon_col_w))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -2275,6 +2320,13 @@ impl EditorView {
         let context_count = context_paths.len();
 
         if !is_dir {
+            items.push(self.render_format_submenu_trigger_item(
+                self.t(crate::i18n::TextKey::Export),
+                None,
+                ContextMenuKind::Export { path: path.clone() },
+                cx,
+            ));
+            items.push(self.render_context_menu_separator());
             let starred_paths: Vec<PathBuf> = context_paths
                 .iter()
                 .filter(|path| path.is_file())
@@ -2472,6 +2524,14 @@ impl EditorView {
     ) -> Vec<AnyElement> {
         let mut items: Vec<AnyElement> = Vec::new();
 
+        items.push(self.render_format_submenu_trigger_item(
+            self.t(crate::i18n::TextKey::Export),
+            None,
+            ContextMenuKind::Export { path: path.clone() },
+            cx,
+        ));
+        items.push(self.render_context_menu_separator());
+
         {
             let context_paths = self.sidebar_context_paths(&path);
             let context_count = context_paths.len();
@@ -2660,6 +2720,12 @@ impl EditorView {
                 },
             ));
         }
+        items.push(self.render_format_submenu_trigger_item(
+            self.t(crate::i18n::TextKey::Export),
+            None,
+            ContextMenuKind::Export { path: path.clone() },
+            cx,
+        ));
         if self.selected_sidebar_paths.len() <= 1 {
             let rename_path = path.clone();
             items.push(self.render_context_menu_item(
@@ -3869,6 +3935,10 @@ impl EditorView {
 
     fn format_submenu_height(&self, submenu_kind: &ContextMenuKind) -> f32 {
         match submenu_kind {
+            ContextMenuKind::Export { .. } => {
+                self.scaled(self.styles.context_menu.menu_padding_y_px) * 2.0
+                    + self.scaled(self.styles.context_menu.menu_item_height_px) * 3.0
+            }
             ContextMenuKind::FormatHeading => self.format_heading_menu_height(),
             ContextMenuKind::FormatMore => self.format_more_menu_height(),
             ContextMenuKind::Table {
@@ -3885,6 +3955,97 @@ impl EditorView {
                     + self.context_menu_separator_block_height() * 2.0
             }
             _ => self.format_more_menu_height(),
+        }
+    }
+
+    fn render_export_context_submenu(
+        &self,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        [
+            (
+                "Markdown",
+                "assets/icons/filetree/markdown.svg",
+                super::info_panel::ExportFormat::Markdown,
+            ),
+            (
+                "HTML",
+                "assets/icons/menu/html.svg",
+                super::info_panel::ExportFormat::Html,
+            ),
+            (
+                "PDF",
+                "assets/icons/menu/pdf.svg",
+                super::info_panel::ExportFormat::Pdf,
+            ),
+        ]
+        .into_iter()
+        .map(|(label, icon_path, format)| {
+            let path = path.to_path_buf();
+            self.render_context_menu_item_with_icon_behavior(
+                label,
+                icon_path,
+                false,
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.close_context_menu(cx);
+                    this.export_path(path.clone(), format, cx);
+                },
+            )
+        })
+        .collect()
+    }
+
+    fn export_submenu_layout(
+        &self,
+        main_layout: ContextMenuPanelLayout,
+        main_menu_width: f32,
+        submenu_width: f32,
+        submenu_height: f32,
+    ) -> ContextMenuPanelLayout {
+        let gap = self.scaled(self.styles.context_menu.menu_submenu_gap_px);
+        let right_space = main_layout.overlay_width
+            - (main_layout.left + main_menu_width)
+            - gap
+            - main_layout.margin;
+        let left = if right_space >= submenu_width {
+            main_layout.left + main_menu_width + gap
+        } else {
+            (main_layout.left - submenu_width - gap).max(main_layout.margin)
+        };
+        let visible_height = submenu_height
+            .min((main_layout.overlay_height - 2.0 * main_layout.margin).max(self.scaled(100.0)));
+        let desired_top = self
+            .export_trigger_bounds
+            .get()
+            .map(|bounds| {
+                let (_, trigger_top) = self.context_menu_overlay_coordinates(bounds.origin);
+                aligned_submenu_top(
+                    trigger_top,
+                    trigger_top + f32::from(bounds.size.height),
+                    visible_height,
+                    main_layout.overlay_height,
+                    main_layout.margin,
+                )
+            })
+            .unwrap_or(main_layout.estimated_top);
+        let estimated_top = desired_top.clamp(
+            main_layout.margin,
+            (main_layout.overlay_height - main_layout.margin - visible_height)
+                .max(main_layout.margin),
+        );
+
+        ContextMenuPanelLayout {
+            left,
+            estimated_top,
+            max_height: (main_layout.overlay_height - 2.0 * main_layout.margin)
+                .max(self.scaled(100.0)),
+            bottom_anchor: None,
+            overlay_width: main_layout.overlay_width,
+            overlay_height: main_layout.overlay_height,
+            margin: main_layout.margin,
         }
     }
 
@@ -4253,6 +4414,10 @@ impl EditorView {
                 self.render_format_more_context_menu(cx),
                 self.scaled(self.styles.context_menu.menu_format_width_px),
             ),
+            ContextMenuKind::Export { .. } => (
+                Vec::new(),
+                self.scaled(self.styles.context_menu.menu_format_width_px),
+            ),
             ContextMenuKind::FormatHeading => (
                 self.render_heading_context_menu(cx),
                 self.scaled(self.styles.context_menu.menu_format_width_px),
@@ -4347,6 +4512,19 @@ impl EditorView {
                 self.append_tab_pane_context_menu_items(&mut items, tab_id, cx);
                 if let Some(tab) = self.tabs.iter().find(|t| t.id == *tab_id) {
                     if let Some(path) = &tab.path {
+                        if tab
+                            .file_kind
+                            .as_ref()
+                            .is_some_and(FileKind::supports_text_buffer)
+                        {
+                            items.push(self.render_context_menu_separator());
+                            items.push(self.render_format_submenu_trigger_item(
+                                self.t(crate::i18n::TextKey::Export),
+                                None,
+                                ContextMenuKind::Export { path: path.clone() },
+                                cx,
+                            ));
+                        }
                         let chat_path = path.clone();
                         items.push(self.render_context_menu_item(
                             crate::i18n::add_file_to_chat_label(self.ui_language),
@@ -4684,14 +4862,19 @@ impl EditorView {
         };
         let main_menu = self.render_context_menu_panel("context-menu", layout, width, items, cx);
 
-        let submenu = if matches!(
+        let export_submenu_open =
+            matches!(self.context_submenu, Some(ContextMenuKind::Export { .. }));
+        let format_submenu_open = matches!(
             menu.kind,
             ContextMenuKind::Format | ContextMenuKind::Table { .. }
         ) && self.context_submenu.is_some()
-            && self.can_render_format_submenu()
-        {
+            && self.can_render_format_submenu();
+        let submenu = if export_submenu_open || format_submenu_open {
             let submenu_kind = self.context_submenu.as_ref().cloned();
             let submenu_items = match submenu_kind.as_ref() {
+                Some(ContextMenuKind::Export { path }) => {
+                    self.render_export_context_submenu(path, cx)
+                }
                 Some(ContextMenuKind::FormatHeading) => self.render_heading_context_menu(cx),
                 Some(ContextMenuKind::FormatMore) => self.render_format_more_context_menu(cx),
                 Some(ContextMenuKind::Table {
@@ -4701,19 +4884,32 @@ impl EditorView {
                 }) => self.render_table_context_submenu(*table_start_line, *row, *col, cx),
                 _ => Vec::new(),
             };
-            let submenu_width = self.scaled(self.styles.context_menu.menu_format_width_px);
-            let submenu_layout = submenu_kind
-                .as_ref()
-                .and_then(|submenu_kind| self.format_submenu_layout(menu, submenu_kind))
-                .unwrap_or(ContextMenuPanelLayout {
-                    left: layout.left + width,
-                    estimated_top: layout.estimated_top,
-                    max_height: layout.max_height,
-                    bottom_anchor: None,
-                    overlay_width: layout.overlay_width,
-                    overlay_height: layout.overlay_height,
-                    margin: layout.margin,
-                });
+            let submenu_width = if export_submenu_open {
+                self.scaled(self.styles.context_menu.menu_export_width_px)
+            } else {
+                self.scaled(self.styles.context_menu.menu_format_width_px)
+            };
+            let submenu_layout = match submenu_kind.as_ref() {
+                Some(kind @ ContextMenuKind::Export { .. }) => self.export_submenu_layout(
+                    layout,
+                    width,
+                    submenu_width,
+                    self.format_submenu_height(kind),
+                ),
+                Some(kind) => {
+                    self.format_submenu_layout(menu, kind)
+                        .unwrap_or(ContextMenuPanelLayout {
+                            left: layout.left + width,
+                            estimated_top: layout.estimated_top,
+                            max_height: layout.max_height,
+                            bottom_anchor: None,
+                            overlay_width: layout.overlay_width,
+                            overlay_height: layout.overlay_height,
+                            margin: layout.margin,
+                        })
+                }
+                None => layout,
+            };
             Some(self.render_context_menu_panel(
                 "context-submenu",
                 submenu_layout,

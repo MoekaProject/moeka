@@ -4,40 +4,24 @@ use gpui::Context;
 
 use super::EditorView;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NotificationSeverity {
-    Info,
-    Error,
-}
-
 pub(crate) struct Notification {
     pub id: usize,
-    pub severity: NotificationSeverity,
     pub message: String,
 }
 
 impl EditorView {
     pub(crate) fn notify_error(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
-        self.push_notification(NotificationSeverity::Error, message.into(), cx);
+        self.push_notification(message.into(), cx);
     }
 
     pub(crate) fn notify_info(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
-        self.push_notification(NotificationSeverity::Info, message.into(), cx);
+        self.push_notification(message.into(), cx);
     }
 
-    fn push_notification(
-        &mut self,
-        severity: NotificationSeverity,
-        message: String,
-        cx: &mut Context<Self>,
-    ) {
+    fn push_notification(&mut self, message: String, cx: &mut Context<Self>) {
         let id = self.next_notification_id;
         self.next_notification_id = self.next_notification_id.wrapping_add(1);
-        self.notifications.push(Notification {
-            id,
-            severity,
-            message,
-        });
+        self.notifications.push(Notification { id, message });
         let max_visible = self.styles.notification.notification_max_visible;
         while self.notifications.len() > max_visible {
             self.notifications.remove(0);
@@ -79,10 +63,6 @@ impl EditorView {
             .gap(px(self.scaled(ns.notification_gap_px)))
             .children(self.notifications.iter().map(|notification| {
                 let id = notification.id;
-                let accent = match notification.severity {
-                    NotificationSeverity::Error => ns.notification_error_accent,
-                    NotificationSeverity::Info => ns.notification_info_accent,
-                };
                 div()
                     .id(("notification", id))
                     .occlude()
@@ -93,20 +73,15 @@ impl EditorView {
                     .rounded(px(ns.notification_radius_px))
                     .overflow_hidden()
                     .flex()
-                    .flex_row()
                     .cursor(CursorStyle::PointingHand)
                     .hover(move |style| style.opacity(hover_opacity))
                     .child(
                         div()
-                            .w(px(ns.notification_accent_width_px))
-                            .flex_none()
-                            .bg(accent),
-                    )
-                    .child(
-                        div()
                             .flex_1()
+                            .min_w(px(0.0))
                             .px(px(self.scaled(ns.notification_padding_x_px)))
                             .py(px(self.scaled(ns.notification_padding_y_px)))
+                            .whitespace_normal()
                             .text_size(px(self.scaled(ns.notification_font_size_px)))
                             .text_color(ns.notification_text_color)
                             .child(SharedString::from(notification.message.clone())),
