@@ -189,7 +189,7 @@ impl EditorView {
                         .shortcut
                         .into_iter()
                         .chain(spec.alternate_shortcuts.iter().copied())
-                        .map(str::to_string)
+                        .map(super::shortcut::display_shortcut_from_keystroke)
                         .collect(),
                 };
             div()

@@ -201,8 +201,8 @@ impl CommandId {
     }
 }
 
-/// Convert a gpui keystroke string (e.g. "cmd-shift-s") to the display form
-/// used in menus and the command palette (e.g. "⌘⇧S").
+/// Convert a gpui keystroke string (e.g. "secondary-shift-s") to the display
+/// form used in menus and the command palette ("⌘⇧S", or "Ctrl+Shift+S").
 pub(crate) fn display_shortcut_from_keystroke(keystroke: &str) -> String {
     let mut tokens: Vec<&str> = keystroke.split('-').collect();
     // A trailing empty token means the key itself is "-" (e.g. "cmd--").
@@ -211,34 +211,79 @@ pub(crate) fn display_shortcut_from_keystroke(keystroke: &str) -> String {
         Some(key) => key,
         None => return String::new(),
     };
+
+    let is_primary =
+        |token: &str| token == "cmd" || token == "super" || token == "win" || token == "secondary";
+    // gpui resolves `secondary` to Control everywhere except macOS.
+    let has_ctrl = tokens.iter().any(|token| *token == "ctrl")
+        || (!cfg!(target_os = "macos") && tokens.iter().any(|token| is_primary(token)));
+    let has_primary = cfg!(target_os = "macos") && tokens.iter().any(|token| is_primary(token));
+    let has_alt = tokens.iter().any(|token| *token == "alt");
+    let has_shift = tokens.iter().any(|token| *token == "shift");
+
     let mut display = String::new();
-    // Match the modifier order used by COMMAND_SPECS display strings (⌃⌘⌥⇧).
-    for modifier in ["ctrl", "cmd", "alt", "shift"] {
-        if tokens.iter().any(|token| *token == modifier) {
-            display.push(match modifier {
-                "ctrl" => '⌃',
-                "cmd" => '⌘',
-                "alt" => '⌥',
-                _ => '⇧',
-            });
+    if cfg!(target_os = "macos") {
+        // Match the modifier order used by the macOS menu bar (⌃⌘⌥⇧).
+        for (present, symbol) in [
+            (has_ctrl, '⌃'),
+            (has_primary, '⌘'),
+            (has_alt, '⌥'),
+            (has_shift, '⇧'),
+        ] {
+            if present {
+                display.push(symbol);
+            }
+        }
+    } else {
+        for (present, name) in [
+            (has_ctrl, "Ctrl+"),
+            (has_alt, "Alt+"),
+            (has_shift, "Shift+"),
+        ] {
+            if present {
+                display.push_str(name);
+            }
         }
     }
-    let key_display = match key {
-        "enter" => "↩".to_string(),
-        "backspace" => "⌫".to_string(),
-        "delete" => "⌦".to_string(),
-        "escape" => "⎋".to_string(),
-        "tab" => "⇥".to_string(),
+
+    display.push_str(&display_key(key));
+    display
+}
+
+fn display_key(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        return match key {
+            "enter" => "↩".to_string(),
+            "backspace" => "⌫".to_string(),
+            "delete" => "⌦".to_string(),
+            "escape" => "⎋".to_string(),
+            "tab" => "⇥".to_string(),
+            "space" => "Space".to_string(),
+            "up" => "↑".to_string(),
+            "down" => "↓".to_string(),
+            "left" => "←".to_string(),
+            "right" => "→".to_string(),
+            "minus" => "-".to_string(),
+            other => other.to_uppercase(),
+        };
+    }
+
+    match key {
+        "enter" => "Enter".to_string(),
+        "backspace" => "Backspace".to_string(),
+        "delete" => "Del".to_string(),
+        "escape" => "Esc".to_string(),
+        "tab" => "Tab".to_string(),
         "space" => "Space".to_string(),
         "up" => "↑".to_string(),
         "down" => "↓".to_string(),
         "left" => "←".to_string(),
         "right" => "→".to_string(),
+        "home" => "Home".to_string(),
+        "end" => "End".to_string(),
         "minus" => "-".to_string(),
         other => other.to_uppercase(),
-    };
-    display.push_str(&key_display);
-    display
+    }
 }
 
 /// Validated keybinding overrides from settings: `(command, keystroke)` pairs
@@ -432,7 +477,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         CommandId::NewDocument,
         TextKey::NewFile,
         "File",
-        Some("⌘N"),
+        Some("secondary-n"),
         false,
         new_document_title,
     ),
@@ -440,34 +485,46 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         CommandId::NewTab,
         TextKey::NewFile,
         "File",
-        Some("⌘T"),
+        Some("secondary-t"),
         false,
         new_tab_title,
     ),
-    command(CommandId::OpenFile, TextKey::OpenFile, "File", "⌘O", false),
+    command(
+        CommandId::OpenFile,
+        TextKey::OpenFile,
+        "File",
+        "secondary-o",
+        false,
+    ),
     command_with_title(
         CommandId::QuickOpen,
         TextKey::QuickOpenPlaceholder,
         "File",
-        Some("⌘P"),
+        Some("secondary-p"),
         false,
         quick_open_title,
     ),
-    command(CommandId::Save, TextKey::Save, "File", "⌘S", false),
+    command(CommandId::Save, TextKey::Save, "File", "secondary-s", false),
     command_without_shortcut(CommandId::SaveAs, TextKey::SaveAs, "File", false),
     command(
         CommandId::OpenSettings,
         TextKey::SettingsTitle,
         "Application",
-        "⌘,",
+        "secondary-,",
         false,
     ),
-    command(CommandId::CloseTab, TextKey::Close, "Tab", "⌘W", false),
+    command(
+        CommandId::CloseTab,
+        TextKey::Close,
+        "Tab",
+        "secondary-w",
+        false,
+    ),
     command_with_title(
         CommandId::Find,
         TextKey::SearchPlaceholder,
         "Search",
-        Some("⌘F"),
+        Some("secondary-f"),
         false,
         find_document_title,
     ),
@@ -475,7 +532,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         CommandId::FindInFiles,
         TextKey::WorkspaceSearchPlaceholder,
         "Search",
-        Some("⌘⇧F"),
+        Some("secondary-shift-f"),
         false,
         find_files_title,
     ),
@@ -483,21 +540,21 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         CommandId::ToggleSidebar,
         TextKey::ToolbarSidebarTooltip,
         "View",
-        "⌘⇧S",
+        "secondary-shift-s",
         false,
     ),
     command(
         CommandId::ToggleOutline,
         TextKey::ToolbarOutlineTooltip,
         "View",
-        "⌃⌘1",
+        crate::platform::keys::TOGGLE_OUTLINE,
         false,
     ),
     command_with_title(
         CommandId::ToggleTerminal,
         TextKey::ClearTerminal,
         "View",
-        Some("⌃⌘T"),
+        Some(crate::platform::keys::TOGGLE_TERMINAL_PANEL),
         false,
         crate::i18n::terminal_label,
     ),
@@ -505,14 +562,14 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         CommandId::ToggleInfo,
         TextKey::FileInfo,
         "View",
-        "⌘⌥I",
+        "secondary-alt-i",
         false,
     ),
     command(
         CommandId::ToggleGitHistory,
         TextKey::GitHistory,
         "View",
-        "⌃⇧G",
+        crate::platform::keys::TOGGLE_GIT_HISTORY,
         false,
     ),
     command_without_shortcut(
@@ -521,13 +578,25 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         "View",
         false,
     ),
-    command(CommandId::Bold, TextKey::Bold, "Format", "⌘B", true),
-    command(CommandId::Italic, TextKey::Italic, "Format", "⌘I", true),
+    command(
+        CommandId::Bold,
+        TextKey::Bold,
+        "Format",
+        "secondary-b",
+        true,
+    ),
+    command(
+        CommandId::Italic,
+        TextKey::Italic,
+        "Format",
+        "secondary-i",
+        true,
+    ),
     command_with_title(
         CommandId::Underline,
         TextKey::Italic,
         "Format",
-        Some("⌘U"),
+        Some("secondary-u"),
         true,
         underline_title,
     ),
@@ -535,54 +604,78 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         CommandId::Strikethrough,
         TextKey::Strikethrough,
         "Format",
-        "⌘⇧X",
+        "secondary-shift-x",
         true,
     ),
     command(
         CommandId::InlineCode,
         TextKey::InlineCode,
         "Format",
-        "⌘E",
+        "secondary-e",
         true,
     ),
-    command(CommandId::Link, TextKey::Link, "Format", "⌘K", true),
+    command(
+        CommandId::Link,
+        TextKey::Link,
+        "Format",
+        "secondary-k",
+        true,
+    ),
     command_without_shortcut(CommandId::Image, TextKey::Image, "Format", true),
-    command(CommandId::Quote, TextKey::Quote, "Format", "⌘⌥Q", true),
-    command(CommandId::Todo, TextKey::Todo, "Format", "⌘⌥↩", true),
+    command(
+        CommandId::Quote,
+        TextKey::Quote,
+        "Format",
+        "secondary-alt-q",
+        true,
+    ),
+    command(
+        CommandId::Todo,
+        TextKey::Todo,
+        "Format",
+        "secondary-alt-enter",
+        true,
+    ),
     command(
         CommandId::UnorderedList,
         TextKey::UnorderedList,
         "Format",
-        "⌘⌥U",
+        "secondary-alt-u",
         true,
     ),
     command(
         CommandId::OrderedList,
         TextKey::OrderedList,
         "Format",
-        "⌘⌥O",
+        "secondary-alt-o",
         true,
     ),
-    command(CommandId::Table, TextKey::Table, "Format", "⌘⌥T", true),
+    command(
+        CommandId::Table,
+        TextKey::Table,
+        "Format",
+        "secondary-alt-t",
+        true,
+    ),
     command(
         CommandId::CodeBlock,
         TextKey::CodeBlock,
         "Format",
-        "⌘⌥C",
+        "secondary-alt-c",
         true,
     ),
     command(
         CommandId::Paragraph,
         TextKey::Paragraph,
         "Format",
-        "⌘0",
+        "secondary-0",
         true,
     ),
     command_with_title(
         CommandId::Fold,
         TextKey::CollapseAllDirectories,
         "Fold",
-        Some("⌘⌥["),
+        Some("secondary-alt-["),
         false,
         fold_section_title,
     ),
@@ -590,7 +683,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         CommandId::Unfold,
         TextKey::ExpandAllDirectories,
         "Fold",
-        Some("⌘⌥]"),
+        Some("secondary-alt-]"),
         false,
         unfold_section_title,
     ),
@@ -614,7 +707,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         CommandId::ZoomIn,
         TextKey::Reset,
         "View",
-        Some("⌘="),
+        Some("secondary-="),
         false,
         zoom_in_title,
     ),
@@ -622,7 +715,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         CommandId::ZoomOut,
         TextKey::Reset,
         "View",
-        Some("⌘-"),
+        Some("secondary-minus"),
         false,
         zoom_out_title,
     ),
@@ -630,7 +723,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         CommandId::ZoomReset,
         TextKey::Reset,
         "View",
-        Some("⌘⌥0"),
+        Some("secondary-alt-0"),
         false,
         zoom_reset_title,
     ),
@@ -782,7 +875,7 @@ mod command_tests {
             .find(|spec| spec.id == CommandId::SaveAs)
             .unwrap();
 
-        assert_eq!(sidebar.shortcut, Some("⌘⇧S"));
+        assert_eq!(sidebar.shortcut, Some("secondary-shift-s"));
         assert_eq!(save_as.shortcut, None);
     }
 
@@ -827,19 +920,49 @@ mod command_tests {
         assert_eq!(super::CommandId::from_config_key("unknown"), None);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn keystroke_display_conversion() {
-        assert_eq!(super::display_shortcut_from_keystroke("cmd-shift-s"), "⌘⇧S");
-        assert_eq!(super::display_shortcut_from_keystroke("cmd-,"), "⌘,");
-        assert_eq!(super::display_shortcut_from_keystroke("cmd--"), "⌘-");
         assert_eq!(
-            super::display_shortcut_from_keystroke("cmd-alt-enter"),
+            super::display_shortcut_from_keystroke("secondary-shift-s"),
+            "⌘⇧S"
+        );
+        assert_eq!(super::display_shortcut_from_keystroke("secondary-,"), "⌘,");
+        assert_eq!(
+            super::display_shortcut_from_keystroke("secondary-minus"),
+            "⌘-"
+        );
+        assert_eq!(
+            super::display_shortcut_from_keystroke("secondary-alt-enter"),
             "⌘⌥↩"
         );
         assert_eq!(
             super::display_shortcut_from_keystroke("ctrl-shift-g"),
             "⌃⇧G"
         );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn keystroke_display_conversion() {
+        assert_eq!(
+            super::display_shortcut_from_keystroke("secondary-shift-s"),
+            "Ctrl+Shift+S"
+        );
+        assert_eq!(
+            super::display_shortcut_from_keystroke("secondary-,"),
+            "Ctrl+,"
+        );
+        assert_eq!(
+            super::display_shortcut_from_keystroke("secondary-alt-enter"),
+            "Ctrl+Alt+Enter"
+        );
+        // `secondary` already means Control here, so it must not double up.
+        assert_eq!(
+            super::display_shortcut_from_keystroke("secondary-ctrl-t"),
+            "Ctrl+T"
+        );
+        assert_eq!(super::display_shortcut_from_keystroke("home"), "Home");
     }
 
     #[test]
@@ -866,10 +989,11 @@ mod command_tests {
         assert_eq!(warnings.len(), 3);
     }
 
-    /// Convert a COMMAND_SPECS display shortcut ("⌘⇧X") to the long form used
-    /// by the help documents ("Command + Shift + X").
-    fn docs_shortcut(display: &str) -> String {
-        display
+    /// Convert a COMMAND_SPECS keystroke to the long form used by the help
+    /// documents ("Command + Shift + X"). The docs describe the macOS build.
+    #[cfg(target_os = "macos")]
+    fn docs_shortcut(keystroke: &str) -> String {
+        super::display_shortcut_from_keystroke(keystroke)
             .chars()
             .map(|ch| match ch {
                 '⌃' => "Control".to_string(),
@@ -883,6 +1007,7 @@ mod command_tests {
             .join(" + ")
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn help_docs_list_format_command_shortcuts_for_every_language() {
         let docs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
