@@ -1041,7 +1041,7 @@ impl ChatAgentCli {
     pub(crate) fn command_name(self) -> &'static str {
         match self {
             Self::GithubCopilot => "copilot",
-            Self::Terminal => "/bin/zsh",
+            Self::Terminal => crate::platform::terminal::DEFAULT_SHELL_PROGRAM,
             Self::OpenAICodex => "codex",
             Self::ClaudeCode => "claude",
             Self::GeminiCli => "gemini",
@@ -1079,8 +1079,9 @@ impl ChatAgentCli {
     pub(crate) fn build_command(self, custom_command_line: Option<&str>) -> CommandBuilder {
         if let Some(command_line) = custom_command_line.filter(|line| !line.trim().is_empty()) {
             let mut command = CommandBuilder::new(chat_terminal_default_shell_program());
-            command.arg("-lc");
-            command.arg(format!("exec {}", command_line.trim()));
+            for argument in crate::platform::terminal::shell_command_args(command_line.trim()) {
+                command.arg(argument);
+            }
             return command;
         }
         match self {
@@ -1593,11 +1594,10 @@ fn agent_cli_command_exists(agent_cli: ChatAgentCli) -> bool {
         return true;
     }
 
-    let command_name = agent_cli.command_name();
+    let names = crate::platform::terminal::executable_names(agent_cli.command_name());
     let paths = chat_terminal_path_env();
     env::split_paths(&paths)
-        .map(|path| path.join(command_name))
-        .any(|path| path.is_file())
+        .any(|directory| names.iter().any(|name| directory.join(name).is_file()))
 }
 
 /// PATH reported by the user's login shell. Finder-launched apps inherit a
@@ -1609,23 +1609,10 @@ static LOGIN_SHELL_PATH_PREFETCH: std::sync::Once = std::sync::Once::new();
 pub(crate) fn prefetch_login_shell_path() {
     LOGIN_SHELL_PATH_PREFETCH.call_once(|| {
         std::thread::spawn(|| {
-            let value = query_login_shell_path();
+            let value = crate::platform::terminal::login_shell_path();
             let _ = LOGIN_SHELL_PATH.set(value);
         });
     });
-}
-
-fn query_login_shell_path() -> Option<OsString> {
-    let output = std::process::Command::new(chat_terminal_default_shell_program())
-        .args(["-lc", "printf '%s' \"$PATH\""])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&output.stdout);
-    let trimmed = path.trim();
-    (!trimmed.is_empty()).then(|| OsString::from(trimmed))
 }
 
 fn chat_terminal_path_env() -> OsString {
@@ -1646,43 +1633,18 @@ fn chat_terminal_path_env() -> OsString {
             push_unique(&mut paths, path);
         }
     }
-    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
-        for candidate in [".local/bin", ".cargo/bin", "bin"] {
-            push_unique(&mut paths, home.join(candidate));
-        }
-    }
-    for candidate in [
-        "/opt/homebrew/bin",
-        "/opt/homebrew/sbin",
-        "/usr/local/bin",
-        "/usr/local/sbin",
-        "/usr/bin",
-        "/bin",
-        "/usr/sbin",
-        "/sbin",
-    ] {
-        push_unique(&mut paths, PathBuf::from(candidate));
+    for candidate in crate::platform::terminal::extra_path_candidates() {
+        push_unique(&mut paths, candidate);
     }
 
     env::join_paths(paths).unwrap_or_else(|_| env::var_os("PATH").unwrap_or_default())
 }
 
-fn chat_terminal_locale_env(key: &str) -> OsString {
-    env::var_os(key)
-        .filter(|value| {
-            value
-                .to_string_lossy()
-                .to_ascii_uppercase()
-                .contains("UTF-8")
-        })
-        .unwrap_or_else(|| OsString::from("en_US.UTF-8"))
-}
-
 fn configure_chat_terminal_environment(command: &mut CommandBuilder) {
     command.env("PATH", chat_terminal_path_env());
-    command.env("LANG", chat_terminal_locale_env("LANG"));
-    command.env("LC_ALL", chat_terminal_locale_env("LC_ALL"));
-    command.env("LC_CTYPE", chat_terminal_locale_env("LC_CTYPE"));
+    for (key, value) in crate::platform::terminal::locale_env_vars() {
+        command.env(key, value);
+    }
     command.env("SHELL", chat_terminal_default_shell_program());
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
@@ -1973,10 +1935,7 @@ fn terminal_color_to_hsla(
 }
 
 fn chat_terminal_default_shell_program() -> String {
-    env::var("SHELL")
-        .ok()
-        .filter(|shell| !shell.trim().is_empty())
-        .unwrap_or_else(|| "/bin/zsh".to_string())
+    crate::platform::terminal::default_shell_program()
 }
 
 fn chat_terminal_mouse_button_code(button: MouseButton) -> Option<u8> {
