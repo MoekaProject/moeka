@@ -4391,6 +4391,7 @@ dependencies = [
  "chrono",
  "core-graphics 0.24.0",
  "directories",
+ "embed-resource",
  "emojis",
  "gpui",
  "image",

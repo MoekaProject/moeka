@@ -19,4 +19,14 @@ fn main() {
 
     println!("cargo:rustc-env=MOEKA_GIT_COMMIT={commit}");
     println!("cargo:rustc-env=MOEKA_GIT_TAG={tag}");
+
+    // gpui already supplies the DPI-aware application manifest.
+    #[cfg(windows)]
+    {
+        println!("cargo:rerun-if-changed=packaging/windows/moeka.rc");
+        println!("cargo:rerun-if-changed=packaging/windows/moeka.ico");
+        embed_resource::compile("packaging/windows/moeka.rc", embed_resource::NONE)
+            .manifest_optional()
+            .expect("embed Windows resources");
+    }
 }

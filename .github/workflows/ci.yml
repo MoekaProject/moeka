@@ -60,3 +60,42 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  # Windows binaries cannot be cross-built: gpui compiles its HLSL shaders with
+  # the DirectX shader compiler, which only runs on Windows.
+  windows-package:
+    name: Windows portable package
+    runs-on: windows-latest
+    if: github.event_name == 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-package
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Stage package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/moeka | Out-Null
+          Copy-Item target/release/moeka.exe dist/moeka/
+          Copy-Item -Recurse assets dist/moeka/assets
+          Copy-Item -Recurse docs dist/moeka/docs
+          Copy-Item config.yaml dist/moeka/ -ErrorAction SilentlyContinue
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: moeka-windows-x86_64
+          path: dist/moeka
+          if-no-files-found: error
