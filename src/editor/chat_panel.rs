@@ -2104,7 +2104,7 @@ impl EditorView {
         } else {
             self.app_settings.terminal_font.as_str()
         };
-        let family: SharedString = if configured == ".SystemUIFont" {
+        let family: SharedString = if configured == crate::platform::fonts::SYSTEM_UI {
             text_style.font().family.clone()
         } else {
             configured.to_string().into()

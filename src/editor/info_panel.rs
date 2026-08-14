@@ -1254,34 +1254,21 @@ fn wrap_text_for_pdf(text: &str, max_units: usize) -> Vec<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn pdf_font_candidates() -> Vec<PathBuf> {
-    let mut candidates = vec![
-        PathBuf::from("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
-        PathBuf::from("/System/Library/Fonts/Supplemental/Arial.ttf"),
-        PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-        PathBuf::from("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
-        PathBuf::from("C:/Windows/Fonts/arial.ttf"),
-    ];
-
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(PathBuf::from(home).join("Library/Fonts/Arial Unicode.ttf"));
-    }
-
-    candidates
-}
-
-#[cfg(not(target_os = "macos"))]
-fn find_pdf_font_path() -> Option<PathBuf> {
-    pdf_font_candidates().into_iter().find(|path| path.exists())
-}
-
-#[cfg(not(target_os = "macos"))]
 fn build_pdf_document_with_printpdf(title: &str, markdown: &str) -> anyhow::Result<Vec<u8>> {
-    let font_path = find_pdf_font_path()
-        .ok_or_else(|| anyhow::anyhow!("could not find a usable system font for PDF export"))?;
     let (document, first_page, first_layer) =
         PdfDocument::new(title, Mm(210.0), Mm(297.0), "Layer 1");
-    let font = document.add_external_font(fs::File::open(&font_path)?)?;
+
+    // Existing on disk is not enough: collections and variable fonts parse
+    // only on some backends, so keep trying until one actually loads.
+    let font = crate::platform::fonts::pdf_font_candidates()
+        .into_iter()
+        .filter(|path| path.exists())
+        .find_map(|path| {
+            fs::File::open(&path)
+                .ok()
+                .and_then(|file| document.add_external_font(file).ok())
+        })
+        .ok_or_else(|| anyhow::anyhow!("could not find a usable system font for PDF export"))?;
 
     let page_width_mm = 210.0;
     let page_height_mm = 297.0;

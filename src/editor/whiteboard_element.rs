@@ -893,7 +893,7 @@ fn build_canvas_font(window: &Window, editor: &EditorView) -> Font {
     let styles = &editor.styles.editor;
     let mut font = text_style.font();
     let latin = styles.editor_body_latin_font_family;
-    let family: SharedString = if latin == ".SystemUIFont" {
+    let family: SharedString = if latin == crate::platform::fonts::SYSTEM_UI {
         text_style.font().family.clone()
     } else {
         latin.into()

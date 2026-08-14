@@ -1966,7 +1966,7 @@ impl Element for EditorElement {
         let text_style = window.text_style();
         let editor_styles = &editor.styles.editor;
         let configured_font_family = |configured: &'static str| {
-            if configured == ".SystemUIFont" {
+            if configured == crate::platform::fonts::SYSTEM_UI {
                 text_style.font().family.clone()
             } else {
                 configured.into()

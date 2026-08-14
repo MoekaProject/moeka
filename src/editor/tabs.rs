@@ -1276,7 +1276,8 @@ impl EditorView {
             .text_color(text_color)
             .when(is_preview && !is_active, |this| this.opacity(0.72))
             .when(is_preview, |this| {
-                this.font_family("Helvetica Neue").italic()
+                this.font_family(crate::platform::fonts::PROPORTIONAL)
+                    .italic()
             })
             .font_weight(if is_preview {
                 FontWeight::NORMAL

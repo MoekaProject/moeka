@@ -235,7 +235,7 @@ fn default_light_theme() -> String {
 }
 
 fn default_ui_font() -> String {
-    "Menlo".to_string()
+    crate::platform::fonts::MONOSPACE.to_string()
 }
 
 fn default_language() -> String {
@@ -259,15 +259,15 @@ fn default_ui_scale() -> f32 {
 }
 
 fn default_body_latin_font() -> String {
-    "Menlo".to_string()
+    crate::platform::fonts::MONOSPACE.to_string()
 }
 
 fn default_body_cjk_font() -> String {
-    "Menlo".to_string()
+    crate::platform::fonts::MONOSPACE.to_string()
 }
 
 fn default_code_font() -> String {
-    "Menlo".to_string()
+    crate::platform::fonts::MONOSPACE.to_string()
 }
 
 fn default_mermaid_theme() -> String {
@@ -756,13 +756,14 @@ mod tests {
     }
 
     #[test]
-    fn default_fonts_are_all_menlo() {
+    fn default_fonts_all_use_the_platform_monospace_family() {
         let settings = AppSettings::default();
+        let expected = crate::platform::fonts::MONOSPACE;
 
-        assert_eq!(settings.ui_font, "Menlo");
-        assert_eq!(settings.body_latin_font, "Menlo");
-        assert_eq!(settings.body_cjk_font, "Menlo");
-        assert_eq!(settings.code_font, "Menlo");
+        assert_eq!(settings.ui_font, expected);
+        assert_eq!(settings.body_latin_font, expected);
+        assert_eq!(settings.body_cjk_font, expected);
+        assert_eq!(settings.code_font, expected);
     }
 
     #[test]

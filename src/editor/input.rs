@@ -1887,7 +1887,7 @@ impl EditorView {
         let text_style = window.text_style();
         let editor_styles = &self.styles.editor;
         let configured_font_family = |configured: &'static str| {
-            if configured == ".SystemUIFont" {
+            if configured == crate::platform::fonts::SYSTEM_UI {
                 text_style.font().family.clone()
             } else {
                 configured.into()
@@ -2028,7 +2028,7 @@ impl EditorView {
         let text_style = window.text_style();
         let editor_styles = &self.styles.editor;
         let configured_font_family = |configured: &'static str| {
-            if configured == ".SystemUIFont" {
+            if configured == crate::platform::fonts::SYSTEM_UI {
                 text_style.font().family.clone()
             } else {
                 configured.into()

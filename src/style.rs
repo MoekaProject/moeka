@@ -1459,7 +1459,7 @@ impl Styles {
         };
         let settings_update_color = settings_theme.text_warning;
         Self {
-            ui_font_family: ".SystemUIFont",
+            ui_font_family: crate::platform::fonts::SYSTEM_UI,
             ui_font_size_px,
             anchored_popup_gap_px: 2.0,
             anchored_popup_margin_px: 8.0,
@@ -1481,13 +1481,13 @@ impl Styles {
                 editor_paragraph_line_height_factor: 1.5,
                 editor_heading_line_height_factor: 1.5,
                 editor_letter_spacing_px: 0.0,
-                editor_body_latin_font_family: "Menlo",
-                editor_body_cjk_font_family: "PingFang SC",
-                editor_heading_latin_font_family: "Menlo",
-                editor_heading_cjk_font_family: "PingFang SC",
-                editor_italic_latin_font_family: "Menlo",
-                editor_italic_cjk_font_family: "Maple Mono NF CN",
-                editor_monospace_font_family: "Menlo",
+                editor_body_latin_font_family: crate::platform::fonts::MONOSPACE,
+                editor_body_cjk_font_family: crate::platform::fonts::CJK,
+                editor_heading_latin_font_family: crate::platform::fonts::MONOSPACE,
+                editor_heading_cjk_font_family: crate::platform::fonts::CJK,
+                editor_italic_latin_font_family: crate::platform::fonts::MONOSPACE,
+                editor_italic_cjk_font_family: crate::platform::fonts::ITALIC_CJK,
+                editor_monospace_font_family: crate::platform::fonts::MONOSPACE,
                 editor_paragraph_padding_top_px: 0.0,
                 editor_paragraph_padding_bottom_px: 0.0,
                 editor_heading_padding_top_px: 10.0,
@@ -2257,7 +2257,7 @@ impl Styles {
                 menu_shortcut_font_family: if cfg!(target_os = "macos") {
                     "BlinkMacSystemFont"
                 } else {
-                    ".SystemUIFont"
+                    crate::platform::fonts::SYSTEM_UI
                 },
                 menu_shortcut_text_color: with_alpha(ui_theme.text_secondary, 0.78),
                 menu_shortcut_gap_px: 3.0,

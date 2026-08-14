@@ -208,7 +208,7 @@ mod tests {
             language: "fr".to_string(),
             ui_scale: 1.2,
             body_latin_font: "IBM Plex Sans".to_string(),
-            body_cjk_font: "PingFang SC".to_string(),
+            body_cjk_font: crate::platform::fonts::CJK.to_string(),
             code_font: "JetBrains Mono".to_string(),
             mermaid_theme: "auto".to_string(),
             font_size: 17.0,
