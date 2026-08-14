@@ -2222,6 +2222,89 @@ impl EditorView {
         tooltip::with_tooltip(button, cx.entity().clone(), tooltip_title, shortcut)
     }
 
+    /// Caption buttons for platforms whose title bar the app draws itself.
+    /// macOS keeps its native traffic lights.
+    #[cfg(target_os = "macos")]
+    pub(super) fn render_window_caption_buttons(&self, _cx: &mut Context<Self>) -> AnyElement {
+        div().into_any_element()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn render_window_caption_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
+        // Fluent caption buttons are 46x32dp regardless of the surrounding UI.
+        let width = self.scaled(46.0);
+        let icon_size = self.scaled(10.0);
+        let icon_color = ts.tab_item_icon_color;
+        let hover_bg = ts.tab_item_hover_bg;
+        let is_maximized = self.window_is_maximized;
+
+        let button = |id: &'static str,
+                      icon: &'static str,
+                      danger: bool,
+                      cx: &mut Context<Self>,
+                      action: fn(&mut Window)| {
+            div()
+                .id(id)
+                .w(px(width))
+                .h(px(height))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor(CursorStyle::Arrow)
+                .hover(move |style| {
+                    style.bg(if danger {
+                        gpui::rgb(0x00c42b1c).into()
+                    } else {
+                        hover_bg
+                    })
+                })
+                .child(svg().path(icon).size(px(icon_size)).text_color(icon_color))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |_, _, window, cx| {
+                        cx.stop_propagation();
+                        action(window);
+                    }),
+                )
+        };
+
+        div()
+            .id("window-caption-buttons")
+            .h(px(height))
+            .flex_none()
+            .flex()
+            .items_center()
+            .child(button(
+                "window-minimize",
+                "assets/icons/window/minimize.svg",
+                false,
+                cx,
+                |window| window.minimize_window(),
+            ))
+            .child(button(
+                "window-maximize",
+                if is_maximized {
+                    "assets/icons/window/restore.svg"
+                } else {
+                    "assets/icons/window/maximize.svg"
+                },
+                false,
+                cx,
+                |window| window.zoom_window(),
+            ))
+            .child(button(
+                "window-close",
+                "assets/icons/window/close.svg",
+                true,
+                cx,
+                |window| window.remove_window(),
+            ))
+            .into_any_element()
+    }
+
     fn render_update_ready_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let ts = &self.styles.tab_bar;
         let button_height = (self.tab_bar_height()
@@ -2619,7 +2702,10 @@ impl EditorView {
             .when(
                 is_top_right_pane && !self.should_render_utility_panel_on_right(),
                 |this| this.child(self.render_tab_bar_toggle_actions(cx)),
-            );
+            )
+            .when(is_top_right_pane && !cfg!(target_os = "macos"), |this| {
+                this.child(self.render_window_caption_buttons(cx))
+            });
 
         div()
             .id("tab-bar")

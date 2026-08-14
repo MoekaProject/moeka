@@ -5,11 +5,11 @@ mod branch_picker;
 mod chat_panel;
 mod code_commands;
 mod command_palette;
-mod config_paths;
+pub(crate) mod config_paths;
 mod config_store;
 mod element;
 mod file_list;
-mod file_ops;
+pub(crate) mod file_ops;
 mod fold;
 mod git_ops;
 mod git_panel;
@@ -1456,6 +1456,8 @@ pub struct EditorView {
     pub(crate) ui_scale: f32,
     #[cfg(target_os = "macos")]
     pub(crate) traffic_light_ui_scale: Option<f32>,
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) window_is_maximized: bool,
     pub(crate) folded_sections: HashSet<usize>,
     pub(crate) folded_image_previews: HashSet<usize>,
     pub(crate) generated_preview_keys: HashSet<String>,
@@ -2116,6 +2118,8 @@ impl EditorView {
             ui_scale: app_settings.ui_scale,
             #[cfg(target_os = "macos")]
             traffic_light_ui_scale: None,
+            #[cfg(not(target_os = "macos"))]
+            window_is_maximized: false,
             folded_sections: HashSet::new(),
             folded_image_previews: HashSet::new(),
             generated_preview_keys: HashSet::new(),

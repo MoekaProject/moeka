@@ -408,6 +408,11 @@ impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(target_os = "macos")]
         self.sync_macos_traffic_light_position(window);
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.window_is_maximized = window.is_maximized();
+            crate::platform::window_state::track(window.window_bounds());
+        }
         self.execute_pending_command(window, cx);
         self.refresh_chat_terminal_metrics(window, cx);
         self.process_pending_inline_diff(cx);

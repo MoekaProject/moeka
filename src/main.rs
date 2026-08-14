@@ -201,11 +201,9 @@ fn editor_window_options(cx: &App) -> WindowOptions {
     let traffic_light_position = point(px(10.0), px(10.0));
 
     WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-            None,
-            size(px(1024.0), px(768.0)),
-            cx,
-        ))),
+        window_bounds: Some(platform::window_state::restore(cx).unwrap_or_else(|| {
+            WindowBounds::Windowed(Bounds::centered(None, size(px(1024.0), px(768.0)), cx))
+        })),
         window_min_size: Some(size(px(MIN_WINDOW_WIDTH_PX), px(MIN_WINDOW_HEIGHT_PX))),
         titlebar: Some(TitlebarOptions {
             title: Some(system_application_display_name().into()),
@@ -760,6 +758,11 @@ fn main() {
         ]);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_app_quit(|_| {
+            platform::window_state::save_tracked();
+            async {}
+        })
+        .detach();
         cx.on_action(|_: &OpenTerminalWindow, cx| {
             if let Err(error) = open_terminal_window(cx) {
                 eprintln!("failed to open terminal window: {error:#}");

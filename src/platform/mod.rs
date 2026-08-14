@@ -11,3 +11,4 @@ pub(crate) mod paths;
 pub(crate) mod shell;
 pub(crate) mod terminal;
 pub(crate) mod trash;
+pub(crate) mod window_state;
