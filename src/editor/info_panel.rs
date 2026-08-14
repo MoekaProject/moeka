@@ -2,7 +2,6 @@ use std::fs;
 use std::mem::size_of;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -1326,7 +1325,7 @@ pub(super) fn git_show_file_at_revision(
     relative_path: &str,
 ) -> String {
     let object = format!("{revision}:{relative_path}");
-    let Ok(output) = Command::new("git")
+    let Ok(output) = crate::platform::process::headless_command("git")
         .arg("-C")
         .arg(repo_root)
         .args(["show", &object])

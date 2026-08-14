@@ -62,13 +62,17 @@ impl UpdateState {
 pub(crate) struct PreparedUpdate {
     pub version: String,
     pub release_notes: String,
-    pub path: PathBuf,
+    /// Downloaded installer, or `None` where the release ships no build for
+    /// this platform and the download page is opened instead.
+    pub path: Option<PathBuf>,
+    pub release_url: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct GitHubRelease {
     tag_name: String,
     body: Option<String>,
+    html_url: Option<String>,
     assets: Vec<GitHubAsset>,
 }
 
@@ -167,12 +171,22 @@ fn check_and_download_update() -> Result<Option<PreparedUpdate>, String> {
         return Ok(None);
     }
 
-    let asset = select_update_asset(&release.assets).ok_or_else(|| {
-        format!(
-            "no compatible macOS update DMG found in release {}",
-            release.tag_name
-        )
-    })?;
+    let release_url = release
+        .html_url
+        .clone()
+        .unwrap_or_else(|| "https://github.com/MoekaProject/community/releases/latest".to_string());
+
+    // Without a matching asset the update is still worth announcing; the user
+    // is sent to the release page rather than left on an outdated build.
+    let Some(asset) = select_update_asset(&release.assets) else {
+        return Ok(Some(PreparedUpdate {
+            version: release.tag_name,
+            release_notes: release.body.unwrap_or_default(),
+            path: None,
+            release_url,
+        }));
+    };
+
     let update_dir = config_paths::cache_dir()
         .join("updates")
         .join(safe_file_name(&release.tag_name));
@@ -183,7 +197,8 @@ fn check_and_download_update() -> Result<Option<PreparedUpdate>, String> {
     Ok(Some(PreparedUpdate {
         version: release.tag_name,
         release_notes: release.body.unwrap_or_default(),
-        path: out_path,
+        path: Some(out_path),
+        release_url,
     }))
 }
 
@@ -232,6 +247,11 @@ fn select_update_asset_for_arch<'a>(
     assets: &'a [GitHubAsset],
     architecture: &str,
 ) -> Option<&'a GitHubAsset> {
+    // Only macOS builds are published as directly installable assets.
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+
     let preferred: &[&str] = match architecture {
         "aarch64" => &["macos-arm64.dmg", "macos-universal.dmg"],
         "x86_64" => &["macos-x86_64.dmg", "macos-amd64.dmg", "macos-universal.dmg"],
@@ -279,14 +299,19 @@ fn user_agent() -> String {
 }
 
 fn install_update(update: PreparedUpdate) -> Result<(), String> {
-    let Some(bundle_path) = current_app_bundle_path() else {
-        Command::new("open")
-            .arg(&update.path)
-            .spawn()
-            .map_err(|error| error.to_string())?;
-        return Ok(());
+    let Some(installer_path) = update.path.clone() else {
+        return crate::platform::shell::open_url(&update.release_url)
+            .map_err(|error| error.to_string());
     };
 
+    let Some(bundle_path) = current_app_bundle_path() else {
+        return crate::platform::shell::open_path(&installer_path)
+            .map_err(|error| error.to_string());
+    };
+    let update = PreparedUpdate {
+        path: Some(installer_path),
+        ..update
+    };
     let pid = std::process::id();
     let expected_arch = lipo_arch_for_rust_arch(std::env::consts::ARCH).ok_or_else(|| {
         format!(
@@ -386,7 +411,7 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') Moeka update installed and relaunched"
         .arg("-c")
         .arg(script)
         .arg("moeka-update")
-        .arg(&update.path)
+        .arg(update.path.as_deref().unwrap_or(Path::new("")))
         .arg(bundle_path)
         .arg(pid.to_string())
         .arg(expected_arch)

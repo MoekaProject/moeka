@@ -8,6 +8,7 @@ pub(crate) mod clipboard;
 pub(crate) mod fonts;
 pub(crate) mod keys;
 pub(crate) mod paths;
+pub(crate) mod process;
 pub(crate) mod shell;
 pub(crate) mod terminal;
 pub(crate) mod trash;

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use gpui::{Context, Pixels, px};
@@ -108,7 +107,7 @@ mod tests {
 }
 
 fn sidebar_git_repo_root_for_path(sidebar_root: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
+    let output = crate::platform::process::headless_command("git")
         .arg("-C")
         .arg(sidebar_root)
         .args(["rev-parse", "--show-toplevel"])
@@ -149,7 +148,7 @@ fn collect_sidebar_git_statuses_for_root(
     }
 
     let mut statuses = HashMap::new();
-    if let Ok(output) = Command::new("git")
+    if let Ok(output) = crate::platform::process::headless_command("git")
         .arg("-c")
         .arg("core.quotepath=false")
         .arg("-C")

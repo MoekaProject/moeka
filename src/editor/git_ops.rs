@@ -7,7 +7,6 @@
 //! operation at a time, and completion funnels into one invalidation chain.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::SystemTime;
 
 use gpui::Context;
@@ -193,7 +192,7 @@ pub(crate) enum GitOpError {
 /// Runs `git -C <repo_root> <args>` capturing stdout and stderr. Network
 /// prompts are disabled so operations fail instead of hanging.
 pub(super) fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = crate::platform::process::headless_command("git")
         .arg("-c")
         .arg("core.quotepath=false")
         .arg("-C")
@@ -1288,7 +1287,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
-            let status = Command::new("git")
+            let status = crate::platform::process::headless_command("git")
                 .arg("-C")
                 .arg(&root)
                 .args(args)
