@@ -9191,7 +9191,7 @@ impl EditorView {
 
         match target {
             MarkdownNavigationTarget::ExternalUrl(url) => {
-                if let Err(error) = std::process::Command::new("open").arg(&url).spawn() {
+                if let Err(error) = crate::platform::shell::open_url(&url) {
                     eprintln!("failed to open URL: {error}");
                     return false;
                 }

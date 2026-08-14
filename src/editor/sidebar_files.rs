@@ -687,19 +687,15 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn reveal_in_finder(&self, path: &Path) {
-        if let Err(error) = std::process::Command::new("open")
-            .arg("--reveal")
-            .arg(path)
-            .spawn()
-        {
-            eprintln!("failed to reveal in Finder: {error}");
+    pub(crate) fn reveal_in_file_manager(&self, path: &Path) {
+        if let Err(error) = crate::platform::shell::reveal(path) {
+            eprintln!("failed to reveal {}: {error}", path.display());
         }
     }
 
-    pub(crate) fn reveal_paths_in_finder(&self, paths: &[PathBuf]) {
+    pub(crate) fn reveal_paths_in_file_manager(&self, paths: &[PathBuf]) {
         for path in paths {
-            self.reveal_in_finder(path);
+            self.reveal_in_file_manager(path);
         }
     }
 

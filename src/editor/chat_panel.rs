@@ -2465,11 +2465,14 @@ impl EditorView {
         Some((agent_cli, agent_cli.install_url()?))
     }
 
-    fn open_agent_cli_install_page(&mut self, agent_cli: ChatAgentCli, _cx: &mut Context<Self>) {
+    fn open_agent_cli_install_page(&mut self, agent_cli: ChatAgentCli, cx: &mut Context<Self>) {
         let Some(url) = agent_cli.install_url() else {
             return;
         };
-        let _ = std::process::Command::new("open").arg(url).spawn();
+        if let Err(error) = crate::platform::shell::open_url(url) {
+            let message = format!("{}: {error}", self.t(crate::i18n::TextKey::OpenFailed));
+            self.notify_error(message, cx);
+        }
     }
 
     /// Creates a terminal tab in the current pane and activates it. Returns

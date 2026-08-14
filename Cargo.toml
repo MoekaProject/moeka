@@ -24,6 +24,7 @@ syntect = { version = "5.2", default-features = false, features = [
   "default-fancy",
 ] }
 notify = "8"
+opener = { version = "0.8", features = ["reveal"] }
 rfd = "0.15"
 ureq = "2.12"
 regex = "1"

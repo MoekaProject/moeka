@@ -295,9 +295,8 @@ impl EditorView {
                 cx.listener(|this, _, _, cx| {
                     if this.prepared_update().is_some() {
                         this.show_prepared_update_dialog(cx);
-                    } else if let Err(error) = std::process::Command::new("open")
-                        .arg("https://moeka.app/")
-                        .spawn()
+                    } else if let Err(error) =
+                        crate::platform::shell::open_url("https://moeka.app/")
                     {
                         eprintln!("failed to open official website: {error}");
                     }

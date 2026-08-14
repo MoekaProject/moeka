@@ -2589,14 +2589,14 @@ impl EditorView {
             .map(InfoPanelReferenceTarget::LocalPath)
     }
 
-    fn reveal_panel_reference_in_finder(&self, path: &Path) {
+    fn reveal_panel_reference_in_file_manager(&self, path: &Path) {
         if path.exists() {
-            self.reveal_in_finder(path);
+            self.reveal_in_file_manager(path);
             return;
         }
 
         if let Some(parent) = path.parent().filter(|parent| parent.exists()) {
-            if let Err(error) = Command::new("open").arg(parent).spawn() {
+            if let Err(error) = crate::platform::shell::open_path(parent) {
                 eprintln!("failed to open parent folder {}: {error}", parent.display());
             }
         }
@@ -2604,9 +2604,11 @@ impl EditorView {
 
     fn trigger_info_panel_share_action(&self, action: &InfoPanelShareAction) {
         match action {
-            InfoPanelShareAction::RevealPath(path) => self.reveal_panel_reference_in_finder(path),
+            InfoPanelShareAction::RevealPath(path) => {
+                self.reveal_panel_reference_in_file_manager(path)
+            }
             InfoPanelShareAction::OpenUrl(url) => {
-                if let Err(error) = Command::new("open").arg(url).spawn() {
+                if let Err(error) = crate::platform::shell::open_url(url) {
                     eprintln!("failed to open URL {url}: {error}");
                 }
             }

@@ -12,8 +12,12 @@ concurrency:
 
 jobs:
   check:
-    name: Format, lint and test
-    runs-on: macos-latest
+    name: Lint and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,10 +27,32 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt clippy
           rustup default stable
 
+      # gpui renders through Vulkan/Wayland/X11 on Linux and needs the
+      # corresponding development headers at build time.
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            libasound2-dev \
+            libfontconfig-dev \
+            libssl-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-x11-dev \
+            pkg-config
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
 
       - name: Check formatting
+        if: matrix.os == 'macos-latest'
         run: cargo fmt --check
 
       - name: Clippy

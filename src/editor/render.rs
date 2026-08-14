@@ -1285,7 +1285,13 @@ impl EditorView {
                                 .and_then(|index| this.tabs.get(index))
                                 .and_then(|tab| tab.path.clone())
                             {
-                                let _ = std::process::Command::new("open").arg(path).spawn();
+                                if let Err(error) = crate::platform::shell::open_path(&path) {
+                                    let message = format!(
+                                        "{}: {error}",
+                                        this.t(crate::i18n::TextKey::OpenFailed)
+                                    );
+                                    this.notify_error(message, cx);
+                                }
                             }
                             cx.notify();
                         }),

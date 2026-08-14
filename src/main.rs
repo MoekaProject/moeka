@@ -7,6 +7,7 @@ mod cursor;
 mod editor;
 mod i18n;
 mod markdown;
+mod platform;
 mod style;
 mod table_ops;
 mod text_input;

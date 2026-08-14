@@ -2272,7 +2272,7 @@ impl EditorView {
                     false,
                     cx,
                     move |this, _, _cx| {
-                        this.reveal_in_finder(&p);
+                        this.reveal_in_file_manager(&p);
                     },
                 ));
             }
@@ -2509,7 +2509,7 @@ impl EditorView {
                 false,
                 cx,
                 move |this, _, _cx| {
-                    this.reveal_in_finder(&p);
+                    this.reveal_in_file_manager(&p);
                 },
             ));
         }
@@ -2677,7 +2677,7 @@ impl EditorView {
                 false,
                 cx,
                 move |this, _, _cx| {
-                    this.reveal_paths_in_finder(&reveal_paths);
+                    this.reveal_paths_in_file_manager(&reveal_paths);
                 },
             ));
         }
@@ -2802,7 +2802,7 @@ impl EditorView {
                 cx,
                 move |this, _, cx| {
                     this.close_context_menu(cx);
-                    this.reveal_in_finder(&reveal_path);
+                    this.reveal_in_file_manager(&reveal_path);
                 },
             ));
         }
@@ -2916,7 +2916,7 @@ impl EditorView {
                     cx,
                     move |this, _, cx| {
                         this.context_menu = None;
-                        this.reveal_in_finder(&reveal_path);
+                        this.reveal_in_file_manager(&reveal_path);
                         cx.notify();
                     },
                 ));
@@ -4247,7 +4247,7 @@ impl EditorView {
                     cx,
                     |this, _, cx| {
                         if let Some(path) = this.current_file_path.clone() {
-                            this.reveal_in_finder(&path);
+                            this.reveal_in_file_manager(&path);
                         }
                         this.close_context_menu(cx);
                     },
@@ -4554,7 +4554,7 @@ impl EditorView {
                                 cx,
                                 move |this, _, cx| {
                                     this.close_context_menu(cx);
-                                    this.reveal_in_finder(&reveal_path);
+                                    this.reveal_in_file_manager(&reveal_path);
                                 },
                             ));
                         }
