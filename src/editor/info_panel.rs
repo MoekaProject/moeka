@@ -3200,8 +3200,7 @@ impl EditorView {
                     .rounded(px(self.scaled(6.0)))
                     .text_color(share_icon_color)
                     .opacity(0.5)
-                    .hover(move |style| style.bg(ups.utility_panel_button_hover_bg))
-                    .hover(move |style| style.opacity(0.6))
+                    .hover(move |style| style.bg(ups.utility_panel_button_hover_bg).opacity(0.6))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
