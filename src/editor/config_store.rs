@@ -155,6 +155,19 @@ pub(crate) fn load_settings() -> AppSettings {
     load_config().settings
 }
 
+/// Reports the parse error instead of silently falling back, so a hand-edited
+/// config can be rejected with a message.
+pub(crate) fn load_settings_strict() -> Result<AppSettings, String> {
+    let path = config_paths::config_file_path();
+    if !path.exists() {
+        return Ok(AppSettings::default());
+    }
+    let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    serde_yaml::from_str::<AppConfig>(&content)
+        .map(|config| config.settings)
+        .map_err(|error| error.to_string())
+}
+
 pub(crate) fn save_settings(settings: &AppSettings) {
     let mut config = load_config();
     config.settings = settings.clone();
@@ -222,6 +235,7 @@ mod tests {
             show_whitespace: false,
             highlight_line_background: true,
             simple_mode: false,
+            format_toolbar_visible: true,
             attachment_location: "current_file".to_string(),
             attachment_folder: "attachments".to_string(),
             terminal_cursor_shape: "bar".to_string(),

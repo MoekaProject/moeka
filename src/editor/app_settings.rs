@@ -197,6 +197,8 @@ pub(crate) struct AppSettings {
     pub highlight_line_background: bool,
     #[serde(default)]
     pub simple_mode: bool,
+    #[serde(default = "default_format_toolbar_visible")]
+    pub format_toolbar_visible: bool,
     #[serde(default = "default_attachment_location")]
     pub attachment_location: String,
     #[serde(default = "default_attachment_folder")]
@@ -318,6 +320,10 @@ fn default_show_whitespace() -> bool {
     false
 }
 
+fn default_format_toolbar_visible() -> bool {
+    true
+}
+
 fn default_highlight_line_background() -> bool {
     true
 }
@@ -384,6 +390,7 @@ impl Default for AppSettings {
             show_whitespace: default_show_whitespace(),
             highlight_line_background: default_highlight_line_background(),
             simple_mode: false,
+            format_toolbar_visible: default_format_toolbar_visible(),
             attachment_location: default_attachment_location(),
             attachment_folder: default_attachment_folder(),
             terminal_cursor_shape: default_terminal_cursor_shape(),

@@ -472,9 +472,12 @@ impl EditorView {
             .when(self.active_tab_is_diff(), |this| {
                 this.child(self.render_active_tab_path_bar(cx))
             })
-            .when(self.active_tab_is_markdown(), |this| {
-                this.child(self.render_format_toolbar(cx))
-            })
+            .when(
+                is_focused_pane
+                    && self.app_settings.format_toolbar_visible
+                    && self.active_tab_is_markdown(),
+                |this| this.child(self.render_format_toolbar(editor_pane_width, cx)),
+            )
             .child(
                 div()
                     .id("editor-pane-content")

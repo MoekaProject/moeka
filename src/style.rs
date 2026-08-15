@@ -581,6 +581,9 @@ pub struct ToolbarStyles {
 pub struct FormatToolbarStyles {
     pub format_toolbar_height_px: f32,
     pub format_toolbar_padding_x_px: f32,
+    /// Pulls the row back by the transparent margin baked into the icons, so
+    /// the first glyph lines up optically with the body text.
+    pub format_toolbar_optical_left_inset_px: f32,
     pub format_toolbar_gap_px: f32,
     pub format_toolbar_group_gap_px: f32,
     pub format_toolbar_bg: Hsla,
@@ -731,6 +734,9 @@ pub struct QuoteBlockStyles {
     pub quote_block_callout_padding_top_px: f32,
     pub quote_block_callout_padding_bottom_px: f32,
     pub quote_block_padding_left_px: f32,
+    /// Extra indent for quoted lines that carry their own line-level marker
+    /// (list, ordered list, task), so the nesting reads as one step deeper.
+    pub quote_block_line_syntax_indent_px: f32,
     pub quote_block_padding_right_px: f32,
     pub quote_block_callout_icon_color: Hsla,
     pub quote_block_callout_icon_size_factor: f32,
@@ -1762,7 +1768,7 @@ impl Styles {
                 // the active document stands out from hover.
                 file_list_item_selected_bg: if sidebar_theme.bg_primary.l < 0.5 {
                     let mut selected = sidebar_theme.bg_primary;
-                    selected.l = (selected.l * 0.6).max(0.0);
+                    selected.l = (selected.l * 0.8).max(0.0);
                     selected
                 } else {
                     sidebar_theme.bg_primary
@@ -1977,6 +1983,7 @@ impl Styles {
             format_toolbar: FormatToolbarStyles {
                 format_toolbar_height_px: 30.0,
                 format_toolbar_padding_x_px: 8.0,
+                format_toolbar_optical_left_inset_px: 5.0,
                 format_toolbar_gap_px: 1.0,
                 format_toolbar_group_gap_px: 2.0,
                 format_toolbar_bg: theme.bg_primary,
@@ -1990,7 +1997,7 @@ impl Styles {
                 format_toolbar_separator_width_px: 1.0,
                 format_toolbar_separator_height_px: 14.0,
                 format_toolbar_separator_margin_x_px: 5.0,
-                format_toolbar_separator_color: theme.border_secondary,
+                format_toolbar_separator_color: with_alpha(theme.text_secondary, 0.38),
             },
             whiteboard: WhiteboardStyles {
                 whiteboard_swatch_size_px: 28.0,
@@ -2099,6 +2106,7 @@ impl Styles {
                 quote_block_callout_padding_top_px: 5.0,
                 quote_block_callout_padding_bottom_px: 5.0,
                 quote_block_padding_left_px: 12.0,
+                quote_block_line_syntax_indent_px: 10.0,
                 quote_block_padding_right_px: 10.0,
                 quote_block_callout_icon_color: theme.bold,
                 quote_block_callout_icon_size_factor: 1.0,

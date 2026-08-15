@@ -1386,6 +1386,9 @@ impl EditorView {
         };
         let scroll_y = -f32::from(self.sidebar_scroll_handle.offset().y);
         let sticky_headers_visible = has_root && scroll_y >= logo_area_height;
+        // Only macOS parks its window controls over the sidebar, so elsewhere the
+        // search field can claim the top row instead of an empty spacer.
+        let search_starts_at_top = !cfg!(target_os = "macos") && self.workspace_search_visible;
         let active_scroll_handle = if self.workspace_search_visible {
             &self.workspace_search_scroll_handle
         } else {
@@ -1417,7 +1420,7 @@ impl EditorView {
                 this.border_r(px(ss.sidebar_resize_indicator_width_px))
                     .border_color(ss.sidebar_resize_indicator_color)
             })
-            .child(top_spacer)
+            .when(!search_starts_at_top, |this| this.child(top_spacer))
             .when(
                 self.workspace_search_visible,
                 |this: gpui::Stateful<gpui::Div>| this.child(self.render_workspace_search(cx)),

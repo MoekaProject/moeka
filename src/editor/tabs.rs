@@ -2369,6 +2369,19 @@ impl EditorView {
             .when(self.prepared_update().is_some(), |this| {
                 this.child(self.render_update_ready_button(cx))
             })
+            .when(self.app_settings.simple_mode, |this| {
+                this.child(self.render_tab_bar_action_button(
+                    "tab-bar-theme-toggle",
+                    MOUNTAIN_SVG_PATH,
+                    !self.theme_kind.is_dark(),
+                    true,
+                    None,
+                    crate::i18n::theme_action_label(self.ui_language, self.theme_kind.is_dark()),
+                    None,
+                    cx,
+                    |this, cx| this.toggle_theme(cx),
+                ))
+            })
             .when(
                 self.app_settings.simple_mode && self.active_tab_is_markdown(),
                 |this| {
@@ -2390,19 +2403,6 @@ impl EditorView {
                     ))
                 },
             )
-            .when(self.app_settings.simple_mode, |this| {
-                this.child(self.render_tab_bar_action_button(
-                    "tab-bar-theme-toggle",
-                    MOUNTAIN_SVG_PATH,
-                    !self.theme_kind.is_dark(),
-                    true,
-                    None,
-                    crate::i18n::theme_action_label(self.ui_language, self.theme_kind.is_dark()),
-                    None,
-                    cx,
-                    |this, cx| this.toggle_theme(cx),
-                ))
-            })
             .child(self.render_tab_bar_action_button(
                 "tab-bar-terminal-toggle",
                 MENU_TERMINAL_SVG_PATH,

@@ -4299,6 +4299,32 @@ mod tests {
     }
 
     #[test]
+    fn quoted_lines_keep_their_line_level_block_syntax() {
+        let cases = [
+            ("> - item\n", BlockType::UnorderedList),
+            ("> 1. item\n", BlockType::OrderedList),
+            ("> - [ ] todo\n", BlockType::TaskList(false)),
+            ("> - [x] done\n", BlockType::TaskList(true)),
+            ("> # heading\n", BlockType::Heading(1)),
+        ];
+
+        for (text, expected) in cases {
+            let decorations = parse_decorations(text);
+            assert_eq!(decorations[0].block_type, expected, "{text:?}");
+            assert!(
+                decorations[0]
+                    .block_contexts
+                    .contains(&BlockContext::Blockquote),
+                "{text:?} should stay inside the quote"
+            );
+            assert!(
+                !decorations[0].syntax_ranges.is_empty(),
+                "{text:?} should conceal its markers"
+            );
+        }
+    }
+
+    #[test]
     fn bare_unordered_markers_are_visible_until_space_is_typed() {
         for marker in ["-", "+", "*"] {
             let decorations = parse_decorations(marker);

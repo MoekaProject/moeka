@@ -14,9 +14,10 @@ use crate::i18n::{
 use crate::theme::{EditorThemeMode, ThemeKind};
 
 use super::{
-    APP_VERSION, ChatAgentCli, DOC_SVG_PATH, EditorView, FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH,
-    MermaidTheme, SITE_SVG_PATH, SearchMenuConfig, SearchMenuRow, THEME_DARK_MINI_SVG_PATH,
-    THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape, attachments, tooltip,
+    APP_VERSION, ChatAgentCli, DOC_SVG_PATH, EditorView, FILE_INFO_SECTION_INFO_SVG_PATH,
+    FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, MermaidTheme, SITE_SVG_PATH, SearchMenuConfig,
+    SearchMenuRow, THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape,
+    attachments, tooltip,
 };
 
 // ── Font picker state ───────────────────────────────────────────────
@@ -99,6 +100,7 @@ pub(crate) struct FontPickerState {
 enum SettingsOptionAction {
     ShowWhitespace(bool),
     HighlightLine(bool),
+    FormatToolbar(bool),
     SimpleMode(bool),
     SidebarAlwaysDark(bool),
     TerminalCopyOnSelect(bool),
@@ -176,6 +178,7 @@ impl EditorView {
                                     .items_center()
                                     .justify_end()
                                     .gap(px(self.scaled(sps.settings_header_actions_gap_px)))
+                                    .child(self.render_settings_config_button(cx))
                                     .child(self.render_settings_help_button(cx))
                                     .child(self.render_settings_site_button(cx)),
                             ),
@@ -185,6 +188,53 @@ impl EditorView {
                     .child(self.render_format_section(cx))
                     .child(self.render_terminal_settings_section(cx))
                     .child(self.render_attachment_settings_section(cx)),
+            )
+            .into_any_element()
+    }
+
+    fn render_settings_config_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let sps = &self.styles.settings_panel;
+        let height = self.scaled(sps.settings_site_button_height_px);
+        let icon_size = self.scaled(sps.settings_site_button_icon_size_px);
+
+        div()
+            .id("settings-config-button")
+            .h(px(height))
+            .max_w(px(self.scaled(sps.settings_header_button_max_width_px)))
+            .px(px(self.scaled(sps.settings_site_button_padding_x_px)))
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(sps.settings_site_button_gap_px)))
+            .rounded(px(self.scaled(sps.settings_site_button_radius_px)))
+            .border(px(sps.settings_site_button_border_width_px))
+            .border_color(sps.settings_site_button_border_color)
+            .bg(sps.settings_site_button_bg)
+            .text_size(px(self.scaled(sps.settings_site_button_font_size_px)))
+            .text_color(sps.settings_site_button_text_color)
+            .cursor(CursorStyle::Arrow)
+            .hover({
+                let hover_bg = sps.settings_site_button_hover_bg;
+                move |style| style.bg(hover_bg)
+            })
+            .child(
+                svg()
+                    .path(FILE_INFO_SECTION_INFO_SVG_PATH)
+                    .size(px(icon_size))
+                    .text_color(sps.settings_site_button_icon_color),
+            )
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .truncate()
+                    .whitespace_nowrap()
+                    .child(crate::i18n::config_file_label(self.ui_language)),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.open_config_file_tab(cx);
+                }),
             )
             .into_any_element()
     }
@@ -552,6 +602,16 @@ impl EditorView {
                 ),
             ))
             .child(self.render_attachment_settings_row(
+                crate::i18n::settings_label(self.ui_language, "format_toolbar"),
+                self.render_boolean_settings_checkbox(
+                    "settings-format-toolbar",
+                    self.app_settings.format_toolbar_visible,
+                    SettingsOptionAction::FormatToolbar(false),
+                    SettingsOptionAction::FormatToolbar(true),
+                    cx,
+                ),
+            ))
+            .child(self.render_attachment_settings_row(
                 crate::i18n::settings_label(self.ui_language, "highlight_line"),
                 self.render_boolean_settings_checkbox(
                     "settings-highlight-line-background",
@@ -631,6 +691,9 @@ impl EditorView {
             }
             SettingsOptionAction::HighlightLine(value) => {
                 self.app_settings.highlight_line_background = value;
+            }
+            SettingsOptionAction::FormatToolbar(value) => {
+                self.app_settings.format_toolbar_visible = value;
             }
             SettingsOptionAction::SimpleMode(value) => {
                 self.app_settings.simple_mode = value;
@@ -804,7 +867,54 @@ impl EditorView {
     pub(crate) fn finalize_settings_change(&mut self, cx: &mut Context<Self>) {
         self.app_settings.save();
         self.clear_all_tab_layout_caches();
+        // The config file sits outside the watched workspace, so push the write
+        // through the same reload path the fs watcher would use.
+        self.handle_fs_events(&[crate::editor::config_paths::config_file_path()], cx);
         cx.notify();
+    }
+
+    pub(crate) fn open_config_file_tab(&mut self, cx: &mut Context<Self>) {
+        let path = crate::editor::config_paths::config_file_path();
+        // The file only exists once something has been persisted, so write the
+        // current settings first to give the user a complete document to edit.
+        if !path.exists() {
+            self.app_settings.save();
+        }
+        self.open_path_in_permanent_tab(path, true, cx);
+    }
+
+    /// Re-reads the config file the user just saved and applies everything the
+    /// settings panel owns; session and window state stay untouched.
+    pub(crate) fn apply_saved_config_file(&mut self, cx: &mut Context<Self>) {
+        let settings = match crate::editor::config_store::load_settings_strict() {
+            Ok(settings) => settings,
+            Err(error) => {
+                let message = format!(
+                    "{}: {error}",
+                    crate::i18n::config_invalid_label(self.ui_language)
+                );
+                self.notify_error(message, cx);
+                return;
+            }
+        };
+
+        self.app_settings = settings;
+        self.ui_language = self.app_settings.ui_language();
+        self.theme_kind = self.app_settings.theme_kind();
+        self.editor_theme_mode = self
+            .app_settings
+            .editor_theme_mode_for_appearance(self.theme_kind.is_dark());
+        self.theme = crate::theme::apply_editor_theme_mode(
+            &self.theme_kind.build(),
+            self.editor_theme_mode,
+            self.theme_kind.is_dark(),
+        );
+        self.ui_scale = self.app_settings.ui_scale;
+        self.refresh_theme_styles(true, cx);
+        self.refresh_builtin_tab_titles();
+
+        let message = crate::i18n::config_applied_label(self.ui_language).to_string();
+        self.notify_info(message, cx);
     }
 
     // ── Theme section ───────────────────────────────────────────

@@ -2412,6 +2412,9 @@ impl EditorView {
                     );
                     session_store::persist_session(self);
                     cx.notify();
+                    if path == &crate::editor::config_paths::config_file_path() {
+                        self.apply_saved_config_file(cx);
+                    }
                 }
                 Err(error) => {
                     let message = format!("{}: {error}", self.t(crate::i18n::TextKey::SaveFailed));

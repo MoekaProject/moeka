@@ -3523,6 +3523,17 @@ impl Element for EditorElement {
             } else {
                 0.0
             };
+            // Quoted rows carrying their own marker step one level deeper. Only
+            // the text moves; the quote bar and fill stay put.
+            let quote_content_indent_px = if is_quote_line
+                && matches!(
+                    block_type,
+                    BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_)
+                ) {
+                editor.scaled(quote_styles.quote_block_line_syntax_indent_px)
+            } else {
+                0.0
+            };
 
             let code_mode_split_gap = editor.scaled(14.0);
             let code_mode_text_width = ((text_width - code_mode_split_gap) * 0.5).max(80.0);
@@ -3542,6 +3553,7 @@ impl Element for EditorElement {
                 (text_width
                     - quote_horizontal_padding
                     - quote_indent_px
+                    - quote_content_indent_px
                     - editor.scaled(editor.styles.editor.editor_wrap_right_padding_px))
                 .max(editor.scaled(80.0))
             } else {
@@ -3763,7 +3775,11 @@ impl Element for EditorElement {
                         + quote_inner_left_padding
                         + editor.scaled(editor.styles.code_block.code_block_text_padding_left_px)
                 } else if is_quote_line {
-                    editor_left + editor.padding_left() + quote_indent_px + quote_inner_left_padding
+                    editor_left
+                        + editor.padding_left()
+                        + quote_indent_px
+                        + quote_content_indent_px
+                        + quote_inner_left_padding
                 } else {
                     editor_left + editor.padding_left()
                 };

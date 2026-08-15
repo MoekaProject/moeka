@@ -2047,13 +2047,18 @@ impl EditorView {
         let wss = &self.styles.workspace_switcher;
         let is_open = self.context_submenu.as_ref() == Some(&submenu_kind);
         let icon_size = self.scaled(ms.menu_format_icon_size_px);
-        let (icon_col_w, icon_gap) = menu_icon_column_metrics(
-            ms.menu_format_icon_size_px,
-            wss.ws_menu_item_check_size_px,
-            wss.ws_menu_item_action_icon_gap_px,
-        );
-        let icon_col_w = self.scaled(icon_col_w);
-        let icon_gap = self.scaled(icon_gap);
+        // Export lives in the sidebar-style menus, the rest in the format menu;
+        // each has to match its host's icon column or the label drifts.
+        let (icon_col_w, icon_gap) = if matches!(submenu_kind, ContextMenuKind::Export { .. }) {
+            let (column, gap) = menu_icon_column_metrics(
+                ms.menu_format_icon_size_px,
+                wss.ws_menu_item_check_size_px,
+                wss.ws_menu_item_action_icon_gap_px,
+            );
+            (self.scaled(column), self.scaled(gap))
+        } else {
+            (icon_size, self.scaled(ms.menu_format_icon_gap_px))
+        };
         let arrow_size = (icon_size - self.scaled(2.0)).max(self.scaled(10.0));
         let hover_bg = ms.menu_item_hover_bg;
         let text_color = ms.menu_item_primary_text_color;
@@ -2330,13 +2335,15 @@ impl EditorView {
         let context_count = context_paths.len();
 
         if !is_dir {
-            items.push(self.render_format_submenu_trigger_item(
-                self.t(crate::i18n::TextKey::Export),
-                None,
-                ContextMenuKind::Export { path: path.clone() },
-                cx,
-            ));
-            items.push(self.render_context_menu_separator());
+            if is_markdown_file(&path) {
+                items.push(self.render_format_submenu_trigger_item(
+                    self.t(crate::i18n::TextKey::Export),
+                    None,
+                    ContextMenuKind::Export { path: path.clone() },
+                    cx,
+                ));
+                items.push(self.render_context_menu_separator());
+            }
             let starred_paths: Vec<PathBuf> = context_paths
                 .iter()
                 .filter(|path| path.is_file())
@@ -2534,13 +2541,15 @@ impl EditorView {
     ) -> Vec<AnyElement> {
         let mut items: Vec<AnyElement> = Vec::new();
 
-        items.push(self.render_format_submenu_trigger_item(
-            self.t(crate::i18n::TextKey::Export),
-            None,
-            ContextMenuKind::Export { path: path.clone() },
-            cx,
-        ));
-        items.push(self.render_context_menu_separator());
+        if is_markdown_file(&path) {
+            items.push(self.render_format_submenu_trigger_item(
+                self.t(crate::i18n::TextKey::Export),
+                None,
+                ContextMenuKind::Export { path: path.clone() },
+                cx,
+            ));
+            items.push(self.render_context_menu_separator());
+        }
 
         {
             let context_paths = self.sidebar_context_paths(&path);
@@ -2730,12 +2739,14 @@ impl EditorView {
                 },
             ));
         }
-        items.push(self.render_format_submenu_trigger_item(
-            self.t(crate::i18n::TextKey::Export),
-            None,
-            ContextMenuKind::Export { path: path.clone() },
-            cx,
-        ));
+        if is_markdown_file(&path) {
+            items.push(self.render_format_submenu_trigger_item(
+                self.t(crate::i18n::TextKey::Export),
+                None,
+                ContextMenuKind::Export { path: path.clone() },
+                cx,
+            ));
+        }
         if self.selected_sidebar_paths.len() <= 1 {
             let rename_path = path.clone();
             items.push(self.render_context_menu_item(
@@ -3048,9 +3059,23 @@ impl EditorView {
         ]
     }
 
-    pub(crate) fn render_format_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_format_toolbar(
+        &self,
+        pane_width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let fts = &self.styles.format_toolbar;
         let active_actions = self.active_format_actions();
+        // Start where the markdown text starts, mirroring the editor's own
+        // centred content column.
+        let content_left = if self.editor_uses_expanded_layout() {
+            self.padding_left()
+        } else {
+            let editor_width = pane_width.min(self.max_editor_width());
+            ((pane_width - editor_width) / 2.0).max(0.0) + self.padding_left()
+        };
+        let content_left =
+            (content_left - self.scaled(fts.format_toolbar_optical_left_inset_px)).max(0.0);
 
         let mut bar = div()
             .id("format-toolbar")
@@ -3059,8 +3084,8 @@ impl EditorView {
             .h(px(self.scaled(fts.format_toolbar_height_px)))
             .flex()
             .items_center()
-            .justify_center()
-            .px(px(self.scaled(fts.format_toolbar_padding_x_px)))
+            .pl(px(content_left))
+            .pr(px(self.scaled(fts.format_toolbar_padding_x_px)))
             .gap(px(self.scaled(fts.format_toolbar_gap_px)))
             .overflow_hidden()
             .bg(fts.format_toolbar_bg)
@@ -4782,11 +4807,7 @@ impl EditorView {
                 self.append_tab_pane_context_menu_items(&mut items, tab_id, cx);
                 if let Some(tab) = self.tabs.iter().find(|t| t.id == *tab_id) {
                     if let Some(path) = &tab.path {
-                        if tab
-                            .file_kind
-                            .as_ref()
-                            .is_some_and(FileKind::supports_text_buffer)
-                        {
+                        if is_markdown_file(path) {
                             items.push(self.render_context_menu_separator());
                             items.push(self.render_format_submenu_trigger_item(
                                 self.t(crate::i18n::TextKey::Export),

@@ -3848,7 +3848,20 @@ impl EditorView {
             }
         }
 
-        if changed_paths_in_workspace.is_empty() && !git_metadata_impact.any() {
+        // Open documents can live outside the watched workspace (the config
+        // file, files opened by path), so reload those on their own paths.
+        let mut changed_paths_for_tabs = changed_paths_in_workspace.clone();
+        for path in changed_paths.iter().map(PathBuf::as_path) {
+            if path.starts_with(&self.sidebar_root) || self.is_internal_temp_change_path(path) {
+                continue;
+            }
+            let is_open = self.all_tabs().any(|tab| tab.path.as_deref() == Some(path));
+            if is_open && seen_paths_in_workspace.insert(path.to_path_buf()) {
+                changed_paths_for_tabs.push(path.to_path_buf());
+            }
+        }
+
+        if changed_paths_for_tabs.is_empty() && !git_metadata_impact.any() {
             return;
         }
 
@@ -3898,7 +3911,7 @@ impl EditorView {
 
                 for (tab_index, tab) in this.tabs.iter_mut().enumerate() {
                     if let Some(ref tab_path) = tab.path {
-                        let path_changed = changed_paths_in_workspace
+                        let path_changed = changed_paths_for_tabs
                             .iter()
                             .any(|path| path == tab_path || tab_path.starts_with(path));
                         let should_refresh_diff = tab.git_diff.as_ref().is_some_and(|diff| {

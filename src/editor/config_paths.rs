@@ -5,10 +5,25 @@ use directories::ProjectDirs;
 
 const APP_NAME: &str = "moeka";
 
+/// `~/.config/moeka` on every Unix (macOS included) and `%APPDATA%\moeka` on
+/// Windows, so the file stays where users expect to hand-edit it.
 pub(crate) fn config_dir() -> PathBuf {
-    project_dirs()
-        .map(|dirs| dirs.config_dir().to_path_buf())
-        .unwrap_or_else(fallback_config_dir)
+    #[cfg(windows)]
+    if let Some(appdata) = env::var_os("APPDATA") {
+        return PathBuf::from(appdata).join(APP_NAME);
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Some(xdg) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+            return PathBuf::from(xdg).join(APP_NAME);
+        }
+        if let Some(home) = env::var_os("HOME") {
+            return PathBuf::from(home).join(".config").join(APP_NAME);
+        }
+    }
+
+    fallback_config_dir()
 }
 
 pub(crate) fn cache_dir() -> PathBuf {
