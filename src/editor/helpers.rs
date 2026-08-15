@@ -5227,35 +5227,45 @@ pub(crate) fn load_render_image_from_url(url: &str) -> anyhow::Result<RenderImag
 }
 
 pub(crate) fn pick_image_file_blocking() -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .set_title("Choose Image")
-        .add_filter(
-            "Images",
-            &[
-                "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg", "heic", "heif",
-                "avif",
-            ],
-        )
-        .pick_file()
+    crate::platform::dialog::run(|| {
+        rfd::FileDialog::new()
+            .set_title("Choose Image")
+            .add_filter(
+                "Images",
+                &[
+                    "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg", "heic",
+                    "heif", "avif",
+                ],
+            )
+            .pick_file()
+    })
 }
 
 pub(crate) fn pick_markdown_file_blocking(title: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .set_title(title)
-        .add_filter("Markdown", &["md", "markdown"])
-        .pick_file()
+    let title = title.to_string();
+    crate::platform::dialog::run(move || {
+        rfd::FileDialog::new()
+            .set_title(title)
+            .add_filter("Markdown", &["md", "markdown"])
+            .pick_file()
+    })
 }
 
 pub(crate) fn pick_folder_blocking(title: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new().set_title(title).pick_folder()
+    let title = title.to_string();
+    crate::platform::dialog::run(move || rfd::FileDialog::new().set_title(title).pick_folder())
 }
 
 pub(crate) fn save_file_blocking(default_name: &str, title: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .set_title(title)
-        .set_file_name(default_name)
-        .add_filter("Markdown", &["md", "markdown"])
-        .save_file()
+    let default_name = default_name.to_string();
+    let title = title.to_string();
+    crate::platform::dialog::run(move || {
+        rfd::FileDialog::new()
+            .set_title(title)
+            .set_file_name(default_name)
+            .add_filter("Markdown", &["md", "markdown"])
+            .save_file()
+    })
 }
 
 /// Map a buffer byte offset (within line) to display byte offset.

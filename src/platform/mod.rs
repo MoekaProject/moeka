@@ -5,6 +5,7 @@
 //! hunting for platform assumptions across the codebase.
 
 pub(crate) mod clipboard;
+pub(crate) mod dialog;
 pub(crate) mod fonts;
 pub(crate) mod keys;
 pub(crate) mod paths;

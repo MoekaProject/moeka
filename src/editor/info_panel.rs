@@ -137,10 +137,14 @@ fn format_file_size(size: u64) -> String {
 }
 
 fn export_dialog_path(default_name: &str, title: &str) -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new()
-        .set_title(title)
-        .set_file_name(default_name)
-        .save_file()
+    let default_name = default_name.to_string();
+    let title = title.to_string();
+    crate::platform::dialog::run(move || {
+        rfd::FileDialog::new()
+            .set_title(title)
+            .set_file_name(default_name)
+            .save_file()
+    })
 }
 
 fn html_escape(text: &str) -> String {

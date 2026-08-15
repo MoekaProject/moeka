@@ -29,11 +29,9 @@ fn main() {
 
         // Cross-compiling usually has no resource compiler; ship
         // `moeka.exe.manifest` beside the binary in that case.
-        if let Err(error) = embed_resource::compile(
-            "packaging/windows/moeka.rc",
-            embed_resource::NONE,
-        )
-        .manifest_optional()
+        if let Err(error) =
+            embed_resource::compile("packaging/windows/moeka.rc", embed_resource::NONE)
+                .manifest_optional()
         {
             println!("cargo:warning=Windows resources were not embedded: {error}");
         }
