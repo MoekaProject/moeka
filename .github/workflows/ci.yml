@@ -64,9 +64,17 @@ jobs:
   # Windows binaries cannot be cross-built: gpui compiles its HLSL shaders with
   # the DirectX shader compiler, which only runs on Windows.
   windows-package:
-    name: Windows portable package
-    runs-on: windows-latest
+    name: Windows portable package (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -79,7 +87,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: windows-package
+          key: windows-package-${{ matrix.arch }}
 
       - name: Build
         run: cargo build --release
@@ -96,6 +104,6 @@ jobs:
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: moeka-windows-x86_64
+          name: moeka-windows-${{ matrix.arch }}
           path: dist/moeka
           if-no-files-found: error

@@ -1,1 +1,6 @@
-<svg viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" width="200" height="200"><path d="M170.666667 170.666667h682.666666v682.666666H170.666667V170.666667z m85.333333 85.333333v512h512V256H256z" fill="#ffffff"></path></svg>
+<svg viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" width="200"
+  height="200">
+  <path
+    d="M170.666667 170.666667h682.666666v682.666666H170.666667V170.666667z m85.333333 85.333333v512h512V256H256z"
+    fill="#ffffff"></path>
+</svg>

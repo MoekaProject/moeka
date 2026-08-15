@@ -1,4 +1,6 @@
 #![allow(unexpected_cfgs)]
+// Debug builds keep the console so panics and diagnostics stay visible.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod actions;
 mod buffer;
