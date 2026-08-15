@@ -2236,7 +2236,7 @@ impl EditorView {
         let ts = &self.styles.tab_bar;
         let height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
         // Fluent caption buttons are 46x32dp regardless of the surrounding UI.
-        let width = self.scaled(46.0);
+        let width = self.scaled(crate::style::WINDOW_CAPTION_BUTTON_WIDTH_PX);
         let icon_size = self.scaled(13.0);
         let icon_color = ts.tab_item_icon_color;
         let hover_bg = ts.tab_item_hover_bg;
@@ -2730,8 +2730,9 @@ impl EditorView {
                 is_top_right_pane && !self.should_render_utility_panel_on_right(),
                 |this| this.child(self.render_tab_bar_toggle_actions(cx)),
             )
-            .when(is_top_right_pane && !cfg!(target_os = "macos"), |this| {
-                this.child(self.render_window_caption_buttons(cx))
+            // Leaves room for the caption buttons the window draws on top.
+            .when(is_top_right_pane, |this| {
+                this.pr(px(self.window_caption_trailing_inset()))
             });
 
         div()

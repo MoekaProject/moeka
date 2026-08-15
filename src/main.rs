@@ -1,6 +1,5 @@
 #![allow(unexpected_cfgs)]
-// Debug builds keep the console so panics and diagnostics stay visible.
-#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod actions;
 mod buffer;
@@ -318,7 +317,36 @@ fn open_terminal_window(cx: &mut App) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Records panics to a file, since a windowed process has nowhere to print
+/// them and the message would otherwise be lost with the crash.
+fn install_panic_logger() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let path = editor::config_paths::cache_dir().join("crash.log");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write;
+
+            let _ = writeln!(
+                file,
+                "\n===== {} =====\n{info}\n{}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+        previous(info);
+    }));
+}
+
 fn main() {
+    install_panic_logger();
+
     #[cfg(target_os = "macos")]
     let pending_open_paths = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
     #[cfg(target_os = "macos")]

@@ -8,6 +8,9 @@ use crate::theme::{Theme, with_alpha};
 
 pub(crate) const TOP_BAR_HEIGHT_PX: f32 = 33.0;
 
+/// Fluent caption buttons are 46dp wide regardless of the surrounding UI.
+pub(crate) const WINDOW_CAPTION_BUTTON_WIDTH_PX: f32 = 46.0;
+
 /// Per-component style configuration, derived from the active theme.
 ///
 /// Naming convention: `{功能}_{位置}_{状态}_{样式}_{单位}`

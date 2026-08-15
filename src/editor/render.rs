@@ -1238,6 +1238,17 @@ impl Render for EditorView {
             .when(!self.notifications.is_empty(), |this| {
                 this.child(deferred(self.render_notifications(cx)))
             })
+            // Anchored to the window rather than the tab bar, which stops short
+            // of the frame whenever a right-hand panel is open.
+            .when(!cfg!(target_os = "macos"), |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .child(self.render_window_caption_buttons(cx)),
+                )
+            })
     }
 }
 

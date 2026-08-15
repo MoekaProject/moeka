@@ -78,6 +78,16 @@ impl EditorView {
         }
     }
 
+    /// Width reserved at the trailing edge for the caption buttons the app
+    /// draws itself.
+    pub(crate) fn window_caption_trailing_inset(&self) -> f32 {
+        if cfg!(target_os = "macos") {
+            0.0
+        } else {
+            self.scaled(crate::style::WINDOW_CAPTION_BUTTON_WIDTH_PX * 3.0)
+        }
+    }
+
     /// Preserve existing border metrics outside the Moeka retro theme family,
     /// whose chrome uses a uniform two-pixel rule.
     pub(crate) fn ui_border_width(&self, default_width: f32) -> f32 {
