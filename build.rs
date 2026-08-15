@@ -20,13 +20,22 @@ fn main() {
     println!("cargo:rustc-env=MOEKA_GIT_COMMIT={commit}");
     println!("cargo:rustc-env=MOEKA_GIT_TAG={tag}");
 
-    // gpui already supplies the DPI-aware application manifest.
-    #[cfg(windows)]
-    {
+    // `cfg!(windows)` in a build script describes the host, not the target, so
+    // resources would silently vanish when cross-compiling.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rerun-if-changed=packaging/windows/moeka.rc");
         println!("cargo:rerun-if-changed=packaging/windows/moeka.ico");
-        embed_resource::compile("packaging/windows/moeka.rc", embed_resource::NONE)
-            .manifest_optional()
-            .expect("embed Windows resources");
+        println!("cargo:rerun-if-changed=packaging/windows/moeka.exe.manifest");
+
+        // Cross-compiling usually has no resource compiler; ship
+        // `moeka.exe.manifest` beside the binary in that case.
+        if let Err(error) = embed_resource::compile(
+            "packaging/windows/moeka.rc",
+            embed_resource::NONE,
+        )
+        .manifest_optional()
+        {
+            println!("cargo:warning=Windows resources were not embedded: {error}");
+        }
     }
 }
