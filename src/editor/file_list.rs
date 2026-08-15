@@ -954,9 +954,9 @@ impl EditorView {
                 MouseButton::Left,
                 cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
                     if event.click_count >= 2 {
-                        window.zoom_window();
+                        crate::platform::window_chrome::toggle_maximize(window);
                     } else {
-                        super::perform_window_drag(window);
+                        crate::platform::window_chrome::start_drag(window);
                     }
                 }),
             )

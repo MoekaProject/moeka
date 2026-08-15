@@ -1125,21 +1125,16 @@ impl EditorView {
                         ),
                 )
             })
-            .window_control_area(gpui::WindowControlArea::Drag)
-            // Windows handles the caption area natively; zooming here too would
-            // toggle twice and land back where it started.
-            .when(!cfg!(target_os = "windows"), |this| {
-                this.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
-                        if event.click_count >= 2 {
-                            window.zoom_window();
-                        } else {
-                            super::perform_window_drag(window);
-                        }
-                    }),
-                )
-            });
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
+                    if event.click_count >= 2 {
+                        crate::platform::window_chrome::toggle_maximize(window);
+                    } else {
+                        crate::platform::window_chrome::start_drag(window);
+                    }
+                }),
+            );
 
         let header = self.render_sidebar_header(cx);
         let mut tree_items: Vec<AnyElement> = Vec::new();

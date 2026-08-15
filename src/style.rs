@@ -32,6 +32,7 @@ pub struct Styles {
     pub utility_panel: UtilityPanelStyles,
     pub tab_bar: TabBarStyles,
     pub toolbar: ToolbarStyles,
+    pub format_toolbar: FormatToolbarStyles,
     pub whiteboard: WhiteboardStyles,
     pub tooltip: TooltipStyles,
     pub cursor: CursorStyles,
@@ -573,6 +574,27 @@ pub struct ToolbarStyles {
     pub toolbar_whiteboard_btn_hover_bg: Hsla,
     pub toolbar_whiteboard_icon_color: Hsla,
     pub toolbar_whiteboard_icon_active_color: Hsla,
+}
+
+/// Hover and active states shift icon contrast only; the bar draws no button
+/// backgrounds.
+pub struct FormatToolbarStyles {
+    pub format_toolbar_height_px: f32,
+    pub format_toolbar_padding_x_px: f32,
+    pub format_toolbar_gap_px: f32,
+    pub format_toolbar_group_gap_px: f32,
+    pub format_toolbar_bg: Hsla,
+    pub format_toolbar_border_width_px: f32,
+    pub format_toolbar_border_color: Hsla,
+    pub format_toolbar_btn_size_px: f32,
+    pub format_toolbar_icon_size_px: f32,
+    pub format_toolbar_icon_color: Hsla,
+    pub format_toolbar_icon_hover_color: Hsla,
+    pub format_toolbar_icon_active_color: Hsla,
+    pub format_toolbar_separator_width_px: f32,
+    pub format_toolbar_separator_height_px: f32,
+    pub format_toolbar_separator_margin_x_px: f32,
+    pub format_toolbar_separator_color: Hsla,
 }
 
 // ── Whiteboard ─────────────────────────────────────────────────────
@@ -1281,6 +1303,10 @@ impl Styles {
         self.editor.editor_path_bar_border_width_px = border_width;
         self.editor.editor_match_border_width_px = border_width;
 
+        self.format_toolbar.format_toolbar_border_width_px = border_width;
+        self.format_toolbar.format_toolbar_border_color = chrome.border_primary;
+        self.format_toolbar.format_toolbar_separator_color = chrome.border_primary;
+
         self.sidebar.sidebar_edit_input_border_width_px = border_width;
         self.sidebar.sidebar_empty_btn_border_width_px = border_width;
         self.sidebar.file_list_header_border_width_px = border_width;
@@ -1947,6 +1973,24 @@ impl Styles {
                 toolbar_whiteboard_btn_hover_bg: theme.bg_hover,
                 toolbar_whiteboard_icon_color: theme.text_secondary,
                 toolbar_whiteboard_icon_active_color: theme.text_bright,
+            },
+            format_toolbar: FormatToolbarStyles {
+                format_toolbar_height_px: 30.0,
+                format_toolbar_padding_x_px: 8.0,
+                format_toolbar_gap_px: 1.0,
+                format_toolbar_group_gap_px: 2.0,
+                format_toolbar_bg: theme.bg_primary,
+                format_toolbar_border_width_px: 1.0,
+                format_toolbar_border_color: theme.border_secondary,
+                format_toolbar_btn_size_px: 22.0,
+                format_toolbar_icon_size_px: 13.0,
+                format_toolbar_icon_color: with_alpha(theme.text_secondary, 0.72),
+                format_toolbar_icon_hover_color: theme.text_bright,
+                format_toolbar_icon_active_color: theme.text_bright,
+                format_toolbar_separator_width_px: 1.0,
+                format_toolbar_separator_height_px: 14.0,
+                format_toolbar_separator_margin_x_px: 5.0,
+                format_toolbar_separator_color: theme.border_secondary,
             },
             whiteboard: WhiteboardStyles {
                 whiteboard_swatch_size_px: 28.0,

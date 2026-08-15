@@ -472,6 +472,9 @@ impl EditorView {
             .when(self.active_tab_is_diff(), |this| {
                 this.child(self.render_active_tab_path_bar(cx))
             })
+            .when(self.active_tab_is_markdown(), |this| {
+                this.child(self.render_format_toolbar(cx))
+            })
             .child(
                 div()
                     .id("editor-pane-content")

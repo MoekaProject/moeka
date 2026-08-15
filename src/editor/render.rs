@@ -61,7 +61,6 @@ impl EditorView {
                                     this.border_b(px(self.styles.tab_bar.tab_bar_border_width_px))
                                         .border_color(self.styles.tab_bar.tab_bar_border_color)
                                 })
-                                .window_control_area(gpui::WindowControlArea::Drag)
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(Self::on_tab_bar_drag_space_mouse_down),

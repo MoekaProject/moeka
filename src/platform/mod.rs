@@ -13,4 +13,5 @@ pub(crate) mod process;
 pub(crate) mod shell;
 pub(crate) mod terminal;
 pub(crate) mod trash;
+pub(crate) mod window_chrome;
 pub(crate) mod window_state;

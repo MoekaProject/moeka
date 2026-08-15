@@ -58,6 +58,16 @@ struct SlashMenuItem {
     action: FormatMenuAction,
 }
 
+enum FormatToolbarEntry {
+    Separator,
+    HeadingMenu,
+    Action {
+        action: FormatMenuAction,
+        icon: &'static str,
+        shortcut: Option<SharedString>,
+    },
+}
+
 fn aligned_submenu_top(
     trigger_top: f32,
     trigger_bottom: f32,
@@ -2924,6 +2934,266 @@ impl EditorView {
         }
 
         items
+    }
+
+    /// Mirrors the format context menu, flattening its "more formats" submenu
+    /// and keeping the same grouping separators.
+    fn format_toolbar_entries(&self) -> Vec<FormatToolbarEntry> {
+        let entry = |action, icon, shortcut: Option<SharedString>| FormatToolbarEntry::Action {
+            action,
+            icon,
+            shortcut,
+        };
+        let hint = crate::editor::shortcut::hint;
+
+        vec![
+            FormatToolbarEntry::HeadingMenu,
+            FormatToolbarEntry::Separator,
+            entry(
+                FormatMenuAction::Bold,
+                FMT_BOLD_SVG,
+                Some(hint("secondary-b")),
+            ),
+            entry(
+                FormatMenuAction::Italic,
+                FMT_ITALIC_SVG,
+                Some(hint("secondary-i")),
+            ),
+            entry(
+                FormatMenuAction::Strikethrough,
+                FMT_STRIKETHROUGH_SVG,
+                Some(hint("secondary-shift-x")),
+            ),
+            entry(
+                FormatMenuAction::Underline,
+                FMT_UNDERLINE_SVG,
+                Some(hint("secondary-u")),
+            ),
+            entry(
+                FormatMenuAction::InlineCode,
+                FMT_INLINE_CODE_SVG,
+                Some(hint("secondary-e")),
+            ),
+            FormatToolbarEntry::Separator,
+            entry(
+                FormatMenuAction::Todo,
+                FMT_TODO_SVG,
+                Some(hint("secondary-alt-enter")),
+            ),
+            entry(
+                FormatMenuAction::Link,
+                FMT_LINK_SVG,
+                Some(hint("secondary-k")),
+            ),
+            FormatToolbarEntry::Separator,
+            entry(
+                FormatMenuAction::CodeBlock,
+                FMT_CODE_SVG,
+                Some(hint("secondary-alt-c")),
+            ),
+            entry(
+                FormatMenuAction::HorizontalRule,
+                FMT_SPLIT_SVG,
+                Some("---".into()),
+            ),
+            entry(
+                FormatMenuAction::Quote,
+                FMT_QUOTE_SVG,
+                Some(hint("secondary-alt-q")),
+            ),
+            entry(
+                FormatMenuAction::UnorderedList,
+                FMT_LIST_SVG,
+                Some(hint("secondary-alt-u")),
+            ),
+            entry(
+                FormatMenuAction::OrderedList,
+                FMT_ORDER_LIST_SVG,
+                Some(hint("secondary-alt-o")),
+            ),
+            FormatToolbarEntry::Separator,
+            entry(
+                FormatMenuAction::WikiLink,
+                FMT_WIKI_LINK_SVG,
+                Some("[[".into()),
+            ),
+            entry(FormatMenuAction::Image, FMT_IMAGE_SVG, None),
+            entry(FormatMenuAction::Table, FMT_TABLE_SVG, Some("2×2".into())),
+            FormatToolbarEntry::Separator,
+            entry(
+                FormatMenuAction::Superscript,
+                FMT_SUPERSCRIPT_SVG,
+                Some("^text^".into()),
+            ),
+            entry(
+                FormatMenuAction::Subscript,
+                FMT_SUBSCRIPT_SVG,
+                Some("~text~".into()),
+            ),
+            entry(
+                FormatMenuAction::Footnote,
+                FMT_FOOTNOTE_SVG,
+                Some("[^note]".into()),
+            ),
+            entry(
+                FormatMenuAction::CalloutTip,
+                FMT_CALLOUT_TIP_SVG,
+                Some("> [!TIP]".into()),
+            ),
+            entry(
+                FormatMenuAction::Highlight,
+                FMT_HIGHLIGHT_SVG,
+                Some("==text==".into()),
+            ),
+        ]
+    }
+
+    pub(crate) fn render_format_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let fts = &self.styles.format_toolbar;
+        let active_actions = self.active_format_actions();
+
+        let mut bar = div()
+            .id("format-toolbar")
+            .w_full()
+            .flex_none()
+            .h(px(self.scaled(fts.format_toolbar_height_px)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .px(px(self.scaled(fts.format_toolbar_padding_x_px)))
+            .gap(px(self.scaled(fts.format_toolbar_gap_px)))
+            .overflow_hidden()
+            .bg(fts.format_toolbar_bg)
+            .border_b(px(self.scaled(fts.format_toolbar_border_width_px)))
+            .border_color(fts.format_toolbar_border_color)
+            .cursor(CursorStyle::Arrow)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
+            );
+
+        for entry in self.format_toolbar_entries() {
+            bar = match entry {
+                FormatToolbarEntry::Separator => bar.child(self.render_format_toolbar_separator()),
+                FormatToolbarEntry::HeadingMenu => {
+                    bar.child(self.render_format_toolbar_heading_button(cx))
+                }
+                FormatToolbarEntry::Action {
+                    action,
+                    icon,
+                    shortcut,
+                } => {
+                    let is_active = active_actions.contains(&action);
+                    bar.child(self.render_format_toolbar_button(
+                        self.format_action_label(action),
+                        icon,
+                        shortcut,
+                        is_active,
+                        cx,
+                        move |this, cx| this.execute_format_menu_action(action, cx),
+                    ))
+                }
+            };
+        }
+
+        bar.into_any_element()
+    }
+
+    fn render_format_toolbar_separator(&self) -> AnyElement {
+        let fts = &self.styles.format_toolbar;
+        div()
+            .w(px(self.scaled(fts.format_toolbar_separator_width_px)))
+            .h(px(self.scaled(fts.format_toolbar_separator_height_px)))
+            .mx(px(self.scaled(fts.format_toolbar_separator_margin_x_px)))
+            .flex_none()
+            .bg(fts.format_toolbar_separator_color)
+            .into_any_element()
+    }
+
+    fn render_format_toolbar_button(
+        &self,
+        label: String,
+        icon: &'static str,
+        shortcut: Option<SharedString>,
+        is_active: bool,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let fts = &self.styles.format_toolbar;
+        let group_name = SharedString::from(format!("format-toolbar-{label}"));
+        let hover_color = fts.format_toolbar_icon_hover_color;
+        let icon_color = if is_active {
+            fts.format_toolbar_icon_active_color
+        } else {
+            fts.format_toolbar_icon_color
+        };
+        let button_size = self.scaled(fts.format_toolbar_btn_size_px);
+        let icon_size = self.scaled(fts.format_toolbar_icon_size_px);
+
+        let button = div()
+            .id(SharedString::from(format!("format-toolbar-btn-{label}")))
+            .group(group_name.clone())
+            .w(px(button_size))
+            .h(px(button_size))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .cursor(CursorStyle::Arrow)
+            .child(
+                svg()
+                    .path(icon)
+                    .size(px(icon_size))
+                    .text_color(icon_color)
+                    .group_hover(group_name, move |style| style.text_color(hover_color)),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    on_click(this, cx);
+                }),
+            );
+
+        tooltip::with_tooltip(button, cx.entity().clone(), label, shortcut)
+    }
+
+    fn render_format_toolbar_heading_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let trigger_bounds = self.format_toolbar_heading_bounds.clone();
+        let button = self.render_format_toolbar_button(
+            self.t(crate::i18n::TextKey::Heading).to_string(),
+            HEADING_1_SVG_PATH,
+            None,
+            self.current_heading_action().is_some(),
+            cx,
+            move |this, cx| {
+                let position = this
+                    .format_toolbar_heading_bounds
+                    .get()
+                    .map(|bounds| Point::new(bounds.origin.x, bounds.origin.y + bounds.size.height))
+                    .unwrap_or_else(|| this.cursor_screen_position());
+                this.open_context_menu(
+                    ContextMenu {
+                        position,
+                        kind: ContextMenuKind::FormatHeading,
+                    },
+                    true,
+                    cx,
+                );
+            },
+        );
+
+        div()
+            .flex_none()
+            .on_children_prepainted(move |bounds: Vec<Bounds<Pixels>>, _, _| {
+                trigger_bounds.set(bounds.first().copied());
+            })
+            .child(button)
+            .into_any_element()
     }
 
     fn render_format_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {

@@ -191,51 +191,16 @@ impl EditorView {
         }
 
         self.focused_sidebar_path = None;
-
-        // Windows delivers this as WM_NCLBUTTONDOWN on the caption area, where
-        // DefWindowProc already does the drag, the snap and the double-click
-        // restore. Consuming the event here is what suppressed all three.
-        if cfg!(target_os = "windows") {
-            cx.notify();
-            return;
-        }
-
         window.prevent_default();
         cx.stop_propagation();
 
         if event.click_count >= 2 {
-            window.titlebar_double_click();
+            crate::platform::window_chrome::toggle_maximize(window);
         } else {
-            Self::start_native_window_drag(window);
+            crate::platform::window_chrome::start_drag(window);
         }
 
         cx.notify();
-    }
-
-    #[cfg(target_os = "macos")]
-    fn start_native_window_drag(window: &mut Window) {
-        use objc::{class, msg_send, sel, sel_impl};
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-        if let Ok(handle) = window.window_handle() {
-            if let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
-                unsafe {
-                    let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
-                    let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
-                    let app: *mut objc::runtime::Object =
-                        msg_send![class!(NSApplication), sharedApplication];
-                    let event: *mut objc::runtime::Object = msg_send![app, currentEvent];
-                    if !ns_window.is_null() && !event.is_null() {
-                        let () = msg_send![ns_window, performWindowDragWithEvent: event];
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn start_native_window_drag(window: &mut Window) {
-        window.start_window_move();
     }
 
     fn preview_tab_index(&self) -> Option<usize> {
@@ -2325,7 +2290,7 @@ impl EditorView {
                 WindowControlArea::Max,
                 false,
                 cx,
-                |window| window.zoom_window(),
+                |window| crate::platform::window_chrome::toggle_maximize(window),
             ))
             .child(button(
                 "window-close",
@@ -2812,17 +2777,7 @@ impl EditorView {
                         cx.listener(Self::on_tab_bar_drag_space_mouse_down),
                     )
                     .children(tab_items)
-                    // Only the space past the last tab drags the window; a
-                    // control area over the tabs would report HTCAPTION and
-                    // swallow their clicks.
-                    .child(
-                        div()
-                            .id("tab-bar-drag-space")
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .h_full()
-                            .window_control_area(gpui::WindowControlArea::Drag),
-                    ),
+                    .child(div().flex_1().min_w(px(0.0)).h_full()),
             )
             .child(action_chrome)
             .into_any_element()

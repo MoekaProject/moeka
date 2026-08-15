@@ -235,29 +235,6 @@ fn remaining_refresh_delay(scanned_at: Option<SystemTime>, minimum_interval_ms: 
     minimum_interval.saturating_sub(elapsed)
 }
 
-// ── Platform helpers ────────────────────────────────────────────────
-
-#[cfg(target_os = "macos")]
-pub(crate) fn perform_window_drag(window: &gpui::Window) {
-    use objc::{msg_send, sel, sel_impl};
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    if let Ok(handle) = HasWindowHandle::window_handle(window) {
-        if let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
-            unsafe {
-                let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
-                let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
-                let current_event: *mut objc::runtime::Object = msg_send![ns_window, currentEvent];
-                if !current_event.is_null() {
-                    let () = msg_send![ns_window, performWindowDragWithEvent: current_event];
-                }
-            }
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn perform_window_drag(_window: &gpui::Window) {}
-
 fn timestamp_file_stem() -> String {
     Local::now().format("%Y%m%d%H%M%S").to_string()
 }
@@ -1444,6 +1421,9 @@ pub struct EditorView {
     pub(crate) context_submenu_hovered: bool,
     pub(crate) format_heading_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) format_more_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Anchors the heading popup to the format toolbar button; kept separate
+    /// from the menu trigger bounds, which `open_context_menu` clears.
+    pub(crate) format_toolbar_heading_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) export_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) context_menu_opacity: f32,
     pub(crate) context_menu_opacity_target: f32,
@@ -2106,6 +2086,7 @@ impl EditorView {
             context_submenu_hovered: false,
             format_heading_trigger_bounds: Rc::new(Cell::new(None)),
             format_more_trigger_bounds: Rc::new(Cell::new(None)),
+            format_toolbar_heading_bounds: Rc::new(Cell::new(None)),
             export_trigger_bounds: Rc::new(Cell::new(None)),
             context_menu_opacity: 0.0,
             context_menu_opacity_target: 0.0,
