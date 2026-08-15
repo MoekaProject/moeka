@@ -1581,11 +1581,14 @@ impl ChatTerminalSession {
     fn stop(&mut self) {
         if let Some(mut runtime) = self.runtime.take() {
             let _ = runtime.child.kill();
-            let _ = runtime.child.wait();
             drop(runtime.writer);
+            // Closing the pty is what lets the reader see EOF. Windows keeps the
+            // ConPTY pipe open until then, so joining first would deadlock.
+            drop(runtime.master);
             if let Some(handle) = runtime.reader_thread.take() {
                 let _ = handle.join();
             }
+            let _ = runtime.child.wait();
         }
         self.receiver = None;
         self.poll_task = None;

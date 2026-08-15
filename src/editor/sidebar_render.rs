@@ -1037,6 +1037,8 @@ impl EditorView {
                     div()
                         .flex()
                         .items_center()
+                        // Keeps the buttons out of the drag area behind them.
+                        .occlude()
                         .gap(px(self.scaled(ss.sidebar_top_button_gap_px)))
                         .child(self.render_sidebar_top_button(
                             "sidebar-top-filetree",
@@ -1119,6 +1121,7 @@ impl EditorView {
                         ),
                 )
             })
+            .window_control_area(gpui::WindowControlArea::Drag)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_this, event: &MouseDownEvent, window, _cx| {

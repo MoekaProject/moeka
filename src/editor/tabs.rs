@@ -2277,7 +2277,7 @@ impl EditorView {
                             this.group_hover(group, |style| style.text_color(gpui::white()))
                         }),
                 )
-                .child(window_control_area(area))
+                .window_control_area(area)
                 // Windows routes these through the non-client area, so this only
                 // runs where that path does not exist.
                 .on_mouse_down(
@@ -2801,33 +2801,20 @@ impl EditorView {
                     )
                     .children(tab_items)
                     // Only the space past the last tab drags the window; a
-                    // control area covering the tabs would swallow their clicks.
-                    .child({
-                        let filler = div().relative().flex_1().min_w(px(0.0)).h_full();
-                        #[cfg(not(target_os = "macos"))]
-                        let filler =
-                            filler.child(window_control_area(gpui::WindowControlArea::Drag));
-                        filler
-                    }),
+                    // control area over the tabs would report HTCAPTION and
+                    // swallow their clicks.
+                    .child(
+                        div()
+                            .id("tab-bar-drag-space")
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .window_control_area(gpui::WindowControlArea::Drag),
+                    ),
             )
             .child(action_chrome)
             .into_any_element()
     }
-}
-
-/// Marks a region as a native window control area.
-///
-/// Windows resolves dragging, double-click maximize, snap layouts and the
-/// caption buttons through `WM_NCHITTEST`, so these regions have to be handed
-/// to the platform rather than handled as ordinary mouse events.
-#[cfg(not(target_os = "macos"))]
-fn window_control_area(area: gpui::WindowControlArea) -> impl IntoElement {
-    gpui::canvas(
-        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
-        move |_, hitbox, window, _| window.insert_window_control_hitbox(area, hitbox),
-    )
-    .absolute()
-    .size_full()
 }
 
 /// Returns the byte offset of the end of the first Markdown content line,
