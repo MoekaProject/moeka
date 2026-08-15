@@ -250,6 +250,11 @@ pub(crate) fn display_shortcut_from_keystroke(keystroke: &str) -> String {
     display
 }
 
+/// Renders a keystroke for a tooltip or menu hint.
+pub(crate) fn hint(keystroke: &str) -> gpui::SharedString {
+    display_shortcut_from_keystroke(keystroke).into()
+}
+
 fn display_key(key: &str) -> String {
     if cfg!(target_os = "macos") {
         return match key {

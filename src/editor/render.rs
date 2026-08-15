@@ -198,7 +198,7 @@ impl EditorView {
         icon_path: &'static str,
         _anchor_bounds: Bounds<gpui::Pixels>,
         tooltip_title: &'static str,
-        tooltip_subtitle: Option<&'static str>,
+        tooltip_subtitle: Option<SharedString>,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {

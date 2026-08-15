@@ -54,7 +54,7 @@ struct SlashMenuItem {
     label: String,
     filter_text: &'static str,
     icon: Option<&'static str>,
-    shortcut: Option<&'static str>,
+    shortcut: Option<SharedString>,
     action: FormatMenuAction,
 }
 
@@ -1478,49 +1478,49 @@ impl EditorView {
                 label: self.format_action_label(FormatMenuAction::Todo),
                 filter_text: "todo task checkbox",
                 icon: Some(FMT_TODO_SVG),
-                shortcut: Some("⌘⌥↩"),
+                shortcut: Some(crate::editor::shortcut::hint("secondary-alt-enter")),
                 action: FormatMenuAction::Todo,
             },
             SlashMenuItem {
                 label: self.format_action_label(FormatMenuAction::CodeBlock),
                 filter_text: "code block",
                 icon: Some(FMT_CODE_SVG),
-                shortcut: Some("⌘⌥C"),
+                shortcut: Some(crate::editor::shortcut::hint("secondary-alt-c")),
                 action: FormatMenuAction::CodeBlock,
             },
             SlashMenuItem {
                 label: self.format_action_label(FormatMenuAction::Table),
                 filter_text: "table grid 2x2",
                 icon: Some(FMT_TABLE_SVG),
-                shortcut: Some("⌘⌥T"),
+                shortcut: Some(crate::editor::shortcut::hint("secondary-alt-t")),
                 action: FormatMenuAction::Table,
             },
             SlashMenuItem {
                 label: self.format_action_label(FormatMenuAction::Link),
                 filter_text: "link url",
                 icon: Some(FMT_LINK_SVG),
-                shortcut: Some("⌘K"),
+                shortcut: Some(crate::editor::shortcut::hint("secondary-k")),
                 action: FormatMenuAction::Link,
             },
             SlashMenuItem {
                 label: self.format_action_label(FormatMenuAction::DateTime),
                 filter_text: "date time now today timestamp calendar",
                 icon: Some(FMT_DATE_TIME_SVG),
-                shortcut: Some("now"),
+                shortcut: Some("now".into()),
                 action: FormatMenuAction::DateTime,
             },
             SlashMenuItem {
                 label: self.format_action_label(FormatMenuAction::CalloutTip),
                 filter_text: "tip callout alert admonition quote",
                 icon: Some(FMT_CALLOUT_TIP_SVG),
-                shortcut: Some("> [!TIP]"),
+                shortcut: Some("> [!TIP]".into()),
                 action: FormatMenuAction::CalloutTip,
             },
             SlashMenuItem {
                 label: self.format_action_label(FormatMenuAction::WikiLink),
                 filter_text: "wiki link backlink bidirectional",
                 icon: Some(FMT_WIKI_LINK_SVG),
-                shortcut: Some("[["),
+                shortcut: Some("[[".into()),
                 action: FormatMenuAction::WikiLink,
             },
             SlashMenuItem {
@@ -1888,7 +1888,7 @@ impl EditorView {
         &self,
         label: &str,
         icon_path: Option<&str>,
-        shortcut: Option<&str>,
+        shortcut: Option<SharedString>,
         is_selected: bool,
         is_active: bool,
         cx: &mut Context<Self>,
@@ -1910,7 +1910,7 @@ impl EditorView {
         &self,
         label: &str,
         icon_path: Option<&str>,
-        shortcut: Option<&str>,
+        shortcut: Option<SharedString>,
         is_selected: bool,
         is_active: bool,
         hover_behavior: FormatMenuHoverBehavior,
@@ -1983,7 +1983,7 @@ impl EditorView {
                     .chars()
                     .any(|ch| matches!(ch, '⌘' | '⌥' | '⌃' | '⇧'))
                 {
-                    this.child(div().child(render_shortcut(shortcut, shortcut_style)))
+                    this.child(div().child(render_shortcut(&shortcut, shortcut_style)))
                 } else {
                     this.child(
                         div()
@@ -2948,17 +2948,17 @@ impl EditorView {
             for (label, shortcut, action) in [
                 (
                     self.format_action_label(FormatMenuAction::Cut),
-                    Some("⌘X"),
+                    Some(crate::editor::shortcut::hint("secondary-x")),
                     FormatMenuAction::Cut,
                 ),
                 (
                     self.format_action_label(FormatMenuAction::Copy),
-                    Some("⌘C"),
+                    Some(crate::editor::shortcut::hint("secondary-c")),
                     FormatMenuAction::Copy,
                 ),
                 (
                     self.format_action_label(FormatMenuAction::Paste),
-                    Some("⌘V"),
+                    Some(crate::editor::shortcut::hint("secondary-v")),
                     FormatMenuAction::Paste,
                 ),
             ] {
@@ -3052,31 +3052,31 @@ impl EditorView {
                 (
                     self.format_action_label(FormatMenuAction::Bold),
                     Some(FMT_BOLD_SVG),
-                    Some("⌘B"),
+                    Some(crate::editor::shortcut::hint("secondary-b")),
                     FormatMenuAction::Bold,
                 ),
                 (
                     self.format_action_label(FormatMenuAction::Italic),
                     Some(FMT_ITALIC_SVG),
-                    Some("⌘I"),
+                    Some(crate::editor::shortcut::hint("secondary-i")),
                     FormatMenuAction::Italic,
                 ),
                 (
                     self.format_action_label(FormatMenuAction::Strikethrough),
                     Some(FMT_STRIKETHROUGH_SVG),
-                    Some("⌘⇧X"),
+                    Some(crate::editor::shortcut::hint("secondary-shift-x")),
                     FormatMenuAction::Strikethrough,
                 ),
                 (
                     self.format_action_label(FormatMenuAction::Underline),
                     Some(FMT_UNDERLINE_SVG),
-                    Some("⌘U"),
+                    Some(crate::editor::shortcut::hint("secondary-u")),
                     FormatMenuAction::Underline,
                 ),
                 (
                     self.format_action_label(FormatMenuAction::InlineCode),
                     Some(FMT_INLINE_CODE_SVG),
-                    Some("⌘E"),
+                    Some(crate::editor::shortcut::hint("secondary-e")),
                     FormatMenuAction::InlineCode,
                 ),
             ] {
@@ -3101,13 +3101,13 @@ impl EditorView {
                 (
                     self.format_action_label(FormatMenuAction::Todo),
                     Some(FMT_TODO_SVG),
-                    Some("⌘⌥↩"),
+                    Some(crate::editor::shortcut::hint("secondary-alt-enter")),
                     FormatMenuAction::Todo,
                 ),
                 (
                     self.format_action_label(FormatMenuAction::Link),
                     Some(FMT_LINK_SVG),
-                    Some("⌘K"),
+                    Some(crate::editor::shortcut::hint("secondary-k")),
                     FormatMenuAction::Link,
                 ),
             ] {
@@ -3165,31 +3165,31 @@ impl EditorView {
             (
                 self.format_action_label(FormatMenuAction::CodeBlock),
                 Some(FMT_CODE_SVG),
-                Some("⌘⌥C"),
+                Some(crate::editor::shortcut::hint("secondary-alt-c")),
                 FormatMenuAction::CodeBlock,
             ),
             (
                 self.format_action_label(FormatMenuAction::HorizontalRule),
                 Some(FMT_SPLIT_SVG),
-                Some("---"),
+                Some("---".into()),
                 FormatMenuAction::HorizontalRule,
             ),
             (
                 self.format_action_label(FormatMenuAction::Quote),
                 Some(FMT_QUOTE_SVG),
-                Some("⌘⌥Q"),
+                Some(crate::editor::shortcut::hint("secondary-alt-q")),
                 FormatMenuAction::Quote,
             ),
             (
                 self.format_action_label(FormatMenuAction::UnorderedList),
                 Some(FMT_LIST_SVG),
-                Some("⌘⌥U"),
+                Some(crate::editor::shortcut::hint("secondary-alt-u")),
                 FormatMenuAction::UnorderedList,
             ),
             (
                 self.format_action_label(FormatMenuAction::OrderedList),
                 Some(FMT_ORDER_LIST_SVG),
-                Some("⌘⌥O"),
+                Some(crate::editor::shortcut::hint("secondary-alt-o")),
                 FormatMenuAction::OrderedList,
             ),
         ];
@@ -3215,7 +3215,7 @@ impl EditorView {
             (
                 self.format_action_label(FormatMenuAction::WikiLink),
                 Some(FMT_WIKI_LINK_SVG),
-                Some("[["),
+                Some("[[".into()),
                 FormatMenuAction::WikiLink,
             ),
             (
@@ -3227,7 +3227,7 @@ impl EditorView {
             (
                 self.format_action_label(FormatMenuAction::Table),
                 Some(FMT_TABLE_SVG),
-                Some("2×2"),
+                Some("2×2".into()),
                 FormatMenuAction::Table,
             ),
         ] {
@@ -3251,37 +3251,37 @@ impl EditorView {
             (
                 self.format_action_label(FormatMenuAction::Superscript),
                 Some(FMT_SUPERSCRIPT_SVG),
-                Some("^text^"),
+                Some("^text^".into()),
                 FormatMenuAction::Superscript,
             ),
             (
                 self.format_action_label(FormatMenuAction::Subscript),
                 Some(FMT_SUBSCRIPT_SVG),
-                Some("~text~"),
+                Some("~text~".into()),
                 FormatMenuAction::Subscript,
             ),
             (
                 self.format_action_label(FormatMenuAction::Footnote),
                 Some(FMT_FOOTNOTE_SVG),
-                Some("[^note]"),
+                Some("[^note]".into()),
                 FormatMenuAction::Footnote,
             ),
             (
                 self.format_action_label(FormatMenuAction::Underline),
                 Some(FMT_UNDERLINE_SVG),
-                Some("++text++"),
+                Some("++text++".into()),
                 FormatMenuAction::Underline,
             ),
             (
                 self.format_action_label(FormatMenuAction::CalloutTip),
                 Some(FMT_CALLOUT_TIP_SVG),
-                Some("> [!TIP]"),
+                Some("> [!TIP]".into()),
                 FormatMenuAction::CalloutTip,
             ),
             (
                 self.format_action_label(FormatMenuAction::Highlight),
                 Some(FMT_HIGHLIGHT_SVG),
-                Some("==text=="),
+                Some("==text==".into()),
                 FormatMenuAction::Highlight,
             ),
         ] {

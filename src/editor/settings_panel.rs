@@ -1527,7 +1527,7 @@ impl EditorView {
                         "ui-scale-dec",
                         "−",
                         false,
-                        Some("⌘-"),
+                        Some(crate::editor::shortcut::hint("secondary-minus")),
                         cx,
                         |this, cx| {
                             let current = this.ui_scale;
@@ -1556,7 +1556,7 @@ impl EditorView {
                         "ui-scale-inc",
                         "+",
                         true,
-                        Some("⌘+"),
+                        Some(crate::editor::shortcut::hint("secondary-=")),
                         cx,
                         |this, cx| {
                             let current = this.ui_scale;
@@ -1572,7 +1572,7 @@ impl EditorView {
         id: &'static str,
         symbol: &'static str,
         increase: bool,
-        shortcut: Option<&'static str>,
+        shortcut: Option<SharedString>,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {

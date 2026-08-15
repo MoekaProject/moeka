@@ -723,7 +723,7 @@ impl EditorView {
                                             }),
                                         ),
                                     "case",
-                                    Some("⌘⌥C"),
+                                    Some(crate::editor::shortcut::hint("secondary-alt-c")),
                                     cx,
                                 ),
                             )
@@ -765,7 +765,7 @@ impl EditorView {
                                             }),
                                         ),
                                     "word",
-                                    Some("⌘⌥W"),
+                                    Some(crate::editor::shortcut::hint("secondary-alt-w")),
                                     cx,
                                 ),
                             )
@@ -807,7 +807,7 @@ impl EditorView {
                                             }),
                                         ),
                                     "regex",
-                                    Some("⌘⌥R"),
+                                    Some(crate::editor::shortcut::hint("secondary-alt-r")),
                                     cx,
                                 ),
                             )

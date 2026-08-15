@@ -2012,7 +2012,7 @@ impl EditorView {
                                 ),
                             cx.entity().clone(),
                             self.t(crate::i18n::TextKey::Close),
-                            Some("⌘W"),
+                            Some(crate::editor::shortcut::hint("secondary-w")),
                         ))
                     })
                     .when(!is_active, |this| {
@@ -2158,7 +2158,7 @@ impl EditorView {
         is_enabled: bool,
         on_right_click: Option<fn(&mut Self, &mut Context<Self>)>,
         tooltip_title: &'static str,
-        shortcut: Option<&'static str>,
+        shortcut: Option<SharedString>,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
@@ -2384,7 +2384,9 @@ impl EditorView {
                             self.ui_language,
                             self.is_utility_panel_active(RightUtilityPanel::Outline),
                         ),
-                        Some("⌃⌘1"),
+                        Some(crate::editor::shortcut::hint(
+                            crate::platform::keys::TOGGLE_OUTLINE,
+                        )),
                         cx,
                         |this, cx| this.toggle_outline_visibility(cx),
                     ))
@@ -2410,7 +2412,9 @@ impl EditorView {
                 true,
                 None,
                 crate::i18n::terminal_label(self.ui_language),
-                Some("⌃⌘T"),
+                Some(crate::editor::shortcut::hint(
+                    crate::platform::keys::TOGGLE_TERMINAL_PANEL,
+                )),
                 cx,
                 |this, cx| this.toggle_terminal_panel(cx),
             ))
@@ -2421,7 +2425,7 @@ impl EditorView {
                 true,
                 None,
                 self.t(crate::i18n::TextKey::FileInfo),
-                Some("⌘⌥I"),
+                Some(crate::editor::shortcut::hint("secondary-alt-i")),
                 cx,
                 |this, cx| this.toggle_info_panel(cx),
             ))
@@ -2432,7 +2436,9 @@ impl EditorView {
                 true,
                 None,
                 self.t(crate::i18n::TextKey::GitPanelTitle),
-                Some("⌃⇧G"),
+                Some(crate::editor::shortcut::hint(
+                    crate::platform::keys::TOGGLE_GIT_HISTORY,
+                )),
                 cx,
                 |this, cx| this.toggle_git_history_panel(cx),
             ))
@@ -2497,7 +2503,7 @@ impl EditorView {
                 ),
             cx.entity().clone(),
             self.t(crate::i18n::TextKey::NewFile),
-            Some("⌘T"),
+            Some(crate::editor::shortcut::hint("secondary-t")),
         ));
         tab_items.push(
             div()
@@ -2650,7 +2656,7 @@ impl EditorView {
                 ),
             cx.entity().clone(),
             sidebar_tooltip,
-            Some("⌘⇧S"),
+            Some(crate::editor::shortcut::hint("secondary-shift-s")),
         );
         let left_controls = div()
             .id("tab-bar-left-controls")

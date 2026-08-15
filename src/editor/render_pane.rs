@@ -690,8 +690,8 @@ impl EditorView {
                             };
                             let align_shortcut = self
                                 .active_tab_is_non_markdown_text()
-                                .then_some("⌥Z")
-                                .or(Some("⌘⌥L"));
+                                .then_some(crate::editor::shortcut::hint("alt-z"))
+                                .or(Some(crate::editor::shortcut::hint("secondary-alt-l")));
                             let sidebar_tooltip = if self.workspaces.is_empty() {
                                 self.t(crate::i18n::TextKey::OpenFolder)
                             } else {
@@ -700,7 +700,7 @@ impl EditorView {
                                     self.sidebar_visible,
                                 )
                             };
-                            let sidebar_shortcut = Some("⌘⇧S");
+                            let sidebar_shortcut = Some(crate::editor::shortcut::hint("secondary-shift-s"));
                             div()
                                 .absolute()
                                 .left(px(toolbar_left))
@@ -803,7 +803,7 @@ impl EditorView {
                                         OUTLINE_TOGGLE_SVG_PATH,
                                         outline_anchor,
                                         outline_tooltip,
-                                        Some("⌃⌘1"),
+                                        Some(crate::editor::shortcut::hint(crate::platform::keys::TOGGLE_OUTLINE)),
                                         cx,
                                         |this: &mut Self, cx| {
                                             this.toggle_outline_visibility(cx);

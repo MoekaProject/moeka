@@ -107,7 +107,7 @@ impl EditorView {
         id: &'static str,
         icon_path: &'static str,
         tooltip_title: &'static str,
-        shortcut: Option<&'static str>,
+        shortcut: Option<SharedString>,
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &MouseDownEvent, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
@@ -146,7 +146,7 @@ impl EditorView {
         icon_path: &'static str,
         is_active: bool,
         tooltip_title: &'static str,
-        shortcut: Option<&'static str>,
+        shortcut: Option<SharedString>,
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &MouseDownEvent, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
@@ -237,7 +237,7 @@ impl EditorView {
                         "sidebar-header-search",
                         FILETREE_SEARCH_SVG_PATH,
                         crate::i18n::sidebar_action_label(self.ui_language, "search"),
-                        Some("⌘⇧F"),
+                        Some(crate::editor::shortcut::hint("secondary-shift-f")),
                         cx,
                         |this, _event, window, cx| {
                             this.toggle_workspace_search(window, cx);
@@ -1059,7 +1059,7 @@ impl EditorView {
                             "assets/icons/search.svg",
                             self.workspace_search_visible,
                             crate::i18n::sidebar_action_label(self.ui_language, "search"),
-                            Some("⌘⇧F"),
+                            Some(crate::editor::shortcut::hint("secondary-shift-f")),
                             cx,
                             |this, _event, window, cx| {
                                 this.toggle_workspace_search(window, cx);
@@ -1088,7 +1088,7 @@ impl EditorView {
                                 "assets/icons/file-tree-toggle.svg",
                                 self.sidebar_visible,
                                 sidebar_tooltip,
-                                Some("⌘⇧S"),
+                                Some(crate::editor::shortcut::hint("secondary-shift-s")),
                                 cx,
                                 |this, _event, _window, cx| {
                                     if this.workspaces.is_empty() {

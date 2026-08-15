@@ -15,7 +15,7 @@ impl EditorView {
         &self,
         child: impl IntoElement,
         label_key: &'static str,
-        shortcut: Option<&'static str>,
+        shortcut: Option<SharedString>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         tooltip::with_tooltip(
@@ -539,7 +539,7 @@ impl EditorView {
                                     }),
                                 ),
                             "case",
-                            Some("⌘⌥C"),
+                            Some(crate::editor::shortcut::hint("secondary-alt-c")),
                             cx,
                         ),
                     )
@@ -577,7 +577,7 @@ impl EditorView {
                                     }),
                                 ),
                             "word",
-                            Some("⌘⌥W"),
+                            Some(crate::editor::shortcut::hint("secondary-alt-w")),
                             cx,
                         ),
                     )
@@ -615,7 +615,7 @@ impl EditorView {
                                     }),
                                 ),
                             "regex",
-                            Some("⌘⌥R"),
+                            Some(crate::editor::shortcut::hint("secondary-alt-r")),
                             cx,
                         ),
                     ),
@@ -646,7 +646,7 @@ impl EditorView {
                             }),
                         ),
                     "previous",
-                    Some("⌘⇧G"),
+                    Some(crate::editor::shortcut::hint("secondary-shift-g")),
                     cx,
                 ),
             )
@@ -676,7 +676,7 @@ impl EditorView {
                             }),
                         ),
                     "next",
-                    Some("⌘G"),
+                    Some(crate::editor::shortcut::hint("secondary-g")),
                     cx,
                 ),
             )
