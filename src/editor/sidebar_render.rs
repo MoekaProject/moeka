@@ -1033,7 +1033,7 @@ impl EditorView {
             .items_center()
             .justify_start()
             .when(ss.sidebar_top_buttons_visible, |this| {
-                this.pl(px(self.traffic_light_safe_left_inset())).child(
+                this.pl(px(self.window_controls_leading_inset())).child(
                     div()
                         .flex()
                         .items_center()
@@ -1082,7 +1082,7 @@ impl EditorView {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(div().pl(px(self.traffic_light_safe_left_inset())).child(
+                        .child(div().pl(px(self.window_controls_leading_inset())).child(
                             self.render_sidebar_top_button(
                                 "sidebar-top-file-tree-toggle",
                                 "assets/icons/file-tree-toggle.svg",

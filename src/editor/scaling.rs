@@ -68,12 +68,13 @@ impl EditorView {
         value * self.ui_scale
     }
 
-    pub(crate) fn traffic_light_safe_left_inset(&self) -> f32 {
-        let inset = self.styles.tab_bar.tab_history_hidden_sidebar_margin_px;
+    /// Space the platform's own window controls take at the leading edge of the
+    /// tab bar. Only macOS puts them there; elsewhere they sit on the right.
+    pub(crate) fn window_controls_leading_inset(&self) -> f32 {
         if cfg!(target_os = "macos") {
-            inset
+            self.styles.tab_bar.tab_history_hidden_sidebar_margin_px
         } else {
-            self.scaled(inset)
+            0.0
         }
     }
 

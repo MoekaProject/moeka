@@ -1468,7 +1468,9 @@ impl Styles {
                 window_bg: theme.bg_primary,
                 window_border_width_px: if is_light { 0.0 } else { 1.0 },
                 window_border_color: theme.window_border,
-                window_radius_px: 16.0,
+                // Only macOS rounds its own frame to match; elsewhere a rounded
+                // client area just cuts corners out of a square window.
+                window_radius_px: if cfg!(target_os = "macos") { 16.0 } else { 0.0 },
             },
             editor: EditorStyles {
                 editor_font_size_px: editor_body_font_size_px,

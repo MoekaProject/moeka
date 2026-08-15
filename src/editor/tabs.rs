@@ -2231,22 +2231,28 @@ impl EditorView {
 
     #[cfg(not(target_os = "macos"))]
     pub(super) fn render_window_caption_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
+        use gpui::WindowControlArea;
+
         let ts = &self.styles.tab_bar;
         let height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
         // Fluent caption buttons are 46x32dp regardless of the surrounding UI.
         let width = self.scaled(46.0);
-        let icon_size = self.scaled(10.0);
+        let icon_size = self.scaled(13.0);
         let icon_color = ts.tab_item_icon_color;
         let hover_bg = ts.tab_item_hover_bg;
         let is_maximized = self.window_is_maximized;
 
         let button = |id: &'static str,
                       icon: &'static str,
+                      area: WindowControlArea,
                       danger: bool,
                       cx: &mut Context<Self>,
                       action: fn(&mut Window)| {
+            let group = SharedString::from(id);
             div()
                 .id(id)
+                .group(group.clone())
+                .relative()
                 .w(px(width))
                 .h(px(height))
                 .flex_none()
@@ -2261,7 +2267,19 @@ impl EditorView {
                         hover_bg
                     })
                 })
-                .child(svg().path(icon).size(px(icon_size)).text_color(icon_color))
+                .child(
+                    svg()
+                        .path(icon)
+                        .size(px(icon_size))
+                        .text_color(icon_color)
+                        // The red close hover needs a light glyph to stay legible.
+                        .when(danger, |this| {
+                            this.group_hover(group, |style| style.text_color(gpui::white()))
+                        }),
+                )
+                .child(window_control_area(area))
+                // Windows routes these through the non-client area, so this only
+                // runs where that path does not exist.
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |_, _, window, cx| {
@@ -2280,6 +2298,7 @@ impl EditorView {
             .child(button(
                 "window-minimize",
                 "assets/icons/window/minimize.svg",
+                WindowControlArea::Min,
                 false,
                 cx,
                 |window| window.minimize_window(),
@@ -2291,6 +2310,7 @@ impl EditorView {
                 } else {
                     "assets/icons/window/maximize.svg"
                 },
+                WindowControlArea::Max,
                 false,
                 cx,
                 |window| window.zoom_window(),
@@ -2298,6 +2318,7 @@ impl EditorView {
             .child(button(
                 "window-close",
                 "assets/icons/window/close.svg",
+                WindowControlArea::Close,
                 true,
                 cx,
                 |window| window.remove_window(),
@@ -2684,7 +2705,7 @@ impl EditorView {
         let leading_left_margin = if self.sidebar_visible || !is_top_left_pane {
             0.0
         } else {
-            self.traffic_light_safe_left_inset()
+            self.window_controls_leading_inset()
         };
         let left_controls_group = div()
             .id("tab-bar-left-group")
@@ -2777,11 +2798,35 @@ impl EditorView {
                         MouseButton::Left,
                         cx.listener(Self::on_tab_bar_drag_space_mouse_down),
                     )
-                    .children(tab_items),
+                    .children(tab_items)
+                    // Only the space past the last tab drags the window; a
+                    // control area covering the tabs would swallow their clicks.
+                    .child({
+                        let filler = div().relative().flex_1().min_w(px(0.0)).h_full();
+                        #[cfg(not(target_os = "macos"))]
+                        let filler =
+                            filler.child(window_control_area(gpui::WindowControlArea::Drag));
+                        filler
+                    }),
             )
             .child(action_chrome)
             .into_any_element()
     }
+}
+
+/// Marks a region as a native window control area.
+///
+/// Windows resolves dragging, double-click maximize, snap layouts and the
+/// caption buttons through `WM_NCHITTEST`, so these regions have to be handed
+/// to the platform rather than handled as ordinary mouse events.
+#[cfg(not(target_os = "macos"))]
+fn window_control_area(area: gpui::WindowControlArea) -> impl IntoElement {
+    gpui::canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |_, hitbox, window, _| window.insert_window_control_hitbox(area, hitbox),
+    )
+    .absolute()
+    .size_full()
 }
 
 /// Returns the byte offset of the end of the first Markdown content line,
