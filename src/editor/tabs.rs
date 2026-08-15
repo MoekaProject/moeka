@@ -191,6 +191,15 @@ impl EditorView {
         }
 
         self.focused_sidebar_path = None;
+
+        // Windows delivers this as WM_NCLBUTTONDOWN on the caption area, where
+        // DefWindowProc already does the drag, the snap and the double-click
+        // restore. Consuming the event here is what suppressed all three.
+        if cfg!(target_os = "windows") {
+            cx.notify();
+            return;
+        }
+
         window.prevent_default();
         cx.stop_propagation();
 
@@ -2295,6 +2304,9 @@ impl EditorView {
             .flex_none()
             .flex()
             .items_center()
+            // Keeps the drag area of whatever sits underneath from claiming the
+            // buttons: the hit test reports the first control area it matches.
+            .occlude()
             .child(button(
                 "window-minimize",
                 "assets/icons/window/minimize.svg",

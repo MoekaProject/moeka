@@ -1084,25 +1084,29 @@ impl EditorView {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(div().pl(px(self.window_controls_leading_inset())).child(
-                            self.render_sidebar_top_button(
-                                "sidebar-top-file-tree-toggle",
-                                "assets/icons/file-tree-toggle.svg",
-                                self.sidebar_visible,
-                                sidebar_tooltip,
-                                Some(crate::editor::shortcut::hint("secondary-shift-s")),
-                                cx,
-                                |this, _event, _window, cx| {
-                                    if this.workspaces.is_empty() {
-                                        this.pick_workspace_folder(cx);
-                                    } else {
-                                        this.toggle_sidebar_visibility(cx);
-                                    }
-                                },
-                            ),
-                        ))
                         .child(
                             div()
+                                .occlude()
+                                .pl(px(self.window_controls_leading_inset()))
+                                .child(self.render_sidebar_top_button(
+                                    "sidebar-top-file-tree-toggle",
+                                    "assets/icons/file-tree-toggle.svg",
+                                    self.sidebar_visible,
+                                    sidebar_tooltip,
+                                    Some(crate::editor::shortcut::hint("secondary-shift-s")),
+                                    cx,
+                                    |this, _event, _window, cx| {
+                                        if this.workspaces.is_empty() {
+                                            this.pick_workspace_folder(cx);
+                                        } else {
+                                            this.toggle_sidebar_visibility(cx);
+                                        }
+                                    },
+                                )),
+                        )
+                        .child(
+                            div()
+                                .occlude()
                                 .pr(px(self.scaled(ss.sidebar_top_button_padding_right_px)))
                                 .child(self.render_sidebar_top_button(
                                     "sidebar-top-file-list-toggle",
@@ -1122,16 +1126,20 @@ impl EditorView {
                 )
             })
             .window_control_area(gpui::WindowControlArea::Drag)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
-                    if event.click_count >= 2 {
-                        window.zoom_window();
-                    } else {
-                        super::perform_window_drag(window);
-                    }
-                }),
-            );
+            // Windows handles the caption area natively; zooming here too would
+            // toggle twice and land back where it started.
+            .when(!cfg!(target_os = "windows"), |this| {
+                this.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
+                        if event.click_count >= 2 {
+                            window.zoom_window();
+                        } else {
+                            super::perform_window_drag(window);
+                        }
+                    }),
+                )
+            });
 
         let header = self.render_sidebar_header(cx);
         let mut tree_items: Vec<AnyElement> = Vec::new();
