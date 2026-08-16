@@ -193,6 +193,10 @@ pub(crate) enum GitOpError {
 /// prompts are disabled so operations fail instead of hanging.
 pub(super) fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, String> {
     let output = crate::platform::process::headless_command("git")
+        // Without this, `git status` refreshes and rewrites `.git/index`, which
+        // the workspace watcher reports back as a git change and re-triggers
+        // the very status poll that wrote it.
+        .arg("--no-optional-locks")
         .arg("-c")
         .arg("core.quotepath=false")
         .arg("-C")

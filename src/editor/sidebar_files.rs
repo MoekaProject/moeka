@@ -729,7 +729,7 @@ impl EditorView {
         // This is intentional navigation to a different root: unlike a
         // refresh, old directory children must not remain visible.
         self.sidebar_directory_children.clear();
-        self.sidebar_items_cache.clear();
+        self.sidebar_items_cache = Rc::new(Vec::new());
         self.sidebar_items_dirty = true;
         self.invalidate_sidebar_items_cache();
         self.pending_sidebar_scroll_top.set(None);

@@ -298,7 +298,7 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn sidebar_items(&mut self) -> Vec<SidebarItem> {
+    pub(crate) fn sidebar_items(&mut self) -> Rc<Vec<SidebarItem>> {
         if self.sidebar_items_dirty {
             let mut items = Vec::new();
             if self.sidebar_error.is_none()
@@ -307,7 +307,7 @@ impl EditorView {
             {
                 self.collect_sidebar_items(&self.sidebar_root, 1, &mut items);
             }
-            self.sidebar_items_cache = items;
+            self.sidebar_items_cache = Rc::new(items);
             self.sidebar_items_dirty = false;
         }
 

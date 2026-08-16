@@ -696,8 +696,7 @@ impl EditorView {
             clipboard.is_cut
                 && clipboard.paths.iter().any(|cut_path| {
                     let cut_path = Self::normalize_sidebar_path(cut_path);
-                    let current_path = Self::normalize_sidebar_path(&path);
-                    current_path == cut_path || current_path.starts_with(&cut_path)
+                    normalized_path == cut_path || normalized_path.starts_with(&cut_path)
                 })
         });
         let icon_color = if is_selected {

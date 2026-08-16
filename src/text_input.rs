@@ -87,6 +87,9 @@ pub struct TextInput {
     cursor_opacity: f32,
     cursor_opacity_direction: f32,
     blink_epoch: usize,
+    /// The caret is painted only while focused, so the animation must idle
+    /// otherwise; several unfocused inputs coexist on the settings page.
+    blink_allowed: bool,
     // Context menu
     context_menu_position: Option<Point<Pixels>>,
     /// Whether right-click opens the copy/paste context menu. Must be disabled
@@ -123,6 +126,7 @@ impl TextInput {
             cursor_opacity: 1.0,
             cursor_opacity_direction: -1.0,
             blink_epoch: 0,
+            blink_allowed: false,
             context_menu_position: None,
             context_menu_enabled: true,
             undo_stack: Vec::new(),
@@ -359,13 +363,16 @@ impl TextInput {
     }
 
     fn schedule_blink(&self, epoch: usize, cx: &mut Context<Self>) {
+        if !self.blink_allowed {
+            return;
+        }
         cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(5))
+                .timer(Duration::from_millis(16))
                 .await;
             this.update(cx, |this, cx| {
                 if this.blink_epoch == epoch {
-                    this.cursor_opacity += 0.03 * this.cursor_opacity_direction;
+                    this.cursor_opacity += 0.15 * this.cursor_opacity_direction;
                     if this.cursor_opacity <= 0.0 {
                         this.cursor_opacity = 0.0;
                         this.cursor_opacity_direction = 1.0;
@@ -388,6 +395,20 @@ impl TextInput {
             .ok();
         })
         .detach();
+    }
+
+    fn sync_blink_allowed(&mut self, allowed: bool, cx: &mut Context<Self>) {
+        if self.blink_allowed == allowed {
+            return;
+        }
+        self.blink_allowed = allowed;
+        if allowed {
+            self.start_blinking(cx);
+        } else {
+            self.next_blink_epoch();
+            self.cursor_opacity = 1.0;
+            self.cursor_opacity_direction = -1.0;
+        }
     }
 
     fn schedule_blink_pause(&self, epoch: usize, duration: Duration, cx: &mut Context<Self>) {
@@ -873,8 +894,9 @@ impl TextInput {
 
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let s = &self.styles;
         let is_focused = self.focus_handle.is_focused(window);
+        self.sync_blink_allowed(is_focused, cx);
+        let s = &self.styles;
         let bg = if is_focused {
             s.text_input_focus_bg
         } else {

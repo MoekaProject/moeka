@@ -2040,13 +2040,15 @@ impl Styles {
                 cursor_color: theme.cursor,
                 cursor_width_px: 2.0,
                 cursor_height_factor: 1.0,
-                cursor_blink_tick_ms: 5,
+                // Each tick repaints the whole view tree, so stay at one frame
+                // rather than the display-independent 5ms this used to run at.
+                cursor_blink_tick_ms: 16,
                 cursor_blink_pause_ms: 300,
                 cursor_blink_visible_ms: 200,
                 cursor_blink_transparent_ms: 300,
                 cursor_opacity_min: 0.0,
                 cursor_opacity_max: 1.0,
-                cursor_opacity_step: 0.03,
+                cursor_opacity_step: 0.15,
             },
             code_block: CodeBlockStyles {
                 code_block_bg: theme.bg_code,

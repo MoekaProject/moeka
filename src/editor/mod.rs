@@ -114,6 +114,9 @@ const SIDEBAR_GIT_STATUS_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 const GIT_HISTORY_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 const GENERATED_PREVIEW_RENDER_BUDGET: usize = 24;
 const GENERATED_PREVIEW_CACHE_RETAIN: usize = 96;
+/// Entry count alone says nothing about cost: one full-width retina diagram can
+/// outweigh dozens of small ones, so cap the decoded bytes as well.
+const GENERATED_PREVIEW_CACHE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
 
 #[derive(Default)]
 pub(crate) struct GeneratedPreviewTabCache {
@@ -1314,6 +1317,9 @@ pub struct EditorView {
     pub(crate) cursor_opacity: f32,
     pub(crate) cursor_opacity_direction: f32,
     pub(crate) blink_epoch: usize,
+    /// Mirrors the conditions under which the caret is actually painted; the
+    /// blink loop repaints the whole view tree, so it must idle otherwise.
+    pub(crate) cursor_blink_allowed: bool,
     // IME preedit state
     pub(crate) marked_range: Option<Range<usize>>,
     pub(crate) extra_marked_ranges: Vec<Range<usize>>,
@@ -1527,7 +1533,9 @@ pub struct EditorView {
     pub(crate) sidebar_drag_expand_task: Option<Task<()>>,
     /// 拖拽悬停时自动展开、离开后可回折的目录集合
     pub(crate) sidebar_drag_auto_expanded_dirs: HashSet<PathBuf>,
-    pub(crate) sidebar_items_cache: Vec<SidebarItem>,
+    /// Shared so the render path can take a handle per frame instead of deep
+    /// copying every entry (and its `PathBuf`) on each repaint.
+    pub(crate) sidebar_items_cache: Rc<Vec<SidebarItem>>,
     pub(crate) sidebar_items_dirty: bool,
     pub(crate) sidebar_directory_children:
         HashMap<PathBuf, Vec<sidebar_tree::SidebarDirectoryChild>>,
@@ -2003,6 +2011,7 @@ impl EditorView {
             cursor_opacity: init_cursor_opacity,
             cursor_opacity_direction: -1.0,
             blink_epoch: 0,
+            cursor_blink_allowed: false,
             marked_range: None,
             extra_marked_ranges: Vec::new(),
             ime_composition_snapshot: None,
@@ -2186,7 +2195,7 @@ impl EditorView {
             suppress_fold_for_empty_selection_drag: false,
             sidebar_drag_expand_task: None,
             sidebar_drag_auto_expanded_dirs: HashSet::new(),
-            sidebar_items_cache: Vec::new(),
+            sidebar_items_cache: Rc::new(Vec::new()),
             sidebar_items_dirty: true,
             sidebar_directory_children: HashMap::new(),
             sidebar_directory_loading: HashSet::new(),
@@ -3758,11 +3767,14 @@ impl EditorView {
                     affects_history: true,
                     affects_working_tree_diff: true,
                 },
-                Some("index" | "index.lock") => GitMetadataImpact {
+                Some("index") => GitMetadataImpact {
                     affects_sidebar_status: true,
                     affects_history: true,
                     affects_working_tree_diff: false,
                 },
+                // `index.lock` only marks a git command in flight; the real
+                // change arrives with the `index` write that follows.
+                Some("index.lock") => GitMetadataImpact::default(),
                 _ => GitMetadataImpact::default(),
             };
         }
@@ -4937,6 +4949,9 @@ impl EditorView {
     }
 
     pub(crate) fn schedule_blink(&self, epoch: usize, cx: &mut Context<Self>) {
+        if !self.cursor_blink_allowed {
+            return;
+        }
         let tick = self.styles.cursor.blink_tick();
         let opacity_step = self.styles.cursor.cursor_opacity_step;
         let min_opacity = self.styles.cursor.cursor_opacity_min;
@@ -4981,6 +4996,21 @@ impl EditorView {
             .ok();
         })
         .detach();
+    }
+
+    /// Starts or stops the caret animation as the caret becomes (in)visible,
+    /// so an unfocused window costs nothing.
+    pub(crate) fn sync_cursor_blink_allowed(&mut self, allowed: bool, cx: &mut Context<Self>) {
+        if self.cursor_blink_allowed == allowed {
+            return;
+        }
+        self.cursor_blink_allowed = allowed;
+        if allowed {
+            self.start_blinking(cx);
+        } else {
+            self.next_blink_epoch();
+            self.cursor_opacity = self.styles.cursor.cursor_opacity_max;
+        }
     }
 
     pub(crate) fn pause_cursor_blinking(&mut self, cx: &mut Context<Self>) {
@@ -5352,8 +5382,36 @@ impl EditorView {
         self.trim_generated_preview_render_caches();
     }
 
+    fn generated_preview_cache_bytes(&self, cache_key: &str) -> usize {
+        fn decoded_bytes(image: &RenderImage) -> usize {
+            let size = image.size(0);
+            let width = i32::from(size.width).max(0) as usize;
+            let height = i32::from(size.height).max(0) as usize;
+            width * height * 4
+        }
+
+        let mut bytes = 0;
+        if let Some(Some(image)) = self.image_cache.get(cache_key) {
+            bytes += decoded_bytes(image);
+        }
+        if let Some(svg) = self.generated_preview_svg_cache.get(cache_key) {
+            bytes += svg.len();
+        }
+        if let Some((_, image)) = self.generated_preview_overlay_cache.get(cache_key) {
+            bytes += decoded_bytes(image);
+        }
+        bytes
+    }
+
     fn trim_generated_preview_render_caches(&mut self) {
-        if self.generated_preview_keys.len() <= GENERATED_PREVIEW_CACHE_RETAIN {
+        let total_bytes = self
+            .generated_preview_keys
+            .iter()
+            .map(|cache_key| self.generated_preview_cache_bytes(cache_key))
+            .sum::<usize>();
+        if self.generated_preview_keys.len() <= GENERATED_PREVIEW_CACHE_RETAIN
+            && total_bytes <= GENERATED_PREVIEW_CACHE_BYTE_BUDGET
+        {
             return;
         }
 
@@ -5389,16 +5447,20 @@ impl EditorView {
                 )
             })
             .collect::<Vec<_>>();
-        if ranked_keys.len() <= GENERATED_PREVIEW_CACHE_RETAIN {
-            return;
-        }
 
         ranked_keys.sort();
-        let mut keep_keys = ranked_keys
-            .into_iter()
-            .take(GENERATED_PREVIEW_CACHE_RETAIN)
-            .map(|(_, _, cache_key)| cache_key)
-            .collect::<HashSet<_>>();
+        let mut keep_keys = HashSet::new();
+        let mut kept_bytes = 0usize;
+        for (_, _, cache_key) in ranked_keys.into_iter().take(GENERATED_PREVIEW_CACHE_RETAIN) {
+            let bytes = self.generated_preview_cache_bytes(&cache_key);
+            // Keep the closest preview even when it alone exceeds the budget,
+            // otherwise the one on screen would be dropped every frame.
+            if !keep_keys.is_empty() && kept_bytes + bytes > GENERATED_PREVIEW_CACHE_BYTE_BUDGET {
+                break;
+            }
+            kept_bytes += bytes;
+            keep_keys.insert(cache_key);
+        }
         if let Some(cache_key) = self.code_mode_preview_key.as_ref() {
             keep_keys.insert(cache_key.clone());
         }

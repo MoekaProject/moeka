@@ -437,6 +437,17 @@ impl Render for EditorView {
             .iter()
             .find(|(_, state)| state.focus_handle.is_focused(window))
             .map(|(tab_id, _)| tab_id.clone());
+        // The terminal caret shares the editor's blink opacity, so it has to
+        // keep the animation alive while it owns focus. Tabs without a text
+        // buffer (settings, images) paint no caret at all.
+        self.sync_cursor_blink_allowed(
+            window.is_window_active()
+                && self.focused_sidebar_path.is_none()
+                && ((self.focus_handle.is_focused(window)
+                    && self.active_tab_supports_text_buffer())
+                    || focused_terminal_tab_id.is_some()),
+            cx,
+        );
         if let Some(tab_id) = focused_terminal_tab_id {
             self.record_terminal_focus(&tab_id);
             window.invalidate_character_coordinates();
