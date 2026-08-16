@@ -1228,6 +1228,7 @@ impl EditorView {
         is_active: bool,
         is_preview: bool,
         is_deleted: bool,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let ts = &self.styles.tab_bar;
         let text_color = if is_deleted {
@@ -1238,8 +1239,13 @@ impl EditorView {
             ts.tab_item_text_color
         };
         let (base, suffix) = split_file_name_for_display(&tab.title);
+        let tooltip_text = tab
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| tab.title.clone());
 
-        div()
+        let label = div()
             .flex_1()
             .min_w(px(0.0))
             .overflow_hidden()
@@ -1270,8 +1276,13 @@ impl EditorView {
                         .opacity(ts.tab_item_suffix_opacity)
                         .child(suffix.to_string()),
                 )
-            })
-            .into_any_element()
+            });
+        tooltip::with_tooltip(
+            label,
+            cx.entity().clone(),
+            tooltip_text,
+            None::<&'static str>,
+        )
     }
 
     fn active_tab_breadcrumb_items(&self) -> Vec<(String, Option<PathBuf>)> {
@@ -1943,7 +1954,9 @@ impl EditorView {
                                     }),
                             )
                         })
-                        .child(self.render_tab_title_label(tab, is_active, is_preview, is_deleted))
+                        .child(
+                            self.render_tab_title_label(tab, is_active, is_preview, is_deleted, cx),
+                        )
                         .child(tooltip::with_tooltip(
                             div()
                                 .id(SharedString::from(format!("close-{}", tab.id)))
@@ -2138,13 +2151,11 @@ impl EditorView {
     ) -> AnyElement {
         let ts = &self.styles.tab_bar;
         let button_height = (self.tab_bar_height() - self.scaled(6.0)).max(18.0);
-        let icon_size = self.scaled(
-            if matches!(id, "tab-bar-outline-toggle" | "tab-bar-theme-toggle") {
-                ts.tab_action_emphasis_icon_size_px
-            } else {
-                ts.tab_item_icon_size_px
-            },
-        );
+        let icon_size = self.scaled(match id {
+            "tab-bar-outline-toggle" => ts.tab_action_emphasis_icon_size_px - 1.0,
+            "tab-bar-theme-toggle" => ts.tab_action_emphasis_icon_size_px,
+            _ => ts.tab_item_icon_size_px,
+        });
         let button_padding_x = self.scaled(ts.tab_action_button_padding_x_px);
         let button_opacity = if is_active {
             ts.tab_item_icon_active_opacity
@@ -2369,11 +2380,31 @@ impl EditorView {
             .when(self.prepared_update().is_some(), |this| {
                 this.child(self.render_update_ready_button(cx))
             })
+            .when(
+                self.app_settings.simple_mode && self.active_tab_supports_text_buffer(),
+                |this| {
+                    this.child(self.render_tab_bar_action_button(
+                        "tab-bar-align-toggle",
+                        ALIGN_LEFT_MINI_SVG_PATH,
+                        self.editor_left_aligned,
+                        true,
+                        None,
+                        if self.active_tab_is_non_markdown_text() {
+                            self.t(crate::i18n::TextKey::ToolbarWrapTooltip)
+                        } else {
+                            self.t(crate::i18n::TextKey::ToolbarAlignTooltip)
+                        },
+                        Some(crate::editor::shortcut::hint("secondary-alt-l")),
+                        cx,
+                        |this, cx| this.toggle_editor_alignment(cx),
+                    ))
+                },
+            )
             .when(self.app_settings.simple_mode, |this| {
                 this.child(self.render_tab_bar_action_button(
                     "tab-bar-theme-toggle",
                     MOUNTAIN_SVG_PATH,
-                    !self.theme_kind.is_dark(),
+                    false,
                     true,
                     None,
                     crate::i18n::theme_action_label(self.ui_language, self.theme_kind.is_dark()),

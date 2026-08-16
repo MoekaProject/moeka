@@ -94,6 +94,130 @@ impl EditorView {
             .iter()
             .position(|line_idx| *line_idx == source_line)
     }
+
+    /// `(table_start_line, source_line, column)` of the cell holding the caret,
+    /// or `None` when the caret is outside a (non front matter) table body.
+    pub(crate) fn table_cursor_cell(&self) -> Option<(usize, usize, usize)> {
+        let line = self.cursor_line();
+        let table_info = self.decorations.get(line)?.table_info.as_ref()?;
+        if table_info.is_separator || table_info.is_front_matter {
+            return None;
+        }
+        let col = self.cursor.offset - self.buffer.line_start(line);
+        let index = table_info
+            .cell_ranges
+            .iter()
+            .position(|range| (range.start..=range.end).contains(&col))
+            .or_else(|| {
+                table_info
+                    .cell_ranges
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, range)| col.clamp(range.start, range.end).abs_diff(col))
+                    .map(|(index, _)| index)
+            })?;
+        Some((table_info.table_start_line, line, index))
+    }
+
+    /// Selects the whole text of `column` on `source_line`.
+    fn select_table_cell(&mut self, source_line: usize, column: usize) -> bool {
+        let Some(range) = self
+            .decorations
+            .get(source_line)
+            .and_then(|decoration| decoration.table_info.as_ref())
+            .and_then(|table_info| table_info.cell_ranges.get(column).cloned())
+        else {
+            return false;
+        };
+        let line_start = self.buffer.line_start(source_line);
+        self.cursor.anchor = line_start + range.start;
+        self.cursor.offset = line_start + range.end;
+        self.reset_cursor_visual_targeting();
+        true
+    }
+
+    /// Tab / Shift+Tab: select the next / previous cell, wrapping across rows.
+    /// Tab past the last cell appends a row, matching Typora and Obsidian.
+    pub(crate) fn table_move_to_adjacent_cell(
+        &mut self,
+        forward: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((table_start, line, column)) = self.table_cursor_cell() else {
+            return false;
+        };
+        let Some(rows) = visible_table_line_indices(&self.decorations, table_start) else {
+            return false;
+        };
+        let Some(row) = rows.iter().position(|candidate| *candidate == line) else {
+            return false;
+        };
+        let column_count = self
+            .decorations
+            .get(line)
+            .and_then(|decoration| decoration.table_info.as_ref())
+            .map(|table_info| table_info.cell_ranges.len())
+            .unwrap_or(0);
+        if column_count == 0 {
+            return false;
+        }
+
+        let (target_row, target_column) = if forward {
+            if column + 1 < column_count {
+                (row, column + 1)
+            } else if row + 1 < rows.len() {
+                (row + 1, 0)
+            } else {
+                self.table_insert_row(table_start, row, false, cx);
+                (row + 1, 0)
+            }
+        } else if column > 0 {
+            (row, column - 1)
+        } else if row > 0 {
+            (row - 1, column_count - 1)
+        } else {
+            (row, column)
+        };
+
+        let Some(target_line) = self.table_source_line_for_visual_row(table_start, target_row)
+        else {
+            return false;
+        };
+        if !self.select_table_cell(target_line, target_column) {
+            return false;
+        }
+        self.navigate_scroll_to_cursor();
+        self.pause_blinking(cx);
+        cx.notify();
+        true
+    }
+
+    /// Enter inside a table selects the cell directly below, appending a row
+    /// when the caret is already on the last one.
+    pub(crate) fn table_move_to_cell_below(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((table_start, line, column)) = self.table_cursor_cell() else {
+            return false;
+        };
+        let Some(rows) = visible_table_line_indices(&self.decorations, table_start) else {
+            return false;
+        };
+        let Some(row) = rows.iter().position(|candidate| *candidate == line) else {
+            return false;
+        };
+        if row + 1 >= rows.len() {
+            self.table_insert_row(table_start, row, false, cx);
+        }
+        let Some(target_line) = self.table_source_line_for_visual_row(table_start, row + 1) else {
+            return false;
+        };
+        if !self.select_table_cell(target_line, column) {
+            return false;
+        }
+        self.navigate_scroll_to_cursor();
+        self.pause_blinking(cx);
+        cx.notify();
+        true
+    }
 }
 
 #[cfg(test)]

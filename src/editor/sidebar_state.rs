@@ -335,6 +335,33 @@ impl EditorView {
         true
     }
 
+    /// Scrolls the file tree so `index` sits vertically centered, regardless of
+    /// whether it is already visible. Used by explicit "reveal in tree".
+    pub(super) fn center_sidebar_item_in_view(&self, index: usize, item_count: usize) -> bool {
+        if item_count == 0 {
+            return false;
+        }
+
+        let bounds = self.sidebar_scroll_handle.bounds();
+        let viewport_height = f32::from(bounds.size.height);
+        if viewport_height <= 0.0 {
+            return false;
+        }
+
+        let offset = self.sidebar_scroll_handle.offset();
+        let item_height = self.sidebar_item_height_px();
+        let prefix_height = self.sidebar_scroll_prefix_height(true);
+        let item_top = prefix_height + index as f32 * item_height;
+        let bottom_spacer_height = self.scaled(self.styles.sidebar.sidebar_bottom_spacer_height_px);
+        let content_height = prefix_height + item_count as f32 * item_height + bottom_spacer_height;
+        let max_scroll_top = (content_height - viewport_height).max(0.0);
+        let desired_top =
+            (item_top + item_height * 0.5 - viewport_height * 0.5).clamp(0.0, max_scroll_top);
+        self.sidebar_scroll_handle
+            .set_offset(gpui::point(offset.x, px(-desired_top)));
+        true
+    }
+
     pub(super) fn resolve_pending_sidebar_scroll_anchor(&mut self, items: &[SidebarItem]) {
         let Some(anchor) = self.pending_sidebar_scroll_anchor.take() else {
             return;
@@ -673,6 +700,7 @@ impl EditorView {
         &mut self,
         path: PathBuf,
         show_sidebar: bool,
+        centered: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(root) = self.workspace_root_for_path(&path) else {
@@ -720,6 +748,9 @@ impl EditorView {
         }
 
         self.set_file_list_dir_for_path(&path, cx);
+        if centered {
+            self.file_list_pending_reveal_centered = true;
+        }
         self.selected_sidebar_paths.clear();
         self.selected_sidebar_paths.insert(path.clone());
         self.sidebar_selection_anchor = Some(path.clone());
@@ -733,8 +764,13 @@ impl EditorView {
         if sidebar_is_available {
             self.focused_sidebar_path = Some(path.clone());
             let current_index = items.iter().position(|item| item.path == path);
-            let immediate_scrolled = current_index
-                .is_some_and(|index| self.ensure_sidebar_item_minimally_visible(index, item_count));
+            let immediate_scrolled = current_index.is_some_and(|index| {
+                if centered {
+                    self.center_sidebar_item_in_view(index, item_count)
+                } else {
+                    self.ensure_sidebar_item_minimally_visible(index, item_count)
+                }
+            });
             let needs_deferred_reveal = switched_workspace
                 || expanded_changed
                 || immediate_scrolled
@@ -766,7 +802,12 @@ impl EditorView {
                                 return false;
                             }
 
-                            if editor.ensure_sidebar_item_minimally_visible(index, item_count) {
+                            if centered {
+                                editor.center_sidebar_item_in_view(index, item_count);
+                                cx.notify();
+                            } else if editor
+                                .ensure_sidebar_item_minimally_visible(index, item_count)
+                            {
                                 cx.notify();
                             }
                             if editor.pending_sidebar_reveal_path.as_ref() == Some(path) {
@@ -790,10 +831,16 @@ impl EditorView {
     }
 
     pub(crate) fn reveal_path_in_sidebar(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.reveal_path_in_sidebar_internal(path, true, cx);
+        self.reveal_path_in_sidebar_internal(path, true, false, cx);
+    }
+
+    /// "Reveal in tree": expands ancestors and centers the row in both the file
+    /// tree and the FileList.
+    pub(crate) fn locate_path_in_sidebar(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.reveal_path_in_sidebar_internal(path, true, true, cx);
     }
 
     pub(crate) fn sync_path_in_sidebar_state(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.reveal_path_in_sidebar_internal(path, false, cx);
+        self.reveal_path_in_sidebar_internal(path, false, false, cx);
     }
 }

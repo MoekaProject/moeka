@@ -44,6 +44,31 @@ pub(crate) enum CommandId {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    Undo,
+    Redo,
+    SelectAll,
+    DuplicateLine,
+    DeleteLine,
+    MoveLineUp,
+    MoveLineDown,
+    JoinLines,
+    ToggleComment,
+    SelectNextOccurrence,
+    SelectAllOccurrences,
+    AddCursorAbove,
+    AddCursorBelow,
+    ToggleWordWrap,
+    ToggleLeftAlign,
+    SplitRight,
+    SplitDown,
+    FocusNextPane,
+    ReopenClosedTab,
+    NextTab,
+    PreviousTab,
+    PinTab,
+    NewWhiteboard,
+    OpenTerminalWindow,
+    HorizontalRule,
 }
 
 #[derive(Clone, Copy)]
@@ -55,10 +80,15 @@ pub(crate) struct CommandSpec {
     pub alternate_shortcuts: &'static [&'static str],
     pub markdown_only: bool,
     pub title_override: Option<fn(UiLanguage) -> &'static str>,
+    /// Key into `i18n::COMMAND_LABELS` for commands with no dedicated `TextKey`.
+    pub label_key: Option<&'static str>,
 }
 
 impl CommandSpec {
     pub(crate) fn localized_title(self, language: UiLanguage) -> &'static str {
+        if let Some(label_key) = self.label_key {
+            return crate::i18n::command_label(language, label_key);
+        }
         self.title_override
             .map(|title| title(language))
             .unwrap_or_else(|| crate::i18n::translate(language, self.title))
@@ -105,6 +135,31 @@ impl CommandId {
             Self::ZoomIn => Box::new(ZoomIn),
             Self::ZoomOut => Box::new(ZoomOut),
             Self::ZoomReset => Box::new(ZoomReset),
+            Self::Undo => Box::new(Undo),
+            Self::Redo => Box::new(Redo),
+            Self::SelectAll => Box::new(SelectAll),
+            Self::DuplicateLine => Box::new(DuplicateLine),
+            Self::DeleteLine => Box::new(DeleteLine),
+            Self::MoveLineUp => Box::new(MoveLineUp),
+            Self::MoveLineDown => Box::new(MoveLineDown),
+            Self::JoinLines => Box::new(JoinLines),
+            Self::ToggleComment => Box::new(ToggleLineComment),
+            Self::SelectNextOccurrence => Box::new(SelectNextOccurrence),
+            Self::SelectAllOccurrences => Box::new(SelectAllOccurrences),
+            Self::AddCursorAbove => Box::new(AddCursorAbove),
+            Self::AddCursorBelow => Box::new(AddCursorBelow),
+            Self::ToggleWordWrap => Box::new(ToggleWordWrap),
+            Self::ToggleLeftAlign => Box::new(ToggleEditorLeftAlign),
+            Self::SplitRight => Box::new(SplitPaneRight),
+            Self::SplitDown => Box::new(SplitPaneDown),
+            Self::FocusNextPane => Box::new(FocusNextPane),
+            Self::ReopenClosedTab => Box::new(ReopenClosedTab),
+            Self::NextTab => Box::new(ActivateNextTab),
+            Self::PreviousTab => Box::new(ActivatePreviousTab),
+            Self::PinTab => Box::new(PinTab),
+            Self::NewWhiteboard => Box::new(NewWhiteboard),
+            Self::OpenTerminalWindow => Box::new(OpenTerminalWindow),
+            Self::HorizontalRule => Box::new(InsertHorizontalRule),
         }
     }
 
@@ -147,10 +202,35 @@ impl CommandId {
             Self::ZoomIn => "Increase editor zoom",
             Self::ZoomOut => "Decrease editor zoom",
             Self::ZoomReset => "Reset editor zoom",
+            Self::Undo => "Undo the last edit",
+            Self::Redo => "Redo the last undone edit",
+            Self::SelectAll => "Select the whole document",
+            Self::DuplicateLine => "Duplicate the current line",
+            Self::DeleteLine => "Delete the current line",
+            Self::MoveLineUp => "Move the current line up",
+            Self::MoveLineDown => "Move the current line down",
+            Self::JoinLines => "Join the current line with the next",
+            Self::ToggleComment => "Comment or uncomment the selection",
+            Self::SelectNextOccurrence => "Select the next occurrence of the selection",
+            Self::SelectAllOccurrences => "Select every occurrence of the selection",
+            Self::AddCursorAbove => "Add a cursor on the line above",
+            Self::AddCursorBelow => "Add a cursor on the line below",
+            Self::ToggleWordWrap => "Turn soft wrapping on or off",
+            Self::ToggleLeftAlign => "Left align or centre the editor content",
+            Self::SplitRight => "Split the editor to the right",
+            Self::SplitDown => "Split the editor downwards",
+            Self::FocusNextPane => "Move focus to the next pane",
+            Self::ReopenClosedTab => "Reopen the most recently closed tab",
+            Self::NextTab => "Activate the next tab",
+            Self::PreviousTab => "Activate the previous tab",
+            Self::PinTab => "Pin or unpin the active tab",
+            Self::NewWhiteboard => "Create a new whiteboard",
+            Self::OpenTerminalWindow => "Open a standalone terminal window",
+            Self::HorizontalRule => "Insert a horizontal rule",
         }
     }
 
-    /// Stable identifier used for keybinding overrides in config.yaml.
+    /// Stable identifier used for keybinding overrides in settings.yaml.
     pub(crate) fn config_key(self) -> &'static str {
         match self {
             Self::NewDocument => "new_document",
@@ -190,6 +270,31 @@ impl CommandId {
             Self::ZoomIn => "zoom_in",
             Self::ZoomOut => "zoom_out",
             Self::ZoomReset => "zoom_reset",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
+            Self::SelectAll => "select_all",
+            Self::DuplicateLine => "duplicate_line",
+            Self::DeleteLine => "delete_line",
+            Self::MoveLineUp => "move_line_up",
+            Self::MoveLineDown => "move_line_down",
+            Self::JoinLines => "join_lines",
+            Self::ToggleComment => "toggle_comment",
+            Self::SelectNextOccurrence => "select_next_occurrence",
+            Self::SelectAllOccurrences => "select_all_occurrences",
+            Self::AddCursorAbove => "add_cursor_above",
+            Self::AddCursorBelow => "add_cursor_below",
+            Self::ToggleWordWrap => "toggle_word_wrap",
+            Self::ToggleLeftAlign => "toggle_left_align",
+            Self::SplitRight => "split_right",
+            Self::SplitDown => "split_down",
+            Self::FocusNextPane => "focus_next_pane",
+            Self::ReopenClosedTab => "reopen_closed_tab",
+            Self::NextTab => "next_tab",
+            Self::PreviousTab => "previous_tab",
+            Self::PinTab => "pin_tab",
+            Self::NewWhiteboard => "new_whiteboard",
+            Self::OpenTerminalWindow => "open_terminal_window",
+            Self::HorizontalRule => "horizontal_rule",
         }
     }
 
@@ -732,7 +837,85 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         false,
         zoom_reset_title,
     ),
+    command(CommandId::Undo, TextKey::Undo, "Edit", "secondary-z", false),
+    command(
+        CommandId::Redo,
+        TextKey::Redo,
+        "Edit",
+        "secondary-shift-z",
+        false,
+    ),
+    command(
+        CommandId::SelectAll,
+        TextKey::SelectAll,
+        "Edit",
+        "secondary-a",
+        false,
+    ),
+    command_labelled(CommandId::DuplicateLine, "Edit", "duplicate_line"),
+    command_labelled(CommandId::DeleteLine, "Edit", "delete_line"),
+    command_labelled(CommandId::MoveLineUp, "Edit", "move_line_up"),
+    command_labelled(CommandId::MoveLineDown, "Edit", "move_line_down"),
+    command_labelled(CommandId::JoinLines, "Edit", "join_lines"),
+    command_labelled(CommandId::ToggleComment, "Edit", "toggle_comment"),
+    command_labelled(
+        CommandId::SelectNextOccurrence,
+        "Edit",
+        "select_next_occurrence",
+    ),
+    command_labelled(
+        CommandId::SelectAllOccurrences,
+        "Edit",
+        "select_all_occurrences",
+    ),
+    command_labelled(CommandId::AddCursorAbove, "Edit", "add_cursor_above"),
+    command_labelled(CommandId::AddCursorBelow, "Edit", "add_cursor_below"),
+    command_labelled(CommandId::ToggleWordWrap, "View", "toggle_word_wrap"),
+    command_labelled(CommandId::ToggleLeftAlign, "View", "toggle_left_align"),
+    command_labelled(CommandId::SplitRight, "View", "split_right"),
+    command_labelled(CommandId::SplitDown, "View", "split_down"),
+    command_labelled(CommandId::FocusNextPane, "View", "focus_next_pane"),
+    command_labelled(CommandId::ReopenClosedTab, "Tab", "reopen_closed_tab"),
+    command_labelled(CommandId::NextTab, "Tab", "next_tab"),
+    command_labelled(CommandId::PreviousTab, "Tab", "previous_tab"),
+    command_without_shortcut(CommandId::PinTab, TextKey::PinTab, "Tab", false),
+    command_without_shortcut(
+        CommandId::NewWhiteboard,
+        TextKey::NewWhiteboard,
+        "File",
+        false,
+    ),
+    command_labelled(
+        CommandId::OpenTerminalWindow,
+        "Application",
+        "open_terminal_window",
+    ),
+    command_without_shortcut(
+        CommandId::HorizontalRule,
+        TextKey::HorizontalRule,
+        "Format",
+        true,
+    ),
 ];
+
+/// Command whose visible title comes from the `COMMAND_LABELS` table rather
+/// than a `TextKey`.
+const fn command_labelled(
+    id: CommandId,
+    category: &'static str,
+    label_key: &'static str,
+) -> CommandSpec {
+    CommandSpec {
+        id,
+        title: TextKey::Reset,
+        category,
+        shortcut: None,
+        alternate_shortcuts: &[],
+        markdown_only: false,
+        title_override: None,
+        label_key: Some(label_key),
+    }
+}
 
 const fn command(
     id: CommandId,
@@ -749,6 +932,7 @@ const fn command(
         alternate_shortcuts: &[],
         markdown_only,
         title_override: None,
+        label_key: None,
     }
 }
 
@@ -766,6 +950,7 @@ const fn command_without_shortcut(
         alternate_shortcuts: &[],
         markdown_only,
         title_override: None,
+        label_key: None,
     }
 }
 
@@ -785,6 +970,7 @@ const fn command_with_title(
         alternate_shortcuts: &[],
         markdown_only,
         title_override: Some(title_override),
+        label_key: None,
     }
 }
 

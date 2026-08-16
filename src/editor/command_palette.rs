@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use gpui::{AnyElement, Context, CursorStyle, Focusable, MouseButton, Window, div, prelude::*, px};
 
 use super::{
@@ -56,6 +58,7 @@ impl EditorView {
                     }
                     crate::text_input::TextInputEvent::Escape => {
                         this.command_palette_visible = false;
+                        this.reset_command_palette_state(cx);
                         this.pending_editor_focus = true;
                         cx.notify();
                     }
@@ -84,8 +87,20 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Clears query and selection so the next open starts fresh.
+    pub(crate) fn reset_command_palette_state(&mut self, cx: &mut Context<Self>) {
+        self.command_palette_query.clear();
+        self.command_palette_selected_index = 0;
+        self.command_palette_scroll_handle.scroll_to_item(0);
+        if let Some(editor) = self.command_palette_editor.clone() {
+            editor.update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.command_palette_query.clear();
+    }
+
     pub(crate) fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.command_palette_visible = false;
+        self.reset_command_palette_state(cx);
         window.focus(&self.focus_handle(cx));
         cx.notify();
     }
@@ -95,6 +110,7 @@ impl EditorView {
             return;
         };
         self.command_palette_visible = false;
+        self.reset_command_palette_state(cx);
         window.focus(&self.focus_handle(cx));
         let action = command.action();
         window.defer(cx, move |window, cx| {
@@ -111,16 +127,52 @@ impl EditorView {
                 if query.is_empty() {
                     return true;
                 }
-                let title = self.command_title(spec).to_lowercase();
-                title.contains(&query)
-                    || spec
-                        .id
-                        .english_description()
-                        .to_lowercase()
-                        .contains(&query)
-                    || spec.category.to_lowercase().contains(&query)
+                query.split_whitespace().all(|term| {
+                    self.command_title(spec).to_lowercase().contains(term)
+                        || spec
+                            .id
+                            .english_description()
+                            .to_lowercase()
+                            .contains(term)
+                        || spec.category.to_lowercase().contains(term)
+                        // The config key carries snake_case English aliases
+                        // ("split_right", "find_in_files") worth searching.
+                        || spec.id.config_key().replace('_', " ").contains(term)
+                        || spec.id.config_key().contains(term)
+                })
             })
             .collect()
+    }
+
+    /// Workspace roots offered as "switch workspace" rows below the commands.
+    fn visible_command_palette_workspaces(&self) -> Vec<PathBuf> {
+        let query = self.command_palette_query.trim().to_lowercase();
+        let label = crate::i18n::command_label(self.ui_language, "switch_workspace").to_lowercase();
+        self.workspaces
+            .iter()
+            .filter(|root| root.as_path() != self.sidebar_root.as_path())
+            .filter(|root| {
+                if query.is_empty() {
+                    return true;
+                }
+                let name = Self::workspace_display_name(root).to_lowercase();
+                query.split_whitespace().all(|term| {
+                    name.contains(term) || label.contains(term) || "switch workspace".contains(term)
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn workspace_display_name(root: &Path) -> String {
+        root.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| root.display().to_string())
+    }
+
+    fn command_palette_item_count(&self) -> usize {
+        self.visible_command_specs().len() + self.visible_command_palette_workspaces().len()
     }
 
     fn command_title(&self, spec: &CommandSpec) -> &'static str {
@@ -128,7 +180,7 @@ impl EditorView {
     }
 
     fn move_command_palette_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let item_count = self.visible_command_specs().len();
+        let item_count = self.command_palette_item_count();
         if item_count == 0 {
             self.command_palette_selected_index = 0;
             cx.notify();
@@ -142,13 +194,22 @@ impl EditorView {
     }
 
     fn queue_selected_command(&mut self, cx: &mut Context<Self>) {
-        let command = self
-            .visible_command_specs()
-            .get(self.command_palette_selected_index)
-            .map(|spec| spec.id);
-        if let Some(command) = command {
-            self.command_palette_pending = Some(command);
+        let specs = self.visible_command_specs();
+        if let Some(spec) = specs.get(self.command_palette_selected_index) {
+            self.command_palette_pending = Some(spec.id);
             self.command_palette_visible = false;
+            cx.notify();
+            return;
+        }
+        let workspace_index = self.command_palette_selected_index - specs.len();
+        if let Some(root) = self
+            .visible_command_palette_workspaces()
+            .get(workspace_index)
+            .cloned()
+        {
+            self.command_palette_visible = false;
+            self.reset_command_palette_state(cx);
+            self.switch_workspace(root, cx);
             cx.notify();
         }
     }
@@ -176,6 +237,62 @@ impl EditorView {
         };
         let specs = self.visible_command_specs();
         let shortcut_bg = styles.quick_open_result_shortcut_bg;
+        let command_count = specs.len();
+        let workspace_label = crate::i18n::command_label(self.ui_language, "switch_workspace");
+        let workspace_rows = self
+            .visible_command_palette_workspaces()
+            .into_iter()
+            .enumerate()
+            .map(|(offset, root)| {
+                let index = command_count + offset;
+                let selected = index == self.command_palette_selected_index;
+                let name = Self::workspace_display_name(&root);
+                let detail = root.display().to_string();
+                div()
+                    .id(("command-palette-workspace", offset))
+                    .h(px(row_height))
+                    .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
+                    .flex()
+                    .items_center()
+                    .gap(px(self.scaled(8.0)))
+                    .cursor(CursorStyle::Arrow)
+                    .when(selected, |this| this.bg(selected_bg))
+                    .hover(move |style| style.bg(hover_bg))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(self.scaled(6.0)))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .truncate()
+                                    .text_size(px(title_size))
+                                    .text_color(styles.quick_open_result_text_color)
+                                    .child(format!("{workspace_label}: {name}")),
+                            )
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .text_size(px(description_size))
+                                    .text_color(styles.quick_open_result_secondary_text_color)
+                                    .child(detail),
+                            ),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.command_palette_visible = false;
+                            this.reset_command_palette_state(cx);
+                            this.switch_workspace(root.clone(), cx);
+                            cx.notify();
+                        }),
+                    )
+            })
+            .collect::<Vec<_>>();
 
         let rows = specs.into_iter().enumerate().map(|(index, spec)| {
             let selected = index == self.command_palette_selected_index;
@@ -313,7 +430,8 @@ impl EditorView {
                             .max_h(px(self.scaled(styles.quick_open_results_max_height_px)))
                             .overflow_y_scroll()
                             .track_scroll(&self.command_palette_scroll_handle)
-                            .children(rows),
+                            .children(rows)
+                            .children(workspace_rows),
                     )
                     .child(self.render_search_shortcut_footer(
                         crate::i18n::search_menu_footer_label(self.ui_language, "execute"),

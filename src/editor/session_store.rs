@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -9,7 +10,7 @@ use super::history_store;
 use super::*;
 
 pub(crate) fn persist_session(editor: &EditorView) {
-    let mut config = config_store::load_config();
+    let mut config = config_store::load_sessions();
     config.workspaces.roots = editor.workspaces.clone();
     config.workspaces.active_root = if editor.sidebar_root.as_os_str().is_empty() {
         None
@@ -34,10 +35,10 @@ pub(crate) fn persist_session(editor: &EditorView) {
     // Startup/theme refreshes can operate on the default welcome tab before a
     // real restored session is ready. Preserve a previously saved work session
     // instead of overwriting it with that placeholder state.
-    if !is_default_welcome_session(editor) || !session_contains_nonwelcome_tabs(&config.session) {
-        config.session = session;
+    if !is_default_welcome_session(editor) || !session_contains_nonwelcome_tabs(&config.sessions) {
+        config.sessions = session;
     }
-    config_store::save_config(&config);
+    config_store::save_sessions(&config);
 }
 
 fn is_default_welcome_session(editor: &EditorView) -> bool {
@@ -111,7 +112,8 @@ fn pane_layout_to_record(editor: &EditorView, layout: &PaneLayout) -> PaneLayout
 }
 
 pub(crate) fn restore_session(editor: &mut EditorView) {
-    let config = config_store::load_config();
+    let config = config_store::load_sessions();
+    prefetch_session_files(&config.sessions);
     editor.workspaces = config.workspaces.roots.clone();
     if let Some(active_root) = config.workspaces.active_root {
         editor.sidebar_root = active_root.clone();
@@ -121,23 +123,23 @@ pub(crate) fn restore_session(editor: &mut EditorView) {
     }
 
     // Split-pane layout (new format) supersedes the legacy flat tab list.
-    if let Some(layout_record) = config.session.pane_layout.as_ref()
+    if let Some(layout_record) = config.sessions.pane_layout.as_ref()
         && restore_pane_layout(
             editor,
             layout_record,
-            config.session.focused_pane_leaf,
-            config.session.next_tab_id,
+            config.sessions.focused_pane_leaf,
+            config.sessions.next_tab_id,
         )
     {
         return;
     }
 
-    if config.session.tabs.is_empty() {
+    if config.sessions.tabs.is_empty() {
         return;
     }
 
     let mut restored_tabs = Vec::new();
-    for record in &config.session.tabs {
+    for record in &config.sessions.tabs {
         if let Some(tab) = restore_tab_from_record(record, editor.ui_language) {
             restored_tabs.push(tab);
         }
@@ -149,12 +151,12 @@ pub(crate) fn restore_session(editor: &mut EditorView) {
 
     editor.tabs = restored_tabs;
     editor.active_tab_id = config
-        .session
+        .sessions
         .active_tab_id
         .filter(|active_id| editor.tabs.iter().any(|tab| tab.id == *active_id))
         .or_else(|| editor.tabs.first().map(|tab| tab.id.clone()));
     editor.next_tab_id = config
-        .session
+        .sessions
         .next_tab_id
         .unwrap_or_else(|| infer_next_tab_id(&editor.tabs, editor.next_tab_id));
 
@@ -569,8 +571,67 @@ fn resolve_snapshot(
     }
 }
 
+/// Restored tab contents, read in parallel so startup pays one round trip
+/// instead of one per tab (which is what hurts on network volumes).
+fn session_file_prefetch() -> &'static std::sync::Mutex<HashMap<PathBuf, Vec<u8>>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Vec<u8>>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn prefetch_session_files(session: &SessionConfig) {
+    fn collect(layout: &PaneLayoutRecord, paths: &mut Vec<PathBuf>) {
+        match layout {
+            PaneLayoutRecord::Leaf { tabs, .. } => {
+                paths.extend(tabs.iter().filter_map(|tab| tab.path.clone()));
+            }
+            PaneLayoutRecord::Split { children, .. } => {
+                for child in children {
+                    collect(child, paths);
+                }
+            }
+        }
+    }
+
+    let mut paths = session
+        .tabs
+        .iter()
+        .filter_map(|tab| tab.path.clone())
+        .collect::<Vec<_>>();
+    if let Some(layout) = session.pane_layout.as_ref() {
+        collect(layout, &mut paths);
+    }
+    paths.sort();
+    paths.dedup();
+    if paths.len() < 2 {
+        return;
+    }
+
+    let results = std::thread::scope(|scope| {
+        let handles = paths
+            .into_iter()
+            .map(|path| scope.spawn(move || (path.clone(), fs::read(&path).ok())))
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok())
+            .filter_map(|(path, bytes)| bytes.map(|bytes| (path, bytes)))
+            .collect::<Vec<_>>()
+    });
+    if let Ok(mut cache) = session_file_prefetch().lock() {
+        cache.extend(results);
+    }
+}
+
+fn take_prefetched_session_file(path: &Path) -> Option<Vec<u8>> {
+    session_file_prefetch().lock().ok()?.remove(path)
+}
+
 fn load_file_snapshot(path: &Path) -> Option<(EditorSnapshot, FileKind)> {
-    let bytes = fs::read(path).ok()?;
+    let bytes = match take_prefetched_session_file(path) {
+        Some(bytes) => bytes,
+        None => fs::read(path).ok()?,
+    };
     let file_kind = classify_file_kind_for_bytes(path, &bytes);
     let text = if file_kind.supports_text_buffer() {
         String::from_utf8_lossy(&bytes).into_owned()

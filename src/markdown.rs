@@ -293,7 +293,7 @@ fn is_in_progress_setext_underline(content: &str) -> bool {
     content.trim_matches([' ', '\t']).chars().count() < 3
 }
 
-fn blockquote_prefix_len(content: &str) -> usize {
+pub fn blockquote_prefix_len(content: &str) -> usize {
     let leading_spaces = content.bytes().take_while(|&byte| byte == b' ').count();
     if leading_spaces > 3 {
         return 0;
@@ -962,8 +962,15 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                         &text[start..end]
                     };
                     let current_list_context = list_stack.last().copied();
-                    let leading_ws = content.len() - content.trim_start_matches([' ', '\t']).len();
-                    let trimmed = &content[leading_ws..];
+                    // Inside a blockquote the marker follows `> `, so measure
+                    // the indent from after that prefix or the marker range
+                    // would be empty and render as plain text.
+                    let quote_prefix_len = blockquote_prefix_len(content);
+                    let after_quote = &content[quote_prefix_len..];
+                    let leading_ws =
+                        after_quote.len() - after_quote.trim_start_matches([' ', '\t']).len();
+                    let marker_start = quote_prefix_len + leading_ws;
+                    let trimmed = &after_quote[leading_ws..];
                     let ordered_prefix_len = ordered_list_prefix_len(trimmed);
                     if ordered_prefix_len > 0
                         || current_list_context == Some(BlockContext::OrderedList)
@@ -971,15 +978,15 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                         decorations[line].block_type = BlockType::OrderedList;
                         if ordered_prefix_len > 0 {
                             decorations[line].syntax_ranges.push(SyntaxRange {
-                                range: leading_ws..leading_ws + ordered_prefix_len,
-                                trigger_range: leading_ws..leading_ws + ordered_prefix_len,
+                                range: marker_start..marker_start + ordered_prefix_len,
+                                trigger_range: marker_start..marker_start + ordered_prefix_len,
                             });
                         }
                     } else if let unordered_prefix_len @ 1.. = unordered_list_prefix_len(trimmed) {
                         decorations[line].block_type = BlockType::UnorderedList;
                         decorations[line].syntax_ranges.push(SyntaxRange {
-                            range: leading_ws..leading_ws + unordered_prefix_len,
-                            trigger_range: leading_ws..leading_ws + unordered_prefix_len,
+                            range: marker_start..marker_start + unordered_prefix_len,
+                            trigger_range: marker_start..marker_start + unordered_prefix_len,
                         });
                     } else if current_list_context == Some(BlockContext::UnorderedList) {
                         decorations[line].block_type = BlockType::UnorderedList;
@@ -1268,8 +1275,10 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
                     let line_start = line_starts[line];
                     let line_end_offset = line_starts.get(line + 1).copied().unwrap_or(text.len());
                     let line_content = &text[line_start..line_end_offset];
-                    let leading_ws =
-                        line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+                    let quote_prefix_len = blockquote_prefix_len(line_content);
+                    let after_quote = &line_content[quote_prefix_len..];
+                    let leading_ws = quote_prefix_len
+                        + (after_quote.len() - after_quote.trim_start_matches([' ', '\t']).len());
                     let mut col_end = source_range.end.saturating_sub(line_start);
                     // Include trailing space after ] if present
                     if col_end < line_content.len() && line_content.as_bytes()[col_end] == b' ' {

@@ -55,6 +55,45 @@ impl EditorView {
             .into_any_element()
     }
 
+    /// Extra right margin that lines a header badge up with the file tree rows,
+    /// whose own right edge sits inside a 1px row border plus the item padding.
+    fn sidebar_header_badge_right_margin(&self) -> f32 {
+        let ss = &self.styles.sidebar;
+        (self.scaled(ss.sidebar_item_padding_right_px) + self.ui_border_width(1.0)
+            - self.scaled(ss.sidebar_header_padding_right_px))
+        .max(0.0)
+    }
+
+    /// Rounded pill showing how many documents live under a directory.
+    /// Shared by file tree rows, the workspace header, the starred header and
+    /// the FileList header.
+    pub(super) fn render_sidebar_count_badge(
+        &self,
+        count: usize,
+        left_margin: bool,
+        right_margin_px: f32,
+    ) -> AnyElement {
+        let ss = &self.styles.sidebar;
+        div()
+            .flex_none()
+            .when(left_margin, |this| {
+                this.ml(px(self.scaled(ss.sidebar_count_badge_margin_left_px)))
+            })
+            .when(right_margin_px > 0.0, |this| this.mr(px(right_margin_px)))
+            .min_w(px(self.scaled(ss.sidebar_count_badge_min_width_px)))
+            .h(px(self.scaled(ss.sidebar_count_badge_height_px)))
+            .px(px(self.scaled(ss.sidebar_count_badge_padding_x_px)))
+            .rounded(px(self.scaled(ss.sidebar_count_badge_radius_px)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(ss.sidebar_count_badge_bg)
+            .text_size(px(self.scaled(ss.sidebar_count_badge_font_size_px)))
+            .text_color(ss.sidebar_count_badge_text_color)
+            .child(count.to_string())
+            .into_any_element()
+    }
+
     fn render_sidebar_edit_indicator(
         &self,
         name: &str,
@@ -184,6 +223,15 @@ impl EditorView {
     fn render_sidebar_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let ss = &self.styles.sidebar;
         let root_name = self.sidebar_root_name().to_uppercase();
+        let root_file_count = self
+            .file_list_visible
+            .then(|| {
+                self.sidebar_dir_file_counts
+                    .get(&self.sidebar_root)
+                    .copied()
+            })
+            .flatten()
+            .filter(|count| *count > 0);
         let is_selected = self.is_sidebar_item_selected(&self.sidebar_root);
         let header_hover_bg = ss.sidebar_header_hover_bg;
         let header_drag_over_bg = ss.sidebar_item_selected_bg;
@@ -228,6 +276,9 @@ impl EditorView {
                     .truncate()
                     .child(root_name),
             )
+            .when_some(root_file_count, |this, count| {
+                this.child(self.render_sidebar_count_badge(count, false, 0.0))
+            })
             .child(
                 div()
                     .flex()
@@ -364,6 +415,13 @@ impl EditorView {
                     .truncate()
                     .child(self.t(crate::i18n::TextKey::StarredFiles)),
             )
+            .when(is_collapsed && !starred_files.is_empty(), |this| {
+                this.child(self.render_sidebar_count_badge(
+                    starred_files.len(),
+                    true,
+                    self.sidebar_header_badge_right_margin(),
+                ))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -769,6 +827,14 @@ impl EditorView {
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| self.sidebar_root.clone())
         };
+        let dir_file_count = if item.is_dir && self.file_list_visible {
+            self.sidebar_dir_file_counts
+                .get(&item.path)
+                .copied()
+                .filter(|count| *count > 0)
+        } else {
+            None
+        };
         let indicator = if item.is_dir {
             svg()
                 .path(if item.is_expanded {
@@ -885,6 +951,9 @@ impl EditorView {
                                 .font_weight(FontWeight::EXTRA_BOLD)
                                 .child(marker),
                         )
+                    })
+                    .when_some(dir_file_count, |this, count| {
+                        this.child(self.render_sidebar_count_badge(count, true, 0.0))
                     }),
             )
             .on_click({
@@ -1021,6 +1090,20 @@ impl EditorView {
         } else {
             None
         };
+        if has_root && self.file_list_visible {
+            let force = self.sidebar_dir_file_counts_epoch != self.sidebar_directory_epoch;
+            self.sidebar_dir_file_counts_epoch = self.sidebar_directory_epoch;
+            let mut dirs = vec![self.sidebar_root.clone()];
+            if let Some(items) = items.as_ref() {
+                dirs.extend(
+                    items
+                        .iter()
+                        .filter(|item| item.is_dir)
+                        .map(|item| item.path.clone()),
+                );
+            }
+            self.request_sidebar_dir_file_counts(dirs, force, cx);
+        }
         let ss = self.styles.sidebar.clone();
 
         let top_spacer = div()

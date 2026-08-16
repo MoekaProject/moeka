@@ -33,7 +33,68 @@ fn load_sidebar_directory(path: &Path, sort_mode: SidebarSortMode) -> Vec<Sideba
         .collect()
 }
 
+/// Number of markdown documents directly inside `dir`, matching what the
+/// FileList pane lists for that directory.
+fn count_dir_markdown_files(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let path = entry.path();
+            let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+            !is_dir && !should_skip_path(&path, false) && is_markdown_file(&path)
+        })
+        .count()
+}
+
 impl EditorView {
+    /// Loads the badge counts for the given directories in the background.
+    /// Already-known counts are kept visible until the new value arrives.
+    pub(crate) fn request_sidebar_dir_file_counts(
+        &mut self,
+        dirs: Vec<PathBuf>,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let pending = dirs
+            .into_iter()
+            .filter(|dir| {
+                (force || !self.sidebar_dir_file_counts.contains_key(dir))
+                    && !self.sidebar_dir_file_counts_loading.contains(dir)
+            })
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return;
+        }
+        self.sidebar_dir_file_counts_loading
+            .extend(pending.iter().cloned());
+        cx.spawn(async move |this, cx| {
+            let counted = cx
+                .background_executor()
+                .spawn(async move {
+                    pending
+                        .into_iter()
+                        .map(|dir| {
+                            let count = count_dir_markdown_files(&dir);
+                            (dir, count)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                for (dir, count) in counted {
+                    this.sidebar_dir_file_counts_loading.remove(&dir);
+                    this.sidebar_dir_file_counts.insert(dir, count);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn capture_file_view_scroll_positions(&mut self) {
         if self.pending_sidebar_reveal_path.is_some() {
             return;

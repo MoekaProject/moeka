@@ -8,16 +8,24 @@ use super::file_ops;
 
 pub(crate) const CONFIG_SCHEMA_VERSION: u32 = 1;
 
+/// `settings.yaml` — the only file the settings UI reads back and reloads on.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
-pub(crate) struct AppConfig {
+pub(crate) struct SettingsFile {
     #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
+    pub version: u32,
     #[serde(default)]
     pub settings: AppSettings,
+}
+
+/// `sessions.yaml` — workspaces plus the restored pane/tab layout.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct SessionsFile {
+    #[serde(default = "default_schema_version")]
+    pub version: u32,
     #[serde(default)]
     pub workspaces: WorkspaceConfig,
     #[serde(default)]
-    pub session: SessionConfig,
+    pub sessions: SessionConfig,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
@@ -130,75 +138,89 @@ pub(crate) struct TabHistoryIndex {
     pub entry_count: usize,
 }
 
-impl Default for AppConfig {
+impl Default for SettingsFile {
     fn default() -> Self {
         Self {
-            schema_version: default_schema_version(),
+            version: default_schema_version(),
             settings: AppSettings::default(),
-            workspaces: WorkspaceConfig::default(),
-            session: SessionConfig::default(),
         }
     }
 }
 
-pub(crate) fn load_config() -> AppConfig {
-    load_config_from_path(&config_paths::config_file_path()).unwrap_or_default()
+impl Default for SessionsFile {
+    fn default() -> Self {
+        Self {
+            version: default_schema_version(),
+            workspaces: WorkspaceConfig::default(),
+            sessions: SessionConfig::default(),
+        }
+    }
 }
 
-pub(crate) fn save_config(config: &AppConfig) {
-    if let Err(error) = save_config_to_path(&config_paths::config_file_path(), config) {
-        eprintln!("failed to save config: {error}");
+pub(crate) fn load_sessions() -> SessionsFile {
+    load_yaml_file::<SessionsFile>(&config_paths::sessions_file_path()).unwrap_or_default()
+}
+
+pub(crate) fn save_sessions(sessions: &SessionsFile) {
+    if let Err(error) = save_yaml_file(&config_paths::sessions_file_path(), sessions) {
+        eprintln!("failed to save sessions: {error}");
     }
 }
 
 pub(crate) fn load_settings() -> AppSettings {
-    load_config().settings
+    load_yaml_file::<SettingsFile>(&config_paths::settings_file_path())
+        .unwrap_or_default()
+        .settings
 }
 
 /// Reports the parse error instead of silently falling back, so a hand-edited
-/// config can be rejected with a message.
+/// settings file can be rejected with a message.
 pub(crate) fn load_settings_strict() -> Result<AppSettings, String> {
-    let path = config_paths::config_file_path();
+    let path = config_paths::settings_file_path();
     if !path.exists() {
         return Ok(AppSettings::default());
     }
     let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    serde_yaml::from_str::<AppConfig>(&content)
-        .map(|config| config.settings)
+    serde_yaml::from_str::<SettingsFile>(&content)
+        .map(|file| file.settings)
         .map_err(|error| error.to_string())
 }
 
 pub(crate) fn save_settings(settings: &AppSettings) {
-    let mut config = load_config();
-    config.settings = settings.clone();
-    save_config(&config);
+    let file = SettingsFile {
+        version: CONFIG_SCHEMA_VERSION,
+        settings: settings.clone(),
+    };
+    if let Err(error) = save_yaml_file(&config_paths::settings_file_path(), &file) {
+        eprintln!("failed to save settings: {error}");
+    }
 }
 
 fn default_schema_version() -> u32 {
     CONFIG_SCHEMA_VERSION
 }
 
-fn load_config_from_path(path: &Path) -> io::Result<AppConfig> {
+fn load_yaml_file<T: serde::de::DeserializeOwned + Default>(path: &Path) -> io::Result<T> {
     if !path.exists() {
-        return Ok(AppConfig::default());
+        return Ok(T::default());
     }
 
     let content = fs::read_to_string(path)?;
-    match serde_yaml::from_str::<AppConfig>(&content) {
-        Ok(config) => Ok(config),
+    match serde_yaml::from_str::<T>(&content) {
+        Ok(value) => Ok(value),
         Err(error) => {
-            eprintln!("failed to parse config yaml: {error}");
-            Ok(AppConfig::default())
+            eprintln!("failed to parse {}: {error}", path.display());
+            Ok(T::default())
         }
     }
 }
 
-fn save_config_to_path(path: &Path, config: &AppConfig) -> io::Result<()> {
+fn save_yaml_file<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let yaml = serde_yaml::to_string(config)
+    let yaml = serde_yaml::to_string(value)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     file_ops::atomic_write(path, yaml.as_bytes())
 }
@@ -255,43 +277,53 @@ mod tests {
     #[test]
     fn load_missing_config_returns_defaults() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
+        let path = dir.path().join("settings.yaml");
 
-        let config = load_config_from_path(&path).unwrap();
+        let config = load_yaml_file::<SettingsFile>(&path).unwrap();
 
-        assert_eq!(config, AppConfig::default());
+        assert_eq!(config, SettingsFile::default());
     }
 
     #[test]
     fn save_and_load_roundtrip_preserves_settings() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
-        let config = AppConfig {
+        let path = dir.path().join("settings.yaml");
+        let config = SettingsFile {
             settings: sample_settings(),
-            workspaces: WorkspaceConfig {
-                roots: vec![PathBuf::from("/tmp/project")],
-                active_root: Some(PathBuf::from("/tmp/project")),
-            },
-            ..AppConfig::default()
+            ..SettingsFile::default()
         };
 
-        save_config_to_path(&path, &config).unwrap();
-        let loaded = load_config_from_path(&path).unwrap();
+        save_yaml_file(&path, &config).unwrap();
+        let loaded = load_yaml_file::<SettingsFile>(&path).unwrap();
 
         assert_eq!(loaded, config);
     }
 
     #[test]
+    fn sessions_roundtrip_preserves_workspaces() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sessions.yaml");
+        let sessions = SessionsFile {
+            workspaces: WorkspaceConfig {
+                roots: vec![PathBuf::from("/tmp/project")],
+                active_root: Some(PathBuf::from("/tmp/project")),
+            },
+            ..SessionsFile::default()
+        };
+
+        save_yaml_file(&path, &sessions).unwrap();
+        let loaded = load_yaml_file::<SessionsFile>(&path).unwrap();
+
+        assert_eq!(loaded, sessions);
+    }
+
+    #[test]
     fn load_partial_yaml_fills_missing_fields_with_defaults() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
-        fs::write(
-            &path,
-            "settings:\n  theme: MilkyDark\nworkspaces:\n  roots:\n    - /tmp/demo\n",
-        )
-        .unwrap();
+        let path = dir.path().join("settings.yaml");
+        fs::write(&path, "settings:\n  theme: MilkyDark\n").unwrap();
 
-        let loaded = load_config_from_path(&path).unwrap();
+        let loaded = load_yaml_file::<SettingsFile>(&path).unwrap();
 
         assert_eq!(loaded.settings.theme, "MilkyDark");
         assert_eq!(
@@ -317,36 +349,35 @@ mod tests {
             AppSettings::default().terminal_cursor_shape
         );
         assert!(loaded.settings.terminal_copy_on_select);
-        assert_eq!(loaded.workspaces.roots, vec![PathBuf::from("/tmp/demo")]);
-        assert_eq!(loaded.schema_version, CONFIG_SCHEMA_VERSION);
+        assert_eq!(loaded.version, CONFIG_SCHEMA_VERSION);
     }
 
     #[test]
     fn invalid_yaml_falls_back_to_default_config() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
+        let path = dir.path().join("settings.yaml");
         fs::write(&path, "settings: [unterminated").unwrap();
 
-        let loaded = load_config_from_path(&path).unwrap();
+        let loaded = load_yaml_file::<SettingsFile>(&path).unwrap();
 
-        assert_eq!(loaded, AppConfig::default());
+        assert_eq!(loaded, SettingsFile::default());
     }
 
     #[test]
     fn atomic_write_overwrites_existing_file_contents() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
+        let path = dir.path().join("settings.yaml");
 
-        let mut first = AppConfig::default();
+        let mut first = SettingsFile::default();
         first.settings.theme = "OneLight".to_string();
-        save_config_to_path(&path, &first).unwrap();
+        save_yaml_file(&path, &first).unwrap();
 
-        let mut second = AppConfig::default();
+        let mut second = SettingsFile::default();
         second.settings.theme = "MilkyLight".to_string();
         second.settings.light_theme = "MilkyLight".to_string();
-        save_config_to_path(&path, &second).unwrap();
+        save_yaml_file(&path, &second).unwrap();
 
-        let loaded = load_config_from_path(&path).unwrap();
+        let loaded = load_yaml_file::<SettingsFile>(&path).unwrap();
         assert_eq!(loaded.settings.theme, "MilkyLight");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
@@ -354,11 +385,11 @@ mod tests {
     #[test]
     fn session_roundtrip_preserves_recovery_and_view_state() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
+        let path = dir.path().join("sessions.yaml");
         let source_path = dir.path().join("note.md");
         let temp_path = dir.path().join(".note.md.temp");
-        let mut config = AppConfig::default();
-        config.session = SessionConfig {
+        let mut config = SessionsFile::default();
+        config.sessions = SessionConfig {
             active_tab_id: Some("tab-7".to_string()),
             next_tab_id: Some(8),
             pane_layout: None,
@@ -395,9 +426,9 @@ mod tests {
             }],
         };
 
-        save_config_to_path(&path, &config).unwrap();
-        let loaded = load_config_from_path(&path).unwrap();
+        save_yaml_file(&path, &config).unwrap();
+        let loaded = load_yaml_file::<SessionsFile>(&path).unwrap();
 
-        assert_eq!(loaded.session, config.session);
+        assert_eq!(loaded.sessions, config.sessions);
     }
 }

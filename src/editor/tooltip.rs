@@ -216,8 +216,8 @@ impl Render for TooltipView {
             .rounded(px(editor.scaled(styles.tooltip_radius_px)))
             .child(
                 div()
-                    .flex_none()
-                    .whitespace_nowrap()
+                    .min_w(px(0.0))
+                    .whitespace_normal()
                     .text_size(px(title_font_size))
                     .text_color(styles.tooltip_title_text_color)
                     .child(self.title.clone()),
@@ -265,10 +265,22 @@ fn tooltip_size(editor: &EditorView, title: &str, shortcut: Option<&str>) -> (f3
         + gap
         + title_font_size
         + editor.scaled(styles.tooltip_padding_x_px) * 2.0;
+    // Long text (file paths) wraps instead of stretching the tooltip past the
+    // viewport; the estimate must count the wrapped lines or an above-anchor
+    // tooltip would overlap its button.
+    let chrome_width = width - estimate_text_width(title, title_font_size);
+    let max_width = editor
+        .scaled(styles.tooltip_max_width_px)
+        .max(chrome_width + title_font_size * 6.0);
+    let width = width.min(max_width);
+    let available_text_width = (width - chrome_width).max(1.0);
+    let title_lines = (estimate_text_width(title, title_font_size) / available_text_width)
+        .ceil()
+        .max(1.0);
     // Match TooltipView's explicit line height so the height estimate is
     // exact; an underestimate makes above-anchor tooltips overlap the button.
     let content_height =
-        (title_font_size * TOOLTIP_LINE_HEIGHT_FACTOR).max(if shortcut_width > 0.0 {
+        (title_font_size * TOOLTIP_LINE_HEIGHT_FACTOR * title_lines).max(if shortcut_width > 0.0 {
             editor.scaled(styles.tooltip_shortcut_key_height_px)
         } else {
             0.0

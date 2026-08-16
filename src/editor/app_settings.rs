@@ -321,7 +321,7 @@ fn default_show_whitespace() -> bool {
 }
 
 fn default_format_toolbar_visible() -> bool {
-    true
+    false
 }
 
 fn default_highlight_line_background() -> bool {

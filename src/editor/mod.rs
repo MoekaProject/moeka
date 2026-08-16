@@ -1542,6 +1542,11 @@ pub struct EditorView {
     pub(crate) sidebar_directory_loading: HashSet<PathBuf>,
     pub(crate) sidebar_directory_epoch: usize,
     pub(crate) sidebar_directory_refresh_pending: bool,
+    /// Markdown file count directly inside each directory, shown as a badge
+    /// next to FileTree directory rows while the FileList pane is open.
+    pub(crate) sidebar_dir_file_counts: HashMap<PathBuf, usize>,
+    pub(crate) sidebar_dir_file_counts_loading: HashSet<PathBuf>,
+    pub(crate) sidebar_dir_file_counts_epoch: usize,
     pub(crate) sidebar_scroll_handle: ScrollHandle,
     pub(crate) pending_sidebar_scroll_top: Rc<Cell<Option<f32>>>,
     pub(crate) pending_sidebar_scroll_anchor: Option<PendingSidebarScrollAnchor>,
@@ -1569,6 +1574,9 @@ pub struct EditorView {
     /// A markdown file whose FileList item should be scrolled into view once
     /// the current directory's items finish loading (tab/FileTree linkage).
     pub(crate) file_list_pending_reveal_path: Option<PathBuf>,
+    /// When set, the pending FileList reveal centers the row instead of only
+    /// bringing it minimally into view ("reveal in tree" navigation).
+    pub(crate) file_list_pending_reveal_centered: bool,
     /// True while the active `sidebar_edit` (create/rename input) should render
     /// inside the FileList pane instead of the file tree.
     pub(crate) sidebar_edit_in_file_list: bool,
@@ -1895,7 +1903,14 @@ impl EditorView {
         }
         let welcome_file_kind = welcome_tab.file_kind.clone();
         let buffer = Buffer::from_text(&welcome_tab.snapshot.text);
-        let decorations = markdown::parse_decorations(buffer.text());
+        // A non-embedded editor immediately restores its session (or opens the
+        // launch file) and reparses, so parsing the placeholder document here
+        // would be thrown away before the first frame.
+        let decorations = if embedded_editor {
+            markdown::parse_decorations(buffer.text())
+        } else {
+            Vec::new()
+        };
         let theme_kind = app_settings.theme_kind();
         let editor_theme_mode = app_settings.editor_theme_mode_for_appearance(theme_kind.is_dark());
         let theme = crate::theme::apply_editor_theme_mode(
@@ -2199,6 +2214,9 @@ impl EditorView {
             sidebar_items_dirty: true,
             sidebar_directory_children: HashMap::new(),
             sidebar_directory_loading: HashSet::new(),
+            sidebar_dir_file_counts: HashMap::new(),
+            sidebar_dir_file_counts_loading: HashSet::new(),
+            sidebar_dir_file_counts_epoch: 0,
             sidebar_directory_epoch: 0,
             sidebar_directory_refresh_pending: false,
             sidebar_scroll_handle: ScrollHandle::new(),
@@ -2225,6 +2243,7 @@ impl EditorView {
             file_list_resizing: false,
             file_list_resize_grab_offset_x: 0.0,
             file_list_pending_reveal_path: None,
+            file_list_pending_reveal_centered: false,
             sidebar_edit_in_file_list: false,
             file_list_menu_origin: false,
             sidebar_git_statuses: HashMap::new(),
@@ -2449,6 +2468,9 @@ impl EditorView {
             (init_max_width - this.padding_left() - this.padding_right()).max(this.scaled(120.0));
         if !embedded_editor {
             session_store::restore_session(&mut this);
+            if this.decorations.is_empty() {
+                this.reparse();
+            }
             this.refresh_builtin_tab_titles();
             this.sync_panel_display_state();
             this.start_update_polling(cx);
@@ -3836,6 +3858,67 @@ impl EditorView {
         self.handle_fs_events(&changed_paths, cx);
     }
 
+    /// A rename outside the app arrives as "old path gone, new path appeared".
+    /// Re-point saved tabs at the new path (matching by content) so the tab
+    /// keeps tracking the same document instead of showing up as deleted.
+    /// Returns the changed paths with the followed old paths dropped.
+    fn follow_external_tab_renames(&mut self, changed_paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let vanished = changed_paths
+            .iter()
+            .filter(|path| !path.exists())
+            .cloned()
+            .collect::<Vec<_>>();
+        if vanished.is_empty() {
+            return changed_paths;
+        }
+        let appeared = changed_paths
+            .iter()
+            .filter(|path| {
+                path.is_file()
+                    && !self
+                        .all_tabs()
+                        .any(|tab| tab.path.as_deref() == Some(path.as_path()))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if appeared.is_empty() {
+            return changed_paths;
+        }
+
+        let mut followed = Vec::new();
+        for old_path in vanished {
+            // A dirty buffer has unsaved work whose content no longer matches
+            // anything on disk; leave it flagged as deleted.
+            let Some(expected) = self
+                .all_tabs()
+                .find(|tab| tab.path.as_deref() == Some(old_path.as_path()) && !tab.is_dirty)
+                .map(|tab| tab.snapshot.text.clone())
+            else {
+                continue;
+            };
+            let Some(new_path) = appeared.iter().find(|candidate| {
+                !followed.iter().any(|(_, taken)| taken == *candidate)
+                    && std::fs::read(candidate)
+                        .is_ok_and(|bytes| String::from_utf8_lossy(&bytes) == expected)
+            }) else {
+                continue;
+            };
+            followed.push((old_path, new_path.clone()));
+        }
+
+        if followed.is_empty() {
+            return changed_paths;
+        }
+        for (old_path, new_path) in &followed {
+            self.rewrite_open_tab_paths_after_move(old_path, new_path);
+        }
+        session_store::persist_session(self);
+        changed_paths
+            .into_iter()
+            .filter(|path| !followed.iter().any(|(old_path, _)| old_path == path))
+            .collect()
+    }
+
     pub(crate) fn handle_fs_events(&mut self, changed_paths: &[PathBuf], cx: &mut Context<Self>) {
         let mut changed_paths_in_workspace = Vec::new();
         let mut seen_paths_in_workspace = HashSet::new();
@@ -3876,6 +3959,8 @@ impl EditorView {
         if changed_paths_for_tabs.is_empty() && !git_metadata_impact.any() {
             return;
         }
+
+        changed_paths_for_tabs = self.follow_external_tab_renames(changed_paths_for_tabs);
 
         let current_file_hit = self.current_file_path.as_ref().is_some_and(|current_path| {
             changed_paths_in_workspace
@@ -5985,6 +6070,13 @@ impl EditorView {
         let line_start = self.buffer.line_start(line);
         let previous_offset = self.cursor.offset;
         let cursor_col = self.cursor.offset - line_start;
+        if let Some(col) = self.table_cell_col_for_line_col(line, cursor_col) {
+            if col != cursor_col {
+                self.cursor.move_to(line_start + col, &self.buffer);
+                self.clear_wrap_boundary_affinity();
+            }
+            return;
+        }
         let content_start = self.line_content_start_col(line);
         if content_start > 0 && cursor_col < content_start {
             self.cursor
@@ -5993,6 +6085,63 @@ impl EditorView {
                 self.clear_wrap_boundary_affinity();
             }
         }
+    }
+
+    /// The `|---|` row is never painted, so a caret must not rest on it: move
+    /// one more row in the direction the caret was travelling.
+    pub(crate) fn skip_table_separator_line(&mut self, downward: bool) {
+        let line = self.cursor_line();
+        let is_separator = self
+            .decorations
+            .get(line)
+            .and_then(|decoration| decoration.table_info.as_ref())
+            .is_some_and(|table| table.is_separator);
+        if !is_separator {
+            return;
+        }
+        let target = if downward {
+            if line + 1 >= self.buffer.line_count() {
+                return;
+            }
+            line + 1
+        } else {
+            if line == 0 {
+                return;
+            }
+            line - 1
+        };
+        let col = self.cursor.offset - self.buffer.line_start(line);
+        let target_start = self.buffer.line_start(target);
+        let target_len = self.buffer.line_content(target).len();
+        self.cursor
+            .move_to(target_start + col.min(target_len), &self.buffer);
+        self.snap_cursor_to_content();
+    }
+
+    /// Table rows only paint a caret inside a cell's own range; a column that
+    /// falls on a `|` (or the separator row) would leave the caret invisible.
+    /// Returns the nearest column inside a cell, or `None` for non-table lines.
+    fn table_cell_col_for_line_col(&self, line: usize, col: usize) -> Option<usize> {
+        let table_info = self.decorations.get(line)?.table_info.as_ref()?;
+        if table_info.is_separator || table_info.cell_ranges.is_empty() {
+            return None;
+        }
+        if table_info
+            .cell_ranges
+            .iter()
+            .any(|range| (range.start..=range.end).contains(&col))
+        {
+            return Some(col);
+        }
+        table_info
+            .cell_ranges
+            .iter()
+            .map(|range| {
+                let clamped = col.clamp(range.start, range.end);
+                (clamped.abs_diff(col), clamped)
+            })
+            .min_by_key(|(distance, _)| *distance)
+            .map(|(_, clamped)| clamped)
     }
 
     pub(crate) fn has_extra_cursors(&self) -> bool {
@@ -7660,6 +7809,130 @@ impl EditorView {
         }
         self.reparse();
         self.scroll_to_cursor();
+    }
+
+    /// Strips a `marker … marker` pair whose content span the caret sits in and
+    /// selects the freed text. Used by syntaxes the inline-span parser reports
+    /// separately (highlight, superscript, subscript), which `apply_wrap` does
+    /// not know how to toggle off.
+    pub(crate) fn remove_marker_wrap_at_cursor(&mut self, marker: &str) -> bool {
+        let line = self.cursor_line();
+        let line_start = self.buffer.line_start(line);
+        let col = self.cursor.offset.saturating_sub(line_start);
+        let line_content = self.buffer.line_content(line).to_string();
+        let Some(decoration) = self.decorations.get(line) else {
+            return false;
+        };
+        let spans: &Vec<Range<usize>> = match marker {
+            "==" => &decoration.highlight_spans,
+            "^" => &decoration.superscript_spans,
+            "~" => &decoration.subscript_spans,
+            _ => return false,
+        };
+        let marker_len = marker.len();
+        let Some(span) = spans
+            .iter()
+            .filter(|span| {
+                let start = span.start.saturating_sub(marker_len);
+                let end = (span.end + marker_len).min(line_content.len());
+                col >= start && col <= end
+            })
+            .min_by_key(|span| span.end.saturating_sub(span.start))
+            .cloned()
+        else {
+            return false;
+        };
+        let marker_start = span.start.saturating_sub(marker_len);
+        let marker_end = (span.end + marker_len).min(line_content.len());
+        if !line_content[marker_start..].starts_with(marker)
+            || !line_content[..marker_end].ends_with(marker)
+        {
+            return false;
+        }
+        let (new_text, new_start, new_end) = toggle_wrap(
+            self.buffer.text(),
+            line_start + marker_start,
+            line_start + marker_end,
+            marker,
+            marker,
+        );
+        self.buffer = Buffer::from_text(&new_text);
+        self.cursor.anchor = new_start;
+        self.cursor.offset = new_end;
+        self.reparse();
+        self.scroll_to_cursor();
+        true
+    }
+
+    /// Replaces the enclosing `range` with `keep` and selects what is left, so
+    /// re-invoking Link / Image / WikiLink / Footnote removes the syntax
+    /// instead of nesting another one.
+    pub(crate) fn unwrap_syntax_range(&mut self, range: Range<usize>, keep: Range<usize>) {
+        let kept = self.buffer.text_for_range(keep).to_string();
+        self.buffer.replace(range.clone(), &kept);
+        self.cursor.anchor = range.start;
+        self.cursor.offset = range.start + kept.len();
+        self.reparse();
+        self.scroll_to_cursor();
+    }
+
+    /// Removes the fences around the code block the caret is in.
+    pub(crate) fn unwrap_code_block_at_cursor(&mut self) -> bool {
+        let line = self.cursor_line();
+        let Some((fence_start, fence_end)) = self.code_fence_group_range(line) else {
+            return false;
+        };
+        if fence_end <= fence_start {
+            return false;
+        }
+        let body_start = self.buffer.line_start(fence_start + 1);
+        let body_end = self.buffer.line_start(fence_end).min(self.buffer.len());
+        if body_start > body_end {
+            return false;
+        }
+        let body = self.buffer.text()[body_start..body_end].to_string();
+        let block_start = self.buffer.line_start(fence_start);
+        let block_end = if fence_end + 1 < self.buffer.line_count() {
+            self.buffer.line_start(fence_end + 1)
+        } else {
+            self.buffer.len()
+        };
+        self.buffer.replace(block_start..block_end, &body);
+        self.cursor.anchor = block_start;
+        self.cursor.offset =
+            (block_start + body.trim_end_matches('\n').len()).min(self.buffer.len());
+        self.reparse();
+        self.scroll_to_cursor();
+        true
+    }
+
+    /// First and last physical line of the fenced code block containing `line`.
+    fn code_fence_group_range(&self, line: usize) -> Option<(usize, usize)> {
+        let is_fence = |index: usize| {
+            self.decorations
+                .get(index)
+                .is_some_and(|decoration| decoration.block_type == BlockType::CodeBlockFence)
+        };
+        let in_block = |index: usize| {
+            self.decorations.get(index).is_some_and(|decoration| {
+                matches!(
+                    decoration.block_type,
+                    BlockType::CodeBlock | BlockType::CodeBlockFence
+                )
+            })
+        };
+        if !in_block(line) {
+            return None;
+        }
+        let mut start = line;
+        while start > 0 && in_block(start - 1) {
+            start -= 1;
+        }
+        let mut end = line;
+        while end + 1 < self.buffer.line_count() && in_block(end + 1) {
+            end += 1;
+        }
+        (is_fence(start) && is_fence(end) && end > start).then_some((start, end))
     }
 
     pub(crate) fn apply_wrap(&mut self, prefix: &str, suffix: &str) {

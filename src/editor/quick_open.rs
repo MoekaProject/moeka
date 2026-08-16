@@ -147,6 +147,7 @@ impl EditorView {
                     crate::text_input::TextInputEvent::Escape => {
                         this.quick_open_visible = false;
                         this.quick_open_task = None;
+                        this.reset_quick_open_state(cx);
                         this.pending_editor_focus = true;
                         cx.notify();
                     }
@@ -178,9 +179,23 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Clears query, results and selection so the next open starts fresh.
+    pub(crate) fn reset_quick_open_state(&mut self, cx: &mut Context<Self>) {
+        self.quick_open_query.clear();
+        self.quick_open_results.clear();
+        self.quick_open_selected_index = 0;
+        self.quick_open_render_limit = super::list_viewport::SEARCH_LIST_POLICY.initial_count;
+        self.quick_open_scroll_handle.scroll_to_item(0);
+        if let Some(editor) = self.quick_open_editor.clone() {
+            editor.update(cx, |ti, cx| ti.set_text("", cx));
+        }
+        self.quick_open_query.clear();
+    }
+
     pub(crate) fn close_quick_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.quick_open_visible = false;
         self.quick_open_task = None;
+        self.reset_quick_open_state(cx);
         window.focus(&self.focus_handle(cx));
         cx.notify();
     }
@@ -226,20 +241,17 @@ impl EditorView {
     }
 
     pub(crate) fn confirm_quick_open(&mut self, cx: &mut Context<Self>) {
-        let Some(result) = self
+        let result = self
             .quick_open_results
             .get(self.quick_open_selected_index)
-            .cloned()
-        else {
-            self.quick_open_visible = false;
-            self.quick_open_task = None;
-            cx.notify();
-            return;
-        };
+            .cloned();
         self.quick_open_visible = false;
         self.quick_open_task = None;
+        self.reset_quick_open_state(cx);
         cx.notify();
-        self.open_sidebar_file(result.path, cx);
+        if let Some(result) = result {
+            self.open_sidebar_file(result.path, cx);
+        }
     }
 
     pub(crate) fn run_quick_open_search(&mut self, cx: &mut Context<Self>) {

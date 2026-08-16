@@ -20,6 +20,7 @@ pub(crate) const FILETREE_CLOSE_SVG_PATH: &str = "assets/icons/filetree/close.sv
 pub(crate) const FILETREE_FOLD_SVG_PATH: &str = "assets/icons/filetree/fold.svg";
 pub(crate) const SIDEBAR_TOGGLE_SVG_PATH: &str = "assets/icons/sidebar-toggle.svg";
 pub(crate) const EDITOR_ALIGN_LEFT_SVG_PATH: &str = "assets/icons/editor-align-left.svg";
+pub(crate) const ALIGN_LEFT_MINI_SVG_PATH: &str = "assets/icons/align-left-mini.svg";
 pub(crate) const THEME_LIGHT_SVG_PATH: &str = "assets/icons/theme-light.svg";
 pub(crate) const THEME_DARK_SVG_PATH: &str = "assets/icons/theme-dark.svg";
 pub(crate) const THEME_LIGHT_MINI_SVG_PATH: &str = "assets/icons/theme-light-mini.svg";

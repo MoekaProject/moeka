@@ -869,12 +869,12 @@ impl EditorView {
         self.clear_all_tab_layout_caches();
         // The config file sits outside the watched workspace, so push the write
         // through the same reload path the fs watcher would use.
-        self.handle_fs_events(&[crate::editor::config_paths::config_file_path()], cx);
+        self.handle_fs_events(&[crate::editor::config_paths::settings_file_path()], cx);
         cx.notify();
     }
 
     pub(crate) fn open_config_file_tab(&mut self, cx: &mut Context<Self>) {
-        let path = crate::editor::config_paths::config_file_path();
+        let path = crate::editor::config_paths::settings_file_path();
         // The file only exists once something has been persisted, so write the
         // current settings first to give the user a complete document to edit.
         if !path.exists() {

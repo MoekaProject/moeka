@@ -584,6 +584,7 @@ fn push_unordered_list_marker_paint(
     block_type: &BlockType,
     prefix_collapsed: bool,
     wrapped: &WrappedLine,
+    buffer_to_display: &[usize],
     font_size: f32,
     line_height: f32,
     content_x: f32,
@@ -629,14 +630,19 @@ fn push_unordered_list_marker_paint(
         None,
     ) && let Some(marker_wrapped) = marker_wrapped_lines.pop()
     {
-        let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
-        let marker_anchor_x = if leading_ws == 0 {
+        // The `>` prefix of a quoted list is concealed, so the marker's source
+        // column is not its display column; map through the display index.
+        let marker_display_index = raw_offset_to_display_offset(
+            buffer_to_display,
+            helpers::list_marker_indent(line_content),
+        );
+        let marker_anchor_x = if marker_display_index == 0 {
             base_content_x
         } else {
             content_x
                 + f32::from(
                     wrapped
-                        .position_for_index(leading_ws, px(line_height))
+                        .position_for_index(marker_display_index, px(line_height))
                         .unwrap_or_default()
                         .x,
                 )
@@ -5278,12 +5284,13 @@ impl Element for EditorElement {
             // Image URL-edit icon
             if image_active {
                 let ie_size = editor.scaled(13.0);
-                let syntax_end_x = wrapped
+                // Follow the syntax to its true end, including the wrapped row
+                // it lands on, so folding/expanding never strands the icon.
+                let syntax_end = wrapped
                     .position_for_index(display_text.len(), px(line_height))
-                    .map(|pos| f32::from(pos.x))
-                    .unwrap_or(0.0);
-                let ie_x = content_x + syntax_end_x + editor.scaled(10.0);
-                let ie_y = text_line_top + (line_height - ie_size) / 2.0;
+                    .unwrap_or_default();
+                let ie_x = content_x + f32::from(syntax_end.x) + editor.scaled(10.0);
+                let ie_y = text_line_top + f32::from(syntax_end.y) + (line_height - ie_size) / 2.0;
                 let ie_bounds =
                     Bounds::new(point(px(ie_x), px(ie_y)), size(px(ie_size), px(ie_size)));
                 let is_hovered = editor.hovering_image_edit_line == Some(line_idx);
@@ -5652,6 +5659,7 @@ impl Element for EditorElement {
                                 &r_decoration.block_type,
                                 prefix_collapsed,
                                 &wrapped,
+                                &buffer_to_display,
                                 r_font_size,
                                 r_line_height,
                                 row_content_x,
@@ -6562,6 +6570,7 @@ impl Element for EditorElement {
                 block_type,
                 prefix_collapsed,
                 wrapped,
+                &buffer_to_display,
                 font_size,
                 line_height,
                 content_x,
@@ -6737,13 +6746,17 @@ impl Element for EditorElement {
                         let preview_border_x = group.left + code_mode_text_width;
                         let preview_left = preview_border_x + 1.0;
                         let preview_width = (group.width - code_mode_text_width - 1.0).max(1.0);
-                        // Position the render from the block's true content
-                        // offset so it scrolls with its source. Right after an
-                        // edit the line-geometry cache is momentarily stale (all
-                        // lines collapse to a default height, throwing the render
-                        // far above its block); on that frame fall back to the
-                        // fresh per-line geometry (`group`) computed this frame.
-                        let (preview_top, preview_height) = if has_valid_cache {
+                        // `group` is measured from this frame's real line
+                        // geometry, so it is authoritative whenever the whole
+                        // block was laid out. The cached `line_y_offset` path
+                        // only covers blocks the windowed prepaint clipped;
+                        // using it while editing made the render (and its action
+                        // buttons) jump by one frame of stale line heights.
+                        let block_fully_rendered = preview.start_line >= render_start_line
+                            && preview.end_line < render_end_line;
+                        let (preview_top, preview_height) = if !block_fully_rendered
+                            && has_valid_cache
+                        {
                             let block_scroll = scroll_offset + scroll_anchor_delta;
                             let true_top =
                                 origin_y + editor.line_y_offset(preview.start_line) - block_scroll;
@@ -6860,7 +6873,10 @@ impl Element for EditorElement {
             let is_visible = if preview_anchor.is_some() {
                 preview_actions_visible
             } else {
-                group_syntax_active
+                // A folded block hides its body, so the language label is the
+                // only remaining hint about its content: keep it pinned.
+                editor.folded_sections.contains(start_line)
+                    || group_syntax_active
                     || editor.hovering_code_block_start == Some(*start_line)
                     || editor.hovering_code_block_copy_start == Some(*start_line)
                     || is_copied
@@ -7917,6 +7933,7 @@ impl Element for EditorElement {
             Some((_, false, _)) => CursorStyle::ResizeRow,
             None if editor.hovering_checkbox_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_fold_line.is_some() => CursorStyle::Arrow,
+            None if editor.hovering_image_edit_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_image_preview_line.is_some() => CursorStyle::Arrow,
             None if editor.image_drag_state.is_some()
                 && editor.preview_overlay_state().is_some() =>

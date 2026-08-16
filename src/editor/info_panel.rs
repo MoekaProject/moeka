@@ -32,6 +32,7 @@ pub(crate) enum ExportFormat {
     Markdown,
     Html,
     Pdf,
+    Png,
 }
 
 impl ExportFormat {
@@ -40,6 +41,7 @@ impl ExportFormat {
             Self::Markdown => "Markdown",
             Self::Html => "HTML",
             Self::Pdf => "PDF",
+            Self::Png => "PNG",
         }
     }
 
@@ -48,6 +50,7 @@ impl ExportFormat {
             Self::Markdown => "md",
             Self::Html => "html",
             Self::Pdf => "pdf",
+            Self::Png => "png",
         }
     }
 }
@@ -1076,6 +1079,191 @@ async fn build_pdf_document_from_html_macos(
             Some(Ok(bytes)) => Ok(bytes),
             Some(Err(message)) => anyhow::bail!("WKWebView createPDF failed: {message}"),
             None => anyhow::bail!("timed out waiting for WKWebView PDF generation"),
+        }
+    }
+}
+
+/// Renders the same HTML the PDF export uses into a single full-page PNG.
+#[cfg(target_os = "macos")]
+async fn build_png_document_from_html_macos(
+    html: &str,
+    source_file_path: Option<&Path>,
+    cx: &mut gpui::AsyncApp,
+) -> anyhow::Result<Vec<u8>> {
+    unsafe {
+        // Same A4 content width as the PDF export so padding and line breaks
+        // match; the height grows to fit the whole document.
+        let page_width = 595.0_f64;
+        let mut frame = NSRect {
+            origin: NSPoint { x: 0.0, y: 0.0 },
+            size: NSSize {
+                width: page_width,
+                height: 842.0,
+            },
+        };
+        let nil = std::ptr::null_mut::<objc::runtime::Object>();
+        let configuration: *mut objc::runtime::Object =
+            msg_send![class!(WKWebViewConfiguration), new];
+        let web_view: *mut objc::runtime::Object = msg_send![class!(WKWebView), alloc];
+        let web_view: *mut objc::runtime::Object =
+            msg_send![web_view, initWithFrame: frame configuration: configuration];
+
+        let host_window: *mut objc::runtime::Object = msg_send![class!(NSWindow), alloc];
+        let host_window: *mut objc::runtime::Object = msg_send![
+            host_window,
+            initWithContentRect: frame
+            styleMask: 0u64
+            backing: 2u64
+            defer: false
+        ];
+        let () = msg_send![host_window, setReleasedWhenClosed: false];
+        let () = msg_send![host_window, setAlphaValue: 0.0_f64];
+        let () = msg_send![host_window, setIgnoresMouseEvents: true];
+        let () = msg_send![host_window, setContentView: web_view];
+        let () = msg_send![host_window, orderFrontRegardless];
+
+        let base_url = source_file_path
+            .and_then(Path::parent)
+            .map(nsurl_from_directory)
+            .unwrap_or(nil);
+        let () = msg_send![web_view, loadHTMLString: nsstring(html) baseURL: base_url];
+
+        let start = std::time::Instant::now();
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(20))
+                .await;
+            let is_loading: bool = msg_send![web_view, isLoading];
+            if !is_loading {
+                break;
+            }
+            if start.elapsed() > std::time::Duration::from_secs(20) {
+                let () = msg_send![host_window, close];
+                anyhow::bail!("timed out waiting for WebKit HTML rendering");
+            }
+        }
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(100))
+            .await;
+
+        // Grow the view to the full document height so the snapshot is not
+        // clipped to one viewport.
+        let height_slot: std::rc::Rc<std::cell::RefCell<Option<f64>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let height_block_slot = height_slot.clone();
+        let height_completion = block::ConcreteBlock::new(
+            move |value: *mut objc::runtime::Object, _error: *mut objc::runtime::Object| {
+                let height = if value.is_null() {
+                    0.0
+                } else {
+                    msg_send![value, doubleValue]
+                };
+                *height_block_slot.borrow_mut() = Some(height);
+            },
+        );
+        let height_completion = height_completion.copy();
+        let () = msg_send![
+            web_view,
+            evaluateJavaScript: nsstring("document.documentElement.scrollHeight")
+            completionHandler: &*height_completion
+        ];
+        let height_start = std::time::Instant::now();
+        while height_slot.borrow().is_none() {
+            if height_start.elapsed() > std::time::Duration::from_secs(10) {
+                break;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(20))
+                .await;
+        }
+        let content_height = height_slot
+            .borrow_mut()
+            .take()
+            .filter(|height| *height > 1.0)
+            .unwrap_or(frame.size.height)
+            .min(20_000.0);
+        frame.size.height = content_height;
+        let () = msg_send![host_window, setContentSize: frame.size];
+        let () = msg_send![web_view, setFrame: frame];
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(200))
+            .await;
+
+        let result: std::rc::Rc<std::cell::RefCell<Option<Result<Vec<u8>, String>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let block_result = result.clone();
+        let completion = block::ConcreteBlock::new(
+            move |image: *mut objc::runtime::Object, error: *mut objc::runtime::Object| {
+                let outcome = if image.is_null() {
+                    let message = if error.is_null() {
+                        "takeSnapshot returned no image".to_string()
+                    } else {
+                        let desc: *mut objc::runtime::Object =
+                            msg_send![error, localizedDescription];
+                        let cstr: *const std::os::raw::c_char = msg_send![desc, UTF8String];
+                        if cstr.is_null() {
+                            "unknown takeSnapshot error".to_string()
+                        } else {
+                            std::ffi::CStr::from_ptr(cstr)
+                                .to_string_lossy()
+                                .into_owned()
+                        }
+                    };
+                    Err(message)
+                } else {
+                    let tiff: *mut objc::runtime::Object = msg_send![image, TIFFRepresentation];
+                    if tiff.is_null() {
+                        Err("snapshot image had no bitmap data".to_string())
+                    } else {
+                        let rep: *mut objc::runtime::Object =
+                            msg_send![class!(NSBitmapImageRep), imageRepWithData: tiff];
+                        let properties: *mut objc::runtime::Object =
+                            msg_send![class!(NSDictionary), dictionary];
+                        // NSBitmapImageFileTypePNG
+                        let png: *mut objc::runtime::Object =
+                            msg_send![rep, representationUsingType: 4u64 properties: properties];
+                        let length: usize = msg_send![png, length];
+                        let ptr: *const u8 = msg_send![png, bytes];
+                        if png.is_null() || ptr.is_null() || length == 0 {
+                            Err("PNG encoding produced no data".to_string())
+                        } else {
+                            Ok(std::slice::from_raw_parts(ptr, length).to_vec())
+                        }
+                    }
+                };
+                *block_result.borrow_mut() = Some(outcome);
+            },
+        );
+        let completion = completion.copy();
+        let snapshot_config: *mut objc::runtime::Object =
+            msg_send![class!(WKSnapshotConfiguration), new];
+        let () = msg_send![snapshot_config, setRect: frame];
+        // 2x for a crisp export regardless of the current display scale.
+        let snapshot_width: *mut objc::runtime::Object =
+            msg_send![class!(NSNumber), numberWithDouble: page_width * 2.0];
+        let () = msg_send![snapshot_config, setSnapshotWidth: snapshot_width];
+        let () = msg_send![
+            web_view,
+            takeSnapshotWithConfiguration: snapshot_config
+            completionHandler: &*completion
+        ];
+
+        let wait_start = std::time::Instant::now();
+        while result.borrow().is_none() {
+            if wait_start.elapsed() > std::time::Duration::from_secs(30) {
+                break;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(20))
+                .await;
+        }
+
+        let () = msg_send![host_window, close];
+
+        match result.borrow_mut().take() {
+            Some(Ok(bytes)) => Ok(bytes),
+            Some(Err(message)) => anyhow::bail!("WKWebView takeSnapshot failed: {message}"),
+            None => anyhow::bail!("timed out waiting for WKWebView PNG generation"),
         }
     }
 }
@@ -2966,7 +3154,7 @@ impl EditorView {
             ExportFormat::Html => {
                 Some(build_html_document(&title, &text, source_file_path.as_deref()).into_bytes())
             }
-            ExportFormat::Pdf => None,
+            ExportFormat::Pdf | ExportFormat::Png => None,
         };
 
         cx.spawn(async move |this, cx| {
@@ -2988,16 +3176,36 @@ impl EditorView {
                 #[cfg(target_os = "macos")]
                 let export_result = {
                     let html = build_html_document(&title, &text, source_file_path.as_deref());
-                    build_pdf_document_from_html_macos(&html, source_file_path.as_deref(), cx).await
+                    match format {
+                        ExportFormat::Png => {
+                            build_png_document_from_html_macos(
+                                &html,
+                                source_file_path.as_deref(),
+                                cx,
+                            )
+                            .await
+                        }
+                        _ => {
+                            build_pdf_document_from_html_macos(
+                                &html,
+                                source_file_path.as_deref(),
+                                cx,
+                            )
+                            .await
+                        }
+                    }
                 };
 
                 #[cfg(not(target_os = "macos"))]
-                let export_result =
+                let export_result = if matches!(format, ExportFormat::Png) {
+                    Err(anyhow::anyhow!("PNG export is only available on macOS"))
+                } else {
                     cx.background_executor()
                         .spawn(async move {
                             build_pdf_document(&title, &text, source_file_path.as_deref())
                         })
-                        .await;
+                        .await
+                };
 
                 match export_result {
                     Ok(bytes) => fs::write(&path, bytes).err().map(|error| error.to_string()),
@@ -3372,6 +3580,12 @@ impl EditorView {
                             data.supports_text_export,
                             cx,
                             |this, cx| this.export_current_pdf(cx),
+                        ),
+                        self.render_export_button(
+                            "PNG",
+                            data.supports_text_export && cfg!(target_os = "macos"),
+                            cx,
+                            |this, cx| this.export_current(ExportFormat::Png, cx),
                         ),
                     ])
                     .into_any_element(),

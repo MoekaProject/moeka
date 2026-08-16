@@ -32,8 +32,14 @@ pub(crate) fn cache_dir() -> PathBuf {
         .unwrap_or_else(fallback_cache_dir)
 }
 
-pub(crate) fn config_file_path() -> PathBuf {
-    config_dir().join("config.yaml")
+/// User-editable preferences. Only this file drives settings reloads.
+pub(crate) fn settings_file_path() -> PathBuf {
+    config_dir().join("settings.yaml")
+}
+
+/// Restored workspaces, panes and tabs; written by the app, not hand-edited.
+pub(crate) fn sessions_file_path() -> PathBuf {
+    config_dir().join("sessions.yaml")
 }
 
 pub(crate) fn history_dir() -> PathBuf {

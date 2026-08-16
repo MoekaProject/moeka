@@ -244,6 +244,15 @@ pub struct SidebarStyles {
     pub sidebar_item_badge_font_size_px: f32,
     pub sidebar_item_badge_bg: Hsla,
     pub sidebar_item_badge_text_color: Hsla,
+    // Directory file-count badge (file tree rows, workspace/starred/file list headers)
+    pub sidebar_count_badge_min_width_px: f32,
+    pub sidebar_count_badge_height_px: f32,
+    pub sidebar_count_badge_padding_x_px: f32,
+    pub sidebar_count_badge_radius_px: f32,
+    pub sidebar_count_badge_font_size_px: f32,
+    pub sidebar_count_badge_margin_left_px: f32,
+    pub sidebar_count_badge_bg: Hsla,
+    pub sidebar_count_badge_text_color: Hsla,
     // File tree item — label
     pub sidebar_item_font_size_px: f32,
     pub sidebar_item_text_color: Hsla,
@@ -1443,6 +1452,13 @@ impl Styles {
         ui_theme: &Theme,
         sidebar_always_dark: bool,
     ) -> Self {
+        // Light palettes need their muted foregrounds and hairlines deepened
+        // before any style token is derived from them.
+        let theme_contrast = theme.with_light_surface_contrast();
+        let ui_theme_contrast = ui_theme.with_light_surface_contrast();
+        let theme = &theme_contrast;
+        let ui_theme = &ui_theme_contrast;
+
         let ui_font_size_px = 13.0;
         let ui_font_size_sm_px = ui_font_size_px - 1.0;
         let ui_font_size_xs_px = ui_font_size_px - 2.0;
@@ -1686,6 +1702,14 @@ impl Styles {
                 sidebar_item_badge_font_size_px: 10.0,
                 sidebar_item_badge_bg: with_alpha(sidebar_theme.text_secondary, 0.3),
                 sidebar_item_badge_text_color: sidebar_theme.text_secondary,
+                sidebar_count_badge_min_width_px: 16.0,
+                sidebar_count_badge_height_px: 15.0,
+                sidebar_count_badge_padding_x_px: 4.0,
+                sidebar_count_badge_radius_px: 4.0,
+                sidebar_count_badge_font_size_px: 10.0,
+                sidebar_count_badge_margin_left_px: 6.0,
+                sidebar_count_badge_bg: with_alpha(sidebar_theme.text_secondary, 0.18),
+                sidebar_count_badge_text_color: with_alpha(sidebar_theme.text_secondary, 0.92),
                 sidebar_item_font_size_px: ui_font_size_px,
                 sidebar_item_text_color: sidebar_theme.text_primary,
                 sidebar_item_selected_text_color: sidebar_theme.text_bright,
@@ -1764,15 +1788,7 @@ impl Styles {
                 file_list_item_thumbnail_border_color: sidebar_theme.border_primary,
                 file_list_item_bg: sidebar_theme.bg_secondary,
                 file_list_item_hover_bg: sidebar_theme.bg_primary,
-                // Dark sidebars deepen the selected row beyond bg_primary so
-                // the active document stands out from hover.
-                file_list_item_selected_bg: if sidebar_theme.bg_primary.l < 0.5 {
-                    let mut selected = sidebar_theme.bg_primary;
-                    selected.l = (selected.l * 0.8).max(0.0);
-                    selected
-                } else {
-                    sidebar_theme.bg_primary
-                },
+                file_list_item_selected_bg: sidebar_theme.bg_primary,
                 file_list_item_separator_width_px: 1.0,
                 file_list_item_separator_color: with_alpha(sidebar_theme.border_secondary, 0.35),
                 file_list_empty_font_size_px: ui_font_size_sm_px,
@@ -2037,15 +2053,17 @@ impl Styles {
                 tooltip_shortcut_key_bg: with_alpha(ui_theme.bg_code, 0.98),
             },
             cursor: CursorStyles {
-                cursor_color: theme.cursor,
+                // The caret keeps one blue across every theme so it never blends
+                // into a palette's own foreground colours.
+                cursor_color: crate::theme::EDITOR_CARET,
                 cursor_width_px: 2.0,
                 cursor_height_factor: 1.0,
                 // Each tick repaints the whole view tree, so stay at one frame
                 // rather than the display-independent 5ms this used to run at.
                 cursor_blink_tick_ms: 16,
-                cursor_blink_pause_ms: 300,
-                cursor_blink_visible_ms: 200,
-                cursor_blink_transparent_ms: 300,
+                cursor_blink_pause_ms: 420,
+                cursor_blink_visible_ms: 480,
+                cursor_blink_transparent_ms: 480,
                 cursor_opacity_min: 0.0,
                 cursor_opacity_max: 1.0,
                 cursor_opacity_step: 0.15,
@@ -2071,7 +2089,7 @@ impl Styles {
                 code_block_text_padding_left_px: 20.0,
                 code_block_wrap_right_padding_px: 30.0,
                 code_block_fence_clip_px: 15.0,
-                code_block_copy_button_top_px: 3.0,
+                code_block_copy_button_top_px: 2.0,
                 code_block_copy_button_right_px: -4.0,
                 code_block_copy_button_padding_x_px: 10.0,
                 code_block_copy_button_padding_y_px: 4.0,
@@ -2703,6 +2721,9 @@ mod tests {
         let dark_ui_theme = Theme::one_dark();
         let styles = Styles::from_theme(&light_theme, &dark_ui_theme);
         let panel = &styles.utility_panel;
+        // Light palettes get their muted foregrounds and hairlines deepened
+        // before any token is derived from them.
+        let light_theme = light_theme.with_light_surface_contrast();
 
         assert_eq!(panel.utility_panel_bg, light_theme.bg_secondary);
         assert_eq!(panel.utility_panel_border_color, light_theme.border_primary);

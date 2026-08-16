@@ -101,6 +101,40 @@ fn image_markdown_ranges(line_content: &str) -> Option<(Range<usize>, Range<usiz
     ))
 }
 
+/// Innermost `[desc](url)` containing `col`, skipping image syntax (`![`).
+fn markdown_link_ranges(
+    line_content: &str,
+    col: usize,
+) -> Option<(Range<usize>, Range<usize>, Range<usize>)> {
+    let bytes = line_content.as_bytes();
+    let mut search_from = 0;
+    while let Some(offset) = line_content[search_from..].find('[') {
+        let full_start = search_from + offset;
+        search_from = full_start + 1;
+        if full_start > 0 && bytes[full_start - 1] == b'!' {
+            continue;
+        }
+        let desc_start = full_start + 1;
+        let Some(desc_len) = line_content[desc_start..].find("](") else {
+            continue;
+        };
+        let desc_end = desc_start + desc_len;
+        let url_start = desc_end + 2;
+        let Some(url_len) = line_content[url_start..].find(')') else {
+            continue;
+        };
+        let url_end = url_start + url_len;
+        if (full_start..=url_end + 1).contains(&col) {
+            return Some((
+                full_start..url_end + 1,
+                desc_start..desc_end,
+                url_start..url_end,
+            ));
+        }
+    }
+    None
+}
+
 #[derive(Clone)]
 pub(super) struct ImageMenuTarget {
     pub(super) line: usize,
@@ -726,6 +760,54 @@ impl EditorView {
     /// Uses the markdown parser's decoration data for accurate detection.
     /// Inline syntax has priority over block-level syntax.
     /// Returns at most one active action.
+    /// `(full syntax range, text to keep)` for the `[desc](url)` the caret is
+    /// inside, in buffer offsets.
+    fn link_syntax_at_cursor(&self) -> Option<(Range<usize>, Range<usize>)> {
+        let line = self.cursor_line();
+        let line_start = self.buffer.line_start(line);
+        let col = self.cursor.offset.saturating_sub(line_start);
+        let line_content = self.buffer.line_content(line);
+        // An image is a link with a leading `!`; leave those to the image action.
+        let (full, desc, _url) = markdown_link_ranges(line_content, col)?;
+        Some((
+            line_start + full.start..line_start + full.end,
+            line_start + desc.start..line_start + desc.end,
+        ))
+    }
+
+    /// `(full syntax range, target to keep)` for the `[[target]]` at the caret.
+    fn wiki_link_syntax_at_cursor(&self) -> Option<(Range<usize>, Range<usize>)> {
+        let line = self.cursor_line();
+        let line_start = self.buffer.line_start(line);
+        let decoration = self.decorations.get(line)?;
+        let col = self.cursor.offset.saturating_sub(line_start);
+        let wiki_link = decoration
+            .wiki_links
+            .iter()
+            .find(|link| (link.full_range.start..=link.full_range.end).contains(&col))?;
+        Some((
+            line_start + wiki_link.full_range.start..line_start + wiki_link.full_range.end,
+            line_start + wiki_link.full_range.start + 2
+                ..line_start + wiki_link.full_range.end.saturating_sub(2),
+        ))
+    }
+
+    /// `(full syntax range, label to keep)` for the `[^label]` at the caret.
+    fn footnote_syntax_at_cursor(&self) -> Option<(Range<usize>, Range<usize>)> {
+        let line = self.cursor_line();
+        let line_start = self.buffer.line_start(line);
+        let decoration = self.decorations.get(line)?;
+        let col = self.cursor.offset.saturating_sub(line_start);
+        let footnote = decoration.footnote_references.iter().find(|reference| {
+            (reference.full_range.start..=reference.full_range.end).contains(&col)
+        })?;
+        Some((
+            line_start + footnote.full_range.start..line_start + footnote.full_range.end,
+            line_start + footnote.full_range.start + 2
+                ..line_start + footnote.full_range.end.saturating_sub(1),
+        ))
+    }
+
     fn active_format_actions(&self) -> Vec<FormatMenuAction> {
         let cursor_line = self.cursor_line();
         let decoration = match self.decorations.get(cursor_line) {
@@ -920,12 +1002,24 @@ impl EditorView {
         gpui::point(start_position.x, cursor_position.y)
     }
 
+    /// Horizontally pinned to the `/` so the menu does not drift while the
+    /// filter is typed; vertically pinned to the bottom of the cursor's row so
+    /// the layout can flip it directly above or below that row.
+    pub(super) fn slash_menu_position(&self) -> Option<Point<Pixels>> {
+        let start = self.slash_menu_start?;
+        let start_position = self.screen_position_for_offset(start);
+        let cursor_position = self.cursor_screen_position();
+        Some(gpui::point(start_position.x, cursor_position.y))
+    }
+
     pub(crate) fn open_slash_menu(&mut self, cx: &mut Context<Self>) {
         self.slash_menu_start = Some(self.cursor.offset - 1);
         self.slash_filter = String::new();
         self.menu_selected_index = 0;
         self.heading_submenu_open = false;
-        let pos = self.cursor_screen_position();
+        let pos = self
+            .slash_menu_position()
+            .unwrap_or_else(|| self.cursor_screen_position());
         self.open_format_context_menu(pos, cx);
     }
 
@@ -1013,7 +1107,9 @@ impl EditorView {
             } else {
                 self.slash_filter.clear();
             }
-            let pos = self.cursor_screen_position();
+            let pos = self
+                .slash_menu_position()
+                .unwrap_or_else(|| self.cursor_screen_position());
             if let Some(menu) = &mut self.context_menu {
                 menu.position = pos;
             }
@@ -1184,6 +1280,17 @@ impl EditorView {
         self.animate_context_menu_opacity(0.0, true, cx);
     }
 
+    /// Dismisses without the fade-out. The slash menu must use this: during a
+    /// fade the menu is still mounted but `slash_menu_start` is already cleared,
+    /// so it would repaint as the full format menu.
+    pub(crate) fn close_context_menu_immediately(&mut self, cx: &mut Context<Self>) {
+        self.context_menu_opacity_epoch += 1;
+        self.context_menu_opacity_task = None;
+        self.context_menu_opacity = 0.0;
+        self.context_menu_opacity_target = 0.0;
+        self.finish_close_context_menu(cx);
+    }
+
     pub(crate) fn sync_wiki_link_menu(&mut self, cx: &mut Context<Self>) {
         let Some(start) = self.wiki_link_start else {
             return;
@@ -1253,6 +1360,7 @@ impl EditorView {
                 self.reparse();
             }
             self.slash_filter.clear();
+            self.close_context_menu_immediately(cx);
         }
         self.close_context_menu(cx);
         match action {
@@ -1331,12 +1439,16 @@ impl EditorView {
             }
             FormatMenuAction::Highlight => {
                 self.checkpoint();
-                self.apply_wrap("==", "==");
+                if !self.remove_marker_wrap_at_cursor("==") {
+                    self.apply_wrap("==", "==");
+                }
                 self.pause_blinking(cx);
             }
             FormatMenuAction::CodeBlock => {
                 self.checkpoint();
-                self.wrap_current_lines_as_code_block();
+                if !self.unwrap_code_block_at_cursor() {
+                    self.wrap_current_lines_as_code_block();
+                }
                 self.pause_blinking(cx);
             }
             FormatMenuAction::HorizontalRule => {
@@ -1368,11 +1480,21 @@ impl EditorView {
             }
             FormatMenuAction::Link => {
                 self.checkpoint();
-                self.insert_link_or_image("[", "](https://)", "title");
+                if let Some((full, keep)) = self.link_syntax_at_cursor() {
+                    self.unwrap_syntax_range(full, keep);
+                } else {
+                    self.insert_link_or_image("[", "](https://)", "title");
+                }
                 self.pause_blinking(cx);
             }
             FormatMenuAction::WikiLink => {
                 self.checkpoint();
+                if let Some((full, keep)) = self.wiki_link_syntax_at_cursor() {
+                    self.unwrap_syntax_range(full, keep);
+                    self.pause_blinking(cx);
+                    self.close_context_menu(cx);
+                    return;
+                }
                 let range = self.cursor.selection_range();
                 let selected_text = self.buffer.text_for_range(range.clone()).to_string();
                 let replacement = format!("[[{}]]", selected_text);
@@ -1387,7 +1509,15 @@ impl EditorView {
             }
             FormatMenuAction::Image => {
                 self.checkpoint();
-                self.insert_link_or_image("![", "](image.png)", "alt");
+                if let Some(target) = self.current_image_menu_target() {
+                    let line_start = self.buffer.line_start(target.line);
+                    self.unwrap_syntax_range(
+                        line_start + target.full_range.start..line_start + target.full_range.end,
+                        line_start + target.desc_range.start..line_start + target.desc_range.end,
+                    );
+                } else {
+                    self.insert_link_or_image("![", "](image.png)", "alt");
+                }
                 self.pause_blinking(cx);
             }
             FormatMenuAction::Table => {
@@ -1419,16 +1549,26 @@ impl EditorView {
             }
             FormatMenuAction::Superscript => {
                 self.checkpoint();
-                self.apply_wrap("^", "^");
+                if !self.remove_marker_wrap_at_cursor("^") {
+                    self.apply_wrap("^", "^");
+                }
                 self.pause_blinking(cx);
             }
             FormatMenuAction::Subscript => {
                 self.checkpoint();
-                self.apply_wrap("~", "~");
+                if !self.remove_marker_wrap_at_cursor("~") {
+                    self.apply_wrap("~", "~");
+                }
                 self.pause_blinking(cx);
             }
             FormatMenuAction::Footnote => {
                 self.checkpoint();
+                if let Some((full, keep)) = self.footnote_syntax_at_cursor() {
+                    self.unwrap_syntax_range(full, keep);
+                    self.pause_blinking(cx);
+                    self.close_context_menu(cx);
+                    return;
+                }
                 let range = self.cursor.selection_range();
                 if range.is_empty() {
                     let snippet = "[^note]";
@@ -2920,7 +3060,7 @@ impl EditorView {
                     cx,
                     move |this, _, cx| {
                         this.close_context_menu(cx);
-                        this.reveal_path_in_sidebar(reveal_path.clone(), cx);
+                        this.locate_path_in_sidebar(reveal_path.clone(), cx);
                     },
                 ));
             }
@@ -4232,7 +4372,7 @@ impl EditorView {
         match submenu_kind {
             ContextMenuKind::Export { .. } => {
                 self.scaled(self.styles.context_menu.menu_padding_y_px) * 2.0
-                    + self.scaled(self.styles.context_menu.menu_item_height_px) * 3.0
+                    + self.scaled(self.styles.context_menu.menu_item_height_px) * 4.0
             }
             ContextMenuKind::FormatHeading => self.format_heading_menu_height(),
             ContextMenuKind::FormatMore => self.format_more_menu_height(),
@@ -4261,7 +4401,7 @@ impl EditorView {
         [
             (
                 "Markdown",
-                "assets/icons/filetree/markdown.svg",
+                "assets/icons/menu/markdown.svg",
                 super::info_panel::ExportFormat::Markdown,
             ),
             (
@@ -4273,6 +4413,11 @@ impl EditorView {
                 "PDF",
                 "assets/icons/menu/pdf.svg",
                 super::info_panel::ExportFormat::Pdf,
+            ),
+            (
+                "PNG",
+                "assets/icons/menu/png.svg",
+                super::info_panel::ExportFormat::Png,
             ),
         ]
         .into_iter()
@@ -4834,7 +4979,7 @@ impl EditorView {
                             cx,
                             move |this, _, cx| {
                                 this.close_context_menu(cx);
-                                this.reveal_path_in_sidebar(reveal_path.clone(), cx);
+                                this.locate_path_in_sidebar(reveal_path.clone(), cx);
                             },
                         ));
                         {
@@ -5129,6 +5274,12 @@ impl EditorView {
 
         let estimated_menu_height = self.estimated_context_menu_height(items.len());
         let anchor_height = self.context_menu_anchor_height(&menu.kind);
+        // Recompute from the live layout: filtering changes the row count and
+        // the cached position can predate the frame that laid out this line.
+        let anchor_position = self
+            .slash_menu_position()
+            .filter(|_| matches!(menu.kind, ContextMenuKind::Format))
+            .unwrap_or(menu.position);
         let layout = if matches!(menu.kind, ContextMenuKind::Workspace) {
             self.workspace_bar_bounds
                 .get()
@@ -5137,7 +5288,7 @@ impl EditorView {
                 })
                 .unwrap_or_else(|| {
                     self.context_menu_panel_layout_with_anchor(
-                        menu.position,
+                        anchor_position,
                         width,
                         estimated_menu_height,
                         anchor_height,
@@ -5145,7 +5296,7 @@ impl EditorView {
                 })
         } else {
             self.context_menu_panel_layout_with_anchor(
-                menu.position,
+                anchor_position,
                 width,
                 estimated_menu_height,
                 anchor_height,

@@ -2,6 +2,7 @@ SHELL := /bin/bash
 
 APP_NAME := moeka
 APP_DISPLAY_NAME := Moeka
+LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 RUSTC ?= $(shell command -v rustc 2>/dev/null || printf '%s/.cargo/bin/rustc' "$$HOME")
 HOST_TARGET := $(shell "$(RUSTC)" -vV | awk '/^host:/ { print $$2 }')
 TARGET ?= $(HOST_TARGET)
@@ -200,6 +201,7 @@ $(DMG_PATH): app $(DMG_BACKGROUND) $(DMG_SCRIPT)
 	@ln -sfn /Applications "$(DMG_STAGING_DIR)/Applications"
 	@rm -f "$(DMG_PATH)"
 	@bash "$(DMG_SCRIPT)" "$(DMG_STAGING_DIR)" "$(DMG_PATH)" "$(VOLUME_NAME)" "$(APP_DISPLAY_NAME)" "$(DMG_BACKGROUND)"
+	@$(LSREGISTER) -u "$(DMG_STAGING_DIR)/$(APP_DISPLAY_NAME).app" >/dev/null 2>&1 || true
 	@echo "Created $(DMG_PATH)"
 
 app: $(APP_DIR)
@@ -231,6 +233,9 @@ $(APP_DIR): build-release $(INFO_PLIST_TEMPLATE) $(ICON_FILE)
 		plutil -insert CFBundleIconFile -string AppIcon.icns "$(CONTENTS_DIR)/Info.plist"; \
 	fi
 	@touch "$(APP_DIR)"
+	# Keep build products out of the system "Open With" list: LaunchServices
+	# otherwise accumulates one entry per target/DMG copy of the bundle.
+	@$(LSREGISTER) -u "$(APP_DIR)" >/dev/null 2>&1 || true
 	@echo "Created $(APP_DIR)"
 
 build-release:

@@ -38,6 +38,27 @@ fn scroll_y_to_center_uniform_item(
     if item_top >= current_scroll_y && item_bottom <= current_scroll_y + viewport_height {
         return None;
     }
+    centered_scroll_y_for_uniform_item(
+        viewport_height,
+        prefix_height,
+        item_height,
+        index,
+        item_count,
+    )
+}
+
+/// Centers an item vertically regardless of its current visibility.
+fn centered_scroll_y_for_uniform_item(
+    viewport_height: f32,
+    prefix_height: f32,
+    item_height: f32,
+    index: usize,
+    item_count: usize,
+) -> Option<f32> {
+    if viewport_height <= 0.0 || item_height <= 0.0 {
+        return None;
+    }
+    let item_top = prefix_height + index as f32 * item_height;
     let content_height = prefix_height + item_count as f32 * item_height;
     let max_scroll = (content_height - viewport_height).max(0.0);
     Some((item_top + item_height * 0.5 - viewport_height * 0.5).clamp(0.0, max_scroll))
@@ -964,11 +985,18 @@ impl EditorView {
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .text_size(px(self.scaled(ss.file_list_header_font_size_px)))
-                    .text_color(ss.file_list_header_text_color)
-                    .overflow_hidden()
-                    .truncate()
-                    .child(name),
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .text_size(px(self.scaled(ss.file_list_header_font_size_px)))
+                            .text_color(ss.file_list_header_text_color)
+                            .overflow_hidden()
+                            .truncate()
+                            .child(name),
+                    )
+                    .child(self.render_sidebar_count_badge(self.file_list_items.len(), true, 0.0)),
             )
             .child(
                 div()
@@ -1139,14 +1167,18 @@ impl EditorView {
         } else {
             ss.file_list_item_title_color
         };
-        let title = if self.file_list_display_mode == super::FileListDisplayMode::FileName {
-            split_file_name_for_display(&item.name).0.to_string()
-        } else {
-            item.details
-                .as_ref()
-                .and_then(|details| details.title.clone())
-                .unwrap_or_else(|| split_file_name_for_display(&item.name).0.to_string())
-        };
+        let (title, title_suffix) =
+            if self.file_list_display_mode == super::FileListDisplayMode::FileName {
+                let (base, suffix) = split_file_name_for_display(&item.name);
+                (base.to_string(), suffix.map(str::to_string))
+            } else {
+                let title = item
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.title.clone())
+                    .unwrap_or_else(|| split_file_name_for_display(&item.name).0.to_string());
+                (title, None)
+            };
         let modified_time_label =
             crate::i18n::format_relative_time(self.ui_language, item.modified);
         let created_time_label = self.file_list_created_time_label(item.created);
@@ -1224,8 +1256,8 @@ impl EditorView {
                                             .flex_1()
                                             .min_w(px(0.0))
                                             .overflow_hidden()
-                                            .truncate()
-                                            .whitespace_nowrap()
+                                            .flex()
+                                            .items_center()
                                             .text_size(px(
                                                 self.scaled(ss.file_list_item_title_font_size_px)
                                             ))
@@ -1234,7 +1266,22 @@ impl EditorView {
                                             ))
                                             .text_color(title_color)
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .child(title),
+                                            .child(
+                                                div()
+                                                    .overflow_hidden()
+                                                    .truncate()
+                                                    .whitespace_nowrap()
+                                                    .child(title),
+                                            )
+                                            .when_some(title_suffix, |this, suffix| {
+                                                this.child(
+                                                    div()
+                                                        .flex_none()
+                                                        .whitespace_nowrap()
+                                                        .opacity(ss.sidebar_item_suffix_opacity)
+                                                        .child(suffix),
+                                                )
+                                            }),
                                     ),
                             )
                             .when(preview_line_count > 0, |this| {
@@ -1420,17 +1467,30 @@ impl EditorView {
                 .position(|item| item.path == reveal_path)
             {
                 self.file_list_pending_reveal_path = None;
+                let centered = self.file_list_pending_reveal_centered;
+                self.file_list_pending_reveal_centered = false;
                 let viewport_height = f32::from(self.file_list_scroll_handle.bounds().size.height);
                 let current_scroll_y =
                     (-f32::from(self.file_list_scroll_handle.offset().y)).max(0.0);
-                if let Some(next_scroll_y) = scroll_y_to_center_uniform_item(
-                    current_scroll_y,
-                    viewport_height,
-                    prefix_height,
-                    item_height,
-                    index,
-                    self.file_list_items.len(),
-                ) {
+                let next_scroll_y = if centered {
+                    centered_scroll_y_for_uniform_item(
+                        viewport_height,
+                        prefix_height,
+                        item_height,
+                        index,
+                        self.file_list_items.len(),
+                    )
+                } else {
+                    scroll_y_to_center_uniform_item(
+                        current_scroll_y,
+                        viewport_height,
+                        prefix_height,
+                        item_height,
+                        index,
+                        self.file_list_items.len(),
+                    )
+                };
+                if let Some(next_scroll_y) = next_scroll_y {
                     let offset = self.file_list_scroll_handle.offset();
                     self.file_list_scroll_handle
                         .set_offset(gpui::point(offset.x, px(-next_scroll_y)));

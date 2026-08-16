@@ -799,7 +799,7 @@ fn main() {
             }
         });
 
-        // User keybinding overrides from config.yaml are registered last so
+        // User keybinding overrides from settings.yaml are registered last so
         // they take precedence over the default bindings above.
         editor::register_keybinding_overrides(cx);
         editor::set_application_menus(cx);

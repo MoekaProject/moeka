@@ -149,6 +149,14 @@ impl ThemeKind {
     }
 
     pub fn build(self) -> Theme {
+        let mut theme = self.palette();
+        // One caret colour across every theme so it never blends into a
+        // palette's own foreground colours.
+        theme.cursor = EDITOR_CARET;
+        theme
+    }
+
+    fn palette(self) -> Theme {
         match self {
             Self::MoekaPrintDark => Theme::moeka_print_dark(),
             Self::MoekaPrintLight => Theme::moeka_print_light(),
@@ -380,6 +388,8 @@ macro_rules! hex_hsla {
 /// light theme builders; also tunable per-theme via the theme debugger.
 pub const LIGHT_WINDOW_BORDER: Hsla = hex_to_hsla("#00000033");
 pub const DARK_EDITOR_LINK: Hsla = hex_to_hsla("#5AA0FF");
+/// Theme-independent caret colour.
+pub const EDITOR_CARET: Hsla = hex_to_hsla("#2F7CF6");
 
 /// Per-theme token colors for code block syntax highlighting.
 ///
@@ -2440,6 +2450,46 @@ pub const fn with_alpha(color: Hsla, alpha: f32) -> Hsla {
     Hsla { a: alpha, ..color }
 }
 
+fn cap_lightness(color: Hsla, max_lightness: f32) -> Hsla {
+    if color.l <= max_lightness {
+        return color;
+    }
+    Hsla {
+        l: max_lightness,
+        ..color
+    }
+}
+
+impl Theme {
+    /// Light palettes ship very pale muted foregrounds and hairline borders that
+    /// disappear against their own background. Deepen those tokens so icons,
+    /// muted labels, git markers and separators stay legible. Dark palettes are
+    /// returned unchanged.
+    pub fn with_light_surface_contrast(&self) -> Self {
+        if self.bg_primary.l < 0.5 {
+            return self.clone();
+        }
+        let border_primary = cap_lightness(self.border_primary, 0.72);
+        Self {
+            text_secondary: cap_lightness(self.text_secondary, 0.42),
+            git_status_added: cap_lightness(self.git_status_added, 0.38),
+            git_status_modified: cap_lightness(self.git_status_modified, 0.42),
+            border_primary,
+            // The tab bar, tab items, path bar and workspace bar draw their
+            // hairline from `border_secondary`, which light palettes often ship
+            // nearly transparent. Hold it to the same weight as the borders
+            // around it instead.
+            border_secondary: Hsla {
+                a: self.border_secondary.a.max(border_primary.a),
+                ..cap_lightness(self.border_secondary, 0.72)
+            },
+            border_tertiary: cap_lightness(self.border_tertiary, 0.68),
+            border_decorative: cap_lightness(self.border_decorative, 0.74),
+            ..self.clone()
+        }
+    }
+}
+
 pub fn parse_hex_color(input: &str) -> Option<Hsla> {
     let hex = input.trim().trim_start_matches('#');
     let (r, g, b, a) = match hex.len() {
@@ -2561,6 +2611,24 @@ mod tests {
         DARK_EDITOR_LINK, EditorThemeMode, Theme, ThemeColorField, ThemeKind,
         apply_editor_theme_mode, with_alpha,
     };
+
+    #[test]
+    fn light_chrome_hairlines_match_the_primary_border_weight() {
+        for kind in ThemeKind::light_themes() {
+            let theme = kind.build().with_light_surface_contrast();
+            assert_eq!(
+                theme.border_secondary.a,
+                theme.border_primary.a,
+                "{} tab bar / workspace bar hairline is fainter than its other borders",
+                kind.label()
+            );
+            assert!(
+                theme.border_secondary.l <= theme.border_primary.l + f32::EPSILON,
+                "{} tab bar / workspace bar hairline is lighter than its other borders",
+                kind.label()
+            );
+        }
+    }
 
     #[test]
     fn interface_semantic_colors_round_trip_for_all_builtin_themes() {

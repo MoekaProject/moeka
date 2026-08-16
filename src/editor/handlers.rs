@@ -720,6 +720,7 @@ impl EditorView {
             self.cursor.move_up(&self.buffer);
         }
         self.snap_cursor_to_content();
+        self.skip_table_separator_line(false);
         self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
         self.maybe_auto_select_link_url(prev_offset, false, cx);
         self.navigate_scroll_to_cursor();
@@ -770,6 +771,7 @@ impl EditorView {
             self.cursor.move_down(&self.buffer);
         }
         self.snap_cursor_to_content();
+        self.skip_table_separator_line(true);
         self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
         self.maybe_auto_select_link_url(prev_offset, false, cx);
         self.navigate_scroll_to_cursor();
@@ -912,17 +914,19 @@ impl EditorView {
         line_start: usize,
         line_end: usize,
         line_content: &str,
-        leading_ws: usize,
+        prefix_len: usize,
+        body_indent: usize,
         indent_step: usize,
     ) -> bool {
-        if leading_ws == 0 {
+        if body_indent == 0 {
             return false;
         }
-        let step = indent_step.clamp(1, leading_ws);
+        let step = indent_step.clamp(1, body_indent);
         let outdented = format!(
-            "{}{}",
-            " ".repeat(leading_ws - step),
-            &line_content[leading_ws..]
+            "{}{}{}",
+            &line_content[..prefix_len],
+            " ".repeat(body_indent - step),
+            &line_content[prefix_len + body_indent..]
         );
         self.queue_non_markdown_line_display_transfer(&(line_start..line_end), &outdented);
         self.buffer.replace(line_start..line_end, &outdented);
@@ -955,6 +959,9 @@ impl EditorView {
             self.commit_sidebar_edit(cx);
             return;
         }
+        if !self.has_extra_cursors() && self.table_move_to_cell_below(cx) {
+            return;
+        }
         self.checkpoint();
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
@@ -976,9 +983,15 @@ impl EditorView {
             .map(|d| d.block_type.clone())
             .unwrap_or(BlockType::Normal);
 
-        let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+        // Blockquote lines continue with their own `> ` prefix, and any list
+        // nested inside one is measured from after that prefix.
+        let quote_prefix_len = markdown::blockquote_prefix_len(&line_content);
+        let quote_prefix = &line_content[..quote_prefix_len];
+        let body = &line_content[quote_prefix_len..];
+        let body_indent = body.len() - body.trim_start_matches([' ', '\t']).len();
+        let leading_ws = quote_prefix_len + body_indent;
         let trimmed = &line_content[leading_ws..];
-        let ws_str = " ".repeat(leading_ws);
+        let ws_str = format!("{}{}", quote_prefix, " ".repeat(body_indent));
 
         match block_type {
             BlockType::UnorderedList => {
@@ -997,15 +1010,18 @@ impl EditorView {
                             line_start,
                             line_end,
                             &line_content,
-                            leading_ws,
+                            quote_prefix_len,
+                            body_indent,
                             2,
                         ) {
+                            let cleared = quote_prefix.to_string();
                             self.queue_non_markdown_line_display_transfer(
                                 &(line_start..line_end),
-                                "\n",
+                                &cleared,
                             );
-                            self.buffer.replace(line_start..line_end, "");
-                            self.cursor.move_to(line_start, &self.buffer);
+                            self.buffer.replace(line_start..line_end, &cleared);
+                            self.cursor
+                                .move_to(line_start + cleared.len(), &self.buffer);
                             self.cursor.insert(&mut self.buffer, "\n");
                         }
                     } else {
@@ -1032,15 +1048,18 @@ impl EditorView {
                             line_start,
                             line_end,
                             &line_content,
-                            leading_ws,
+                            quote_prefix_len,
+                            body_indent,
                             2,
                         ) {
+                            let cleared = quote_prefix.to_string();
                             self.queue_non_markdown_line_display_transfer(
                                 &(line_start..line_end),
-                                "\n",
+                                &cleared,
                             );
-                            self.buffer.replace(line_start..line_end, "");
-                            self.cursor.move_to(line_start, &self.buffer);
+                            self.buffer.replace(line_start..line_end, &cleared);
+                            self.cursor
+                                .move_to(line_start + cleared.len(), &self.buffer);
                             self.cursor.insert(&mut self.buffer, "\n");
                         }
                     } else {
@@ -1074,15 +1093,18 @@ impl EditorView {
                             line_start,
                             line_end,
                             &line_content,
-                            leading_ws,
+                            quote_prefix_len,
+                            body_indent,
                             3,
                         ) {
+                            let cleared = quote_prefix.to_string();
                             self.queue_non_markdown_line_display_transfer(
                                 &(line_start..line_end),
-                                "\n",
+                                &cleared,
                             );
-                            self.buffer.replace(line_start..line_end, "");
-                            self.cursor.move_to(line_start, &self.buffer);
+                            self.buffer.replace(line_start..line_end, &cleared);
+                            self.cursor
+                                .move_to(line_start + cleared.len(), &self.buffer);
                             self.cursor.insert(&mut self.buffer, "\n");
                         }
                         self.reparse();
@@ -1095,6 +1117,29 @@ impl EditorView {
                         self.renumber_ordered_list_after(cursor_line + 2, number + 2, leading_ws);
                         self.reparse();
                     }
+                    if !cursor_had_inline_headroom {
+                        self.scroll_to_cursor();
+                    }
+                    self.pause_blinking(cx);
+                    return;
+                }
+            }
+            BlockType::Blockquote if quote_prefix_len > 0 => {
+                if self.cursor.offset >= line_start + quote_prefix_len {
+                    // Enter on an empty quote line leaves the quote instead of
+                    // adding another empty `>` row.
+                    if line_content[quote_prefix_len..].trim().is_empty() {
+                        self.queue_non_markdown_line_display_transfer(&(line_start..line_end), "");
+                        self.buffer.replace(line_start..line_end, "");
+                        self.cursor.move_to(line_start, &self.buffer);
+                        self.cursor.insert(&mut self.buffer, "\n");
+                    } else {
+                        let continuation = format!("\n{}", quote_prefix);
+                        let insert_range = self.cursor.selection_range();
+                        self.queue_non_markdown_line_display_transfer(&insert_range, &continuation);
+                        self.cursor.insert(&mut self.buffer, &continuation);
+                    }
+                    self.reparse();
                     if !cursor_had_inline_headroom {
                         self.scroll_to_cursor();
                     }
@@ -1135,6 +1180,9 @@ impl EditorView {
         if self.active_tab_is_read_only() {
             return;
         }
+        if self.table_move_to_adjacent_cell(true, cx) {
+            return;
+        }
         self.checkpoint();
         let (line_indices, has_selection, has_list_line) =
             self.collect_line_indices_for_block_indent();
@@ -1166,6 +1214,9 @@ impl EditorView {
 
     pub(crate) fn on_back_tab(&mut self, _: &BackTab, _: &mut Window, cx: &mut Context<Self>) {
         if self.active_tab_is_read_only() {
+            return;
+        }
+        if self.table_move_to_adjacent_cell(false, cx) {
             return;
         }
         self.checkpoint();
@@ -2412,7 +2463,7 @@ impl EditorView {
                     );
                     session_store::persist_session(self);
                     cx.notify();
-                    if path == &crate::editor::config_paths::config_file_path() {
+                    if path == &crate::editor::config_paths::settings_file_path() {
                         self.apply_saved_config_file(cx);
                     }
                 }

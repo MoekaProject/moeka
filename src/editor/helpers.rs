@@ -242,9 +242,21 @@ pub(crate) fn task_prefix_target_width_px(
         return None;
     }
 
-    let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
-    let indent_levels = leading_ws / task_source_indent_step_chars;
+    let indent_levels = list_marker_body_indent(line_content) / task_source_indent_step_chars;
     Some((indent_levels + 1) as f32 * (checkbox_size_px + checkbox_text_gap_px))
+}
+
+/// Byte offset at which a line's list/task marker starts: the blockquote
+/// prefix (if any) plus the indentation that follows it.
+pub(crate) fn list_marker_indent(line_content: &str) -> usize {
+    let quote_len = markdown::blockquote_prefix_len(line_content);
+    quote_len + list_marker_body_indent(line_content)
+}
+
+/// Indentation after the blockquote prefix, i.e. the real nesting depth.
+pub(crate) fn list_marker_body_indent(line_content: &str) -> usize {
+    let body = &line_content[markdown::blockquote_prefix_len(line_content)..];
+    body.len() - body.trim_start_matches([' ', '\t']).len()
 }
 
 fn active_range_intersects_target(active_range: &Range<usize>, target: &Range<usize>) -> bool {
@@ -385,7 +397,8 @@ pub(crate) fn build_display_text(
     }
 
     let len = line_content.len();
-    let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+    let leading_ws = list_marker_indent(line_content);
+    let body_indent = list_marker_body_indent(line_content);
     let trimmed = &line_content[leading_ws..];
     let task_core_len = task_core_syntax_len(trimmed);
     let task_fold_len = task_prefix_len(trimmed);
@@ -641,7 +654,7 @@ pub(crate) fn build_display_text(
         BlockType::TaskList(_) => {
             let fold_len = task_fold_len;
             let visual_indent = task_visual_indent_display_columns(
-                leading_ws,
+                body_indent,
                 task_indent_step_display_columns,
                 task_source_indent_step_chars,
             );
@@ -2238,6 +2251,41 @@ mod tests {
                 !display_text.contains('>'),
                 "line {line_content:?} rendered {display_text:?}"
             );
+        }
+    }
+
+    #[test]
+    fn quoted_lists_render_like_unquoted_ones() {
+        for (quoted, plain) in [
+            ("> - item", "- item"),
+            ("> 1. item", "1. item"),
+            ("> - [ ] todo", "- [ ] todo"),
+        ] {
+            let render = |line: &str| {
+                let decorations = markdown::parse_decorations(&format!("{line}\n"));
+                let (display_text, _, buffer_to_display, prefix_collapsed) = build_display_text(
+                    line,
+                    &decorations[0],
+                    &[],
+                    false,
+                    None,
+                    1,
+                    2,
+                    2,
+                    2,
+                    1,
+                    0.7,
+                    0.7,
+                    0.7,
+                );
+                let marker_display_index = buffer_to_display
+                    .get(super::list_marker_indent(line))
+                    .copied()
+                    .unwrap_or(0);
+                (display_text, prefix_collapsed, marker_display_index)
+            };
+
+            assert_eq!(render(quoted), render(plain), "quoted {quoted:?}");
         }
     }
 
@@ -5443,7 +5491,7 @@ pub(crate) fn build_text_runs_for_display(
         }
     }
 
-    let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+    let leading_ws = list_marker_indent(line_content);
     let trimmed = &line_content[leading_ws..];
     match decoration.block_type {
         BlockType::UnorderedList => {
@@ -5492,7 +5540,7 @@ pub(crate) fn build_text_runs_for_display(
     }
 
     if let BlockType::TaskList(true) = decoration.block_type {
-        let leading_ws = line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+        let leading_ws = list_marker_indent(line_content);
         let trimmed = &line_content[leading_ws..];
         let prefix_len = task_prefix_len(trimmed);
         let text_start = (leading_ws + prefix_len).min(buf_len);
