@@ -29,24 +29,24 @@ Moeka هو تطبيق **لتحرير Markdown** أنيق وسلس ويعمل م�
 - [ ] أضف عناصر مكتملة أخرى لاحقًا.
 ***
 ### التعامل مع الجداول
-| الميزة                     | الاختصار        |
-| -------------------------- | --------------- |
-| `Command + B`              | عريض            |
-| `Command + I`              | مائل            |
-| `Command + U`              | تسطير           |
-| `Command + Shift + X`      | يتوسطه خط       |
-| `Command + E`              | كود داخل السطر  |
-| `Command + Option + C`     | كتلة كود        |
-| `Command + Option + Q`     | اقتباس          |
-| `Command + Option + U`     | قائمة غير مرتبة |
-| `Command + Option + O`     | قائمة مرتبة     |
-| `Command + Option + Enter` | مهمة            |
-| `Command + K`              | رابط            |
-| `Command + Option + T`     | جدول            |
-| `Command + 0`              | فقرة            |
-| `/ image`                  | صورة            |
+| الميزة                                  | الاختصار        |
+| --------------------------------------- | --------------- |
+| `Command / Ctrl + B`                    | عريض            |
+| `Command / Ctrl + I`                    | مائل            |
+| `Command / Ctrl + U`                    | تسطير           |
+| `Command / Ctrl + Shift + X`            | يتوسطه خط       |
+| `Command / Ctrl + E`                    | كود داخل السطر  |
+| `Command / Ctrl + Option / Alt + C`     | كتلة كود        |
+| `Command / Ctrl + Option / Alt + Q`     | اقتباس          |
+| `Command / Ctrl + Option / Alt + U`     | قائمة غير مرتبة |
+| `Command / Ctrl + Option / Alt + O`     | قائمة مرتبة     |
+| `Command / Ctrl + Option / Alt + Enter` | مهمة            |
+| `Command / Ctrl + K`                    | رابط            |
+| `Command / Ctrl + Option / Alt + T`     | جدول            |
+| `Command / Ctrl + 0`                    | فقرة            |
+| `/ image`                               | صورة            |
 
-| --------------------- | --------  |
+| --------------------- | --------- |
 | --------------------- | --------- |
 | `[[`                  | رابط wiki |
 | `/ image`             | صورة      |
@@ -111,7 +111,7 @@ pie title Pets adopted by volunteers
 - استخدم [رابطًا خارجيًا](https://google.com) لفتح أي عنوان ويب.
 - استخدم صيغة الحواشي[^note] للانتقال إلى سطر مرجعي.
 - استخدم [رابط ملف](Feature Plan.md) لفتح ملف أو عنوان.
-- اضغط مع الاستمرار على `Command` وانقر على هذه الروابط لفتحها.
+- اضغط مع الاستمرار على `Command / Ctrl` وانقر على هذه الروابط لفتحها.
 ## صيغة داخلية موسعة
 - مثال الرمز السفلي: H~2~O. مثال الرمز العلوي: E=mc^2^. تعمل أيضًا Foo~zoo~ أو Bar^baz^.
 - صيغة ==التمييز== مدعومة لإبراز النص.

@@ -29,22 +29,22 @@ description: 介绍小语文稿的使用
 - [ ] 追加录入一些已完成事项。
 ***
 ### 表格交互
-| 功能                       | 快捷键   |
-| -------------------------- | -------- |
-| `Command + B`              | 加粗     |
-| `Command + I`              | 斜体     |
-| `Command + U`              | 下划线   |
-| `Command + Shift + X`      | 删除线   |
-| `Command + E`              | 行内代码 |
-| `Command + Option + C`     | 代码块   |
-| `Command + Option + Q`     | 引用     |
-| `Command + Option + U`     | 无序列表 |
-| `Command + Option + O`     | 有序列表 |
-| `Command + Option + Enter` | 待办事项 |
-| `Command + K`              | 链接     |
-| `Command + Option + T`     | 表格     |
-| `Command + 0`              | 正文     |
-| `/ image`                  | 图片     |
+| 功能                                    | 快捷键   |
+| --------------------------------------- | -------- |
+| `Command / Ctrl + B`                    | 加粗     |
+| `Command / Ctrl + I`                    | 斜体     |
+| `Command / Ctrl + U`                    | 下划线   |
+| `Command / Ctrl + Shift + X`            | 删除线   |
+| `Command / Ctrl + E`                    | 行内代码 |
+| `Command / Ctrl + Option / Alt + C`     | 代码块   |
+| `Command / Ctrl + Option / Alt + Q`     | 引用     |
+| `Command / Ctrl + Option / Alt + U`     | 无序列表 |
+| `Command / Ctrl + Option / Alt + O`     | 有序列表 |
+| `Command / Ctrl + Option / Alt + Enter` | 待办事项 |
+| `Command / Ctrl + K`                    | 链接     |
+| `Command / Ctrl + Option / Alt + T`     | 表格     |
+| `Command / Ctrl + 0`                    | 正文     |
+| `/ image`                               | 图片     |
 ## 代码块语法
 ```rust
 fn greet(name: &str) {
@@ -95,7 +95,7 @@ mindmap
 - 或者使用[外部链接](https://google.com)，跳转到外部的任意链接。
 - 还可以使用脚注语法[^note]跳转到脚注行用于引用参考。
 - 另外可以使用[文件链接](功能规划.md)跳转到指定文件的指定标题。
-- 以上所有语法，都可以按住 `Command` 键并点击后跳转。
+- 以上所有语法，都可以按住 `Command / Ctrl` 键并点击后跳转。
 ## 行内扩展语法
 - 下标示例：H~2~O，上标示例：E=mc^2^，可以用英文：Foo~zoo~ 或者 Bar^baz^ 等。
 - 另外也支持==高亮==语法，让文本显得更加醒目强调。

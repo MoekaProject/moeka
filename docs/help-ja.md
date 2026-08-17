@@ -29,24 +29,24 @@ Moeka は `Markdown` をテキスト形式として使います。Markdown は�
 - [ ] 完了した項目をあとで追加できます。
 ***
 ### テーブル操作
-| 機能                       | ショートカット   |
-| -------------------------- | ---------------- |
-| `Command + B`              | 太字             |
-| `Command + I`              | 斜体             |
-| `Command + U`              | 下線             |
-| `Command + Shift + X`      | 取り消し線       |
-| `Command + E`              | インラインコード |
-| `Command + Option + C`     | コードブロック   |
-| `Command + Option + Q`     | 引用             |
-| `Command + Option + U`     | 箇条書き         |
-| `Command + Option + O`     | 番号付きリスト   |
-| `Command + Option + Enter` | Todo             |
-| `Command + K`              | リンク           |
-| `Command + Option + T`     | 表               |
-| `Command + 0`              | 本文             |
-| `/ image`                  | 画像             |
+| 機能                                    | ショートカット   |
+| --------------------------------------- | ---------------- |
+| `Command / Ctrl + B`                    | 太字             |
+| `Command / Ctrl + I`                    | 斜体             |
+| `Command / Ctrl + U`                    | 下線             |
+| `Command / Ctrl + Shift + X`            | 取り消し線       |
+| `Command / Ctrl + E`                    | インラインコード |
+| `Command / Ctrl + Option / Alt + C`     | コードブロック   |
+| `Command / Ctrl + Option / Alt + Q`     | 引用             |
+| `Command / Ctrl + Option / Alt + U`     | 箇条書き         |
+| `Command / Ctrl + Option / Alt + O`     | 番号付きリスト   |
+| `Command / Ctrl + Option / Alt + Enter` | Todo             |
+| `Command / Ctrl + K`                    | リンク           |
+| `Command / Ctrl + Option / Alt + T`     | 表               |
+| `Command / Ctrl + 0`                    | 本文             |
+| `/ image`                               | 画像             |
 
-| --------------------- | --------    |
+| --------------------- | ----------- |
 | --------------------- | ----------- |
 | `[[`                  | Wiki リンク |
 | `/ image`             | 画像        |
@@ -111,7 +111,7 @@ pie title Pets adopted by volunteers
 - [外部リンク](https://google.com) で任意の Web ページを開けます。
 - 脚注構文[^note]で参照行へ移動できます。
 - [ファイルリンク](Feature Plan.md) で指定したファイルや見出しへ移動できます。
-- これらのリンクは `Command` キーを押しながらクリックすると開けます。
+- これらのリンクは `Command / Ctrl` キーを押しながらクリックすると開けます。
 ## 拡張インライン構文
 - 下付き文字の例：H~2~O。上付き文字の例：E=mc^2^。英語の Foo~zoo~ や Bar^baz^ も使えます。
 - ==ハイライト== 構文で文字を目立たせることもできます。

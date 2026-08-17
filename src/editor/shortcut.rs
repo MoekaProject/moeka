@@ -1181,16 +1181,16 @@ mod command_tests {
     }
 
     /// Convert a COMMAND_SPECS keystroke to the long form used by the help
-    /// documents ("Command + Shift + X"). The docs describe the macOS build.
+    /// documents ("Command / Ctrl + Shift + X"), which name both platforms.
     #[cfg(target_os = "macos")]
     fn docs_shortcut(keystroke: &str) -> String {
         super::display_shortcut_from_keystroke(keystroke)
             .chars()
             .map(|ch| match ch {
                 '⌃' => "Control".to_string(),
-                '⌥' => "Option".to_string(),
+                '⌥' => "Option / Alt".to_string(),
                 '⇧' => "Shift".to_string(),
-                '⌘' => "Command".to_string(),
+                '⌘' => "Command / Ctrl".to_string(),
                 '↩' => "Enter".to_string(),
                 other => other.to_string(),
             })

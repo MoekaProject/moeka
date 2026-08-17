@@ -29,24 +29,24 @@ Moeka는 `Markdown`을 텍스트 편집 형식으로 사용합니다. Markdown�
 - [ ] 완료된 항목을 나중에 추가할 수 있습니다.
 ***
 ### 표 상호작용
-| 기능                       | 단축키         |
-| -------------------------- | -------------- |
-| `Command + B`              | 굵게           |
-| `Command + I`              | 기울임         |
-| `Command + U`              | 밑줄           |
-| `Command + Shift + X`      | 취소선         |
-| `Command + E`              | 인라인 코드    |
-| `Command + Option + C`     | 코드 블록      |
-| `Command + Option + Q`     | 인용           |
-| `Command + Option + U`     | 순서 없는 목록 |
-| `Command + Option + O`     | 순서 있는 목록 |
-| `Command + Option + Enter` | 할 일          |
-| `Command + K`              | 링크           |
-| `Command + Option + T`     | 표             |
-| `Command + 0`              | 본문           |
-| `/ image`                  | 이미지         |
+| 기능                                    | 단축키         |
+| --------------------------------------- | -------------- |
+| `Command / Ctrl + B`                    | 굵게           |
+| `Command / Ctrl + I`                    | 기울임         |
+| `Command / Ctrl + U`                    | 밑줄           |
+| `Command / Ctrl + Shift + X`            | 취소선         |
+| `Command / Ctrl + E`                    | 인라인 코드    |
+| `Command / Ctrl + Option / Alt + C`     | 코드 블록      |
+| `Command / Ctrl + Option / Alt + Q`     | 인용           |
+| `Command / Ctrl + Option / Alt + U`     | 순서 없는 목록 |
+| `Command / Ctrl + Option / Alt + O`     | 순서 있는 목록 |
+| `Command / Ctrl + Option / Alt + Enter` | 할 일          |
+| `Command / Ctrl + K`                    | 링크           |
+| `Command / Ctrl + Option / Alt + T`     | 표             |
+| `Command / Ctrl + 0`                    | 본문           |
+| `/ image`                               | 이미지         |
 
-| --------------------- | --------  |
+| --------------------- | --------- |
 | --------------------- | --------- |
 | `[[`                  | 위키 링크 |
 | `/ image`             | 이미지    |
@@ -111,7 +111,7 @@ pie title Pets adopted by volunteers
 - [외부 링크](https://google.com)로 원하는 웹 주소를 열 수 있습니다.
 - 각주 문법[^note]으로 참조 줄로 이동할 수 있습니다.
 - [파일 링크](Feature Plan.md)로 지정한 파일이나 제목으로 이동할 수 있습니다.
-- 위 링크들은 `Command` 키를 누른 채 클릭하면 열립니다.
+- 위 링크들은 `Command / Ctrl` 키를 누른 채 클릭하면 열립니다.
 ## 확장 인라인 문법
 - 아래 첨자 예시: H~2~O. 위 첨자 예시: E=mc^2^. Foo~zoo~ 또는 Bar^baz^ 같은 영어도 사용할 수 있습니다.
 - ==하이라이트== 문법으로 텍스트를 더 눈에 띄게 만들 수 있습니다.

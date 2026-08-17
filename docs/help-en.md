@@ -29,24 +29,24 @@ Moeka uses `Markdown` as its text format. Markdown is ideal for writers because 
 - [ ] Add more completed items later.
 ***
 ### Table Interaction
-| Feature                    | Shortcut       |
-| -------------------------- | -------------- |
-| `Command + B`              | Bold           |
-| `Command + I`              | Italic         |
-| `Command + U`              | Underline      |
-| `Command + Shift + X`      | Strikethrough  |
-| `Command + E`              | Inline code    |
-| `Command + Option + C`     | Code block     |
-| `Command + Option + Q`     | Quote          |
-| `Command + Option + U`     | Unordered list |
-| `Command + Option + O`     | Ordered list   |
-| `Command + Option + Enter` | Todo           |
-| `Command + K`              | Link           |
-| `Command + Option + T`     | Table          |
-| `Command + 0`              | Paragraph      |
-| `/ image`                  | Image          |
+| Feature                                 | Shortcut       |
+| --------------------------------------- | -------------- |
+| `Command / Ctrl + B`                    | Bold           |
+| `Command / Ctrl + I`                    | Italic         |
+| `Command / Ctrl + U`                    | Underline      |
+| `Command / Ctrl + Shift + X`            | Strikethrough  |
+| `Command / Ctrl + E`                    | Inline code    |
+| `Command / Ctrl + Option / Alt + C`     | Code block     |
+| `Command / Ctrl + Option / Alt + Q`     | Quote          |
+| `Command / Ctrl + Option / Alt + U`     | Unordered list |
+| `Command / Ctrl + Option / Alt + O`     | Ordered list   |
+| `Command / Ctrl + Option / Alt + Enter` | Todo           |
+| `Command / Ctrl + K`                    | Link           |
+| `Command / Ctrl + Option / Alt + T`     | Table          |
+| `Command / Ctrl + 0`                    | Paragraph      |
+| `/ image`                               | Image          |
 
-| --------------------- | --------  |
+| --------------------- | --------- |
 | --------------------- | --------- |
 | `[[`                  | Wiki link |
 | `/ image`             | Image     |
@@ -111,7 +111,7 @@ pie title Pets adopted by volunteers
 - Use an [external link](https://google.com) to open any web address.
 - Use footnote syntax[^note] to jump to a reference line.
 - Use a [file link](Feature Plan.md) to jump to a file or heading.
-- Hold `Command` and click any of the above links to open them.
+- Hold `Command / Ctrl` and click any of the above links to open them.
 ## Local Attachments
 - Pasting an image or file, or dropping one from Finder into a Markdown document, copies it to the attachment location selected in Settings. Dropping a file from Moeka's sidebar inserts a link without copying the file.
 - Attachment locations can be the document folder, a workspace folder, or a subfolder beside the current document. Custom folders must be relative paths inside the workspace.

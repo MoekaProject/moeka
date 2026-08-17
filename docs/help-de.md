@@ -29,24 +29,24 @@ Moeka verwendet `Markdown` als Textformat. Markdown eignet sich gut für Autorin
 - [ ] Füge später weitere erledigte Einträge hinzu.
 ***
 ### Tabelleninteraktion
-| Funktion                   | Kurzbefehl        |
-| -------------------------- | ----------------- |
-| `Command + B`              | Fett              |
-| `Command + I`              | Kursiv            |
-| `Command + U`              | Unterstreichen    |
-| `Command + Shift + X`      | Durchgestrichen   |
-| `Command + E`              | Inline-Code       |
-| `Command + Option + C`     | Codeblock         |
-| `Command + Option + Q`     | Zitat             |
-| `Command + Option + U`     | Ungeordnete Liste |
-| `Command + Option + O`     | Geordnete Liste   |
-| `Command + Option + Enter` | Aufgabe           |
-| `Command + K`              | Link              |
-| `Command + Option + T`     | Tabelle           |
-| `Command + 0`              | Absatz            |
-| `/ image`                  | Bild              |
+| Funktion                                | Kurzbefehl        |
+| --------------------------------------- | ----------------- |
+| `Command / Ctrl + B`                    | Fett              |
+| `Command / Ctrl + I`                    | Kursiv            |
+| `Command / Ctrl + U`                    | Unterstreichen    |
+| `Command / Ctrl + Shift + X`            | Durchgestrichen   |
+| `Command / Ctrl + E`                    | Inline-Code       |
+| `Command / Ctrl + Option / Alt + C`     | Codeblock         |
+| `Command / Ctrl + Option / Alt + Q`     | Zitat             |
+| `Command / Ctrl + Option / Alt + U`     | Ungeordnete Liste |
+| `Command / Ctrl + Option / Alt + O`     | Geordnete Liste   |
+| `Command / Ctrl + Option / Alt + Enter` | Aufgabe           |
+| `Command / Ctrl + K`                    | Link              |
+| `Command / Ctrl + Option / Alt + T`     | Tabelle           |
+| `Command / Ctrl + 0`                    | Absatz            |
+| `/ image`                               | Bild              |
 
-| --------------------- | --------  |
+| --------------------- | --------- |
 | --------------------- | --------- |
 | `[[`                  | Wiki-Link |
 | `/ image`             | Bild      |
@@ -111,7 +111,7 @@ pie title Pets adopted by volunteers
 - Nutze einen [externen Link](https://google.com), um eine Webadresse zu öffnen.
 - Nutze Fußnoten[^note], um zu einer Referenzzeile zu springen.
 - Nutze einen [Dateilink](Feature Plan.md), um eine Datei oder Überschrift zu öffnen.
-- Halte `Command` gedrückt und klicke auf diese Links, um sie zu öffnen.
+- Halte `Command / Ctrl` gedrückt und klicke auf diese Links, um sie zu öffnen.
 ## Erweiterte Inline-Syntax
 - Tiefstellung: H~2~O. Hochstellung: E=mc^2^. Auch Foo~zoo~ oder Bar^baz^ funktionieren.
 - ==Hervorhebung== wird für stärkere Betonung unterstützt.

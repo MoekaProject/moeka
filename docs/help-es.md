@@ -29,24 +29,24 @@ Moeka usa `Markdown` como formato de texto. Markdown es ideal para escribir porq
 - [ ] Agrega más elementos completados después.
 ***
 ### Interacción con tablas
-| Función                    | Atajo            |
-| -------------------------- | ---------------- |
-| `Command + B`              | Negrita          |
-| `Command + I`              | Cursiva          |
-| `Command + U`              | Subrayar         |
-| `Command + Shift + X`      | Tachado          |
-| `Command + E`              | Código en línea  |
-| `Command + Option + C`     | Bloque de código |
-| `Command + Option + Q`     | Cita             |
-| `Command + Option + U`     | Lista sin orden  |
-| `Command + Option + O`     | Lista ordenada   |
-| `Command + Option + Enter` | Tarea            |
-| `Command + K`              | Enlace           |
-| `Command + Option + T`     | Tabla            |
-| `Command + 0`              | Párrafo          |
-| `/ image`                  | Imagen           |
+| Función                                 | Atajo            |
+| --------------------------------------- | ---------------- |
+| `Command / Ctrl + B`                    | Negrita          |
+| `Command / Ctrl + I`                    | Cursiva          |
+| `Command / Ctrl + U`                    | Subrayar         |
+| `Command / Ctrl + Shift + X`            | Tachado          |
+| `Command / Ctrl + E`                    | Código en línea  |
+| `Command / Ctrl + Option / Alt + C`     | Bloque de código |
+| `Command / Ctrl + Option / Alt + Q`     | Cita             |
+| `Command / Ctrl + Option / Alt + U`     | Lista sin orden  |
+| `Command / Ctrl + Option / Alt + O`     | Lista ordenada   |
+| `Command / Ctrl + Option / Alt + Enter` | Tarea            |
+| `Command / Ctrl + K`                    | Enlace           |
+| `Command / Ctrl + Option / Alt + T`     | Tabla            |
+| `Command / Ctrl + 0`                    | Párrafo          |
+| `/ image`                               | Imagen           |
 
-| --------------------- | --------    |
+| --------------------- | ----------- |
 | --------------------- | ----------- |
 | `[[`                  | Enlace wiki |
 | `/ image`             | Imagen      |
@@ -111,7 +111,7 @@ pie title Pets adopted by volunteers
 - Usa un [enlace externo](https://google.com) para abrir cualquier dirección web.
 - Usa notas al pie[^note] para saltar a una referencia.
 - Usa un [enlace de archivo](Feature Plan.md) para abrir un archivo o título.
-- Mantén `Command` y haz clic para abrir estos enlaces.
+- Mantén `Command / Ctrl` y haz clic para abrir estos enlaces.
 ## Sintaxis en línea extendida
 - Subíndice: H~2~O. Superíndice: E=mc^2^. También funciona Foo~zoo~ o Bar^baz^.
 - La sintaxis ==resaltada== ayuda a enfatizar más el texto.

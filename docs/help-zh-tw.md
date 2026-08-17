@@ -29,22 +29,22 @@ description: 介紹小語文稿的使用
 - [ ] 追加記錄一些已完成事項。
 ***
 ### 表格互動
-| 功能                       | 快捷鍵     |
-| -------------------------- | ---------- |
-| `Command + B`              | 粗體       |
-| `Command + I`              | 斜體       |
-| `Command + U`              | 底線       |
-| `Command + Shift + X`      | 刪除線     |
-| `Command + E`              | 行內程式碼 |
-| `Command + Option + C`     | 程式碼區塊 |
-| `Command + Option + Q`     | 引用       |
-| `Command + Option + U`     | 無序列表   |
-| `Command + Option + O`     | 有序列表   |
-| `Command + Option + Enter` | 待辦事項   |
-| `Command + K`              | 連結       |
-| `Command + Option + T`     | 表格       |
-| `Command + 0`              | 正文       |
-| `/ image`                  | 圖片       |
+| 功能                                    | 快捷鍵     |
+| --------------------------------------- | ---------- |
+| `Command / Ctrl + B`                    | 粗體       |
+| `Command / Ctrl + I`                    | 斜體       |
+| `Command / Ctrl + U`                    | 底線       |
+| `Command / Ctrl + Shift + X`            | 刪除線     |
+| `Command / Ctrl + E`                    | 行內程式碼 |
+| `Command / Ctrl + Option / Alt + C`     | 程式碼區塊 |
+| `Command / Ctrl + Option / Alt + Q`     | 引用       |
+| `Command / Ctrl + Option / Alt + U`     | 無序列表   |
+| `Command / Ctrl + Option / Alt + O`     | 有序列表   |
+| `Command / Ctrl + Option / Alt + Enter` | 待辦事項   |
+| `Command / Ctrl + K`                    | 連結       |
+| `Command / Ctrl + Option / Alt + T`     | 表格       |
+| `Command / Ctrl + 0`                    | 正文       |
+| `/ image`                               | 圖片       |
 
 | --------------------- | -------- |
 | --------------------- | -------- |
@@ -111,7 +111,7 @@ pie title Pets adopted by volunteers
 - 或使用[外部連結](https://google.com)，跳到任意外部網址。
 - 還可以使用腳註語法[^note]跳到腳註行作為引用。
 - 另外可使用[檔案連結](功能規劃.md)跳到指定檔案或標題。
-- 以上所有語法，都可以按住 `Command` 鍵並點擊跳轉。
+- 以上所有語法，都可以按住 `Command / Ctrl` 鍵並點擊跳轉。
 ## 行內擴充語法
 - 下標示例：H~2~O，上標示例：E=mc^2^，也可以使用英文：Foo~zoo~ 或 Bar^baz^。
 - 也支援==高亮==語法，讓文字更醒目。
