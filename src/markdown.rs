@@ -314,6 +314,18 @@ pub fn blockquote_prefix_len(content: &str) -> usize {
     usize::from(found) * index
 }
 
+/// Splits a line into the prefix a continuation line must repeat (blockquote
+/// markers plus the indentation after them) and the content that follows.
+pub fn split_continuation_prefix(content: &str) -> (String, &str) {
+    let quote_len = blockquote_prefix_len(content);
+    let body = &content[quote_len..];
+    let indent = body.len() - body.trim_start_matches([' ', '\t']).len();
+    (
+        format!("{}{}", &content[..quote_len], " ".repeat(indent)),
+        &body[indent..],
+    )
+}
+
 fn setext_heading_underline_len(content: &str) -> Option<usize> {
     let trimmed_end = content.trim_end_matches([' ', '\t']);
     let leading_spaces = trimmed_end
@@ -3476,8 +3488,8 @@ mod tests {
 
     use super::{
         BlockContext, BlockPreviewKind, BlockType, CalloutKind, InlineKind, LineDecoration,
-        LocalLinkSyntax, parse_decorations, parse_local_link_targets,
-        parse_table_cells_with_ranges, raw_wiki_link_ranges,
+        LocalLinkSyntax, blockquote_prefix_len, parse_decorations, parse_local_link_targets,
+        parse_table_cells_with_ranges, raw_wiki_link_ranges, split_continuation_prefix,
     };
 
     #[test]
@@ -4329,6 +4341,49 @@ mod tests {
             assert!(
                 !decorations[0].syntax_ranges.is_empty(),
                 "{text:?} should conceal its markers"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_lists_indent_after_the_quote_marker() {
+        let line = "> - b";
+        let quote_len = blockquote_prefix_len(line);
+        assert_eq!(quote_len, 2);
+
+        // Tab inserts at the indent anchor, never in front of the `>`.
+        let indented = format!("{}  {}", &line[..quote_len], &line[quote_len..]);
+        assert_eq!(indented, ">   - b");
+
+        let decorations = parse_decorations(&format!("> - a\n{indented}\n"));
+        assert_eq!(decorations[1].block_type, BlockType::UnorderedList);
+        assert_eq!(
+            decorations[1]
+                .syntax_ranges
+                .iter()
+                .map(|syntax| syntax.range.clone())
+                .collect::<Vec<_>>(),
+            vec![0..2, 4..6],
+            "the quote marker and the nested bullet stay separately concealed"
+        );
+    }
+
+    #[test]
+    fn continuation_prefix_repeats_the_quote_and_its_nested_indent() {
+        for (line, prefix, rest) in [
+            ("- item", "", "- item"),
+            ("  - item", "  ", "- item"),
+            ("> - item", "> ", "- item"),
+            (">   - item", ">   ", "- item"),
+            ("> 1. item", "> ", "1. item"),
+            ("> - [ ] todo", "> ", "- [ ] todo"),
+            (">> - item", ">> ", "- item"),
+            ("> text", "> ", "text"),
+        ] {
+            assert_eq!(
+                split_continuation_prefix(line),
+                (prefix.to_string(), rest),
+                "{line:?}"
             );
         }
     }

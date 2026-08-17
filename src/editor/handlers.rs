@@ -987,11 +987,9 @@ impl EditorView {
         // nested inside one is measured from after that prefix.
         let quote_prefix_len = markdown::blockquote_prefix_len(&line_content);
         let quote_prefix = &line_content[..quote_prefix_len];
-        let body = &line_content[quote_prefix_len..];
-        let body_indent = body.len() - body.trim_start_matches([' ', '\t']).len();
+        let (ws_str, trimmed) = markdown::split_continuation_prefix(&line_content);
+        let body_indent = ws_str.len() - quote_prefix_len;
         let leading_ws = quote_prefix_len + body_indent;
-        let trimmed = &line_content[leading_ws..];
-        let ws_str = format!("{}{}", quote_prefix, " ".repeat(body_indent));
 
         match block_type {
             BlockType::UnorderedList => {

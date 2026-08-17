@@ -4675,6 +4675,23 @@ impl EditorView {
         (lines, has_selection, has_list_line)
     }
 
+    /// Offset a line's indentation starts at: after any `>` prefix, so indenting
+    /// a quoted list moves the list rather than the quote.
+    fn line_indent_start(&self, line: usize) -> usize {
+        let quote_len = markdown::blockquote_prefix_len(self.buffer.line_content(line));
+        self.buffer.line_start(line) + quote_len
+    }
+
+    /// Indent spaces available to strip from `line`, capped at `max_spaces`.
+    fn leading_indent_spaces(&self, line: usize, max_spaces: usize) -> usize {
+        let content = self.buffer.line_content(line);
+        content[markdown::blockquote_prefix_len(content)..]
+            .bytes()
+            .take(max_spaces)
+            .take_while(|&byte| byte == b' ')
+            .count()
+    }
+
     pub(crate) fn indent_line_indices(&mut self, line_indices: &[usize], spaces: &str) {
         if line_indices.is_empty() || spaces.is_empty() {
             return;
@@ -4683,19 +4700,19 @@ impl EditorView {
         let inserted = spaces.len();
         let mut cursor_states = self.cursor_states_with_primary_flag();
         for &line in line_indices {
-            let line_start = self.buffer.line_start(line);
-            self.buffer.insert(line_start, spaces);
+            let indent_start = self.line_indent_start(line);
+            self.buffer.insert(indent_start, spaces);
             for (cursor, _) in &mut cursor_states {
                 cursor.offset = Self::adjust_offset_for_line_prefix_change(
                     cursor.offset,
-                    line_start,
+                    indent_start,
                     0,
                     inserted,
                 )
                 .min(self.buffer.len());
                 cursor.anchor = Self::adjust_offset_for_line_prefix_change(
                     cursor.anchor,
-                    line_start,
+                    indent_start,
                     0,
                     inserted,
                 )
@@ -4719,16 +4736,24 @@ impl EditorView {
                 continue;
             }
 
-            let line_start = self.buffer.line_start(line);
+            let indent_start = self.line_indent_start(line);
             let spaces = " ".repeat(width);
-            self.buffer.insert(line_start, &spaces);
+            self.buffer.insert(indent_start, &spaces);
             for (cursor, _) in &mut cursor_states {
-                cursor.offset =
-                    Self::adjust_offset_for_line_prefix_change(cursor.offset, line_start, 0, width)
-                        .min(self.buffer.len());
-                cursor.anchor =
-                    Self::adjust_offset_for_line_prefix_change(cursor.anchor, line_start, 0, width)
-                        .min(self.buffer.len());
+                cursor.offset = Self::adjust_offset_for_line_prefix_change(
+                    cursor.offset,
+                    indent_start,
+                    0,
+                    width,
+                )
+                .min(self.buffer.len());
+                cursor.anchor = Self::adjust_offset_for_line_prefix_change(
+                    cursor.anchor,
+                    indent_start,
+                    0,
+                    width,
+                )
+                .min(self.buffer.len());
             }
         }
 
@@ -4744,26 +4769,28 @@ impl EditorView {
 
         let mut cursor_states = self.cursor_states_with_primary_flag();
         for &line in line_indices {
-            let line_start = self.buffer.line_start(line);
-            let strip = self
-                .buffer
-                .line_content(line)
-                .bytes()
-                .take(max_spaces)
-                .take_while(|&byte| byte == b' ')
-                .count();
+            let strip = self.leading_indent_spaces(line, max_spaces);
             if strip == 0 {
                 continue;
             }
 
-            self.buffer.replace(line_start..line_start + strip, "");
+            let indent_start = self.line_indent_start(line);
+            self.buffer.replace(indent_start..indent_start + strip, "");
             for (cursor, _) in &mut cursor_states {
-                cursor.offset =
-                    Self::adjust_offset_for_line_prefix_change(cursor.offset, line_start, strip, 0)
-                        .min(self.buffer.len());
-                cursor.anchor =
-                    Self::adjust_offset_for_line_prefix_change(cursor.anchor, line_start, strip, 0)
-                        .min(self.buffer.len());
+                cursor.offset = Self::adjust_offset_for_line_prefix_change(
+                    cursor.offset,
+                    indent_start,
+                    strip,
+                    0,
+                )
+                .min(self.buffer.len());
+                cursor.anchor = Self::adjust_offset_for_line_prefix_change(
+                    cursor.anchor,
+                    indent_start,
+                    strip,
+                    0,
+                )
+                .min(self.buffer.len());
             }
         }
 
@@ -4783,26 +4810,28 @@ impl EditorView {
                 continue;
             }
 
-            let line_start = self.buffer.line_start(line);
-            let strip = self
-                .buffer
-                .line_content(line)
-                .bytes()
-                .take(width)
-                .take_while(|&byte| byte == b' ')
-                .count();
+            let strip = self.leading_indent_spaces(line, width);
             if strip == 0 {
                 continue;
             }
 
-            self.buffer.replace(line_start..line_start + strip, "");
+            let indent_start = self.line_indent_start(line);
+            self.buffer.replace(indent_start..indent_start + strip, "");
             for (cursor, _) in &mut cursor_states {
-                cursor.offset =
-                    Self::adjust_offset_for_line_prefix_change(cursor.offset, line_start, strip, 0)
-                        .min(self.buffer.len());
-                cursor.anchor =
-                    Self::adjust_offset_for_line_prefix_change(cursor.anchor, line_start, strip, 0)
-                        .min(self.buffer.len());
+                cursor.offset = Self::adjust_offset_for_line_prefix_change(
+                    cursor.offset,
+                    indent_start,
+                    strip,
+                    0,
+                )
+                .min(self.buffer.len());
+                cursor.anchor = Self::adjust_offset_for_line_prefix_change(
+                    cursor.anchor,
+                    indent_start,
+                    strip,
+                    0,
+                )
+                .min(self.buffer.len());
             }
         }
 
