@@ -4699,6 +4699,16 @@ pub(crate) fn apply_code_block_highlighting(
     }
 }
 
+/// Image source for an asset shipped with the app.
+///
+/// Goes through `AssetSource` rather than a resolved path so it still works
+/// where the assets only exist inside the binary, which is every Windows and
+/// Linux build: those ship a lone executable with no `assets/` beside it.
+pub(crate) fn asset_image_source(path: &'static str) -> gpui::ImageSource {
+    gpui::ImageSource::Resource(gpui::Resource::Embedded(SharedString::new_static(path)))
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn resolve_asset_image_path(path: &str) -> PathBuf {
     use std::sync::{Mutex, OnceLock};
 
@@ -4718,6 +4728,7 @@ pub(crate) fn resolve_asset_image_path(path: &str) -> PathBuf {
     resolved
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) const APP_ICON_PATH: &str = "assets/icons/app/icon-0.png";
 
 pub(crate) fn is_remote_image_url(path: &str) -> bool {

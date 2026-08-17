@@ -1434,7 +1434,7 @@ impl EditorView {
                     .justify_center()
                     .py(px(self.scaled(ss.sidebar_logo_padding_y_px)))
                     .child(
-                        img(helpers::resolve_asset_image_path(LOGO_SVG_PATH))
+                        img(helpers::asset_image_source(LOGO_SVG_PATH))
                             .w(px(self.scaled(ss.sidebar_logo_size_px)))
                             .h(px(self.scaled(ss.sidebar_logo_size_px))),
                     )

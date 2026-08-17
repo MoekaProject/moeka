@@ -231,7 +231,7 @@ impl EditorView {
                 }
             })
             .child(
-                img(helpers::resolve_asset_image_path(icon_path))
+                img(helpers::asset_image_source(icon_path))
                     .w(px(icon_size))
                     .h(px(icon_size))
                     .opacity(if is_hovered {
