@@ -1,12 +1,12 @@
-# Building `moeka.exe` from macOS
+# Building `Moeka.exe` from macOS
 
-`make windows` cross-builds a single self-contained `moeka.exe` for both
+`make windows` cross-builds a single self-contained `Moeka.exe` for both
 `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`, without a Windows
-machine or CI runner. Output lands in `dist/`:
+machine or CI runner, and zips each one. Output lands in `dist/`:
 
 ```
-dist/moeka-windows-x86_64.exe
-dist/moeka-windows-arm64.exe
+dist/Moeka-windows-x86_64.zip
+dist/Moeka-windows-arm64.zip
 ```
 
 Nothing has to be shipped alongside the binary — `assets/`, the DPI/comctl32
@@ -95,8 +95,8 @@ The exes cannot be run on macOS. To sanity-check one without Windows:
 
 ```sh
 python3 - <<'PY'
-import struct
-d = open('dist/moeka-windows-arm64.exe','rb').read()
+import struct, zipfile
+d = zipfile.ZipFile('dist/Moeka-windows-arm64.zip').read('Moeka.exe')
 pe = struct.unpack_from('<I', d, 0x3c)[0]
 print(hex(struct.unpack_from('<H', d, pe + 4)[0]))  # 0x8664 x64, 0xaa64 ARM64
 PY

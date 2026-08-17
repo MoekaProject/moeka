@@ -61,8 +61,8 @@ jobs:
       - name: Test
         run: cargo test
 
-  # Windows binaries cannot be cross-built: gpui compiles its HLSL shaders with
-  # the DirectX shader compiler, which only runs on Windows.
+  # `make windows` cross-builds the shipped binaries; this job is the native
+  # counterpart that would catch vendor/gpui drifting from upstream.
   windows-package:
     name: Windows portable package (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
