@@ -257,7 +257,7 @@ fn default_light_editor_theme_mode() -> String {
 }
 
 fn default_ui_scale() -> f32 {
-    1.0
+    1.2
 }
 
 fn default_body_latin_font() -> String {
