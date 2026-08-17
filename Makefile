@@ -36,6 +36,7 @@ SIGNED_PACKAGE_SCRIPT := scripts/sign_notarize_package.sh
 VOLUME_NAME := $(APP_DISPLAY_NAME)
 TAG ?= $(firstword $(filter v%,$(MAKECMDGOALS)))
 RELEASE_REPO ?= MoekaProject/release
+SOURCE_REPO ?= MoekaProject/moeka
 DEVELOPER_ID_APPLICATION ?= $(shell security find-identity -v -p codesigning 2>/dev/null | sed -nE 's/.*"(Developer ID Application:[^"]+)".*/\1/p' | head -1)
 TEAM_ID ?= $(shell printf '%s\n' '$(DEVELOPER_ID_APPLICATION)' | sed -nE 's/.*\(([A-Z0-9]{10})\)$$/\1/p')
 NOTARY_PROFILE ?= moeka-notary
@@ -44,9 +45,13 @@ ZIP_PATHS := \
 	$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-arm64.zip \
 	$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-x86_64.zip
 WINDOWS_TARGETS := x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+WINDOWS_ARCHES := arm64 x86_64
+WINDOWS_ZIP_PATHS := \
+	$(DIST_DIR)/$(APP_DISPLAY_NAME)-windows-arm64.zip \
+	$(DIST_DIR)/$(APP_DISPLAY_NAME)-windows-x86_64.zip
 XWIN_SHIMS := packaging/windows/xwin-shims
 
-.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check windows windows-one windows-arm64 windows-x86_64
+.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check windows windows-check windows-icon
 
 dmg: $(ICON_FILE)
 	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -67,33 +72,58 @@ dmg-x86_64:
 
 dist: dmg
 
-# Cross-builds a self-contained moeka.exe from macOS/Linux. Requires
-# `cargo install cargo-xwin` plus the `llvm-lib`/`lld-link` shims described in
-# packaging/windows/README.md.
+# Collects the Windows binaries CI built for the current commit into one zip
+# per architecture.
+#
+# They cannot be built here: gpui compiles its HLSL with fxc.exe, which is
+# Windows-only, and its build script only runs the compile step when the host
+# itself is Windows. A cross-built release binary has no shaders and dies at
+# startup, so the only real source is a native runner.
 windows:
+	@set -euo pipefail; \
+	command -v gh >/dev/null || { echo "gh CLI is required: brew install gh && gh auth login"; exit 1; }; \
+	sha="$$(git rev-parse HEAD)"; \
+	run=""; \
+	for _ in $$(seq 1 60); do \
+		run="$$(gh run list --repo "$(SOURCE_REPO)" --commit "$$sha" \
+			--workflow ci.yml --limit 1 --json databaseId --jq '.[0].databaseId // empty')"; \
+		[[ -n "$$run" ]] && break; \
+		echo "Waiting for CI to pick up $$sha ..."; \
+		sleep 10; \
+	done; \
+	[[ -n "$$run" ]] || { echo "No CI run for $$sha. Push the commit first."; exit 1; }; \
+	gh run watch "$$run" --repo "$(SOURCE_REPO)" --exit-status >/dev/null; \
+	mkdir -p "$(DIST_DIR)"; \
+	for arch in $(WINDOWS_ARCHES); do \
+		stage="$$(mktemp -d)"; \
+		gh run download "$$run" --repo "$(SOURCE_REPO)" \
+			--name "$(APP_DISPLAY_NAME)-windows-$$arch" --dir "$$stage"; \
+		zip_path="$(CURDIR)/$(DIST_DIR)/$(APP_DISPLAY_NAME)-windows-$$arch.zip"; \
+		rm -f "$$zip_path"; \
+		(cd "$$stage" && zip -qr "$$zip_path" .); \
+		rm -rf "$$stage"; \
+	done
+	@ls -lh $(WINDOWS_ZIP_PATHS)
+
+# Type-checks the Windows target locally. Requires `cargo install cargo-xwin`
+# plus the `llvm-lib`/`lld-link` shims described in packaging/windows/README.md.
+windows-check:
 	@rustup target add $(WINDOWS_TARGETS)
-	@$(MAKE) windows-x86_64
-	@$(MAKE) windows-arm64
-	@ls -lh $(DIST_DIR)/$(APP_NAME)-windows-*.exe
-
-windows-x86_64:
-	@$(MAKE) windows-one WINDOWS_TARGET=x86_64-pc-windows-msvc WINDOWS_SUFFIX=x86_64
-
-windows-arm64:
-	@$(MAKE) windows-one WINDOWS_TARGET=aarch64-pc-windows-msvc WINDOWS_SUFFIX=arm64
-
-windows-one:
-	@mkdir -p "$(DIST_DIR)"
 	@chmod +x $(XWIN_SHIMS)/*
-	PATH="$(CURDIR)/$(XWIN_SHIMS):$$PATH" \
-		cargo xwin build --release --target "$(WINDOWS_TARGET)"
-	@cp "target/$(WINDOWS_TARGET)/release/$(APP_NAME).exe" \
-		"$(DIST_DIR)/$(APP_NAME)-windows-$(WINDOWS_SUFFIX).exe"
+	@for target in $(WINDOWS_TARGETS); do \
+		PATH="$(CURDIR)/$(XWIN_SHIMS):$$PATH" cargo xwin check --target "$$target"; \
+	done
+
+# Regenerates packaging/windows/moeka.ico from the app-icon master. Needs
+# Pillow, and the result is committed, so this is not part of `make windows`.
+windows-icon:
+	@python3 scripts/generate_windows_icon.py
 
 publish: publish-check
 	@git push --force-with-lease origin HEAD:main
 	@$(MAKE) tag TAG="$(TAG)"
 	@$(MAKE) signed-release
+	@$(MAKE) windows
 	@set -euo pipefail; \
 	assets=(); \
 	for suffix in $(DIST_SUFFIXES); do \
@@ -101,7 +131,7 @@ publish: publish-check
 		[[ -f "$$asset" ]] || { echo "Missing $$asset"; exit 1; }; \
 		assets+=("$$asset"); \
 	done; \
-	for asset in $(ZIP_PATHS); do \
+	for asset in $(ZIP_PATHS) $(WINDOWS_ZIP_PATHS); do \
 		[[ -f "$$asset" ]] || { echo "Missing $$asset"; exit 1; }; \
 		assets+=("$$asset"); \
 	done; \

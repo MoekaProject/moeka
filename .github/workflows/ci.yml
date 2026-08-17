@@ -92,19 +92,17 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      # Assets, docs and the manifest are all baked into the binary, so the
+      # package is the one file.
       - name: Stage package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist/moeka | Out-Null
-          Copy-Item target/release/moeka.exe dist/moeka/
-          Copy-Item packaging/windows/moeka.exe.manifest dist/moeka/
-          Copy-Item -Recurse assets dist/moeka/assets
-          Copy-Item -Recurse docs dist/moeka/docs
-          Copy-Item config.yaml dist/moeka/ -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
+          Copy-Item target/release/moeka.exe dist/windows/Moeka.exe
 
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: moeka-windows-${{ matrix.arch }}
-          path: dist/moeka
+          name: Moeka-windows-${{ matrix.arch }}
+          path: dist/windows
           if-no-files-found: error
