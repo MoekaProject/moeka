@@ -21,10 +21,74 @@ fn main() {
     println!("cargo:rustc-env=MOEKA_GIT_COMMIT={commit}");
     println!("cargo:rustc-env=MOEKA_GIT_TAG={tag}");
 
+    embedded_assets::generate();
+
     // `cfg!(windows)` in a build script describes the host, not the target, so
     // resources would silently vanish when cross-compiling.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         windows_resources::embed();
+    }
+}
+
+/// Bakes `assets/` into the binary so a bare `moeka.exe` still finds its icons.
+/// `FsAssets` keeps preferring on-disk copies, which is what the macOS bundle
+/// and local development use.
+///
+/// Everything goes into one blob rather than an `include_bytes!` per file:
+/// hundreds of anonymous constants get scattered across the crate's 256
+/// codegen units and the macOS linker then fails to resolve them.
+mod embedded_assets {
+    use super::*;
+
+    pub(super) fn generate() {
+        println!("cargo:rerun-if-changed=assets");
+
+        let mut files = Vec::new();
+        collect(Path::new("assets"), &mut files);
+
+        // Keyed and sorted as strings so the lookup can binary search. `Path`
+        // ordering is by component and would disagree (`icons-x/` vs `icons/`).
+        let mut entries: Vec<(String, PathBuf)> = files
+            .into_iter()
+            .map(|file| (file.to_string_lossy().replace('\\', "/"), file))
+            .collect();
+        entries.sort();
+
+        let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+        let mut blob = Vec::new();
+        let mut index = String::from("&[\n");
+
+        for (key, file) in &entries {
+            let bytes = std::fs::read(file)
+                .unwrap_or_else(|error| panic!("read {}: {error}", file.display()));
+            let start = blob.len();
+            blob.extend_from_slice(&bytes);
+            index.push_str(&format!("    ({key:?}, {start}, {}),\n", blob.len()));
+        }
+        index.push_str("]\n");
+
+        std::fs::write(out_dir.join("assets.bin"), &blob).expect("write assets.bin");
+        std::fs::write(out_dir.join("embedded_assets.rs"), index).expect("write index");
+    }
+
+    fn collect(dir: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+            {
+                continue;
+            }
+            if path.is_dir() {
+                collect(&path, files);
+            } else {
+                files.push(path);
+            }
+        }
     }
 }
 

@@ -9,7 +9,7 @@ dist/moeka-windows-x86_64.exe
 dist/moeka-windows-arm64.exe
 ```
 
-Nothing has to be shipped alongside the binary — assets, the DPI/comctl32
+Nothing has to be shipped alongside the binary — `assets/`, the DPI/comctl32
 manifest, and the application icon are all embedded.
 
 ## One-time setup
@@ -29,8 +29,9 @@ use and caches them under `~/Library/Caches/cargo-xwin`.
 
 ## What the cross-build needs on top of `cargo-xwin`
 
-Three upstream assumptions break when the *host* is not Windows. Each is worked
-around in-tree so the build stays a plain `make windows`.
+Four upstream assumptions break when the *host* is not Windows, or when there is
+no `.app`-style bundle to hold resources. Each is worked around in-tree so the
+build stays a plain `make windows`.
 
 ### 1. `vendor/gpui` — shaders
 
@@ -60,7 +61,23 @@ the embedded manifest the loader binds comctl32 5.82 and `rfd`'s
 `RT_MANIFEST`) and hands it to the linker via `cargo:rustc-link-arg-bins`. This
 is pure `std`, so it behaves identically on every host.
 
-### 3. `xwin-shims/` — ARM64 C and assembly
+### 3. `build.rs` — UI assets
+
+`AssetSource` reads `assets/` from disk, relative to the executable. The macOS
+bundle satisfies that via `Contents/Resources`, but a lone `moeka.exe` has
+nowhere to look, so every SVG icon silently renders as nothing.
+
+`build.rs` concatenates `assets/` into a single blob with a path-sorted offset
+index, which `FsAssets` falls back to when the on-disk lookup misses. Disk still
+wins, so development and the macOS bundle are unaffected. One blob rather than
+an `include_bytes!` per file is deliberate: hundreds of anonymous constants get
+scattered across the crate's 256 codegen units and the macOS linker then fails
+to resolve them.
+
+Help documents already had an `include_str!` fallback, and fonts come from the
+OS, so those needed no change.
+
+### 4. `xwin-shims/` — ARM64 C and assembly
 
 Two crates disagree with `cargo-xwin` about compiler flavour, so `make windows`
 prepends `packaging/windows/xwin-shims` to `PATH`:

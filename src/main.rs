@@ -40,10 +40,24 @@ const MAIN_WINDOW_FRAME_AUTOSAVE_NAME: &str = "MoekaMainWindow";
 
 struct FsAssets;
 
+/// `assets/` baked in at build time as one blob plus a path-sorted index of
+/// `(key, start, end)`. See `build.rs`.
+static EMBEDDED_ASSET_DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/assets.bin"));
+static EMBEDDED_ASSETS: &[(&str, usize, usize)] =
+    include!(concat!(env!("OUT_DIR"), "/embedded_assets.rs"));
+
+fn embedded_asset(path: &str) -> Option<&'static [u8]> {
+    let index = EMBEDDED_ASSETS
+        .binary_search_by_key(&path, |(key, _, _)| key)
+        .ok()?;
+    let (_, start, end) = EMBEDDED_ASSETS[index];
+    Some(&EMBEDDED_ASSET_DATA[start..end])
+}
+
 impl AssetSource for FsAssets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
         let Some(resolved_path) = resolve_runtime_path(path) else {
-            return Ok(None);
+            return Ok(embedded_asset(path).map(Cow::Borrowed));
         };
 
         Ok(Some(std::fs::read(resolved_path)?.into()))
@@ -51,7 +65,12 @@ impl AssetSource for FsAssets {
 
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
         let Some(resolved_path) = resolve_runtime_path(path) else {
-            return Ok(Vec::new());
+            let prefix = format!("{}/", path.trim_end_matches('/'));
+            return Ok(EMBEDDED_ASSETS
+                .iter()
+                .filter(|(key, _, _)| key.starts_with(&prefix))
+                .map(|(key, _, _)| SharedString::from(*key))
+                .collect());
         };
 
         Ok(std::fs::read_dir(resolved_path)?
@@ -827,6 +846,7 @@ fn main() {
 #[cfg(all(test, target_os = "macos"))]
 mod macos_file_open_tests {
     use super::macos_markdown_path_from_url;
+    use super::{EMBEDDED_ASSET_DATA, EMBEDDED_ASSETS, embedded_asset};
 
     #[test]
     fn decodes_markdown_file_urls_with_spaces_and_unicode() {
@@ -868,5 +888,27 @@ mod macos_file_open_tests {
             macos_markdown_path_from_url(&format!("file://{}", directory.path().display())),
             std::fs::canonicalize(directory.path()).ok(),
         );
+    }
+
+    #[test]
+    fn every_asset_is_embedded_and_reachable_by_lookup() {
+        assert!(
+            EMBEDDED_ASSETS.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "embedded assets must be sorted for the binary search to work"
+        );
+
+        for (key, start, end) in EMBEDDED_ASSETS {
+            assert!(start < end, "{key} is empty");
+            assert_eq!(
+                embedded_asset(key),
+                Some(&EMBEDDED_ASSET_DATA[*start..*end]),
+                "{key} is not findable"
+            );
+        }
+
+        // A bare `moeka.exe` has no `assets/` next to it, so a miss here is a
+        // missing icon on Windows.
+        assert!(embedded_asset(crate::editor::LOGO_SVG_PATH).is_some());
+        assert!(embedded_asset("assets/icons/filetree/star.svg").is_some());
     }
 }
