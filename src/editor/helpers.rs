@@ -6021,30 +6021,38 @@ pub(crate) fn apply_search_match_text_styles(
 }
 
 /// Apply letter spacing to a shaped WrappedLine by offsetting glyph positions.
-/// Each glyph's x position is shifted by `glyph_index * spacing` pixels.
+///
+/// A glyph is pushed along by the spacing owed to everything before it, and a
+/// full-width character owes two columns' worth. Charging every glyph the same
+/// amount would make two lines of equal column width come out different
+/// lengths, which is what breaks box drawing and any other aligned ASCII art.
 pub(crate) fn apply_letter_spacing(wrapped: &mut WrappedLine, spacing_px: f32) {
     if spacing_px == 0.0 {
         return;
     }
 
+    let text = wrapped.text.clone();
     let old_layout = &**wrapped;
     let old_line = &old_layout.unwrapped_layout;
     let mut new_runs: Vec<ShapedRun> = Vec::with_capacity(old_line.runs.len());
-    let mut glyph_count: usize = 0;
+    let mut columns: usize = 0;
+    let mut last_offset = px(0.0);
 
     for run in &old_line.runs {
         let mut new_glyphs: Vec<ShapedGlyph> = Vec::with_capacity(run.glyphs.len());
         for glyph in &run.glyphs {
+            last_offset = px(columns as f32 * spacing_px);
             new_glyphs.push(ShapedGlyph {
                 id: glyph.id,
-                position: point(
-                    glyph.position.x + px(glyph_count as f32 * spacing_px),
-                    glyph.position.y,
-                ),
+                position: point(glyph.position.x + last_offset, glyph.position.y),
                 index: glyph.index,
                 is_emoji: glyph.is_emoji,
             });
-            glyph_count += 1;
+            columns += text
+                .get(glyph.index..)
+                .and_then(|rest| rest.chars().next())
+                .map(char_display_width)
+                .unwrap_or(1);
         }
         new_runs.push(ShapedRun {
             font_id: run.font_id,
@@ -6052,15 +6060,9 @@ pub(crate) fn apply_letter_spacing(wrapped: &mut WrappedLine, spacing_px: f32) {
         });
     }
 
-    let extra_width = if glyph_count > 0 {
-        px((glyph_count - 1) as f32 * spacing_px)
-    } else {
-        px(0.0)
-    };
-
     let new_line_layout = Arc::new(LineLayout {
         font_size: old_line.font_size,
-        width: old_line.width + extra_width,
+        width: old_line.width + last_offset,
         ascent: old_line.ascent,
         descent: old_line.descent,
         runs: new_runs,
