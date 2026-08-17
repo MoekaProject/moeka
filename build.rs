@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn git_output(args: &[&str]) -> String {
@@ -23,17 +24,136 @@ fn main() {
     // `cfg!(windows)` in a build script describes the host, not the target, so
     // resources would silently vanish when cross-compiling.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        println!("cargo:rerun-if-changed=packaging/windows/moeka.rc");
-        println!("cargo:rerun-if-changed=packaging/windows/moeka.ico");
-        println!("cargo:rerun-if-changed=packaging/windows/moeka.exe.manifest");
+        windows_resources::embed();
+    }
+}
 
-        // Cross-compiling usually has no resource compiler; ship
-        // `moeka.exe.manifest` beside the binary in that case.
-        if let Err(error) =
-            embed_resource::compile("packaging/windows/moeka.rc", embed_resource::NONE)
-                .manifest_optional()
-        {
-            println!("cargo:warning=Windows resources were not embedded: {error}");
+/// Builds a Win32 `.res` blob (icon + application manifest) without a resource
+/// compiler, so `cargo xwin` cross-builds from macOS/Linux still produce a
+/// self-contained `moeka.exe`.
+///
+/// Without the embedded manifest the loader binds comctl32 5.82 and `rfd`'s
+/// `TaskDialogIndirect` import fails before `main` runs.
+mod windows_resources {
+    use super::*;
+
+    const RT_ICON: u16 = 3;
+    const RT_GROUP_ICON: u16 = 14;
+    const RT_MANIFEST: u16 = 24;
+
+    /// `CREATEPROCESS_MANIFEST_RESOURCE_ID`, and the id `moeka.rc` used for the icon.
+    const RESOURCE_ID: u16 = 1;
+    const LANG_EN_US: u16 = 0x0409;
+
+    pub(super) fn embed() {
+        let packaging = Path::new("packaging/windows");
+        let icon_path = packaging.join("moeka.ico");
+        let manifest_path = packaging.join("moeka.exe.manifest");
+
+        println!("cargo:rerun-if-changed={}", icon_path.display());
+        println!("cargo:rerun-if-changed={}", manifest_path.display());
+
+        let icon = std::fs::read(&icon_path).expect("read packaging/windows/moeka.ico");
+        let manifest =
+            std::fs::read(&manifest_path).expect("read packaging/windows/moeka.exe.manifest");
+
+        let mut res = Vec::new();
+        // A `.res` file opens with an empty entry acting as the format marker.
+        write_entry(&mut res, 0, 0, 0, 0, &[]);
+
+        let (group, images) = parse_icon(&icon);
+        for (index, image) in images.iter().enumerate() {
+            write_entry(
+                &mut res,
+                RT_ICON,
+                index as u16 + 1,
+                LANG_EN_US,
+                0x1010,
+                image,
+            );
+        }
+        write_entry(
+            &mut res,
+            RT_GROUP_ICON,
+            RESOURCE_ID,
+            LANG_EN_US,
+            0x1030,
+            &group,
+        );
+        write_entry(
+            &mut res,
+            RT_MANIFEST,
+            RESOURCE_ID,
+            LANG_EN_US,
+            0x1030,
+            &manifest,
+        );
+
+        let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("moeka.res");
+        std::fs::write(&out, &res).expect("write moeka.res");
+        println!("cargo:rustc-link-arg-bins={}", out.display());
+    }
+
+    /// Splits an `.ico` into its `GRPICONDIR` directory and the individual images.
+    fn parse_icon(icon: &[u8]) -> (Vec<u8>, Vec<&[u8]>) {
+        assert!(icon.len() >= 6, "moeka.ico is truncated");
+        let count = u16::from_le_bytes([icon[4], icon[5]]) as usize;
+
+        let mut group = Vec::new();
+        group.extend_from_slice(&icon[0..6]);
+        let mut images = Vec::with_capacity(count);
+
+        for index in 0..count {
+            let start = 6 + index * 16;
+            let entry = icon
+                .get(start..start + 16)
+                .expect("moeka.ico directory is truncated");
+            let size = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as usize;
+            let offset = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as usize;
+
+            // `GRPICONDIRENTRY` matches `ICONDIRENTRY` up to the size, then
+            // replaces the file offset with the `RT_ICON` resource id.
+            group.extend_from_slice(&entry[0..12]);
+            group.extend_from_slice(&(index as u16 + 1).to_le_bytes());
+
+            images.push(
+                icon.get(offset..offset + size)
+                    .expect("moeka.ico image is truncated"),
+            );
+        }
+
+        (group, images)
+    }
+
+    fn write_entry(
+        out: &mut Vec<u8>,
+        ty: u16,
+        name: u16,
+        lang: u16,
+        memory_flags: u16,
+        data: &[u8],
+    ) {
+        let mut header = Vec::with_capacity(32);
+        header.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        header.extend_from_slice(&0u32.to_le_bytes()); // header size, patched below
+        // `0xFFFF` marks an ordinal (rather than string) type/name.
+        header.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        header.extend_from_slice(&ty.to_le_bytes());
+        header.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        header.extend_from_slice(&name.to_le_bytes());
+        header.extend_from_slice(&0u32.to_le_bytes()); // data version
+        header.extend_from_slice(&memory_flags.to_le_bytes());
+        header.extend_from_slice(&lang.to_le_bytes());
+        header.extend_from_slice(&0u32.to_le_bytes()); // version
+        header.extend_from_slice(&0u32.to_le_bytes()); // characteristics
+
+        let header_size = (header.len() as u32).to_le_bytes();
+        header[4..8].copy_from_slice(&header_size);
+
+        out.extend_from_slice(&header);
+        out.extend_from_slice(data);
+        while out.len() % 4 != 0 {
+            out.push(0);
         }
     }
 }

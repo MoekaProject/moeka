@@ -43,8 +43,10 @@ DIST_SUFFIXES := arm64 x86_64
 ZIP_PATHS := \
 	$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-arm64.zip \
 	$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-x86_64.zip
+WINDOWS_TARGETS := x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+XWIN_SHIMS := packaging/windows/xwin-shims
 
-.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check
+.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check windows windows-one windows-arm64 windows-x86_64
 
 dmg: $(ICON_FILE)
 	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -64,6 +66,29 @@ dmg-x86_64:
 		VOLUME_NAME="$(APP_DISPLAY_NAME)-x86_64"
 
 dist: dmg
+
+# Cross-builds a self-contained moeka.exe from macOS/Linux. Requires
+# `cargo install cargo-xwin` plus the `llvm-lib`/`lld-link` shims described in
+# packaging/windows/README.md.
+windows:
+	@rustup target add $(WINDOWS_TARGETS)
+	@$(MAKE) windows-x86_64
+	@$(MAKE) windows-arm64
+	@ls -lh $(DIST_DIR)/$(APP_NAME)-windows-*.exe
+
+windows-x86_64:
+	@$(MAKE) windows-one WINDOWS_TARGET=x86_64-pc-windows-msvc WINDOWS_SUFFIX=x86_64
+
+windows-arm64:
+	@$(MAKE) windows-one WINDOWS_TARGET=aarch64-pc-windows-msvc WINDOWS_SUFFIX=arm64
+
+windows-one:
+	@mkdir -p "$(DIST_DIR)"
+	@chmod +x $(XWIN_SHIMS)/*
+	PATH="$(CURDIR)/$(XWIN_SHIMS):$$PATH" \
+		cargo xwin build --release --target "$(WINDOWS_TARGET)"
+	@cp "target/$(WINDOWS_TARGET)/release/$(APP_NAME).exe" \
+		"$(DIST_DIR)/$(APP_NAME)-windows-$(WINDOWS_SUFFIX).exe"
 
 publish: publish-check
 	@git push --force-with-lease origin HEAD:main

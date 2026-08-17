@@ -60,10 +60,11 @@ pprof = { version = "0.15", features = ["flamegraph"] }
 [dev-dependencies]
 tempfile = "3"
 
-# Build dependencies resolve against the host, so this cannot be gated on a
-# Windows `cfg` or cross-compiling would lose it.
-[build-dependencies]
-embed-resource = "3"
+# Vendored so Windows builds can be cross-compiled from macOS: upstream only
+# runs its Windows build script (fxc shader compilation) when the *host* is
+# Windows. See packaging/windows/README.md.
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
