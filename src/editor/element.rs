@@ -7972,7 +7972,7 @@ impl Element for EditorElement {
             let editor = self.editor.clone();
             window.on_modifiers_changed(move |event, _window, cx| {
                 editor.update(cx, |this, cx| {
-                    let new_val = event.modifiers.platform;
+                    let new_val = event.modifiers.secondary();
                     if this.command_held != new_val {
                         this.command_held = new_val;
                         cx.notify();

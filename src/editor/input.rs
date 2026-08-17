@@ -83,7 +83,7 @@ pub(super) const fn ime_debug_enabled() -> bool {
 
 pub(super) fn ime_debug_log(message: impl AsRef<str>) {
     if ime_debug_enabled() {
-        eprintln!("[ime-debug] {}", message.as_ref());
+        log_error!("[ime-debug] {}", message.as_ref());
     }
 }
 
@@ -601,7 +601,7 @@ impl EditorView {
         self.sync_selection_drag_scroll_task(cx);
         self.last_mouse_down_target = Some((event.position, offset));
         self.update_wrap_boundary_affinity_for_position(offset, event.position);
-        if event.modifiers.platform {
+        if event.modifiers.secondary() {
             let (line, col) = self.buffer.offset_to_line_col(offset);
             let footnote_label = self.decorations.get(line).and_then(|dec| {
                 dec.footnote_references
@@ -1549,7 +1549,7 @@ impl EditorView {
             }
         }
 
-        let cmd = event.modifiers.platform;
+        let cmd = event.modifiers.secondary();
         if cmd != self.command_held {
             self.command_held = cmd;
             cx.notify();
