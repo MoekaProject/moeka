@@ -82,6 +82,49 @@ fn hwnd(window: &Window) -> Option<windows_sys::Win32::Foundation::HWND> {
     }
 }
 
+/// Points the taskbar and Alt+Tab at an icon rendered for their real size.
+///
+/// gpui loads a single `LR_DEFAULTSIZE` icon into the window class, which is
+/// 32px at the system DPI; everything larger is upscaled from that one bitmap.
+#[cfg(target_os = "windows")]
+pub(crate) fn apply_icon(window: &Window) {
+    use std::ptr;
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        ICON_BIG, ICON_SMALL, IMAGE_ICON, LoadImageW, SM_CXICON, SM_CXSMICON, SM_CYICON,
+        SM_CYSMICON, SendMessageW, WM_SETICON,
+    };
+
+    let Some(hwnd) = hwnd(window) else {
+        return;
+    };
+    unsafe {
+        let module = GetModuleHandleW(ptr::null());
+        let dpi = GetDpiForWindow(hwnd);
+        for (which, cx_metric, cy_metric) in [
+            (ICON_BIG, SM_CXICON, SM_CYICON),
+            (ICON_SMALL, SM_CXSMICON, SM_CYSMICON),
+        ] {
+            // The id `build.rs` gives the `RT_GROUP_ICON` resource.
+            let icon = LoadImageW(
+                module as _,
+                1 as *const u16,
+                IMAGE_ICON,
+                GetSystemMetricsForDpi(cx_metric, dpi),
+                GetSystemMetricsForDpi(cy_metric, dpi),
+                0,
+            );
+            if !icon.is_null() {
+                SendMessageW(hwnd, WM_SETICON, which as usize, icon as isize);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn apply_icon(_window: &Window) {}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(crate) fn start_drag(window: &Window) {
     window.start_window_move();

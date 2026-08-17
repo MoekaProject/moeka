@@ -249,6 +249,7 @@ fn editor_window_options(cx: &App) -> WindowOptions {
 
 fn configure_editor_window(window: &mut Window, remember_main_window_frame: bool) {
     window.set_background_appearance(WindowBackgroundAppearance::Transparent);
+    platform::window_chrome::apply_icon(window);
     #[cfg(target_os = "macos")]
     {
         use objc::{class, msg_send, sel, sel_impl};
