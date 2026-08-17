@@ -1091,8 +1091,6 @@ impl EditorView {
             None
         };
         if has_root && self.file_list_visible {
-            let force = self.sidebar_dir_file_counts_epoch != self.sidebar_directory_epoch;
-            self.sidebar_dir_file_counts_epoch = self.sidebar_directory_epoch;
             let mut dirs = vec![self.sidebar_root.clone()];
             if let Some(items) = items.as_ref() {
                 dirs.extend(
@@ -1102,7 +1100,7 @@ impl EditorView {
                         .map(|item| item.path.clone()),
                 );
             }
-            self.request_sidebar_dir_file_counts(dirs, force, cx);
+            self.request_sidebar_dir_file_counts(dirs, cx);
         }
         let ss = self.styles.sidebar.clone();
 

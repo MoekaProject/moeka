@@ -50,23 +50,38 @@ fn count_dir_markdown_files(dir: &Path) -> usize {
 }
 
 impl EditorView {
+    /// Marks the badge counts of `dirs` as out of date. The watcher calls this
+    /// with the parent of every path that changed on disk, which is the only
+    /// thing that can change a count.
+    pub(crate) fn mark_sidebar_dir_file_counts_dirty(
+        &mut self,
+        dirs: impl IntoIterator<Item = PathBuf>,
+    ) {
+        self.sidebar_dir_file_counts_dirty.extend(dirs);
+    }
+
     /// Loads the badge counts for the given directories in the background.
     /// Already-known counts are kept visible until the new value arrives.
     pub(crate) fn request_sidebar_dir_file_counts(
         &mut self,
         dirs: Vec<PathBuf>,
-        force: bool,
         cx: &mut Context<Self>,
     ) {
         let pending = dirs
             .into_iter()
             .filter(|dir| {
-                (force || !self.sidebar_dir_file_counts.contains_key(dir))
+                (self.sidebar_dir_file_counts_dirty.contains(dir)
+                    || !self.sidebar_dir_file_counts.contains_key(dir))
                     && !self.sidebar_dir_file_counts_loading.contains(dir)
             })
             .collect::<Vec<_>>();
         if pending.is_empty() {
             return;
+        }
+        // Only the dispatched ones stop being dirty; anything skipped because a
+        // count was already in flight has to be asked for again next frame.
+        for dir in &pending {
+            self.sidebar_dir_file_counts_dirty.remove(dir);
         }
         self.sidebar_dir_file_counts_loading
             .extend(pending.iter().cloned());
@@ -233,6 +248,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.capture_file_view_scroll_positions();
+        self.mark_sidebar_dir_file_counts_dirty([path.clone()]);
         self.schedule_sidebar_directory_request(path, true, cx);
     }
 

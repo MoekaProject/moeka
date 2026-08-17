@@ -1546,7 +1546,7 @@ pub struct EditorView {
     /// next to FileTree directory rows while the FileList pane is open.
     pub(crate) sidebar_dir_file_counts: HashMap<PathBuf, usize>,
     pub(crate) sidebar_dir_file_counts_loading: HashSet<PathBuf>,
-    pub(crate) sidebar_dir_file_counts_epoch: usize,
+    pub(crate) sidebar_dir_file_counts_dirty: HashSet<PathBuf>,
     pub(crate) sidebar_scroll_handle: ScrollHandle,
     pub(crate) pending_sidebar_scroll_top: Rc<Cell<Option<f32>>>,
     pub(crate) pending_sidebar_scroll_anchor: Option<PendingSidebarScrollAnchor>,
@@ -2216,7 +2216,7 @@ impl EditorView {
             sidebar_directory_loading: HashSet::new(),
             sidebar_dir_file_counts: HashMap::new(),
             sidebar_dir_file_counts_loading: HashSet::new(),
-            sidebar_dir_file_counts_epoch: 0,
+            sidebar_dir_file_counts_dirty: HashSet::new(),
             sidebar_directory_epoch: 0,
             sidebar_directory_refresh_pending: false,
             sidebar_scroll_handle: ScrollHandle::new(),
@@ -3969,6 +3969,11 @@ impl EditorView {
         });
         let mut needs_notify = false;
         if !changed_paths_in_workspace.is_empty() {
+            self.mark_sidebar_dir_file_counts_dirty(
+                changed_paths_in_workspace
+                    .iter()
+                    .filter_map(|path| path.parent().map(Path::to_path_buf)),
+            );
             if self.sidebar_paths_require_structure_refresh(&changed_paths_in_workspace) {
                 self.invalidate_sidebar_items_cache();
             } else {
