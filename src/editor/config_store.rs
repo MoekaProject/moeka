@@ -163,7 +163,7 @@ pub(crate) fn load_sessions() -> SessionsFile {
 
 pub(crate) fn save_sessions(sessions: &SessionsFile) {
     if let Err(error) = save_yaml_file(&config_paths::sessions_file_path(), sessions) {
-        eprintln!("failed to save sessions: {error}");
+        log_error!("failed to save sessions: {error}");
     }
 }
 
@@ -192,7 +192,7 @@ pub(crate) fn save_settings(settings: &AppSettings) {
         settings: settings.clone(),
     };
     if let Err(error) = save_yaml_file(&config_paths::settings_file_path(), &file) {
-        eprintln!("failed to save settings: {error}");
+        log_error!("failed to save settings: {error}");
     }
 }
 
@@ -209,7 +209,7 @@ fn load_yaml_file<T: serde::de::DeserializeOwned + Default>(path: &Path) -> io::
     match serde_yaml::from_str::<T>(&content) {
         Ok(value) => Ok(value),
         Err(error) => {
-            eprintln!("failed to parse {}: {error}", path.display());
+            log_error!("failed to parse {}: {error}", path.display());
             Ok(T::default())
         }
     }

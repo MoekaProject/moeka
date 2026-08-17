@@ -693,7 +693,7 @@ impl EditorView {
             return;
         };
         let Some(document_path) = self.current_file_path.clone() else {
-            eprintln!("select image requires a saved markdown file");
+            log_error!("select image requires a saved markdown file");
             return;
         };
 

@@ -1,6 +1,18 @@
 #![allow(unexpected_cfgs)]
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+/// Reports a failure we can carry on from.
+///
+/// `eprintln!` would panic instead: a `windows_subsystem = "windows"` process
+/// started from Explorer has no stderr handle, and printing to a missing one is
+/// an error that `eprintln!` turns into a panic.
+macro_rules! log_error {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod actions;
 mod buffer;
 mod checkbox;
@@ -415,7 +427,7 @@ fn main() {
             } else {
                 match open_editor_window(cx) {
                     Ok(editor) => *editor_for_reopen.borrow_mut() = Some(editor),
-                    Err(error) => eprintln!("failed to reopen main window: {error:#}"),
+                    Err(error) => log_error!("failed to reopen main window: {error:#}"),
                 }
             }
             cx.activate(true);
@@ -814,7 +826,7 @@ fn main() {
         .detach();
         cx.on_action(|_: &OpenTerminalWindow, cx| {
             if let Err(error) = open_terminal_window(cx) {
-                eprintln!("failed to open terminal window: {error:#}");
+                log_error!("failed to open terminal window: {error:#}");
             }
         });
 

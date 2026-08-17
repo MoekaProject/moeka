@@ -74,6 +74,22 @@ fn is_web_url(url: &str) -> bool {
     })
 }
 
+/// Runs a blocking shell call on a thread of its own.
+///
+/// `ShellExecuteW` pumps the calling thread's message queue while it works. On
+/// the UI thread that re-enters the window procedure in the middle of a gpui
+/// update, and `App` is a `RefCell`, so the second borrow aborts the process.
+fn away_from_ui(
+    call: impl FnOnce() -> Result<(), OpenError> + Send + 'static,
+) -> Result<(), ShellError> {
+    match std::thread::spawn(call).join() {
+        Ok(result) => Ok(result?),
+        Err(_) => Err(ShellError::Open(OpenError::Io(std::io::Error::other(
+            "the system handler crashed",
+        )))),
+    }
+}
+
 /// Opens a link with the system handler for its scheme.
 pub(crate) fn open_url(url: &str) -> Result<(), ShellError> {
     if let Some(scheme) = blocked_scheme(url) {
@@ -81,24 +97,27 @@ pub(crate) fn open_url(url: &str) -> Result<(), ShellError> {
     }
 
     // `$BROWSER` should only override real web links, not custom app schemes.
-    if is_web_url(url) {
-        opener::open_browser(url)?;
-    } else {
-        opener::open(url)?;
-    }
-    Ok(())
+    let web = is_web_url(url);
+    let url = url.to_owned();
+    away_from_ui(move || {
+        if web {
+            opener::open_browser(url)
+        } else {
+            opener::open(url)
+        }
+    })
 }
 
 /// Opens a file or folder with its default application.
 pub(crate) fn open_path(path: &Path) -> Result<(), ShellError> {
-    opener::open(path)?;
-    Ok(())
+    let path = path.to_owned();
+    away_from_ui(move || opener::open(path))
 }
 
 /// Shows a path selected inside the system file manager.
 pub(crate) fn reveal(path: &Path) -> Result<(), ShellError> {
-    opener::reveal(path)?;
-    Ok(())
+    let path = path.to_owned();
+    away_from_ui(move || opener::reveal(path))
 }
 
 #[cfg(test)]

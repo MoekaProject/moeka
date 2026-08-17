@@ -125,7 +125,7 @@ impl RuntimeProfiler {
         let (cpu_profiler_status, cpu_guard) =
             start_cpu_profiler(config.cpu_enabled, config.cpu_frequency_hz);
         if let CpuProfilerStatus::Unavailable { error } = &cpu_profiler_status {
-            eprintln!("Runtime CPU profiler unavailable: {error}");
+            log_error!("Runtime CPU profiler unavailable: {error}");
         }
 
         let mut profiler = Self {
@@ -460,7 +460,7 @@ fn spawn_sampler(
                 Arc::clone(&sampler_errors),
                 stop_sampler,
             ) {
-                eprintln!("Runtime profiler sampler failed: {error:#}");
+                log_error!("Runtime profiler sampler failed: {error:#}");
                 if let Ok(mut errors) = sampler_errors.lock() {
                     errors.push(format!("{error:#}"));
                 }

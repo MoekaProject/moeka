@@ -661,7 +661,7 @@ impl EditorView {
 
     pub(crate) fn reveal_in_file_manager(&self, path: &Path) {
         if let Err(error) = crate::platform::shell::reveal(path) {
-            eprintln!("failed to reveal {}: {error}", path.display());
+            log_error!("failed to reveal {}: {error}", path.display());
         }
     }
 

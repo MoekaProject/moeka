@@ -2771,7 +2771,7 @@ impl EditorView {
 
         if let Some(parent) = path.parent().filter(|parent| parent.exists()) {
             if let Err(error) = crate::platform::shell::open_path(parent) {
-                eprintln!("failed to open parent folder {}: {error}", parent.display());
+                log_error!("failed to open parent folder {}: {error}", parent.display());
             }
         }
     }
@@ -2783,7 +2783,7 @@ impl EditorView {
             }
             InfoPanelShareAction::OpenUrl(url) => {
                 if let Err(error) = crate::platform::shell::open_url(url) {
-                    eprintln!("failed to open URL {url}: {error}");
+                    log_error!("failed to open URL {url}: {error}");
                 }
             }
         }

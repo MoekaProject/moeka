@@ -1857,7 +1857,7 @@ impl Drop for EditorView {
         if let Some(profiler) = self.runtime_profiler.take()
             && let Err(error) = profiler.stop_with_diagnostics("drop", Some(diagnostics))
         {
-            eprintln!("Failed to write runtime profile on shutdown: {error:#}");
+            log_error!("Failed to write runtime profile on shutdown: {error:#}");
         }
     }
 }
@@ -1883,7 +1883,7 @@ impl EditorView {
             match profiler::RuntimeProfiler::start_from_env() {
                 Ok(profiler) => profiler,
                 Err(error) => {
-                    eprintln!("Failed to start runtime profiler from environment: {error:#}");
+                    log_error!("Failed to start runtime profiler from environment: {error:#}");
                     None
                 }
             }
@@ -9443,7 +9443,7 @@ impl EditorView {
         match target {
             MarkdownNavigationTarget::ExternalUrl(url) => {
                 if let Err(error) = crate::platform::shell::open_url(&url) {
-                    eprintln!("failed to open URL: {error}");
+                    log_error!("failed to open URL: {error}");
                     return false;
                 }
                 true

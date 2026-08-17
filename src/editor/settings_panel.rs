@@ -348,7 +348,7 @@ impl EditorView {
                     } else if let Err(error) =
                         crate::platform::shell::open_url("https://moeka.app/")
                     {
-                        eprintln!("failed to open official website: {error}");
+                        log_error!("failed to open official website: {error}");
                     }
                 }),
             )

@@ -122,7 +122,7 @@ impl EditorView {
                     Ok(Some(update)) => UpdateState::Ready(update),
                     Ok(None) => UpdateState::UpToDate,
                     Err(error) => {
-                        eprintln!("Moeka update check failed: {error}");
+                        log_error!("Moeka update check failed: {error}");
                         UpdateState::Failed
                     }
                 };
@@ -159,7 +159,7 @@ impl EditorView {
     pub(crate) fn install_update(&mut self, update: PreparedUpdate) {
         self.update_state = UpdateState::Installing;
         if let Err(error) = install_update(update) {
-            eprintln!("Moeka update install failed: {error}");
+            log_error!("Moeka update install failed: {error}");
             self.update_state = UpdateState::Failed;
         }
     }
