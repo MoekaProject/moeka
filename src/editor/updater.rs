@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
+#[cfg(any(target_os = "macos", windows))]
 use std::process::Stdio;
 use std::time::Duration;
 

@@ -56,6 +56,9 @@ LINUX_DESKTOP_FILE := packaging/linux/app.moeka.moeka.desktop
 LINUX_INSTALL_SCRIPT := packaging/linux/install.sh
 LINUX_README := packaging/linux/README.txt
 LINUX_ICON_SOURCE := packaging/linux/app.moeka.moeka.png
+LINUX_SYSROOT_SCRIPT := scripts/prepare_linux_sysroot.py
+LINUX_SYSROOT_ROOT ?= target/linux-sysroots
+LINUX_GLIBC_VERSION ?= 2.35
 
 .PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check windows windows-one windows-arm64 windows-x86_64 windows-icon linux linux-one linux-arm64 linux-x86_64
 
@@ -111,34 +114,56 @@ windows-one:
 windows-icon:
 	@python3 scripts/generate_windows_icon.py
 
-# Linux packages are built natively: GPUI links to the target desktop's Vulkan,
-# Wayland, X11, fontconfig and ALSA libraries. Use an x86_64 Ubuntu host for the
-# x86_64 package and an ARM64 Ubuntu host (including a Fusion VM) for ARM64.
+# Linux hosts build natively. macOS hosts use Zig plus a minimal, checksummed
+# Ubuntu 22.04 sysroot containing the XCB/XKB libraries GPUI links directly.
 linux:
-	@case "$(HOST_TARGET)" in \
-		x86_64-unknown-linux-gnu) $(MAKE) linux-x86_64 ;; \
-		aarch64-unknown-linux-gnu) $(MAKE) linux-arm64 ;; \
-		*) echo "Linux packaging requires a native x86_64 or ARM64 Linux host (current: $(HOST_TARGET))"; exit 1 ;; \
-	esac
+	@rustup target add $(LINUX_TARGETS)
+	@$(MAKE) linux-x86_64
+	@$(MAKE) linux-arm64
+	@ls -lh $(LINUX_ARCHIVES)
 
 linux-x86_64:
-	@$(MAKE) linux-one LINUX_TARGET=x86_64-unknown-linux-gnu LINUX_SUFFIX=x86_64
+	@$(MAKE) linux-one \
+		LINUX_TARGET=x86_64-unknown-linux-gnu \
+		LINUX_SUFFIX=x86_64 \
+		LINUX_TRIPLET=x86_64-linux-gnu
 
 linux-arm64:
-	@$(MAKE) linux-one LINUX_TARGET=aarch64-unknown-linux-gnu LINUX_SUFFIX=arm64
+	@$(MAKE) linux-one \
+		LINUX_TARGET=aarch64-unknown-linux-gnu \
+		LINUX_SUFFIX=arm64 \
+		LINUX_TRIPLET=aarch64-linux-gnu
 
 linux-one:
-	@if [[ "$(HOST_TARGET)" != "$(LINUX_TARGET)" ]]; then \
-		echo "$(LINUX_TARGET) must be built on a matching Linux host (current: $(HOST_TARGET))"; \
-		exit 1; \
-	fi
 	@rustup target add "$(LINUX_TARGET)"
-	@cargo build --release --target "$(LINUX_TARGET)"
 	@set -euo pipefail; \
+	case "$(HOST_TARGET)" in \
+		"$(LINUX_TARGET)") \
+			CARGO_INCREMENTAL=0 cargo build --release --target "$(LINUX_TARGET)"; \
+			;; \
+		*-apple-darwin) \
+			for tool in zig cargo-zigbuild python3 ar zstd; do \
+				command -v "$$tool" >/dev/null || { echo "$$tool is required for Linux cross-compilation"; exit 1; }; \
+			done; \
+			sysroot="$(CURDIR)/$(LINUX_SYSROOT_ROOT)/$(LINUX_SUFFIX)"; \
+			python3 "$(LINUX_SYSROOT_SCRIPT)" "$(LINUX_SUFFIX)" "$$sysroot"; \
+			RUSTFLAGS="$${RUSTFLAGS:+$$RUSTFLAGS }-L native=$$sysroot/usr/lib/$(LINUX_TRIPLET)" \
+				CARGO_INCREMENTAL=0 cargo zigbuild --release \
+				--target "$(LINUX_TARGET).$(LINUX_GLIBC_VERSION)"; \
+			;; \
+		*) \
+			echo "Unsupported host for $(LINUX_TARGET): $(HOST_TARGET)"; \
+			exit 1; \
+			;; \
+	esac; \
 	binary="target/$(LINUX_TARGET)/release/$(APP_NAME)"; \
-	if ldd "$$binary" | tee /dev/stderr | grep -q 'not found'; then \
-		echo "Linux package has unresolved runtime libraries"; \
-		exit 1; \
+	if [[ "$(HOST_TARGET)" == "$(LINUX_TARGET)" ]]; then \
+		if ldd "$$binary" | tee /dev/stderr | grep -q 'not found'; then \
+			echo "Linux package has unresolved runtime libraries"; \
+			exit 1; \
+		fi; \
+	else \
+		file "$$binary" | grep -q 'ELF 64-bit' || { echo "Not a 64-bit Linux ELF: $$binary"; exit 1; }; \
 	fi; \
 	stage="$$(mktemp -d)"; \
 	package="$$stage/$(APP_DISPLAY_NAME)-linux-$(LINUX_SUFFIX)"; \
@@ -161,6 +186,7 @@ publish: publish-check
 	@$(MAKE) tag TAG="$(TAG)"
 	@$(MAKE) signed-release
 	@$(MAKE) windows
+	@$(MAKE) linux
 	@set -euo pipefail; \
 	assets=(); \
 	for suffix in $(DIST_SUFFIXES); do \
@@ -168,7 +194,7 @@ publish: publish-check
 		[[ -f "$$asset" ]] || { echo "Missing $$asset"; exit 1; }; \
 		assets+=("$$asset"); \
 	done; \
-	for asset in $(ZIP_PATHS) $(WINDOWS_ZIP_PATHS); do \
+	for asset in $(ZIP_PATHS) $(WINDOWS_ZIP_PATHS) $(LINUX_ARCHIVES); do \
 		[[ -f "$$asset" ]] || { echo "Missing $$asset"; exit 1; }; \
 		assets+=("$$asset"); \
 	done; \
@@ -199,6 +225,9 @@ publish-check:
 		exit 1; \
 	fi
 	@command -v gh >/dev/null || { echo "gh CLI is required: brew install gh && gh auth login"; exit 1; }
+	@for tool in zig cargo-zigbuild python3 ar zstd; do \
+		command -v "$$tool" >/dev/null || { echo "$$tool is required for Linux cross-compilation"; exit 1; }; \
+	done
 	@test -n "$(DEVELOPER_ID_APPLICATION)" || { \
 		echo "No Developer ID Application identity found in Keychain."; \
 		echo "Create it in Xcode > Settings > Accounts > Manage Certificates."; \

@@ -32,3 +32,12 @@ Build from source on Ubuntu Desktop:
     libxcb-render0-dev libxcb-shape0-dev libxcb-shm0-dev libxcb-xfixes0-dev \
     libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev
   make linux
+
+Cross-build both architectures from macOS:
+
+  brew install zig zstd
+  cargo install cargo-zigbuild --locked
+  make linux
+
+The first cross-build downloads a checksummed, minimal Ubuntu 22.04 XCB/XKB
+sysroot into target/linux-sysroots. Later builds reuse it.
