@@ -1280,7 +1280,6 @@ mod tests {
 
     #[test]
     fn history_collector_pages_and_reports_working_tree() {
-        use std::process::Command;
         let root = std::env::temp_dir().join(format!(
             "moeka-git-ops-history-{}-{}",
             std::process::id(),

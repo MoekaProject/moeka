@@ -3,7 +3,7 @@ category: Primeros pasos
 description: Aprende a usar Moeka
 ---
 # Moeka
-Moeka es una **aplicación de edición Markdown** elegante, fluida y local primero. Es fácil de empezar a usar, pero también sirve para quienes escriben mucho. Puedes usarla en macOS; ~~Windows y Linux~~ llegarán más adelante. Esta guía te ayuda a crear tu base de conocimiento con rapidez.
+Moeka es una **aplicación de edición Markdown** elegante, fluida y local primero. Es fácil de empezar a usar, pero también sirve para quienes escriben mucho. Puedes usarla en macOS y Windows; Linux llegará más adelante. Esta guía te ayuda a crear tu base de conocimiento con rapidez.
 
 Moeka usa `Markdown` como formato de texto. Markdown es ideal para escribir porque mantiene buena legibilidad sin interrumpir la creación. Puedes previsualizar la sintaxis admitida desde el menú contextual, usar los [atajos](#interacción-con-tablas) o escribir `/` en una línea vacía para abrir el menú de formato.
 

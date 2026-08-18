@@ -33,13 +33,39 @@ pub(crate) fn expand_tilde(path: &str) -> Option<PathBuf> {
 
 /// Converts a `file://` URL into a native path.
 pub(crate) fn path_from_file_url(url: &str) -> Option<PathBuf> {
-    let encoded = url.strip_prefix("file://")?;
-    let encoded = encoded.strip_prefix("localhost").unwrap_or(encoded);
-    if !encoded.starts_with('/') {
+    if !is_file_url(url) {
         return None;
     }
+    let encoded = url[7..].split(['?', '#']).next()?;
+    let encoded_path = if encoded.starts_with('/') {
+        encoded.to_string()
+    } else {
+        let (host, path) = encoded.split_once('/')?;
+        if host.is_empty() || path.is_empty() {
+            return None;
+        }
 
-    let decoded = percent_encoding::percent_decode_str(encoded)
+        if host.eq_ignore_ascii_case("localhost") {
+            format!("/{path}")
+        } else {
+            let host = percent_encoding::percent_decode_str(host)
+                .decode_utf8()
+                .ok()?;
+            let path = percent_encoding::percent_decode_str(path)
+                .decode_utf8()
+                .ok()?;
+            #[cfg(windows)]
+            return Some(PathBuf::from(format!(
+                r"\\{}\{}",
+                host,
+                path.replace('/', r"\")
+            )));
+            #[cfg(not(windows))]
+            return Some(PathBuf::from(format!("//{host}/{path}")));
+        }
+    };
+
+    let decoded = percent_encoding::percent_decode_str(&encoded_path)
         .decode_utf8()
         .ok()?;
     let decoded = decoded.as_ref();
@@ -49,6 +75,12 @@ pub(crate) fn path_from_file_url(url: &str) -> Option<PathBuf> {
     let decoded = decoded.trim_start_matches('/');
 
     (!decoded.is_empty()).then(|| PathBuf::from(decoded))
+}
+
+pub(crate) fn is_file_url(value: &str) -> bool {
+    value
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file://"))
 }
 
 /// Directories searched for bundled assets, in priority order.
@@ -148,13 +180,48 @@ mod tests {
             path_from_file_url(&format!("file://localhost{URL_DIR}note.md")),
             Some(native_path("note.md"))
         );
+        assert_eq!(
+            path_from_file_url(&file_url("note.md?download=1#section")),
+            Some(native_path("note.md"))
+        );
+        assert_eq!(
+            path_from_file_url(&file_url("literal%23name.md")),
+            Some(native_path("literal#name.md"))
+        );
+        assert_eq!(
+            path_from_file_url(&file_url("note.md").replacen("file", "FILE", 1)),
+            Some(native_path("note.md"))
+        );
     }
 
     #[test]
     fn rejects_urls_that_are_not_absolute_file_paths() {
         assert_eq!(path_from_file_url("https://moeka.app/"), None);
-        assert_eq!(path_from_file_url("file://relative/note.md"), None);
+        assert_eq!(path_from_file_url("file://localhostfoo/note.md"), {
+            #[cfg(windows)]
+            {
+                Some(PathBuf::from(r"\\localhostfoo\note.md"))
+            }
+            #[cfg(not(windows))]
+            {
+                Some(PathBuf::from("//localhostfoo/note.md"))
+            }
+        });
         assert_eq!(path_from_file_url("/tmp/note.md"), None);
         assert_eq!(path_from_file_url("file://"), None);
+    }
+
+    #[test]
+    fn converts_file_url_authorities_to_network_paths() {
+        #[cfg(windows)]
+        assert_eq!(
+            path_from_file_url("file://server/share/%E7%AC%94%E8%AE%B0.md"),
+            Some(PathBuf::from(r"\\server\share\笔记.md"))
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            path_from_file_url("file://server/share/%E7%AC%94%E8%AE%B0.md"),
+            Some(PathBuf::from("//server/share/笔记.md"))
+        );
     }
 }

@@ -588,8 +588,9 @@ impl EditorView {
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     cx.stop_propagation();
                     let mods = event.modifiers();
-                    let has_modifier = mods.platform || mods.shift;
-                    this.sidebar_select_item(&click_path, mods.shift, mods.platform);
+                    let secondary = mods.secondary();
+                    let has_modifier = secondary || mods.shift;
+                    this.sidebar_select_item(&click_path, mods.shift, secondary);
                     if !has_modifier {
                         this.set_file_list_dir_for_path(&click_path, cx);
                         this.suppress_next_sidebar_sync_path = Some(click_path.clone());
@@ -960,8 +961,9 @@ impl EditorView {
                 let path = path.clone();
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     let mods = event.modifiers();
-                    let has_modifier = mods.platform || mods.shift;
-                    this.sidebar_select_item(&path, mods.shift, mods.platform);
+                    let secondary = mods.secondary();
+                    let has_modifier = secondary || mods.shift;
+                    this.sidebar_select_item(&path, mods.shift, secondary);
                     if !has_modifier {
                         this.set_file_list_dir_for_path(&path, cx);
                         if path.is_dir() {

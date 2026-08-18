@@ -1298,31 +1298,6 @@ fn reference_scheme(target: &str) -> Option<&str> {
         .then_some(scheme)
 }
 
-fn decode_file_url_path(target: &str) -> String {
-    if let Some(stripped) = target.strip_prefix("file://") {
-        let mut result = String::with_capacity(stripped.len());
-        let bytes = stripped.as_bytes();
-        let mut index = 0usize;
-        while index < bytes.len() {
-            if bytes[index] == b'%' && index + 2 < bytes.len() {
-                if let Ok(byte) = u8::from_str_radix(
-                    std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or(""),
-                    16,
-                ) {
-                    result.push(byte as char);
-                    index += 3;
-                    continue;
-                }
-            }
-            result.push(bytes[index] as char);
-            index += 1;
-        }
-        result
-    } else {
-        target.to_string()
-    }
-}
-
 fn external_reference_host(target: &str) -> Option<String> {
     let trimmed = target.trim();
     if let Some(rest) = trimmed.strip_prefix("mailto:") {
@@ -2697,10 +2672,13 @@ impl EditorView {
     }
 
     fn resolve_info_panel_reference_path(&self, raw: &str) -> Option<PathBuf> {
-        let decoded = decode_file_url_path(raw);
-        let raw = decoded.trim();
+        let raw = raw.trim();
         if raw.is_empty() || raw.starts_with('#') {
             return None;
+        }
+
+        if crate::platform::paths::is_file_url(raw) {
+            return crate::platform::paths::path_from_file_url(raw);
         }
 
         let expanded = crate::platform::paths::expand_tilde(raw)?;
@@ -2744,7 +2722,7 @@ impl EditorView {
             return None;
         }
 
-        if trimmed.starts_with("file://") {
+        if crate::platform::paths::is_file_url(trimmed) {
             return self
                 .resolve_info_panel_reference_path(raw)
                 .map(InfoPanelReferenceTarget::LocalPath);

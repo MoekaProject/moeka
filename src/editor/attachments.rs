@@ -322,15 +322,14 @@ impl WorkspaceLinkIndex {
         let raw_path = raw_target
             .split_once('#')
             .map_or(raw_target, |(path, _)| path);
+        if crate::platform::paths::is_file_url(raw_path) {
+            let path = crate::platform::paths::path_from_file_url(raw_path)?;
+            return path.exists().then_some(path);
+        }
         let decoded = percent_decode_str(raw_path).decode_utf8().ok()?;
         let decoded = decoded.trim();
         if decoded.is_empty() {
             return source_file.map(Path::to_path_buf);
-        }
-
-        if let Some(file_path) = decoded.strip_prefix("file://") {
-            let path = PathBuf::from(file_path);
-            return path.exists().then_some(path);
         }
 
         let path = PathBuf::from(decoded.as_ref() as &str);

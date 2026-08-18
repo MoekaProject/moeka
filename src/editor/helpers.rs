@@ -4747,12 +4747,13 @@ pub(crate) fn resolve_image_to_path(
     file_dir: Option<&PathBuf>,
     workspace_roots: &[PathBuf],
 ) -> Option<PathBuf> {
-    // Strip file:// scheme
-    let path_str = if let Some(stripped) = raw.strip_prefix("file://") {
-        percent_decode_path(stripped)
-    } else {
-        percent_decode_path(raw)
-    };
+    if crate::platform::paths::is_file_url(raw) {
+        let path = crate::platform::paths::path_from_file_url(raw)?;
+        let path = normalize_image_path(&path);
+        return path.exists().then_some(path);
+    }
+
+    let path_str = percent_decode_path(raw);
 
     let path_str = path_str.as_str();
 

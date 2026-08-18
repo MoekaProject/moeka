@@ -124,6 +124,8 @@ impl RuntimeProfiler {
 
         let (cpu_profiler_status, cpu_guard) =
             start_cpu_profiler(config.cpu_enabled, config.cpu_frequency_hz);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let _ = cpu_guard;
         if let CpuProfilerStatus::Unavailable { error } = &cpu_profiler_status {
             log_error!("Runtime CPU profiler unavailable: {error}");
         }
@@ -311,9 +313,12 @@ impl ProfileConfig {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum CpuProfilerStatus {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Enabled,
     Disabled,
-    Unavailable { error: String },
+    Unavailable {
+        error: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]

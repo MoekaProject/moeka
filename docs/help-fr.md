@@ -3,7 +3,7 @@ category: Premiers pas
 description: Découvrir l'utilisation de Moeka
 ---
 # Moeka
-Moeka est une application de **rédaction Markdown** élégante, fluide et locale d'abord. Elle est simple à prendre en main, tout en restant assez puissante pour les écrivains intensifs. Elle fonctionne sur macOS, avec ~~Windows et Linux~~ prévus plus tard. Ce guide vous aide à créer rapidement votre base de connaissances.
+Moeka est une application de **rédaction Markdown** élégante, fluide et locale d'abord. Elle est simple à prendre en main, tout en restant assez puissante pour les écrivains intensifs. Elle fonctionne sur macOS et Windows, avec Linux prévu plus tard. Ce guide vous aide à créer rapidement votre base de connaissances.
 
 Moeka utilise `Markdown` comme format de texte. Markdown convient très bien à l'écriture, car il reste lisible sans interrompre le flux de création. Vous pouvez prévisualiser les syntaxes prises en charge depuis le menu contextuel, utiliser les [raccourcis](#interaction-avec-les-tableaux), ou saisir `/` sur une ligne vide pour ouvrir le menu de mise en forme.
 

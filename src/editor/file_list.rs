@@ -1339,8 +1339,9 @@ impl EditorView {
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     cx.stop_propagation();
                     let mods = event.modifiers();
-                    let has_modifier = mods.platform || mods.shift;
-                    this.sidebar_select_item(&click_path, mods.shift, mods.platform);
+                    let secondary = mods.secondary();
+                    let has_modifier = secondary || mods.shift;
+                    this.sidebar_select_item(&click_path, mods.shift, secondary);
                     if !has_modifier {
                         // Unlike FileTree clicks this does not suppress the
                         // sidebar sync: activating the tab should reveal the

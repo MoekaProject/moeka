@@ -491,10 +491,14 @@ impl rwh::HasWindowHandle for WindowsWindow {
     }
 }
 
-// todo(windows)
 impl rwh::HasDisplayHandle for WindowsWindow {
     fn display_handle(&self) -> std::result::Result<rwh::DisplayHandle<'_>, rwh::HandleError> {
-        unimplemented!()
+        // SAFETY: the Windows display handle carries no borrowed native data.
+        unsafe {
+            Ok(rwh::DisplayHandle::borrow_raw(
+                rwh::WindowsDisplayHandle::new().into(),
+            ))
+        }
     }
 }
 

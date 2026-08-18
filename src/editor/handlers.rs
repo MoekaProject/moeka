@@ -164,13 +164,19 @@ impl EditorView {
         match RuntimeProfiler::start_manual() {
             Ok(profiler) => {
                 let output_dir = profiler.output_dir().to_path_buf();
+                let stop_shortcut = crate::editor::shortcut::display_shortcut_from_keystroke(
+                    "secondary-alt-ctrl-p",
+                );
+                let snapshot_shortcut = crate::editor::shortcut::display_shortcut_from_keystroke(
+                    "secondary-shift-alt-ctrl-p",
+                );
                 self.runtime_profiler = Some(profiler);
                 self.show_dialog(
                     Dialog {
                         title: "Runtime profile started".to_string(),
                         message: format!(
-                            "Profile output directory:\n{}\n\nPress Cmd+Ctrl+Option+P to stop, or Cmd+Ctrl+Option+Shift+P to write an intermediate snapshot.",
-                            output_dir.display()
+                            "Profile output directory:\n{}\n\nPress {stop_shortcut} to stop, or {snapshot_shortcut} to write an intermediate snapshot.",
+                            output_dir.display(),
                         ),
                         save_label: None,
                         confirm_label: "OK".to_string(),
@@ -196,9 +202,11 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         if self.runtime_profiler.is_none() {
+            let shortcut =
+                crate::editor::shortcut::display_shortcut_from_keystroke("secondary-alt-ctrl-p");
             self.show_runtime_profile_error(
                 "Runtime profile is not running",
-                "Press Cmd+Ctrl+Option+P to start profiling before taking a snapshot.".to_string(),
+                format!("Press {shortcut} to start profiling before taking a snapshot."),
                 cx,
             );
             return;

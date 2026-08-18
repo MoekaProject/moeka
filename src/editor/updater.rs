@@ -1,7 +1,9 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+#[cfg(target_os = "macos")]
+use std::process::Command;
+use std::process::Stdio;
 use std::time::Duration;
 
 use gpui::Context;
@@ -240,21 +242,19 @@ fn parse_version(value: &str) -> Vec<u64> {
 }
 
 fn select_update_asset(assets: &[GitHubAsset]) -> Option<&GitHubAsset> {
-    select_update_asset_for_arch(assets, std::env::consts::ARCH)
+    select_update_asset_for_platform(assets, std::env::consts::OS, std::env::consts::ARCH)
 }
 
-fn select_update_asset_for_arch<'a>(
+fn select_update_asset_for_platform<'a>(
     assets: &'a [GitHubAsset],
+    platform: &str,
     architecture: &str,
 ) -> Option<&'a GitHubAsset> {
-    // Only macOS builds are published as directly installable assets.
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
-
-    let preferred: &[&str] = match architecture {
-        "aarch64" => &["macos-arm64.dmg", "macos-universal.dmg"],
-        "x86_64" => &["macos-x86_64.dmg", "macos-amd64.dmg", "macos-universal.dmg"],
+    let preferred: &[&str] = match (platform, architecture) {
+        ("macos", "aarch64") => &["macos-arm64.dmg", "macos-universal.dmg"],
+        ("macos", "x86_64") => &["macos-x86_64.dmg", "macos-amd64.dmg", "macos-universal.dmg"],
+        ("windows", "aarch64") => &["windows-arm64.zip"],
+        ("windows", "x86_64") => &["windows-x86_64.zip", "windows-amd64.zip"],
         _ => return None,
     };
     preferred.iter().find_map(|suffix| {
@@ -304,6 +304,88 @@ fn install_update(update: PreparedUpdate) -> Result<(), String> {
             .map_err(|error| error.to_string());
     };
 
+    #[cfg(windows)]
+    return install_windows_update(&installer_path);
+
+    #[cfg(target_os = "macos")]
+    return install_macos_update(update, installer_path);
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    crate::platform::shell::open_path(&installer_path).map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn install_windows_update(installer_path: &Path) -> Result<(), String> {
+    let executable_path = std::env::current_exe().map_err(|error| error.to_string())?;
+    let update_dir = installer_path
+        .parent()
+        .ok_or_else(|| "the update archive has no parent directory".to_string())?;
+    let script_path = update_dir.join("install-update.ps1");
+    let log_path = update_dir.join("install.log");
+    let script = r#"param(
+    [Parameter(Mandatory=$true)][string]$ArchivePath,
+    [Parameter(Mandatory=$true)][string]$ExecutablePath,
+    [Parameter(Mandatory=$true)][int]$MoekaProcessId,
+    [Parameter(Mandatory=$true)][string]$LogPath
+)
+$ErrorActionPreference = 'Stop'
+$stage = Join-Path ([IO.Path]::GetDirectoryName($ArchivePath)) ('.stage-' + [guid]::NewGuid())
+$backup = $ExecutablePath + '.previous-update'
+try {
+    while (Get-Process -Id $MoekaProcessId -ErrorAction SilentlyContinue) {
+        Start-Sleep -Milliseconds 200
+    }
+    Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Installing $ArchivePath"
+    Expand-Archive -LiteralPath $ArchivePath -DestinationPath $stage -Force
+    $newExecutable = Get-ChildItem -LiteralPath $stage -Filter 'Moeka.exe' -File -Recurse |
+        Select-Object -First 1
+    if ($null -eq $newExecutable) { throw 'Moeka.exe was not found in the update archive' }
+    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+    Move-Item -LiteralPath $ExecutablePath -Destination $backup
+    try {
+        Move-Item -LiteralPath $newExecutable.FullName -Destination $ExecutablePath
+        Start-Process -FilePath $ExecutablePath
+        Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+        Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) Update installed"
+    } catch {
+        Remove-Item -LiteralPath $ExecutablePath -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $backup -Destination $ExecutablePath -Force
+        throw
+    }
+} catch {
+    Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format s) $($_.Exception.Message)"
+    Start-Process -FilePath $ExecutablePath -ErrorAction SilentlyContinue
+} finally {
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+}
+"#;
+    fs::write(&script_path, script).map_err(|error| error.to_string())?;
+
+    crate::platform::process::headless_command("powershell.exe")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&script_path)
+        .arg("-ArchivePath")
+        .arg(installer_path)
+        .arg("-ExecutablePath")
+        .arg(executable_path)
+        .arg("-MoekaProcessId")
+        .arg(std::process::id().to_string())
+        .arg("-LogPath")
+        .arg(log_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    std::process::exit(0);
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_update(update: PreparedUpdate, installer_path: PathBuf) -> Result<(), String> {
     let Some(bundle_path) = current_app_bundle_path() else {
         return crate::platform::shell::open_path(&installer_path)
             .map_err(|error| error.to_string());
@@ -423,6 +505,7 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') Moeka update installed and relaunched"
     std::process::exit(0);
 }
 
+#[cfg(target_os = "macos")]
 fn lipo_arch_for_rust_arch(architecture: &str) -> Option<&'static str> {
     match architecture {
         "aarch64" => Some("arm64"),
@@ -431,6 +514,7 @@ fn lipo_arch_for_rust_arch(architecture: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn current_app_bundle_path() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
     let macos_dir = executable.parent()?;
@@ -461,7 +545,9 @@ fn safe_file_name(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{GitHubAsset, lipo_arch_for_rust_arch, select_update_asset_for_arch};
+    #[cfg(target_os = "macos")]
+    use super::lipo_arch_for_rust_arch;
+    use super::{GitHubAsset, select_update_asset_for_platform};
 
     fn asset(name: &str) -> GitHubAsset {
         GitHubAsset {
@@ -480,23 +566,46 @@ mod tests {
         ];
 
         assert_eq!(
-            select_update_asset_for_arch(&assets, "aarch64").map(|asset| asset.name.as_str()),
+            select_update_asset_for_platform(&assets, "macos", "aarch64")
+                .map(|asset| asset.name.as_str()),
             Some("Moeka-macos-arm64.dmg")
         );
         assert_eq!(
-            select_update_asset_for_arch(&assets, "x86_64").map(|asset| asset.name.as_str()),
+            select_update_asset_for_platform(&assets, "macos", "x86_64")
+                .map(|asset| asset.name.as_str()),
             Some("Moeka-macos-x86_64.dmg")
         );
-        assert!(select_update_asset_for_arch(&assets, "riscv64").is_none());
+        assert!(select_update_asset_for_platform(&assets, "macos", "riscv64").is_none());
     }
 
     #[test]
     fn update_assets_ignore_zip_only_releases() {
         let assets = [asset("Moeka-macos-arm64.zip")];
-        assert!(select_update_asset_for_arch(&assets, "aarch64").is_none());
+        assert!(select_update_asset_for_platform(&assets, "macos", "aarch64").is_none());
     }
 
     #[test]
+    fn update_assets_select_windows_portable_zips() {
+        let assets = [
+            asset("Moeka-windows-x86_64.zip"),
+            asset("Moeka-windows-arm64.zip"),
+            asset("Moeka-macos-arm64.dmg"),
+        ];
+
+        assert_eq!(
+            select_update_asset_for_platform(&assets, "windows", "aarch64")
+                .map(|asset| asset.name.as_str()),
+            Some("Moeka-windows-arm64.zip")
+        );
+        assert_eq!(
+            select_update_asset_for_platform(&assets, "windows", "x86_64")
+                .map(|asset| asset.name.as_str()),
+            Some("Moeka-windows-x86_64.zip")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
     fn rust_architectures_map_to_lipo_names() {
         assert_eq!(lipo_arch_for_rust_arch("aarch64"), Some("arm64"));
         assert_eq!(lipo_arch_for_rust_arch("x86_64"), Some("x86_64"));

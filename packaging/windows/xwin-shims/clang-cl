@@ -28,7 +28,7 @@ while [ $# -gt 0 ]; do
     /imsvc*) args+=(-isystem "${1#/imsvc}") ;;
     # cl-only spellings the GNU driver would misread (`-MD` means "write a
     # depfile" there) or reject.
-    -nologo|-MD|-MT|-MDd|-MTd|-Brepro|--) ;;
+    -nologo|-MD|-MT|-MDd|-MTd|-Brepro|-Z7|--) ;;
     *) args+=("$1") ;;
   esac
   shift

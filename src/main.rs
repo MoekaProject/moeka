@@ -1,15 +1,9 @@
 #![allow(unexpected_cfgs)]
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-/// Reports a failure we can carry on from.
-///
-/// `eprintln!` would panic instead: a `windows_subsystem = "windows"` process
-/// started from Explorer has no stderr handle, and printing to a missing one is
-/// an error that `eprintln!` turns into a panic.
 macro_rules! log_error {
     ($($arg:tt)*) => {{
-        use std::io::Write as _;
-        let _ = writeln!(std::io::stderr(), $($arg)*);
+        crate::log_nonfatal_error(format_args!($($arg)*));
     }};
 }
 
@@ -44,6 +38,30 @@ use gpui::*;
 use actions::*;
 use editor::EditorView;
 use platform::keys;
+
+fn log_nonfatal_error(message: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+
+    let _ = writeln!(std::io::stderr(), "{message}");
+    #[cfg(windows)]
+    {
+        let path = editor::config_paths::cache_dir().join("app.log");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(
+                file,
+                "{} {message}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
+        }
+    }
+}
 
 const MIN_WINDOW_WIDTH_PX: f32 = 480.0;
 const MIN_WINDOW_HEIGHT_PX: f32 = 320.0;
@@ -247,7 +265,7 @@ fn editor_window_options(cx: &App) -> WindowOptions {
     }
 }
 
-fn configure_editor_window(window: &mut Window, remember_main_window_frame: bool) {
+fn configure_editor_window(window: &mut Window, _remember_main_window_frame: bool) {
     window.set_background_appearance(WindowBackgroundAppearance::Transparent);
     platform::window_chrome::apply_icon(window);
     #[cfg(target_os = "macos")]
@@ -262,7 +280,7 @@ fn configure_editor_window(window: &mut Window, remember_main_window_frame: bool
                 let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
                 disable_gpui_content_view_window_drag(ns_view);
                 let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
-                if remember_main_window_frame {
+                if _remember_main_window_frame {
                     let autosave_name = std::ffi::CString::new(MAIN_WINDOW_FRAME_AUTOSAVE_NAME)
                         .expect("window frame autosave name");
                     let autosave_name: *mut objc::runtime::Object = msg_send![
@@ -305,6 +323,7 @@ fn open_editor_window(cx: &mut App) -> anyhow::Result<Entity<EditorView>> {
     Ok(editor.expect("editor view must be created with its window"))
 }
 
+#[cfg(target_os = "macos")]
 fn restore_window(handle: AnyWindowHandle, cx: &mut App) {
     let _ = handle.update(cx, |_, window, _| {
         #[cfg(target_os = "macos")]

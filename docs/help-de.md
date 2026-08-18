@@ -3,7 +3,7 @@ category: Einstieg
 description: Moeka verwenden
 ---
 # Moeka
-Moeka ist eine elegante, flüssige, lokal orientierte **Markdown-Editor-App**. Sie ist einfach zu bedienen und zugleich stark genug für anspruchsvolles Schreiben. Sie läuft auf macOS; ~~Windows und Linux~~ folgen später. Diese Anleitung hilft dir, schneller eine eigene Wissensbasis aufzubauen.
+Moeka ist eine elegante, flüssige, lokal orientierte **Markdown-Editor-App**. Sie ist einfach zu bedienen und zugleich stark genug für anspruchsvolles Schreiben. Sie läuft auf macOS und Windows; Linux folgt später. Diese Anleitung hilft dir, schneller eine eigene Wissensbasis aufzubauen.
 
 Moeka verwendet `Markdown` als Textformat. Markdown eignet sich gut für Autorinnen und Autoren, weil es lesbar bleibt und den Schreibfluss nicht stört. Unterstützte Syntax kannst du im Kontextmenü ansehen, über [Kurzbefehle](#tabelleninteraktion) anwenden oder auf einer leeren Zeile `/` eingeben, um das Formatmenü zu öffnen.
 
