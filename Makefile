@@ -48,8 +48,16 @@ WINDOWS_ZIP_PATHS := \
 	$(DIST_DIR)/$(APP_DISPLAY_NAME)-windows-arm64.zip \
 	$(DIST_DIR)/$(APP_DISPLAY_NAME)-windows-x86_64.zip
 XWIN_SHIMS := packaging/windows/xwin-shims
+LINUX_TARGETS := x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+LINUX_ARCHIVES := \
+	$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-arm64.tar.gz \
+	$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-x86_64.tar.gz
+LINUX_DESKTOP_FILE := packaging/linux/app.moeka.moeka.desktop
+LINUX_INSTALL_SCRIPT := packaging/linux/install.sh
+LINUX_README := packaging/linux/README.txt
+LINUX_ICON_SOURCE := packaging/linux/app.moeka.moeka.png
 
-.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check windows windows-one windows-arm64 windows-x86_64 windows-icon
+.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check windows windows-one windows-arm64 windows-x86_64 windows-icon linux linux-one linux-arm64 linux-x86_64
 
 dmg: $(ICON_FILE)
 	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -102,6 +110,51 @@ windows-one:
 # Pillow, and the result is committed, so this is not part of `make windows`.
 windows-icon:
 	@python3 scripts/generate_windows_icon.py
+
+# Linux packages are built natively: GPUI links to the target desktop's Vulkan,
+# Wayland, X11, fontconfig and ALSA libraries. Use an x86_64 Ubuntu host for the
+# x86_64 package and an ARM64 Ubuntu host (including a Fusion VM) for ARM64.
+linux:
+	@case "$(HOST_TARGET)" in \
+		x86_64-unknown-linux-gnu) $(MAKE) linux-x86_64 ;; \
+		aarch64-unknown-linux-gnu) $(MAKE) linux-arm64 ;; \
+		*) echo "Linux packaging requires a native x86_64 or ARM64 Linux host (current: $(HOST_TARGET))"; exit 1 ;; \
+	esac
+
+linux-x86_64:
+	@$(MAKE) linux-one LINUX_TARGET=x86_64-unknown-linux-gnu LINUX_SUFFIX=x86_64
+
+linux-arm64:
+	@$(MAKE) linux-one LINUX_TARGET=aarch64-unknown-linux-gnu LINUX_SUFFIX=arm64
+
+linux-one:
+	@if [[ "$(HOST_TARGET)" != "$(LINUX_TARGET)" ]]; then \
+		echo "$(LINUX_TARGET) must be built on a matching Linux host (current: $(HOST_TARGET))"; \
+		exit 1; \
+	fi
+	@rustup target add "$(LINUX_TARGET)"
+	@cargo build --release --target "$(LINUX_TARGET)"
+	@set -euo pipefail; \
+	binary="target/$(LINUX_TARGET)/release/$(APP_NAME)"; \
+	if ldd "$$binary" | tee /dev/stderr | grep -q 'not found'; then \
+		echo "Linux package has unresolved runtime libraries"; \
+		exit 1; \
+	fi; \
+	stage="$$(mktemp -d)"; \
+	package="$$stage/$(APP_DISPLAY_NAME)-linux-$(LINUX_SUFFIX)"; \
+	mkdir -p "$$package" "$(DIST_DIR)"; \
+	cp "$$binary" "$$package/$(APP_DISPLAY_NAME)"; \
+	chmod +x "$$package/$(APP_DISPLAY_NAME)"; \
+	cp "$(LINUX_DESKTOP_FILE)" "$$package/"; \
+	cp "$(LINUX_INSTALL_SCRIPT)" "$$package/install.sh"; \
+	chmod +x "$$package/install.sh"; \
+	cp "$(LINUX_README)" "$$package/README.txt"; \
+	cp "$(LINUX_ICON_SOURCE)" "$$package/app.moeka.moeka.png"; \
+	archive="$(CURDIR)/$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-$(LINUX_SUFFIX).tar.gz"; \
+	rm -f "$$archive"; \
+	tar -C "$$stage" -czf "$$archive" "$$(basename "$$package")"; \
+	rm -rf "$$stage"; \
+	echo "Created $$archive"
 
 publish: publish-check
 	@git push --force-with-lease origin HEAD:main

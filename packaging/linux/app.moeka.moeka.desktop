@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Moeka
+GenericName=Markdown Editor
+Comment=Local-first Markdown editor
+Exec=moeka %F
+Icon=app.moeka.moeka
+Terminal=false
+Categories=Office;TextEditor;
+MimeType=text/markdown;text/plain;
+StartupNotify=true
+StartupWMClass=app.moeka.moeka

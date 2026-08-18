@@ -249,6 +249,10 @@ fn editor_window_options(cx: &App) -> WindowOptions {
         EditorView::traffic_light_position_for_ui_scale(editor::AppSettings::load().ui_scale);
     #[cfg(not(target_os = "macos"))]
     let traffic_light_position = point(px(10.0), px(10.0));
+    #[cfg(target_os = "linux")]
+    let app_id = Some("app.moeka.moeka".into());
+    #[cfg(not(target_os = "linux"))]
+    let app_id = None;
 
     WindowOptions {
         window_bounds: Some(platform::window_state::restore(cx).unwrap_or_else(|| {
@@ -261,6 +265,7 @@ fn editor_window_options(cx: &App) -> WindowOptions {
             traffic_light_position: Some(traffic_light_position),
         }),
         window_background: WindowBackgroundAppearance::Transparent,
+        app_id,
         ..Default::default()
     }
 }

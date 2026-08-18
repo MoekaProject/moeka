@@ -106,3 +106,62 @@ jobs:
           name: Moeka-windows-${{ matrix.arch }}
           path: dist/windows
           if-no-files-found: error
+
+  linux-package:
+    name: Linux portable package (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            libasound2-dev \
+            libfontconfig-dev \
+            libssl-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-shm0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-xkb-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            pkg-config
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-package-${{ matrix.arch }}
+
+      - name: Build package
+        run: CARGO_INCREMENTAL=0 make linux-${{ matrix.arch }}
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Moeka-linux-${{ matrix.arch }}
+          path: dist/Moeka-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
