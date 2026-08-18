@@ -54,6 +54,7 @@ LINUX_ARCHIVES := \
 	$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-x86_64.tar.gz
 LINUX_DESKTOP_FILE := packaging/linux/app.moeka.moeka.desktop
 LINUX_INSTALL_SCRIPT := packaging/linux/install.sh
+LINUX_UNINSTALL_SCRIPT := packaging/linux/uninstall.sh
 LINUX_README := packaging/linux/README.txt
 LINUX_ICON_SOURCE := packaging/linux/app.moeka.moeka.png
 LINUX_SYSROOT_SCRIPT := scripts/prepare_linux_sysroot.py
@@ -198,6 +199,8 @@ linux-one:
 	cp "$(LINUX_DESKTOP_FILE)" "$$package/"; \
 	cp "$(LINUX_INSTALL_SCRIPT)" "$$package/install.sh"; \
 	chmod +x "$$package/install.sh"; \
+	cp "$(LINUX_UNINSTALL_SCRIPT)" "$$package/uninstall.sh"; \
+	chmod +x "$$package/uninstall.sh"; \
 	cp "$(LINUX_README)" "$$package/README.txt"; \
 	cp "$(LINUX_ICON_SOURCE)" "$$package/app.moeka.moeka.png"; \
 	archive="$(CURDIR)/$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-$(LINUX_SUFFIX).tar.gz"; \

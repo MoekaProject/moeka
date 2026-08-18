@@ -1,6 +1,8 @@
 //! Font families and font files available on the host platform.
 
 #[cfg(not(target_os = "macos"))]
+use std::collections::HashSet;
+#[cfg(not(target_os = "macos"))]
 use std::path::PathBuf;
 
 /// Family name that resolves to the platform's UI font at render time.
@@ -54,11 +56,41 @@ const PDF_FONT_FILES: &[&str] = &[
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
 ];
 
+#[cfg(all(unix, not(target_os = "macos")))]
+const PDF_FONT_FAMILIES: &[&str] = &[
+    "Noto Sans CJK SC",
+    "Source Han Sans SC",
+    "DejaVu Sans",
+    "Liberation Sans",
+];
+
 /// Font files to try, in order, when drawing a PDF without a web view.
 ///
 /// Callers must tolerate entries that exist but fail to parse: collections
 /// and variable fonts are not loadable by every PDF backend.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn pdf_font_candidates() -> Vec<PathBuf> {
-    PDF_FONT_FILES.iter().map(PathBuf::from).collect()
+    let mut candidates = Vec::new();
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    for family in PDF_FONT_FAMILIES {
+        if let Ok(output) = std::process::Command::new("fc-match")
+            .args(["-f", "%{file}\n", family])
+            .output()
+            && output.status.success()
+        {
+            candidates.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from),
+            );
+        }
+    }
+
+    candidates.extend(PDF_FONT_FILES.iter().map(PathBuf::from));
+    let mut seen = HashSet::new();
+    candidates.retain(|path| seen.insert(path.clone()));
+    candidates
 }

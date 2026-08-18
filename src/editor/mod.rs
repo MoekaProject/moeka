@@ -1444,6 +1444,8 @@ pub struct EditorView {
     pub(crate) traffic_light_ui_scale: Option<f32>,
     #[cfg(not(target_os = "macos"))]
     pub(crate) window_is_maximized: bool,
+    #[cfg(target_os = "linux")]
+    pub(crate) client_side_window_decorations: bool,
     pub(crate) folded_sections: HashSet<usize>,
     pub(crate) folded_image_previews: HashSet<usize>,
     pub(crate) generated_preview_keys: HashSet<String>,
@@ -2125,6 +2127,8 @@ impl EditorView {
             traffic_light_ui_scale: None,
             #[cfg(not(target_os = "macos"))]
             window_is_maximized: false,
+            #[cfg(target_os = "linux")]
+            client_side_window_decorations: false,
             folded_sections: HashSet::new(),
             folded_image_previews: HashSet::new(),
             generated_preview_keys: HashSet::new(),

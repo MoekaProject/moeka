@@ -3,6 +3,7 @@ Type=Application
 Name=Moeka
 GenericName=Markdown Editor
 Comment=Local-first Markdown editor
+Keywords=markdown;editor;text;notes;writing;
 Exec=moeka %F
 Icon=app.moeka.moeka
 Terminal=false

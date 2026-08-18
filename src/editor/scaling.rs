@@ -81,6 +81,11 @@ impl EditorView {
     /// Width reserved at the trailing edge for the caption buttons the app
     /// draws itself.
     pub(crate) fn window_caption_trailing_inset(&self) -> f32 {
+        #[cfg(target_os = "linux")]
+        if !self.client_side_window_decorations {
+            return 0.0;
+        }
+
         if cfg!(target_os = "macos") {
             0.0
         } else {

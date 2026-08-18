@@ -3,6 +3,8 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Window, canvas, deferred,
     div, img, prelude::*, px, quad,
 };
+#[cfg(target_os = "linux")]
+use gpui::{BoxShadow, Decorations, Hsla, Point, ResizeEdge, Size, Tiling, transparent_black};
 
 use super::*;
 
@@ -10,6 +12,31 @@ pub(super) fn clamp_resize_dimension(value: f32, minimum: f32, maximum: f32) -> 
     let lower_bound = minimum.min(maximum);
     let upper_bound = minimum.max(maximum);
     value.clamp(lower_bound, upper_bound)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_client_resize_edge(
+    position: Point<gpui::Pixels>,
+    inset: gpui::Pixels,
+    size: Size<gpui::Pixels>,
+    tiling: Tiling,
+) -> Option<ResizeEdge> {
+    let top = !tiling.top && position.y < inset;
+    let bottom = !tiling.bottom && position.y > size.height - inset;
+    let left = !tiling.left && position.x < inset;
+    let right = !tiling.right && position.x > size.width - inset;
+
+    match (top, bottom, left, right) {
+        (true, _, true, _) => Some(ResizeEdge::TopLeft),
+        (true, _, _, true) => Some(ResizeEdge::TopRight),
+        (_, true, true, _) => Some(ResizeEdge::BottomLeft),
+        (_, true, _, true) => Some(ResizeEdge::BottomRight),
+        (true, _, _, _) => Some(ResizeEdge::Top),
+        (_, true, _, _) => Some(ResizeEdge::Bottom),
+        (_, _, true, _) => Some(ResizeEdge::Left),
+        (_, _, _, true) => Some(ResizeEdge::Right),
+        _ => None,
+    }
 }
 
 impl EditorView {
@@ -413,6 +440,25 @@ impl Render for EditorView {
             self.window_is_maximized = window.is_maximized();
             crate::platform::window_state::track(window.window_bounds());
         }
+        #[cfg(target_os = "linux")]
+        let linux_decorations = window.window_decorations();
+        #[cfg(target_os = "linux")]
+        {
+            self.client_side_window_decorations =
+                matches!(linux_decorations, Decorations::Client { .. });
+            match linux_decorations {
+                Decorations::Client { .. } => window.set_client_inset(px(12.0)),
+                Decorations::Server => window.set_client_inset(px(0.0)),
+            }
+        }
+        #[cfg(target_os = "macos")]
+        let show_window_caption_buttons = false;
+        #[cfg(windows)]
+        let show_window_caption_buttons = true;
+        #[cfg(target_os = "linux")]
+        let show_window_caption_buttons = self.client_side_window_decorations;
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        let show_window_caption_buttons = true;
         self.execute_pending_command(window, cx);
         self.refresh_chat_terminal_metrics(window, cx);
         self.process_pending_inline_diff(cx);
@@ -609,7 +655,7 @@ impl Render for EditorView {
         let wb = window.bounds();
         self.last_window_width = f32::from(wb.size.width);
         self.last_window_height = f32::from(wb.size.height);
-        div()
+        let content = div()
             .id("editor-root")
             .key_context(if self.focused_sidebar_path.is_some() {
                 "MarkdownEditor Sidebar"
@@ -1254,7 +1300,7 @@ impl Render for EditorView {
             })
             // Anchored to the window rather than the tab bar, which stops short
             // of the frame whenever a right-hand panel is open.
-            .when(!cfg!(target_os = "macos"), |this| {
+            .when(show_window_caption_buttons, |this| {
                 this.child(
                     div()
                         .absolute()
@@ -1262,7 +1308,69 @@ impl Render for EditorView {
                         .right_0()
                         .child(self.render_window_caption_buttons(cx)),
                 )
-            })
+            });
+
+        #[cfg(target_os = "linux")]
+        {
+            const SHADOW_INSET: f32 = 12.0;
+            const CORNER_RADIUS: f32 = 10.0;
+
+            match linux_decorations {
+                Decorations::Server => div().size_full().child(content).into_any_element(),
+                Decorations::Client { tiling } => div()
+                    .id("linux-window-backdrop")
+                    .size_full()
+                    .bg(transparent_black())
+                    .when(!tiling.top, |this| this.pt(px(SHADOW_INSET)))
+                    .when(!tiling.bottom, |this| this.pb(px(SHADOW_INSET)))
+                    .when(!tiling.left, |this| this.pl(px(SHADOW_INSET)))
+                    .when(!tiling.right, |this| this.pr(px(SHADOW_INSET)))
+                    .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                        let size = window.window_bounds().get_bounds().size;
+                        if let Some(edge) =
+                            linux_client_resize_edge(event.position, px(SHADOW_INSET), size, tiling)
+                        {
+                            cx.stop_propagation();
+                            window.start_window_resize(edge);
+                        }
+                    })
+                    .child(
+                        div()
+                            .size_full()
+                            .when(!(tiling.top || tiling.left), |this| {
+                                this.rounded_tl(px(CORNER_RADIUS))
+                            })
+                            .when(!(tiling.top || tiling.right), |this| {
+                                this.rounded_tr(px(CORNER_RADIUS))
+                            })
+                            .when(!(tiling.bottom || tiling.left), |this| {
+                                this.rounded_bl(px(CORNER_RADIUS))
+                            })
+                            .when(!(tiling.bottom || tiling.right), |this| {
+                                this.rounded_br(px(CORNER_RADIUS))
+                            })
+                            .when(!tiling.is_tiled(), |this| {
+                                this.shadow(vec![BoxShadow {
+                                    color: Hsla {
+                                        h: 0.0,
+                                        s: 0.0,
+                                        l: 0.0,
+                                        a: 0.38,
+                                    },
+                                    offset: gpui::point(px(0.0), px(2.0)),
+                                    blur_radius: px(10.0),
+                                    spread_radius: px(0.0),
+                                }])
+                            })
+                            .overflow_hidden()
+                            .child(content),
+                    )
+                    .into_any_element(),
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        content
     }
 }
 
