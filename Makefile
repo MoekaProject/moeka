@@ -117,10 +117,17 @@ windows-icon:
 # Linux hosts build natively. macOS hosts use Zig plus a minimal, checksummed
 # Ubuntu 22.04 sysroot containing the XCB/XKB libraries GPUI links directly.
 linux:
-	@rustup target add $(LINUX_TARGETS)
-	@$(MAKE) linux-x86_64
-	@$(MAKE) linux-arm64
-	@ls -lh $(LINUX_ARCHIVES)
+	@case "$(HOST_TARGET)" in \
+		*-apple-darwin) \
+			rustup target add $(LINUX_TARGETS); \
+			$(MAKE) linux-x86_64; \
+			$(MAKE) linux-arm64; \
+			ls -lh $(LINUX_ARCHIVES); \
+			;; \
+		x86_64-unknown-linux-gnu) $(MAKE) linux-x86_64 ;; \
+		aarch64-unknown-linux-gnu) $(MAKE) linux-arm64 ;; \
+		*) echo "Unsupported Linux packaging host: $(HOST_TARGET)"; exit 1 ;; \
+	esac
 
 linux-x86_64:
 	@$(MAKE) linux-one \

@@ -41,3 +41,6 @@ Cross-build both architectures from macOS:
 
 The first cross-build downloads a checksummed, minimal Ubuntu 22.04 XCB/XKB
 sysroot into target/linux-sysroots. Later builds reuse it.
+
+On macOS, `make linux` builds both architectures. On Linux, it builds the
+native architecture only; use the matching archive for that machine.
