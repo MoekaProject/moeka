@@ -8,6 +8,11 @@ use gpui::{BoxShadow, Decorations, Hsla, Point, ResizeEdge, Size, Tiling, transp
 
 use super::*;
 
+#[cfg(target_os = "linux")]
+const LINUX_CSD_INSET: f32 = 10.0;
+#[cfg(target_os = "linux")]
+const LINUX_CSD_RADIUS: f32 = 10.0;
+
 pub(super) fn clamp_resize_dimension(value: f32, minimum: f32, maximum: f32) -> f32 {
     let lower_bound = minimum.min(maximum);
     let upper_bound = minimum.max(maximum);
@@ -447,7 +452,7 @@ impl Render for EditorView {
             self.client_side_window_decorations =
                 matches!(linux_decorations, Decorations::Client { .. });
             match linux_decorations {
-                Decorations::Client { .. } => window.set_client_inset(px(12.0)),
+                Decorations::Client { .. } => window.set_client_inset(px(LINUX_CSD_INSET)),
                 Decorations::Server => window.set_client_inset(px(0.0)),
             }
         }
@@ -507,6 +512,14 @@ impl Render for EditorView {
             || self.pane_resize_drag.is_some();
         let show_empty_workspace = self.panes.len() == 1 && self.tabs.is_empty();
         let ws = &self.styles.window;
+        #[cfg(target_os = "linux")]
+        let root_window_radius = if self.client_side_window_decorations {
+            LINUX_CSD_RADIUS
+        } else {
+            ws.window_radius_px
+        };
+        #[cfg(not(target_os = "linux"))]
+        let root_window_radius = ws.window_radius_px;
         let editor = cx.entity().clone();
         let global_mouse_listeners = (!self.embedded_editor).then(|| {
             canvas(
@@ -694,7 +707,7 @@ impl Render for EditorView {
             .bg(ws.window_bg)
             .border(px(ws.window_border_width_px))
             .border_color(ws.window_border_color)
-            .rounded(px(ws.window_radius_px))
+            .rounded(px(root_window_radius))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -1312,42 +1325,42 @@ impl Render for EditorView {
 
         #[cfg(target_os = "linux")]
         {
-            const SHADOW_INSET: f32 = 18.0;
-            const CORNER_RADIUS: f32 = 12.0;
-
             match linux_decorations {
                 Decorations::Server => div().size_full().child(content).into_any_element(),
                 Decorations::Client { tiling } => div()
                     .id("linux-window-backdrop")
                     .size_full()
                     .bg(transparent_black())
-                    .when(!tiling.top, |this| this.pt(px(SHADOW_INSET)))
-                    .when(!tiling.bottom, |this| this.pb(px(SHADOW_INSET)))
-                    .when(!tiling.left, |this| this.pl(px(SHADOW_INSET)))
-                    .when(!tiling.right, |this| this.pr(px(SHADOW_INSET)))
                     .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                         let size = window.window_bounds().get_bounds().size;
-                        if let Some(edge) =
-                            linux_client_resize_edge(event.position, px(SHADOW_INSET), size, tiling)
-                        {
+                        if let Some(edge) = linux_client_resize_edge(
+                            event.position,
+                            px(LINUX_CSD_INSET * 1.5),
+                            size,
+                            tiling,
+                        ) {
                             cx.stop_propagation();
                             window.start_window_resize(edge);
                         }
                     })
+                    .when(!tiling.top, |this| this.pt(px(LINUX_CSD_INSET)))
+                    .when(!tiling.bottom, |this| this.pb(px(LINUX_CSD_INSET)))
+                    .when(!tiling.left, |this| this.pl(px(LINUX_CSD_INSET)))
+                    .when(!tiling.right, |this| this.pr(px(LINUX_CSD_INSET)))
                     .child(
                         div()
                             .size_full()
                             .when(!(tiling.top || tiling.left), |this| {
-                                this.rounded_tl(px(CORNER_RADIUS))
+                                this.rounded_tl(px(LINUX_CSD_RADIUS))
                             })
                             .when(!(tiling.top || tiling.right), |this| {
-                                this.rounded_tr(px(CORNER_RADIUS))
+                                this.rounded_tr(px(LINUX_CSD_RADIUS))
                             })
                             .when(!(tiling.bottom || tiling.left), |this| {
-                                this.rounded_bl(px(CORNER_RADIUS))
+                                this.rounded_bl(px(LINUX_CSD_RADIUS))
                             })
                             .when(!(tiling.bottom || tiling.right), |this| {
-                                this.rounded_br(px(CORNER_RADIUS))
+                                this.rounded_br(px(LINUX_CSD_RADIUS))
                             })
                             .when(!tiling.is_tiled(), |this| {
                                 this.shadow(vec![BoxShadow {
@@ -1355,15 +1368,76 @@ impl Render for EditorView {
                                         h: 0.0,
                                         s: 0.0,
                                         l: 0.0,
-                                        a: 0.22,
+                                        a: 0.18,
                                     },
-                                    offset: gpui::point(px(0.0), px(3.0)),
-                                    blur_radius: px(18.0),
+                                    offset: gpui::point(px(0.0), px(2.0)),
+                                    blur_radius: px(6.0),
                                     spread_radius: px(0.0),
                                 }])
                             })
-                            .overflow_hidden()
-                            .child(content),
+                            .child(
+                                div()
+                                    .size_full()
+                                    .when(!(tiling.top || tiling.left), |this| {
+                                        this.rounded_tl(px(LINUX_CSD_RADIUS))
+                                    })
+                                    .when(!(tiling.top || tiling.right), |this| {
+                                        this.rounded_tr(px(LINUX_CSD_RADIUS))
+                                    })
+                                    .when(!(tiling.bottom || tiling.left), |this| {
+                                        this.rounded_bl(px(LINUX_CSD_RADIUS))
+                                    })
+                                    .when(!(tiling.bottom || tiling.right), |this| {
+                                        this.rounded_br(px(LINUX_CSD_RADIUS))
+                                    })
+                                    .overflow_hidden()
+                                    .child(content),
+                            ),
+                    )
+                    .child(
+                        canvas(
+                            |_bounds, window, _cx| {
+                                window.insert_hitbox(
+                                    Bounds::new(
+                                        gpui::point(px(0.0), px(0.0)),
+                                        window.window_bounds().get_bounds().size,
+                                    ),
+                                    HitboxBehavior::Normal,
+                                )
+                            },
+                            move |_bounds, hitbox, window, _cx| {
+                                let Some(edge) = linux_client_resize_edge(
+                                    window.mouse_position(),
+                                    px(LINUX_CSD_INSET * 1.5),
+                                    window.window_bounds().get_bounds().size,
+                                    tiling,
+                                ) else {
+                                    return;
+                                };
+                                window.set_cursor_style(
+                                    match edge {
+                                        ResizeEdge::Top | ResizeEdge::Bottom => {
+                                            CursorStyle::ResizeUpDown
+                                        }
+                                        ResizeEdge::Left | ResizeEdge::Right => {
+                                            CursorStyle::ResizeLeftRight
+                                        }
+                                        ResizeEdge::TopLeft | ResizeEdge::BottomRight => {
+                                            CursorStyle::ResizeUpLeftDownRight
+                                        }
+                                        ResizeEdge::TopRight | ResizeEdge::BottomLeft => {
+                                            CursorStyle::ResizeUpRightDownLeft
+                                        }
+                                    },
+                                    &hitbox,
+                                );
+                            },
+                        )
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top_0()
+                        .bottom_0(),
                     )
                     .into_any_element(),
             }
