@@ -26,6 +26,8 @@ while [ $# -gt 0 ]; do
     --target=*) target="${1#--target=}"; args+=("$1") ;;
     /imsvc)  shift; args+=(-isystem "$1") ;;
     /imsvc*) args+=(-isystem "${1#/imsvc}") ;;
+    -Fo*) args+=(-o "${1#-Fo}") ;;
+    /Fo*) args+=(-o "${1#/Fo}") ;;
     # cl-only spellings the GNU driver would misread (`-MD` means "write a
     # depfile" there) or reject.
     -nologo|-MD|-MT|-MDd|-MTd|-Brepro|-Z7|--) ;;

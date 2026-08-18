@@ -50,8 +50,8 @@ WINDOWS_ZIP_PATHS := \
 XWIN_SHIMS := packaging/windows/xwin-shims
 LINUX_TARGETS := x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
 LINUX_ARCHIVES := \
-	$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-arm64.tar.gz \
-	$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-x86_64.tar.gz
+	$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-arm64.zip \
+	$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-x86_64.zip
 LINUX_DESKTOP_FILE := packaging/linux/app.moeka.moeka.desktop
 LINUX_INSTALL_SCRIPT := packaging/linux/install.sh
 LINUX_UNINSTALL_SCRIPT := packaging/linux/uninstall.sh
@@ -203,9 +203,9 @@ linux-one:
 	chmod +x "$$package/uninstall.sh"; \
 	cp "$(LINUX_README)" "$$package/README.txt"; \
 	cp "$(LINUX_ICON_SOURCE)" "$$package/app.moeka.moeka.png"; \
-	archive="$(CURDIR)/$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-$(LINUX_SUFFIX).tar.gz"; \
+	archive="$(CURDIR)/$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-$(LINUX_SUFFIX).zip"; \
 	rm -f "$$archive"; \
-	COPYFILE_DISABLE=1 tar -C "$$stage" -czf "$$archive" "$$(basename "$$package")"; \
+	(cd "$$stage" && zip -qr "$$archive" "$$(basename "$$package")"); \
 	rm -rf "$$stage"; \
 	echo "Created $$archive"
 

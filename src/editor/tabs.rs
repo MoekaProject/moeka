@@ -2339,7 +2339,7 @@ impl EditorView {
                 .items_center()
                 .justify_center()
                 .rounded_full()
-                .cursor(CursorStyle::PointingHand)
+                .cursor(CursorStyle::Arrow)
                 .hover(move |style| style.bg(hover_bg))
                 .active(move |style| style.bg(hover_bg))
                 .child(svg().path(icon).size(px(icon_size)).text_color(icon_color))

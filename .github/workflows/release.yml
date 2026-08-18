@@ -163,7 +163,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-assets-linux-${{ matrix.arch }}
-          path: dist/Moeka-linux-${{ matrix.arch }}.tar.gz
+          path: dist/Moeka-linux-${{ matrix.arch }}.zip
           if-no-files-found: error
 
   build_windows:
@@ -264,8 +264,8 @@ jobs:
           assets=(
             dist/Moeka-macos-arm64.dmg
             dist/Moeka-macos-universal.dmg
-            dist/Moeka-linux-arm64.tar.gz
-            dist/Moeka-linux-x86_64.tar.gz
+            dist/Moeka-linux-arm64.zip
+            dist/Moeka-linux-x86_64.zip
             dist/Moeka-windows-arm64.zip
             dist/Moeka-windows-x86_64.zip
           )

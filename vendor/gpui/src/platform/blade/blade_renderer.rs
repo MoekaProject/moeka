@@ -20,7 +20,9 @@ const MAX_FRAME_TIME_MS: u32 = 10000;
 struct GlobalParams {
     viewport_size: [f32; 2],
     premultiplied_alpha: u32,
-    pad: u32,
+    rounded_clip_enabled: u32,
+    rounded_clip_bounds: PodBounds,
+    rounded_clip_radii: [f32; 4],
 }
 
 //Note: we can't use `Bounds` directly here because
@@ -344,6 +346,25 @@ pub struct BladeRenderer {
 }
 
 impl BladeRenderer {
+    fn global_params(&self, rounded_clip: Option<(PodBounds, [f32; 4])>) -> GlobalParams {
+        let (rounded_clip_enabled, rounded_clip_bounds, rounded_clip_radii) = rounded_clip
+            .map(|(bounds, radii)| (1, bounds, radii))
+            .unwrap_or((0, PodBounds::zeroed(), [0.0; 4]));
+        GlobalParams {
+            viewport_size: [
+                self.surface_config.size.width as f32,
+                self.surface_config.size.height as f32,
+            ],
+            premultiplied_alpha: match self.surface.info().alpha {
+                gpu::AlphaMode::Ignored | gpu::AlphaMode::PostMultiplied => 0,
+                gpu::AlphaMode::PreMultiplied => 1,
+            },
+            rounded_clip_enabled,
+            rounded_clip_bounds,
+            rounded_clip_radii,
+        }
+    }
+
     pub fn new<I: raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle>(
         context: &BladeContext,
         window: &I,
@@ -596,7 +617,9 @@ impl BladeRenderer {
             let globals = GlobalParams {
                 viewport_size: [width, height],
                 premultiplied_alpha: 0,
-                pad: 0,
+                rounded_clip_enabled: 0,
+                rounded_clip_bounds: PodBounds::zeroed(),
+                rounded_clip_radii: [0.0; 4],
             };
             let mut encoder = pass.with(&self.pipelines.path_rasterization);
 
@@ -641,6 +664,14 @@ impl BladeRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
+        self.draw_with_rounded_clip(scene, None);
+    }
+
+    pub fn draw_with_rounded_clip(
+        &mut self,
+        scene: &Scene,
+        rounded_clip: Option<([f32; 2], [f32; 2], [f32; 4])>,
+    ) {
         self.command_encoder.start();
         self.atlas.before_frame(&mut self.command_encoder);
 
@@ -650,17 +681,9 @@ impl BladeRenderer {
         };
         self.command_encoder.init_texture(frame.texture());
 
-        let globals = GlobalParams {
-            viewport_size: [
-                self.surface_config.size.width as f32,
-                self.surface_config.size.height as f32,
-            ],
-            premultiplied_alpha: match self.surface.info().alpha {
-                gpu::AlphaMode::Ignored | gpu::AlphaMode::PostMultiplied => 0,
-                gpu::AlphaMode::PreMultiplied => 1,
-            },
-            pad: 0,
-        };
+        let globals = self.global_params(
+            rounded_clip.map(|(origin, size, radii)| (PodBounds { origin, size }, radii)),
+        );
 
         let mut pass = self.command_encoder.render(
             "main",

@@ -60,7 +60,9 @@ fn apply_contrast_and_gamma_correction(sample: f32, color: vec3<f32>, enhanced_c
 struct GlobalParams {
     viewport_size: vec2<f32>,
     premultiplied_alpha: u32,
-    pad: u32,
+    rounded_clip_enabled: u32,
+    rounded_clip_bounds: Bounds,
+    rounded_clip_radii: Corners,
 }
 
 var<uniform> globals: GlobalParams;
@@ -358,6 +360,17 @@ fn quad_sdf_impl(corner_center_to_point: vec2<f32>, corner_radius: f32) -> f32 {
     }
 }
 
+fn clip_to_rounded_window(color: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
+    if (globals.rounded_clip_enabled == 0u) {
+        return color;
+    }
+
+    let distance = quad_sdf(position, globals.rounded_clip_bounds, globals.rounded_clip_radii);
+    let alpha = saturate(0.5 - distance);
+    let rgb_multiplier = select(1.0, alpha, globals.premultiplied_alpha != 0u);
+    return vec4<f32>(color.rgb * rgb_multiplier, color.a * alpha);
+}
+
 // Abstract away the final color transformation based on the
 // target alpha compositing mode.
 fn blend_color(color: vec4<f32>, alpha_factor: f32) -> vec4<f32> {
@@ -544,7 +557,7 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
             quad.border_widths.right == 0.0 &&
             quad.border_widths.bottom == 0.0 &&
             unrounded) {
-        return blend_color(background_color, 1.0);
+        return clip_to_rounded_window(blend_color(background_color, 1.0), input.position.xy);
     }
 
     let size = quad.bounds.size;
@@ -610,7 +623,7 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
     // However, that might negatively impact performance in the case of
     // reasonable sizes for rounded corners.
     if (is_within_inner_straight_border && !is_near_rounded_corner) {
-        return blend_color(background_color, 1.0);
+        return clip_to_rounded_window(blend_color(background_color, 1.0), input.position.xy);
     }
 
     // Signed distance of the point to the outside edge of the quad's border. It
@@ -849,7 +862,10 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
                     saturate(antialias_threshold - inner_sdf));
     }
 
-    return blend_color(color, saturate(antialias_threshold - outer_sdf));
+    return clip_to_rounded_window(
+        blend_color(color, saturate(antialias_threshold - outer_sdf)),
+        input.position.xy,
+    );
 }
 
 // Returns the dash velocity of a corner given the dash velocity of the two
@@ -1074,7 +1090,7 @@ fn vs_path(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
 @fragment
 fn fs_path(input: PathVarying) -> @location(0) vec4<f32> {
     let sample = textureSample(t_sprite, s_sprite, input.texture_coords);
-    return sample;
+    return clip_to_rounded_window(sample, input.position.xy);
 }
 
 // --- underlines --- //
@@ -1124,7 +1140,10 @@ fn fs_underline(input: UnderlineVarying) -> @location(0) vec4<f32> {
     let underline = b_underlines[input.underline_id];
     if ((underline.wavy & 0xFFu) == 0u)
     {
-        return blend_color(input.color, input.color.a);
+        return clip_to_rounded_window(
+            blend_color(input.color, input.color.a),
+            input.position.xy,
+        );
     }
 
     let half_thickness = underline.thickness * 0.5;
@@ -1140,7 +1159,10 @@ fn fs_underline(input: UnderlineVarying) -> @location(0) vec4<f32> {
     let distance_from_top_border = distance_in_pixels - half_thickness;
     let distance_from_bottom_border = distance_in_pixels + half_thickness;
     let alpha = saturate(0.5 - max(-distance_from_bottom_border, distance_from_top_border));
-    return blend_color(input.color, alpha * input.color.a);
+    return clip_to_rounded_window(
+        blend_color(input.color, alpha * input.color.a),
+        input.position.xy,
+    );
 }
 
 // --- monochrome sprites --- //
@@ -1188,7 +1210,10 @@ fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
     }
 
     // convert to srgb space as the rest of the code (output swapchain) expects that
-    return blend_color(input.color, alpha_corrected);
+    return clip_to_rounded_window(
+        blend_color(input.color, alpha_corrected),
+        input.position.xy,
+    );
 }
 
 // --- polychrome sprites --- //
@@ -1241,7 +1266,10 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
         let grayscale = dot(color.rgb, GRAYSCALE_FACTORS);
         color = vec4<f32>(vec3<f32>(grayscale), sample.a);
     }
-    return blend_color(color, sprite.opacity * saturate(0.5 - distance));
+    return clip_to_rounded_window(
+        blend_color(color, sprite.opacity * saturate(0.5 - distance)),
+        input.position.xy,
+    );
 }
 
 // --- surfaces --- //
@@ -1292,5 +1320,5 @@ fn fs_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
         textureSampleLevel(t_cb_cr, s_surface, input.texture_position, 0.0).rg,
         1.0);
 
-    return ycbcr_to_RGB * y_cb_cr;
+    return clip_to_rounded_window(ycbcr_to_RGB * y_cb_cr, input.position.xy);
 }

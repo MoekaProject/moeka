@@ -164,5 +164,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Moeka-linux-${{ matrix.arch }}
-          path: dist/Moeka-linux-${{ matrix.arch }}.tar.gz
+          path: dist/Moeka-linux-${{ matrix.arch }}.zip
           if-no-files-found: error

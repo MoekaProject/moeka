@@ -1019,7 +1019,46 @@ impl PlatformWindow for WaylandWindow {
 
     fn draw(&self, scene: &Scene) {
         let mut state = self.borrow_mut();
-        state.renderer.draw(scene);
+        let rounded_clip = if state.decorations == WindowDecorations::Client {
+            let inset = state.inset().0 * state.scale;
+            let viewport = state.renderer.viewport_size();
+            let left = if state.tiling.left { 0.0 } else { inset };
+            let top = if state.tiling.top { 0.0 } else { inset };
+            let right = if state.tiling.right { 0.0 } else { inset };
+            let bottom = if state.tiling.bottom { 0.0 } else { inset };
+            Some((
+                [left, top],
+                [
+                    viewport.width as f32 - left - right,
+                    viewport.height as f32 - top - bottom,
+                ],
+                [
+                    if state.tiling.top || state.tiling.left {
+                        0.0
+                    } else {
+                        inset
+                    },
+                    if state.tiling.top || state.tiling.right {
+                        0.0
+                    } else {
+                        inset
+                    },
+                    if state.tiling.bottom || state.tiling.right {
+                        0.0
+                    } else {
+                        inset
+                    },
+                    if state.tiling.bottom || state.tiling.left {
+                        0.0
+                    } else {
+                        inset
+                    },
+                ],
+            ))
+        } else {
+            None
+        };
+        state.renderer.draw_with_rounded_clip(scene, rounded_clip);
     }
 
     fn completed_frame(&self) {
