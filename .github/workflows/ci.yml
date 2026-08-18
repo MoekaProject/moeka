@@ -149,6 +149,7 @@ jobs:
             libxcb1-dev \
             libxkbcommon-dev \
             libxkbcommon-x11-dev \
+            patchelf \
             pkg-config
 
       - name: Cache cargo

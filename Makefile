@@ -59,6 +59,15 @@ LINUX_ICON_SOURCE := packaging/linux/app.moeka.moeka.png
 LINUX_SYSROOT_SCRIPT := scripts/prepare_linux_sysroot.py
 LINUX_SYSROOT_ROOT ?= target/linux-sysroots
 LINUX_GLIBC_VERSION ?= 2.35
+LINUX_BUNDLED_LIBS := \
+	libXau.so.6 \
+	libXdmcp.so.6 \
+	libbsd.so.0 \
+	libmd.so.0 \
+	libxcb.so.1 \
+	libxcb-xkb.so.1 \
+	libxkbcommon.so.0 \
+	libxkbcommon-x11.so.0
 
 .PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check windows windows-one windows-arm64 windows-x86_64 windows-icon linux linux-one linux-arm64 linux-x86_64
 
@@ -147,14 +156,16 @@ linux-one:
 	case "$(HOST_TARGET)" in \
 		"$(LINUX_TARGET)") \
 			CARGO_INCREMENTAL=0 cargo build --release --target "$(LINUX_TARGET)"; \
+			library_dir="$$(dirname "$$(ldconfig -p | awk '/libxkbcommon-x11\.so\.0 / { print $$NF; exit }')")"; \
 			;; \
 		*-apple-darwin) \
-			for tool in zig cargo-zigbuild python3 ar zstd; do \
+			for tool in zig cargo-zigbuild python3 ar zstd patchelf; do \
 				command -v "$$tool" >/dev/null || { echo "$$tool is required for Linux cross-compilation"; exit 1; }; \
 			done; \
 			sysroot="$(CURDIR)/$(LINUX_SYSROOT_ROOT)/$(LINUX_SUFFIX)"; \
 			python3 "$(LINUX_SYSROOT_SCRIPT)" "$(LINUX_SUFFIX)" "$$sysroot"; \
-			RUSTFLAGS="$${RUSTFLAGS:+$$RUSTFLAGS }-L native=$$sysroot/usr/lib/$(LINUX_TRIPLET)" \
+			library_dir="$$sysroot/usr/lib/$(LINUX_TRIPLET)"; \
+			RUSTFLAGS="$${RUSTFLAGS:+$$RUSTFLAGS }-L native=$$library_dir" \
 				CARGO_INCREMENTAL=0 cargo zigbuild --release \
 				--target "$(LINUX_TARGET).$(LINUX_GLIBC_VERSION)"; \
 			;; \
@@ -174,9 +185,16 @@ linux-one:
 	fi; \
 	stage="$$(mktemp -d)"; \
 	package="$$stage/$(APP_DISPLAY_NAME)-linux-$(LINUX_SUFFIX)"; \
-	mkdir -p "$$package" "$(DIST_DIR)"; \
+	mkdir -p "$$package/lib" "$(DIST_DIR)"; \
 	cp "$$binary" "$$package/$(APP_DISPLAY_NAME)"; \
 	chmod +x "$$package/$(APP_DISPLAY_NAME)"; \
+	patchelf --set-rpath '$$ORIGIN/lib' "$$package/$(APP_DISPLAY_NAME)"; \
+	for library in $(LINUX_BUNDLED_LIBS); do \
+		source="$$library_dir/$$library"; \
+		[[ -e "$$source" ]] || { echo "Missing Linux runtime library: $$source"; exit 1; }; \
+		cp -L "$$source" "$$package/lib/$$library"; \
+		patchelf --set-rpath '$$ORIGIN' "$$package/lib/$$library"; \
+	done; \
 	cp "$(LINUX_DESKTOP_FILE)" "$$package/"; \
 	cp "$(LINUX_INSTALL_SCRIPT)" "$$package/install.sh"; \
 	chmod +x "$$package/install.sh"; \
@@ -184,7 +202,7 @@ linux-one:
 	cp "$(LINUX_ICON_SOURCE)" "$$package/app.moeka.moeka.png"; \
 	archive="$(CURDIR)/$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-$(LINUX_SUFFIX).tar.gz"; \
 	rm -f "$$archive"; \
-	tar -C "$$stage" -czf "$$archive" "$$(basename "$$package")"; \
+	COPYFILE_DISABLE=1 tar -C "$$stage" -czf "$$archive" "$$(basename "$$package")"; \
 	rm -rf "$$stage"; \
 	echo "Created $$archive"
 
@@ -232,7 +250,7 @@ publish-check:
 		exit 1; \
 	fi
 	@command -v gh >/dev/null || { echo "gh CLI is required: brew install gh && gh auth login"; exit 1; }
-	@for tool in zig cargo-zigbuild python3 ar zstd; do \
+	@for tool in zig cargo-zigbuild python3 ar zstd patchelf; do \
 		command -v "$$tool" >/dev/null || { echo "$$tool is required for Linux cross-compilation"; exit 1; }; \
 	done
 	@test -n "$(DEVELOPER_ID_APPLICATION)" || { \

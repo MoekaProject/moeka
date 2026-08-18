@@ -6,9 +6,17 @@ install_root=${XDG_DATA_HOME:-"$HOME/.local/share"}
 bin_dir=${HOME}/.local/bin
 app_dir=${install_root}/applications
 icon_dir=${install_root}/icons/hicolor/256x256/apps
+moeka_dir=${install_root}/moeka
 
-mkdir -p "$bin_dir" "$app_dir" "$icon_dir"
-install -m 0755 "$package_dir/Moeka" "$bin_dir/moeka"
+mkdir -p "$bin_dir" "$app_dir" "$icon_dir" "$moeka_dir"
+install -m 0755 "$package_dir/Moeka" "$moeka_dir/Moeka"
+rm -rf "$moeka_dir/lib"
+cp -R "$package_dir/lib" "$moeka_dir/lib"
+cat > "$bin_dir/moeka" <<EOF
+#!/usr/bin/env sh
+exec "$moeka_dir/Moeka" "\$@"
+EOF
+chmod 0755 "$bin_dir/moeka"
 sed "s|^Exec=.*|Exec=$bin_dir/moeka %F|" \
   "$package_dir/app.moeka.moeka.desktop" > "$app_dir/app.moeka.moeka.desktop"
 chmod 0644 "$app_dir/app.moeka.moeka.desktop"
@@ -18,5 +26,5 @@ if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$app_dir" >/dev/null 2>&1 || true
 fi
 
-printf 'Installed Moeka to %s\n' "$bin_dir/moeka"
+printf 'Installed Moeka to %s\n' "$moeka_dir"
 printf 'The desktop launcher may take a moment to appear in the application menu.\n'

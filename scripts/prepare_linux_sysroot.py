@@ -20,6 +20,9 @@ import urllib.request
 
 SUITE = "jammy"
 PACKAGES = {
+    "libbsd0",
+    "libmd0",
+    "libxau6",
     "libxcb1-dev",
     "libxcb1",
     "libxcb-xkb-dev",
@@ -28,6 +31,7 @@ PACKAGES = {
     "libxkbcommon0",
     "libxkbcommon-x11-dev",
     "libxkbcommon-x11-0",
+    "libxdmcp6",
 }
 ARCHITECTURES = {
     "x86_64": ("amd64", "x86_64-linux-gnu", "https://archive.ubuntu.com/ubuntu"),

@@ -149,7 +149,7 @@ jobs:
             clang cmake libasound2-dev libfontconfig-dev libssl-dev \
             libvulkan-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev \
             libxcb-shm0-dev libxcb-xfixes0-dev libxcb-xkb-dev libxcb1-dev \
-            libxkbcommon-dev libxkbcommon-x11-dev pkg-config
+            libxkbcommon-dev libxkbcommon-x11-dev patchelf pkg-config
 
       - name: Cache Cargo build
         uses: Swatinem/rust-cache@v2
