@@ -82,14 +82,27 @@ impl EditorView {
     /// draws itself.
     pub(crate) fn window_caption_trailing_inset(&self) -> f32 {
         #[cfg(target_os = "linux")]
-        if !self.client_side_window_decorations {
-            return 0.0;
+        {
+            if self.client_side_window_decorations {
+                self.scaled(crate::style::LINUX_CAPTION_BUTTONS_WIDTH_PX)
+            } else {
+                0.0
+            }
         }
 
-        if cfg!(target_os = "macos") {
+        #[cfg(target_os = "macos")]
+        {
             0.0
-        } else {
+        }
+
+        #[cfg(windows)]
+        {
             self.scaled(crate::style::WINDOW_CAPTION_BUTTON_WIDTH_PX * 3.0)
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            0.0
         }
     }
 

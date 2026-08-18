@@ -1312,8 +1312,8 @@ impl Render for EditorView {
 
         #[cfg(target_os = "linux")]
         {
-            const SHADOW_INSET: f32 = 12.0;
-            const CORNER_RADIUS: f32 = 10.0;
+            const SHADOW_INSET: f32 = 18.0;
+            const CORNER_RADIUS: f32 = 12.0;
 
             match linux_decorations {
                 Decorations::Server => div().size_full().child(content).into_any_element(),
@@ -1355,10 +1355,10 @@ impl Render for EditorView {
                                         h: 0.0,
                                         s: 0.0,
                                         l: 0.0,
-                                        a: 0.38,
+                                        a: 0.22,
                                     },
-                                    offset: gpui::point(px(0.0), px(2.0)),
-                                    blur_radius: px(10.0),
+                                    offset: gpui::point(px(0.0), px(3.0)),
+                                    blur_radius: px(18.0),
                                     spread_radius: px(0.0),
                                 }])
                             })

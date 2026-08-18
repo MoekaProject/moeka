@@ -2214,7 +2214,7 @@ impl EditorView {
         div().into_any_element()
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     pub(super) fn render_window_caption_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
         use gpui::WindowControlArea;
 
@@ -2312,6 +2312,83 @@ impl EditorView {
                 |window| window.remove_window(),
             ))
             .into_any_element()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn render_window_caption_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
+        let button_size = self.scaled(20.0);
+        let icon_size = self.scaled(12.0);
+        let gap = self.scaled(12.0);
+        let padding = self.scaled(12.0);
+        let icon_color = ts.tab_item_icon_color;
+        let hover_bg = ts.tab_item_hover_bg;
+        let is_maximized = self.window_is_maximized;
+
+        let button = |id: &'static str,
+                      icon: &'static str,
+                      cx: &mut Context<Self>,
+                      action: fn(&mut Window)| {
+            div()
+                .id(id)
+                .w(px(button_size))
+                .h(px(button_size))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .cursor(CursorStyle::PointingHand)
+                .hover(move |style| style.bg(hover_bg))
+                .active(move |style| style.bg(hover_bg))
+                .child(svg().path(icon).size(px(icon_size)).text_color(icon_color))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |_, _, window, cx| {
+                        cx.stop_propagation();
+                        action(window);
+                    }),
+                )
+        };
+
+        div()
+            .id("linux-window-caption-buttons")
+            .h(px(height))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(gap))
+            .px(px(padding))
+            .occlude()
+            .child(button(
+                "linux-window-minimize",
+                "assets/icons/window/minimize.svg",
+                cx,
+                |window| window.minimize_window(),
+            ))
+            .child(button(
+                "linux-window-maximize",
+                if is_maximized {
+                    "assets/icons/window/restore.svg"
+                } else {
+                    "assets/icons/window/maximize.svg"
+                },
+                cx,
+                |window| window.zoom_window(),
+            ))
+            .child(button(
+                "linux-window-close",
+                "assets/icons/window/close.svg",
+                cx,
+                |window| window.remove_window(),
+            ))
+            .into_any_element()
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    pub(super) fn render_window_caption_buttons(&self, _cx: &mut Context<Self>) -> AnyElement {
+        div().into_any_element()
     }
 
     fn render_update_ready_button(&self, cx: &mut Context<Self>) -> AnyElement {

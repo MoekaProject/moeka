@@ -9,6 +9,14 @@ Install for the current user (binary, application menu entry and icon):
 
   ./install.sh
 
+Moeka uses native Wayland by default. For window decorations drawn entirely by
+GNOME/KDE through XWayland (system title bar, buttons, shadow and corners), run:
+
+  moeka-x11
+
+The same option is available from the application's desktop context menu as
+"Open with X11 system decorations".
+
 Uninstall the application while keeping settings and cache:
 
   moeka-uninstall

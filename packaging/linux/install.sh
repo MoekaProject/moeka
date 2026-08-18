@@ -18,12 +18,19 @@ cat > "$bin_dir/moeka" <<EOF
 exec "$moeka_dir/Moeka" "\$@"
 EOF
 chmod 0755 "$bin_dir/moeka"
+cat > "$bin_dir/moeka-x11" <<EOF
+#!/usr/bin/env sh
+MOEKA_FORCE_X11=1 exec "$moeka_dir/Moeka" "\$@"
+EOF
+chmod 0755 "$bin_dir/moeka-x11"
 cat > "$bin_dir/moeka-uninstall" <<EOF
 #!/usr/bin/env sh
 exec "$moeka_dir/uninstall.sh" "\$@"
 EOF
 chmod 0755 "$bin_dir/moeka-uninstall"
-sed "s|^Exec=.*|Exec=$bin_dir/moeka %F|" \
+sed \
+  -e "s|^Exec=moeka %F|Exec=$bin_dir/moeka %F|" \
+  -e "s|^Exec=moeka-x11 %F|Exec=$bin_dir/moeka-x11 %F|" \
   "$package_dir/app.moeka.moeka.desktop" > "$app_dir/app.moeka.moeka.desktop"
 chmod 0644 "$app_dir/app.moeka.moeka.desktop"
 install -m 0644 "$package_dir/app.moeka.moeka.png" "$icon_dir/app.moeka.moeka.png"

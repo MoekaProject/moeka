@@ -20,7 +20,7 @@ case "${1:-}" in
     ;;
 esac
 
-rm -f "$bin_dir/moeka" "$bin_dir/moeka-uninstall"
+rm -f "$bin_dir/moeka" "$bin_dir/moeka-x11" "$bin_dir/moeka-uninstall"
 rm -f "$app_dir/app.moeka.moeka.desktop" "$icon_file"
 rm -rf "$moeka_dir"
 

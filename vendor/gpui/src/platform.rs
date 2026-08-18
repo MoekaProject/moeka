@@ -141,8 +141,11 @@ pub fn guess_compositor() -> &'static str {
 
     let use_wayland = wayland_display.is_some_and(|display| !display.is_empty());
     let use_x11 = x11_display.is_some_and(|display| !display.is_empty());
+    let force_x11 = std::env::var_os("MOEKA_FORCE_X11").is_some();
 
-    if use_wayland {
+    if force_x11 && use_x11 {
+        "X11"
+    } else if use_wayland {
         "Wayland"
     } else if use_x11 {
         "X11"

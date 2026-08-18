@@ -11,3 +11,8 @@ Categories=Office;TextEditor;
 MimeType=text/markdown;text/plain;
 StartupNotify=true
 StartupWMClass=app.moeka.moeka
+Actions=LaunchX11;
+
+[Desktop Action LaunchX11]
+Name=Open with X11 system decorations
+Exec=moeka-x11 %F
