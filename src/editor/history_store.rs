@@ -32,6 +32,11 @@ pub(crate) enum HistoryEntry {
         inserted_text: String,
         view: SnapshotViewState,
     },
+    Transaction {
+        edits: Vec<crate::buffer::BufferEdit>,
+        before_view: SnapshotViewState,
+        after_view: SnapshotViewState,
+    },
 }
 
 fn snapshot_from_view(text: String, view: &SnapshotViewState) -> EditorSnapshot {
@@ -92,10 +97,29 @@ fn pop_entry(stack: &mut Vec<HistoryEntry>, live: &EditorSnapshot) -> Option<Edi
             stack.pop();
             Some(snapshot)
         }
+        HistoryEntry::Transaction {
+            edits, before_view, ..
+        } => {
+            let mut text = live.text.clone();
+            for edit in edits.iter().rev() {
+                let end = edit.start + edit.inserted_text.len();
+                if end > text.len()
+                    || !text.is_char_boundary(edit.start)
+                    || text.get(edit.start..end) != Some(edit.inserted_text.as_str())
+                {
+                    return None;
+                }
+                text.replace_range(edit.start..end, &edit.deleted_text);
+            }
+            let snapshot = snapshot_from_view(text, before_view);
+            stack.pop();
+            Some(snapshot)
+        }
     }
 }
 
 /// Decode a delta stack back into full snapshots (bottom..top order).
+#[cfg(test)]
 fn decode_stack(entries: &[HistoryEntry]) -> io::Result<Vec<EditorSnapshot>> {
     let mut snapshots: Vec<EditorSnapshot> = Vec::with_capacity(entries.len());
     let mut successor: Option<EditorSnapshot> = None;
@@ -124,6 +148,27 @@ fn decode_stack(entries: &[HistoryEntry]) -> io::Result<Vec<EditorSnapshot>> {
                 let mut text = base.text.clone();
                 text.replace_range(*start..end, deleted_text);
                 snapshot_from_view(text, view)
+            }
+            HistoryEntry::Transaction {
+                edits, before_view, ..
+            } => {
+                let base = successor.as_ref().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "transaction without successor")
+                })?;
+                let mut text = base.text.clone();
+                for edit in edits.iter().rev() {
+                    let end = edit.start + edit.inserted_text.len();
+                    if end > text.len()
+                        || text.get(edit.start..end) != Some(edit.inserted_text.as_str())
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid transaction successor",
+                        ));
+                    }
+                    text.replace_range(edit.start..end, &edit.deleted_text);
+                }
+                snapshot_from_view(text, before_view)
             }
         };
         successor = Some(snapshot.clone());
@@ -161,13 +206,142 @@ impl TabHistory {
         }
     }
 
+    pub(crate) fn push_undo_transaction(
+        &mut self,
+        edits: Vec<crate::buffer::BufferEdit>,
+        before_view: SnapshotViewState,
+        after_view: SnapshotViewState,
+        merge_with_previous: bool,
+    ) {
+        if edits.is_empty() {
+            return;
+        }
+        if merge_with_previous
+            && let Some(HistoryEntry::Transaction {
+                edits: previous_edits,
+                after_view: previous_after_view,
+                ..
+            }) = self.undo_stack.last_mut()
+        {
+            previous_edits.extend(edits);
+            *previous_after_view = after_view;
+            self.redo_stack.clear();
+            return;
+        }
+        self.undo_stack.push(HistoryEntry::Transaction {
+            edits,
+            before_view,
+            after_view,
+        });
+        self.redo_stack.clear();
+        if self.undo_stack.len() > MAX_HISTORY_ENTRIES {
+            let overflow = self.undo_stack.len() - MAX_HISTORY_ENTRIES;
+            self.undo_stack.drain(0..overflow);
+        }
+    }
+
     pub(crate) fn take_undo(&mut self, current: &EditorSnapshot) -> Option<EditorSnapshot> {
+        if matches!(
+            self.undo_stack.last(),
+            Some(HistoryEntry::Transaction { .. })
+        ) {
+            let entry = self.undo_stack.pop()?;
+            let HistoryEntry::Transaction {
+                edits,
+                before_view,
+                after_view,
+            } = &entry
+            else {
+                unreachable!()
+            };
+            let mut text = current.text.clone();
+            for edit in edits.iter().rev() {
+                let end = edit.start + edit.inserted_text.len();
+                if end > text.len()
+                    || text.get(edit.start..end) != Some(edit.inserted_text.as_str())
+                {
+                    self.undo_stack.push(entry);
+                    return None;
+                }
+                text.replace_range(edit.start..end, &edit.deleted_text);
+            }
+            let snapshot = snapshot_from_view(text, before_view);
+            debug_assert_eq!(SnapshotViewState::from(current), *after_view);
+            self.redo_stack.push(entry);
+            return Some(snapshot);
+        }
         let snapshot = pop_entry(&mut self.undo_stack, current)?;
         push_entry(&mut self.redo_stack, current.clone());
         Some(snapshot)
     }
 
+    pub(crate) fn take_undo_transaction(
+        &mut self,
+    ) -> Option<(Vec<crate::buffer::BufferEdit>, SnapshotViewState)> {
+        let entry = self.undo_stack.pop()?;
+        let HistoryEntry::Transaction {
+            edits,
+            before_view,
+            after_view,
+        } = &entry
+        else {
+            self.undo_stack.push(entry);
+            return None;
+        };
+        let result = (edits.clone(), before_view.clone());
+        let _ = after_view;
+        self.redo_stack.push(entry);
+        Some(result)
+    }
+
+    pub(crate) fn take_redo_transaction(
+        &mut self,
+    ) -> Option<(Vec<crate::buffer::BufferEdit>, SnapshotViewState)> {
+        let entry = self.redo_stack.pop()?;
+        let HistoryEntry::Transaction {
+            edits,
+            before_view,
+            after_view,
+        } = &entry
+        else {
+            self.redo_stack.push(entry);
+            return None;
+        };
+        let result = (edits.clone(), after_view.clone());
+        let _ = before_view;
+        self.undo_stack.push(entry);
+        Some(result)
+    }
+
     pub(crate) fn take_redo(&mut self, current: &EditorSnapshot) -> Option<EditorSnapshot> {
+        if matches!(
+            self.redo_stack.last(),
+            Some(HistoryEntry::Transaction { .. })
+        ) {
+            let entry = self.redo_stack.pop()?;
+            let HistoryEntry::Transaction {
+                edits,
+                before_view,
+                after_view,
+            } = &entry
+            else {
+                unreachable!()
+            };
+            let mut text = current.text.clone();
+            for edit in edits {
+                let end = edit.start + edit.deleted_text.len();
+                if end > text.len() || text.get(edit.start..end) != Some(edit.deleted_text.as_str())
+                {
+                    self.redo_stack.push(entry);
+                    return None;
+                }
+                text.replace_range(edit.start..end, &edit.inserted_text);
+            }
+            let snapshot = snapshot_from_view(text, after_view);
+            debug_assert_eq!(SnapshotViewState::from(current), *before_view);
+            self.undo_stack.push(entry);
+            return Some(snapshot);
+        }
         let snapshot = pop_entry(&mut self.redo_stack, current)?;
         push_entry(&mut self.undo_stack, current.clone());
         Some(snapshot)
@@ -179,6 +353,11 @@ impl TabHistory {
 
     pub(crate) fn entry_count(&self) -> usize {
         self.undo_stack.len() + self.redo_stack.len() + 1
+    }
+
+    pub(crate) fn clear_entries(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
     }
 }
 
@@ -295,11 +474,26 @@ fn build_journal(
     current_snapshot: &EditorSnapshot,
     source_identity: String,
 ) -> io::Result<UndoJournal> {
-    let mut timeline = decode_stack(&history.undo_stack)?;
+    let mut replay = history.clone();
+    let mut past = Vec::with_capacity(replay.undo_stack.len());
+    let mut replay_current = current_snapshot.clone();
+    while !replay.undo_stack.is_empty() {
+        replay_current = replay
+            .take_undo(&replay_current)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid undo history"))?;
+        past.push(replay_current.clone());
+    }
+    past.reverse();
+    let mut timeline = past;
     timeline.push(current_snapshot.clone());
-    let mut redo_snapshots = decode_stack(&history.redo_stack)?;
-    redo_snapshots.reverse();
-    timeline.extend(redo_snapshots);
+    let mut replay = history.clone();
+    let mut replay_current = current_snapshot.clone();
+    while !replay.redo_stack.is_empty() {
+        replay_current = replay
+            .take_redo(&replay_current)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid redo history"))?;
+        timeline.push(replay_current.clone());
+    }
 
     let entries = timeline
         .iter()
@@ -482,6 +676,22 @@ impl From<&EditorSnapshot> for SnapshotViewState {
     }
 }
 
+impl SnapshotViewState {
+    pub(crate) fn new(
+        cursor_offset: usize,
+        cursor_anchor: usize,
+        scroll_offset: f32,
+        extra_cursors: Vec<(usize, usize)>,
+    ) -> Self {
+        Self {
+            cursor_offset,
+            cursor_anchor,
+            scroll_offset,
+            extra_cursors,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,5 +810,45 @@ mod tests {
         }
         assert!(history.redo_stack.is_empty());
         assert_eq!(current, states[3]);
+    }
+
+    #[test]
+    fn multi_edit_transaction_roundtrips_without_full_checkpoint() {
+        let before = snapshot("alpha\nbeta\n", 0);
+        let after = snapshot("Xlpha\nB\n", 8);
+        let edits = vec![
+            crate::buffer::BufferEdit {
+                start: 0,
+                deleted_text: String::new(),
+                inserted_text: "X".to_string(),
+            },
+            crate::buffer::BufferEdit {
+                start: 7,
+                deleted_text: "beta".to_string(),
+                inserted_text: "B".to_string(),
+            },
+            crate::buffer::BufferEdit {
+                start: 1,
+                deleted_text: "a".to_string(),
+                inserted_text: String::new(),
+            },
+        ];
+        let mut history = TabHistory::default();
+        history.push_undo_transaction(
+            edits,
+            SnapshotViewState::from(&before),
+            SnapshotViewState::from(&after),
+            false,
+        );
+
+        let restored = history.take_undo(&after).expect("undo transaction");
+        assert_eq!(restored, before);
+        let redone = history.take_redo(&restored).expect("redo transaction");
+        assert_eq!(redone, after);
+
+        let journal = build_journal(&history, &after, "source".to_string()).unwrap();
+        let (mut rebuilt, current) = history_from_journal(&journal).unwrap();
+        assert_eq!(current, after);
+        assert_eq!(rebuilt.take_undo(&current), Some(before));
     }
 }

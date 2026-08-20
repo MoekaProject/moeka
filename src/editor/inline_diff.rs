@@ -541,7 +541,7 @@ impl EditorView {
         self.reset_cursor_visual_targeting();
         self.mark_active_tab_dirty();
         self.reparse();
-        cx.notify();
+        self.pause_blinking(cx);
     }
 
     /// Requests an inline-diff recompute on the next render. Set `refetch_base`

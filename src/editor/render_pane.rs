@@ -561,6 +561,7 @@ impl EditorView {
                         },
                     ))
                     .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                        this.clear_sidebar_drag_state(cx);
                         this.focus_pane(pane_id, cx);
                         this.import_external_paths_as_attachments(paths.paths(), cx);
                     }))

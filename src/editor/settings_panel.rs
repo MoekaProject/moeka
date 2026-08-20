@@ -101,6 +101,7 @@ enum SettingsOptionAction {
     ShowWhitespace(bool),
     HighlightLine(bool),
     FormatToolbar(bool),
+    AutoSave(bool),
     SimpleMode(bool),
     SidebarAlwaysDark(bool),
     TerminalCopyOnSelect(bool),
@@ -612,6 +613,16 @@ impl EditorView {
                 ),
             ))
             .child(self.render_attachment_settings_row(
+                crate::i18n::settings_label(self.ui_language, "auto_save"),
+                self.render_boolean_settings_checkbox(
+                    "settings-auto-save",
+                    self.app_settings.auto_save,
+                    SettingsOptionAction::AutoSave(false),
+                    SettingsOptionAction::AutoSave(true),
+                    cx,
+                ),
+            ))
+            .child(self.render_attachment_settings_row(
                 crate::i18n::settings_label(self.ui_language, "highlight_line"),
                 self.render_boolean_settings_checkbox(
                     "settings-highlight-line-background",
@@ -694,6 +705,15 @@ impl EditorView {
             }
             SettingsOptionAction::FormatToolbar(value) => {
                 self.app_settings.format_toolbar_visible = value;
+            }
+            SettingsOptionAction::AutoSave(value) => {
+                self.app_settings.auto_save = value;
+                if value {
+                    self.schedule_auto_save_for_active_tab(cx);
+                } else {
+                    self.cancel_all_auto_saves();
+                    self.schedule_temp_save_for_active_tab(cx);
+                }
             }
             SettingsOptionAction::SimpleMode(value) => {
                 self.app_settings.simple_mode = value;

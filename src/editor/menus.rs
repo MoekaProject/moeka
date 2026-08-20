@@ -1355,9 +1355,11 @@ impl EditorView {
         if let Some(start) = self.slash_menu_start.take() {
             let end = self.cursor.offset;
             if end > start {
+                self.checkpoint();
                 self.buffer.replace(start..end, "");
                 self.cursor.move_to(start, &self.buffer);
                 self.reparse();
+                self.commit_history_transaction();
             }
             self.slash_filter.clear();
             self.close_context_menu_immediately(cx);
@@ -4502,6 +4504,51 @@ impl EditorView {
             .get(table_start_line)
             .and_then(|dec| dec.table_info.as_ref())
             .is_some_and(|info| info.is_front_matter);
+        if !is_front_matter {
+            items.push(self.render_context_menu_item_with_icon(
+                self.t(crate::i18n::TextKey::AlignLeft),
+                TABLE_ALIGN_LEFT_SVG,
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.table_set_column_alignment(
+                        table_start_line,
+                        col,
+                        crate::markdown::TableAlign::Left,
+                        cx,
+                    )
+                },
+            ));
+            items.push(self.render_context_menu_item_with_icon(
+                self.t(crate::i18n::TextKey::AlignCenter),
+                TABLE_ALIGN_CENTER_SVG,
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.table_set_column_alignment(
+                        table_start_line,
+                        col,
+                        crate::markdown::TableAlign::Center,
+                        cx,
+                    )
+                },
+            ));
+            items.push(self.render_context_menu_item_with_icon(
+                self.t(crate::i18n::TextKey::AlignRight),
+                TABLE_ALIGN_RIGHT_SVG,
+                false,
+                cx,
+                move |this, _, cx| {
+                    this.table_set_column_alignment(
+                        table_start_line,
+                        col,
+                        crate::markdown::TableAlign::Right,
+                        cx,
+                    )
+                },
+            ));
+            items.push(self.render_context_menu_separator());
+        }
         items.push(self.render_context_menu_item_with_icon(
             self.t(crate::i18n::TextKey::AddRowAbove),
             TABLE_ROWS_SVG,

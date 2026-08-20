@@ -358,17 +358,6 @@ impl EntityInputHandler for EditorView {
         {
             self.scroll_to_cursor();
         }
-        self.pause_blinking(cx);
-        if had_ime_composition {
-            self.finish_ime_composition();
-        }
-        if ime_debug_enabled() {
-            ime_debug_log(format!(
-                "replace_text_in_range end cursor={} marked_after={:?}",
-                self.cursor.offset, self.marked_range
-            ));
-        }
-
         if self.slash_menu_start.is_some() {
             self.update_slash_filter(cx);
         } else if self.wiki_link_start.is_some() {
@@ -392,6 +381,16 @@ impl EntityInputHandler for EditorView {
             if trimmed == "/" && col == line_content.len() {
                 self.open_slash_menu(cx);
             }
+        }
+        self.pause_blinking(cx);
+        if had_ime_composition {
+            self.finish_ime_composition();
+        }
+        if ime_debug_enabled() {
+            ime_debug_log(format!(
+                "replace_text_in_range end cursor={} marked_after={:?}",
+                self.cursor.offset, self.marked_range
+            ));
         }
     }
 
@@ -642,7 +641,12 @@ impl EntityInputHandler for EditorView {
                 .unwrap_or_default();
             let line_height =
                 self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
-            let x = f32::from(cell_bounds.origin.x) + padding_x + f32::from(pos.x);
+            let content_offset = helpers::table_cell_content_offset(
+                info.alignment,
+                inner_width,
+                f32::from(info.wrapped.unwrapped_layout.width),
+            );
+            let x = f32::from(cell_bounds.origin.x) + padding_x + content_offset + f32::from(pos.x);
             let y = f32::from(cell_bounds.origin.y) + padding_y + f32::from(pos.y);
             if ime_debug_enabled() {
                 ime_debug_log(format!(

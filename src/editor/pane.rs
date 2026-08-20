@@ -327,12 +327,17 @@ pane_state! {
     (cursor, Cursor, Cursor::new()),
     (extra_cursors, Vec<Cursor>, Vec::new()),
     (decorations, Vec<LineDecoration>, Vec::new()),
+    (lazy_markdown_decorations, Option<LazyMarkdownDecorations>, None),
+    (markdown_outline_index, RefCell<Option<MarkdownOutlineIndex>>, RefCell::new(None)),
+    (markdown_outline_build_task, Option<Task<()>>, None),
+    (markdown_outline_epoch, usize, 0),
     (scroll_offset, f32, 0.0),
     (is_selecting, bool, false),
     (vertical_move_goal_x, Option<f32>, None),
     (last_scroll_cursor_visual_x, Option<f32>, None),
     (wrap_boundary_affinity, Option<WrapBoundaryAffinity>, None),
     (line_display_info, LineDisplayCache, Vec::new()),
+    (visible_line_geometry, Vec<(usize, f32, f32)>, Vec::new()),
     (pending_line_display_transfer, Option<PendingLineDisplayTransfer>, None),
     (line_display_trim_update_counter, Cell<usize>, Cell::new(0)),
     (line_geometry_cache_dirty, Cell<bool>, Cell::new(true)),
@@ -347,6 +352,7 @@ pane_state! {
     (pending_preview_reveal, Option<PendingPreviewReveal>, None),
     (pending_typing_scroll_guard, Option<PendingTypingScrollGuard>, None),
     (pending_click_anchor, Option<ClickScrollAnchor>, None),
+    (pending_history_transaction, Option<PendingHistoryTransaction>, None),
     (code_mode_preview_key, Option<String>, None),
     (generated_preview_rerender_task, Option<Task<()>>, None),
     (generated_preview_rerender_pending, bool, false),
@@ -448,6 +454,8 @@ pane_state! {
     (editor_scrollbar_idle_epoch, usize, 0),
     (editor_scrollbar_idle_task, Option<Task<()>>, None),
     (editor_scrollbar_drag, Option<EditorScrollbarDragState>, None),
+    (pending_editor_scrollbar_drag_position, Option<Point<Pixels>>, None),
+    (editor_scrollbar_drag_task, Option<Task<()>>, None),
     // ── Typing/undo grouping ──
     (last_typing_checkpoint_time, Option<Instant>, None),
     (last_typing_checkpoint_offset, Option<usize>, None),
@@ -670,6 +678,7 @@ impl EditorView {
         // Panels/status/outline follow the focused pane.
         self.invalidate_active_file_panel_caches();
         self.outline_headings_cache_dirty.set(true);
+        self.invalidate_outline_layout_cache();
         self.mark_inline_diff_dirty(false);
         if let Some(path) = self.current_file_path.clone() {
             self.sync_path_in_sidebar_state(path, cx);

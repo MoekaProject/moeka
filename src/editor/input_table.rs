@@ -229,6 +229,7 @@ mod tests {
         TableLineInfo {
             cells: vec![],
             cell_ranges: vec![],
+            column_alignments: vec![],
             is_header: false,
             is_separator,
             is_front_matter: false,

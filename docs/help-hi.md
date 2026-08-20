@@ -29,27 +29,27 @@ Moeka टेक्स्ट प्रारूप के रूप में `Ma
 - [ ] बाद में पूर्ण किए गए और आइटम जोड़ें।
 ***
 ### तालिका इंटरैक्शन
-| सुविधा                                  | शॉर्टकट        |
-| --------------------------------------- | ------------- |
-| `Command / Ctrl + B`                    | बोल्ड          |
-| `Command / Ctrl + I`                    | इटैलिक        |
-| `Command / Ctrl + U`                    | रेखांकित      |
-| `Command / Ctrl + Shift + X`            | स्ट्राइकथ्रू     |
-| `Command / Ctrl + E`                    | इनलाइन कोड    |
-| `Command / Ctrl + Option / Alt + C`     | कोड ब्लॉक      |
-| `Command / Ctrl + Option / Alt + Q`     | उद्धरण         |
+| सुविधा                                     | शॉर्टकट      |
+| --------------------------------------- | ---------- |
+| `Command / Ctrl + B`                    | बोल्ड        |
+| `Command / Ctrl + I`                    | इटैलिक       |
+| `Command / Ctrl + U`                    | रेखांकित       |
+| `Command / Ctrl + Shift + X`            | स्ट्राइकथ्रू    |
+| `Command / Ctrl + E`                    | इनलाइन कोड   |
+| `Command / Ctrl + Option / Alt + C`     | कोड ब्लॉक     |
+| `Command / Ctrl + Option / Alt + Q`     | उद्धरण      |
 | `Command / Ctrl + Option / Alt + U`     | अव्यवस्थित सूची |
 | `Command / Ctrl + Option / Alt + O`     | व्यवस्थित सूची  |
-| `Command / Ctrl + Option / Alt + Enter` | कार्य          |
-| `Command / Ctrl + K`                    | लिंक          |
+| `Command / Ctrl + Option / Alt + Enter` | कार्य        |
+| `Command / Ctrl + K`                    | लिंक         |
 | `Command / Ctrl + Option / Alt + T`     | तालिका        |
-| `Command / Ctrl + 0`                    | अनुच्छेद       |
-| `/ image`                               | चित्र          |
+| `Command / Ctrl + 0`                    | अनुच्छेद      |
+| `/ image`                               | चित्र        |
 
 | --------------------- | --------- |
-| --------------------- | --------  |
-| `[[`                  | wiki लिंक |
-| `/ image`             | चित्र      |
+| --------------------- | --------- |
+| `[[`                  | wiki लिंक   |
+| `/ image`             | चित्र       |
 ## कोड ब्लॉक सिंटैक्स
 ```rust
 fn greet(name: &str) {

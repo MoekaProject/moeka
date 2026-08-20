@@ -980,7 +980,10 @@ fn build_precise_table_layout(
                     None,
                 ) {
                     if let Some(shaped) = shaped_lines.into_iter().next() {
-                        let visual_lines = helpers::wrap_boundary_byte_indices(&shaped).len() + 1;
+                        let visual_lines =
+                            helpers::wrap_boundary_byte_indices(&shaped, &cell_layout.display_text)
+                                .len()
+                                + 1;
                         row_height = row_height
                             .max(visual_lines as f32 * line_height + cell_padding_y * 2.0);
                     }
@@ -1076,7 +1079,7 @@ fn compute_wrap_boundary_upstream_xs(
     let mut upstream_xs = HashMap::new();
     let mut segment_start = 0;
 
-    for boundary in helpers::wrap_boundary_byte_indices(wrapped) {
+    for boundary in helpers::wrap_boundary_byte_indices(wrapped, display_text) {
         let segment_text = &display_text[segment_start..boundary];
         let segment_runs = helpers::extract_runs_for_range(runs, segment_start, boundary);
         let segment_shared: SharedString = if segment_text.is_empty() {
@@ -1128,10 +1131,11 @@ fn upstream_wrap_boundary_position(
 
 fn downstream_wrap_boundary_position(
     wrapped: &WrappedLine,
+    display_text: &str,
     disp_col: usize,
     line_height: f32,
 ) -> Option<Point<Pixels>> {
-    let downstream_visual_idx = helpers::wrap_boundary_byte_indices(wrapped)
+    let downstream_visual_idx = helpers::wrap_boundary_byte_indices(wrapped, display_text)
         .iter()
         .position(|boundary| *boundary == disp_col)?
         + 1;
@@ -1614,6 +1618,11 @@ impl Element for EditorElement {
         let pane_swapped = self
             .editor
             .update(cx, |editor, _| editor.begin_pane_swap(self.pane_id));
+        self.editor.update(cx, |editor, _| {
+            if editor.focused_pane_id == self.pane_id {
+                editor.begin_large_document_frame_work();
+            }
+        });
         // Resolve a deferred scroll-to-cursor before reading layout state, when
         // the per-line geometry cache is already valid (the common case after an
         // edit like pasting long text). Otherwise the layout loop below positions
@@ -1672,6 +1681,20 @@ impl Element for EditorElement {
             }
         });
 
+        self.editor.update(cx, |editor, _| {
+            if !editor.uses_lazy_markdown_decorations() {
+                return;
+            }
+            let viewport_height: f32 = bounds.size.height.into();
+            let overscan = viewport_height * 0.75;
+            let start = editor.line_at_y((editor.scroll_offset - overscan).max(0.0));
+            let end = editor
+                .line_at_y(editor.scroll_offset + viewport_height + overscan)
+                .saturating_add(1);
+            editor.ensure_lazy_markdown_decorations(start..end);
+            editor.record_large_document_syntax_viewport(start..end);
+        });
+
         let editor = self.editor.read(cx);
         let theme = &editor.theme;
         let buffer = &editor.buffer;
@@ -1727,10 +1750,10 @@ impl Element for EditorElement {
         const WINDOWED_PREPAINT_CURSOR_CONTEXT_LINES: usize = 8;
         let active_file_kind = editor.active_file_kind();
         let active_tab_is_markdown = active_file_kind.is_some_and(FileKind::is_markdown);
-        let use_windowed_prepaint = !wrap_width_changed
+        let use_windowed_prepaint = (!wrap_width_changed || editor.uses_sparse_line_geometry())
             && active_file_kind.is_some_and(|file_kind| {
                 if file_kind.is_markdown() {
-                    has_valid_cache
+                    has_valid_cache || editor.uses_lazy_markdown_decorations()
                 } else {
                     file_kind.supports_text_buffer()
                 }
@@ -1747,9 +1770,6 @@ impl Element for EditorElement {
             if editor.editor_wraps_to_available_width() {
                 end = end.saturating_add(OFFSCREEN_WRAP_REFLOW_BUDGET_PER_FRAME);
             }
-
-            start = start.min(cursor_line.saturating_sub(WINDOWED_PREPAINT_CURSOR_CONTEXT_LINES));
-            end = end.max(cursor_line.saturating_add(WINDOWED_PREPAINT_CURSOR_CONTEXT_LINES + 1));
 
             if active_tab_is_markdown {
                 let mut expanded = true;
@@ -1832,12 +1852,12 @@ impl Element for EditorElement {
         } else {
             (0, line_count)
         };
-        let mut y = origin_y
-            + if render_start_line == 0 {
-                editor.padding_top()
-            } else {
-                editor.line_y_offset(render_start_line)
-            };
+        let render_start_y = if render_start_line == 0 {
+            editor.padding_top() as f64
+        } else {
+            editor.line_y_offset_precise(render_start_line)
+        };
+        let mut y = origin_y + (render_start_y - scroll_offset as f64) as f32;
         let mut _last_line_height = 0.0_f32;
         let mut scroll_anchor_delta = 0.0_f32;
         let suppress_scroll_anchor_compensation = editor.pending_preview_reveal.is_some()
@@ -1871,7 +1891,9 @@ impl Element for EditorElement {
             let start_line = buffer.offset_to_line_col(range.start).0;
             let end_offset = range.end.saturating_sub(1).min(buffer.len());
             let end_line = buffer.offset_to_line_col(end_offset).0;
-            for line in start_line..=end_line {
+            let visible_start = start_line.max(render_start_line);
+            let visible_end = end_line.min(render_end_line.saturating_sub(1));
+            for line in visible_start..=visible_end {
                 active_line_numbers.insert(line);
             }
         }
@@ -1960,9 +1982,17 @@ impl Element for EditorElement {
                 .and_then(|decoration| decoration.table_info.as_ref())
                 .is_some_and(|table_info| table_info.is_front_matter);
             if !front_matter_active {
-                for (line, decoration) in decorations.iter().enumerate() {
-                    if hide_front_matter_separator(decoration, false) {
-                        set.insert(line);
+                if let Some(front_matter) = decorations
+                    .first()
+                    .and_then(|decoration| decoration.table_info.as_ref())
+                    .filter(|table_info| table_info.is_front_matter)
+                {
+                    for line in front_matter.table_start_line
+                        ..front_matter.table_end_line.min(decorations.len())
+                    {
+                        if hide_front_matter_separator(&decorations[line], false) {
+                            set.insert(line);
+                        }
                     }
                 }
             }
@@ -2034,7 +2064,10 @@ impl Element for EditorElement {
                 None,
                 None,
             ) {
-                f32::from(test_lines[0].width())
+                test_lines
+                    .first()
+                    .map(|line| f32::from(line.width()))
+                    .unwrap_or_else(|| editor.base_font_size() * 0.6)
             } else {
                 editor.base_font_size() * 0.6
             }
@@ -2082,7 +2115,10 @@ impl Element for EditorElement {
                 None,
                 None,
             ) {
-                f32::from(test_lines[0].width()).max(1.0)
+                test_lines
+                    .first()
+                    .map(|line| f32::from(line.width()).max(1.0))
+                    .unwrap_or_else(|| base_char_width.max(1.0))
             } else {
                 base_char_width.max(1.0)
             }
@@ -2222,8 +2258,7 @@ impl Element for EditorElement {
                 if let Some(cached) = cached_line {
                     let cached_h =
                         cached.line_height * cached.visual_line_count as f32 + cached.extra_height;
-                    let effective_scroll_offset = scroll_offset + scroll_anchor_delta;
-                    let est_top = y - effective_scroll_offset;
+                    let est_top = y - scroll_anchor_delta;
                     let est_bottom = est_top + cached_h;
                     cached_height_before_reflow = Some(cached_h);
                     cached_line_above_viewport = est_bottom < origin_y;
@@ -2336,8 +2371,7 @@ impl Element for EditorElement {
             let is_cursor_line = line_idx == cursor_line;
             let estimated_total_line_height =
                 line_height + block_padding_top + block_padding_bottom;
-            let effective_scroll_offset = scroll_offset + scroll_anchor_delta;
-            let estimated_line_top = y - effective_scroll_offset;
+            let estimated_line_top = y - scroll_anchor_delta;
             let should_defer_uncached_offscreen_non_markdown_line = editor
                 .active_tab_is_non_markdown_text()
                 && !is_cursor_line
@@ -2594,8 +2628,7 @@ impl Element for EditorElement {
                 let visual_line_count = cached.visual_line_count;
                 let text_line_height = line_height * visual_line_count as f32;
                 let total_line_height = text_line_height + cached.extra_height;
-                let effective_scroll_offset = scroll_offset + scroll_anchor_delta;
-                let line_top = y - effective_scroll_offset;
+                let line_top = y - scroll_anchor_delta;
                 let line_bottom = line_top + total_line_height;
                 let text_line_top = line_top;
                 let content_x = editor_left + editor.padding_left();
@@ -3159,6 +3192,7 @@ impl Element for EditorElement {
                             }) if affinity_offset == cur_offset => {
                                 downstream_wrap_boundary_position(
                                     &cached.wrapped_line,
+                                    &cached.display_text,
                                     disp_cursor_col,
                                     line_height,
                                 )
@@ -3332,13 +3366,14 @@ impl Element for EditorElement {
                         false,
                     )
                 } else {
-                    let render_decoration =
-                        diff_table_syntax_line.then(|| crate::markdown::LineDecoration {
-                            block_type: BlockType::CodeBlock,
-                            diff_added_spans: decoration.diff_added_spans.clone(),
-                            diff_removed_spans: decoration.diff_removed_spans.clone(),
-                            ..crate::markdown::LineDecoration::default()
-                        });
+                    let render_decoration = diff_table_syntax_line.then(|| {
+                        let mut render_decoration = crate::markdown::LineDecoration::default();
+                        render_decoration.block_type = BlockType::CodeBlock;
+                        render_decoration.diff_added_spans = decoration.diff_added_spans.clone();
+                        render_decoration.diff_removed_spans =
+                            decoration.diff_removed_spans.clone();
+                        render_decoration
+                    });
                     let render_decoration = render_decoration.as_ref().unwrap_or(&decoration);
                     helpers::build_display_text(
                         line_content,
@@ -3356,13 +3391,13 @@ impl Element for EditorElement {
                         editor.styles.editor.editor_superscript_scale_factor,
                     )
                 };
-            let render_decoration =
-                diff_table_syntax_line.then(|| crate::markdown::LineDecoration {
-                    block_type: BlockType::CodeBlock,
-                    diff_added_spans: decoration.diff_added_spans.clone(),
-                    diff_removed_spans: decoration.diff_removed_spans.clone(),
-                    ..crate::markdown::LineDecoration::default()
-                });
+            let render_decoration = diff_table_syntax_line.then(|| {
+                let mut render_decoration = crate::markdown::LineDecoration::default();
+                render_decoration.block_type = BlockType::CodeBlock;
+                render_decoration.diff_added_spans = decoration.diff_added_spans.clone();
+                render_decoration.diff_removed_spans = decoration.diff_removed_spans.clone();
+                render_decoration
+            });
             let render_decoration = render_decoration.as_ref().unwrap_or(&decoration);
             editor.apply_list_display_styles(
                 line_content,
@@ -3381,7 +3416,7 @@ impl Element for EditorElement {
                     strikethrough: None,
                 }]
             } else {
-                let mut runs = helpers::build_text_runs_for_display(
+                let mut runs = helpers::build_text_runs_for_display_with_language(
                     &display_text,
                     line_content,
                     &display_to_buffer,
@@ -3408,6 +3443,10 @@ impl Element for EditorElement {
                     editor.styles.editor.editor_heading_marker_text_color,
                     Some(editor.styles.table.front_matter_key_text_color),
                     editor.active_tab_is_non_markdown_text(),
+                    match editor.active_file_kind() {
+                        Some(FileKind::Code { language }) => Some(language.as_str()),
+                        _ => None,
+                    },
                 );
                 helpers::apply_search_match_text_styles(
                     &mut runs,
@@ -3604,7 +3643,11 @@ impl Element for EditorElement {
                 }
             }
 
-            let wrapped = &wrapped_lines[0];
+            let Some(wrapped) = wrapped_lines.first() else {
+                display_info_updates.push((line_idx, None));
+                y += estimated_total_line_height;
+                continue;
+            };
             let indent_px =
                 if is_list_type && prefix_bytes > 0 && prefix_bytes <= display_text.len() {
                     wrapped
@@ -3763,8 +3806,7 @@ impl Element for EditorElement {
                 scroll_anchor_delta += total_line_height - cached_h;
             }
 
-            let effective_scroll_offset = scroll_offset + scroll_anchor_delta;
-            let line_top = y - effective_scroll_offset;
+            let line_top = y - scroll_anchor_delta;
             let line_bottom = line_top + total_line_height;
             // The inline image preview is painted above its syntax text, so the
             // text row is pushed down by the preview's reserved height. Keep
@@ -3874,7 +3916,7 @@ impl Element for EditorElement {
             }
 
             let segments = if !wrapped.wrap_boundaries().is_empty() {
-                let byte_indices = helpers::wrap_boundary_byte_indices(wrapped);
+                let byte_indices = helpers::wrap_boundary_byte_indices(wrapped, &display_text);
                 let mut shaped_segments: Vec<(WrappedLine, Point<Pixels>)> = Vec::new();
                 for (seg_idx, segment_range) in
                     helpers::wrap_segment_byte_ranges(display_text.len(), &byte_indices)
@@ -4320,7 +4362,8 @@ impl Element for EditorElement {
                                             cell_runs
                                         };
 
-                                    let cell_x = table_left + cell_layout.x + layout.cell_padding_x;
+                                    let cell_content_x =
+                                        table_left + cell_layout.x + layout.cell_padding_x;
                                     let cell_text_y = row_y + layout.cell_padding_y;
 
                                     let wrap_width = (cell_layout.width
@@ -4335,6 +4378,12 @@ impl Element for EditorElement {
                                         None,
                                     ) {
                                         if let Some(shaped) = shaped_lines.into_iter().next() {
+                                            let cell_x = cell_content_x
+                                                + helpers::table_cell_content_offset(
+                                                    cell_layout.alignment,
+                                                    wrap_width,
+                                                    f32::from(shaped.unwrapped_layout.width),
+                                                );
                                             let mut push_search_highlights =
                                                 |matches: &[std::ops::Range<usize>],
                                                  active_index: Option<usize>| {
@@ -5520,9 +5569,10 @@ impl Element for EditorElement {
                                 row_top += r_line_height;
                                 continue;
                             };
-                            let visual_lines = helpers::wrap_boundary_byte_indices(&wrapped)
-                                .len()
-                                .saturating_add(1);
+                            let visual_lines =
+                                helpers::wrap_boundary_byte_indices(&wrapped, &display_text)
+                                    .len()
+                                    .saturating_add(1);
                             if matches!(r_decoration.block_type, BlockType::TaskList(_))
                                 && prefix_collapsed
                             {
@@ -6235,10 +6285,13 @@ impl Element for EditorElement {
                         Some(WrapBoundaryAffinity {
                             offset: affinity_offset,
                             kind: WrapBoundaryAffinityKind::Downstream,
-                        }) if affinity_offset == cur_offset => {
-                            downstream_wrap_boundary_position(wrapped, disp_cursor_col, line_height)
-                                .unwrap_or(cursor_pos)
-                        }
+                        }) if affinity_offset == cur_offset => downstream_wrap_boundary_position(
+                            wrapped,
+                            &display_text,
+                            disp_cursor_col,
+                            line_height,
+                        )
+                        .unwrap_or(cursor_pos),
                         _ => cursor_pos,
                     };
 
@@ -7381,7 +7434,9 @@ impl Element for EditorElement {
                     InlineDiffHunkKind::Added | InlineDiffHunkKind::Modified => {
                         let mut bar_top = f32::MAX;
                         let mut bar_bottom = f32::MIN;
-                        for line in hunk.buffer_start..hunk.buffer_end {
+                        let visible_hunk_start = hunk.buffer_start.max(render_start_line);
+                        let visible_hunk_end = hunk.buffer_end.min(render_end_line);
+                        for line in visible_hunk_start..visible_hunk_end {
                             let Some(&(top, height)) = geometry.get(&line) else {
                                 continue;
                             };
@@ -7643,6 +7698,7 @@ impl Element for EditorElement {
 
         self.editor.update(cx, |editor, cx| {
             editor.apply_line_display_info_updates(line_count, display_info_updates);
+            editor.visible_line_geometry = inline_diff_line_geometry.clone();
             editor.last_viewport_height = viewport_height;
             editor.last_viewport_width = viewport_width;
             editor.checkbox_areas = checkbox_hit_areas.clone();
@@ -7812,7 +7868,9 @@ impl Element for EditorElement {
             // here used to allocate thousands of LineDecoration structs on every
             // prepaint frame (i.e. every scroll frame) on large documents.
             let editor = self.editor.read(cx);
-            for dec in &editor.decorations {
+            let decoration_start = render_start_line.min(editor.decorations.len());
+            let decoration_end = render_end_line.min(editor.decorations.len());
+            for dec in &editor.decorations[decoration_start..decoration_end] {
                 if let Some(ref path) = dec.image_path
                     && !editor.image_cache.contains_key(path)
                 {
@@ -8261,5 +8319,10 @@ impl Element for EditorElement {
             self.editor
                 .update(cx, |editor, _| editor.end_pane_swap(self.pane_id));
         }
+        self.editor.update(cx, |editor, _| {
+            if editor.focused_pane_id == self.pane_id {
+                editor.end_large_document_frame_work();
+            }
+        });
     }
 }

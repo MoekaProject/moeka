@@ -79,6 +79,7 @@ pub(crate) struct InfoPanelData {
     external_link_items: Vec<InfoPanelReferenceItem>,
     wiki_link_items: Vec<InfoPanelReferenceItem>,
     supports_text_export: bool,
+    resources_indexed: bool,
 }
 
 #[derive(Clone)]
@@ -1360,6 +1361,10 @@ fn count_document_words(text: &str) -> usize {
     UnicodeSegmentation::unicode_words(text).count()
 }
 
+fn should_defer_info_panel_expensive_work(supports_text_export: bool, line_count: usize) -> bool {
+    supports_text_export && line_count >= LARGE_MARKDOWN_MIN_LINES
+}
+
 #[cfg(not(target_os = "macos"))]
 fn pdf_display_width(text: &str) -> usize {
     text.chars()
@@ -1946,6 +1951,8 @@ impl EditorView {
     pub(crate) fn invalidate_info_panel_cache(&mut self) {
         self.info_panel_cache_tab_id = None;
         self.info_panel_cache_result = None;
+        self.info_panel_refresh_epoch = self.info_panel_refresh_epoch.wrapping_add(1);
+        self.info_panel_refresh_task = None;
     }
 
     pub(crate) fn invalidate_git_history_cache(&mut self) {
@@ -1960,16 +1967,52 @@ impl EditorView {
         self.invalidate_git_history_cache();
     }
 
-    fn cached_info_panel_data(&mut self) -> Option<Arc<InfoPanelData>> {
+    fn cached_info_panel_data(&mut self, cx: &mut Context<Self>) -> Option<Arc<InfoPanelData>> {
         let current_tab_id = self.active_tab_id.clone();
         if self.info_panel_cache_tab_id != current_tab_id {
-            self.info_panel_cache_tab_id = current_tab_id;
-            self.info_panel_cache_result = Some(self.collect_info_panel_data().map(Arc::new));
+            self.info_panel_refresh_epoch = self.info_panel_refresh_epoch.wrapping_add(1);
+            self.info_panel_refresh_task = None;
+            self.info_panel_cache_tab_id = current_tab_id.clone();
+            let defer_expensive = should_defer_info_panel_expensive_work(
+                self.active_tab_supports_text_buffer(),
+                self.buffer.line_count(),
+            );
+            self.info_panel_cache_result =
+                Some(self.collect_info_panel_data(!defer_expensive).map(Arc::new));
+            if defer_expensive {
+                self.schedule_info_panel_word_count(current_tab_id, cx);
+            }
         }
 
         self.info_panel_cache_result
             .as_ref()
             .and_then(|result| result.as_ref().cloned())
+    }
+
+    fn schedule_info_panel_word_count(&mut self, tab_id: Option<String>, cx: &mut Context<Self>) {
+        let text = self.buffer.text().to_string();
+        let epoch = self.info_panel_refresh_epoch;
+        self.info_panel_refresh_task = Some(cx.spawn(async move |this, cx| {
+            let word_count = cx
+                .background_executor()
+                .spawn(async move { count_document_words(&text) })
+                .await;
+            this.update(cx, |editor, cx| {
+                if editor.info_panel_refresh_epoch != epoch
+                    || editor.info_panel_cache_tab_id != tab_id
+                {
+                    return;
+                }
+                if let Some(Some(data)) = editor.info_panel_cache_result.as_mut()
+                    && let Some(row) = Arc::make_mut(data).primary_rows.get_mut(4)
+                {
+                    row.value = word_count.to_string();
+                }
+                editor.info_panel_refresh_task = None;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn schedule_git_history_refresh(&mut self, cx: &mut Context<Self>) {
@@ -2912,7 +2955,7 @@ impl EditorView {
         )
     }
 
-    fn collect_info_panel_data(&self) -> Option<InfoPanelData> {
+    fn collect_info_panel_data(&self, include_expensive: bool) -> Option<InfoPanelData> {
         let active_index = self.active_tab_index()?;
         let tab = self.tabs.get(active_index)?;
         let path = tab.path.as_deref();
@@ -2947,10 +2990,12 @@ impl EditorView {
             .map(|meta| meta.len())
             .unwrap_or_else(|| text.len() as u64);
 
-        let word_count = if supports_text_export {
-            count_document_words(text)
+        let word_count = if !supports_text_export {
+            Some(0)
+        } else if include_expensive {
+            Some(count_document_words(text))
         } else {
-            0
+            None
         };
         let line_count = if supports_text_export {
             self.buffer.line_count()
@@ -2959,7 +3004,7 @@ impl EditorView {
         };
 
         let (attachment_items, image_items, external_link_items, wiki_link_items) =
-            if supports_text_export {
+            if supports_text_export && include_expensive {
                 self.collect_info_panel_resources(text)
             } else {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
@@ -2998,7 +3043,9 @@ impl EditorView {
                 },
                 InfoPanelRow {
                     label: self.t(crate::i18n::TextKey::InfoWords).to_string(),
-                    value: word_count.to_string(),
+                    value: word_count
+                        .map(|count| count.to_string())
+                        .unwrap_or_else(|| "…".to_string()),
                     tooltip: None,
                 },
                 InfoPanelRow {
@@ -3012,6 +3059,7 @@ impl EditorView {
             external_link_items,
             wiki_link_items,
             supports_text_export,
+            resources_indexed: !supports_text_export || include_expensive,
         })
     }
 
@@ -3480,7 +3528,7 @@ impl EditorView {
         if self.active_tab_is_whiteboard() {
             return self.render_whiteboard_properties_panel(cx);
         }
-        let data = self.cached_info_panel_data();
+        let data = self.cached_info_panel_data(cx);
         let ups = &self.styles.utility_panel;
         let top_spacer = self.scaled(ups.utility_panel_top_spacer_height_px);
         let bottom_spacer = self.scaled(ups.utility_panel_bottom_spacer_height_px);
@@ -3570,7 +3618,7 @@ impl EditorView {
             );
             content_y += export_height;
 
-            if data.supports_text_export {
+            if data.supports_text_export && data.resources_indexed {
                 self.push_info_reference_section(
                     &mut children,
                     &mut content_y,
@@ -3672,10 +3720,17 @@ mod tests {
         GitDiffRow, GitDiffRowKind, InfoPanelReferenceTarget, InfoPanelShareAction,
         build_git_diff_rows, build_git_diff_snapshot_text, build_html_document,
         external_reference_host, fallback_reference_label, path_reference_name, reference_scheme,
-        visible_git_diff_rows,
+        should_defer_info_panel_expensive_work, visible_git_diff_rows,
     };
     use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
     use std::path::PathBuf;
+
+    #[test]
+    fn large_text_documents_defer_expensive_info_collection() {
+        assert!(!should_defer_info_panel_expensive_work(true, 99_999));
+        assert!(should_defer_info_panel_expensive_work(true, 100_000));
+        assert!(!should_defer_info_panel_expensive_work(false, 2_000_000));
+    }
 
     #[test]
     fn export_highlights_code_blocks_and_styles_tables() {
@@ -3966,9 +4021,10 @@ mod tests {
             GitDiffRow {
                 kind: GitDiffRowKind::Removed,
                 text: "before".to_string(),
-                decoration: crate::markdown::LineDecoration {
-                    diff_removed_spans: vec![0..6],
-                    ..crate::markdown::LineDecoration::default()
+                decoration: {
+                    let mut decoration = crate::markdown::LineDecoration::default();
+                    decoration.diff_removed_spans = vec![0..6];
+                    decoration
                 },
                 source_line_number: Some(2),
                 is_hunk_label: false,
@@ -3976,9 +4032,10 @@ mod tests {
             GitDiffRow {
                 kind: GitDiffRowKind::Added,
                 text: "after".to_string(),
-                decoration: crate::markdown::LineDecoration {
-                    diff_added_spans: vec![0..5],
-                    ..crate::markdown::LineDecoration::default()
+                decoration: {
+                    let mut decoration = crate::markdown::LineDecoration::default();
+                    decoration.diff_added_spans = vec![0..5];
+                    decoration
                 },
                 source_line_number: Some(2),
                 is_hunk_label: false,

@@ -579,7 +579,13 @@ impl EditorView {
             state.revealed = true;
         }
         self.cancel_panel_scrollbar_idle_fade(kind);
-        self.sync_panel_scrollbar_opacity(kind, cx);
+        let target = self.desired_panel_scrollbar_opacity(kind);
+        if let Some(state) = self.panel_scrollbar_state_mut(kind) {
+            state.opacity_epoch = state.opacity_epoch.wrapping_add(1);
+            state.opacity_task = None;
+            state.opacity = target;
+            state.opacity_target = target;
+        }
         self.sync_panel_scrollbar_width(kind, cx);
         let should_schedule = self
             .panel_scrollbar_state(kind)

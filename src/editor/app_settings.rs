@@ -199,6 +199,8 @@ pub(crate) struct AppSettings {
     pub simple_mode: bool,
     #[serde(default = "default_format_toolbar_visible")]
     pub format_toolbar_visible: bool,
+    #[serde(default)]
+    pub auto_save: bool,
     #[serde(default = "default_attachment_location")]
     pub attachment_location: String,
     #[serde(default = "default_attachment_folder")]
@@ -391,6 +393,7 @@ impl Default for AppSettings {
             highlight_line_background: default_highlight_line_background(),
             simple_mode: false,
             format_toolbar_visible: default_format_toolbar_visible(),
+            auto_save: false,
             attachment_location: default_attachment_location(),
             attachment_folder: default_attachment_folder(),
             terminal_cursor_shape: default_terminal_cursor_shape(),
@@ -807,6 +810,11 @@ mod tests {
 
         settings.editor_content_width = 2000.0;
         assert_eq!(settings.effective_editor_content_width(), 1600.0);
+    }
+
+    #[test]
+    fn auto_save_defaults_to_disabled() {
+        assert!(!AppSettings::default().auto_save);
     }
 
     #[test]

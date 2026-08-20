@@ -23,6 +23,7 @@ impl EditorView {
             &EditorSnapshot,
         ) -> Option<EditorSnapshot>,
     ) {
+        self.commit_history_transaction();
         let current = self.current_snapshot();
         let Some(index) = self.active_tab_index() else {
             return;
@@ -39,12 +40,62 @@ impl EditorView {
         self.pause_blinking(cx);
     }
 
+    fn restore_history_view(&mut self, view: history_store::SnapshotViewState) {
+        self.cursor.offset = view.cursor_offset.min(self.buffer.len());
+        self.cursor.anchor = view.cursor_anchor.min(self.buffer.len());
+        self.extra_cursors = view
+            .extra_cursors
+            .into_iter()
+            .map(|(offset, anchor)| Cursor {
+                offset: offset.min(self.buffer.len()),
+                anchor: anchor.min(self.buffer.len()),
+            })
+            .collect();
+        self.scroll_offset = view.scroll_offset;
+    }
+
+    fn apply_history_transaction(&mut self, undo: bool, cx: &mut Context<Self>) -> bool {
+        self.commit_history_transaction();
+        let Some(index) = self.active_tab_index() else {
+            return false;
+        };
+        let transaction = if undo {
+            self.tabs[index].history.take_undo_transaction()
+        } else {
+            self.tabs[index].history.take_redo_transaction()
+        };
+        let Some((edits, view)) = transaction else {
+            return false;
+        };
+        let applied = if undo {
+            self.buffer.apply_edits_inverse(&edits)
+        } else {
+            self.buffer.apply_edits_forward(&edits)
+        };
+        debug_assert!(applied, "history transaction out of sync");
+        if !applied {
+            return false;
+        }
+        self.restore_history_view(view);
+        self.clear_marked_ranges();
+        self.reset_cursor_visual_targeting();
+        self.ime_composition_snapshot = None;
+        self.dedup_cursors();
+        self.reparse();
+        self.reset_typing_checkpoint_grouping();
+        self.sync_active_tab_dirty_state();
+        self.pause_blinking(cx);
+        true
+    }
+
     pub(crate) fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
         if self.active_tab_is_whiteboard() {
             self.whiteboard_undo(cx);
             return;
         }
-        self.apply_history_snapshot(cx, |history, current| history.take_undo(current));
+        if !self.apply_history_transaction(true, cx) {
+            self.apply_history_snapshot(cx, |history, current| history.take_undo(current));
+        }
     }
 
     pub(crate) fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
@@ -139,7 +190,9 @@ impl EditorView {
             self.whiteboard_redo(cx);
             return;
         }
-        self.apply_history_snapshot(cx, |history, current| history.take_redo(current));
+        if !self.apply_history_transaction(false, cx) {
+            self.apply_history_snapshot(cx, |history, current| history.take_redo(current));
+        }
     }
 
     pub(crate) fn on_toggle_runtime_profile(
@@ -2424,7 +2477,8 @@ impl EditorView {
         }
 
         if text != original_text {
-            self.buffer = Buffer::from_text(&text);
+            let old_len = self.buffer.len();
+            self.buffer.replace(0..old_len, &text);
             self.cursor.offset = self.cursor.offset.min(self.buffer.len());
             self.cursor.anchor = self.cursor.anchor.min(self.buffer.len());
             for cursor in &mut self.extra_cursors {
@@ -2451,7 +2505,18 @@ impl EditorView {
             self.save_active_whiteboard(cx);
             return;
         }
+        self.commit_history_transaction();
+        let before_normalize = self.buffer.text().to_string();
+        if self.active_tab_is_markdown() || !self.buffer.text().ends_with('\n') {
+            self.checkpoint();
+        }
         let text = self.normalize_text_for_save();
+        if text == before_normalize {
+            self.pending_history_transaction = None;
+            self.buffer.finish_edit_recording();
+        } else {
+            self.commit_history_transaction();
+        }
         if let Some(ref path) = self.tabs[index].path.clone() {
             match file_ops::atomic_write(path, text.as_bytes()) {
                 Ok(()) => {

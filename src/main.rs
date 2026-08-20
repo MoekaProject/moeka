@@ -13,6 +13,8 @@ mod checkbox;
 mod cursor;
 mod editor;
 mod i18n;
+#[cfg(test)]
+mod large_document_bench;
 mod markdown;
 mod platform;
 mod style;
@@ -177,6 +179,7 @@ fn open_launch_paths(editor: &Entity<EditorView>, paths: Vec<PathBuf>, cx: &mut 
         for (index, path) in files.into_iter().enumerate() {
             editor.open_path_in_permanent_tab(path, index + 1 == file_count, cx);
         }
+        cx.notify();
     });
 }
 

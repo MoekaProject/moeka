@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, ScrollWheelEvent, SharedString,
-    Window, div, prelude::*, px, svg,
+    AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, SharedString, div, prelude::*,
+    px, svg,
 };
 use std::cell::Ref;
 
@@ -15,57 +15,304 @@ pub(crate) struct OutlineHeading {
     pub text: SharedString,
 }
 
-fn centered_overflow_offset(
-    viewport_height: f32,
-    total_height: f32,
-    active_center: Option<f32>,
-    padding: f32,
-) -> f32 {
-    let padding = padding.min(viewport_height.max(0.0) / 2.0);
-    let viewport_inner_height = (viewport_height - padding * 2.0).max(0.0);
-    if total_height <= viewport_inner_height {
-        return padding + (viewport_inner_height - total_height).max(0.0) / 2.0;
+#[derive(Clone, Copy, PartialEq)]
+struct OutlinePanelLayoutKey {
+    epoch: usize,
+    panel_width: f32,
+    section_padding_x: f32,
+    item_min_height: f32,
+    item_padding_y: f32,
+    line_height: f32,
+    font_size: f32,
+    indent_step: f32,
+    fold_icon_hit_size: f32,
+    fold_icon_gap: f32,
+    scrollbar_reserve: f32,
+    fallback_chars_per_line: usize,
+    max_lines: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct OutlinePanelLayoutCache {
+    key: Option<OutlinePanelLayoutKey>,
+    visible_heading_indices: Vec<(usize, usize)>,
+    item_heights: Vec<f32>,
+    chars_per_line: Vec<usize>,
+    visible_expanded: Vec<bool>,
+    has_later_peer: Vec<bool>,
+    has_prior_expanded_peer: Vec<bool>,
+    offsets: Vec<f32>,
+}
+
+impl OutlinePanelLayoutCache {
+    fn rebuild_if_needed(
+        &mut self,
+        key: OutlinePanelLayoutKey,
+        headings: &[OutlineHeading],
+        collapsed_lines: &std::collections::HashSet<usize>,
+        mut row_metrics: impl FnMut(&OutlineHeading, usize) -> (f32, usize),
+    ) {
+        if self.key == Some(key) {
+            return;
+        }
+
+        let visible_heading_indices =
+            visible_outline_heading_indices_with_depths(headings, collapsed_lines);
+        let mut item_heights = Vec::with_capacity(visible_heading_indices.len());
+        let mut chars_per_line = Vec::with_capacity(visible_heading_indices.len());
+        let mut visible_expanded = Vec::with_capacity(visible_heading_indices.len());
+        let mut offsets = Vec::with_capacity(visible_heading_indices.len() + 1);
+        offsets.push(0.0);
+        for (heading_index, depth) in &visible_heading_indices {
+            let heading = &headings[*heading_index];
+            let (height, chars) = row_metrics(heading, *depth);
+            item_heights.push(height);
+            chars_per_line.push(chars);
+            visible_expanded.push(
+                outline_heading_has_children(headings, *heading_index)
+                    && !collapsed_lines.contains(&heading.line),
+            );
+            offsets.push(offsets.last().copied().unwrap_or(0.0) + height);
+        }
+
+        let mut has_later_peer = vec![false; visible_heading_indices.len()];
+        let mut next_peer_at_depth = Vec::<bool>::new();
+        for (visible_index, (_, depth)) in visible_heading_indices.iter().enumerate().rev() {
+            next_peer_at_depth.truncate(depth + 1);
+            if next_peer_at_depth.len() <= *depth {
+                next_peer_at_depth.resize(depth + 1, false);
+            }
+            has_later_peer[visible_index] = next_peer_at_depth[*depth];
+            next_peer_at_depth[*depth] = true;
+        }
+
+        let mut has_prior_expanded_peer = vec![false; visible_heading_indices.len()];
+        let mut expanded_seen_at_depth = Vec::<bool>::new();
+        for (visible_index, (_, depth)) in visible_heading_indices.iter().enumerate() {
+            expanded_seen_at_depth.truncate(depth + 1);
+            if expanded_seen_at_depth.len() <= *depth {
+                expanded_seen_at_depth.resize(depth + 1, false);
+            }
+            has_prior_expanded_peer[visible_index] = expanded_seen_at_depth[*depth];
+            expanded_seen_at_depth[*depth] |= visible_expanded[visible_index];
+        }
+
+        self.key = Some(key);
+        self.visible_heading_indices = visible_heading_indices;
+        self.item_heights = item_heights;
+        self.chars_per_line = chars_per_line;
+        self.visible_expanded = visible_expanded;
+        self.has_later_peer = has_later_peer;
+        self.has_prior_expanded_peer = has_prior_expanded_peer;
+        self.offsets = offsets;
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct MarkdownOutlineIndex {
+    pub(crate) headings: Vec<OutlineHeading>,
+    fence_before_line: Vec<u16>,
+}
+
+impl MarkdownOutlineIndex {
+    pub(crate) fn rebuild(buffer: &Buffer) -> Self {
+        let mut index = Self {
+            headings: Vec::new(),
+            fence_before_line: vec![0; buffer.line_count() + 1],
+        };
+        let mut state = 0;
+        for line in 0..buffer.line_count() {
+            index.fence_before_line[line] = state;
+            state = next_fence_state(buffer.line_content(line), state);
+            if let Some(heading) = outline_heading(buffer, line, state) {
+                index.headings.push(heading);
+            }
+        }
+        index.fence_before_line[buffer.line_count()] = state;
+        index
     }
 
-    let desired =
-        padding + viewport_inner_height / 2.0 - active_center.unwrap_or(total_height / 2.0);
-    desired.clamp(padding + viewport_inner_height - total_height, padding)
+    pub(crate) fn update_after_edit(
+        &mut self,
+        buffer: &Buffer,
+        start_line: usize,
+        old_end_line_exclusive: usize,
+        new_end_line_exclusive: usize,
+    ) {
+        let old_line_count = self.fence_before_line.len().saturating_sub(1);
+        let line_delta = new_end_line_exclusive as isize - old_end_line_exclusive as isize;
+        let start = start_line.min(buffer.line_count());
+        let old_end = old_end_line_exclusive.min(old_line_count).max(start);
+        let new_end = new_end_line_exclusive.min(buffer.line_count()).max(start);
+
+        let old_inner_start = (start + 1).min(self.fence_before_line.len());
+        let old_inner_end = old_end.min(self.fence_before_line.len());
+        let new_inner_count = new_end.saturating_sub(start + 1);
+        self.fence_before_line.splice(
+            old_inner_start..old_inner_end,
+            std::iter::repeat_n(0, new_inner_count),
+        );
+        self.fence_before_line.resize(buffer.line_count() + 1, 0);
+
+        for heading in &mut self.headings {
+            if heading.line >= old_end {
+                heading.line = (heading.line as isize + line_delta).max(0) as usize;
+            }
+        }
+
+        let scan_start = start.saturating_sub(1);
+        let mut scan_end = new_end.max(scan_start + 1).min(buffer.line_count());
+        let mut state = self.fence_before_line[scan_start];
+        let mut line = scan_start;
+        while line < buffer.line_count() {
+            self.fence_before_line[line] = state;
+            let next = next_fence_state(buffer.line_content(line), state);
+            let previous_next = self.fence_before_line[line + 1];
+            self.fence_before_line[line + 1] = next;
+            line += 1;
+            state = next;
+            scan_end = line;
+            if line >= new_end && next == previous_next {
+                break;
+            }
+        }
+
+        self.headings
+            .retain(|heading| heading.line < scan_start || heading.line >= scan_end);
+        let replacement = (scan_start..scan_end)
+            .filter_map(|line| outline_heading(buffer, line, self.fence_before_line[line + 1]))
+            .collect::<Vec<_>>();
+        let insert_at = self
+            .headings
+            .partition_point(|heading| heading.line < scan_start);
+        self.headings.splice(insert_at..insert_at, replacement);
+    }
 }
 
-fn overflow_max_scroll(viewport_height: f32, total_height: f32, padding: f32) -> f32 {
-    let padding = padding.min(viewport_height.max(0.0) / 2.0);
-    let viewport_inner_height = (viewport_height - padding * 2.0).max(0.0);
-    (total_height - viewport_inner_height).max(0.0)
-}
-
-fn overflow_offset_from_scroll(scroll_offset: f32, viewport_height: f32, padding: f32) -> f32 {
-    let padding = padding.min(viewport_height.max(0.0) / 2.0);
-    padding - scroll_offset.max(0.0)
-}
-
-fn overflow_offset_from_shared_scroll(
-    shared_scroll: Option<f32>,
-    shared_max_scroll: f32,
-    content_max_scroll: f32,
-    viewport_height: f32,
-    padding: f32,
-) -> Option<f32> {
-    if shared_max_scroll <= 0.0 || content_max_scroll <= 0.0 {
+fn structural_line_content(content: &str) -> Option<&str> {
+    let leading = content.bytes().take_while(|byte| *byte == b' ').count();
+    if leading > 3 {
         return None;
     }
-
-    let shared_scroll = shared_scroll?.clamp(0.0, shared_max_scroll);
-    let content_scroll = shared_scroll * (content_max_scroll / shared_max_scroll);
-    Some(overflow_offset_from_scroll(
-        content_scroll,
-        viewport_height,
-        padding,
-    ))
+    let mut content = &content[leading..];
+    while let Some(rest) = content.strip_prefix('>') {
+        content = rest.strip_prefix([' ', '\t']).unwrap_or(rest);
+    }
+    Some(content)
 }
 
-fn overflow_scroll_from_offset(top_offset: f32, viewport_height: f32, padding: f32) -> f32 {
-    let padding = padding.min(viewport_height.max(0.0) / 2.0);
-    (padding - top_offset).max(0.0)
+fn atx_outline_heading(content: &str) -> Option<(u8, &str)> {
+    let content = structural_line_content(content)?;
+    let marker_len = content.bytes().take_while(|byte| *byte == b'#').count();
+    if !(1..=6).contains(&marker_len)
+        || !content
+            .as_bytes()
+            .get(marker_len)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        return None;
+    }
+    let text = content[marker_len..]
+        .trim()
+        .trim_end_matches('#')
+        .trim_end();
+    Some((marker_len as u8, text))
+}
+
+fn next_fence_state(content: &str, state: u16) -> u16 {
+    let Some(content) = structural_line_content(content) else {
+        return state;
+    };
+    let marker = content.as_bytes().first().copied().unwrap_or_default();
+    if !matches!(marker, b'`' | b'~') {
+        return state;
+    }
+    let marker_len = content.bytes().take_while(|byte| *byte == marker).count();
+    if marker_len < 3 {
+        return state;
+    }
+    let encoded = u16::from(marker == b'~') << 8 | marker_len.min(255) as u16;
+    if state == 0 {
+        encoded
+    } else {
+        let state_marker = if state >> 8 == 0 { b'`' } else { b'~' };
+        let state_len = usize::from(state & 0xff);
+        if marker == state_marker
+            && marker_len >= state_len
+            && content[marker_len..].trim().is_empty()
+        {
+            0
+        } else {
+            state
+        }
+    }
+}
+
+fn outline_heading(buffer: &Buffer, line: usize, state_after_line: u16) -> Option<OutlineHeading> {
+    if state_after_line != 0 {
+        return None;
+    }
+    let content = buffer.line_content(line);
+    if let Some((level, text)) = atx_outline_heading(content) {
+        return Some(OutlineHeading {
+            line,
+            level,
+            text: SharedString::from(text.to_string()),
+        });
+    }
+
+    let trimmed = structural_line_content(content)?.trim();
+    let setext_level = if trimmed.len() >= 3 && trimmed.bytes().all(|byte| byte == b'=') {
+        Some(1)
+    } else if trimmed.len() >= 3 && trimmed.bytes().all(|byte| byte == b'-') {
+        Some(2)
+    } else {
+        None
+    };
+    let level = setext_level?;
+    let text_line = line.checked_sub(1)?;
+    let text = structural_line_content(buffer.line_content(text_line))?.trim();
+    (!text.is_empty()).then(|| OutlineHeading {
+        line: text_line,
+        level,
+        text: SharedString::from(text.to_string()),
+    })
+}
+
+fn outline_rail_row_top(
+    row_index: usize,
+    row_count: usize,
+    viewport_height: f32,
+    row_height: f32,
+    tick_thickness: f32,
+) -> f32 {
+    let progress = if row_count <= 1 {
+        0.0
+    } else {
+        row_index.min(row_count - 1) as f32 / (row_count - 1) as f32
+    };
+    let tick_travel = (viewport_height - tick_thickness).max(0.0);
+    let tick_inset = (row_height - tick_thickness).max(0.0) / 2.0;
+    progress * tick_travel - tick_inset
+}
+
+fn outline_rail_slot_count(viewport_height: f32, row_height: f32) -> usize {
+    if viewport_height <= 0.0 {
+        return 0;
+    }
+    (viewport_height / row_height.max(1.0)).ceil() as usize
+}
+
+fn outline_rail_inner_height(viewport_height: f32, vertical_padding: f32) -> f32 {
+    (viewport_height - vertical_padding.max(0.0) * 2.0).max(0.0)
+}
+
+fn outline_rail_project_index(index: usize, source_count: usize, target_count: usize) -> usize {
+    if source_count <= 1 || target_count <= 1 {
+        return 0;
+    }
+    let progress = index.min(source_count - 1) as f32 / (source_count - 1) as f32;
+    (progress * (target_count - 1) as f32).round() as usize
 }
 
 fn outline_text_columns(text: &str) -> usize {
@@ -138,11 +385,57 @@ fn normalized_outline_width_bounds(min_width: f32, max_width: f32) -> (f32, f32)
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    use crate::buffer::Buffer;
+
     use super::{
+        MarkdownOutlineIndex, OutlineHeading, OutlinePanelLayoutCache, OutlinePanelLayoutKey,
         animated_outline_tick_influence, normalized_outline_width_bounds, outline_has_later_peer,
         outline_has_prior_expanded_peer, outline_hover_animation_value,
-        outline_nearest_guide_ranges, outline_tick_influence, outline_wrapped_text,
+        outline_nearest_guide_ranges, outline_rail_inner_height, outline_rail_project_index,
+        outline_rail_row_top, outline_rail_slot_count, outline_tick_influence,
+        outline_wrapped_text,
     };
+
+    #[test]
+    fn markdown_outline_index_skips_fences_and_supports_all_heading_forms() {
+        let buffer =
+            Buffer::from_text("# ATX\n\n> ## Quoted\n\nSetext\n---\n\n```md\n# hidden\n```\n");
+        let index = MarkdownOutlineIndex::rebuild(&buffer);
+        let headings = index
+            .headings
+            .iter()
+            .map(|heading| (heading.line, heading.level, heading.text.as_ref()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            headings,
+            vec![(0, 1, "ATX"), (2, 2, "Quoted"), (4, 2, "Setext")]
+        );
+    }
+
+    #[test]
+    fn markdown_outline_index_updates_only_the_edited_region() {
+        let mut buffer = Buffer::from_text("# One\n\ntext\n\n## Two\n");
+        let mut index = MarkdownOutlineIndex::rebuild(&buffer);
+        let start = buffer.line_start(2);
+        let end = buffer.line_end(2);
+        buffer.replace(start..end, "### Middle");
+        index.update_after_edit(&buffer, 2, 3, 3);
+
+        let headings = index
+            .headings
+            .iter()
+            .map(|heading| (heading.line, heading.level, heading.text.as_ref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            headings,
+            vec![(0, 1, "One"), (2, 3, "Middle"), (4, 2, "Two")]
+        );
+    }
 
     #[test]
     fn outline_width_bounds_are_normalized_before_clamp() {
@@ -158,6 +451,52 @@ mod tests {
             normalized_outline_width_bounds(324.0, f32::NAN),
             (324.0, 324.0)
         );
+    }
+
+    #[test]
+    fn outline_rail_respects_vertical_padding_without_scrolling() {
+        let row_height = 6.0;
+        let tick_thickness = 2.0;
+        let viewport_height = 100.0;
+        let vertical_padding = 20.0;
+        let inner_height = outline_rail_inner_height(viewport_height, vertical_padding);
+        let tick_inset = (row_height - tick_thickness) / 2.0;
+
+        let first_top =
+            vertical_padding + outline_rail_row_top(0, 3, inner_height, row_height, tick_thickness);
+        let middle_top =
+            vertical_padding + outline_rail_row_top(1, 3, inner_height, row_height, tick_thickness);
+        let last_top =
+            vertical_padding + outline_rail_row_top(2, 3, inner_height, row_height, tick_thickness);
+
+        assert_eq!(first_top + tick_inset, vertical_padding);
+        assert_eq!(middle_top + row_height / 2.0, viewport_height / 2.0);
+        assert_eq!(
+            last_top + tick_inset + tick_thickness,
+            viewport_height - vertical_padding
+        );
+    }
+
+    #[test]
+    fn outline_rail_line_count_depends_only_on_height_and_spacing() {
+        let slot_count = outline_rail_slot_count(800.0, 6.0);
+
+        assert_eq!(slot_count, 134);
+        assert_eq!(outline_rail_slot_count(800.0, 6.0), slot_count);
+        assert_eq!(outline_rail_slot_count(400.0, 6.0), 67);
+    }
+
+    #[test]
+    fn outline_headings_project_onto_fixed_rail_slots() {
+        let slot_count = outline_rail_slot_count(800.0, 6.0);
+
+        assert_eq!(outline_rail_project_index(0, 50_000, slot_count), 0);
+        assert_eq!(outline_rail_project_index(25_000, 50_000, slot_count), 67);
+        assert_eq!(
+            outline_rail_project_index(49_999, 50_000, slot_count),
+            slot_count - 1
+        );
+        assert_eq!(outline_rail_project_index(0, 1, slot_count), 0);
     }
 
     #[test]
@@ -217,6 +556,124 @@ mod tests {
         assert!(!outline_has_prior_expanded_peer(&visible, &expanded, 2, 1));
         assert!(outline_has_prior_expanded_peer(&visible, &expanded, 5, 1));
         assert!(!outline_has_prior_expanded_peer(&visible, &expanded, 7, 1));
+    }
+
+    #[test]
+    fn cached_outline_guide_relations_match_direct_scans() {
+        let headings = [
+            (0, 1, "Root"),
+            (1, 2, "One"),
+            (2, 2, "Two"),
+            (3, 3, "Nested"),
+            (4, 3, "Nested peer"),
+            (5, 2, "Three"),
+            (6, 1, "Second root"),
+            (7, 2, "Child"),
+        ]
+        .into_iter()
+        .map(|(line, level, text)| OutlineHeading {
+            line,
+            level,
+            text: text.into(),
+        })
+        .collect::<Vec<_>>();
+        let mut cache = OutlinePanelLayoutCache::default();
+        cache.rebuild_if_needed(test_layout_key(0), &headings, &HashSet::new(), |_, _| {
+            (24.0, 24)
+        });
+
+        for (index, (_, depth)) in cache.visible_heading_indices.iter().enumerate() {
+            assert_eq!(
+                cache.has_later_peer[index],
+                outline_has_later_peer(&cache.visible_heading_indices, index, *depth),
+            );
+            assert_eq!(
+                cache.has_prior_expanded_peer[index],
+                outline_has_prior_expanded_peer(
+                    &cache.visible_heading_indices,
+                    &cache.visible_expanded,
+                    index,
+                    *depth,
+                ),
+            );
+        }
+    }
+
+    fn test_layout_key(epoch: usize) -> OutlinePanelLayoutKey {
+        OutlinePanelLayoutKey {
+            epoch,
+            panel_width: 320.0,
+            section_padding_x: 12.0,
+            item_min_height: 24.0,
+            item_padding_y: 4.0,
+            line_height: 18.0,
+            font_size: 13.0,
+            indent_step: 14.0,
+            fold_icon_hit_size: 20.0,
+            fold_icon_gap: 4.0,
+            scrollbar_reserve: 12.0,
+            fallback_chars_per_line: 24,
+            max_lines: 3,
+        }
+    }
+
+    #[test]
+    #[ignore = "50k-heading release benchmark; run explicitly with --ignored --nocapture"]
+    fn outline_panel_layout_cache_50k_benchmark() {
+        let headings = (0..50_000)
+            .map(|index| OutlineHeading {
+                line: index * 40,
+                level: (index % 6 + 1) as u8,
+                text: format!("Section {index} with CJK 标题 and emoji 🙂").into(),
+            })
+            .collect::<Vec<_>>();
+        let mut cache = OutlinePanelLayoutCache::default();
+
+        let rebuild_started = Instant::now();
+        cache.rebuild_if_needed(
+            test_layout_key(1),
+            &headings,
+            &HashSet::new(),
+            |heading, depth| {
+                let chars = 28usize.saturating_sub(depth).max(8);
+                let lines = heading.text.chars().count().div_ceil(chars).clamp(1, 3);
+                ((lines as f32 * 18.0 + 8.0).max(24.0), chars)
+            },
+        );
+        let rebuild_ms = rebuild_started.elapsed().as_secs_f64() * 1_000.0;
+
+        let cached_started = Instant::now();
+        for _ in 0..10_000 {
+            cache.rebuild_if_needed(test_layout_key(1), &headings, &HashSet::new(), |_, _| {
+                unreachable!("cache hit must not rebuild rows")
+            });
+        }
+        let cached_hits_ms = cached_started.elapsed().as_secs_f64() * 1_000.0;
+
+        let scroll_started = Instant::now();
+        let total_height = cache.offsets.last().copied().unwrap_or(0.0);
+        let mut rendered_rows = 0usize;
+        for sample in 0..10_000 {
+            let scroll_y = total_height * sample as f32 / 10_000.0;
+            let window = crate::editor::list_viewport::variable_list_window_for_offsets(
+                scroll_y,
+                600.0,
+                0.0,
+                &cache.offsets,
+                12,
+                24,
+            );
+            rendered_rows += window.render.len();
+            black_box(window);
+        }
+        let scroll_queries_ms = scroll_started.elapsed().as_secs_f64() * 1_000.0;
+
+        assert_eq!(cache.visible_heading_indices.len(), 50_000);
+        assert!(rendered_rows / 10_000 < 64);
+        println!(
+            "outline-ui headings=50000 rebuild_ms={rebuild_ms:.3} cached_hits_10k_ms={cached_hits_ms:.3} scroll_queries_10k_ms={scroll_queries_ms:.3} avg_rendered_rows={:.1}",
+            rendered_rows as f64 / 10_000.0,
+        );
     }
 
     #[test]
@@ -313,6 +770,15 @@ fn outline_heading_has_children(headings: &[OutlineHeading], heading_index: usiz
         .is_some_and(|next| next.level > current.level)
 }
 
+fn outline_heading_index_for_line(headings: &[OutlineHeading], line: usize) -> Option<usize> {
+    let index = headings.partition_point(|heading| heading.line < line);
+    headings
+        .get(index)
+        .is_some_and(|heading| heading.line == line)
+        .then_some(index)
+}
+
+#[cfg(test)]
 fn outline_has_later_peer(
     visible_headings: &[(usize, usize)],
     current_index: usize,
@@ -326,6 +792,7 @@ fn outline_has_later_peer(
         .any(|next_depth| next_depth == depth)
 }
 
+#[cfg(test)]
 fn outline_has_prior_expanded_peer(
     visible_headings: &[(usize, usize)],
     expanded: &[bool],
@@ -459,6 +926,11 @@ fn outline_hover_animation_value(
 }
 
 impl EditorView {
+    pub(crate) fn invalidate_outline_layout_cache(&mut self) {
+        self.outline_panel_layout_epoch = self.outline_panel_layout_epoch.wrapping_add(1);
+        self.outline_panel_layout_cache.borrow_mut().key = None;
+    }
+
     pub(crate) fn flash_outline_heading_line(
         &mut self,
         target_line: usize,
@@ -542,7 +1014,47 @@ impl EditorView {
         .detach();
     }
 
+    pub(crate) fn schedule_large_markdown_outline_index(&mut self, cx: &mut Context<Self>) {
+        let outline_visible = self.outline_rail_visible
+            || self.utility_panel == Some(RightUtilityPanel::Outline)
+            || self.displayed_utility_panel == Some(RightUtilityPanel::Outline);
+        if !outline_visible
+            || !self.uses_lazy_markdown_decorations()
+            || self.markdown_outline_index.borrow().is_some()
+            || self.markdown_outline_build_task.is_some()
+        {
+            return;
+        }
+        let pane_id = self.current_pane_id();
+        let epoch = self.markdown_outline_epoch;
+        let text = self.buffer.text().to_string();
+        let build = cx.background_executor().spawn(async move {
+            let buffer = Buffer::from_string(text);
+            MarkdownOutlineIndex::rebuild(&buffer)
+        });
+        self.markdown_outline_build_task = Some(cx.spawn(async move |this, cx| {
+            let index = build.await;
+            this.update(cx, |this, cx| {
+                this.with_pane_if_alive(pane_id, |this| {
+                    this.markdown_outline_build_task = None;
+                    if this.markdown_outline_epoch == epoch && this.uses_lazy_markdown_decorations()
+                    {
+                        *this.markdown_outline_index.borrow_mut() = Some(index);
+                        this.invalidate_outline_layout_cache();
+                    }
+                });
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     pub(crate) fn collect_outline_headings(&self) -> Ref<'_, Vec<OutlineHeading>> {
+        if self.uses_lazy_markdown_decorations() && self.markdown_outline_index.borrow().is_some() {
+            return Ref::map(self.markdown_outline_index.borrow(), |index| {
+                &index.as_ref().expect("checked above").headings
+            });
+        }
         if self.outline_headings_cache_dirty.get() {
             {
                 let mut headings = self.outline_headings_cache.borrow_mut();
@@ -567,25 +1079,35 @@ impl EditorView {
     /// The first heading visible in the editor viewport, falling back to the
     /// section heading scrolled above the viewport top.
     fn first_visible_outline_heading_line(&self, headings: &[OutlineHeading]) -> Option<usize> {
+        if headings.is_empty() {
+            return None;
+        }
         let top = self.scroll_offset;
         let bottom = top + self.last_viewport_height.max(0.0);
-        let mut fallback = None;
-        for heading in headings {
-            let y = self.line_y_offset(heading.line);
-            if y < top {
-                fallback = Some(heading.line);
-            } else if y < bottom {
-                return Some(heading.line);
+        let mut low = 0usize;
+        let mut high = headings.len();
+        while low < high {
+            let middle = (low + high) / 2;
+            if self.line_y_offset(headings[middle].line) < top {
+                low = middle + 1;
             } else {
-                break;
+                high = middle;
             }
         }
-        fallback.or_else(|| headings.first().map(|heading| heading.line))
+
+        if let Some(heading) = headings.get(low)
+            && self.line_y_offset(heading.line) < bottom
+        {
+            return Some(heading.line);
+        }
+        Some(headings[low.saturating_sub(1)].line)
     }
 
     fn outline_rail_active_line(&self, headings: &[OutlineHeading]) -> Option<usize> {
         self.outline_rail_clicked_active_line
-            .filter(|clicked_line| headings.iter().any(|heading| heading.line == *clicked_line))
+            .filter(|clicked_line| {
+                outline_heading_index_for_line(headings, *clicked_line).is_some()
+            })
             .or_else(|| self.first_visible_outline_heading_line(headings))
     }
 
@@ -659,66 +1181,7 @@ impl EditorView {
         if !self.outline_rail_collapsed_heading_lines.remove(&line) {
             self.outline_rail_collapsed_heading_lines.insert(line);
         }
-        cx.notify();
-    }
-
-    fn on_outline_rail_scroll(
-        &mut self,
-        event: &ScrollWheelEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let os = &self.styles.outline;
-        let viewport_height = self.last_viewport_height.max(0.0);
-        let vertical_padding = self.scaled(os.outline_rail_vertical_padding_px);
-        let row_height = self.scaled(os.outline_rail_row_height_px);
-        let Some((current_scroll, max_scroll)) = ({
-            let headings = self.collect_outline_headings();
-            if headings.is_empty() {
-                None
-            } else {
-                let active_line = self.outline_rail_active_line(&headings);
-                let tick_total_height = headings.len() as f32 * row_height;
-                let tick_max_scroll =
-                    overflow_max_scroll(viewport_height, tick_total_height, vertical_padding);
-                let max_scroll = tick_max_scroll;
-                if max_scroll <= 0.0 {
-                    None
-                } else {
-                    Some((
-                        self.outline_rail_scroll_offset.unwrap_or_else(|| {
-                            let active_index = active_line.and_then(|line| {
-                                headings.iter().position(|heading| heading.line == line)
-                            });
-                            let active_center = active_index
-                                .map(|index| index as f32 * row_height + row_height / 2.0);
-                            let top_offset = centered_overflow_offset(
-                                viewport_height,
-                                tick_total_height,
-                                active_center,
-                                vertical_padding,
-                            );
-                            let tick_initial_scroll = overflow_scroll_from_offset(
-                                top_offset,
-                                viewport_height,
-                                vertical_padding,
-                            );
-                            if tick_max_scroll > 0.0 {
-                                tick_initial_scroll / tick_max_scroll * max_scroll
-                            } else {
-                                tick_initial_scroll
-                            }
-                        }),
-                        max_scroll,
-                    ))
-                }
-            }
-        }) else {
-            return;
-        };
-        let delta_y: f32 = event.delta.pixel_delta(px(row_height * 6.0)).y.into();
-        self.outline_rail_scroll_offset = Some((current_scroll - delta_y).clamp(0.0, max_scroll));
-        cx.stop_propagation();
+        self.invalidate_outline_layout_cache();
         cx.notify();
     }
 
@@ -827,7 +1290,6 @@ impl EditorView {
         );
         let track_right = scrollbar_hit_left_from_right.min(right_margin);
         let track_extra_right_padding = (right_margin - track_right).max(0.0);
-        let vertical_padding = self.scaled(os.outline_rail_vertical_padding_px);
         let row_height = self.scaled(os.outline_rail_row_height_px);
         let tick_width = self.scaled(os.outline_rail_tick_width_px);
         let tick_thickness = self
@@ -841,6 +1303,7 @@ impl EditorView {
         let active_neighbor_count = os.outline_rail_tick_active_neighbor_count;
         let active_falloff_power = os.outline_rail_tick_active_falloff_power;
         let active_anim_seconds = os.outline_rail_tick_active_animation_seconds.max(0.001);
+        let vertical_padding = self.scaled(os.outline_rail_vertical_padding_px);
 
         let previous_active_line = self.outline_rail_last_active_line.get();
         if previous_active_line != active_line {
@@ -873,69 +1336,9 @@ impl EditorView {
             .detach();
         }
 
-        // Measure the rail to decide between centering and active-centered clipping.
         let viewport_height = self.last_viewport_height.max(0.0);
+        let rail_height = outline_rail_inner_height(viewport_height, vertical_padding);
         let row_count = headings.len();
-        let total_height = row_count as f32 * row_height;
-        let active_row_center = active_line
-            .and_then(|line| headings.iter().position(|heading| heading.line == line))
-            .map(|index| index as f32 * row_height + row_height / 2.0);
-        let overflow = viewport_height > 0.0 && total_height > viewport_height;
-        let top_offset = if overflow {
-            let max_scroll = overflow_max_scroll(viewport_height, total_height, vertical_padding);
-            let shared_max_scroll = max_scroll;
-            if let Some(top_offset) = overflow_offset_from_shared_scroll(
-                self.outline_rail_scroll_offset,
-                shared_max_scroll,
-                max_scroll,
-                viewport_height,
-                vertical_padding,
-            ) {
-                top_offset
-            } else {
-                centered_overflow_offset(
-                    viewport_height,
-                    total_height,
-                    active_row_center,
-                    vertical_padding,
-                )
-            }
-        } else {
-            0.0
-        };
-
-        // Top of the tick column relative to the rail track (which spans the
-        // visible viewport): the absolute scroll offset when overflowing, else
-        // the vertically-centred position.
-        let column_top = if overflow {
-            top_offset
-        } else {
-            ((viewport_height - total_height) / 2.0).max(0.0)
-        };
-        let overscan_rows = 8usize;
-        let (visible_start, visible_end) = if overflow {
-            let first = ((-column_top) / row_height).floor().max(0.0) as usize;
-            let last = ((viewport_height - column_top) / row_height)
-                .ceil()
-                .max(0.0) as usize;
-            (
-                first.saturating_sub(overscan_rows).min(row_count),
-                last.saturating_add(overscan_rows).min(row_count),
-            )
-        } else {
-            (0, row_count)
-        };
-        let mut row_elements: Vec<AnyElement> =
-            Vec::with_capacity(visible_end.saturating_sub(visible_start) + 2);
-        if visible_start > 0 {
-            row_elements.push(
-                div()
-                    .h(px(visible_start as f32 * row_height))
-                    .flex_shrink_0()
-                    .into_any_element(),
-            );
-        }
-        let edge_fade = self.scaled(os.outline_rail_edge_fade_px).max(1.0);
         let hover_ease = self
             .outline_rail_hover_since
             .get()
@@ -948,49 +1351,58 @@ impl EditorView {
                 )
             })
             .unwrap_or(self.outline_rail_hover_target.get());
-        let active_index =
-            active_line.and_then(|line| headings.iter().position(|heading| heading.line == line));
-        let previous_active_index = self
+        let active_heading_index =
+            active_line.and_then(|line| outline_heading_index_for_line(&headings, line));
+        let previous_active_heading_index = self
             .outline_rail_previous_active_line
             .get()
-            .and_then(|line| headings.iter().position(|heading| heading.line == line));
+            .and_then(|line| outline_heading_index_for_line(&headings, line));
+        let slot_count = outline_rail_slot_count(rail_height, row_height);
+        let active_slot = active_heading_index
+            .map(|index| outline_rail_project_index(index, row_count, slot_count));
+        let previous_active_slot = previous_active_heading_index
+            .map(|index| outline_rail_project_index(index, row_count, slot_count));
+        let mut row_elements: Vec<AnyElement> = Vec::with_capacity(slot_count);
         let active_progress = self
             .outline_rail_active_since
             .get()
             .map(|started| (started.elapsed().as_secs_f32() / active_anim_seconds).clamp(0.0, 1.0))
             .unwrap_or(1.0);
         let active_ease = super::ease_in_out_cubic(active_progress);
-        for row_index in visible_start..visible_end {
-            let heading = &headings[row_index];
-            let line = heading.line;
+        for slot_index in 0..slot_count {
+            let heading_index = outline_rail_project_index(slot_index, slot_count, row_count);
+            let heading = &headings[heading_index];
             let level_opacity = heading_level_opacity(heading.level, tick_level_opacities);
             let tick_influence = animated_outline_tick_influence(
-                row_index,
-                previous_active_index,
-                active_index,
+                slot_index,
+                previous_active_slot,
+                active_slot,
                 active_neighbor_count,
                 active_falloff_power,
                 active_ease,
             );
             let animated_tick_width = tick_width + active_extra_width * tick_influence;
-            // Fade ticks within `edge_fade` of the top and bottom edges of the
-            // visible rail viewport, giving a soft gradient at the viewport edges
-            // (off-screen ticks clamp to fully transparent).
-            let row_center_y = column_top + row_index as f32 * row_height + row_height / 2.0;
-            let edge_opacity = if viewport_height > 0.0 {
-                (row_center_y.min(viewport_height - row_center_y) / edge_fade).clamp(0.0, 1.0)
-            } else {
-                1.0
-            };
             let resting_color = multiply_alpha(tick_color, level_opacity);
             let hover_color = lerp_hsla(resting_color, tick_active_color, hover_ease);
             let base_tick_color = lerp_hsla(hover_color, tick_active_color, tick_influence);
-            let row_tick_color = multiply_alpha(base_tick_color, edge_opacity);
+            let row_top = vertical_padding
+                + outline_rail_row_top(
+                    slot_index,
+                    slot_count,
+                    rail_height,
+                    row_height,
+                    tick_thickness,
+                );
             row_elements.push(
                 div()
-                    .id(SharedString::from(format!("outline-rail-{}", line)))
+                    .id(SharedString::from(format!(
+                        "outline-rail-slot-{slot_index}"
+                    )))
+                    .absolute()
+                    .top(px(row_top))
+                    .right(px(0.0))
+                    .w_full()
                     .h(px(row_height))
-                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .justify_end()
@@ -1004,13 +1416,12 @@ impl EditorView {
                             .child(
                                 div()
                                     .id(SharedString::from(format!(
-                                        "outline-rail-tick-hit-{}",
-                                        line
+                                        "outline-rail-tick-{slot_index}"
                                     )))
                                     .w(px(animated_tick_width))
                                     .h(px(tick_thickness))
                                     .rounded_full()
-                                    .bg(row_tick_color),
+                                    .bg(base_tick_color),
                             ),
                     )
                     .on_mouse_down(
@@ -1023,15 +1434,6 @@ impl EditorView {
                     .into_any_element(),
             );
         }
-        if visible_end < row_count {
-            row_elements.push(
-                div()
-                    .h(px((row_count - visible_end) as f32 * row_height))
-                    .flex_shrink_0()
-                    .into_any_element(),
-            );
-        }
-
         let rail_collapsed_width = tick_width + active_extra_width;
         let rail_width = rail_collapsed_width;
         let rail_outer_width = rail_width + right_margin;
@@ -1039,10 +1441,9 @@ impl EditorView {
 
         let column = div()
             .id("outline-rail-tick-column")
+            .relative()
+            .h_full()
             .w(px(rail_collapsed_width))
-            .flex()
-            .flex_col()
-            .items_end()
             .children(row_elements);
 
         let content = div()
@@ -1059,17 +1460,7 @@ impl EditorView {
             .w_full()
             .overflow_hidden();
 
-        let track_inner = if overflow {
-            track_inner.child(column.absolute().top(px(top_offset)).right(px(0.0)))
-        } else {
-            track_inner
-                .flex()
-                .flex_col()
-                .justify_center()
-                .items_end()
-                .child(column)
-        };
-        let track_inner = track_inner;
+        let track_inner = track_inner.child(column.absolute().top_0().bottom_0().right(px(0.0)));
 
         let track_hover_width = if self.outline_rail_hovered {
             track_width
@@ -1093,7 +1484,6 @@ impl EditorView {
             .w(px(track_hover_width))
             .occlude()
             .cursor(CursorStyle::Arrow)
-            .on_scroll_wheel(cx.listener(Self::on_outline_rail_scroll))
             // Always listen for hover (not only once already hovered) so hovering
             // anywhere over the full-height rail track — including the empty space
             // above the first tick and below the last — keeps the rail (and the
@@ -1132,10 +1522,6 @@ impl EditorView {
     pub(crate) fn render_outline_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let headings = self.collect_outline_headings();
         let active_line = self.outline_rail_active_line(&headings);
-        let visible_heading_indices = visible_outline_heading_indices_with_depths(
-            &headings,
-            &self.outline_rail_collapsed_heading_lines,
-        );
         let ups = &self.styles.utility_panel;
         let os = &self.styles.outline;
         let top_spacer = self.scaled(ups.utility_panel_top_spacer_height_px);
@@ -1191,6 +1577,30 @@ impl EditorView {
                 (item_padding_y * 2.0 + line_height * line_count as f32).max(item_min_height);
             (height, chars_per_line)
         };
+        let layout_key = OutlinePanelLayoutKey {
+            epoch: self.outline_panel_layout_epoch,
+            panel_width,
+            section_padding_x,
+            item_min_height,
+            item_padding_y,
+            line_height,
+            font_size,
+            indent_step,
+            fold_icon_hit_size,
+            fold_icon_gap,
+            scrollbar_reserve,
+            fallback_chars_per_line,
+            max_lines,
+        };
+        {
+            let mut cache = self.outline_panel_layout_cache.borrow_mut();
+            cache.rebuild_if_needed(
+                layout_key,
+                &headings,
+                &self.outline_rail_collapsed_heading_lines,
+                outline_row_metrics,
+            );
+        }
 
         let mut children: Vec<AnyElement> = vec![
             div().h(px(top_spacer)).flex_shrink_0().into_any_element(),
@@ -1221,27 +1631,12 @@ impl EditorView {
         } else {
             children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
             let prefix_height = top_spacer + header_height + section_gap;
-            let item_heights = visible_heading_indices
-                .iter()
-                .map(|(heading_index, depth)| {
-                    let heading = &headings[*heading_index];
-                    outline_row_metrics(heading, *depth).0
-                })
-                .collect::<Vec<_>>();
-            let visible_expanded = visible_heading_indices
-                .iter()
-                .map(|(heading_index, _)| {
-                    let heading = &headings[*heading_index];
-                    outline_heading_has_children(&headings, *heading_index)
-                        && !self
-                            .outline_rail_collapsed_heading_lines
-                            .contains(&heading.line)
-                })
-                .collect::<Vec<_>>();
-            let list_window = super::list_viewport::variable_list_window(
+            let layout_cache = self.outline_panel_layout_cache.borrow();
+            let visible_heading_indices = &layout_cache.visible_heading_indices;
+            let list_window = super::list_viewport::variable_list_window_from_offsets(
                 &self.outline_panel_scroll_handle,
                 prefix_height,
-                &item_heights,
+                &layout_cache.offsets,
                 12,
                 24,
             );
@@ -1277,29 +1672,22 @@ impl EditorView {
                 };
                 let indent = depth as f32 * indent_step.max(0.0);
                 let inner_padding_left = section_padding_x + indent;
-                let (row_height, chars_per_line) = (item_heights[render_start + visible_offset], {
-                    outline_row_metrics(heading, depth).1
-                });
+                let row_height = layout_cache.item_heights[render_start + visible_offset];
+                let chars_per_line = layout_cache.chars_per_line[render_start + visible_offset];
                 let wrapped_text =
                     outline_wrapped_text(heading.text.as_ref(), chars_per_line, max_lines).0;
                 let visible_index = render_start + visible_offset;
                 let icon_clearance = self.scaled(2.0);
                 let icon_top = ((row_height - fold_icon_size) * 0.5).max(0.0);
                 let mut guide_segments = Vec::new();
-                let guide_was_handed_off = outline_has_prior_expanded_peer(
-                    &visible_heading_indices,
-                    &visible_expanded,
-                    visible_index,
-                    depth,
-                );
+                let guide_was_handed_off = layout_cache.has_prior_expanded_peer[visible_index];
                 if depth > 0 && !guide_was_handed_off {
                     let guide_depth = depth - 1;
                     let guide_x = section_padding_x
                         + guide_depth as f32 * indent_step.max(0.0)
                         + fold_icon_hit_size
                         + fold_icon_gap;
-                    let has_later_peer =
-                        outline_has_later_peer(&visible_heading_indices, visible_index, depth);
+                    let has_later_peer = layout_cache.has_later_peer[visible_index];
                     for (start_y, end_y) in outline_nearest_guide_ranges(
                         row_height,
                         icon_top,

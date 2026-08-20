@@ -356,7 +356,7 @@ impl EditorView {
         self.cursor.anchor = self.cursor.offset;
         self.mark_active_tab_dirty();
         self.reparse();
-        cx.notify();
+        self.pause_blinking(cx);
     }
 
     pub(crate) fn replace_all_matches(&mut self, cx: &mut Context<Self>) {
@@ -377,6 +377,7 @@ impl EditorView {
         self.mark_active_tab_dirty();
         self.reparse();
         self.run_search(cx);
+        self.pause_blinking(cx);
     }
 
     pub(crate) fn search_query_text_input_styles(&self) -> crate::style::TextInputStyles {

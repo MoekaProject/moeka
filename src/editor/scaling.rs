@@ -21,6 +21,10 @@ fn caret_vertical_overflow(
     }
 }
 
+fn cursor_scroll_viewport(scroll_offset: f32, viewport_height: f32) -> (f32, f32) {
+    (scroll_offset, scroll_offset + viewport_height.max(0.0))
+}
+
 fn typing_stayed_on_visual_line(
     before_line: usize,
     before_visual_row: usize,
@@ -455,6 +459,16 @@ impl EditorView {
 
     fn ensure_line_geometry_cache(&self) {
         let line_count = self.buffer.line_count();
+        if self.uses_sparse_line_geometry() {
+            let mut cache = self.line_geometry_cache.borrow_mut();
+            cache.prefix_y_offsets.clear();
+            cache.sparse.ensure_dimensions(
+                line_count,
+                self.line_height_for_block(&BlockType::Normal) as f64,
+            );
+            self.line_geometry_cache_dirty.set(false);
+            return;
+        }
         if !self.line_geometry_cache_dirty.get()
             && self.line_geometry_cache.borrow().prefix_y_offsets.len() == line_count + 1
         {
@@ -480,9 +494,21 @@ impl EditorView {
     }
 
     pub(crate) fn line_y_offset(&self, target_line: usize) -> f32 {
+        self.line_y_offset_precise(target_line) as f32
+    }
+
+    pub(crate) fn line_y_offset_precise(&self, target_line: usize) -> f64 {
+        if self.uses_sparse_line_geometry() {
+            self.ensure_line_geometry_cache();
+            return self
+                .line_geometry_cache
+                .borrow()
+                .sparse
+                .y_offset(target_line, self.padding_top() as f64);
+        }
         self.ensure_line_geometry_cache();
         let target_line = target_line.min(self.buffer.line_count());
-        self.line_geometry_cache.borrow().prefix_y_offsets[target_line]
+        self.line_geometry_cache.borrow().prefix_y_offsets[target_line] as f64
     }
 
     /// Extra height reserved above an image line's syntax text by its inline
@@ -527,6 +553,15 @@ impl EditorView {
     }
 
     pub(crate) fn total_content_height(&self) -> f32 {
+        if self.uses_sparse_line_geometry() {
+            self.ensure_line_geometry_cache();
+            return (self
+                .line_geometry_cache
+                .borrow()
+                .sparse
+                .y_offset(self.buffer.line_count(), self.padding_top() as f64)
+                + self.padding_bottom() as f64) as f32;
+        }
         self.ensure_line_geometry_cache();
         self.line_geometry_cache.borrow().prefix_y_offsets[self.buffer.line_count()]
             + self.padding_bottom()
@@ -536,6 +571,15 @@ impl EditorView {
         let line_count = self.buffer.line_count();
         if line_count == 0 {
             return 0;
+        }
+
+        if self.uses_sparse_line_geometry() {
+            self.ensure_line_geometry_cache();
+            return self
+                .line_geometry_cache
+                .borrow()
+                .sparse
+                .line_at_y(y as f64, self.padding_top() as f64);
         }
 
         self.ensure_line_geometry_cache();
@@ -604,8 +648,8 @@ impl EditorView {
                 self.line_height_for_block(block_type)
             });
         let viewport_height = self.editor_visible_height();
-        let viewport_top = self.scroll_offset + self.padding_top();
-        let viewport_bottom = self.scroll_offset + viewport_height - self.padding_bottom();
+        let (viewport_top, viewport_bottom) =
+            cursor_scroll_viewport(self.scroll_offset, viewport_height);
         let cursor_top = cursor_y;
         let cursor_bottom = cursor_y + cursor_line_height;
         let is_visible = cursor_top >= viewport_top && cursor_bottom <= viewport_bottom;
@@ -1090,7 +1134,7 @@ fn apply_macos_traffic_light_position(
 mod tests {
     #[cfg(target_os = "macos")]
     use super::{EditorView, traffic_light_offsets_for_layout};
-    use super::{caret_vertical_overflow, typing_stayed_on_visual_line};
+    use super::{caret_vertical_overflow, cursor_scroll_viewport, typing_stayed_on_visual_line};
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -1117,6 +1161,17 @@ mod tests {
         assert_eq!(caret_vertical_overflow(180.0, 200.0, 100.0, 200.0), Equal);
         assert_eq!(caret_vertical_overflow(99.9, 119.9, 100.0, 200.0), Less);
         assert_eq!(caret_vertical_overflow(180.1, 200.1, 100.0, 200.0), Greater);
+    }
+
+    #[test]
+    fn cursor_scroll_viewport_does_not_exclude_editor_padding() {
+        let viewport = cursor_scroll_viewport(100.0, 100.0);
+
+        assert_eq!(viewport, (100.0, 200.0));
+        assert_eq!(
+            caret_vertical_overflow(180.0, 200.0, viewport.0, viewport.1),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]

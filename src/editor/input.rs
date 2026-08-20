@@ -13,6 +13,7 @@ use super::*;
 
 pub(super) struct TableCellDisplayInfo {
     pub(super) wrapped: WrappedLine,
+    pub(super) alignment: crate::markdown::TableAlign,
     pub(super) display_text: String,
     pub(super) display_to_buffer: Vec<usize>,
     pub(super) buffer_to_display: Vec<usize>,
@@ -31,6 +32,41 @@ pub(super) struct InlineLineDisplayInfo {
     pub(super) content_x: f32,
 }
 
+fn visible_line_hit(geometry: &[(usize, f32, f32)], position_y: f32) -> Option<(usize, f32)> {
+    geometry.iter().find_map(|(line, top, height)| {
+        (*top <= position_y && position_y < *top + *height).then_some((*line, *top))
+    })
+}
+
+fn local_text_y_for_hit(
+    position_y: f32,
+    document_y: f32,
+    visible_line_top: Option<f32>,
+    document_text_top: f32,
+    line_text_inset: f32,
+) -> f32 {
+    visible_line_top
+        .map(|line_top| position_y - line_top - line_text_inset)
+        .unwrap_or(document_y - document_text_top)
+        .max(0.0)
+}
+
+fn display_index_to_buffer_col(
+    display_text: &str,
+    display_to_buffer: &[usize],
+    display_index: usize,
+) -> usize {
+    let mut display_col = display_index.min(display_text.len());
+    while display_col > 0 && !display_text.is_char_boundary(display_col) {
+        display_col -= 1;
+    }
+    if display_col < display_to_buffer.len() {
+        display_to_buffer[display_col]
+    } else {
+        display_to_buffer.last().copied().map_or(0, |last| last + 1)
+    }
+}
+
 fn compute_inline_wrap_boundary_upstream_xs(
     window: &mut Window,
     wrapped: &WrappedLine,
@@ -43,7 +79,7 @@ fn compute_inline_wrap_boundary_upstream_xs(
     let mut upstream_xs = HashMap::new();
     let mut segment_start = 0;
 
-    for boundary in helpers::wrap_boundary_byte_indices(wrapped) {
+    for boundary in helpers::wrap_boundary_byte_indices(wrapped, display_text) {
         let segment_text = &display_text[segment_start..boundary];
         let segment_runs = helpers::extract_runs_for_range(runs, segment_start, boundary);
         let segment_shared: SharedString = if segment_text.is_empty() {
@@ -519,7 +555,7 @@ impl EditorView {
             self.reparse();
             self.hovering_checkbox = true;
             self.hovering_checkbox_line = Some(line);
-            cx.notify();
+            self.pause_blinking(cx);
             return;
         }
 
@@ -1401,7 +1437,7 @@ impl EditorView {
                             {
                                 let new_lines =
                                     crate::table_ops::move_column(&lines, source_col, insert_at);
-                                self.replace_table_block(start, end, &new_lines);
+                                self.replace_table_block(start, end, &new_lines, cx);
                                 let selected_col = if insert_at > source_col {
                                     insert_at.saturating_sub(1)
                                 } else {
@@ -1435,7 +1471,7 @@ impl EditorView {
                                 } else {
                                     crate::table_ops::move_row(&lines, source_row, insert_visual)
                                 };
-                                self.replace_table_block(start, end, &new_lines);
+                                self.replace_table_block(start, end, &new_lines, cx);
                                 let selected_row = if insert_visual > source_row {
                                     insert_visual.saturating_sub(1)
                                 } else {
@@ -1986,6 +2022,11 @@ impl EditorView {
 
         Some(TableCellDisplayInfo {
             wrapped,
+            alignment: ti
+                .column_alignments
+                .get(col)
+                .copied()
+                .unwrap_or(crate::markdown::TableAlign::Left),
             display_text,
             display_to_buffer,
             buffer_to_display,
@@ -2088,7 +2129,10 @@ impl EditorView {
                 None,
                 None,
             ) {
-                f32::from(test_lines[0].width())
+                test_lines
+                    .first()
+                    .map(|line| f32::from(line.width()))
+                    .unwrap_or_else(|| self.base_font_size() * 0.6)
             } else {
                 self.base_font_size() * 0.6
             }
@@ -2109,7 +2153,10 @@ impl EditorView {
                 None,
                 None,
             ) {
-                f32::from(test_lines[0].width()).max(1.0)
+                test_lines
+                    .first()
+                    .map(|line| f32::from(line.width()).max(1.0))
+                    .unwrap_or_else(|| base_char_width.max(1.0))
             } else {
                 base_char_width.max(1.0)
             }
@@ -2332,7 +2379,7 @@ impl EditorView {
             prefix_collapsed,
         );
 
-        let runs = helpers::build_text_runs_for_display(
+        let runs = helpers::build_text_runs_for_display_with_language(
             &display_text,
             line_content,
             &display_to_buffer,
@@ -2359,6 +2406,10 @@ impl EditorView {
             self.styles.editor.editor_heading_marker_text_color,
             Some(self.styles.table.front_matter_key_text_color),
             self.active_tab_is_non_markdown_text(),
+            match self.active_file_kind() {
+                Some(FileKind::Code { language }) => Some(language.as_str()),
+                _ => None,
+            },
         );
 
         let display_shared: SharedString = if display_text.is_empty() {
@@ -2494,7 +2545,14 @@ impl EditorView {
         let info = self.table_cell_display_info(window, source_line, col, inner_width)?;
         let line_height =
             self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
-        let local_x = (f32::from(position.x) - f32::from(bounds.origin.x) - padding_x).max(0.0);
+        let content_offset = helpers::table_cell_content_offset(
+            info.alignment,
+            inner_width,
+            f32::from(info.wrapped.unwrapped_layout.width),
+        );
+        let local_x =
+            (f32::from(position.x) - f32::from(bounds.origin.x) - padding_x - content_offset)
+                .max(0.0);
         let local_y = (f32::from(position.y) - f32::from(bounds.origin.y) - padding_y).max(0.0);
         let display_index = match info
             .wrapped
@@ -2654,15 +2712,25 @@ impl EditorView {
             let last_line = self.buffer.line_count().saturating_sub(1);
             return self.buffer.line_end(last_line).min(self.buffer.len());
         }
-        let line = self.line_at_y(y);
+        let visible_line_geometry = visible_line_hit(&self.visible_line_geometry, pos_y);
+        let line = visible_line_geometry
+            .map(|(line, _)| line)
+            .unwrap_or_else(|| self.line_at_y(y));
         let line_content = self.buffer.line_content(line);
         if line_content.is_empty() {
             return self.buffer.line_start(line);
         }
 
         if let Some(Some(info)) = self.line_display_info.get(line) {
-            let text_top_y = self.text_y_offset_for_line(line);
-            let local_y = (y - text_top_y).max(0.0);
+            let line_text_inset = self.block_padding_for_line(line).0
+                + self.image_preview_extra_height_for_line(line);
+            let local_y = local_text_y_for_hit(
+                pos_y,
+                y,
+                visible_line_geometry.map(|(_, top)| top),
+                self.text_y_offset_for_line(line),
+                line_text_inset,
+            );
             let visual_line_idx = (local_y / info.line_height) as usize;
             let indent_adjust = if info.indent_px > 0.0 && visual_line_idx > 0 {
                 info.indent_px
@@ -2769,17 +2837,11 @@ impl EditorView {
             {
                 Ok(idx) | Err(idx) => idx,
             };
-            let mut dc = display_index.min(info.display_text.len());
-            while dc > 0 && !info.display_text.is_char_boundary(dc) {
-                dc -= 1;
-            }
-            let buffer_col = if dc < info.display_to_buffer.len() {
-                info.display_to_buffer[dc]
-            } else if let Some(&last) = info.display_to_buffer.last() {
-                last + 1
-            } else {
-                0
-            };
+            let buffer_col = display_index_to_buffer_col(
+                &info.display_text,
+                &info.display_to_buffer,
+                display_index,
+            );
             return self.buffer.line_start(line) + buffer_col;
         }
 
@@ -2787,5 +2849,52 @@ impl EditorView {
         let approx_char_width = self.base_font_size() * 0.6;
         let col = (x / approx_char_width) as usize;
         self.buffer.line_col_to_offset(line, col)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{display_index_to_buffer_col, local_text_y_for_hit, visible_line_hit};
+
+    #[test]
+    fn visible_line_hit_uses_real_screen_geometry_at_far_document_offsets() {
+        let geometry = [(1_999_990, 120.0, 72.0), (1_999_991, 192.0, 24.0)];
+        assert_eq!(visible_line_hit(&geometry, 155.0), Some((1_999_990, 120.0)));
+        assert_eq!(visible_line_hit(&geometry, 192.0), Some((1_999_991, 192.0)));
+        assert_eq!(visible_line_hit(&geometry, 216.0), None);
+    }
+
+    #[test]
+    fn local_text_y_prefers_visible_title_and_preview_insets() {
+        let local_y = local_text_y_for_hit(190.0, 40_000_190.0, Some(120.0), 39_998_000.0, 30.0);
+        assert_eq!(local_y, 40.0);
+    }
+
+    #[test]
+    fn local_text_y_selects_soft_wrap_visual_row_from_screen_coordinates() {
+        let local_y = local_text_y_for_hit(178.0, 39_000_178.0, Some(100.0), 38_990_000.0, 6.0);
+        assert_eq!((local_y / 24.0) as usize, 3);
+    }
+
+    #[test]
+    fn local_text_y_falls_back_to_document_geometry_outside_visible_rows() {
+        assert_eq!(local_text_y_for_hit(10.0, 530.0, None, 500.0, 99.0), 30.0);
+    }
+
+    #[test]
+    fn display_index_mapping_snaps_cjk_and_emoji_to_utf8_boundaries() {
+        let text = "A中🙂B";
+        let display_to_buffer = (0..text.len()).collect::<Vec<_>>();
+
+        assert_eq!(display_index_to_buffer_col(text, &display_to_buffer, 3), 1);
+        assert_eq!(display_index_to_buffer_col(text, &display_to_buffer, 7), 4);
+        assert_eq!(
+            display_index_to_buffer_col(text, &display_to_buffer, text.len()),
+            text.len()
+        );
+        for display_index in 0..=text.len() {
+            let buffer_col = display_index_to_buffer_col(text, &display_to_buffer, display_index);
+            assert!(text.is_char_boundary(buffer_col));
+        }
     }
 }

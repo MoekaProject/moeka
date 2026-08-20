@@ -1,6 +1,7 @@
 mod app_settings;
 mod assets;
 mod attachments;
+mod auto_save;
 mod branch_picker;
 mod chat_panel;
 mod code_commands;
@@ -72,6 +73,7 @@ pub(crate) use branch_picker::BranchPickerItem;
 pub(crate) use file_list::FileListItem;
 pub(crate) use git_ops::*;
 use language_detection::classify_pasted_text_kind;
+pub(crate) use outline::MarkdownOutlineIndex;
 pub(crate) use pane::{
     Pane, PaneId, PaneLayout, PaneResizeDrag, PaneState, SplitAxis, SplitDirection,
 };
@@ -84,7 +86,7 @@ pub(crate) use updater::{APP_VERSION, PreparedUpdate, UpdateState};
 pub(crate) use whiteboard::*;
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Cursor as IoCursor;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -133,6 +135,7 @@ const LINE_DISPLAY_CACHE_MAX_CACHED_LINES: usize = 2_000;
 const LINE_DISPLAY_CACHE_VISIBLE_MARGIN_LINES: usize = 600;
 const LINE_DISPLAY_CACHE_CURSOR_MARGIN_LINES: usize = 200;
 const LINE_DISPLAY_CACHE_TRIM_UPDATE_INTERVAL: usize = 64;
+const SPARSE_LINE_GEOMETRY_BLOCK_LINES: usize = 256;
 pub(super) const WELCOME_TAB_ID: &str = "welcome-1";
 
 fn generated_preview_intersects_range(
@@ -709,6 +712,184 @@ pub(crate) struct LineDisplayInfo {
 
 pub(crate) type LineDisplayCache = Vec<Option<Box<LineDisplayInfo>>>;
 
+const LARGE_MARKDOWN_MIN_LINES: usize = 100_000;
+const LARGE_MARKDOWN_CHUNK_LINES: usize = 128;
+const LARGE_MARKDOWN_BOUNDARY_SCAN_LINES: usize = 512;
+const LARGE_DOCUMENT_FRAME_BENCH_WARMUP: usize = 60;
+const LARGE_DOCUMENT_FRAME_BENCH_SCROLL_FRAMES: usize = 240;
+const LARGE_DOCUMENT_FRAME_BENCH_EDIT_FRAMES: usize = 120;
+
+pub(crate) struct LargeDocumentFrameBench {
+    output_path: PathBuf,
+    frame: usize,
+    last_frame: Option<Instant>,
+    scroll_frame_intervals: Vec<Duration>,
+    edit_frame_intervals: Vec<Duration>,
+    frame_work_times: Vec<Duration>,
+    edit_times: Vec<Duration>,
+    character_edit_times: Vec<Duration>,
+    newline_edit_times: Vec<Duration>,
+    newline_buffer_times: Vec<Duration>,
+    newline_reparse_times: Vec<Duration>,
+    newline_history_times: Vec<Duration>,
+    selection_times: Vec<Duration>,
+    scrollbar_jump_times: Vec<Duration>,
+    history_times: Vec<Duration>,
+    frame_work_started: Option<Instant>,
+    pending_edit_offset: Option<usize>,
+    pending_newline_offset: Option<usize>,
+    syntax_view_samples: usize,
+    syntax_view_misses: usize,
+}
+
+impl LargeDocumentFrameBench {
+    fn from_env() -> Option<Self> {
+        std::env::var_os("MOEKA_LARGE_DOCUMENT_BENCH").map(|path| Self {
+            output_path: PathBuf::from(path),
+            frame: 0,
+            last_frame: None,
+            scroll_frame_intervals: Vec::new(),
+            edit_frame_intervals: Vec::new(),
+            frame_work_times: Vec::new(),
+            edit_times: Vec::new(),
+            character_edit_times: Vec::new(),
+            newline_edit_times: Vec::new(),
+            newline_buffer_times: Vec::new(),
+            newline_reparse_times: Vec::new(),
+            newline_history_times: Vec::new(),
+            selection_times: Vec::new(),
+            scrollbar_jump_times: Vec::new(),
+            history_times: Vec::new(),
+            frame_work_started: None,
+            pending_edit_offset: None,
+            pending_newline_offset: None,
+            syntax_view_samples: 0,
+            syntax_view_misses: 0,
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct LazyMarkdownDecorations {
+    parsed_chunks: Vec<bool>,
+}
+
+impl LazyMarkdownDecorations {
+    fn new(line_count: usize) -> Self {
+        Self {
+            parsed_chunks: vec![false; line_count.div_ceil(LARGE_MARKDOWN_CHUNK_LINES)],
+        }
+    }
+
+    fn is_parsed(&self, chunk: usize) -> bool {
+        self.parsed_chunks.get(chunk).copied().unwrap_or(false)
+    }
+
+    fn mark_parsed(&mut self, chunk: usize) {
+        if let Some(parsed) = self.parsed_chunks.get_mut(chunk) {
+            *parsed = true;
+        }
+    }
+
+    fn invalidate_range(&mut self, range: Range<usize>) {
+        if range.is_empty() || self.parsed_chunks.is_empty() {
+            return;
+        }
+        let first = range.start / LARGE_MARKDOWN_CHUNK_LINES;
+        let last = range.end.saturating_sub(1) / LARGE_MARKDOWN_CHUNK_LINES;
+        for chunk in first..=last.min(self.parsed_chunks.len().saturating_sub(1)) {
+            self.parsed_chunks[chunk] = false;
+        }
+    }
+
+    fn resize_after_structural_edit(&mut self, line_count: usize, start_line: usize) {
+        let chunk_count = line_count.div_ceil(LARGE_MARKDOWN_CHUNK_LINES);
+        self.parsed_chunks.resize(chunk_count, false);
+        let first_invalid = start_line / LARGE_MARKDOWN_CHUNK_LINES;
+        for parsed in self.parsed_chunks.iter_mut().skip(first_invalid) {
+            *parsed = false;
+        }
+    }
+}
+
+pub(crate) fn new_lazy_markdown_decorations(
+    line_count: usize,
+) -> (Vec<LineDecoration>, LazyMarkdownDecorations) {
+    let line_count = line_count.max(1);
+    (
+        (0..line_count).map(|_| LineDecoration::default()).collect(),
+        LazyMarkdownDecorations::new(line_count),
+    )
+}
+
+pub(crate) fn parse_lazy_markdown_range(
+    buffer: &Buffer,
+    decorations: &mut [LineDecoration],
+    lazy: &mut LazyMarkdownDecorations,
+    range: Range<usize>,
+) -> bool {
+    if buffer.line_count() == 0 || lazy.parsed_chunks.is_empty() {
+        return false;
+    }
+
+    let line_count = buffer.line_count();
+    let start = range.start.min(line_count.saturating_sub(1));
+    let end = range.end.max(start + 1).min(line_count);
+    let first_chunk = start / LARGE_MARKDOWN_CHUNK_LINES;
+    let last_chunk = (end - 1) / LARGE_MARKDOWN_CHUNK_LINES;
+    let mut changed = false;
+
+    for chunk in first_chunk..=last_chunk {
+        if lazy.is_parsed(chunk) {
+            continue;
+        }
+
+        let core_start = chunk * LARGE_MARKDOWN_CHUNK_LINES;
+        let core_end = ((chunk + 1) * LARGE_MARKDOWN_CHUNK_LINES).min(line_count);
+        let mut parse_start = core_start;
+        let mut scanned = 0;
+        while parse_start > 0
+            && scanned < LARGE_MARKDOWN_BOUNDARY_SCAN_LINES
+            && !buffer.line_content(parse_start - 1).trim().is_empty()
+        {
+            parse_start -= 1;
+            scanned += 1;
+        }
+        let mut parse_end = core_end;
+        scanned = 0;
+        while parse_end < line_count
+            && scanned < LARGE_MARKDOWN_BOUNDARY_SCAN_LINES
+            && !buffer.line_content(parse_end).trim().is_empty()
+        {
+            parse_end += 1;
+            scanned += 1;
+        }
+
+        let byte_start = buffer.line_start(parse_start);
+        let byte_end = if parse_end < line_count {
+            buffer.line_start(parse_end)
+        } else {
+            buffer.len()
+        };
+        let mut parsed = if parse_start == 0 {
+            markdown::parse_decorations(&buffer.text()[byte_start..byte_end])
+        } else {
+            markdown::parse_decorations_fragment(&buffer.text()[byte_start..byte_end])
+        };
+        let expected_len = parse_end - parse_start;
+        parsed.truncate(expected_len);
+        parsed.resize_with(expected_len, LineDecoration::default);
+        for decoration in &mut parsed {
+            offset_decoration_positions(decoration, parse_start as isize, byte_start as isize);
+        }
+        decorations[parse_start..parse_end].clone_from_slice(&parsed);
+        lazy.mark_parsed(chunk);
+        changed = true;
+    }
+
+    changed
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WordCharClass {
     AsciiWord,
@@ -766,13 +947,16 @@ fn offset_decoration_positions(
             *value = (*value as isize + delta).max(0) as usize;
         }
     };
-    if let Some(preview) = decoration.block_preview.as_mut() {
+    let Some(payload) = decoration.payload_mut() else {
+        return;
+    };
+    if let Some(preview) = payload.block_preview.as_mut() {
         shift_usize(&mut preview.start_line, line_delta);
         shift_usize(&mut preview.end_line, line_delta);
         shift_usize(&mut preview.source_range.start, byte_delta);
         shift_usize(&mut preview.source_range.end, byte_delta);
     }
-    if let Some(table_info) = decoration.table_info.as_mut() {
+    if let Some(table_info) = payload.table_info.as_mut() {
         shift_usize(&mut table_info.table_start_line, line_delta);
         shift_usize(&mut table_info.table_end_line, line_delta);
     }
@@ -1123,6 +1307,11 @@ pub(crate) struct PendingPreviewReveal {
     pub(crate) scroll_offset: f32,
 }
 
+pub(crate) struct PendingHistoryTransaction {
+    before_view: history_store::SnapshotViewState,
+    merge_with_previous: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PendingTypingScrollGuard {
     pub(crate) line: usize,
@@ -1163,11 +1352,16 @@ impl PendingLineDisplayTransfer {
             .min(self.cached_lines.len())
             .max(replace_start);
         let inserted_line_count = self.new_end_line_exclusive.saturating_sub(self.start_line);
-
-        self.cached_lines.splice(
-            replace_start..replace_end,
-            std::iter::repeat_with(|| None).take(inserted_line_count),
-        );
+        if replace_end - replace_start == inserted_line_count {
+            for line in &mut self.cached_lines[replace_start..replace_end] {
+                *line = None;
+            }
+        } else {
+            self.cached_lines.splice(
+                replace_start..replace_end,
+                std::iter::repeat_with(|| None).take(inserted_line_count),
+            );
+        }
 
         if self.cached_lines.len() > new_line_count {
             self.cached_lines.truncate(new_line_count);
@@ -1200,10 +1394,16 @@ impl PendingLineDisplayTransfer {
             default_decoration.code_language = Some(language.to_string());
         }
 
-        decorations.splice(
-            replace_start..replace_end,
-            (0..inserted_line_count).map(move |_| default_decoration.clone()),
-        );
+        if replace_end - replace_start == inserted_line_count {
+            for decoration in &mut decorations[replace_start..replace_end] {
+                *decoration = default_decoration.clone();
+            }
+        } else {
+            decorations.splice(
+                replace_start..replace_end,
+                (0..inserted_line_count).map(move |_| default_decoration.clone()),
+            );
+        }
         if decorations.is_empty() {
             decorations.push(LineDecoration::default());
         }
@@ -1238,8 +1438,116 @@ fn line_display_transfer_line_bounds(
 }
 
 #[derive(Default)]
+struct SparseLineGeometry {
+    line_count: usize,
+    default_height: f64,
+    measured_deltas: BTreeMap<usize, f64>,
+    block_delta_tree: Vec<f64>,
+}
+
+impl SparseLineGeometry {
+    fn reset(&mut self, line_count: usize, default_height: f64) {
+        self.line_count = line_count;
+        self.default_height = default_height;
+        self.measured_deltas.clear();
+        let block_count = line_count.div_ceil(SPARSE_LINE_GEOMETRY_BLOCK_LINES);
+        self.block_delta_tree.clear();
+        self.block_delta_tree.resize(block_count + 1, 0.0);
+    }
+
+    fn ensure_dimensions(&mut self, line_count: usize, default_height: f64) {
+        if self.line_count != line_count || (self.default_height - default_height).abs() > 0.01 {
+            self.reset(line_count, default_height);
+        }
+    }
+
+    fn add_block_delta(&mut self, block: usize, delta: f64) {
+        let mut index = block + 1;
+        while index < self.block_delta_tree.len() {
+            self.block_delta_tree[index] += delta;
+            index += index & index.wrapping_neg();
+        }
+    }
+
+    fn set_measured_height(&mut self, line: usize, height: f64) {
+        if line >= self.line_count {
+            return;
+        }
+        let next_delta = height - self.default_height;
+        let previous_delta = self.measured_deltas.remove(&line).unwrap_or(0.0);
+        let stored_delta = if next_delta.abs() > 0.01 {
+            self.measured_deltas.insert(line, next_delta);
+            next_delta
+        } else {
+            0.0
+        };
+        self.add_block_delta(
+            line / SPARSE_LINE_GEOMETRY_BLOCK_LINES,
+            stored_delta - previous_delta,
+        );
+    }
+
+    fn clear_range(&mut self, range: Range<usize>) {
+        let removed: Vec<(usize, f64)> = self
+            .measured_deltas
+            .range(range)
+            .map(|(&line, &delta)| (line, delta))
+            .collect();
+        for (line, delta) in removed {
+            self.measured_deltas.remove(&line);
+            self.add_block_delta(line / SPARSE_LINE_GEOMETRY_BLOCK_LINES, -delta);
+        }
+    }
+
+    fn block_delta_before(&self, block: usize) -> f64 {
+        let mut index = block.min(self.block_delta_tree.len().saturating_sub(1));
+        let mut total = 0.0;
+        while index > 0 {
+            total += self.block_delta_tree[index];
+            index &= index - 1;
+        }
+        total
+    }
+
+    fn delta_before_line(&self, line: usize) -> f64 {
+        let line = line.min(self.line_count);
+        let block = line / SPARSE_LINE_GEOMETRY_BLOCK_LINES;
+        let block_start = block * SPARSE_LINE_GEOMETRY_BLOCK_LINES;
+        self.block_delta_before(block)
+            + self
+                .measured_deltas
+                .range(block_start..line)
+                .map(|(_, delta)| *delta)
+                .sum::<f64>()
+    }
+
+    fn y_offset(&self, line: usize, padding_top: f64) -> f64 {
+        let line = line.min(self.line_count);
+        padding_top + line as f64 * self.default_height + self.delta_before_line(line)
+    }
+
+    fn line_at_y(&self, y: f64, padding_top: f64) -> usize {
+        if self.line_count == 0 {
+            return 0;
+        }
+        let mut low = 0usize;
+        let mut high = self.line_count;
+        while low < high {
+            let mid = (low + high) / 2;
+            if self.y_offset(mid + 1, padding_top) <= y {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        low.min(self.line_count.saturating_sub(1))
+    }
+}
+
+#[derive(Default)]
 pub(crate) struct LineGeometryCacheState {
     prefix_y_offsets: Vec<f32>,
+    sparse: SparseLineGeometry,
 }
 
 // ── EditorView ──────────────────────────────────────────────────────
@@ -1264,12 +1572,18 @@ pub struct EditorView {
     pub(crate) theme: Theme,
     pub(crate) styles: crate::style::Styles,
     pub(crate) decorations: Vec<LineDecoration>,
+    pub(crate) lazy_markdown_decorations: Option<LazyMarkdownDecorations>,
+    pub(crate) markdown_outline_index: RefCell<Option<MarkdownOutlineIndex>>,
+    pub(crate) markdown_outline_build_task: Option<Task<()>>,
+    pub(crate) markdown_outline_epoch: usize,
+    pub(crate) large_document_frame_bench: Option<LargeDocumentFrameBench>,
     pub(crate) scroll_offset: f32,
     pub(crate) is_selecting: bool,
     pub(crate) vertical_move_goal_x: Option<f32>,
     pub(crate) last_scroll_cursor_visual_x: Option<f32>,
     pub(crate) wrap_boundary_affinity: Option<WrapBoundaryAffinity>,
     pub(crate) line_display_info: LineDisplayCache,
+    pub(crate) visible_line_geometry: Vec<(usize, f32, f32)>,
     pending_line_display_transfer: Option<PendingLineDisplayTransfer>,
     line_display_trim_update_counter: Cell<usize>,
     line_geometry_cache_dirty: Cell<bool>,
@@ -1287,6 +1601,7 @@ pub struct EditorView {
     pub(crate) pending_preview_reveal: Option<PendingPreviewReveal>,
     pub(crate) pending_typing_scroll_guard: Option<PendingTypingScrollGuard>,
     pub(crate) pending_click_anchor: Option<ClickScrollAnchor>,
+    pub(crate) pending_history_transaction: Option<PendingHistoryTransaction>,
     /// Cache key of the generated preview currently shown in code (edit) mode,
     /// tracked so the rendered view (zoom/pan) can be reset whenever the cursor
     /// enters or leaves a preview's source, i.e. on every edit↔render switch.
@@ -1474,6 +1789,8 @@ pub struct EditorView {
     pub(crate) editor_scrollbar_idle_epoch: usize,
     pub(crate) editor_scrollbar_idle_task: Option<Task<()>>,
     pub(crate) editor_scrollbar_drag: Option<EditorScrollbarDragState>,
+    pub(crate) pending_editor_scrollbar_drag_position: Option<Point<Pixels>>,
+    pub(crate) editor_scrollbar_drag_task: Option<Task<()>>,
     pub(crate) panel_scrollbars: HashMap<PanelScrollbarKind, PanelScrollbarState>,
     pub(crate) sidebar_custom_width: Option<f32>,
     /// Time of the last grouped typing checkpoint, used to coalesce rapid
@@ -1594,13 +1911,16 @@ pub struct EditorView {
     pub(crate) _watcher_task: Option<Task<()>>,
     pub(crate) temp_save_tasks: HashMap<String, Task<()>>,
     pub(crate) temp_save_epochs: HashMap<String, usize>,
+    pub(crate) auto_save_tasks: HashMap<String, Task<()>>,
+    pub(crate) auto_save_epochs: HashMap<String, usize>,
     pub(crate) outline_rail_visible: bool,
     pub(crate) outline_rail_hovered: bool,
     pub(crate) outline_rail_clicked_active_line: Option<usize>,
-    pub(crate) outline_rail_scroll_offset: Option<f32>,
     pub(crate) outline_rail_collapsed_heading_lines: HashSet<usize>,
     pub(crate) outline_headings_cache: RefCell<Vec<outline::OutlineHeading>>,
     pub(crate) outline_headings_cache_dirty: Cell<bool>,
+    pub(crate) outline_panel_layout_epoch: usize,
+    pub(crate) outline_panel_layout_cache: RefCell<outline::OutlinePanelLayoutCache>,
     pub(crate) outline_rail_previous_active_line: Cell<Option<usize>>,
     pub(crate) outline_rail_last_active_line: Cell<Option<usize>>,
     pub(crate) outline_rail_active_since: Cell<Option<Instant>>,
@@ -1616,6 +1936,8 @@ pub struct EditorView {
     pub(crate) outline_panel_scroll_handle: ScrollHandle,
     pub(crate) info_panel_cache_tab_id: Option<String>,
     pub(crate) info_panel_cache_result: Option<Option<Arc<info_panel::InfoPanelData>>>,
+    pub(crate) info_panel_refresh_epoch: usize,
+    pub(crate) info_panel_refresh_task: Option<Task<()>>,
     pub(crate) git_history_cache_path: Option<PathBuf>,
     pub(crate) git_history_cache_result: Option<Option<Vec<GitHistoryItem>>>,
     pub(crate) git_history_cache_dirty: bool,
@@ -1993,12 +2315,18 @@ impl EditorView {
             theme,
             styles,
             decorations,
+            lazy_markdown_decorations: None,
+            markdown_outline_index: RefCell::new(None),
+            markdown_outline_build_task: None,
+            markdown_outline_epoch: 0,
+            large_document_frame_bench: None,
             scroll_offset: 0.0,
             is_selecting: false,
             vertical_move_goal_x: None,
             last_scroll_cursor_visual_x: None,
             wrap_boundary_affinity: None,
             line_display_info: Vec::new(),
+            visible_line_geometry: Vec::new(),
             pending_line_display_transfer: None,
             line_display_trim_update_counter: Cell::new(0),
             line_geometry_cache_dirty: Cell::new(true),
@@ -2014,6 +2342,7 @@ impl EditorView {
             pending_preview_reveal: None,
             pending_typing_scroll_guard: None,
             pending_click_anchor: None,
+            pending_history_transaction: None,
             code_mode_preview_key: None,
             generated_preview_rerender_task: None,
             generated_preview_rerender_pending: false,
@@ -2157,6 +2486,8 @@ impl EditorView {
             editor_scrollbar_idle_epoch: 0,
             editor_scrollbar_idle_task: None,
             editor_scrollbar_drag: None,
+            pending_editor_scrollbar_drag_position: None,
+            editor_scrollbar_drag_task: None,
             panel_scrollbars: PanelScrollbarKind::ALL
                 .into_iter()
                 .map(|kind| {
@@ -2259,13 +2590,16 @@ impl EditorView {
             _watcher_task: None,
             temp_save_tasks: HashMap::new(),
             temp_save_epochs: HashMap::new(),
+            auto_save_tasks: HashMap::new(),
+            auto_save_epochs: HashMap::new(),
             outline_rail_visible: app_settings.outline_rail_visible,
             outline_rail_hovered: false,
             outline_rail_clicked_active_line: None,
-            outline_rail_scroll_offset: None,
             outline_rail_collapsed_heading_lines: HashSet::new(),
             outline_headings_cache: RefCell::new(Vec::new()),
             outline_headings_cache_dirty: Cell::new(true),
+            outline_panel_layout_epoch: 0,
+            outline_panel_layout_cache: RefCell::new(outline::OutlinePanelLayoutCache::default()),
             outline_rail_previous_active_line: Cell::new(None),
             outline_rail_last_active_line: Cell::new(None),
             outline_rail_active_since: Cell::new(None),
@@ -2278,6 +2612,8 @@ impl EditorView {
             outline_panel_scroll_handle: ScrollHandle::new(),
             info_panel_cache_tab_id: None,
             info_panel_cache_result: None,
+            info_panel_refresh_epoch: 0,
+            info_panel_refresh_task: None,
             git_history_cache_path: None,
             git_history_cache_result: None,
             git_history_cache_dirty: true,
@@ -2943,10 +3279,15 @@ impl EditorView {
 
         self.editor_scrollbar_revealed = true;
         self.cancel_editor_scrollbar_idle_fade();
-        self.sync_editor_scrollbar_opacity(cx);
+        let target = self.desired_editor_scrollbar_opacity();
+        self.editor_scrollbar_opacity_epoch = self.editor_scrollbar_opacity_epoch.wrapping_add(1);
+        self.editor_scrollbar_opacity_task = None;
+        self.editor_scrollbar_opacity = target;
+        self.editor_scrollbar_opacity_target = target;
         if !self.editor_scrollbar_hovered && self.editor_scrollbar_drag.is_none() {
             self.schedule_editor_scrollbar_idle_fade(cx);
         }
+        cx.notify();
     }
 
     pub(crate) fn set_editor_scrollbar_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
@@ -2998,8 +3339,55 @@ impl EditorView {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(drag) = self.editor_scrollbar_drag else {
+        if self.editor_scrollbar_drag.is_none() {
             return false;
+        }
+
+        self.pending_editor_scrollbar_drag_position = Some(position);
+        if self.editor_scrollbar_drag_task.is_none() {
+            if let Some(position) = self.pending_editor_scrollbar_drag_position.take() {
+                self.apply_editor_scrollbar_drag_position(position, cx);
+            }
+            let pane_id = self.current_pane_id();
+            self.editor_scrollbar_drag_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(16))
+                        .await;
+                    let keep_running = this
+                        .update(cx, |this, cx| {
+                            this.with_pane_if_alive(pane_id, |this| {
+                                if this.editor_scrollbar_drag.is_none() {
+                                    this.pending_editor_scrollbar_drag_position = None;
+                                    this.editor_scrollbar_drag_task = None;
+                                    return false;
+                                }
+                                if let Some(position) =
+                                    this.pending_editor_scrollbar_drag_position.take()
+                                {
+                                    this.apply_editor_scrollbar_drag_position(position, cx);
+                                }
+                                true
+                            })
+                            .unwrap_or(false)
+                        })
+                        .unwrap_or(false);
+                    if !keep_running {
+                        return;
+                    }
+                }
+            }));
+        }
+        true
+    }
+
+    fn apply_editor_scrollbar_drag_position(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.editor_scrollbar_drag else {
+            return;
         };
 
         let delta_y = f32::from(position.y) - drag.start_position_y;
@@ -3008,11 +3396,10 @@ impl EditorView {
             0.0
         } else {
             thumb_top / drag.track_travel * drag.max_scroll
-        };
-        self.clamp_scroll();
+        }
+        .clamp(0.0, drag.max_scroll);
         self.update_toolbar_visibility_for_scroll(cx);
         cx.notify();
-        true
     }
 
     pub(crate) fn stop_editor_scrollbar_drag(
@@ -3020,6 +3407,11 @@ impl EditorView {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.editor_scrollbar_drag.is_some() {
+            self.apply_editor_scrollbar_drag_position(position, cx);
+        }
+        self.pending_editor_scrollbar_drag_position = None;
+        self.editor_scrollbar_drag_task = None;
         if self.editor_scrollbar_drag.take().is_none() {
             return false;
         }
@@ -4096,6 +4488,10 @@ impl EditorView {
                         if let Some(tab) = this.tabs.iter().find(|t| &t.id == active_id) {
                             if !tab.is_dirty && !tab.is_deleted {
                                 let snapshot = tab.snapshot.clone();
+                                this.discard_history_transaction();
+                                if let Some(index) = this.active_tab_index() {
+                                    this.tabs[index].history.clear_entries();
+                                }
                                 this.buffer = crate::buffer::Buffer::from_text(&snapshot.text);
                                 this.cursor.offset = snapshot.cursor_offset.min(this.buffer.len());
                                 this.cursor.anchor = snapshot.cursor_anchor.min(this.buffer.len());
@@ -4463,6 +4859,11 @@ impl EditorView {
             self.open_external_paths_in_tabs(paths, cx);
             return;
         }
+        let (markdown_paths, attachment_paths) = split_external_paths(paths);
+        if attachment_paths.is_empty() {
+            self.open_external_paths_in_tabs(&markdown_paths, cx);
+            return;
+        }
         let Some(current_file) = self.current_file_path.as_deref() else {
             self.show_save_before_import_dialog(cx);
             return;
@@ -4472,7 +4873,7 @@ impl EditorView {
             let target_dir = policy.target_directory(&self.sidebar_root, current_file)?;
             std::fs::create_dir_all(&target_dir)?;
             let mut imported = Vec::new();
-            for source_path in paths.iter().filter(|path| path.is_file()) {
+            for source_path in attachment_paths.iter().filter(|path| path.is_file()) {
                 let extension = source_path
                     .extension()
                     .and_then(|extension| extension.to_str());
@@ -4495,6 +4896,7 @@ impl EditorView {
                 self.notify_error(message, cx);
             }
         }
+        self.open_external_paths_in_tabs(&markdown_paths, cx);
     }
 
     pub(crate) fn capture_workspace_rewrite_context(
@@ -4541,13 +4943,17 @@ impl EditorView {
                     .cursor_anchor
                     .min(rewrite.text.len());
                 if self.active_tab_id.as_deref() == Some(self.tabs[index].id.as_str()) {
-                    self.buffer = Buffer::from_text(&rewrite.text);
+                    self.commit_history_transaction();
+                    self.checkpoint();
+                    let old_len = self.buffer.len();
+                    self.buffer.replace(0..old_len, &rewrite.text);
                     self.cursor.offset = self.cursor.offset.min(self.buffer.len());
                     self.cursor.anchor = self.cursor.anchor.min(self.buffer.len());
                     for cursor in &mut self.extra_cursors {
                         cursor.offset = cursor.offset.min(self.buffer.len());
                         cursor.anchor = cursor.anchor.min(self.buffer.len());
                     }
+                    self.commit_history_transaction();
                     active_changed = true;
                 }
             }
@@ -5155,8 +5561,9 @@ impl EditorView {
     }
 
     pub(crate) fn pause_blinking(&mut self, cx: &mut Context<Self>) {
-        self.persist_active_tab_state();
+        self.commit_history_transaction();
         self.schedule_temp_save_for_active_tab(cx);
+        self.schedule_auto_save_for_active_tab(cx);
         self.pause_cursor_blinking(cx);
     }
 
@@ -5168,7 +5575,23 @@ impl EditorView {
             .cloned()
             .unwrap_or(FileKind::Markdown);
         let pending_line_display_transfer = self.pending_line_display_transfer.take();
-        self.invalidate_indent_guide_step_cache();
+        if self.uses_sparse_line_geometry()
+            && let Some(transfer) = pending_line_display_transfer.as_ref()
+        {
+            let old_line_count = transfer
+                .old_end_line_exclusive
+                .saturating_sub(transfer.start_line);
+            let new_line_count = transfer
+                .new_end_line_exclusive
+                .saturating_sub(transfer.start_line);
+            if old_line_count == new_line_count {
+                self.clear_sparse_line_geometry_range(
+                    transfer.dirty_start_line..transfer.dirty_end_line_exclusive,
+                );
+            } else {
+                self.reset_sparse_line_geometry();
+            }
+        }
         // Take (don't just clear) the current shaping cache. When a transfer is
         // applied below it is restored from the transfer's own snapshot; when no
         // transfer exists we restore this snapshot as-is if the line count is
@@ -5211,16 +5634,65 @@ impl EditorView {
                     true
                 }
                 (FileKind::Markdown, Some(transfer)) => {
-                    self.try_incremental_markdown_decorations(transfer).is_ok()
+                    !self.uses_lazy_markdown_decorations()
+                        && self.try_incremental_markdown_decorations(transfer).is_ok()
                 }
                 _ => false,
             };
             if !incremental_applied {
-                self.set_decorations(parse_decorations_for_file_kind(
-                    self.buffer.text(),
-                    &file_kind,
-                ));
+                if file_kind.is_markdown() && self.buffer.line_count() >= LARGE_MARKDOWN_MIN_LINES {
+                    let cursor_line = self.cursor_line();
+                    let parse_range = pending_line_display_transfer
+                        .as_ref()
+                        .map(|transfer| {
+                            transfer.dirty_start_line
+                                ..transfer
+                                    .dirty_end_line_exclusive
+                                    .max(transfer.dirty_start_line + 1)
+                        })
+                        .unwrap_or_else(|| {
+                            cursor_line.saturating_sub(LARGE_MARKDOWN_CHUNK_LINES)
+                                ..cursor_line.saturating_add(LARGE_MARKDOWN_CHUNK_LINES + 1)
+                        });
+                    if self.lazy_markdown_decorations.is_none() {
+                        self.reset_lazy_markdown_decorations();
+                    } else if self.decorations.len() != self.buffer.line_count()
+                        && let Some(transfer) = pending_line_display_transfer.as_ref()
+                    {
+                        transfer.apply_plain_decoration_transfer(&mut self.decorations, None);
+                        if let Some(lazy) = self.lazy_markdown_decorations.as_mut() {
+                            lazy.resize_after_structural_edit(
+                                self.buffer.line_count(),
+                                transfer.dirty_start_line,
+                            );
+                        }
+                    }
+                    if let Some(lazy) = self.lazy_markdown_decorations.as_mut() {
+                        lazy.invalidate_range(parse_range.clone());
+                    }
+                    self.ensure_lazy_markdown_decorations(parse_range);
+                } else {
+                    self.set_decorations(parse_decorations_for_file_kind(
+                        self.buffer.text(),
+                        &file_kind,
+                    ));
+                }
             }
+        }
+        if file_kind.is_markdown()
+            && self.uses_lazy_markdown_decorations()
+            && let Some(transfer) = pending_line_display_transfer.as_ref()
+        {
+            self.markdown_outline_epoch = self.markdown_outline_epoch.wrapping_add(1);
+            if let Some(index) = self.markdown_outline_index.borrow_mut().as_mut() {
+                index.update_after_edit(
+                    &self.buffer,
+                    transfer.dirty_start_line,
+                    transfer.old_end_line_exclusive,
+                    transfer.new_end_line_exclusive,
+                );
+            }
+            self.invalidate_outline_layout_cache();
         }
         // Restore the per-line shaping cache from the queued transfer whenever one
         // exists. For markdown this now also applies on the full-parse path: the
@@ -6869,6 +7341,7 @@ impl EditorView {
     }
 
     pub(crate) fn push_undo_snapshot(&mut self, snapshot: EditorSnapshot) {
+        self.commit_history_transaction();
         if let Some(index) = self.active_tab_index() {
             self.tabs[index].history.push_undo_snapshot(snapshot);
         }
@@ -6878,7 +7351,7 @@ impl EditorView {
     pub(crate) fn checkpoint(&mut self) {
         self.ime_composition_snapshot = None;
         self.reset_typing_checkpoint_grouping();
-        self.push_undo_snapshot(self.current_snapshot());
+        self.begin_history_transaction(false);
     }
 
     /// Records an undo checkpoint for ordinary typing, coalescing consecutive
@@ -6906,9 +7379,7 @@ impl EditorView {
         let contiguous = self.last_typing_checkpoint_offset == Some(start);
         let coalesce = is_groupable && within_interval && contiguous;
 
-        if !coalesce {
-            self.push_undo_snapshot(self.current_snapshot());
-        }
+        self.begin_history_transaction(coalesce);
 
         if is_groupable {
             self.last_typing_checkpoint_time = Some(now);
@@ -6923,6 +7394,52 @@ impl EditorView {
     pub(crate) fn reset_typing_checkpoint_grouping(&mut self) {
         self.last_typing_checkpoint_time = None;
         self.last_typing_checkpoint_offset = None;
+    }
+
+    fn current_history_view(&self) -> history_store::SnapshotViewState {
+        history_store::SnapshotViewState::new(
+            self.cursor.offset,
+            self.cursor.anchor,
+            self.scroll_offset,
+            self.extra_cursors
+                .iter()
+                .map(|cursor| (cursor.offset, cursor.anchor))
+                .collect(),
+        )
+    }
+
+    fn begin_history_transaction(&mut self, merge_with_previous: bool) {
+        self.commit_history_transaction();
+        self.buffer.begin_edit_recording();
+        self.pending_history_transaction = Some(PendingHistoryTransaction {
+            before_view: self.current_history_view(),
+            merge_with_previous,
+        });
+    }
+
+    pub(crate) fn commit_history_transaction(&mut self) {
+        let Some(transaction) = self.pending_history_transaction.take() else {
+            return;
+        };
+        let edits = self.buffer.finish_edit_recording();
+        if edits.is_empty() {
+            return;
+        }
+        let after_view = self.current_history_view();
+        if let Some(index) = self.active_tab_index() {
+            self.tabs[index].history.push_undo_transaction(
+                edits,
+                transaction.before_view,
+                after_view,
+                transaction.merge_with_previous,
+            );
+        }
+        self.mark_active_tab_dirty();
+    }
+
+    pub(crate) fn discard_history_transaction(&mut self) {
+        self.pending_history_transaction = None;
+        self.buffer.finish_edit_recording();
     }
 
     pub(crate) fn copy_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
@@ -7887,16 +8404,12 @@ impl EditorView {
         {
             return false;
         }
-        let (new_text, new_start, new_end) = toggle_wrap(
-            self.buffer.text(),
-            line_start + marker_start,
-            line_start + marker_end,
-            marker,
-            marker,
-        );
-        self.buffer = Buffer::from_text(&new_text);
-        self.cursor.anchor = new_start;
-        self.cursor.offset = new_end;
+        let range = line_start + marker_start..line_start + marker_end;
+        let wrapped = self.buffer.text_for_range(range.clone()).to_string();
+        let inner = wrapped[marker_len..wrapped.len() - marker_len].to_string();
+        self.buffer.replace(range.clone(), &inner);
+        self.cursor.anchor = range.start;
+        self.cursor.offset = range.start + inner.len();
         self.reparse();
         self.scroll_to_cursor();
         true
@@ -8041,24 +8554,25 @@ impl EditorView {
                     let line_start = self.buffer.line_start(line);
                     let sel_start = line_start + marker_start;
                     let sel_end = line_start + marker_end;
-                    // Remove existing format
-                    let (new_text, new_start, new_end) = toggle_wrap(
-                        self.buffer.text(),
-                        sel_start,
-                        sel_end,
-                        existing_prefix,
-                        existing_suffix,
-                    );
-                    self.buffer = Buffer::from_text(&new_text);
+                    let inner_start = sel_start + existing_prefix.len();
+                    let inner_end = sel_end - existing_suffix.len();
+                    let inner = self
+                        .buffer
+                        .text_for_range(inner_start..inner_end)
+                        .to_string();
+                    self.buffer.replace(sel_start..sel_end, &inner);
+                    let new_start = sel_start;
+                    let new_end = sel_start + inner.len();
                     if existing_prefix == prefix && existing_suffix == suffix {
                         // Same format: select the inner text
                         self.cursor.anchor = new_start;
                         self.cursor.offset = new_end;
                     } else {
                         // Different format: apply the new wrap around inner text
-                        let (new_text2, new_start2, new_end2) =
-                            toggle_wrap(self.buffer.text(), new_start, new_end, prefix, suffix);
-                        self.buffer = Buffer::from_text(&new_text2);
+                        let replacement = format!("{prefix}{inner}{suffix}");
+                        self.buffer.replace(new_start..new_end, &replacement);
+                        let new_start2 = new_start + prefix.len();
+                        let new_end2 = new_start2 + inner.len();
                         self.cursor.anchor = new_start2;
                         self.cursor.offset = new_end2;
                     }
@@ -8070,9 +8584,28 @@ impl EditorView {
         }
 
         let range = self.cursor.selection_range();
-        let (new_text, new_start, new_end) =
-            toggle_wrap(self.buffer.text(), range.start, range.end, prefix, suffix);
-        self.buffer = Buffer::from_text(&new_text);
+        let selected = self.buffer.text_for_range(range.clone()).to_string();
+        let (replacement, new_start, new_end) = if range.is_empty() {
+            (
+                format!("{prefix}{suffix}"),
+                range.start + prefix.len(),
+                range.start + prefix.len(),
+            )
+        } else if selected.starts_with(prefix)
+            && selected.ends_with(suffix)
+            && selected.len() >= prefix.len() + suffix.len()
+        {
+            let inner = selected[prefix.len()..selected.len() - suffix.len()].to_string();
+            let end = range.start + inner.len();
+            (inner, range.start, end)
+        } else {
+            (
+                format!("{prefix}{selected}{suffix}"),
+                range.start + prefix.len(),
+                range.end + prefix.len(),
+            )
+        };
+        self.buffer.replace(range, &replacement);
         self.cursor.anchor = new_start;
         self.cursor.offset = new_end;
         self.reparse();
@@ -8098,9 +8631,24 @@ impl EditorView {
         let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
         let line_start = self.buffer.line_start(line);
         let line_end = self.buffer.line_end(line);
-        let (new_text, new_cursor) =
-            toggle_heading(self.buffer.text(), line_start, line_end, level);
-        self.buffer = Buffer::from_text(&new_text);
+        let line_text = self.buffer.line_content(line).to_string();
+        let target_prefix = format!("{} ", "#".repeat(level as usize));
+        let (replacement, new_cursor) = if line_text.starts_with(&target_prefix) {
+            (line_text[target_prefix.len()..].to_string(), line_start)
+        } else {
+            let stripped = line_text.trim_start_matches('#');
+            let existing_hashes = line_text.len() - stripped.len();
+            let content = if existing_hashes > 0 {
+                stripped.strip_prefix(' ').unwrap_or(stripped)
+            } else {
+                &line_text
+            };
+            (
+                format!("{target_prefix}{content}"),
+                line_start + target_prefix.len(),
+            )
+        };
+        self.buffer.replace(line_start..line_end, &replacement);
         self.cursor.move_to(new_cursor, &self.buffer);
         self.reparse();
         self.scroll_to_cursor();
@@ -8189,15 +8737,25 @@ impl EditorView {
             .is_some_and(|ti| ti.is_front_matter)
     }
 
-    fn replace_table_block(&mut self, table_start: usize, table_end: usize, new_lines: &[String]) {
+    fn replace_table_block(
+        &mut self,
+        table_start: usize,
+        table_end: usize,
+        new_lines: &[String],
+        cx: &mut Context<Self>,
+    ) {
         let text_start = self.buffer.line_start(table_start);
         let text_end = self.buffer.line_end(table_end.saturating_sub(1));
         let new_text = new_lines.join("\n");
         self.ime_composition_snapshot = None;
-        self.push_undo_snapshot(self.current_snapshot());
-        self.buffer.replace(text_start..text_end, &new_text);
+        self.checkpoint();
+        let replaced_range = text_start..text_end;
+        self.queue_non_markdown_line_display_transfer(&replaced_range, &new_text);
+        self.buffer.replace(replaced_range, &new_text);
         self.invalidate_indent_guide_step_cache();
-        self.set_decorations(markdown::parse_decorations(self.buffer.text()));
+        self.reparse();
+        self.commit_history_transaction();
+        self.schedule_auto_save_for_active_tab(cx);
     }
 
     pub(crate) fn table_insert_row(
@@ -8218,7 +8776,7 @@ impl EditorView {
         } else {
             crate::table_ops::insert_row(&lines, insert_at)
         };
-        self.replace_table_block(start, end, &new_lines);
+        self.replace_table_block(start, end, &new_lines, cx);
         cx.notify();
     }
 
@@ -8238,7 +8796,7 @@ impl EditorView {
         } else {
             crate::table_ops::delete_row(&lines, visual_row)
         };
-        self.replace_table_block(start, end, &new_lines);
+        self.replace_table_block(start, end, &new_lines, cx);
         cx.notify();
     }
 
@@ -8260,7 +8818,7 @@ impl EditorView {
         };
         let insert_at = if left { col } else { col + 1 };
         let new_lines = crate::table_ops::insert_column(&lines, insert_at);
-        self.replace_table_block(start, end, &new_lines);
+        self.replace_table_block(start, end, &new_lines, cx);
         cx.notify();
     }
 
@@ -8280,7 +8838,28 @@ impl EditorView {
             return;
         };
         let new_lines = crate::table_ops::delete_column(&lines, col);
-        self.replace_table_block(start, end, &new_lines);
+        self.replace_table_block(start, end, &new_lines, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn table_set_column_alignment(
+        &mut self,
+        table_start_line: usize,
+        col: usize,
+        alignment: crate::markdown::TableAlign,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = None;
+        if self.block_is_front_matter(table_start_line) {
+            cx.notify();
+            return;
+        }
+        let Some((start, end, lines)) = self.table_lines_for_block(table_start_line) else {
+            cx.notify();
+            return;
+        };
+        let new_lines = crate::table_ops::set_column_alignment(&lines, col, alignment);
+        self.replace_table_block(start, end, &new_lines, cx);
         cx.notify();
     }
 
@@ -8297,12 +8876,16 @@ impl EditorView {
             self.buffer.len()
         };
         self.ime_composition_snapshot = None;
-        self.push_undo_snapshot(self.current_snapshot());
-        self.buffer.replace(text_start..text_end, "");
+        self.checkpoint();
+        let replaced_range = text_start..text_end;
+        self.queue_non_markdown_line_display_transfer(&replaced_range, "");
+        self.buffer.replace(replaced_range, "");
         self.cursor.offset = text_start.min(self.buffer.len());
         self.cursor.anchor = self.cursor.offset;
         self.invalidate_indent_guide_step_cache();
-        self.set_decorations(markdown::parse_decorations(self.buffer.text()));
+        self.reparse();
+        self.commit_history_transaction();
+        self.schedule_auto_save_for_active_tab(cx);
         cx.notify();
     }
 
@@ -8618,6 +9201,13 @@ pub(crate) fn is_markdown_file(path: &Path) -> bool {
         .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown" | "mdx"))
 }
 
+fn split_external_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    paths
+        .iter()
+        .cloned()
+        .partition(|path| is_markdown_file(path))
+}
+
 pub(crate) fn is_image_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -8869,7 +9459,7 @@ pub(crate) fn parse_decorations_for_file_kind(
     }
 }
 
-fn plain_text_decorations(text: &str, code_language: Option<String>) -> Vec<LineDecoration> {
+fn plain_text_decorations(text: &str, _code_language: Option<String>) -> Vec<LineDecoration> {
     let line_count = text.lines().count().max(1);
     let line_count = if text.ends_with('\n') {
         line_count + 1
@@ -8877,19 +9467,25 @@ fn plain_text_decorations(text: &str, code_language: Option<String>) -> Vec<Line
         line_count
     };
 
-    let mut decorations: Vec<LineDecoration> =
+    let decorations: Vec<LineDecoration> =
         (0..line_count).map(|_| LineDecoration::default()).collect();
-    if let Some(language) = code_language {
-        for decoration in &mut decorations {
-            decoration.code_language = Some(language.clone());
-        }
-    }
     decorations
 }
 
 impl EditorView {
     fn invalidate_line_geometry_cache(&self) {
         self.line_geometry_cache_dirty.set(true);
+    }
+
+    pub(crate) fn reset_sparse_line_geometry(&self) {
+        self.line_geometry_cache.borrow_mut().sparse = SparseLineGeometry::default();
+    }
+
+    fn clear_sparse_line_geometry_range(&self, range: Range<usize>) {
+        self.line_geometry_cache
+            .borrow_mut()
+            .sparse
+            .clear_range(range);
     }
 
     fn invalidate_indent_guide_step_cache(&self) {
@@ -8909,6 +9505,7 @@ impl EditorView {
 
     fn clear_line_display_info(&mut self) {
         self.line_display_info.clear();
+        self.reset_sparse_line_geometry();
         self.invalidate_line_geometry_cache();
     }
 
@@ -8916,6 +9513,7 @@ impl EditorView {
         if let Some(info) = self.line_display_info.get_mut(line) {
             *info = None;
         }
+        self.clear_sparse_line_geometry_range(line..line.saturating_add(1));
         self.layout_dirty = true;
         self.invalidate_line_geometry_cache();
     }
@@ -8964,6 +9562,16 @@ impl EditorView {
             info.map(|info| info.line_height * info.visual_line_count as f32 + info.extra_height)
         };
         let mut geometry_changed = false;
+        let sparse_geometry = self.uses_sparse_line_geometry();
+        if sparse_geometry {
+            self.line_geometry_cache
+                .borrow_mut()
+                .sparse
+                .ensure_dimensions(
+                    line_count,
+                    self.line_height_for_block(&BlockType::Normal) as f64,
+                );
+        }
         for (line_idx, info) in updates {
             if line_idx < line_count {
                 if !geometry_changed {
@@ -8974,6 +9582,12 @@ impl EditorView {
                         (None, None) => false,
                         _ => true,
                     };
+                }
+                if sparse_geometry && let Some(height) = info_height(info.as_ref()) {
+                    self.line_geometry_cache
+                        .borrow_mut()
+                        .sparse
+                        .set_measured_height(line_idx, height as f64);
                 }
                 self.line_display_info[line_idx] = info.map(Box::new);
             }
@@ -8992,8 +9606,299 @@ impl EditorView {
 
     fn set_decorations(&mut self, decorations: Vec<LineDecoration>) {
         self.decorations = decorations;
+        self.lazy_markdown_decorations = None;
+        self.markdown_outline_index.borrow_mut().take();
+        self.markdown_outline_build_task = None;
+        self.markdown_outline_epoch = self.markdown_outline_epoch.wrapping_add(1);
         self.outline_headings_cache_dirty.set(true);
+        self.invalidate_outline_layout_cache();
+        self.reset_sparse_line_geometry();
         self.invalidate_line_geometry_cache();
+    }
+
+    pub(crate) fn uses_lazy_markdown_decorations(&self) -> bool {
+        self.lazy_markdown_decorations.is_some()
+    }
+
+    pub(crate) fn uses_sparse_line_geometry(&self) -> bool {
+        self.buffer.line_count() >= LARGE_MARKDOWN_MIN_LINES
+            && self
+                .active_file_kind()
+                .is_some_and(FileKind::supports_text_buffer)
+    }
+
+    fn reset_lazy_markdown_decorations(&mut self) {
+        let line_count = self.buffer.line_count().max(1);
+        let (decorations, lazy) = new_lazy_markdown_decorations(line_count);
+        self.decorations = decorations;
+        self.lazy_markdown_decorations = Some(lazy);
+        self.markdown_outline_index.borrow_mut().take();
+        self.markdown_outline_build_task = None;
+        self.markdown_outline_epoch = self.markdown_outline_epoch.wrapping_add(1);
+        self.invalidate_outline_layout_cache();
+        self.reset_sparse_line_geometry();
+        self.invalidate_line_geometry_cache();
+    }
+
+    pub(crate) fn ensure_lazy_markdown_decorations(&mut self, range: Range<usize>) -> bool {
+        let Some(lazy) = self.lazy_markdown_decorations.as_mut() else {
+            return false;
+        };
+        let changed = parse_lazy_markdown_range(&self.buffer, &mut self.decorations, lazy, range);
+
+        changed
+    }
+
+    pub(crate) fn begin_large_document_frame_bench_prepaint(&mut self) {
+        let Some(bench) = self.large_document_frame_bench.as_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        if bench.frame >= LARGE_DOCUMENT_FRAME_BENCH_WARMUP
+            && let Some(last_frame) = bench.last_frame
+        {
+            let interval = now - last_frame;
+            if bench.frame
+                < LARGE_DOCUMENT_FRAME_BENCH_WARMUP + LARGE_DOCUMENT_FRAME_BENCH_SCROLL_FRAMES
+            {
+                bench.scroll_frame_intervals.push(interval);
+            } else {
+                bench.edit_frame_intervals.push(interval);
+            }
+        }
+        bench.last_frame = Some(now);
+    }
+
+    pub(crate) fn begin_large_document_frame_work(&mut self) {
+        if let Some(bench) = self.large_document_frame_bench.as_mut() {
+            bench.frame_work_started = Some(Instant::now());
+        }
+    }
+
+    pub(crate) fn record_large_document_syntax_viewport(&mut self, range: Range<usize>) {
+        if !self.uses_lazy_markdown_decorations() {
+            return;
+        }
+        let Some(bench) = self.large_document_frame_bench.as_mut() else {
+            return;
+        };
+        let start = range.start.min(self.decorations.len());
+        let end = range.end.min(self.decorations.len()).max(start);
+        if start < 100_000 || start == end {
+            return;
+        }
+        bench.syntax_view_samples += 1;
+        let has_syntax = self.decorations[start..end].iter().any(|decoration| {
+            decoration.block_type != BlockType::Normal
+                || !decoration.inline_spans.is_empty()
+                || !decoration.syntax_ranges.is_empty()
+        });
+        if !has_syntax {
+            bench.syntax_view_misses += 1;
+        }
+    }
+
+    pub(crate) fn end_large_document_frame_work(&mut self) {
+        let Some(bench) = self.large_document_frame_bench.as_mut() else {
+            return;
+        };
+        if bench.frame >= LARGE_DOCUMENT_FRAME_BENCH_WARMUP
+            && let Some(started) = bench.frame_work_started.take()
+        {
+            bench.frame_work_times.push(started.elapsed());
+        }
+    }
+
+    pub(crate) fn initialize_large_document_frame_bench_if_needed(&mut self) {
+        if self.large_document_frame_bench.is_none()
+            && self.buffer.line_count() >= LARGE_MARKDOWN_MIN_LINES
+        {
+            self.large_document_frame_bench = LargeDocumentFrameBench::from_env();
+        }
+    }
+
+    pub(crate) fn advance_large_document_frame_bench(&mut self) -> Option<bool> {
+        let Some(mut bench) = self.large_document_frame_bench.take() else {
+            return None;
+        };
+        if bench.frame
+            < LARGE_DOCUMENT_FRAME_BENCH_WARMUP + LARGE_DOCUMENT_FRAME_BENCH_SCROLL_FRAMES
+        {
+            self.scroll_offset += self.line_height_for_block(&BlockType::Normal) * 3.0;
+            self.clamp_scroll();
+        } else {
+            let started = Instant::now();
+            let operation = (bench.frame
+                - LARGE_DOCUMENT_FRAME_BENCH_WARMUP
+                - LARGE_DOCUMENT_FRAME_BENCH_SCROLL_FRAMES)
+                % 10;
+            match operation {
+                0 => {
+                    let edit_line = self
+                        .line_at_y(self.scroll_offset + self.last_viewport_height * 0.5)
+                        .min(self.buffer.line_count().saturating_sub(1));
+                    let offset = self.buffer.line_start(edit_line);
+                    self.checkpoint();
+                    self.queue_non_markdown_line_display_transfer(&(offset..offset), "x");
+                    self.buffer.insert(offset, "x");
+                    self.cursor.move_to(offset + 1, &self.buffer);
+                    self.reparse();
+                    self.commit_history_transaction();
+                    bench.pending_edit_offset = Some(offset);
+                    bench.character_edit_times.push(started.elapsed());
+                }
+                1 => {
+                    let offset = bench
+                        .pending_edit_offset
+                        .take()
+                        .unwrap_or(self.cursor.offset);
+                    self.checkpoint();
+                    self.queue_non_markdown_line_display_transfer(&(offset..offset + 1), "");
+                    self.buffer.delete(offset..offset + 1);
+                    self.cursor.move_to(offset, &self.buffer);
+                    self.reparse();
+                    self.commit_history_transaction();
+                    bench.character_edit_times.push(started.elapsed());
+                }
+                2 => {
+                    let offset = self.cursor.offset;
+                    self.checkpoint();
+                    self.queue_non_markdown_line_display_transfer(&(offset..offset), "\n");
+                    let buffer_started = Instant::now();
+                    self.buffer.insert(offset, "\n");
+                    bench.newline_buffer_times.push(buffer_started.elapsed());
+                    self.cursor.move_to(offset + 1, &self.buffer);
+                    let reparse_started = Instant::now();
+                    self.reparse();
+                    bench.newline_reparse_times.push(reparse_started.elapsed());
+                    let history_started = Instant::now();
+                    self.commit_history_transaction();
+                    bench.newline_history_times.push(history_started.elapsed());
+                    bench.pending_newline_offset = Some(offset);
+                    bench.newline_edit_times.push(started.elapsed());
+                }
+                3 => {
+                    let offset = bench
+                        .pending_newline_offset
+                        .take()
+                        .unwrap_or(self.cursor.offset);
+                    self.checkpoint();
+                    self.queue_non_markdown_line_display_transfer(&(offset..offset + 1), "");
+                    let buffer_started = Instant::now();
+                    self.buffer.delete(offset..offset + 1);
+                    bench.newline_buffer_times.push(buffer_started.elapsed());
+                    self.cursor.move_to(offset, &self.buffer);
+                    let reparse_started = Instant::now();
+                    self.reparse();
+                    bench.newline_reparse_times.push(reparse_started.elapsed());
+                    let history_started = Instant::now();
+                    self.commit_history_transaction();
+                    bench.newline_history_times.push(history_started.elapsed());
+                    bench.newline_edit_times.push(started.elapsed());
+                }
+                4 => {
+                    self.cursor.anchor = 0;
+                    self.cursor.offset = self.buffer.len();
+                    bench.selection_times.push(started.elapsed());
+                }
+                5 => {
+                    self.cursor.anchor = self.cursor.offset;
+                    bench.selection_times.push(started.elapsed());
+                }
+                6 => {
+                    self.commit_history_transaction();
+                    if let Some(index) = self.active_tab_index()
+                        && let Some((edits, view)) =
+                            self.tabs[index].history.take_undo_transaction()
+                    {
+                        self.buffer.apply_edits_inverse(&edits);
+                        self.cursor.offset = view.cursor_offset.min(self.buffer.len());
+                        self.cursor.anchor = view.cursor_anchor.min(self.buffer.len());
+                        self.reparse();
+                    }
+                    bench.history_times.push(started.elapsed());
+                }
+                7 => {
+                    if let Some(index) = self.active_tab_index()
+                        && let Some((edits, view)) =
+                            self.tabs[index].history.take_redo_transaction()
+                    {
+                        self.buffer.apply_edits_forward(&edits);
+                        self.cursor.offset = view.cursor_offset.min(self.buffer.len());
+                        self.cursor.anchor = view.cursor_anchor.min(self.buffer.len());
+                        self.reparse();
+                    }
+                    bench.history_times.push(started.elapsed());
+                }
+                8 => {
+                    self.scroll_offset = self.max_scroll_offset() * 0.85;
+                    bench.scrollbar_jump_times.push(started.elapsed());
+                }
+                _ => {
+                    self.scroll_offset = self.max_scroll_offset() * 0.15;
+                    bench.scrollbar_jump_times.push(started.elapsed());
+                }
+            }
+            bench.edit_times.push(started.elapsed());
+        }
+
+        bench.frame += 1;
+        let total_frames = LARGE_DOCUMENT_FRAME_BENCH_WARMUP
+            + LARGE_DOCUMENT_FRAME_BENCH_SCROLL_FRAMES
+            + LARGE_DOCUMENT_FRAME_BENCH_EDIT_FRAMES;
+        if bench.frame < total_frames {
+            self.large_document_frame_bench = Some(bench);
+            return Some(true);
+        }
+
+        let percentile = |samples: &[Duration], percentile: usize| {
+            let mut sorted = samples.to_vec();
+            sorted.sort_unstable();
+            sorted
+                .get(sorted.len().saturating_sub(1) * percentile / 100)
+                .copied()
+                .unwrap_or_default()
+                .as_secs_f64()
+                * 1_000.0
+        };
+        let output = serde_json::json!({
+            "scroll_frames": bench.scroll_frame_intervals.len(),
+            "edit_frames": bench.edit_frame_intervals.len(),
+            "buffer_lines": self.buffer.line_count(),
+            "decorations": self.decorations.len(),
+            "lazy_markdown": self.uses_lazy_markdown_decorations(),
+            "line_display_slots": self.line_display_info.len(),
+            "line_display_cached": self.line_display_info.iter().filter(|line| line.is_some()).count(),
+            "scroll_frame_p50_ms": percentile(&bench.scroll_frame_intervals, 50),
+            "scroll_frame_p95_ms": percentile(&bench.scroll_frame_intervals, 95),
+            "scroll_frame_p99_ms": percentile(&bench.scroll_frame_intervals, 99),
+            "edit_frame_p50_ms": percentile(&bench.edit_frame_intervals, 50),
+            "edit_frame_p95_ms": percentile(&bench.edit_frame_intervals, 95),
+            "edit_frame_p99_ms": percentile(&bench.edit_frame_intervals, 99),
+            "frame_work_p50_ms": percentile(&bench.frame_work_times, 50),
+            "frame_work_p95_ms": percentile(&bench.frame_work_times, 95),
+            "frame_work_p99_ms": percentile(&bench.frame_work_times, 99),
+            "edit_operation_p50_ms": percentile(&bench.edit_times, 50),
+            "edit_operation_p95_ms": percentile(&bench.edit_times, 95),
+            "edit_operation_p99_ms": percentile(&bench.edit_times, 99),
+            "character_edit_p95_ms": percentile(&bench.character_edit_times, 95),
+            "newline_edit_p95_ms": percentile(&bench.newline_edit_times, 95),
+            "newline_buffer_p95_ms": percentile(&bench.newline_buffer_times, 95),
+            "newline_reparse_p95_ms": percentile(&bench.newline_reparse_times, 95),
+            "newline_history_p95_ms": percentile(&bench.newline_history_times, 95),
+            "selection_update_p95_ms": percentile(&bench.selection_times, 95),
+            "scrollbar_jump_p95_ms": percentile(&bench.scrollbar_jump_times, 95),
+            "history_operation_p95_ms": percentile(&bench.history_times, 95),
+            "syntax_view_samples": bench.syntax_view_samples,
+            "syntax_view_misses": bench.syntax_view_misses,
+        });
+        if let Some(parent) = bench.output_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        if let Ok(file) = std::fs::File::create(&bench.output_path) {
+            serde_json::to_writer_pretty(file, &output).ok();
+        }
+        Some(false)
     }
 
     fn trim_line_display_info_cache_for_large_document(&mut self) {
@@ -9064,6 +9969,12 @@ impl EditorView {
         };
         if !file_kind.supports_text_buffer() || self.line_display_info.is_empty() {
             return;
+        }
+
+        if !file_kind.is_markdown()
+            && edit_may_change_leading_indent(&self.buffer, replaced_range, inserted_text)
+        {
+            self.invalidate_indent_guide_step_cache();
         }
 
         let (start_line, old_end_line_exclusive, new_end_line_exclusive) =
@@ -9477,6 +10388,36 @@ impl EditorView {
     }
 }
 
+fn edit_may_change_leading_indent(
+    buffer: &Buffer,
+    replaced_range: &Range<usize>,
+    inserted_text: &str,
+) -> bool {
+    if inserted_text.contains('\n') {
+        return true;
+    }
+
+    let start = replaced_range.start.min(buffer.len());
+    let end = replaced_range.end.min(buffer.len());
+    let (start_line, start_column) = buffer.offset_to_line_col(start);
+    let (end_line, _) = buffer.offset_to_line_col(end);
+    if start_line != end_line {
+        return true;
+    }
+
+    let leading_bytes = buffer
+        .line_content(start_line)
+        .bytes()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .count();
+    start_column < leading_bytes
+        || (start_column == leading_bytes
+            && inserted_text
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t')))
+}
+
 pub(crate) fn default_document_text(ui_language: UiLanguage) -> String {
     let help_path = help_document_path(ui_language);
     crate::resolve_runtime_path(help_path)
@@ -9584,13 +10525,15 @@ pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use super::{
-        EditorView, classify_file_kind_for_bytes, compute_incremental_markdown_decorations,
+        EditorView, SparseLineGeometry, classify_file_kind_for_bytes,
+        compute_incremental_markdown_decorations, edit_may_change_leading_indent,
         generated_preview_intersects_range, heading_matches_anchor,
         line_display_transfer_line_bounds, normalize_ordered_list_numbers_in_buffer,
-        resolve_markdown_target_path, split_markdown_target, text_tab_is_dirty, unique_import_path,
+        resolve_markdown_target_path, split_external_paths, split_markdown_target,
+        text_tab_is_dirty, unique_import_path,
     };
     use crate::buffer::Buffer;
     use crate::markdown::parse_decorations;
@@ -9632,12 +10575,118 @@ mod tests {
     }
 
     #[test]
+    fn external_drop_splits_markdown_files_from_attachments() {
+        let paths = [
+            "note.md",
+            "guide.MARKDOWN",
+            "page.mdx",
+            "image.png",
+            "data.pdf",
+        ]
+        .map(PathBuf::from);
+        let (markdown, attachments) = split_external_paths(&paths);
+        assert_eq!(
+            markdown,
+            ["note.md", "guide.MARKDOWN", "page.mdx"].map(PathBuf::from)
+        );
+        assert_eq!(attachments, ["image.png", "data.pdf"].map(PathBuf::from));
+    }
+
+    #[test]
     fn generated_previews_render_only_when_they_intersect_the_viewport() {
         assert!(generated_preview_intersects_range(10, 14, 12, 20));
         assert!(generated_preview_intersects_range(12, 20, 10, 14));
         assert!(generated_preview_intersects_range(10, 20, 10, 20));
         assert!(!generated_preview_intersects_range(1, 9, 10, 20));
         assert!(!generated_preview_intersects_range(21, 30, 10, 20));
+    }
+
+    #[test]
+    fn indent_guide_step_cache_only_invalidates_for_leading_whitespace_edits() {
+        let buffer = Buffer::from_text("fn main() {\n    println!(\"ok\");\n}\n");
+        let body_offset = buffer.line_start(1) + 8;
+        assert!(!edit_may_change_leading_indent(
+            &buffer,
+            &(body_offset..body_offset + 1),
+            "x",
+        ));
+
+        let indent_end = buffer.line_start(1) + 4;
+        assert!(edit_may_change_leading_indent(
+            &buffer,
+            &(buffer.line_start(1)..indent_end),
+            "  ",
+        ));
+        assert!(edit_may_change_leading_indent(
+            &buffer,
+            &(indent_end..indent_end),
+            "\t",
+        ));
+        assert!(edit_may_change_leading_indent(
+            &buffer,
+            &(body_offset..body_offset),
+            "\n",
+        ));
+        assert!(edit_may_change_leading_indent(
+            &buffer,
+            &(buffer.line_end(0)..buffer.line_start(2)),
+            "",
+        ));
+    }
+
+    #[test]
+    fn local_history_transaction_records_multiple_buffer_edits() {
+        let mut buffer = Buffer::from_text("alpha\nbeta\n");
+        buffer.begin_edit_recording();
+        buffer.insert(0, "X");
+        buffer.replace(7..11, "B");
+        let edits = buffer.finish_edit_recording();
+
+        let before = super::EditorSnapshot {
+            text: "alpha\nbeta\n".to_string(),
+            cursor_offset: 0,
+            cursor_anchor: 0,
+            scroll_offset: 0.0,
+            extra_cursors: Vec::new(),
+        };
+        let after = super::EditorSnapshot {
+            text: buffer.text().to_string(),
+            cursor_offset: buffer.len(),
+            cursor_anchor: buffer.len(),
+            scroll_offset: 10.0,
+            extra_cursors: Vec::new(),
+        };
+        let mut history = super::history_store::TabHistory::default();
+        history.push_undo_transaction(
+            edits,
+            super::history_store::SnapshotViewState::from(&before),
+            super::history_store::SnapshotViewState::from(&after),
+            false,
+        );
+        assert_eq!(history.take_undo(&after), Some(before.clone()));
+        assert_eq!(history.take_redo(&before), Some(after));
+    }
+
+    #[test]
+    fn sparse_line_geometry_roundtrips_measured_heights_across_blocks() {
+        let mut geometry = SparseLineGeometry::default();
+        geometry.reset(2_000_001, 20.0);
+        geometry.set_measured_height(10, 40.0);
+        geometry.set_measured_height(300, 10.0);
+        geometry.set_measured_height(1_999_999, 60.0);
+
+        assert_eq!(geometry.y_offset(10, 8.0), 208.0);
+        assert_eq!(geometry.y_offset(11, 8.0), 248.0);
+        assert_eq!(geometry.y_offset(301, 8.0), 6_038.0);
+        assert_eq!(geometry.line_at_y(6_037.9, 8.0), 300);
+        assert_eq!(geometry.line_at_y(6_038.0, 8.0), 301);
+
+        let last_line_y = geometry.y_offset(1_999_999, 8.0);
+        assert_eq!(geometry.line_at_y(last_line_y, 8.0), 1_999_999);
+        assert_eq!(geometry.line_at_y(last_line_y + 59.9, 8.0), 1_999_999);
+
+        geometry.clear_range(300..301);
+        assert_eq!(geometry.y_offset(301, 8.0), 6_048.0);
     }
 
     /// Drives `compute_incremental_markdown_decorations` for an `old -> new`

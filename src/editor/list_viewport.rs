@@ -125,29 +125,26 @@ fn fixed_list_window_for_metrics(
     }
 }
 
-pub(crate) fn variable_list_window(
+pub(crate) fn variable_list_window_from_offsets(
     scroll_handle: &ScrollHandle,
     prefix_height: f32,
-    item_heights: &[f32],
+    offsets: &[f32],
     render_overscan: usize,
     preload_overscan: usize,
 ) -> ListWindow {
-    if item_heights.is_empty() {
-        return ListWindow::empty();
-    }
-
     let viewport_height: f32 = scroll_handle.bounds().size.height.into();
     let scroll_y = (-f32::from(scroll_handle.offset().y)).max(0.0);
-    variable_list_window_for_metrics(
+    variable_list_window_for_offsets(
         scroll_y,
         viewport_height,
         prefix_height,
-        item_heights,
+        offsets,
         render_overscan,
         preload_overscan,
     )
 }
 
+#[cfg(test)]
 fn variable_list_window_for_metrics(
     scroll_y: f32,
     viewport_height: f32,
@@ -156,20 +153,38 @@ fn variable_list_window_for_metrics(
     render_overscan: usize,
     preload_overscan: usize,
 ) -> ListWindow {
-    if item_heights.is_empty() {
-        return ListWindow::empty();
-    }
-
-    let content_start = (scroll_y - prefix_height).max(0.0);
-    let content_end = (scroll_y + viewport_height - prefix_height).max(0.0);
-
     let mut offsets = Vec::with_capacity(item_heights.len() + 1);
     offsets.push(0.0);
     for height in item_heights {
         offsets.push(offsets.last().copied().unwrap_or(0.0) + height.max(0.0));
     }
 
-    let item_count = item_heights.len();
+    variable_list_window_for_offsets(
+        scroll_y,
+        viewport_height,
+        prefix_height,
+        &offsets,
+        render_overscan,
+        preload_overscan,
+    )
+}
+
+pub(crate) fn variable_list_window_for_offsets(
+    scroll_y: f32,
+    viewport_height: f32,
+    prefix_height: f32,
+    offsets: &[f32],
+    render_overscan: usize,
+    preload_overscan: usize,
+) -> ListWindow {
+    if offsets.len() < 2 {
+        return ListWindow::empty();
+    }
+
+    let content_start = (scroll_y - prefix_height).max(0.0);
+    let content_end = (scroll_y + viewport_height - prefix_height).max(0.0);
+
+    let item_count = offsets.len() - 1;
     let visible_start = offsets
         .partition_point(|offset| *offset <= content_start)
         .saturating_sub(1)
@@ -197,6 +212,7 @@ fn variable_list_window_for_metrics(
 mod tests {
     use super::{
         ProgressiveListPolicy, fixed_list_window_for_metrics, variable_list_window_for_metrics,
+        variable_list_window_for_offsets,
     };
 
     #[test]
@@ -219,6 +235,19 @@ mod tests {
         assert_eq!(window.render, 1..4);
         assert_eq!(window.preload, 0..4);
         assert_eq!(window.top_spacer_px, 10.0);
+        assert_eq!(window.bottom_spacer_px, 0.0);
+    }
+
+    #[test]
+    fn cached_variable_offsets_window_50k_items_without_scanning_rows() {
+        let offsets = (0..=50_000)
+            .map(|index| index as f32 * 24.0)
+            .collect::<Vec<_>>();
+        let window = variable_list_window_for_offsets(1_199_400.0, 600.0, 0.0, &offsets, 12, 24);
+
+        assert_eq!(window.visible, 49_975..50_000);
+        assert_eq!(window.render, 49_963..50_000);
+        assert_eq!(window.render.len(), 37);
         assert_eq!(window.bottom_spacer_px, 0.0);
     }
 

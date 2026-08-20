@@ -44,7 +44,7 @@ impl EditorView {
         if visual_line_idx == 0 {
             return Some(0);
         }
-        helpers::wrap_boundary_byte_indices(&info.wrapped_line)
+        helpers::wrap_boundary_byte_indices(&info.wrapped_line, &info.display_text)
             .get(visual_line_idx - 1)
             .copied()
     }
@@ -53,7 +53,7 @@ impl EditorView {
         info: &LineDisplayInfo,
         disp_col: usize,
     ) -> Option<(usize, usize)> {
-        helpers::wrap_boundary_byte_indices(&info.wrapped_line)
+        helpers::wrap_boundary_byte_indices(&info.wrapped_line, &info.display_text)
             .iter()
             .position(|boundary| *boundary == disp_col)
             .map(|upstream_visual_idx| (upstream_visual_idx, upstream_visual_idx + 1))
@@ -85,9 +85,10 @@ impl EditorView {
         wrap_boundary_upstream_xs: &HashMap<usize, f32>,
         affinity: Option<WrapBoundaryAffinityKind>,
     ) -> Option<Point<Pixels>> {
-        if let Some(upstream_visual_idx) = helpers::wrap_boundary_byte_indices(wrapped_line)
-            .iter()
-            .position(|boundary| *boundary == disp_col)
+        if let Some(upstream_visual_idx) =
+            helpers::wrap_boundary_byte_indices(wrapped_line, display_text)
+                .iter()
+                .position(|boundary| *boundary == disp_col)
         {
             let downstream_visual_idx = upstream_visual_idx + 1;
             if affinity == Some(WrapBoundaryAffinityKind::Downstream) {

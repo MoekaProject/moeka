@@ -1,0 +1,200 @@
+use std::io;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use gpui::Context;
+
+use super::*;
+
+const AUTO_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
+
+fn should_auto_save(
+    enabled: bool,
+    is_editor: bool,
+    supports_text_buffer: bool,
+    is_dirty: bool,
+    has_path: bool,
+) -> bool {
+    enabled && is_editor && supports_text_buffer && is_dirty && has_path
+}
+
+fn auto_save_epoch_is_current(current_epoch: Option<usize>, task_epoch: usize) -> bool {
+    current_epoch == Some(task_epoch)
+}
+
+impl EditorView {
+    pub(crate) fn active_tab_uses_auto_save(&self) -> bool {
+        let Some(index) = self.active_tab_index() else {
+            return false;
+        };
+        let tab = &self.tabs[index];
+        should_auto_save(
+            self.app_settings.auto_save,
+            tab.kind == TabKind::Editor,
+            tab.file_kind
+                .as_ref()
+                .is_some_and(FileKind::supports_text_buffer),
+            tab.is_dirty,
+            tab.path.is_some(),
+        )
+    }
+
+    pub(crate) fn schedule_auto_save_for_active_tab(&mut self, cx: &mut Context<Self>) {
+        if !self.active_tab_uses_auto_save() {
+            return;
+        }
+        let Some(index) = self.active_tab_index() else {
+            return;
+        };
+        let tab_id = self.tabs[index].id.clone();
+        self.cancel_pending_temp_save_for_tab(&tab_id);
+        let task_tab_id = tab_id.clone();
+        let epoch = self
+            .auto_save_epochs
+            .entry(tab_id.clone())
+            .and_modify(|value| *value = value.wrapping_add(1))
+            .or_insert(1usize)
+            .to_owned();
+
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AUTO_SAVE_DEBOUNCE).await;
+            let payload = this
+                .update(cx, |editor, _cx| {
+                    editor.auto_save_payload_for_tab(&task_tab_id, epoch)
+                })
+                .ok()
+                .flatten();
+            let Some((path, snapshot)) = payload else {
+                return;
+            };
+
+            let write_path = path.clone();
+            let (result, snapshot) = cx
+                .background_executor()
+                .spawn(async move {
+                    let result = file_ops::atomic_write(&write_path, snapshot.text.as_bytes());
+                    (result, snapshot)
+                })
+                .await;
+
+            this.update(cx, |editor, cx| {
+                editor.finish_auto_save(&task_tab_id, epoch, path, snapshot, result, cx);
+            })
+            .ok();
+        });
+        self.auto_save_tasks.insert(tab_id, task);
+    }
+
+    fn auto_save_payload_for_tab(
+        &mut self,
+        tab_id: &str,
+        epoch: usize,
+    ) -> Option<(PathBuf, EditorSnapshot)> {
+        if !auto_save_epoch_is_current(self.auto_save_epochs.get(tab_id).copied(), epoch)
+            || !self.app_settings.auto_save
+        {
+            return None;
+        }
+        let owner = self.pane_id_for_tab(tab_id)?;
+        self.with_pane(owner, |editor| {
+            let index = editor.tabs.iter().position(|tab| tab.id == tab_id)?;
+            let tab = &editor.tabs[index];
+            if !should_auto_save(
+                editor.app_settings.auto_save,
+                tab.kind == TabKind::Editor,
+                tab.file_kind
+                    .as_ref()
+                    .is_some_and(FileKind::supports_text_buffer),
+                tab.is_dirty,
+                tab.path.is_some(),
+            ) {
+                return None;
+            }
+            let path = tab.path.clone()?;
+            let snapshot = if editor.active_tab_id.as_deref() == Some(tab_id) {
+                editor.current_snapshot()
+            } else {
+                tab.snapshot.clone()
+            };
+            Some((path, snapshot))
+        })
+    }
+
+    fn finish_auto_save(
+        &mut self,
+        tab_id: &str,
+        epoch: usize,
+        path: PathBuf,
+        snapshot: EditorSnapshot,
+        result: io::Result<()>,
+        cx: &mut Context<Self>,
+    ) {
+        if !auto_save_epoch_is_current(self.auto_save_epochs.get(tab_id).copied(), epoch) {
+            return;
+        }
+        if let Err(error) = result {
+            let message = format!("{}: {error}", self.t(crate::i18n::TextKey::SaveFailed));
+            self.notify_error(message, cx);
+            return;
+        }
+
+        let Some(owner) = self.pane_id_for_tab(tab_id) else {
+            return;
+        };
+        let saved = self.with_pane(owner, |editor| {
+            let Some(index) = editor.tabs.iter().position(|tab| tab.id == tab_id) else {
+                return false;
+            };
+            if !editor.app_settings.auto_save
+                || !editor.tabs[index].is_dirty
+                || editor.tabs[index].path.as_ref() != Some(&path)
+            {
+                return false;
+            }
+            editor.tabs[index].is_dirty = false;
+            editor.tabs[index].snapshot = snapshot;
+            editor.clear_temp_recovery_for_tab(tab_id);
+            true
+        });
+        if saved {
+            self.auto_save_epochs.remove(tab_id);
+            session_store::persist_session(self);
+            if path == config_paths::settings_file_path() {
+                self.apply_saved_config_file(cx);
+            }
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn cancel_auto_save_for_tab(&mut self, tab_id: &str) {
+        self.auto_save_tasks.remove(tab_id);
+        self.auto_save_epochs.remove(tab_id);
+    }
+
+    pub(crate) fn cancel_all_auto_saves(&mut self) {
+        self.auto_save_tasks.clear();
+        self.auto_save_epochs.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{auto_save_epoch_is_current, should_auto_save};
+
+    #[test]
+    fn auto_save_requires_an_enabled_dirty_saved_text_editor() {
+        assert!(should_auto_save(true, true, true, true, true));
+        assert!(!should_auto_save(false, true, true, true, true));
+        assert!(!should_auto_save(true, false, true, true, true));
+        assert!(!should_auto_save(true, true, false, true, true));
+        assert!(!should_auto_save(true, true, true, false, true));
+        assert!(!should_auto_save(true, true, true, true, false));
+    }
+
+    #[test]
+    fn newer_edits_invalidate_older_auto_save_results() {
+        assert!(auto_save_epoch_is_current(Some(4), 4));
+        assert!(!auto_save_epoch_is_current(Some(5), 4));
+        assert!(!auto_save_epoch_is_current(None, 4));
+    }
+}

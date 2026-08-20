@@ -471,10 +471,9 @@ impl EditorView {
     }
 
     fn selected_character_count(&self) -> usize {
-        let text = self.buffer.text();
         std::iter::once(self.cursor)
             .chain(self.extra_cursors.iter().copied())
-            .map(|cursor| safe_selected_character_count(text, cursor.selection_range()))
+            .map(|cursor| safe_selected_character_count(&self.buffer, cursor.selection_range()))
             .sum()
     }
 
@@ -505,14 +504,18 @@ impl EditorView {
     }
 }
 
-fn safe_selected_character_count(text: &str, range: std::ops::Range<usize>) -> usize {
-    if range.is_empty() || range.start >= text.len() {
+fn safe_selected_character_count(
+    buffer: &crate::buffer::Buffer,
+    range: std::ops::Range<usize>,
+) -> usize {
+    if range.is_empty() || range.start >= buffer.len() {
         return 0;
     }
-    let start = crate::buffer::clamp_grapheme_boundary(text, range.start);
-    let end = crate::buffer::clamp_grapheme_boundary(text, range.end.min(text.len()));
-    text.get(start.min(end)..end)
-        .map_or(0, |selection| selection.chars().count())
+    let start = buffer.clamp_grapheme_offset(range.start);
+    let end = buffer.clamp_grapheme_offset(range.end.min(buffer.len()));
+    buffer
+        .character_offset_for_offset(end)
+        .saturating_sub(buffer.character_offset_for_offset(start.min(end)))
 }
 
 #[derive(Clone, Copy)]
@@ -571,9 +574,9 @@ mod tests {
 
     #[test]
     fn selected_character_count_snaps_invalid_cjk_byte_offsets() {
-        let text = "ab。中文";
-        assert_eq!(safe_selected_character_count(text, 2..5), 1);
-        assert_eq!(safe_selected_character_count(text, 3..8), 2);
-        assert_eq!(safe_selected_character_count(text, 999..1000), 0);
+        let buffer = crate::buffer::Buffer::from_text("ab。中文");
+        assert_eq!(safe_selected_character_count(&buffer, 2..5), 1);
+        assert_eq!(safe_selected_character_count(&buffer, 3..8), 2);
+        assert_eq!(safe_selected_character_count(&buffer, 999..1000), 0);
     }
 }

@@ -1079,6 +1079,10 @@ impl EditorView {
                 .filter(|tab| !tab.is_deleted)
                 .map(|tab| tab.snapshot.clone())
             {
+                self.discard_history_transaction();
+                if let Some(index) = self.active_tab_index() {
+                    self.tabs[index].history.clear_entries();
+                }
                 self.buffer = crate::buffer::Buffer::from_text(&snapshot.text);
                 self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
                 self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());

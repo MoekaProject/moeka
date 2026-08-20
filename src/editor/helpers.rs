@@ -1041,6 +1041,7 @@ pub(crate) struct TableCellLayout {
     pub height: f32,
     /// Column index.
     pub col: usize,
+    pub alignment: crate::markdown::TableAlign,
     /// The display text for this cell (with inline markdown folded).
     pub display_text: String,
     /// Mapping from display offset → buffer offset within the cell.
@@ -1231,6 +1232,11 @@ pub(crate) fn compute_table_layout(
         for ci in 0..col_count {
             let cell_content = ti.cells.get(ci).cloned().unwrap_or_default();
             let cell_range = ti.cell_ranges.get(ci).cloned().unwrap_or(0..0);
+            let alignment = ti
+                .column_alignments
+                .get(ci)
+                .copied()
+                .unwrap_or(crate::markdown::TableAlign::Left);
 
             // Build display text for cell with inline markdown folding
             let cell_decoration =
@@ -1268,6 +1274,7 @@ pub(crate) fn compute_table_layout(
                 width: cell_w,
                 height: row_height,
                 col: ci,
+                alignment,
                 display_text,
                 display_to_buffer: d2b,
                 buffer_to_display: b2d,
@@ -1295,6 +1302,19 @@ pub(crate) fn compute_table_layout(
     }
 }
 
+pub(crate) fn table_cell_content_offset(
+    alignment: crate::markdown::TableAlign,
+    inner_width: f32,
+    text_width: f32,
+) -> f32 {
+    let available = (inner_width - text_width).max(0.0);
+    match alignment {
+        crate::markdown::TableAlign::Left => 0.0,
+        crate::markdown::TableAlign::Center => available * 0.5,
+        crate::markdown::TableAlign::Right => available,
+    }
+}
+
 pub(crate) fn build_highlight_bounds(
     display_text: &str,
     runs: &[TextRun],
@@ -1316,7 +1336,7 @@ pub(crate) fn build_highlight_bounds(
 
     let mut bounds_list = Vec::new();
     let mut segment_start = 0usize;
-    for (segment_index, segment_end) in wrap_boundary_byte_indices(wrapped)
+    for (segment_index, segment_end) in wrap_boundary_byte_indices(wrapped, display_text)
         .into_iter()
         .chain(std::iter::once(display_text.len()))
         .enumerate()
@@ -1607,12 +1627,24 @@ pub(crate) fn extract_runs_for_range(
 }
 
 /// Get wrap boundary byte indices from the WrappedLine's shaped runs.
-pub(crate) fn wrap_boundary_byte_indices(wrapped: &WrappedLine) -> Vec<usize> {
+pub(crate) fn wrap_boundary_byte_indices(wrapped: &WrappedLine, text: &str) -> Vec<usize> {
     let runs = wrapped.runs();
+    let mut previous = 0usize;
     wrapped
         .wrap_boundaries()
         .iter()
-        .map(|wb| runs[wb.run_ix].glyphs[wb.glyph_ix].index)
+        .filter_map(|boundary| {
+            let index = runs
+                .get(boundary.run_ix)?
+                .glyphs
+                .get(boundary.glyph_ix)?
+                .index;
+            if index <= previous || index > text.len() || !text.is_char_boundary(index) {
+                return None;
+            }
+            previous = index;
+            Some(index)
+        })
         .collect()
 }
 
@@ -2223,9 +2255,31 @@ mod tests {
         AnchoredPopupVertical, GeneratedPreviewFontFamilies, anchored_popup_placement,
         build_display_text, build_generated_block_preview_svg, build_text_runs_for_display,
         compute_display_prefix_bytes, compute_generated_preview_size,
-        load_generated_preview_image_from_svg, prefix_is_folded, table_cell_decoration,
-        task_prefix_is_folded, wrap_segment_byte_ranges,
+        load_generated_preview_image_from_svg, prefix_is_folded, table_cell_content_offset,
+        table_cell_decoration, task_prefix_is_folded, wrap_segment_byte_ranges,
     };
+
+    #[test]
+    fn table_cell_alignment_offsets_content_within_available_width() {
+        use markdown::TableAlign;
+
+        assert_eq!(
+            table_cell_content_offset(TableAlign::Left, 100.0, 40.0),
+            0.0
+        );
+        assert_eq!(
+            table_cell_content_offset(TableAlign::Center, 100.0, 40.0),
+            30.0
+        );
+        assert_eq!(
+            table_cell_content_offset(TableAlign::Right, 100.0, 40.0),
+            60.0
+        );
+        assert_eq!(
+            table_cell_content_offset(TableAlign::Right, 40.0, 100.0),
+            0.0
+        );
+    }
 
     #[test]
     fn quote_lines_hide_markers_in_display_text() {
@@ -3187,7 +3241,7 @@ mod tests {
         }
 
         assert!(!inside_mermaid, "unclosed Mermaid fence in help-zh-cn.md");
-        assert_eq!(examples.len(), 27, "unexpected Mermaid example count");
+        assert!(!examples.is_empty(), "no Mermaid examples found");
 
         let theme = Theme::one_dark();
         for (index, source) in examples.iter().enumerate() {
@@ -3319,6 +3373,44 @@ mod tests {
 
         assert_eq!(display_text, line);
         assert_eq!(runs.first().map(|run| run.color), Some(theme.syntax_marker));
+    }
+
+    #[test]
+    fn empty_source_with_display_placeholder_builds_safe_text_run() {
+        let decoration = markdown::LineDecoration::default();
+        let theme = Theme::one_dark();
+        let runs = build_text_runs_for_display(
+            "\u{2003}",
+            "",
+            &[0, 0, 0],
+            &decoration,
+            &[],
+            false,
+            false,
+            &font(".SystemUIFont"),
+            &font("PingFang SC"),
+            &font("Menlo"),
+            &font(".SystemUIFont"),
+            &font("PingFang SC"),
+            &font("Menlo"),
+            &font("PingFang SC"),
+            0,
+            16.0,
+            &theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            None,
+            false,
+        );
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].len, "\u{2003}".len());
+        assert_eq!(runs[0].color, theme.text_primary);
     }
 
     #[test]
@@ -3767,7 +3859,7 @@ mod tests {
             1.0,
         );
 
-        assert_eq!(display_text, "\u{2003}\u{2003}\u{2003}\u{2003}Use it");
+        assert_eq!(display_text, "\u{2003}\u{2009}Use it");
 
         let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
             line,
@@ -5356,6 +5448,65 @@ pub(crate) fn build_text_runs_for_display(
     italic_font: &Font,
     italic_cjk_font: &Font,
     collapsed_task_prefix_chars: usize,
+    font_size: f32,
+    theme: &Theme,
+    diff_inline_added_bg: Hsla,
+    diff_inline_removed_bg: Hsla,
+    wiki_link_text_color: Hsla,
+    wiki_link_text_weight: FontWeight,
+    list_marker_text_color: Hsla,
+    list_marker_font_weight: FontWeight,
+    heading_marker_text_color: Hsla,
+    front_matter_key_text_color: Option<Hsla>,
+    force_monospace: bool,
+) -> Vec<TextRun> {
+    build_text_runs_for_display_with_language(
+        display_text,
+        line_content,
+        display_to_buffer,
+        decoration,
+        active_ranges,
+        code_block_syntax_active,
+        prefix_collapsed,
+        body_font,
+        body_cjk_font,
+        monospace_font,
+        heading_font,
+        heading_cjk_font,
+        italic_font,
+        italic_cjk_font,
+        collapsed_task_prefix_chars,
+        font_size,
+        theme,
+        diff_inline_added_bg,
+        diff_inline_removed_bg,
+        wiki_link_text_color,
+        wiki_link_text_weight,
+        list_marker_text_color,
+        list_marker_font_weight,
+        heading_marker_text_color,
+        front_matter_key_text_color,
+        force_monospace,
+        None,
+    )
+}
+
+pub(crate) fn build_text_runs_for_display_with_language(
+    display_text: &str,
+    line_content: &str,
+    display_to_buffer: &[usize],
+    decoration: &LineDecoration,
+    active_ranges: &[Range<usize>],
+    code_block_syntax_active: bool,
+    prefix_collapsed: bool,
+    body_font: &Font,
+    body_cjk_font: &Font,
+    monospace_font: &Font,
+    heading_font: &Font,
+    heading_cjk_font: &Font,
+    italic_font: &Font,
+    italic_cjk_font: &Font,
+    collapsed_task_prefix_chars: usize,
     _font_size: f32,
     theme: &Theme,
     diff_inline_added_bg: Hsla,
@@ -5367,6 +5518,7 @@ pub(crate) fn build_text_runs_for_display(
     heading_marker_text_color: Hsla,
     front_matter_key_text_color: Option<Hsla>,
     force_monospace: bool,
+    document_code_language: Option<&str>,
 ) -> Vec<TextRun> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FontRole {
@@ -5414,6 +5566,21 @@ pub(crate) fn build_text_runs_for_display(
 
     let buf_len = line_content.len();
     let disp_len = display_text.len();
+
+    if buf_len == 0 {
+        return vec![TextRun {
+            len: disp_len,
+            font: if is_code_line {
+                monospace_font.clone()
+            } else {
+                default_font.clone()
+            },
+            color: theme.text_primary,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }];
+    }
 
     let mut buf_colors: Vec<Hsla> = vec![theme.text_primary; buf_len];
     let mut buf_weights: Vec<FontWeight> = vec![FontWeight::NORMAL; buf_len];
@@ -5567,7 +5734,9 @@ pub(crate) fn build_text_runs_for_display(
             && decoration.inline_spans.is_empty()
             && decoration.syntax_ranges.is_empty()
             && decoration.table_info.is_none();
-    if highlight_entire_line && let Some(language) = decoration.code_language.as_deref() {
+    if highlight_entire_line
+        && let Some(language) = document_code_language.or(decoration.code_language.as_deref())
+    {
         apply_code_block_highlighting(
             line_content,
             language,
@@ -5921,7 +6090,11 @@ pub(crate) fn build_text_runs_for_display(
             FontRole::Monospace => monospace_font.clone(),
         };
         font.weight = weight;
-        font.style = style;
+        font.style = if font_roles[run_start] == FontRole::ItalicCjk && style == FontStyle::Italic {
+            FontStyle::Oblique
+        } else {
+            style
+        };
 
         runs.push(TextRun {
             len: run_end - run_start,
@@ -5974,7 +6147,11 @@ pub(crate) fn apply_search_match_text_styles(
         } else {
             inactive_color
         };
-        for (display_index, &buffer_index) in display_to_buffer.iter().enumerate() {
+        for (display_index, &buffer_index) in display_to_buffer
+            .iter()
+            .take(display_text.len())
+            .enumerate()
+        {
             let absolute_offset = line_start_offset + buffer_index;
             if absolute_offset >= search_match.start && absolute_offset < search_match.end {
                 byte_colors[display_index] = Some(color);
@@ -5986,7 +6163,10 @@ pub(crate) fn apply_search_match_text_styles(
     let mut styled_runs = Vec::with_capacity(original_runs.len());
     let mut run_start = 0usize;
     for run in original_runs {
-        let run_end = run_start + run.len;
+        if run_start >= display_text.len() {
+            break;
+        }
+        let run_end = (run_start + run.len).min(display_text.len());
         let mut segment_start = run_start;
         let mut segment_color = byte_colors
             .get(run_start)

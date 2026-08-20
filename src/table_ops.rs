@@ -282,6 +282,18 @@ pub fn delete_column(lines: &[String], col_idx: usize) -> Vec<String> {
     serialize_table(&model)
 }
 
+pub fn set_column_alignment(
+    lines: &[String],
+    col_idx: usize,
+    alignment: TableAlign,
+) -> Vec<String> {
+    let mut model = parse_table_block(lines);
+    if col_idx < model.col_count {
+        model.aligns[col_idx] = alignment;
+    }
+    serialize_table(&model)
+}
+
 pub fn move_column(lines: &[String], from: usize, to: usize) -> Vec<String> {
     let mut model = parse_table_block(lines);
     if from >= model.col_count || to > model.col_count || from == to {
@@ -436,6 +448,26 @@ mod tests {
             model.aligns,
             vec![TableAlign::Left, TableAlign::Center, TableAlign::Right]
         );
+    }
+
+    #[test]
+    fn test_set_column_alignment() {
+        let input = lines(&["| A | B | C |", "| --- | --- | --- |", "| 1 | 2 | 3 |"]);
+
+        let centered = set_column_alignment(&input, 1, TableAlign::Center);
+        assert_eq!(
+            parse_table_block(&centered).aligns,
+            vec![TableAlign::Left, TableAlign::Center, TableAlign::Left]
+        );
+
+        let right_aligned = set_column_alignment(&centered, 2, TableAlign::Right);
+        assert_eq!(
+            parse_table_block(&right_aligned).aligns,
+            vec![TableAlign::Left, TableAlign::Center, TableAlign::Right]
+        );
+
+        let unchanged = set_column_alignment(&right_aligned, 3, TableAlign::Left);
+        assert_eq!(unchanged, right_aligned);
     }
 
     #[test]

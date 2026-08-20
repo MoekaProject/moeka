@@ -638,6 +638,7 @@ impl EditorView {
     }
 
     pub(crate) fn persist_active_tab_state(&mut self) {
+        self.commit_history_transaction();
         if let Some(index) = self.active_tab_index() {
             if matches!(self.tabs[index].kind, TabKind::Editor | TabKind::Diff) {
                 if self.tabs[index]
@@ -753,6 +754,7 @@ impl EditorView {
     }
 
     pub(crate) fn close_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        self.cancel_auto_save_for_tab(tab_id);
         // The tab may live in another pane (e.g. queued closes after a pane
         // was refocused); move focus there first so the close logic below
         // operates on the owning pane's tab list.

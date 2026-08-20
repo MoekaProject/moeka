@@ -2,6 +2,7 @@ use emojis::get_by_shortcode;
 use pulldown_cmark::{CodeBlockKind, Event, LinkType, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 use std::path::Path;
+use std::sync::OnceLock;
 
 fn cell_display_width(s: &str) -> usize {
     s.chars()
@@ -538,6 +539,11 @@ pub(crate) fn raw_wiki_link_ranges(
 #[derive(Debug, Clone)]
 pub struct LineDecoration {
     pub block_type: BlockType,
+    payload: Option<Box<LineDecorationPayload>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LineDecorationPayload {
     pub block_contexts: Vec<BlockContext>,
     pub callout_kind: Option<CalloutKind>,
     pub inline_spans: Vec<InlineSpan>,
@@ -560,6 +566,54 @@ pub struct LineDecoration {
     pub image_path: Option<String>,
 }
 
+impl LineDecorationPayload {
+    fn is_empty(&self) -> bool {
+        self.block_contexts.is_empty()
+            && self.callout_kind.is_none()
+            && self.inline_spans.is_empty()
+            && self.inline_math_spans.is_empty()
+            && self.protected_ranges.is_empty()
+            && self.diff_added_spans.is_empty()
+            && self.diff_removed_spans.is_empty()
+            && self.syntax_ranges.is_empty()
+            && self.display_replacements.is_empty()
+            && self.block_preview.is_none()
+            && self.highlight_spans.is_empty()
+            && self.superscript_spans.is_empty()
+            && self.subscript_spans.is_empty()
+            && self.wiki_links.is_empty()
+            && self.footnote_references.is_empty()
+            && self.footnote_definition_label.is_none()
+            && self.table_info.is_none()
+            && self.code_language.is_none()
+            && self.image_path.is_none()
+    }
+}
+
+impl std::ops::Deref for LineDecoration {
+    type Target = LineDecorationPayload;
+
+    fn deref(&self) -> &Self::Target {
+        static EMPTY: OnceLock<LineDecorationPayload> = OnceLock::new();
+        self.payload
+            .as_deref()
+            .unwrap_or_else(|| EMPTY.get_or_init(LineDecorationPayload::default))
+    }
+}
+
+impl std::ops::DerefMut for LineDecoration {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.payload
+            .get_or_insert_with(|| Box::new(LineDecorationPayload::default()))
+    }
+}
+
+impl LineDecoration {
+    pub(crate) fn payload_mut(&mut self) -> Option<&mut LineDecorationPayload> {
+        self.payload.as_deref_mut()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TableAlign {
     Left,
@@ -571,6 +625,7 @@ pub enum TableAlign {
 pub struct TableLineInfo {
     pub cells: Vec<String>,
     pub cell_ranges: Vec<Range<usize>>,
+    pub column_alignments: Vec<TableAlign>,
     pub is_header: bool,
     pub is_separator: bool,
     pub is_front_matter: bool,
@@ -583,30 +638,23 @@ impl Default for LineDecoration {
     fn default() -> Self {
         Self {
             block_type: BlockType::Normal,
-            block_contexts: Vec::new(),
-            callout_kind: None,
-            inline_spans: Vec::new(),
-            inline_math_spans: Vec::new(),
-            protected_ranges: Vec::new(),
-            diff_added_spans: Vec::new(),
-            diff_removed_spans: Vec::new(),
-            syntax_ranges: Vec::new(),
-            display_replacements: Vec::new(),
-            block_preview: None,
-            highlight_spans: Vec::new(),
-            superscript_spans: Vec::new(),
-            subscript_spans: Vec::new(),
-            wiki_links: Vec::new(),
-            footnote_references: Vec::new(),
-            footnote_definition_label: None,
-            table_info: None,
-            code_language: None,
-            image_path: None,
+            payload: None,
         }
     }
 }
 
 pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
+    parse_decorations_with_options(text, true)
+}
+
+pub(crate) fn parse_decorations_fragment(text: &str) -> Vec<LineDecoration> {
+    parse_decorations_with_options(text, false)
+}
+
+fn parse_decorations_with_options(
+    text: &str,
+    detect_document_front_matter: bool,
+) -> Vec<LineDecoration> {
     let line_count = text.lines().count().max(1);
     let line_count = if text.ends_with('\n') {
         line_count + 1
@@ -1312,7 +1360,9 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
     assign_fenced_math_block_previews(&mut decorations, text, &line_starts);
     decorate_math_block_previews_as_code_blocks(&mut decorations, text, &line_starts);
 
-    detect_front_matter(&mut decorations, text, &line_starts);
+    if detect_document_front_matter {
+        detect_front_matter(&mut decorations, text, &line_starts);
+    }
     detect_callouts(&mut decorations, text, &line_starts);
 
     // Second pass: detect table lines
@@ -1504,6 +1554,15 @@ pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
         }
     }
 
+    for decoration in &mut decorations {
+        if decoration
+            .payload
+            .as_deref()
+            .is_some_and(LineDecorationPayload::is_empty)
+        {
+            decoration.payload = None;
+        }
+    }
     decorations
 }
 
@@ -1760,6 +1819,7 @@ fn detect_front_matter(decorations: &mut [LineDecoration], text: &str, line_star
         decorations[line].table_info = Some(TableLineInfo {
             cells: cells.clone(),
             cell_ranges: cell_ranges.clone(),
+            column_alignments: vec![TableAlign::Left; column_widths.len()],
             is_header: false,
             is_separator: *is_separator,
             is_front_matter: true,
@@ -2603,6 +2663,22 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
                     .collect();
 
                 let max_cols = all_cells.iter().map(|r| r.len()).max().unwrap_or(0);
+                let column_alignments = all_cells
+                    .get(1)
+                    .map(|cells| {
+                        cells
+                            .iter()
+                            .map(|cell| {
+                                let marker = cell.trim();
+                                match (marker.starts_with(':'), marker.ends_with(':')) {
+                                    (true, true) => TableAlign::Center,
+                                    (false, true) => TableAlign::Right,
+                                    _ => TableAlign::Left,
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 let mut col_widths = vec![0usize; max_cols];
                 for (row_index, row) in all_cells.iter().enumerate() {
                     if row_index == 1 {
@@ -2628,6 +2704,7 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
                             .iter()
                             .map(|(_, range)| range.clone())
                             .collect(),
+                        column_alignments: column_alignments.clone(),
                         is_header: ri == 0,
                         is_separator: is_sep,
                         is_front_matter: false,
@@ -3488,8 +3565,9 @@ mod tests {
 
     use super::{
         BlockContext, BlockPreviewKind, BlockType, CalloutKind, InlineKind, LineDecoration,
-        LocalLinkSyntax, blockquote_prefix_len, parse_decorations, parse_local_link_targets,
-        parse_table_cells_with_ranges, raw_wiki_link_ranges, split_continuation_prefix,
+        LocalLinkSyntax, TableAlign, blockquote_prefix_len, parse_decorations,
+        parse_local_link_targets, parse_table_cells_with_ranges, raw_wiki_link_ranges,
+        split_continuation_prefix,
     };
 
     #[test]
@@ -3757,10 +3835,7 @@ mod tests {
             .display_replacements
             .first()
             .expect("callout display replacement");
-        assert_eq!(
-            replacement.display_text,
-            "\u{2003}\u{2003}\u{2003}\u{2003}WARNING"
-        );
+        assert_eq!(replacement.display_text, "\u{2003}\u{2009}WARNING");
         assert!(
             decorations[0]
                 .inline_spans
@@ -3773,10 +3848,7 @@ mod tests {
             .display_replacements
             .first()
             .expect("titled callout display replacement");
-        assert_eq!(
-            titled_replacement.display_text,
-            "\u{2003}\u{2003}\u{2003}\u{2003}"
-        );
+        assert_eq!(titled_replacement.display_text, "\u{2003}\u{2009}");
     }
 
     #[test]
@@ -4546,6 +4618,22 @@ mod tests {
         assert!(table[..3].iter().all(|decoration| {
             decoration.block_type == BlockType::Table && decoration.table_info.is_some()
         }));
+    }
+
+    #[test]
+    fn table_decorations_preserve_column_alignments() {
+        let table = parse_decorations("| A | B | C |\n| :--- | :---: | ---: |\n| 1 | 2 | 3 |\n");
+        let expected = vec![TableAlign::Left, TableAlign::Center, TableAlign::Right];
+        for decoration in &table[..3] {
+            assert_eq!(
+                decoration
+                    .table_info
+                    .as_ref()
+                    .expect("table line")
+                    .column_alignments,
+                expected
+            );
+        }
     }
 
     #[test]

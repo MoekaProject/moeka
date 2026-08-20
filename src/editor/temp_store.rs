@@ -85,6 +85,9 @@ impl EditorView {
         if !self.tabs[index].is_dirty {
             return;
         }
+        if self.active_tab_uses_auto_save() {
+            return;
+        }
 
         let tab_id = self.tabs[index].id.clone();
         let task_tab_id = tab_id.clone();
@@ -153,8 +156,17 @@ impl EditorView {
     }
 
     pub(crate) fn clear_temp_file_for_tab(&mut self, tab_id: &str) {
+        self.cancel_auto_save_for_tab(tab_id);
+        self.clear_temp_recovery_for_tab(tab_id);
+    }
+
+    pub(crate) fn cancel_pending_temp_save_for_tab(&mut self, tab_id: &str) {
         self.temp_save_tasks.remove(tab_id);
         self.temp_save_epochs.remove(tab_id);
+    }
+
+    pub(crate) fn clear_temp_recovery_for_tab(&mut self, tab_id: &str) {
+        self.cancel_pending_temp_save_for_tab(tab_id);
         if let Some(tab) = self.all_tabs_mut().find(|tab| tab.id == tab_id) {
             if let Some(path) = tab.recovery.temp_path.take() {
                 let _ = delete_temp_file(&path);

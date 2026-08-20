@@ -13,6 +13,26 @@ const LINUX_CSD_INSET: f32 = 10.0;
 #[cfg(target_os = "linux")]
 const LINUX_CSD_RADIUS: f32 = 10.0;
 
+#[cfg(target_os = "macos")]
+fn request_macos_benchmark_frame(window: &Window) {
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() else {
+        return;
+    };
+    unsafe {
+        let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
+        let layer: *mut objc::runtime::Object = msg_send![ns_view, layer];
+        if !layer.is_null() {
+            let () = msg_send![layer, setNeedsDisplay];
+        }
+    }
+}
+
 pub(super) fn clamp_resize_dimension(value: f32, minimum: f32, maximum: f32) -> f32 {
     let lower_bound = minimum.min(maximum);
     let upper_bound = minimum.max(maximum);
@@ -438,6 +458,33 @@ impl EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.initialize_large_document_frame_bench_if_needed();
+        self.schedule_large_markdown_outline_index(cx);
+        self.begin_large_document_frame_bench_prepaint();
+        #[cfg(target_os = "macos")]
+        if self.large_document_frame_bench.is_some() {
+            let window_handle = window.window_handle();
+            cx.spawn(async move |_, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1))
+                    .await;
+                window_handle
+                    .update(cx, |_, window, _| {
+                        window.refresh();
+                        request_macos_benchmark_frame(window);
+                    })
+                    .ok();
+            })
+            .detach();
+        }
+        match self.advance_large_document_frame_bench() {
+            Some(true) => {
+                #[cfg(not(target_os = "macos"))]
+                window.request_animation_frame();
+            }
+            Some(false) => window.defer(cx, |_window, cx| cx.quit()),
+            None => {}
+        }
         #[cfg(target_os = "macos")]
         self.sync_macos_traffic_light_position(window);
         #[cfg(not(target_os = "macos"))]
@@ -1048,6 +1095,7 @@ impl Render for EditorView {
                                         })
                                         .on_drop(cx.listener(
                                             |this, paths: &ExternalPaths, _, cx| {
+                                                this.clear_sidebar_drag_state(cx);
                                                 this.open_external_paths_in_tabs(paths.paths(), cx);
                                             },
                                         ))

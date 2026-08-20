@@ -563,6 +563,69 @@ impl EditorView {
         Ok(())
     }
 
+    fn external_drop_destination(src: &Path, target_dir: &Path) -> Option<PathBuf> {
+        let src = Self::normalize_sidebar_path(src);
+        let target_dir = Self::normalize_sidebar_path(target_dir);
+        if target_dir.starts_with(&src) {
+            return None;
+        }
+        Self::next_available_paste_destination(&src, &target_dir)
+    }
+
+    pub(super) fn sidebar_drop_would_copy(paths: &[PathBuf], target_dir: &Path) -> bool {
+        paths
+            .iter()
+            .any(|src| Self::external_drop_destination(src, target_dir).is_some())
+    }
+
+    fn copy_external_path_into_dir(
+        src: &Path,
+        target_dir: &Path,
+    ) -> std::io::Result<Option<PathBuf>> {
+        let Some(destination) = Self::external_drop_destination(src, target_dir) else {
+            return Ok(None);
+        };
+        Self::copy_path_recursively(src, &destination)?;
+        Ok(Some(destination))
+    }
+
+    pub(crate) fn copy_external_paths_into_dir(
+        &mut self,
+        paths: &[PathBuf],
+        target_dir: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let target_dir = Self::normalize_sidebar_path(&target_dir);
+        let mut copied_paths = Vec::new();
+        for source in paths {
+            match Self::copy_external_path_into_dir(source, &target_dir) {
+                Ok(Some(destination)) => copied_paths.push(destination),
+                Ok(None) => {}
+                Err(error) => {
+                    let message = format!(
+                        "{}: {error}",
+                        self.t(crate::i18n::TextKey::FileOperationFailed)
+                    );
+                    self.notify_error(message, cx);
+                }
+            }
+        }
+
+        self.invalidate_sidebar_items_cache();
+        self.context_menu = None;
+        if let Some(reveal_path) = copied_paths.first().cloned() {
+            self.reveal_path_in_sidebar(reveal_path.clone(), cx);
+            if self.file_list_effective_dir() == target_dir {
+                self.file_list_pending_reveal_path = Some(reveal_path.clone());
+                self.file_list_dirty = true;
+            }
+            self.selected_sidebar_paths = copied_paths.into_iter().collect();
+            self.focused_sidebar_path = Some(reveal_path.clone());
+            self.sidebar_selection_anchor = Some(reveal_path);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn paste_into_dir(&mut self, target_dir: PathBuf, cx: &mut Context<Self>) {
         let Some(clipboard) = self.file_clipboard.clone() else {
             return;
@@ -872,6 +935,39 @@ mod tests {
 
         assert!(EditorView::copy_path_recursively(&source, &destination).is_err());
         assert_eq!(fs::read_to_string(destination).unwrap(), "existing");
+    }
+
+    #[test]
+    fn external_drop_copies_files_and_directories_with_collision_suffixes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("source");
+        let source_dir = source_root.join("docs");
+        let target_dir = temp.path().join("target");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(source_root.join("note.md"), "note").unwrap();
+        fs::write(source_dir.join("guide.md"), "guide").unwrap();
+        fs::write(target_dir.join("note.md"), "existing").unwrap();
+
+        let copied_file =
+            EditorView::copy_external_path_into_dir(&source_root.join("note.md"), &target_dir)
+                .unwrap()
+                .unwrap();
+        let copied_dir = EditorView::copy_external_path_into_dir(&source_dir, &target_dir)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(copied_file.file_name().unwrap(), "note-1.md");
+        assert_eq!(fs::read_to_string(copied_file).unwrap(), "note");
+        assert_eq!(
+            fs::read_to_string(copied_dir.join("guide.md")).unwrap(),
+            "guide"
+        );
+        assert!(
+            EditorView::copy_external_path_into_dir(&source_dir, &source_dir.join("nested"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

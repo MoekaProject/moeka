@@ -258,6 +258,7 @@ mod tests {
             highlight_line_background: true,
             simple_mode: false,
             format_toolbar_visible: true,
+            auto_save: false,
             attachment_location: "current_file".to_string(),
             attachment_folder: "attachments".to_string(),
             terminal_cursor_shape: "bar".to_string(),
