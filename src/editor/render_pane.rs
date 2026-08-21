@@ -55,6 +55,49 @@ fn split_drop_direction(
 const SPLIT_DROP_SNAP_TOLERANCE_PX: f32 = 48.0;
 
 impl EditorView {
+    fn ensure_editor_pane_views(
+        &mut self,
+        pane_id: PaneId,
+        cx: &mut Context<Self>,
+    ) -> (gpui::AnyView, gpui::Entity<super::caret::CaretOverlayView>) {
+        if !self.pane_editor_content_views.contains_key(&pane_id) {
+            let geometry = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let editor = cx.entity().clone();
+            let content_geometry = geometry.clone();
+            let content = cx.new(move |cx| {
+                super::caret::EditorContentView::new(editor, pane_id, content_geometry, cx)
+            });
+            let config = self.caret_animation_config();
+            let overlay = cx.new(move |_| super::caret::CaretOverlayView::new(geometry, config));
+            self.pane_editor_content_views.insert(pane_id, content);
+            self.pane_caret_overlay_views.insert(pane_id, overlay);
+        }
+
+        let content = self
+            .pane_editor_content_views
+            .get(&pane_id)
+            .expect("editor content view inserted")
+            .clone();
+        let overlay = self
+            .pane_caret_overlay_views
+            .get(&pane_id)
+            .expect("caret overlay view inserted")
+            .clone();
+        let cached =
+            gpui::AnyView::from(content).cached(gpui::StyleRefinement::default().size_full());
+        (cached, overlay)
+    }
+
+    fn caret_animation_config(&self) -> super::caret::CaretAnimationConfig {
+        super::caret::CaretAnimationConfig {
+            pause: self.styles.cursor.blink_pause_delay(),
+            visible: self.styles.cursor.blink_visible_duration(),
+            transparent: self.styles.cursor.blink_transparent_duration(),
+            min_opacity: self.styles.cursor.cursor_opacity_min,
+            max_opacity: self.styles.cursor.cursor_opacity_max,
+        }
+    }
+
     /// Resolves which pane (and which split edge, None = merge) a dragged tab
     /// at `position` is targeting. Called from the drag source's
     /// `on_drag_move` handler, which is the only listener guaranteed to see
@@ -442,6 +485,24 @@ impl EditorView {
     ) -> AnyElement {
         let _ = &window;
         let is_focused_pane = pane_id == self.focused_pane_id;
+        let renders_document = !self.active_tab_is_terminal()
+            && !self.active_tab_is_whiteboard()
+            && !self.active_tab_is_image()
+            && !self.active_tab_is_binary();
+        let editor_pane_views = renders_document.then(|| {
+            let (content, overlay) = self.ensure_editor_pane_views(pane_id, cx);
+            let active = is_focused_pane
+                && window.is_window_active()
+                && self.focused_sidebar_path.is_none()
+                && self.focus_handle.is_focused(window)
+                && self.active_tab_supports_text_buffer();
+            let blink_epoch = self.blink_epoch;
+            let config = self.caret_animation_config();
+            overlay.update(cx, |overlay, cx| {
+                overlay.sync(active, blink_epoch, config, cx)
+            });
+            (content, overlay)
+        });
         let editor_pane_width = self
             .pane_bounds
             .get(&pane_id)
@@ -582,11 +643,15 @@ impl EditorView {
                     } else if self.active_tab_is_binary() {
                         self.render_binary_placeholder(cx)
                     } else {
-                        element::EditorElement {
-                            editor: cx.entity().clone(),
-                            pane_id,
-                        }
-                        .into_any_element()
+                        editor_pane_views
+                            .as_ref()
+                            .expect("document pane views initialized")
+                            .0
+                            .clone()
+                            .into_any_element()
+                    })
+                    .when_some(editor_pane_views.map(|(_, overlay)| overlay), |this, overlay| {
+                        this.child(overlay)
                     })
                     .when(self.active_tab_is_whiteboard(), |this| {
                         this.child(self.render_whiteboard_toolbar(cx)).when_some(

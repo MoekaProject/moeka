@@ -945,6 +945,8 @@ impl EditorView {
                 self.panes.remove(index);
             }
             self.pane_bounds.remove(&pane_id);
+            self.pane_editor_content_views.remove(&pane_id);
+            self.pane_caret_overlay_views.remove(&pane_id);
             cx.notify();
         }
     }

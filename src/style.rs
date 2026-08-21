@@ -659,19 +659,14 @@ pub struct CursorStyles {
     pub cursor_color: Hsla,
     pub cursor_width_px: f32,
     pub cursor_height_factor: f32,
-    pub cursor_blink_tick_ms: u64,
     pub cursor_blink_pause_ms: u64,
     pub cursor_blink_visible_ms: u64,
     pub cursor_blink_transparent_ms: u64,
     pub cursor_opacity_min: f32,
     pub cursor_opacity_max: f32,
-    pub cursor_opacity_step: f32,
 }
 
 impl CursorStyles {
-    pub fn blink_tick(&self) -> Duration {
-        Duration::from_millis(self.cursor_blink_tick_ms)
-    }
     pub fn blink_pause_delay(&self) -> Duration {
         Duration::from_millis(self.cursor_blink_pause_ms)
     }
@@ -2059,15 +2054,11 @@ impl Styles {
                 cursor_color: crate::theme::EDITOR_CARET,
                 cursor_width_px: 2.0,
                 cursor_height_factor: 1.0,
-                // Each tick repaints the whole view tree, so stay at one frame
-                // rather than the display-independent 5ms this used to run at.
-                cursor_blink_tick_ms: 16,
                 cursor_blink_pause_ms: 420,
                 cursor_blink_visible_ms: 480,
                 cursor_blink_transparent_ms: 480,
                 cursor_opacity_min: 0.0,
                 cursor_opacity_max: 1.0,
-                cursor_opacity_step: 0.15,
             },
             code_block: CodeBlockStyles {
                 code_block_bg: theme.bg_code,

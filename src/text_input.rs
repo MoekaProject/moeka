@@ -27,6 +27,16 @@ pub enum TextInputEvent {
 
 impl gpui::EventEmitter<TextInputEvent> for TextInput {}
 
+const TEXT_INPUT_CARET_FADE_FRAMES: usize = 4;
+const TEXT_INPUT_CARET_FADE_INTERVAL: Duration = Duration::from_millis(35);
+
+fn text_input_caret_fade_opacity(from: f32, to: f32, frame: usize) -> f32 {
+    let progress =
+        frame.min(TEXT_INPUT_CARET_FADE_FRAMES) as f32 / TEXT_INPUT_CARET_FADE_FRAMES as f32;
+    let eased = progress * progress * (3.0 - 2.0 * progress);
+    from + (to - from) * eased
+}
+
 // ── Actions (scoped to TextInput context) ───────────────────────────
 
 gpui::actions!(
@@ -85,7 +95,6 @@ pub struct TextInput {
     is_selecting: bool,
     // Cursor blink state
     cursor_opacity: f32,
-    cursor_opacity_direction: f32,
     blink_epoch: usize,
     /// The caret is painted only while focused, so the animation must idle
     /// otherwise; several unfocused inputs coexist on the settings page.
@@ -124,7 +133,6 @@ impl TextInput {
             last_lines: Vec::new(),
             is_selecting: false,
             cursor_opacity: 1.0,
-            cursor_opacity_direction: -1.0,
             blink_epoch: 0,
             blink_allowed: false,
             context_menu_position: None,
@@ -332,9 +340,8 @@ impl TextInput {
 
     fn start_blinking(&mut self, cx: &mut Context<Self>) {
         self.cursor_opacity = 1.0;
-        self.cursor_opacity_direction = -1.0;
         let epoch = self.next_blink_epoch();
-        self.schedule_blink(epoch, cx);
+        self.schedule_blink_transition(epoch, Duration::from_millis(200), 1.0, 0.0, cx);
     }
 
     fn pause_blinking(&self, cx: &mut Context<Self>) {
@@ -344,53 +351,57 @@ impl TextInput {
         cx.spawn(async move |this, cx| {
             this.update(cx, |this, cx| {
                 this.cursor_opacity = 1.0;
-                this.cursor_opacity_direction = -1.0;
                 this.blink_epoch = epoch;
                 cx.notify();
-            })
-            .ok();
-            cx.background_executor()
-                .timer(Duration::from_millis(300))
-                .await;
-            this.update(cx, |this, cx| {
-                if this.blink_epoch == epoch {
-                    this.schedule_blink(epoch, cx);
-                }
+                this.schedule_blink_transition(epoch, Duration::from_millis(300), 1.0, 0.0, cx);
             })
             .ok();
         })
         .detach();
     }
 
-    fn schedule_blink(&self, epoch: usize, cx: &mut Context<Self>) {
+    fn schedule_blink_transition(
+        &self,
+        epoch: usize,
+        hold: Duration,
+        from: f32,
+        to: f32,
+        cx: &mut Context<Self>,
+    ) {
         if !self.blink_allowed {
             return;
         }
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(16))
-                .await;
-            this.update(cx, |this, cx| {
-                if this.blink_epoch == epoch {
-                    this.cursor_opacity += 0.15 * this.cursor_opacity_direction;
-                    if this.cursor_opacity <= 0.0 {
-                        this.cursor_opacity = 0.0;
-                        this.cursor_opacity_direction = 1.0;
+            cx.background_executor().timer(hold).await;
+            for frame in 1..=TEXT_INPUT_CARET_FADE_FRAMES {
+                cx.background_executor()
+                    .timer(TEXT_INPUT_CARET_FADE_INTERVAL)
+                    .await;
+                let keep_animating = this
+                    .update(cx, |this, cx| {
+                        if this.blink_epoch != epoch || !this.blink_allowed {
+                            return false;
+                        }
+                        this.cursor_opacity = text_input_caret_fade_opacity(from, to, frame);
                         cx.notify();
-                        // Pause at transparent
-                        this.schedule_blink_pause(epoch, Duration::from_millis(300), cx);
-                        return;
-                    } else if this.cursor_opacity >= 1.0 {
-                        this.cursor_opacity = 1.0;
-                        this.cursor_opacity_direction = -1.0;
-                        cx.notify();
-                        // Pause at visible
-                        this.schedule_blink_pause(epoch, Duration::from_millis(200), cx);
-                        return;
-                    }
-                    cx.notify();
-                    this.schedule_blink(epoch, cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_animating {
+                    return;
                 }
+            }
+
+            this.update(cx, |this, cx| {
+                if this.blink_epoch != epoch || !this.blink_allowed {
+                    return;
+                }
+                let (next_hold, next_target) = if to <= 0.0 {
+                    (Duration::from_millis(300), 1.0)
+                } else {
+                    (Duration::from_millis(200), 0.0)
+                };
+                this.schedule_blink_transition(epoch, next_hold, to, next_target, cx);
             })
             .ok();
         })
@@ -407,21 +418,7 @@ impl TextInput {
         } else {
             self.next_blink_epoch();
             self.cursor_opacity = 1.0;
-            self.cursor_opacity_direction = -1.0;
         }
-    }
-
-    fn schedule_blink_pause(&self, epoch: usize, duration: Duration, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(duration).await;
-            this.update(cx, |this, cx| {
-                if this.blink_epoch == epoch {
-                    this.schedule_blink(epoch, cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
     }
 
     // ── Mouse handlers ──────────────────────────────────────────────

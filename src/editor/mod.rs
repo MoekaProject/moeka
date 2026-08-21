@@ -3,6 +3,7 @@ mod assets;
 mod attachments;
 mod auto_save;
 mod branch_picker;
+mod caret;
 mod chat_panel;
 mod code_commands;
 mod command_palette;
@@ -1630,7 +1631,6 @@ pub struct EditorView {
     pub(crate) whiteboard_text_editor: Option<whiteboard_input::WhiteboardTextEditor>,
     // Cursor blink state
     pub(crate) cursor_opacity: f32,
-    pub(crate) cursor_opacity_direction: f32,
     pub(crate) blink_epoch: usize,
     /// Mirrors the conditions under which the caret is actually painted; the
     /// blink loop repaints the whole view tree, so it must idle otherwise.
@@ -1715,6 +1715,8 @@ pub struct EditorView {
     pub(crate) next_pane_id: PaneId,
     /// Screen bounds of each pane's editor content area from the last paint.
     pub(crate) pane_bounds: HashMap<PaneId, Bounds<Pixels>>,
+    pub(crate) pane_editor_content_views: HashMap<PaneId, gpui::Entity<caret::EditorContentView>>,
+    pub(crate) pane_caret_overlay_views: HashMap<PaneId, gpui::Entity<caret::CaretOverlayView>>,
     /// While a tab drag hovers a pane's content area: the hovered pane and the
     /// split direction (None = merge into that pane).
     pub(crate) tab_drag_split_target: Option<(PaneId, Option<SplitDirection>)>,
@@ -2355,7 +2357,6 @@ impl EditorView {
             whiteboard_bind_targets: Vec::new(),
             whiteboard_text_editor: None,
             cursor_opacity: init_cursor_opacity,
-            cursor_opacity_direction: -1.0,
             blink_epoch: 0,
             cursor_blink_allowed: false,
             marked_range: None,
@@ -2418,6 +2419,8 @@ impl EditorView {
             swapped_pane_id: None,
             next_pane_id: 1,
             pane_bounds: HashMap::new(),
+            pane_editor_content_views: HashMap::new(),
+            pane_caret_overlay_views: HashMap::new(),
             tab_drag_split_target: None,
             context_menu_pane_target: None,
             pane_resize_drag: None,
@@ -5472,55 +5475,37 @@ impl EditorView {
 
     pub(crate) fn start_blinking(&mut self, cx: &mut Context<Self>) {
         self.cursor_opacity = self.styles.cursor.cursor_opacity_max;
-        self.cursor_opacity_direction = -1.0;
         let epoch = self.next_blink_epoch();
-        self.schedule_blink(epoch, cx);
+        self.schedule_blink(epoch, self.styles.cursor.blink_visible_duration(), cx);
     }
 
-    pub(crate) fn schedule_blink(&self, epoch: usize, cx: &mut Context<Self>) {
+    fn next_cursor_blink_opacity(current: f32, min: f32, max: f32) -> f32 {
+        if current > min { min } else { max }
+    }
+
+    pub(crate) fn schedule_blink(&self, epoch: usize, delay: Duration, cx: &mut Context<Self>) {
         if !self.cursor_blink_allowed {
             return;
         }
-        let tick = self.styles.cursor.blink_tick();
-        let opacity_step = self.styles.cursor.cursor_opacity_step;
         let min_opacity = self.styles.cursor.cursor_opacity_min;
         let max_opacity = self.styles.cursor.cursor_opacity_max;
         let transparent_dur = self.styles.cursor.blink_transparent_duration();
         let visible_dur = self.styles.cursor.blink_visible_duration();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(tick).await;
+            cx.background_executor().timer(delay).await;
             this.update(cx, |this, cx| {
-                if this.blink_epoch == epoch {
-                    this.cursor_opacity += opacity_step * this.cursor_opacity_direction;
-                    if this.cursor_opacity <= min_opacity {
-                        this.cursor_opacity = min_opacity;
-                        this.cursor_opacity_direction = 1.0;
-                        cx.notify();
-                        this.schedule_blink_pause(epoch, transparent_dur, cx);
-                        return;
-                    } else if this.cursor_opacity >= max_opacity {
-                        this.cursor_opacity = max_opacity;
-                        this.cursor_opacity_direction = -1.0;
-                        cx.notify();
-                        this.schedule_blink_pause(epoch, visible_dur, cx);
-                        return;
-                    }
-                    cx.notify();
-                    this.schedule_blink(epoch, cx);
+                if this.blink_epoch != epoch || !this.cursor_blink_allowed {
+                    return;
                 }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn schedule_blink_pause(&self, epoch: usize, duration: Duration, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(duration).await;
-            this.update(cx, |this, cx| {
-                if this.blink_epoch == epoch {
-                    this.schedule_blink(epoch, cx);
-                }
+                this.cursor_opacity =
+                    Self::next_cursor_blink_opacity(this.cursor_opacity, min_opacity, max_opacity);
+                let next_delay = if this.cursor_opacity <= min_opacity {
+                    transparent_dur
+                } else {
+                    visible_dur
+                };
+                cx.notify();
+                this.schedule_blink(epoch, next_delay, cx);
             })
             .ok();
         })
@@ -5544,20 +5529,9 @@ impl EditorView {
 
     pub(crate) fn pause_cursor_blinking(&mut self, cx: &mut Context<Self>) {
         self.cursor_opacity = self.styles.cursor.cursor_opacity_max;
-        self.cursor_opacity_direction = -1.0;
         let epoch = self.next_blink_epoch();
         cx.notify();
-        let pause_delay = self.styles.cursor.blink_pause_delay();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(pause_delay).await;
-            this.update(cx, |this, cx| {
-                if this.blink_epoch == epoch {
-                    this.schedule_blink(epoch, cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
+        self.schedule_blink(epoch, self.styles.cursor.blink_pause_delay(), cx);
     }
 
     pub(crate) fn pause_blinking(&mut self, cx: &mut Context<Self>) {
@@ -10537,6 +10511,12 @@ mod tests {
     };
     use crate::buffer::Buffer;
     use crate::markdown::parse_decorations;
+
+    #[test]
+    fn cursor_blink_switches_only_between_opacity_endpoints() {
+        assert_eq!(EditorView::next_cursor_blink_opacity(1.0, 0.0, 1.0), 0.0);
+        assert_eq!(EditorView::next_cursor_blink_opacity(0.0, 0.0, 1.0), 1.0);
+    }
 
     #[test]
     fn fs_rename_events_preserve_old_and_new_paths() {

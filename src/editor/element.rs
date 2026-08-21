@@ -124,6 +124,7 @@ pub(crate) struct EditorElement {
     /// Which pane's document this element renders; its state is swapped into
     /// the root fields for the duration of prepaint/paint.
     pub pane_id: super::PaneId,
+    pub caret_geometry: super::caret::SharedCaretGeometry,
 }
 
 pub(crate) struct EditorPrepaintState {
@@ -132,7 +133,6 @@ pub(crate) struct EditorPrepaintState {
     lines: Vec<PrepaintLine>,
     indent_guide_quads: Vec<PaintQuad>,
     whitespace_dots: Vec<PaintQuad>,
-    cursor_quads: Vec<PaintQuad>,
     selection_quads: Vec<PaintQuad>,
     search_match_quads: Vec<PaintQuad>,
     diff_line_bgs: Vec<PaintQuad>,
@@ -1736,7 +1736,7 @@ impl Element for EditorElement {
         let mut quote_block_bgs = Vec::new();
         let mut code_block_bgs = Vec::new();
         let mut whitespace_dots: Vec<PaintQuad> = Vec::new();
-        let mut cursor_quads: Vec<PaintQuad> = Vec::new();
+        let mut cursor_paints: Vec<super::caret::CaretPaint> = Vec::new();
         let mut marked_underlines = Vec::new();
         let mut link_underlines: Vec<PaintQuad> = Vec::new();
         let mut link_hitboxes: Vec<Hitbox> = Vec::new();
@@ -3153,7 +3153,6 @@ impl Element for EditorElement {
                     && window.is_window_active()
                     && editor.focus_handle.is_focused(window)
                     && editor.focused_sidebar_path.is_none()
-                    && (editor.cursor_opacity > 0.0 || editor.is_selecting)
                 {
                     for &cur_offset in &all_cursor_offsets {
                         if cur_offset < line_start_offset || cur_offset > line_end_offset {
@@ -3205,19 +3204,14 @@ impl Element for EditorElement {
                         let cursor_top = text_line_top
                             + f32::from(cursor_pos.y)
                             + (line_height - cursor_height) / 2.0;
-                        let mut cursor_color = theme.cursor;
-                        cursor_color.a *= if editor.is_selecting {
-                            editor.styles.cursor.cursor_opacity_max
-                        } else {
-                            editor.cursor_opacity
-                        };
-                        cursor_quads.push(fill(
-                            Bounds::new(
+                        cursor_paints.push(super::caret::CaretPaint {
+                            bounds: Bounds::new(
                                 point(px(content_x) + cursor_pos.x, px(cursor_top)),
                                 size(px(editor.styles.cursor.cursor_width_px), px(cursor_height)),
                             ),
-                            cursor_color,
-                        ));
+                            color: theme.cursor,
+                            force_visible: editor.is_selecting,
+                        });
                     }
                 }
 
@@ -4527,8 +4521,6 @@ impl Element for EditorElement {
                                                     && window.is_window_active()
                                                     && editor.focus_handle.is_focused(window)
                                                     && editor.focused_sidebar_path.is_none()
-                                                    && (editor.cursor_opacity > 0.0
-                                                        || editor.is_selecting)
                                                 {
                                                     {
                                                         for &cur_off in &all_cursor_offsets {
@@ -4569,33 +4561,26 @@ impl Element for EditorElement {
                                                                         + (line_height
                                                                             - cursor_height)
                                                                             / 2.0;
-                                                                    let mut cursor_color =
-                                                                        theme.cursor;
-                                                                    cursor_color.a *=
-                                                                        if editor.is_selecting {
-                                                                            editor
-                                                                                .styles
-                                                                                .cursor
-                                                                                .cursor_opacity_max
-                                                                        } else {
-                                                                            editor.cursor_opacity
-                                                                        };
-                                                                    cursor_quads.push(fill(
-                                                                    Bounds::new(
-                                                                        point(
+                                                                    cursor_paints.push(
+                                                                        super::caret::CaretPaint {
+                                                                            bounds: Bounds::new(
+                                                                                point(
                                                                             px(cell_x) + pos.x,
                                                                             px(cursor_top),
                                                                         ),
-                                                                        size(
+                                                                                size(
                                                                             px(editor
                                                                                 .styles
                                                                                 .cursor
                                                                                 .cursor_width_px),
                                                                             px(cursor_height),
                                                                         ),
-                                                                    ),
-                                                                    cursor_color,
-                                                                ));
+                                                                            ),
+                                                                            color: theme.cursor,
+                                                                            force_visible: editor
+                                                                                .is_selecting,
+                                                                        },
+                                                                    );
                                                                 }
                                                             }
                                                         }
@@ -5828,22 +5813,17 @@ impl Element for EditorElement {
                                     let caret_top = row_top
                                         + f32::from(caret_pos.y)
                                         + (r_line_height - caret_height) / 2.0;
-                                    let mut caret_color = theme.cursor;
-                                    caret_color.a *= if editor.phantom_selecting {
-                                        editor.styles.cursor.cursor_opacity_max
-                                    } else {
-                                        editor.cursor_opacity
-                                    };
-                                    cursor_quads.push(fill(
-                                        Bounds::new(
+                                    cursor_paints.push(super::caret::CaretPaint {
+                                        bounds: Bounds::new(
                                             point(px(row_content_x) + caret_pos.x, px(caret_top)),
                                             size(
                                                 px(editor.styles.cursor.cursor_width_px),
                                                 px(caret_height),
                                             ),
                                         ),
-                                        caret_color,
-                                    ));
+                                        color: theme.cursor,
+                                        force_visible: editor.phantom_selecting,
+                                    });
                                 }
                             }
                             if !removed.removed_spans.is_empty() {
@@ -6248,7 +6228,6 @@ impl Element for EditorElement {
                 && window.is_window_active()
                 && editor.focus_handle.is_focused(window)
                 && editor.focused_sidebar_path.is_none()
-                && (editor.cursor_opacity > 0.0 || editor.is_selecting)
             {
                 for &cur_offset in &all_cursor_offsets {
                     if cur_offset < line_start_offset || cur_offset > line_end_offset {
@@ -6301,19 +6280,14 @@ impl Element for EditorElement {
                     let cursor_top = text_line_top
                         + f32::from(cursor_pos.y)
                         + (line_height - cursor_height) / 2.0;
-                    let mut cursor_color = theme.cursor;
-                    cursor_color.a *= if editor.is_selecting {
-                        editor.styles.cursor.cursor_opacity_max
-                    } else {
-                        editor.cursor_opacity
-                    };
-                    cursor_quads.push(fill(
-                        Bounds::new(
+                    cursor_paints.push(super::caret::CaretPaint {
+                        bounds: Bounds::new(
                             point(px(content_x + cursor_indent) + cursor_pos.x, px(cursor_top)),
                             size(px(editor.styles.cursor.cursor_width_px), px(cursor_height)),
                         ),
-                        cursor_color,
-                    ));
+                        color: theme.cursor,
+                        force_visible: editor.is_selecting,
+                    });
                 }
             }
 
@@ -7916,13 +7890,12 @@ impl Element for EditorElement {
             }
         }
 
-        let mut prepaint_state = EditorPrepaintState {
+        let prepaint_state = EditorPrepaintState {
             hitbox,
             link_hitboxes,
             lines,
             indent_guide_quads,
             whitespace_dots,
-            cursor_quads,
             selection_quads,
             search_match_quads,
             diff_line_bgs,
@@ -7956,10 +7929,11 @@ impl Element for EditorElement {
             inline_overlays,
         };
 
-        // Only the focused pane paints a caret.
+        // Only the focused pane publishes caret geometry to its lightweight overlay.
         if self.editor.read(cx).focused_pane_id != self.pane_id {
-            prepaint_state.cursor_quads.clear();
+            cursor_paints.clear();
         }
+        self.caret_geometry.replace(cursor_paints);
         if pane_swapped {
             self.editor
                 .update(cx, |editor, _| editor.end_pane_swap(self.pane_id));
@@ -8301,10 +8275,6 @@ impl Element for EditorElement {
                     cx,
                 )
                 .ok();
-        }
-
-        for cursor in prepaint.cursor_quads.drain(..) {
-            window.paint_quad(cursor);
         }
 
         for quad in prepaint.marked_underlines.drain(..) {

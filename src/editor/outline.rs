@@ -296,11 +296,26 @@ fn outline_rail_row_top(
     progress * tick_travel - tick_inset
 }
 
+fn outline_rail_compact_row_top(
+    row_index: usize,
+    row_count: usize,
+    viewport_height: f32,
+    row_height: f32,
+) -> f32 {
+    let group_height = row_count as f32 * row_height;
+    let group_top = (viewport_height - group_height).max(0.0) / 2.0;
+    group_top + row_index as f32 * row_height
+}
+
 fn outline_rail_slot_count(viewport_height: f32, row_height: f32) -> usize {
     if viewport_height <= 0.0 {
         return 0;
     }
     (viewport_height / row_height.max(1.0)).ceil() as usize
+}
+
+fn outline_rail_render_count(heading_count: usize, viewport_height: f32, row_height: f32) -> usize {
+    heading_count.min(outline_rail_slot_count(viewport_height, row_height))
 }
 
 fn outline_rail_inner_height(viewport_height: f32, vertical_padding: f32) -> f32 {
@@ -395,9 +410,9 @@ mod tests {
         MarkdownOutlineIndex, OutlineHeading, OutlinePanelLayoutCache, OutlinePanelLayoutKey,
         animated_outline_tick_influence, normalized_outline_width_bounds, outline_has_later_peer,
         outline_has_prior_expanded_peer, outline_hover_animation_value,
-        outline_nearest_guide_ranges, outline_rail_inner_height, outline_rail_project_index,
-        outline_rail_row_top, outline_rail_slot_count, outline_tick_influence,
-        outline_wrapped_text,
+        outline_nearest_guide_ranges, outline_rail_compact_row_top, outline_rail_inner_height,
+        outline_rail_project_index, outline_rail_render_count, outline_rail_row_top,
+        outline_rail_slot_count, outline_tick_influence, outline_wrapped_text,
     };
 
     #[test]
@@ -484,6 +499,39 @@ mod tests {
         assert_eq!(slot_count, 134);
         assert_eq!(outline_rail_slot_count(800.0, 6.0), slot_count);
         assert_eq!(outline_rail_slot_count(400.0, 6.0), 67);
+    }
+
+    #[test]
+    fn outline_rail_uses_heading_count_until_capacity_is_exceeded() {
+        assert_eq!(outline_rail_render_count(5, 800.0, 6.0), 5);
+        assert_eq!(outline_rail_render_count(134, 800.0, 6.0), 134);
+        assert_eq!(outline_rail_render_count(135, 800.0, 6.0), 134);
+        assert_eq!(outline_rail_render_count(50_000, 400.0, 6.0), 67);
+        assert_eq!(outline_rail_render_count(5, 0.0, 6.0), 0);
+
+        for index in 0..5 {
+            assert_eq!(outline_rail_project_index(index, 5, 5), index);
+        }
+    }
+
+    #[test]
+    fn outline_rail_keeps_fixed_spacing_when_headings_fit() {
+        let row_height = 6.0;
+        let tick_thickness = 2.0;
+        let viewport_height = 60.0;
+        let row_count = 3;
+        let tick_inset = (row_height - tick_thickness) / 2.0;
+        let centers = (0..row_count)
+            .map(|index| {
+                outline_rail_compact_row_top(index, row_count, viewport_height, row_height)
+                    + tick_inset
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(centers, vec![23.0, 29.0, 35.0]);
+        assert_eq!(centers[1] - centers[0], row_height);
+        assert_eq!(centers[2] - centers[1], row_height);
+        assert_eq!((centers[0] + centers[2] + tick_thickness) / 2.0, 30.0);
     }
 
     #[test]
@@ -1357,7 +1405,8 @@ impl EditorView {
             .outline_rail_previous_active_line
             .get()
             .and_then(|line| outline_heading_index_for_line(&headings, line));
-        let slot_count = outline_rail_slot_count(rail_height, row_height);
+        let slot_count = outline_rail_render_count(row_count, rail_height, row_height);
+        let compressed = row_count > slot_count;
         let active_slot = active_heading_index
             .map(|index| outline_rail_project_index(index, row_count, slot_count));
         let previous_active_slot = previous_active_heading_index
@@ -1386,13 +1435,17 @@ impl EditorView {
             let hover_color = lerp_hsla(resting_color, tick_active_color, hover_ease);
             let base_tick_color = lerp_hsla(hover_color, tick_active_color, tick_influence);
             let row_top = vertical_padding
-                + outline_rail_row_top(
-                    slot_index,
-                    slot_count,
-                    rail_height,
-                    row_height,
-                    tick_thickness,
-                );
+                + if compressed {
+                    outline_rail_row_top(
+                        slot_index,
+                        slot_count,
+                        rail_height,
+                        row_height,
+                        tick_thickness,
+                    )
+                } else {
+                    outline_rail_compact_row_top(slot_index, slot_count, rail_height, row_height)
+                };
             row_elements.push(
                 div()
                     .id(SharedString::from(format!(
