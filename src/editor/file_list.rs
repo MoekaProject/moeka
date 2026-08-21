@@ -740,11 +740,8 @@ impl EditorView {
     }
 
     /// Rendered width of the FileList pane. Follows the sidebar show/hide
-    /// animation proportionally and collapses in workspace-search mode.
+    /// animation proportionally.
     pub(crate) fn file_list_width(&self) -> f32 {
-        if self.workspace_search_visible {
-            return 0.0;
-        }
         if self.sidebar_root.as_os_str().is_empty() {
             return 0.0;
         }

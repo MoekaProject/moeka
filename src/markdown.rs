@@ -707,6 +707,12 @@ fn parse_decorations_with_options(
     if let Some(unpaired) = open_tilde_fence {
         parser_source.replace_range(unpaired, "text");
     }
+    // While a fence is still being typed it has no closer yet; neutralizing the
+    // marker (same byte length, so offsets stay valid) keeps the rest of the
+    // document from turning into code until the closing fence exists.
+    if let Some(span) = unclosed_code_fence_marker_span(text) {
+        parser_source.replace_range(span.clone(), &"x".repeat(span.len()));
+    }
     let parser = Parser::new_ext(&parser_source, opts);
 
     let mut in_code_block = false;
@@ -1032,22 +1038,30 @@ fn parse_decorations_with_options(
                     let marker_start = quote_prefix_len + leading_ws;
                     let trimmed = &after_quote[leading_ws..];
                     let ordered_prefix_len = ordered_list_prefix_len(trimmed);
-                    if ordered_prefix_len > 0
-                        || current_list_context == Some(BlockContext::OrderedList)
-                    {
+                    let unordered_prefix_len = unordered_list_prefix_len(trimmed);
+                    // A nested list that opens on the same physical line (`- 1.`)
+                    // fires a second Item event for that line; the outermost
+                    // marker owns the line prefix, so don't retype it.
+                    let marker_already_recorded = decorations[line]
+                        .syntax_ranges
+                        .iter()
+                        .any(|syntax_range| syntax_range.range.start == marker_start);
+                    if marker_already_recorded {
+                        // Keep the classification the outer marker established.
+                    } else if ordered_prefix_len > 0 {
                         decorations[line].block_type = BlockType::OrderedList;
-                        if ordered_prefix_len > 0 {
-                            decorations[line].syntax_ranges.push(SyntaxRange {
-                                range: marker_start..marker_start + ordered_prefix_len,
-                                trigger_range: marker_start..marker_start + ordered_prefix_len,
-                            });
-                        }
-                    } else if let unordered_prefix_len @ 1.. = unordered_list_prefix_len(trimmed) {
+                        decorations[line].syntax_ranges.push(SyntaxRange {
+                            range: marker_start..marker_start + ordered_prefix_len,
+                            trigger_range: marker_start..marker_start + ordered_prefix_len,
+                        });
+                    } else if unordered_prefix_len > 0 {
                         decorations[line].block_type = BlockType::UnorderedList;
                         decorations[line].syntax_ranges.push(SyntaxRange {
                             range: marker_start..marker_start + unordered_prefix_len,
                             trigger_range: marker_start..marker_start + unordered_prefix_len,
                         });
+                    } else if current_list_context == Some(BlockContext::OrderedList) {
+                        decorations[line].block_type = BlockType::OrderedList;
                     } else if current_list_context == Some(BlockContext::UnorderedList) {
                         decorations[line].block_type = BlockType::UnorderedList;
                     }
@@ -1266,7 +1280,6 @@ fn parse_decorations_with_options(
             Event::Code(_) => {
                 add_inline_code_span(
                     &mut decorations,
-                    &line_starts,
                     &offset_to_line_col,
                     source_range.start,
                     source_range.end,
@@ -2349,7 +2362,6 @@ fn code_span_delimiter_len(source: &str) -> usize {
 
 fn add_inline_code_span(
     decorations: &mut [LineDecoration],
-    line_starts: &[usize],
     offset_to_line_col: &dyn Fn(usize) -> (usize, usize),
     start: usize,
     end: usize,
@@ -2367,56 +2379,29 @@ fn add_inline_code_span(
         return;
     }
 
-    if start_line == end_line {
-        let trigger = start_col..end_col;
-        if start_col + marker_len <= end_col.saturating_sub(marker_len) {
-            decorations[start_line].inline_spans.push(InlineSpan {
-                kind: InlineKind::InlineCode,
-                range: start_col + marker_len..end_col.saturating_sub(marker_len),
-                target: None,
-            });
-        }
-        decorations[start_line].syntax_ranges.push(SyntaxRange {
-            range: start_col..start_col + marker_len,
-            trigger_range: trigger.clone(),
-        });
-        decorations[start_line].syntax_ranges.push(SyntaxRange {
-            range: end_col.saturating_sub(marker_len)..end_col,
-            trigger_range: trigger,
-        });
+    // Deliberate deviation from CommonMark: a code span must close on the line
+    // it opened on. While editing, a stray backtick run would otherwise pair
+    // with an unrelated run further down and swallow everything between them.
+    if start_line != end_line {
         return;
     }
 
-    for line in start_line..=end_line {
-        let line_content = get_line_content(text, line_starts, line, decorations.len());
-        let line_len = line_content.len();
-        let range = if line == start_line {
-            start_col + marker_len..line_len
-        } else if line == end_line {
-            0..end_col.saturating_sub(marker_len)
-        } else {
-            0..line_len
-        };
-        if range.start < range.end {
-            decorations[line].inline_spans.push(InlineSpan {
-                kind: InlineKind::InlineCode,
-                range,
-                target: None,
-            });
-        }
-    }
-
-    let start_line_len = get_line_content(text, line_starts, start_line, decorations.len()).len();
-    decorations[start_line].syntax_ranges.push(SyntaxRange {
-        range: start_col..(start_col + marker_len).min(start_line_len),
-        trigger_range: start_col..start_line_len,
-    });
-    if end_col >= marker_len {
-        decorations[end_line].syntax_ranges.push(SyntaxRange {
-            range: end_col - marker_len..end_col,
-            trigger_range: 0..end_col,
+    let trigger = start_col..end_col;
+    if start_col + marker_len <= end_col.saturating_sub(marker_len) {
+        decorations[start_line].inline_spans.push(InlineSpan {
+            kind: InlineKind::InlineCode,
+            range: start_col + marker_len..end_col.saturating_sub(marker_len),
+            target: None,
         });
     }
+    decorations[start_line].syntax_ranges.push(SyntaxRange {
+        range: start_col..start_col + marker_len,
+        trigger_range: trigger.clone(),
+    });
+    decorations[start_line].syntax_ranges.push(SyntaxRange {
+        range: end_col.saturating_sub(marker_len)..end_col,
+        trigger_range: trigger,
+    });
 }
 
 pub fn ordered_list_prefix_len(content: &str) -> usize {
@@ -2502,6 +2487,97 @@ fn has_closing_backtick_run(text: &str, mut start: usize, expected: usize) -> bo
         start = run_start + run_len;
     }
     false
+}
+
+/// Marker character and run length when `content` opens a fenced code block.
+fn code_fence_opener(content: &str) -> Option<(char, usize)> {
+    let leading = content.len() - content.trim_start_matches(' ').len();
+    if leading > 3 {
+        return None;
+    }
+    let rest = &content[leading..];
+    let marker = rest.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+    let run = rest.chars().take_while(|ch| *ch == marker).count();
+    if run < 3 {
+        return None;
+    }
+    // A backtick fence's info string may not itself contain backticks.
+    if marker == '`' && rest[run..].contains('`') {
+        return None;
+    }
+    Some((marker, run))
+}
+
+fn is_code_fence_closer(content: &str, marker: char, open_run: usize) -> bool {
+    let leading = content.len() - content.trim_start_matches(' ').len();
+    if leading > 3 {
+        return false;
+    }
+    let rest = &content[leading..];
+    let run = rest.chars().take_while(|ch| *ch == marker).count();
+    run >= open_run && rest[run..].trim().is_empty()
+}
+
+/// Byte range of the marker run of a fence that is never closed.
+fn unclosed_code_fence_marker_span(text: &str) -> Option<Range<usize>> {
+    let mut open: Option<(char, usize, usize)> = None;
+    let mut offset = 0usize;
+
+    for line in text.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        match open {
+            Some((marker, run, _)) => {
+                if is_code_fence_closer(content, marker, run) {
+                    open = None;
+                }
+            }
+            None => {
+                if let Some((marker, run)) = code_fence_opener(content) {
+                    let leading = content.len() - content.trim_start_matches(' ').len();
+                    open = Some((marker, run, offset + leading));
+                }
+            }
+        }
+        offset += line.len();
+    }
+
+    open.map(|(_, run, marker_offset)| marker_offset..marker_offset + run)
+}
+
+/// The closing marker a fence opened on `line` still needs, or `None` when that
+/// line does not open a fence or the fence is already closed.
+pub fn unclosed_code_fence_marker(text: &str, line: usize) -> Option<String> {
+    let mut open: Option<(char, usize)> = None;
+    let mut opened_at = 0usize;
+
+    for (index, content) in text.lines().enumerate() {
+        match open {
+            Some((marker, run)) => {
+                if is_code_fence_closer(content, marker, run) {
+                    if opened_at == line {
+                        return None;
+                    }
+                    open = None;
+                }
+            }
+            None => {
+                if let Some((marker, run)) = code_fence_opener(content) {
+                    open = Some((marker, run));
+                    opened_at = index;
+                }
+            }
+        }
+    }
+
+    match open {
+        Some((marker, run)) if opened_at == line => {
+            Some(std::iter::repeat_n(marker, run).collect())
+        }
+        _ => None,
+    }
 }
 
 fn table_pipe_offsets(content: &str) -> Vec<usize> {
@@ -3567,7 +3643,7 @@ mod tests {
         BlockContext, BlockPreviewKind, BlockType, CalloutKind, InlineKind, LineDecoration,
         LocalLinkSyntax, TableAlign, blockquote_prefix_len, parse_decorations,
         parse_local_link_targets, parse_table_cells_with_ranges, raw_wiki_link_ranges,
-        split_continuation_prefix,
+        split_continuation_prefix, unclosed_code_fence_marker,
     };
 
     #[test]
@@ -4053,6 +4129,21 @@ mod tests {
 
     #[test]
     fn commonmark_spec_decoration_feature_scan() {
+        fn source_has_single_line_code_span(markdown: &str) -> bool {
+            markdown.lines().any(|line| {
+                let mut index = 0;
+                while let Some(relative) = line[index..].find('`') {
+                    let run_start = index + relative;
+                    let run_len = super::backtick_run_len(line, run_start);
+                    if super::has_closing_backtick_run(line, run_start + run_len, run_len) {
+                        return true;
+                    }
+                    index = run_start + run_len;
+                }
+                false
+            })
+        }
+
         let mut missing = Vec::new();
 
         for example in commonmark_examples() {
@@ -4128,7 +4219,11 @@ mod tests {
 
             record("heading", has_heading, expects_heading);
             record("thematic break", has_hr, expects_hr);
-            record("code block", has_code_block, expects_code_block);
+            // An unclosed fence stays plain text here so it can be typed, which
+            // the spec's own unterminated-fence examples do not expect.
+            if super::unclosed_code_fence_marker_span(&example.markdown).is_none() {
+                record("code block", has_code_block, expects_code_block);
+            }
             record("blockquote context", has_blockquote, expects_blockquote);
             record(
                 "ordered list context",
@@ -4151,7 +4246,13 @@ mod tests {
                     record("strong", has_strong, expects_strong);
                 }
                 if expects_code_span || !image_description_can_contain_inlines {
-                    record("code span", has_code_span, expects_code_span);
+                    // Code spans are deliberately single-line here, so spec
+                    // examples that only close on a later line are exempt.
+                    if expects_code_span && !source_has_single_line_code_span(&example.markdown) {
+                        // Deliberate deviation; nothing to record.
+                    } else {
+                        record("code span", has_code_span, expects_code_span);
+                    }
                 }
                 if expects_link || !image_description_can_contain_inlines {
                     record("link", has_link, expects_link);
@@ -4173,7 +4274,7 @@ mod tests {
     }
 
     #[test]
-    fn commonmark_code_spans_support_multi_backtick_and_multiline_sources() {
+    fn commonmark_code_spans_support_multi_backtick_delimiters() {
         let double_tick = commonmark_example(329);
         assert_eq!(double_tick.section, "Code spans");
         let decorations = parse_decorations(&double_tick.markdown);
@@ -4195,21 +4296,37 @@ mod tests {
                 .iter()
                 .any(|range| range.range == (13..15))
         );
+    }
 
+    #[test]
+    fn code_spans_do_not_pair_across_lines() {
+        // Editing deviation from CommonMark example 337: an unclosed run stays
+        // literal instead of swallowing the following lines.
         let multiline = commonmark_example(337);
         assert_eq!(multiline.section, "Code spans");
         let decorations = parse_decorations(&multiline.markdown);
+        for decoration in &decorations {
+            assert!(
+                !decoration
+                    .inline_spans
+                    .iter()
+                    .any(|span| span.kind == InlineKind::InlineCode)
+            );
+        }
+
+        let stray = parse_decorations("use ``double`` here\ntext\nand `` again");
         assert!(
-            decorations[0]
+            stray[0]
                 .inline_spans
                 .iter()
-                .any(|span| span.kind == InlineKind::InlineCode && span.range == (1..11))
+                .any(|span| span.kind == InlineKind::InlineCode && span.range == (6..12))
         );
+        assert!(stray[1].inline_spans.is_empty());
         assert!(
-            decorations[1]
+            !stray[2]
                 .inline_spans
                 .iter()
-                .any(|span| span.kind == InlineKind::InlineCode && span.range == (0..3))
+                .any(|span| span.kind == InlineKind::InlineCode)
         );
     }
 
@@ -4495,10 +4612,22 @@ mod tests {
             parse_decorations("- [ ] ")[0].block_type,
             BlockType::TaskList(false)
         );
+    }
+
+    #[test]
+    fn a_fence_only_becomes_a_code_block_once_it_is_closed() {
+        // Typing ``` should not immediately restyle the line (or swallow the
+        // rest of the document) before the closing fence exists.
+        assert_eq!(parse_decorations("```\n")[0].block_type, BlockType::Normal);
         assert_eq!(
-            parse_decorations("```\n")[0].block_type,
-            BlockType::CodeBlockFence
+            parse_decorations("```rust\n")[0].block_type,
+            BlockType::Normal
         );
+
+        let closed = parse_decorations("```\ncode\n```\n");
+        assert_eq!(closed[0].block_type, BlockType::CodeBlockFence);
+        assert_eq!(closed[1].block_type, BlockType::CodeBlock);
+        assert_eq!(closed[2].block_type, BlockType::CodeBlockFence);
     }
 
     #[test]
@@ -4520,11 +4649,51 @@ mod tests {
     }
 
     #[test]
-    fn heading_marker_inside_unclosed_fence_stays_code() {
-        let decorations = parse_decorations("```rust\n# not a heading\n");
+    fn unclosed_code_fence_marker_reports_only_the_open_fence() {
+        assert_eq!(
+            unclosed_code_fence_marker("```rust", 0).as_deref(),
+            Some("```")
+        );
+        assert_eq!(
+            unclosed_code_fence_marker("text\n````\nbody", 1).as_deref(),
+            Some("````")
+        );
+        assert_eq!(unclosed_code_fence_marker("```\nbody\n```", 0), None);
+        assert_eq!(unclosed_code_fence_marker("```\nbody\n```", 2), None);
+        // Inside an open fence a second marker line is body text, not an opener.
+        assert_eq!(unclosed_code_fence_marker("```\n```js", 1), None);
+        assert_eq!(unclosed_code_fence_marker("`` inline", 0), None);
+        assert_eq!(unclosed_code_fence_marker("```a`b", 0), None);
+    }
 
-        assert_eq!(decorations[0].block_type, BlockType::CodeBlockFence);
-        assert_eq!(decorations[1].block_type, BlockType::CodeBlock);
+    #[test]
+    fn unordered_marker_owns_the_line_when_an_ordered_list_starts_on_it() {
+        for source in ["- 1.", "- 1. item", "* 2) nested", "  - 3. deep"] {
+            let decoration = &parse_decorations(source)[0];
+            assert_eq!(
+                decoration.block_type,
+                BlockType::UnorderedList,
+                "{source}"
+            );
+            let leading_ws = source.len() - source.trim_start_matches(' ').len();
+            assert_eq!(
+                decoration
+                    .syntax_ranges
+                    .iter()
+                    .map(|range| range.range.clone())
+                    .collect::<Vec<_>>(),
+                vec![leading_ws..leading_ws + 2],
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unclosed_fence_leaves_the_following_lines_alone() {
+        let decorations = parse_decorations("```rust\n# not swallowed\n");
+
+        assert_eq!(decorations[0].block_type, BlockType::Normal);
+        assert_eq!(decorations[1].block_type, BlockType::Heading(1));
     }
 
     #[test]

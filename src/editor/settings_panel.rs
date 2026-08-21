@@ -13,12 +13,20 @@ use crate::i18n::{
 };
 use crate::theme::{EditorThemeMode, ThemeKind};
 
+use super::app_settings::ThemeMode;
 use super::{
     APP_VERSION, ChatAgentCli, DOC_SVG_PATH, EditorView, FILE_INFO_SECTION_INFO_SVG_PATH,
-    FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, MermaidTheme, SITE_SVG_PATH, SearchMenuConfig,
-    SearchMenuRow, THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape,
-    attachments, tooltip,
+    FLOWER_SVG_PATH, GIT_SYNC_SVG_PATH, MOUNTAIN_SVG_PATH, MermaidTheme, SITE_SVG_PATH,
+    SearchMenuConfig, SearchMenuRow, THEME_AUTO_MINI_SVG_PATH, THEME_DARK_MINI_SVG_PATH,
+    THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape, attachments, tooltip,
 };
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThemeAppearanceChoice {
+    Auto,
+    Light,
+    Dark,
+}
 
 // ── Font picker state ───────────────────────────────────────────────
 
@@ -179,6 +187,7 @@ impl EditorView {
                                     .items_center()
                                     .justify_end()
                                     .gap(px(self.scaled(sps.settings_header_actions_gap_px)))
+                                    .child(self.render_settings_update_button(cx))
                                     .child(self.render_settings_config_button(cx))
                                     .child(self.render_settings_help_button(cx))
                                     .child(self.render_settings_site_button(cx)),
@@ -189,6 +198,60 @@ impl EditorView {
                     .child(self.render_format_section(cx))
                     .child(self.render_terminal_settings_section(cx))
                     .child(self.render_attachment_settings_section(cx)),
+            )
+            .into_any_element()
+    }
+
+    fn render_settings_update_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let sps = &self.styles.settings_panel;
+        let height = self.scaled(sps.settings_site_button_height_px);
+        let icon_size = self.scaled(sps.settings_site_button_icon_size_px);
+        let checking = self.update_check_in_progress();
+        let label = if checking {
+            crate::i18n::checking_updates_label(self.ui_language)
+        } else {
+            crate::i18n::check_updates_label(self.ui_language)
+        };
+
+        div()
+            .id("settings-update-button")
+            .h(px(height))
+            .max_w(px(self.scaled(sps.settings_header_button_max_width_px)))
+            .px(px(self.scaled(sps.settings_site_button_padding_x_px)))
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(sps.settings_site_button_gap_px)))
+            .rounded(px(self.scaled(sps.settings_site_button_radius_px)))
+            .border(px(sps.settings_site_button_border_width_px))
+            .border_color(sps.settings_site_button_border_color)
+            .bg(sps.settings_site_button_bg)
+            .text_size(px(self.scaled(sps.settings_site_button_font_size_px)))
+            .text_color(sps.settings_site_button_text_color)
+            .cursor(CursorStyle::Arrow)
+            .when(checking, |this| this.opacity(0.6))
+            .hover({
+                let hover_bg = sps.settings_site_button_hover_bg;
+                move |style| style.bg(hover_bg)
+            })
+            .child(
+                svg()
+                    .path(GIT_SYNC_SVG_PATH)
+                    .size(px(icon_size))
+                    .text_color(sps.settings_site_button_icon_color),
+            )
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .truncate()
+                    .whitespace_nowrap()
+                    .child(label),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.start_manual_update_check(cx);
+                }),
             )
             .into_any_element()
     }
@@ -593,6 +656,16 @@ impl EditorView {
             .flex_col()
             .gap(px(self.scaled(8.0)))
             .child(self.render_attachment_settings_row(
+                crate::i18n::settings_label(self.ui_language, "auto_save"),
+                self.render_boolean_settings_checkbox(
+                    "settings-auto-save",
+                    self.app_settings.auto_save,
+                    SettingsOptionAction::AutoSave(false),
+                    SettingsOptionAction::AutoSave(true),
+                    cx,
+                ),
+            ))
+            .child(self.render_attachment_settings_row(
                 crate::i18n::settings_label(self.ui_language, "show_whitespace"),
                 self.render_boolean_settings_checkbox(
                     "settings-show-whitespace",
@@ -609,16 +682,6 @@ impl EditorView {
                     self.app_settings.format_toolbar_visible,
                     SettingsOptionAction::FormatToolbar(false),
                     SettingsOptionAction::FormatToolbar(true),
-                    cx,
-                ),
-            ))
-            .child(self.render_attachment_settings_row(
-                crate::i18n::settings_label(self.ui_language, "auto_save"),
-                self.render_boolean_settings_checkbox(
-                    "settings-auto-save",
-                    self.app_settings.auto_save,
-                    SettingsOptionAction::AutoSave(false),
-                    SettingsOptionAction::AutoSave(true),
                     cx,
                 ),
             ))
@@ -939,9 +1002,107 @@ impl EditorView {
 
     // ── Theme section ───────────────────────────────────────────
 
+    fn render_theme_appearance_segment(
+        &self,
+        choice: ThemeAppearanceChoice,
+        active: bool,
+        first: bool,
+        last: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let styles = &self.styles.settings_panel;
+        let text_secondary = styles.settings_option_button_text_color;
+        let hover_bg = styles.settings_option_button_hover_bg;
+        let active_bg = styles.settings_option_button_active_bg;
+        let active_text = styles.settings_option_button_active_text_color;
+        let icon_size = self.scaled(styles.settings_theme_toggle_icon_size_px);
+        let height = self.scaled(styles.settings_theme_toggle_height_px);
+        let padding_x = self.scaled(styles.settings_theme_toggle_padding_x_px);
+        let gap = self.scaled(styles.settings_theme_toggle_gap_px);
+        let radius = self.scaled(styles.settings_theme_toggle_radius_px);
+        let border_width = self.scaled(styles.settings_theme_toggle_border_width_px);
+        let font_size = self.scaled(styles.settings_theme_option_font_size_px);
+        let border_color = styles.settings_theme_option_border_color;
+        let (id, icon, label) = match choice {
+            ThemeAppearanceChoice::Auto => (
+                "theme-toggle-auto",
+                THEME_AUTO_MINI_SVG_PATH,
+                crate::i18n::theme_auto_label(self.ui_language),
+            ),
+            ThemeAppearanceChoice::Light => (
+                "theme-toggle-light",
+                THEME_LIGHT_MINI_SVG_PATH,
+                self.t(TextKey::ThemeLight),
+            ),
+            ThemeAppearanceChoice::Dark => (
+                "theme-toggle-dark",
+                THEME_DARK_MINI_SVG_PATH,
+                self.t(TextKey::ThemeDark),
+            ),
+        };
+
+        div()
+            .id(id)
+            .h(px(height))
+            .px(px(padding_x))
+            .flex()
+            .items_center()
+            .gap(px(gap))
+            .text_size(px(font_size))
+            .border_t(px(border_width))
+            .border_b(px(border_width))
+            .border_color(border_color)
+            .when(first, |this| {
+                this.rounded_l(px(radius)).border_l(px(border_width))
+            })
+            .when(last, |this| {
+                this.rounded_r(px(radius)).border_r(px(border_width))
+            })
+            .bg(styles.settings_option_button_bg)
+            .cursor(CursorStyle::Arrow)
+            .when(active, |this| this.bg(active_bg).text_color(active_text))
+            .when(!active, |this| {
+                this.text_color(text_secondary)
+                    .hover(move |s| s.bg(hover_bg))
+            })
+            .child(svg().path(icon).size(px(icon_size)).text_color(if active {
+                active_text
+            } else {
+                text_secondary
+            }))
+            .child(label.to_string())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.select_theme_appearance(choice, window, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn select_theme_appearance(
+        &mut self,
+        choice: ThemeAppearanceChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match choice {
+            ThemeAppearanceChoice::Auto => self.set_theme_mode(ThemeMode::Auto, window, cx),
+            ThemeAppearanceChoice::Light | ThemeAppearanceChoice::Dark => {
+                let dark = choice == ThemeAppearanceChoice::Dark;
+                self.set_theme_mode(ThemeMode::Manual, window, cx);
+                if dark != self.theme_kind.is_dark() {
+                    let kind = self.theme_kind_for_appearance(dark);
+                    self.set_theme(kind, cx);
+                }
+            }
+        }
+    }
+
     fn render_theme_section(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.theme_kind;
         let is_dark_mode = self.settings_theme_dark_mode;
+        let theme_mode = self.app_settings.theme_mode();
         let editor_theme_mode = self.editor_theme_mode;
         let settings_styles = &self.styles.settings_panel;
         let themes = if is_dark_mode {
@@ -949,17 +1110,8 @@ impl EditorView {
         } else {
             ThemeKind::light_themes()
         };
-        let text_secondary = settings_styles.settings_option_button_text_color;
-        let hover_bg = settings_styles.settings_option_button_hover_bg;
-        let toggle_active_bg = settings_styles.settings_option_button_active_bg;
-        let toggle_active_text = settings_styles.settings_option_button_active_text_color;
         let icon_size = self.scaled(settings_styles.settings_theme_toggle_icon_size_px);
-        let toggle_height = self.scaled(settings_styles.settings_theme_toggle_height_px);
-        let toggle_padding_x = self.scaled(settings_styles.settings_theme_toggle_padding_x_px);
         let toggle_gap = self.scaled(settings_styles.settings_theme_toggle_gap_px);
-        let toggle_radius = self.scaled(settings_styles.settings_theme_toggle_radius_px);
-        let toggle_border_width =
-            self.scaled(settings_styles.settings_theme_toggle_border_width_px);
         let option_height = self.scaled(settings_styles.settings_theme_option_height_px);
         let option_padding_x = self.scaled(settings_styles.settings_theme_option_padding_x_px);
         let option_radius = self.scaled(settings_styles.settings_theme_option_radius_px);
@@ -1010,104 +1162,27 @@ impl EditorView {
                             .flex()
                             .flex_row()
                             .gap(px(0.0))
-                            .child(
-                                div()
-                                    .id("theme-toggle-light")
-                                    .rounded_l(px(toggle_radius))
-                                    .border(px(toggle_border_width))
-                                    .border_color(option_border_color)
-                                    .h(px(toggle_height))
-                                    .px(px(toggle_padding_x))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(toggle_gap))
-                                    .text_size(px(option_font_size))
-                                    .bg(settings_styles.settings_option_button_bg)
-                                    .cursor(CursorStyle::Arrow)
-                                    .when(!is_dark_mode, |this| {
-                                        this.bg(toggle_active_bg).text_color(toggle_active_text)
-                                    })
-                                    .when(is_dark_mode, |this| {
-                                        this.text_color(text_secondary)
-                                            .hover(move |s| s.bg(hover_bg))
-                                    })
-                                    .child(
-                                        svg()
-                                            .path(THEME_LIGHT_MINI_SVG_PATH)
-                                            .size(px(icon_size))
-                                            .text_color(if !is_dark_mode {
-                                                toggle_active_text
-                                            } else {
-                                                text_secondary
-                                            }),
-                                    )
-                                    .child(self.t(TextKey::ThemeLight))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            if this.settings_theme_dark_mode {
-                                                let light_theme = this
-                                                    .theme_kind
-                                                    .moeka_companion()
-                                                    .filter(|kind| !kind.is_dark())
-                                                    .unwrap_or_else(|| {
-                                                        this.app_settings.light_theme_kind()
-                                                    });
-                                                this.set_theme(light_theme, cx);
-                                            }
-                                        }),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .id("theme-toggle-dark")
-                                    .rounded_r(px(toggle_radius))
-                                    .border_t(px(toggle_border_width))
-                                    .border_r(px(toggle_border_width))
-                                    .border_b(px(toggle_border_width))
-                                    .border_color(option_border_color)
-                                    .h(px(toggle_height))
-                                    .px(px(toggle_padding_x))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(toggle_gap))
-                                    .text_size(px(option_font_size))
-                                    .bg(settings_styles.settings_option_button_bg)
-                                    .cursor(CursorStyle::Arrow)
-                                    .when(is_dark_mode, |this| {
-                                        this.bg(toggle_active_bg).text_color(toggle_active_text)
-                                    })
-                                    .when(!is_dark_mode, |this| {
-                                        this.text_color(text_secondary)
-                                            .hover(move |s| s.bg(hover_bg))
-                                    })
-                                    .child(
-                                        svg()
-                                            .path(THEME_DARK_MINI_SVG_PATH)
-                                            .size(px(icon_size))
-                                            .text_color(if is_dark_mode {
-                                                toggle_active_text
-                                            } else {
-                                                text_secondary
-                                            }),
-                                    )
-                                    .child(self.t(TextKey::ThemeDark))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            if !this.settings_theme_dark_mode {
-                                                let dark_theme = this
-                                                    .theme_kind
-                                                    .moeka_companion()
-                                                    .filter(|kind| kind.is_dark())
-                                                    .unwrap_or_else(|| {
-                                                        this.app_settings.dark_theme_kind()
-                                                    });
-                                                this.set_theme(dark_theme, cx);
-                                            }
-                                        }),
-                                    ),
-                            ),
+                            .child(self.render_theme_appearance_segment(
+                                ThemeAppearanceChoice::Auto,
+                                theme_mode == ThemeMode::Auto,
+                                true,
+                                false,
+                                cx,
+                            ))
+                            .child(self.render_theme_appearance_segment(
+                                ThemeAppearanceChoice::Light,
+                                theme_mode != ThemeMode::Auto && !is_dark_mode,
+                                false,
+                                false,
+                                cx,
+                            ))
+                            .child(self.render_theme_appearance_segment(
+                                ThemeAppearanceChoice::Dark,
+                                theme_mode != ThemeMode::Auto && is_dark_mode,
+                                false,
+                                true,
+                                cx,
+                            )),
                     )
                     .child(
                         div().flex().flex_row().gap(px(0.0)).children(

@@ -834,6 +834,176 @@ pub(crate) fn install_update_label(language: UiLanguage) -> &'static str {
     }
 }
 
+pub(crate) fn search_continue_in_file_label(language: UiLanguage, next_line: usize) -> String {
+    match language {
+        UiLanguage::ChineseSimplified => format!("继续搜索此文件（从第 {next_line} 行起）"),
+        UiLanguage::ChineseTraditional => format!("繼續搜尋此檔案（從第 {next_line} 行起）"),
+        UiLanguage::Japanese => format!("このファイルを{next_line}行目から続けて検索"),
+        UiLanguage::Korean => format!("이 파일을 {next_line}행부터 계속 검색"),
+        UiLanguage::French => format!("Continuer depuis la ligne {next_line}"),
+        UiLanguage::German => format!("Ab Zeile {next_line} weitersuchen"),
+        UiLanguage::Spanish => format!("Continuar desde la línea {next_line}"),
+        UiLanguage::Portuguese => format!("Continuar a partir da linha {next_line}"),
+        UiLanguage::Russian => format!("Продолжить со строки {next_line}"),
+        UiLanguage::Arabic => format!("متابعة البحث من السطر {next_line}"),
+        UiLanguage::Hindi => format!("पंक्ति {next_line} से खोज जारी रखें"),
+        UiLanguage::English => format!("Continue searching from line {next_line}"),
+    }
+}
+
+pub(crate) fn format_markdown_label(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "格式化 Markdown",
+        UiLanguage::ChineseTraditional => "格式化 Markdown",
+        UiLanguage::Japanese => "Markdown を整形",
+        UiLanguage::Korean => "Markdown 서식 정리",
+        UiLanguage::French => "Formater le Markdown",
+        UiLanguage::German => "Markdown formatieren",
+        UiLanguage::Spanish => "Formatear Markdown",
+        UiLanguage::Portuguese => "Formatar Markdown",
+        UiLanguage::Russian => "Форматировать Markdown",
+        UiLanguage::Arabic => "تنسيق Markdown",
+        UiLanguage::Hindi => "Markdown फ़ॉर्मैट करें",
+        UiLanguage::English => "Format Markdown",
+    }
+}
+
+pub(crate) fn format_whole_document_prompt(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "未选中任何文本。是否格式化全文？",
+        UiLanguage::ChineseTraditional => "未選取任何文字。是否格式化全文？",
+        UiLanguage::Japanese => "選択範囲がありません。文書全体を整形しますか？",
+        UiLanguage::Korean => "선택된 텍스트가 없습니다. 문서 전체를 정리할까요?",
+        UiLanguage::French => "Aucune sélection. Formater tout le document ?",
+        UiLanguage::German => "Keine Auswahl. Gesamtes Dokument formatieren?",
+        UiLanguage::Spanish => "Sin selección. ¿Formatear todo el documento?",
+        UiLanguage::Portuguese => "Sem seleção. Formatar o documento inteiro?",
+        UiLanguage::Russian => "Нет выделения. Отформатировать весь документ?",
+        UiLanguage::Arabic => "لا يوجد تحديد. هل تريد تنسيق المستند بالكامل؟",
+        UiLanguage::Hindi => "कोई चयन नहीं। पूरा दस्तावेज़ फ़ॉर्मैट करें?",
+        UiLanguage::English => "Nothing is selected. Format the whole document?",
+    }
+}
+
+pub(crate) fn theme_auto_label(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "自动",
+        UiLanguage::ChineseTraditional => "自動",
+        UiLanguage::Japanese => "自動",
+        UiLanguage::Korean => "자동",
+        UiLanguage::French => "Auto",
+        UiLanguage::German => "Auto",
+        UiLanguage::Spanish => "Auto",
+        UiLanguage::Portuguese => "Auto",
+        UiLanguage::Russian => "Авто",
+        UiLanguage::Arabic => "تلقائي",
+        UiLanguage::Hindi => "स्वतः",
+        UiLanguage::English => "Auto",
+    }
+}
+
+pub(crate) fn check_updates_label(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "检查更新",
+        UiLanguage::ChineseTraditional => "檢查更新",
+        UiLanguage::Japanese => "更新を確認",
+        UiLanguage::Korean => "업데이트 확인",
+        UiLanguage::French => "Rechercher",
+        UiLanguage::German => "Nach Updates",
+        UiLanguage::Spanish => "Buscar",
+        UiLanguage::Portuguese => "Procurar",
+        UiLanguage::Russian => "Проверить",
+        UiLanguage::Arabic => "التحقق من التحديثات",
+        UiLanguage::Hindi => "अपडेट जांचें",
+        UiLanguage::English => "Check Updates",
+    }
+}
+
+pub(crate) fn checking_updates_label(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "检查中…",
+        UiLanguage::ChineseTraditional => "檢查中…",
+        UiLanguage::Japanese => "確認中…",
+        UiLanguage::Korean => "확인 중…",
+        UiLanguage::French => "Recherche…",
+        UiLanguage::German => "Suche…",
+        UiLanguage::Spanish => "Buscando…",
+        UiLanguage::Portuguese => "Procurando…",
+        UiLanguage::Russian => "Проверка…",
+        UiLanguage::Arabic => "جارٍ التحقق…",
+        UiLanguage::Hindi => "जाँच हो रही है…",
+        UiLanguage::English => "Checking…",
+    }
+}
+
+pub(crate) fn update_up_to_date_title(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "已是最新版本",
+        UiLanguage::ChineseTraditional => "已是最新版本",
+        UiLanguage::Japanese => "最新バージョンです",
+        UiLanguage::Korean => "최신 버전입니다",
+        UiLanguage::French => "Déjà à jour",
+        UiLanguage::German => "Bereits aktuell",
+        UiLanguage::Spanish => "Ya está actualizado",
+        UiLanguage::Portuguese => "Já está atualizado",
+        UiLanguage::Russian => "Установлена последняя версия",
+        UiLanguage::Arabic => "أنت تستخدم أحدث إصدار",
+        UiLanguage::Hindi => "पहले से नवीनतम संस्करण",
+        UiLanguage::English => "Already up to date",
+    }
+}
+
+pub(crate) fn update_up_to_date_message(language: UiLanguage, version: &str) -> String {
+    match language {
+        UiLanguage::ChineseSimplified => format!("当前版本 {version} 已是最新版本。"),
+        UiLanguage::ChineseTraditional => format!("目前版本 {version} 已是最新版本。"),
+        UiLanguage::Japanese => format!("現在のバージョン {version} は最新です。"),
+        UiLanguage::Korean => format!("현재 버전 {version}이(가) 최신입니다."),
+        UiLanguage::French => format!("La version {version} est la plus récente."),
+        UiLanguage::German => format!("Version {version} ist bereits aktuell."),
+        UiLanguage::Spanish => format!("La versión {version} ya es la más reciente."),
+        UiLanguage::Portuguese => format!("A versão {version} já é a mais recente."),
+        UiLanguage::Russian => format!("Версия {version} — самая новая."),
+        UiLanguage::Arabic => format!("الإصدار {version} هو الأحدث بالفعل."),
+        UiLanguage::Hindi => format!("संस्करण {version} पहले से नवीनतम है।"),
+        UiLanguage::English => format!("Version {version} is the latest release."),
+    }
+}
+
+pub(crate) fn update_check_failed_title(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "检查更新失败",
+        UiLanguage::ChineseTraditional => "檢查更新失敗",
+        UiLanguage::Japanese => "更新の確認に失敗しました",
+        UiLanguage::Korean => "업데이트 확인 실패",
+        UiLanguage::French => "Échec de la recherche",
+        UiLanguage::German => "Update-Suche fehlgeschlagen",
+        UiLanguage::Spanish => "Error al buscar actualizaciones",
+        UiLanguage::Portuguese => "Falha ao procurar atualizações",
+        UiLanguage::Russian => "Не удалось проверить обновления",
+        UiLanguage::Arabic => "فشل التحقق من التحديثات",
+        UiLanguage::Hindi => "अपडेट जाँच विफल",
+        UiLanguage::English => "Update check failed",
+    }
+}
+
+pub(crate) fn update_check_failed_message(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "无法连接到更新服务，请稍后重试。",
+        UiLanguage::ChineseTraditional => "無法連線到更新服務，請稍後再試。",
+        UiLanguage::Japanese => "更新サービスに接続できません。後でもう一度お試しください。",
+        UiLanguage::Korean => "업데이트 서비스에 연결할 수 없습니다. 나중에 다시 시도하세요.",
+        UiLanguage::French => "Impossible de contacter le service de mise à jour. Réessayez plus tard.",
+        UiLanguage::German => "Update-Dienst nicht erreichbar. Bitte später erneut versuchen.",
+        UiLanguage::Spanish => "No se pudo contactar con el servicio de actualización. Inténtalo más tarde.",
+        UiLanguage::Portuguese => "Não foi possível contatar o serviço de atualização. Tente mais tarde.",
+        UiLanguage::Russian => "Не удалось связаться со службой обновлений. Повторите попытку позже.",
+        UiLanguage::Arabic => "تعذر الاتصال بخدمة التحديث. حاول مرة أخرى لاحقًا.",
+        UiLanguage::Hindi => "अपडेट सेवा से संपर्क नहीं हो सका। बाद में पुनः प्रयास करें।",
+        UiLanguage::English => "Could not reach the update service. Please try again later.",
+    }
+}
+
 pub(crate) fn release_notes_empty(language: UiLanguage) -> &'static str {
     match language {
         UiLanguage::ChineseSimplified => "此版本没有提供更新说明。",

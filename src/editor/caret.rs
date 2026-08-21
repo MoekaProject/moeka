@@ -15,7 +15,20 @@ pub(crate) struct CaretPaint {
     pub(crate) force_visible: bool,
 }
 
-pub(crate) type SharedCaretGeometry = Rc<RefCell<Vec<CaretPaint>>>;
+#[derive(Clone, Default)]
+pub(crate) struct CaretGeometrySnapshot {
+    pub(crate) cursor_offset: usize,
+    pub(crate) scroll_offset: f32,
+    pub(crate) paints: Vec<CaretPaint>,
+}
+
+impl CaretGeometrySnapshot {
+    fn matches(&self, cursor_offset: usize, scroll_offset: f32) -> bool {
+        self.cursor_offset == cursor_offset && (self.scroll_offset - scroll_offset).abs() <= 0.5
+    }
+}
+
+pub(crate) type SharedCaretGeometry = Rc<RefCell<CaretGeometrySnapshot>>;
 
 // Four smoothstep samples over 140ms keep the fade visibly continuous while
 // avoiding a display-rate present loop on older integrated GPUs.
@@ -72,6 +85,7 @@ impl Render for EditorContentView {
 }
 
 pub(crate) struct CaretOverlayView {
+    editor: Entity<EditorView>,
     geometry: SharedCaretGeometry,
     config: CaretAnimationConfig,
     opacity: f32,
@@ -81,8 +95,13 @@ pub(crate) struct CaretOverlayView {
 }
 
 impl CaretOverlayView {
-    pub(crate) fn new(geometry: SharedCaretGeometry, config: CaretAnimationConfig) -> Self {
+    pub(crate) fn new(
+        editor: Entity<EditorView>,
+        geometry: SharedCaretGeometry,
+        config: CaretAnimationConfig,
+    ) -> Self {
         Self {
+            editor,
             geometry,
             opacity: config.max_opacity,
             active: false,
@@ -181,7 +200,7 @@ impl CaretOverlayView {
 
 #[cfg(test)]
 mod tests {
-    use super::{CARET_FADE_FRAMES, caret_fade_opacity};
+    use super::{CARET_FADE_FRAMES, CaretGeometrySnapshot, caret_fade_opacity};
 
     #[test]
     fn overlay_caret_fade_is_smooth_monotonic_and_reaches_the_endpoint() {
@@ -197,14 +216,35 @@ mod tests {
             1.0
         );
     }
+
+    #[test]
+    fn overlay_rejects_geometry_from_stale_cursor_or_scroll_state() {
+        let snapshot = CaretGeometrySnapshot {
+            cursor_offset: 42,
+            scroll_offset: 120.0,
+            paints: Vec::new(),
+        };
+        assert!(snapshot.matches(42, 120.4));
+        assert!(!snapshot.matches(43, 120.0));
+        assert!(!snapshot.matches(42, 120.6));
+    }
 }
 
 impl Render for CaretOverlayView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let paints = self.geometry.borrow().clone();
+        let geometry = self.geometry.clone();
+        let editor = self.editor.clone();
         let opacity = self.opacity;
         canvas(
-            move |_, _, _| paints,
+            move |_, _, cx| {
+                let snapshot = geometry.borrow().clone();
+                let editor = editor.read(cx);
+                if snapshot.matches(editor.cursor.offset, editor.scroll_offset) {
+                    snapshot.paints
+                } else {
+                    Vec::new()
+                }
+            },
             move |_, paints, window, _| {
                 for paint in paints {
                     let opacity = if paint.force_visible { 1.0 } else { opacity };

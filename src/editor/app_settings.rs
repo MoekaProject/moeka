@@ -141,10 +141,38 @@ impl MermaidTheme {
     }
 }
 
+/// How the light/dark appearance is chosen. `Manual` keeps whatever theme the
+/// user last picked; `Auto` mirrors the OS appearance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThemeMode {
+    Auto,
+    Manual,
+}
+
+impl ThemeMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "manual" | "light" | "dark" => Some(Self::Manual),
+            _ => None,
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AppSettings {
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// `auto` follows the system appearance; `light`/`dark` pin it.
+    #[serde(default = "default_stored_theme_mode")]
+    pub theme_mode: String,
     #[serde(default = "default_dark_theme")]
     pub dark_theme: String,
     #[serde(default = "default_light_theme")]
@@ -183,6 +211,8 @@ pub(crate) struct AppSettings {
     pub file_list_display_mode: String,
     #[serde(default)]
     pub file_list_width: Option<f32>,
+    #[serde(default)]
+    pub workspace_search_width: Option<f32>,
     #[serde(default = "default_file_list_visible")]
     pub file_list_visible: bool,
     #[serde(default = "default_date_time_format")]
@@ -228,6 +258,12 @@ pub(crate) struct AppSettings {
 
 fn default_theme() -> String {
     "OneDark".to_string()
+}
+
+/// Settings files written before the auto mode existed keep their explicit
+/// light/dark choice; only fresh installs (see `Default`) start on auto.
+fn default_stored_theme_mode() -> String {
+    ThemeMode::Manual.as_str().to_string()
 }
 
 fn default_dark_theme() -> String {
@@ -366,6 +402,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme: default_theme(),
+            theme_mode: ThemeMode::Auto.as_str().to_string(),
             dark_theme: default_dark_theme(),
             light_theme: default_light_theme(),
             dark_editor_theme_mode: default_dark_editor_theme_mode(),
@@ -385,6 +422,7 @@ impl Default for AppSettings {
             sidebar_sort_mode: default_sidebar_sort_mode(),
             file_list_display_mode: default_file_list_display_mode(),
             file_list_width: None,
+            workspace_search_width: None,
             file_list_visible: default_file_list_visible(),
             date_time_format: default_date_time_format(),
             starred_files: default_starred_files(),
@@ -460,6 +498,10 @@ impl AppSettings {
                 self.dark_theme_kind()
             }
         })
+    }
+
+    pub(crate) fn theme_mode(&self) -> ThemeMode {
+        ThemeMode::from_str(&self.theme_mode).unwrap_or(ThemeMode::Manual)
     }
 
     pub(crate) fn ui_language(&self) -> UiLanguage {

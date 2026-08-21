@@ -487,6 +487,8 @@ impl Render for EditorView {
         }
         #[cfg(target_os = "macos")]
         self.sync_macos_traffic_light_position(window);
+        self.sync_window_fullscreen_state(window, cx);
+        self.sync_system_appearance(window, cx);
         #[cfg(not(target_os = "macos"))]
         {
             self.window_is_maximized = window.is_maximized();
@@ -553,6 +555,7 @@ impl Render for EditorView {
         }
         let resizing = self.sidebar_resizing
             || self.file_list_resizing
+            || self.workspace_search_resizing
             || self.utility_panel_resizing
             || self.pane_resize_drag.is_some();
         let show_empty_workspace = self.panes.len() == 1 && self.tabs.is_empty();
@@ -565,6 +568,12 @@ impl Render for EditorView {
         };
         #[cfg(not(target_os = "linux"))]
         let root_window_radius = ws.window_radius_px;
+        // A fullscreen window fills the display, so its corners must be square.
+        let root_window_radius = if self.window_is_fullscreen {
+            0.0
+        } else {
+            root_window_radius
+        };
         let editor = cx.entity().clone();
         let global_mouse_listeners = (!self.embedded_editor).then(|| {
             canvas(
@@ -878,6 +887,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_toggle_command_palette))
             .on_action(cx.listener(Self::on_escape))
+            .on_action(cx.listener(Self::on_toggle_fullscreen))
             .on_key_down(cx.listener(Self::on_preview_overlay_key_down))
             .on_action(cx.listener(Self::on_toggle_outline))
             .on_action(cx.listener(Self::on_toggle_info_panel))
@@ -905,6 +915,7 @@ impl Render for EditorView {
                 let sidebar_layout_w = self.sidebar_layout_width();
                 let file_list_w = self.file_list_width();
                 let file_list_layout_w = self.file_list_layout_width();
+                let search_w = self.workspace_search_panel_width();
                 let ss = &self.styles.sidebar;
                 let hover_indicator_color = ss.sidebar_resize_active_indicator_color;
                 let hover_indicator_width =
@@ -913,7 +924,7 @@ impl Render for EditorView {
                 this.child(
                     div()
                         .id("sidebar-wrap")
-                        .w(px(sidebar_w + file_list_w))
+                        .w(px(sidebar_w + file_list_w + search_w))
                         .h_full()
                         .overflow_hidden()
                         .flex_none()
@@ -944,6 +955,16 @@ impl Render for EditorView {
                                             .w(px(file_list_layout_w))
                                             .child(self.render_file_list(cx)),
                                     ),
+                            )
+                        })
+                        .when(search_w > 0.5, |this| {
+                            this.child(
+                                div()
+                                    .h_full()
+                                    .w(px(search_w))
+                                    .flex_none()
+                                    .overflow_hidden()
+                                    .child(self.render_workspace_search_panel(cx)),
                             )
                         }),
                 )
@@ -1050,6 +1071,32 @@ impl Render for EditorView {
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
                                     this.finish_file_list_resize(cx);
+                                }),
+                            ),
+                    )
+                })
+                .when(search_w > 0.5, |this| {
+                    this.child(
+                        div()
+                            .id("workspace-search-resize-handle")
+                            .absolute()
+                            .left(px(sidebar_w + file_list_w + search_w - handle_width / 2.0))
+                            .top_0()
+                            .w(px(handle_width))
+                            .h_full()
+                            .cursor(CursorStyle::ResizeLeftRight)
+                            .hover(move |style| {
+                                style
+                                    .border_l(px(hover_indicator_width))
+                                    .border_color(hover_indicator_color)
+                            })
+                            // Dragging is tracked by the window-wide overlay, so a
+                            // fast pointer cannot outrun this thin hit area.
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    this.workspace_search_resizing = true;
+                                    cx.notify();
                                 }),
                             ),
                     )
@@ -1205,6 +1252,23 @@ impl Render for EditorView {
                             .bg(ic)
                             .into_any_element(),
                     )
+                } else if self.workspace_search_resizing {
+                    let iw =
+                        self.scaled(self.styles.sidebar.sidebar_resize_active_indicator_width_px);
+                    let ic = self.styles.sidebar.sidebar_resize_active_indicator_color;
+                    let x = self.sidebar_width() + self.file_list_width()
+                        + self.workspace_search_panel_width()
+                        - iw;
+                    Some(
+                        div()
+                            .absolute()
+                            .left(px(x))
+                            .top_0()
+                            .w(px(iw))
+                            .h_full()
+                            .bg(ic)
+                            .into_any_element(),
+                    )
                 } else if self.utility_panel_resizing {
                     let iw = self.scaled(
                         self.styles
@@ -1282,6 +1346,19 @@ impl Render for EditorView {
                                 this.file_list_width_target = new_width;
                                 this.file_list_width_task = None;
                                 cx.notify();
+                            } else if this.workspace_search_resizing {
+                                let left_edge = this.sidebar_width() + this.file_list_width();
+                                let min_w =
+                                    this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
+                                let max_w =
+                                    this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
+                                let new_width = clamp_resize_dimension(
+                                    f32::from(event.position.x) - left_edge,
+                                    min_w,
+                                    max_w,
+                                );
+                                this.set_workspace_search_panel_width(new_width);
+                                cx.notify();
                             } else if this.utility_panel_resizing {
                                 let window_width = f32::from(window.bounds().size.width);
                                 let active_panel = this.active_resizable_utility_panel();
@@ -1319,6 +1396,7 @@ impl Render for EditorView {
                                 this.sidebar_resizing = false;
                                 this.utility_panel_resizing = false;
                                 this.pane_resize_drag = None;
+                                this.finish_workspace_search_resize(cx);
                                 this.finish_file_list_resize(cx);
                                 cx.notify();
                             }),

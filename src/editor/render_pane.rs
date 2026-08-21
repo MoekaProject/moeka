@@ -61,14 +61,19 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> (gpui::AnyView, gpui::Entity<super::caret::CaretOverlayView>) {
         if !self.pane_editor_content_views.contains_key(&pane_id) {
-            let geometry = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let geometry = std::rc::Rc::new(std::cell::RefCell::new(
+                super::caret::CaretGeometrySnapshot::default(),
+            ));
             let editor = cx.entity().clone();
             let content_geometry = geometry.clone();
+            let overlay_editor = editor.clone();
             let content = cx.new(move |cx| {
                 super::caret::EditorContentView::new(editor, pane_id, content_geometry, cx)
             });
             let config = self.caret_animation_config();
-            let overlay = cx.new(move |_| super::caret::CaretOverlayView::new(geometry, config));
+            let overlay = cx.new(move |_| {
+                super::caret::CaretOverlayView::new(overlay_editor, geometry, config)
+            });
             self.pane_editor_content_views.insert(pane_id, content);
             self.pane_caret_overlay_views.insert(pane_id, overlay);
         }

@@ -2007,18 +2007,25 @@ impl EditorView {
         } else {
             display_text.clone().into()
         };
-        let wrapped = window
+        let letter_spacing = self.styles.editor.editor_letter_spacing_px;
+        let shape_width = helpers::effective_wrap_width_for_letter_spacing(
+            cell_inner_width.max(font_size * 0.5),
+            font_size,
+            letter_spacing,
+        );
+        let mut wrapped = window
             .text_system()
             .shape_text(
                 cell_text,
                 px(font_size),
                 &cell_runs,
-                Some(px(cell_inner_width.max(font_size * 0.5))),
+                Some(px(shape_width)),
                 None,
             )
             .ok()?
             .into_iter()
             .next()?;
+        helpers::apply_letter_spacing(&mut wrapped, letter_spacing);
 
         Some(TableCellDisplayInfo {
             wrapped,
@@ -2819,6 +2826,14 @@ impl EditorView {
                         return self.buffer.line_start(line) + nearest_prefix_boundary;
                     }
                 }
+            }
+
+            // Clicking left of a folded line lands before its hidden syntax, so
+            // the caret stays put once the click expands the line.
+            if visual_line_idx == 0 && local_x <= 0.0 && info.display_text != line_content {
+                let leading_ws =
+                    line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
+                return self.buffer.line_start(line) + leading_ws;
             }
 
             let line_end_position = info

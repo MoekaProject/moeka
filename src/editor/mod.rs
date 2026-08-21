@@ -583,10 +583,18 @@ pub(crate) struct WorkspaceSearchMatch {
     pub byte_end: usize,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct WorkspaceSearchResume {
+    pub next_line: usize,
+    pub next_byte_offset: usize,
+}
+
 #[derive(Clone)]
 pub(crate) struct WorkspaceSearchResult {
     pub path: PathBuf,
     pub matches: Vec<WorkspaceSearchMatch>,
+    /// Set when the file was longer than the per-file scan budget.
+    pub resume: Option<WorkspaceSearchResume>,
 }
 
 #[derive(Clone)]
@@ -670,6 +678,7 @@ pub(crate) enum DialogAction {
         tracked: Vec<String>,
         untracked: Vec<String>,
     },
+    FormatWholeDocument,
     DismissOnly,
 }
 
@@ -1500,6 +1509,50 @@ impl SparseLineGeometry {
         }
     }
 
+    fn splice_lines(
+        &mut self,
+        start_line: usize,
+        old_end_line_exclusive: usize,
+        new_end_line_exclusive: usize,
+        dirty_range: Range<usize>,
+        new_line_count: usize,
+        default_height: f64,
+    ) {
+        let line_delta = new_end_line_exclusive as isize - old_end_line_exclusive as isize;
+        let expected_old_line_count = (new_line_count as isize - line_delta).max(0) as usize;
+        if self.line_count != expected_old_line_count
+            || (self.default_height - default_height).abs() > 0.01
+        {
+            self.reset(new_line_count, default_height);
+            return;
+        }
+        let previous = std::mem::take(&mut self.measured_deltas);
+        self.line_count = new_line_count;
+        self.block_delta_tree.clear();
+        self.block_delta_tree.resize(
+            new_line_count.div_ceil(SPARSE_LINE_GEOMETRY_BLOCK_LINES) + 1,
+            0.0,
+        );
+
+        for (line, delta) in previous {
+            let mapped = if line < start_line {
+                Some(line)
+            } else if line >= old_end_line_exclusive {
+                Some((line as isize + line_delta).max(0) as usize)
+            } else {
+                None
+            };
+            let Some(mapped) = mapped else {
+                continue;
+            };
+            if mapped >= new_line_count || dirty_range.contains(&mapped) {
+                continue;
+            }
+            self.measured_deltas.insert(mapped, delta);
+            self.add_block_delta(mapped / SPARSE_LINE_GEOMETRY_BLOCK_LINES, delta);
+        }
+    }
+
     fn block_delta_before(&self, block: usize) -> f64 {
         let mut index = block.min(self.block_delta_tree.len().saturating_sub(1));
         let mut total = 0.0;
@@ -2090,6 +2143,7 @@ pub struct EditorView {
     pub(crate) workspace_search_has_more: bool,
     pub(crate) workspace_search_scroll_handle: ScrollHandle,
     pub(crate) workspace_search_render_limit: usize,
+    pub(crate) workspace_search_resizing: bool,
     /// tantivy candidate index for workspace search; built lazily in the
     /// background on first search and refreshed when the workspace changes.
     pub(crate) workspace_search_index: Option<std::sync::Arc<search_index::WorkspaceSearchIndex>>,
@@ -2168,6 +2222,11 @@ pub struct EditorView {
     pub(crate) update_state: UpdateState,
     pub(crate) update_task: Option<Task<()>>,
     pub(crate) update_poll_task: Option<Task<()>>,
+    /// Set while a user-initiated check runs, so its outcome is reported.
+    pub(crate) update_check_is_manual: bool,
+    /// Last observed OS appearance, used to drive `ThemeMode::Auto`.
+    pub(crate) system_appearance: Option<gpui::WindowAppearance>,
+    pub(crate) window_is_fullscreen: bool,
     pub(crate) ui_language: UiLanguage,
     pub(crate) app_settings: AppSettings,
     pub(crate) runtime_profiler: Option<profiler::RuntimeProfiler>,
@@ -2743,6 +2802,7 @@ impl EditorView {
             workspace_search_has_more: false,
             workspace_search_scroll_handle: ScrollHandle::new(),
             workspace_search_render_limit: list_viewport::SEARCH_LIST_POLICY.initial_count,
+            workspace_search_resizing: false,
             workspace_search_index: None,
             workspace_search_index_task: None,
             workspace_search_index_epoch: 0,
@@ -2802,6 +2862,9 @@ impl EditorView {
             update_state: UpdateState::Idle,
             update_task: None,
             update_poll_task: None,
+            update_check_is_manual: false,
+            system_appearance: None,
+            window_is_fullscreen: false,
             ui_language,
             app_settings,
             runtime_profiler,
@@ -4022,6 +4085,60 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Picks the theme to use for a light/dark appearance, keeping Moeka retro
+    /// palettes paired with their own companion instead of the global default.
+    pub(crate) fn theme_kind_for_appearance(&self, dark: bool) -> ThemeKind {
+        self.theme_kind
+            .moeka_companion()
+            .filter(|kind| kind.is_dark() == dark)
+            .unwrap_or_else(|| {
+                if dark {
+                    self.app_settings.dark_theme_kind()
+                } else {
+                    self.app_settings.light_theme_kind()
+                }
+            })
+    }
+
+    pub(crate) fn set_theme_mode(
+        &mut self,
+        mode: app_settings::ThemeMode,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.app_settings.theme_mode = mode.as_str().to_string();
+        self.app_settings.save();
+        if mode == app_settings::ThemeMode::Auto {
+            self.system_appearance = Some(window.appearance());
+            self.apply_system_appearance_theme(cx);
+        }
+        cx.notify();
+    }
+
+    /// Called every frame; only reacts when the OS appearance actually flips.
+    pub(crate) fn sync_system_appearance(&mut self, window: &gpui::Window, cx: &mut Context<Self>) {
+        let appearance = window.appearance();
+        if self.system_appearance == Some(appearance) {
+            return;
+        }
+        self.system_appearance = Some(appearance);
+        if self.app_settings.theme_mode() == app_settings::ThemeMode::Auto {
+            self.apply_system_appearance_theme(cx);
+        }
+    }
+
+    fn apply_system_appearance_theme(&mut self, cx: &mut Context<Self>) {
+        let dark = matches!(
+            self.system_appearance,
+            Some(gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark)
+        );
+        if dark == self.theme_kind.is_dark() {
+            return;
+        }
+        let kind = self.theme_kind_for_appearance(dark);
+        self.set_theme(kind, cx);
+    }
+
     pub(crate) fn set_editor_theme_mode(&mut self, mode: EditorThemeMode, cx: &mut Context<Self>) {
         if self.editor_theme_mode == mode {
             return;
@@ -4562,6 +4679,9 @@ impl EditorView {
             DialogAction::GitDiscardEntries { tracked, untracked } => {
                 self.run_git_operation(GitOperation::DiscardPaths { tracked, untracked }, cx);
             }
+            DialogAction::FormatWholeDocument => {
+                self.format_whole_markdown_document(cx);
+            }
             DialogAction::DismissOnly => {}
         }
         cx.notify();
@@ -4657,6 +4777,7 @@ impl EditorView {
             | DialogAction::DeletePaths { .. }
             | DialogAction::InstallUpdate { .. }
             | DialogAction::GitDiscardEntries { .. }
+            | DialogAction::FormatWholeDocument
             | DialogAction::CloseRunningTerminal { .. } => {
                 // No save action for delete
             }
@@ -5563,7 +5684,14 @@ impl EditorView {
                     transfer.dirty_start_line..transfer.dirty_end_line_exclusive,
                 );
             } else {
-                self.reset_sparse_line_geometry();
+                self.line_geometry_cache.borrow_mut().sparse.splice_lines(
+                    transfer.start_line,
+                    transfer.old_end_line_exclusive,
+                    transfer.new_end_line_exclusive,
+                    transfer.dirty_start_line..transfer.dirty_end_line_exclusive,
+                    self.buffer.line_count(),
+                    self.line_height_for_block(&BlockType::Normal) as f64,
+                );
             }
         }
         // Take (don't just clear) the current shaping cache. When a transfer is
@@ -7461,6 +7589,53 @@ impl EditorView {
     /// selection is present only that range is copied (still excluding any
     /// syntax characters that fall inside it); otherwise the whole document is
     /// copied as plain text.
+    /// Formats the selection, or asks before rewriting the whole document.
+    pub(crate) fn format_markdown_selection_or_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
+        let selection = self.cursor.selection_range();
+        if selection.start != selection.end {
+            self.format_markdown_range(selection, cx);
+            return;
+        }
+        self.show_dialog(
+            Dialog {
+                title: crate::i18n::format_markdown_label(self.ui_language).to_string(),
+                message: crate::i18n::format_whole_document_prompt(self.ui_language).to_string(),
+                save_label: None,
+                confirm_label: self.t(TextKey::Acknowledge).to_string(),
+                cancel_label: self.t(TextKey::Cancel).to_string(),
+                is_danger: false,
+                action: DialogAction::FormatWholeDocument,
+            },
+            cx,
+        );
+    }
+
+    pub(crate) fn format_whole_markdown_document(&mut self, cx: &mut Context<Self>) {
+        self.format_markdown_range(0..self.buffer.len(), cx);
+    }
+
+    fn format_markdown_range(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) {
+        let Some(source) = self.buffer.text().get(range.clone()) else {
+            return;
+        };
+        let Some(formatted) = crate::markdown_format::format_markdown(source) else {
+            return;
+        };
+        self.checkpoint();
+        self.clear_extra_cursors();
+        self.queue_non_markdown_line_display_transfer(&range, &formatted);
+        self.buffer.replace(range.clone(), &formatted);
+        let caret = range.start + formatted.len();
+        self.cursor
+            .move_to(caret.min(self.buffer.len()), &self.buffer);
+        self.reparse();
+        self.scroll_to_cursor();
+        cx.notify();
+    }
+
     pub(crate) fn copy_plain_text_to_clipboard(&mut self, cx: &mut Context<Self>) {
         let selection = self.cursor.selection_range();
         let (start, end) = if selection.start != selection.end {
@@ -10667,6 +10842,33 @@ mod tests {
 
         geometry.clear_range(300..301);
         assert_eq!(geometry.y_offset(301, 8.0), 6_048.0);
+    }
+
+    #[test]
+    fn sparse_line_geometry_splices_measured_heights_around_structural_edits() {
+        let mut geometry = SparseLineGeometry::default();
+        geometry.reset(8, 20.0);
+        geometry.set_measured_height(1, 30.0);
+        geometry.set_measured_height(3, 40.0);
+        geometry.set_measured_height(6, 50.0);
+
+        geometry.splice_lines(3, 4, 5, 3..5, 9, 20.0);
+
+        assert_eq!(geometry.measured_deltas.get(&1), Some(&10.0));
+        assert!(!geometry.measured_deltas.contains_key(&3));
+        assert_eq!(geometry.measured_deltas.get(&7), Some(&30.0));
+        assert_eq!(geometry.y_offset(8, 0.0), 200.0);
+
+        geometry.splice_lines(3, 5, 4, 3..4, 8, 20.0);
+        assert_eq!(geometry.measured_deltas.get(&1), Some(&10.0));
+        assert_eq!(geometry.measured_deltas.get(&6), Some(&30.0));
+        assert_eq!(geometry.y_offset(7, 0.0), 180.0);
+
+        let mut uninitialized = SparseLineGeometry::default();
+        uninitialized.splice_lines(0, 1, 2, 0..2, 9, 20.0);
+        assert_eq!(uninitialized.line_count, 9);
+        assert_eq!(uninitialized.default_height, 20.0);
+        assert!(uninitialized.measured_deltas.is_empty());
     }
 
     /// Drives `compute_incremental_markdown_decorations` for an `old -> new`

@@ -76,7 +76,12 @@ impl EditorView {
     /// tab bar. Only macOS puts them there; elsewhere they sit on the right.
     pub(crate) fn window_controls_leading_inset(&self) -> f32 {
         if cfg!(target_os = "macos") {
-            self.styles.tab_bar.tab_history_hidden_sidebar_margin_px
+            if self.window_is_fullscreen {
+                // Fullscreen hides the traffic lights, so only keep a margin.
+                self.scaled(crate::style::FULLSCREEN_LEADING_MARGIN_PX)
+            } else {
+                self.styles.tab_bar.tab_history_hidden_sidebar_margin_px
+            }
         } else {
             0.0
         }
@@ -128,6 +133,31 @@ impl EditorView {
             crate::style::TOP_BAR_HEIGHT_PX * ui_scale,
             STANDARD_BUTTON_HEIGHT_PX,
         )
+    }
+
+    /// Called every frame; fullscreen has no window-state event to observe.
+    pub(crate) fn sync_window_fullscreen_state(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fullscreen = window.is_fullscreen();
+        if self.window_is_fullscreen == fullscreen {
+            return;
+        }
+        self.window_is_fullscreen = fullscreen;
+        #[cfg(target_os = "macos")]
+        {
+            let radius = if fullscreen {
+                0.0
+            } else {
+                crate::WINDOW_CONTENT_CORNER_RADIUS
+            };
+            apply_macos_content_corner_radius(window, radius);
+            // Leaving fullscreen restores AppKit's own button frames.
+            self.traffic_light_ui_scale = None;
+        }
+        cx.notify();
     }
 
     #[cfg(target_os = "macos")]
@@ -1128,6 +1158,40 @@ fn apply_macos_traffic_light_position(
         let _: () = msg_send![zoom_button, setFrameOrigin: CGPoint::new(left + spacing * 2.0, y)];
     }
     true
+}
+
+/// Fullscreen windows fill the display, so the rounded content corners that
+/// match the macOS window chrome have to be squared off.
+#[cfg(target_os = "macos")]
+pub(crate) fn apply_macos_content_corner_radius(window: &mut Window, radius: f64) {
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() else {
+        return;
+    };
+
+    unsafe {
+        let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
+        let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let content_view: *mut objc::runtime::Object = msg_send![ns_window, contentView];
+        if content_view.is_null() {
+            return;
+        }
+        let () = msg_send![content_view, setWantsLayer: true];
+        let layer: *mut objc::runtime::Object = msg_send![content_view, layer];
+        if layer.is_null() {
+            return;
+        }
+        let () = msg_send![layer, setCornerRadius: radius];
+        let () = msg_send![layer, setMasksToBounds: true];
+    }
 }
 
 #[cfg(test)]

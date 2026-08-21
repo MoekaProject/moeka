@@ -164,7 +164,22 @@ impl EditorView {
         if self.focused_sidebar_path.is_some() {
             self.focused_sidebar_path = None;
             cx.notify();
+            return;
         }
+        // Last resort, and macOS-only: elsewhere fullscreen is toggled with F11.
+        #[cfg(target_os = "macos")]
+        if window.is_fullscreen() {
+            window.toggle_fullscreen();
+        }
+    }
+
+    pub(crate) fn on_toggle_fullscreen(
+        &mut self,
+        _: &ToggleFullscreen,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.toggle_fullscreen();
     }
 
     pub(crate) fn on_preview_overlay_key_down(
@@ -1207,6 +1222,23 @@ impl EditorView {
                 }
             }
             _ => {}
+        }
+
+        // Typing ``` only opens the fence; Enter is what completes it, so the
+        // caret lands on an empty body line between the two markers.
+        if self.cursor.offset == line_end
+            && let Some(closer) = markdown::unclosed_code_fence_marker(self.buffer.text(), cursor_line)
+        {
+            let continuation = format!("\n\n{closer}");
+            let insert_range = self.cursor.selection_range();
+            let body_offset = insert_range.start + 1;
+            self.queue_non_markdown_line_display_transfer(&insert_range, &continuation);
+            self.cursor.insert(&mut self.buffer, &continuation);
+            self.cursor.move_to(body_offset, &self.buffer);
+            self.reparse();
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
         }
 
         let insert_range = self.cursor.selection_range();

@@ -1234,7 +1234,7 @@ impl EditorView {
                         )),
                 )
             })
-            .when(!self.workspace_search_visible, |this| {
+            .child({
                 let sidebar_tooltip = if self.workspaces.is_empty() {
                     self.t(crate::i18n::TextKey::OpenFolder)
                 } else {
@@ -1243,52 +1243,47 @@ impl EditorView {
                         self.sidebar_visible,
                     )
                 };
-                this.child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .occlude()
-                                .pl(px(self.window_controls_leading_inset()))
-                                .child(self.render_sidebar_top_button(
-                                    "sidebar-top-file-tree-toggle",
-                                    "assets/icons/file-tree-toggle.svg",
-                                    self.sidebar_visible,
-                                    sidebar_tooltip,
-                                    Some(crate::editor::shortcut::hint("secondary-shift-s")),
-                                    cx,
-                                    |this, _event, _window, cx| {
-                                        if this.workspaces.is_empty() {
-                                            this.pick_workspace_folder(cx);
-                                        } else {
-                                            this.toggle_sidebar_visibility(cx);
-                                        }
-                                    },
-                                )),
-                        )
-                        .child(
-                            div()
-                                .occlude()
-                                .pr(px(self.scaled(ss.sidebar_top_button_padding_right_px)))
-                                .child(self.render_sidebar_top_button(
-                                    "sidebar-top-file-list-toggle",
-                                    "assets/icons/file-list-toggle.svg",
-                                    self.file_list_visible,
-                                    crate::i18n::sidebar_action_label(
-                                        self.ui_language,
-                                        "file_list",
-                                    ),
-                                    None,
-                                    cx,
-                                    |this, _event, _window, cx| {
-                                        this.toggle_file_list_visible(cx);
-                                    },
-                                )),
-                        ),
-                )
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .occlude()
+                            .pl(px(self.window_controls_leading_inset()))
+                            .child(self.render_sidebar_top_button(
+                                "sidebar-top-file-tree-toggle",
+                                "assets/icons/file-tree-toggle.svg",
+                                self.sidebar_visible,
+                                sidebar_tooltip,
+                                Some(crate::editor::shortcut::hint("secondary-shift-s")),
+                                cx,
+                                |this, _event, _window, cx| {
+                                    if this.workspaces.is_empty() {
+                                        this.pick_workspace_folder(cx);
+                                    } else {
+                                        this.toggle_sidebar_visibility(cx);
+                                    }
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .occlude()
+                            .pr(px(self.scaled(ss.sidebar_top_button_padding_right_px)))
+                            .child(self.render_sidebar_top_button(
+                                "sidebar-top-file-list-toggle",
+                                "assets/icons/file-list-toggle.svg",
+                                self.file_list_visible,
+                                crate::i18n::sidebar_action_label(self.ui_language, "file_list"),
+                                None,
+                                cx,
+                                |this, _event, _window, cx| {
+                                    this.toggle_file_list_visible(cx);
+                                },
+                            )),
+                    )
             })
             .on_mouse_down(
                 MouseButton::Left,
@@ -1551,17 +1546,9 @@ impl EditorView {
         };
         let scroll_y = -f32::from(self.sidebar_scroll_handle.offset().y);
         let sticky_headers_visible = has_root && scroll_y >= logo_area_height;
-        // Only macOS parks its window controls over the sidebar, so elsewhere the
-        // search field can claim the top row instead of an empty spacer.
-        let search_starts_at_top = !cfg!(target_os = "macos") && self.workspace_search_visible;
-        let active_scroll_handle = if self.workspace_search_visible {
-            &self.workspace_search_scroll_handle
-        } else {
-            &self.sidebar_scroll_handle
-        };
         let sidebar_scrollbar = self.render_scrollbar_for_handle(
             PanelScrollbarKind::Sidebar,
-            active_scroll_handle,
+            &self.sidebar_scroll_handle,
             self.sidebar_scrollbar_track_height(),
             0.0,
             self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
@@ -1585,15 +1572,8 @@ impl EditorView {
                 this.border_r(px(ss.sidebar_resize_indicator_width_px))
                     .border_color(ss.sidebar_resize_indicator_color)
             })
-            .when(!search_starts_at_top, |this| this.child(top_spacer))
-            .when(
-                self.workspace_search_visible,
-                |this: gpui::Stateful<gpui::Div>| this.child(self.render_workspace_search(cx)),
-            )
-            .when(
-                !self.workspace_search_visible,
-                |this: gpui::Stateful<gpui::Div>| {
-                    this.child(
+            .child(top_spacer)
+            .child(
                         div()
                             .id("sidebar-tree")
                             .flex_1()
@@ -1718,11 +1698,9 @@ impl EditorView {
                                 })
                             })
                             .children(tree_items),
-                    )
-                },
             )
             .when(
-                sticky_headers_visible && !self.workspace_search_visible,
+                sticky_headers_visible,
                 |this: gpui::Stateful<gpui::Div>| {
                     this.child(
                         div()

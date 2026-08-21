@@ -25,6 +25,7 @@ pub(crate) const THEME_LIGHT_SVG_PATH: &str = "assets/icons/theme-light.svg";
 pub(crate) const THEME_DARK_SVG_PATH: &str = "assets/icons/theme-dark.svg";
 pub(crate) const THEME_LIGHT_MINI_SVG_PATH: &str = "assets/icons/theme-light-mini.svg";
 pub(crate) const THEME_DARK_MINI_SVG_PATH: &str = "assets/icons/theme-dark-mini.svg";
+pub(crate) const THEME_AUTO_MINI_SVG_PATH: &str = "assets/icons/theme-auto-mini.svg";
 pub(crate) const FLOWER_SVG_PATH: &str = "assets/icons/flower.svg";
 pub(crate) const MOUNTAIN_SVG_PATH: &str = "assets/icons/mountain.svg";
 pub(crate) const DOC_SVG_PATH: &str = "assets/icons/doc.svg";

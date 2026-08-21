@@ -129,9 +129,68 @@ impl EditorView {
                         UpdateState::Failed
                     }
                 };
+                if std::mem::take(&mut this.update_check_is_manual) {
+                    this.report_update_check_outcome(cx);
+                }
                 cx.notify();
             });
         }));
+    }
+
+    /// User-initiated check: unlike the background poll it always reports an
+    /// outcome, and reuses an already prepared update instead of no-op'ing.
+    pub(crate) fn start_manual_update_check(&mut self, cx: &mut Context<Self>) {
+        if self.update_state.is_ready() {
+            self.show_prepared_update_dialog(cx);
+            return;
+        }
+        self.update_check_is_manual = true;
+        if self.update_task.is_some() {
+            return;
+        }
+        self.start_update_check(cx);
+    }
+
+    pub(crate) fn update_check_in_progress(&self) -> bool {
+        self.update_task.is_some()
+    }
+
+    fn report_update_check_outcome(&mut self, cx: &mut Context<Self>) {
+        match self.update_state.clone() {
+            UpdateState::Ready(_) => self.show_prepared_update_dialog(cx),
+            UpdateState::UpToDate => self.show_dismissable_update_dialog(
+                crate::i18n::update_up_to_date_title(self.ui_language).to_string(),
+                crate::i18n::update_up_to_date_message(self.ui_language, current_version()),
+                cx,
+            ),
+            _ => self.show_dismissable_update_dialog(
+                crate::i18n::update_check_failed_title(self.ui_language).to_string(),
+                crate::i18n::update_check_failed_message(self.ui_language).to_string(),
+                cx,
+            ),
+        }
+    }
+
+    fn show_dismissable_update_dialog(
+        &mut self,
+        title: String,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let confirm_label = self.t(crate::i18n::TextKey::Acknowledge).to_string();
+        let cancel_label = self.t(crate::i18n::TextKey::Cancel).to_string();
+        self.show_dialog(
+            Dialog {
+                title,
+                message,
+                save_label: None,
+                confirm_label,
+                cancel_label,
+                is_danger: false,
+                action: DialogAction::DismissOnly,
+            },
+            cx,
+        );
     }
 
     pub(crate) fn prepared_update(&self) -> Option<&PreparedUpdate> {

@@ -298,20 +298,6 @@ impl EntityInputHandler for EditorView {
                     .is_some_and(|text| text.contains(['=', '*', '_', '~', '`', '+'])));
 
         if range.is_empty() && self.marked_range.is_none() && range_utf16.is_none() {
-            if let Some(code_block_range) =
-                input_ime::code_block_autocomplete_range(self.buffer.text(), range.start, new_text)
-            {
-                let snippet = "```\n\n```";
-                let cursor_offset = code_block_range.start + "```\n".len();
-                self.queue_non_markdown_line_display_transfer(&code_block_range, snippet);
-                self.buffer.replace(code_block_range, snippet);
-                self.cursor.move_to(cursor_offset, &self.buffer);
-                self.reparse();
-                self.scroll_to_cursor();
-                self.pause_blinking(cx);
-                return;
-            }
-
             if !(matches!(new_text, "*" | "_" | "~" | "+" | "=")
                 && self.offset_in_code_context(range.start))
                 && let Some((open, close)) =

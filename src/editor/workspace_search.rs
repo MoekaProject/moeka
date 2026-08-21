@@ -46,6 +46,30 @@ fn begin_workspace_search_staging(
 }
 
 impl EditorView {
+    /// Rendered width of the search column, which sits to the right of the
+    /// FileList and keeps its own persisted width.
+    pub(crate) fn workspace_search_panel_width(&self) -> f32 {
+        if !self.workspace_search_visible || !self.sidebar_visible {
+            return 0.0;
+        }
+        self.app_settings
+            .workspace_search_width
+            .unwrap_or_else(|| self.scaled(self.styles.sidebar.sidebar_width_px))
+    }
+
+    pub(crate) fn set_workspace_search_panel_width(&mut self, width: f32) {
+        self.app_settings.workspace_search_width = Some(width);
+    }
+
+    pub(crate) fn finish_workspace_search_resize(&mut self, cx: &mut Context<Self>) {
+        if !self.workspace_search_resizing {
+            return;
+        }
+        self.workspace_search_resizing = false;
+        self.app_settings.save();
+        cx.notify();
+    }
+
     pub(crate) fn sort_workspace_search_results(&mut self) {
         let sort_mode = self.sidebar_sort_mode;
         self.workspace_search_results.sort_by(|left, right| {
@@ -75,14 +99,10 @@ impl EditorView {
             return;
         }
 
-        // If the sidebar was already visible (e.g. file tree), switching to the
-        // search panel is a panel-type switch: change width instantly with no
-        // animation. Only animate when the sidebar is appearing from hidden.
-        let was_sidebar_visible = self.sidebar_visible;
-        self.sidebar_visible = true;
-        if was_sidebar_visible {
-            self.set_sidebar_width_immediately(self.sidebar_target_width());
-        } else {
+        // The search column sits beside the sidebar, so the sidebar only has to
+        // be brought back when it was hidden entirely.
+        if !self.sidebar_visible {
+            self.sidebar_visible = true;
             self.sync_sidebar_width_animation(cx);
         }
         if self.workspace_search_editor.is_none() {
@@ -163,14 +183,6 @@ impl EditorView {
         self.workspace_search_blur_sub = None;
         self.workspace_search_input_focused = false;
         self.clear_workspace_search_preview_state();
-        // If the sidebar remains visible (switching back to the file tree), this
-        // is a panel-type switch: change width instantly. Only animate when the
-        // sidebar is actually being hidden.
-        if self.sidebar_visible {
-            self.set_sidebar_width_immediately(self.sidebar_target_width());
-        } else {
-            self.sync_sidebar_width_animation(cx);
-        }
         window.focus(&self.focus_handle(cx));
         cx.notify();
     }
@@ -217,6 +229,7 @@ impl EditorView {
                 current_index += 1;
                 child_index += 1;
             }
+            child_index += usize::from(result.resume.is_some());
         }
         None
     }
@@ -310,10 +323,77 @@ impl EditorView {
         self.preview_workspace_search_match_at(selected.min(total - 1), true, true, cx);
     }
 
+    /// Continues scanning one oversized file from where the previous pass
+    /// stopped, appending the new matches under the same file header.
+    fn continue_workspace_search_in_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(resume) = self
+            .workspace_search_results
+            .iter()
+            .find(|result| result.path == path)
+            .and_then(|result| result.resume)
+        else {
+            return;
+        };
+        let query = self.workspace_search_query.trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+        let case_sensitive = self.workspace_search_case_sensitive;
+        let whole_word = self.workspace_search_whole_word;
+        let use_regex = self.workspace_search_use_regex;
+        let epoch = self.workspace_search_epoch;
+        let scan_path = path.clone();
+
+        cx.spawn(async move |this, cx| {
+            let scanned = cx
+                .background_executor()
+                .spawn(async move {
+                    let bytes = std::fs::read(&scan_path).ok()?;
+                    let content = String::from_utf8_lossy(&bytes).into_owned();
+                    Some(search_file_window(
+                        &content,
+                        resume.next_byte_offset.min(content.len()),
+                        &query,
+                        case_sensitive,
+                        whole_word,
+                        use_regex,
+                    ))
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                if this.workspace_search_epoch != epoch {
+                    return;
+                }
+                let Some((matches, next_resume)) = scanned else {
+                    return;
+                };
+                let Some(result) = this
+                    .workspace_search_results
+                    .iter_mut()
+                    .find(|result| result.path == path)
+                else {
+                    return;
+                };
+                result.matches.extend(matches);
+                result.resume = next_resume;
+                this.workspace_search_render_limit = super::list_viewport::SEARCH_LIST_POLICY
+                    .ensure_index(
+                        this.workspace_search_render_limit,
+                        this.workspace_search_total_row_count(),
+                        this.workspace_search_total_row_count(),
+                    );
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn workspace_search_total_row_count(&self) -> usize {
         self.workspace_search_results
             .iter()
-            .map(|result| 1 + result.matches.len().min(50))
+            .map(|result| 1 + result.matches.len().min(50) + usize::from(result.resume.is_some()))
             .sum()
     }
 
@@ -600,6 +680,24 @@ impl EditorView {
         styles.text_input_cursor_height_adjust_px =
             workspace_styles.ws_search_input_cursor_height_adjust_px;
         styles
+    }
+
+    /// Standalone column to the right of the sidebar, with its own trailing
+    /// hairline so it reads as a separate panel.
+    pub(crate) fn render_workspace_search_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ss = &self.styles.sidebar;
+        div()
+            .id("workspace-search-column")
+            .w(px(self.workspace_search_panel_width()))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .bg(ss.sidebar_bg)
+            .border_r(px(ss.sidebar_resize_indicator_width_px))
+            .border_color(ss.sidebar_resize_indicator_color)
+            .child(self.render_workspace_search(cx))
+            .into_any_element()
     }
 
     pub(crate) fn render_workspace_search(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1105,6 +1203,43 @@ impl EditorView {
                     );
                     remaining_rows = remaining_rows.saturating_sub(1);
                 }
+
+                if let Some(resume) = result.resume {
+                    if remaining_rows == 0 {
+                        break 'files;
+                    }
+                    let resume_path = result.path.clone();
+                    result_children.push(
+                        div()
+                            .id(gpui::SharedString::from(format!(
+                                "ws-resume-{}",
+                                result.path.display()
+                            )))
+                            .w_full()
+                            .h(px(self.scaled(workspace_styles.ws_search_match_height_px)))
+                            .px(px(
+                                self.scaled(workspace_styles.ws_search_match_padding_x_px)
+                            ))
+                            .flex()
+                            .items_center()
+                            .cursor(CursorStyle::PointingHand)
+                            .text_size(px(
+                                self.scaled(workspace_styles.ws_search_match_font_size_px)
+                            ))
+                            .text_color(workspace_styles.ws_search_file_header_text_color)
+                            .hover(move |style| style.bg(hover_bg))
+                            .child(crate::i18n::search_continue_in_file_label(
+                                self.ui_language,
+                                resume.next_line,
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.continue_workspace_search_in_file(resume_path.clone(), cx);
+                            }))
+                            .into_any_element(),
+                    );
+                    remaining_rows = remaining_rows.saturating_sub(1);
+                }
             }
         }
 
@@ -1233,10 +1368,12 @@ mod atomic_search_tests {
         let mut visible = vec![WorkspaceSearchResult {
             path: PathBuf::from("old.md"),
             matches: Vec::new(),
+            resume: None,
         }];
         let mut staging = vec![WorkspaceSearchResult {
             path: PathBuf::from("partial.md"),
             matches: Vec::new(),
+            resume: None,
         }];
 
         begin_workspace_search_staging(&mut visible, &mut staging);
@@ -1328,6 +1465,70 @@ struct WorkspaceSearchBatch {
     pending_paths: Vec<std::path::PathBuf>,
 }
 
+/// Per-pass line budget for a single file; the rest is searched on demand so a
+/// huge file cannot stall the whole workspace scan.
+const WORKSPACE_SEARCH_FILE_LINE_LIMIT: usize = 10_000;
+
+/// Byte offset just past the `limit`-th newline at or after `start`, or `None`
+/// when the remaining text is within budget.
+fn line_budget_end(content: &str, start: usize, limit: usize) -> Option<usize> {
+    let mut seen = 0usize;
+    for (index, byte) in content.as_bytes().iter().enumerate().skip(start) {
+        if *byte == b'\n' {
+            seen += 1;
+            if seen == limit {
+                let end = index + 1;
+                return (end < content.len()).then_some(end);
+            }
+        }
+    }
+    None
+}
+
+/// Searches at most `WORKSPACE_SEARCH_FILE_LINE_LIMIT` lines starting at
+/// `start_offset`, reporting where a follow-up pass should resume.
+fn search_file_window(
+    content: &str,
+    start_offset: usize,
+    query: &str,
+    case_sensitive: bool,
+    whole_word: bool,
+    use_regex: bool,
+) -> (Vec<WorkspaceSearchMatch>, Option<WorkspaceSearchResume>) {
+    let budget_end = line_budget_end(content, start_offset, WORKSPACE_SEARCH_FILE_LINE_LIMIT);
+    let window_end = budget_end.unwrap_or(content.len());
+    let window = &content[start_offset..window_end];
+    let mut matches = Vec::new();
+
+    for range in find_search_matches(window, query, case_sensitive, whole_word, use_regex) {
+        let byte_offset = start_offset + range.start;
+        let byte_end = start_offset + range.end;
+        let line_start = content[..byte_offset]
+            .rfind('\n')
+            .map(|position| position + 1)
+            .unwrap_or(0);
+        let line_end = content[byte_offset..]
+            .find('\n')
+            .map(|position| byte_offset + position)
+            .unwrap_or(content.len());
+        let match_start_in_line = byte_offset - line_start;
+        matches.push(WorkspaceSearchMatch {
+            line_number: content[..byte_offset].matches('\n').count() + 1,
+            line_text: content[line_start..line_end].to_string(),
+            match_start: match_start_in_line,
+            match_end: match_start_in_line + (byte_end - byte_offset),
+            byte_offset,
+            byte_end,
+        });
+    }
+
+    let resume = budget_end.map(|offset| WorkspaceSearchResume {
+        next_line: content[..offset].matches('\n').count() + 1,
+        next_byte_offset: offset,
+    });
+    (matches, resume)
+}
+
 fn search_directory_batch(
     mut pending_paths: Vec<std::path::PathBuf>,
     query: &str,
@@ -1356,40 +1557,18 @@ fn search_directory_batch(
             let file_kind = classify_file_kind_for_bytes(&path, &bytes);
             if file_kind.supports_text_search() {
                 let content = String::from_utf8_lossy(&bytes).into_owned();
-                let match_ranges =
-                    find_search_matches(&content, query, case_sensitive, whole_word, use_regex);
-                if match_ranges.is_empty() {
+                let (matches, resume) =
+                    search_file_window(&content, 0, query, case_sensitive, whole_word, use_regex);
+                if matches.is_empty() && resume.is_none() {
                     continue;
                 }
 
-                let mut matches = Vec::new();
-                for range in match_ranges {
-                    let byte_offset = range.start;
-                    let line_start = content[..byte_offset]
-                        .rfind('\n')
-                        .map(|position| position + 1)
-                        .unwrap_or(0);
-                    let line_end = content[byte_offset..]
-                        .find('\n')
-                        .map(|position| byte_offset + position)
-                        .unwrap_or(content.len());
-                    let line_number = content[..byte_offset].matches('\n').count() + 1;
-                    let line_text = content[line_start..line_end].to_string();
-                    let match_start_in_line = byte_offset - line_start;
-                    let match_end_in_line = match_start_in_line + (range.end - range.start);
-
-                    matches.push(WorkspaceSearchMatch {
-                        line_number,
-                        line_text,
-                        match_start: match_start_in_line,
-                        match_end: match_end_in_line,
-                        byte_offset,
-                        byte_end: range.end,
-                    });
-                }
-
-                loaded_rows += 1 + matches.len().min(50);
-                results.push(WorkspaceSearchResult { path, matches });
+                loaded_rows += 1 + matches.len().min(50) + usize::from(resume.is_some());
+                results.push(WorkspaceSearchResult {
+                    path,
+                    matches,
+                    resume,
+                });
                 if loaded_rows >= row_budget {
                     break;
                 }
@@ -1407,6 +1586,39 @@ mod tests {
     use std::{fs, time::SystemTime};
 
     use super::search_directory_batch;
+    use super::{WORKSPACE_SEARCH_FILE_LINE_LIMIT, search_file_window};
+
+    #[test]
+    fn a_single_file_is_scanned_in_line_limited_passes() {
+        let mut content = String::new();
+        for line in 0..(WORKSPACE_SEARCH_FILE_LINE_LIMIT + 5) {
+            content.push_str(
+                if line == 3 || line == WORKSPACE_SEARCH_FILE_LINE_LIMIT + 2 {
+                    "needle\n"
+                } else {
+                    "filler\n"
+                },
+            );
+        }
+
+        let (matches, resume) = search_file_window(&content, 0, "needle", true, false, false);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].line_number, 4);
+        let resume = resume.expect("oversized file keeps a resume cursor");
+        assert_eq!(resume.next_line, WORKSPACE_SEARCH_FILE_LINE_LIMIT + 1);
+
+        let (rest, done) = search_file_window(
+            &content,
+            resume.next_byte_offset,
+            "needle",
+            true,
+            false,
+            false,
+        );
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].line_number, WORKSPACE_SEARCH_FILE_LINE_LIMIT + 3);
+        assert!(done.is_none());
+    }
 
     #[test]
     fn workspace_search_batch_preserves_a_cursor_for_later_results() {

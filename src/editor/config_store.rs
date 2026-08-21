@@ -234,6 +234,7 @@ mod tests {
     fn sample_settings() -> AppSettings {
         AppSettings {
             theme: "MilkyDark".to_string(),
+            theme_mode: "auto".to_string(),
             dark_theme: "MilkyDark".to_string(),
             light_theme: "MilkyLight".to_string(),
             dark_editor_theme_mode: "monochrome".to_string(),
@@ -252,6 +253,7 @@ mod tests {
             editor_content_width: 800.0,
             sidebar_sort_mode: "created_desc".to_string(),
             file_list_width: None,
+            workspace_search_width: None,
             file_list_visible: true,
             outline_rail_visible: true,
             show_whitespace: false,

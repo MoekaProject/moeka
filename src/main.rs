@@ -16,6 +16,7 @@ mod i18n;
 #[cfg(test)]
 mod large_document_bench;
 mod markdown;
+mod markdown_format;
 mod platform;
 mod style;
 mod table_ops;
@@ -69,6 +70,10 @@ const MIN_WINDOW_WIDTH_PX: f32 = 480.0;
 const MIN_WINDOW_HEIGHT_PX: f32 = 320.0;
 #[cfg(target_os = "macos")]
 const MAIN_WINDOW_FRAME_AUTOSAVE_NAME: &str = "MoekaMainWindow";
+
+/// Matches the standard macOS window corner; squared off while fullscreen.
+#[cfg(target_os = "macos")]
+pub(crate) const WINDOW_CONTENT_CORNER_RADIUS: f64 = 10.0;
 
 struct FsAssets;
 
@@ -309,7 +314,7 @@ fn configure_editor_window(window: &mut Window, _remember_main_window_frame: boo
                 let content_view: *mut objc::runtime::Object = msg_send![ns_window, contentView];
                 let () = msg_send![content_view, setWantsLayer: true];
                 let layer: *mut objc::runtime::Object = msg_send![content_view, layer];
-                let () = msg_send![layer, setCornerRadius: 10.0_f64];
+                let () = msg_send![layer, setCornerRadius: WINDOW_CONTENT_CORNER_RADIUS];
                 let () = msg_send![layer, setMasksToBounds: true];
             }
         }
@@ -620,6 +625,8 @@ fn main() {
             ),
             KeyBinding::new("secondary-q", Quit, Some("MarkdownEditor")),
             KeyBinding::new("escape", Escape, Some("MarkdownEditor")),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("f11", ToggleFullscreen, Some("MarkdownEditor")),
             KeyBinding::new(keys::TOGGLE_OUTLINE, ToggleOutline, Some("MarkdownEditor")),
             KeyBinding::new(
                 keys::TOGGLE_TERMINAL_PANEL,

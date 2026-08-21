@@ -2,7 +2,7 @@
 
 [package]
 name = "moeka"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 
 [[bin]]
@@ -101,17 +101,9 @@ codegen-units = 16
 incremental = true
 strip = true
 
-[profile.release.package.moeka]
-opt-level = 1
-codegen-units = 256
-
 [profile.profiling]
 inherits = "release"
 debug = true
 strip = false
 lto = false
-codegen-units = 16
-
-[profile.profiling.package.moeka]
-opt-level = 3
 codegen-units = 16

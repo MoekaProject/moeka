@@ -312,11 +312,7 @@ impl EditorView {
     }
 
     fn active_sidebar_scrollbar_handle(&self) -> &ScrollHandle {
-        if self.workspace_search_visible {
-            &self.workspace_search_scroll_handle
-        } else {
-            &self.sidebar_scroll_handle
-        }
+        &self.sidebar_scroll_handle
     }
 
     pub(crate) fn sidebar_scrollbar_track_height(&self) -> f32 {

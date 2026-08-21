@@ -87,32 +87,6 @@ pub(crate) fn paired_delimiter_at(
     }
 }
 
-pub(crate) fn code_block_autocomplete_range(
-    text: &str,
-    cursor_offset: usize,
-    new_text: &str,
-) -> Option<Range<usize>> {
-    // Chinese IMEs map the backtick key to `·` (and full-width `｀`), so those
-    // open a fence just like the ASCII backtick does.
-    if !matches!(new_text, "`" | "·" | "｀") {
-        return None;
-    }
-
-    let marker_len = new_text.len();
-    let pair_start = cursor_offset.checked_sub(marker_len * 2)?;
-    if text.get(pair_start..cursor_offset) != Some(new_text.repeat(2).as_str()) {
-        return None;
-    }
-
-    if let Some(preceding) = pair_start.checked_sub(marker_len)
-        && text.get(preceding..pair_start) == Some(new_text)
-    {
-        return None;
-    }
-
-    Some(pair_start..cursor_offset)
-}
-
 pub(crate) fn missing_wiki_link_closer(text: &str, cursor_offset: usize) -> &'static str {
     let existing = text
         .get(cursor_offset..)
@@ -380,28 +354,7 @@ impl EditorView {
 mod tests {
     use crate::buffer::Buffer;
 
-    use super::{
-        clamp_ime_offset, code_block_autocomplete_range, missing_wiki_link_closer,
-        paired_delimiter_at,
-    };
-
-    #[test]
-    fn third_backtick_triggers_code_block_autocomplete() {
-        assert_eq!(code_block_autocomplete_range("``", 2, "`"), Some(0..2));
-    }
-
-    #[test]
-    fn ime_middle_dot_triggers_code_block_autocomplete() {
-        assert_eq!(code_block_autocomplete_range("··", 4, "·"), Some(0..4));
-        assert_eq!(code_block_autocomplete_range("｀｀", 6, "｀"), Some(0..6));
-        assert_eq!(code_block_autocomplete_range("···", 6, "·"), None);
-        assert_eq!(code_block_autocomplete_range("`·", 3, "·"), None);
-    }
-
-    #[test]
-    fn fourth_backtick_does_not_retrigger_code_block_autocomplete() {
-        assert_eq!(code_block_autocomplete_range("```", 3, "`"), None);
-    }
+    use super::{clamp_ime_offset, missing_wiki_link_closer, paired_delimiter_at};
 
     #[test]
     fn wiki_link_closer_only_fills_missing_brackets() {

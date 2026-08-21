@@ -101,6 +101,7 @@ actions!(
         OpenTerminalWindow,
         Quit,
         Escape,
+        ToggleFullscreen,
         ToggleOutline,
         ToggleInfoPanel,
         ToggleGitHistory,

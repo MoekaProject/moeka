@@ -3469,6 +3469,20 @@ impl EditorView {
                 },
             ));
 
+            items.push(self.render_format_context_menu_item_with_hover_behavior(
+                crate::i18n::format_markdown_label(self.ui_language),
+                Some(MARKDOWN_SVG_PATH),
+                None,
+                false,
+                false,
+                FormatMenuHoverBehavior::ClearSubmenu,
+                cx,
+                move |this, _, cx| {
+                    this.close_context_menu(cx);
+                    this.format_markdown_selection_or_prompt(cx);
+                },
+            ));
+
             items.push(self.render_context_menu_separator());
             items.push(self.render_format_submenu_trigger_item(
                 &self.t(crate::i18n::TextKey::Heading).to_string(),

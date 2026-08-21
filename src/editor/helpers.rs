@@ -782,7 +782,12 @@ pub(crate) fn build_table_display_text(
             .cloned()
             .unwrap_or(consumed..consumed);
 
-        for buf_i in consumed..cell_range.start.min(len) {
+        let gap_start = if ci == 0 {
+            consumed
+        } else {
+            consumed.saturating_add(1)
+        };
+        for buf_i in gap_start..cell_range.start.min(len) {
             b2d[buf_i] = display_pos;
         }
 
@@ -854,7 +859,12 @@ pub(crate) fn build_table_display_text(
         consumed = cell_range.end.min(len);
     }
 
-    for buf_i in consumed..len {
+    let trailing_start = if info.cells.is_empty() {
+        consumed
+    } else {
+        consumed.saturating_add(1)
+    };
+    for buf_i in trailing_start..len {
         b2d[buf_i] = display_pos;
     }
 
@@ -1315,6 +1325,18 @@ pub(crate) fn table_cell_content_offset(
     }
 }
 
+pub(crate) fn effective_wrap_width_for_letter_spacing(
+    width: f32,
+    font_size: f32,
+    letter_spacing: f32,
+) -> f32 {
+    if letter_spacing > 0.0 {
+        width * font_size / (font_size + letter_spacing)
+    } else {
+        width
+    }
+}
+
 pub(crate) fn build_highlight_bounds(
     display_text: &str,
     runs: &[TextRun],
@@ -1716,7 +1738,13 @@ pub(crate) fn compute_display_prefix_bytes(
             if prefix_len > 0 {
                 leading_ws + prefix_len
             } else if prefix_collapsed {
-                leading_ws + char_boundary_after_n_chars(trimmed, 4)
+                // Without a real marker only a digit run can have been folded;
+                // anything else (e.g. `- 1.`) must keep its text visible.
+                if trimmed.starts_with(|ch: char| ch.is_ascii_digit()) {
+                    leading_ws + char_boundary_after_n_chars(trimmed, 4)
+                } else {
+                    leading_ws
+                }
             } else {
                 0
             }
@@ -2253,10 +2281,11 @@ mod tests {
 
     use super::{
         AnchoredPopupVertical, GeneratedPreviewFontFamilies, anchored_popup_placement,
-        build_display_text, build_generated_block_preview_svg, build_text_runs_for_display,
-        compute_display_prefix_bytes, compute_generated_preview_size,
-        load_generated_preview_image_from_svg, prefix_is_folded, table_cell_content_offset,
-        table_cell_decoration, task_prefix_is_folded, wrap_segment_byte_ranges,
+        build_display_text, build_generated_block_preview_svg, build_table_display_text,
+        build_text_runs_for_display, compute_display_prefix_bytes, compute_generated_preview_size,
+        effective_wrap_width_for_letter_spacing, load_generated_preview_image_from_svg,
+        prefix_is_folded, table_cell_content_offset, table_cell_decoration, task_prefix_is_folded,
+        wrap_segment_byte_ranges,
     };
 
     #[test]
@@ -2279,6 +2308,34 @@ mod tests {
             table_cell_content_offset(TableAlign::Right, 40.0, 100.0),
             0.0
         );
+    }
+
+    #[test]
+    fn letter_spaced_table_wrap_width_reserves_spacing_inside_the_cell() {
+        assert_eq!(
+            effective_wrap_width_for_letter_spacing(150.0, 15.0, 1.0),
+            140.625
+        );
+        assert_eq!(
+            effective_wrap_width_for_letter_spacing(150.0, 15.0, 0.0),
+            150.0
+        );
+    }
+
+    #[test]
+    fn folded_table_mapping_keeps_cell_ends_before_synthetic_padding() {
+        let source = "| Header 1 | Header 2 |";
+        let decoration =
+            markdown::parse_decorations(&format!("{source}\n| --- | --- |\n| A | B |"));
+        let info = decoration[0].table_info.as_ref().expect("table header");
+        let (_display, _d2b, b2d, _) =
+            build_table_display_text(source, info, &[], false, None, 1, 0, 0, 0, 0);
+
+        let first_end = info.cell_ranges[0].end;
+        let second_start = info.cell_ranges[1].start;
+        assert_eq!(b2d[first_end], 9);
+        assert_eq!(b2d[first_end + 1], 10);
+        assert_eq!(b2d[second_start], 11);
     }
 
     #[test]

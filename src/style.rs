@@ -12,6 +12,10 @@ pub(crate) const TOP_BAR_HEIGHT_PX: f32 = 33.0;
 pub(crate) const WINDOW_CAPTION_BUTTON_WIDTH_PX: f32 = 46.0;
 pub(crate) const LINUX_CAPTION_BUTTONS_WIDTH_PX: f32 = 108.0;
 
+/// Leading margin for the tab bar's left controls once fullscreen removes the
+/// macOS traffic lights.
+pub(crate) const FULLSCREEN_LEADING_MARGIN_PX: f32 = 8.0;
+
 /// Per-component style configuration, derived from the active theme.
 ///
 /// Naming convention: `{功能}_{位置}_{状态}_{样式}_{单位}`
