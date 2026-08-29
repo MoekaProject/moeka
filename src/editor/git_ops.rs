@@ -193,6 +193,7 @@ pub(crate) enum GitOpError {
 /// prompts are disabled so operations fail instead of hanging.
 pub(super) fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, String> {
     let output = crate::platform::process::headless_command("git")
+        .map_err(|error| error.to_string())?
         // Without this, `git status` refreshes and rewrites `.git/index`, which
         // the workspace watcher reports back as a git change and re-triggers
         // the very status poll that wrote it.
@@ -1148,6 +1149,7 @@ mod tests {
         assert_eq!(top_level.parent_dir(), "");
     }
 
+    #[cfg(not(feature = "mas"))]
     #[test]
     fn unstages_files_before_the_first_commit() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -1175,6 +1177,7 @@ mod tests {
         assert!(error_is_conflict("error: could not apply 1234abc"));
     }
 
+    #[cfg(not(feature = "mas"))]
     #[test]
     fn execute_git_operations_full_cycle() {
         let root = std::env::temp_dir().join(format!(
@@ -1282,6 +1285,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(not(feature = "mas"))]
     #[test]
     fn history_collector_pages_and_reports_working_tree() {
         let root = std::env::temp_dir().join(format!(
@@ -1295,6 +1299,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
             let status = crate::platform::process::headless_command("git")
+                .unwrap()
                 .arg("-C")
                 .arg(&root)
                 .args(args)

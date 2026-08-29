@@ -9,6 +9,11 @@ use super::file_ops;
 const HISTORY_SCHEMA_VERSION: u32 = 1;
 pub(crate) const SNAPSHOT_INTERVAL: usize = 50;
 pub(crate) const MAX_HISTORY_ENTRIES: usize = 10_000;
+/// Ceiling on the document text an in-memory undo stack may pin. A
+/// whole-document rewrite (format, replace-all) stores the previous text inside
+/// its entry, so limiting the entry count alone lets a large file hold on to
+/// gigabytes long after the edit.
+pub(crate) const MAX_HISTORY_TEXT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TabHistory {
@@ -65,6 +70,52 @@ fn push_entry(stack: &mut Vec<HistoryEntry>, snapshot: EditorSnapshot) {
         stack[last_index] = entry;
     }
     stack.push(HistoryEntry::Full(snapshot));
+}
+
+impl HistoryEntry {
+    /// Document text this entry keeps alive.
+    fn text_bytes(&self) -> usize {
+        match self {
+            Self::Full(snapshot) => snapshot.text.len(),
+            Self::Delta {
+                deleted_text,
+                inserted_text,
+                ..
+            } => deleted_text.len() + inserted_text.len(),
+            Self::Transaction { edits, .. } => edits
+                .iter()
+                .map(|edit| edit.deleted_text.len() + edit.inserted_text.len())
+                .sum(),
+        }
+    }
+}
+
+/// Drop the oldest entries until the stack fits both the entry count and the
+/// text budget. The budget grows with the newest entry so a large document
+/// still keeps several undo steps; the newest entry always survives.
+fn trim_stack(stack: &mut Vec<HistoryEntry>) {
+    if stack.len() > MAX_HISTORY_ENTRIES {
+        let overflow = stack.len() - MAX_HISTORY_ENTRIES;
+        stack.drain(0..overflow);
+    }
+
+    let budget = MAX_HISTORY_TEXT_BYTES.max(
+        stack
+            .last()
+            .map_or(0, HistoryEntry::text_bytes)
+            .saturating_mul(3),
+    );
+    let mut total: usize = stack.iter().map(HistoryEntry::text_bytes).sum();
+    if total <= budget {
+        return;
+    }
+    let mut dropped = 0;
+    while total > budget && dropped + 1 < stack.len() {
+        total -= stack[dropped].text_bytes();
+        dropped += 1;
+    }
+    stack.drain(0..dropped);
+    stack.shrink_to_fit();
 }
 
 /// Pop the top entry, reconstructing its snapshot. Delta entries are applied
@@ -200,10 +251,7 @@ impl TabHistory {
     pub(crate) fn push_undo_snapshot(&mut self, snapshot: EditorSnapshot) {
         push_entry(&mut self.undo_stack, snapshot);
         self.redo_stack.clear();
-        if self.undo_stack.len() > MAX_HISTORY_ENTRIES {
-            let overflow = self.undo_stack.len() - MAX_HISTORY_ENTRIES;
-            self.undo_stack.drain(0..overflow);
-        }
+        trim_stack(&mut self.undo_stack);
     }
 
     pub(crate) fn push_undo_transaction(
@@ -234,10 +282,7 @@ impl TabHistory {
             after_view,
         });
         self.redo_stack.clear();
-        if self.undo_stack.len() > MAX_HISTORY_ENTRIES {
-            let overflow = self.undo_stack.len() - MAX_HISTORY_ENTRIES;
-            self.undo_stack.drain(0..overflow);
-        }
+        trim_stack(&mut self.undo_stack);
     }
 
     pub(crate) fn take_undo(&mut self, current: &EditorSnapshot) -> Option<EditorSnapshot> {
@@ -758,6 +803,47 @@ mod tests {
         assert_eq!(history.undo_stack.len(), MAX_HISTORY_ENTRIES);
         let decoded = decode_stack(&history.undo_stack).unwrap();
         assert_eq!(decoded[0].text, "v4");
+    }
+
+    #[test]
+    fn trims_undo_stack_once_it_pins_more_text_than_the_budget() {
+        // Each rewrite replaces the whole document, so every entry keeps a
+        // full copy of the text it superseded.
+        let chunk = MAX_HISTORY_TEXT_BYTES / 8;
+        let mut history = TabHistory::default();
+        for index in 0..40 {
+            let text = std::iter::repeat_n(char::from(b'a' + (index % 26) as u8), chunk)
+                .collect::<String>();
+            history.push_undo_snapshot(snapshot(&text, 0));
+        }
+
+        let held: usize = history
+            .undo_stack
+            .iter()
+            .map(HistoryEntry::text_bytes)
+            .sum();
+        let budget = MAX_HISTORY_TEXT_BYTES.max(
+            history
+                .undo_stack
+                .last()
+                .map_or(0, HistoryEntry::text_bytes)
+                .saturating_mul(3),
+        );
+        assert!(held <= budget, "{held} bytes exceeds the {budget} budget");
+        assert!(!history.undo_stack.is_empty());
+        assert!(matches!(
+            history.undo_stack.last(),
+            Some(HistoryEntry::Full(_))
+        ));
+    }
+
+    #[test]
+    fn a_single_oversized_entry_survives_trimming() {
+        let mut history = TabHistory::default();
+        let text = "x".repeat(MAX_HISTORY_TEXT_BYTES * 2);
+        history.push_undo_snapshot(snapshot(&text, 0));
+
+        assert_eq!(history.undo_stack.len(), 1);
     }
 
     #[test]

@@ -79,10 +79,10 @@ jobs:
             target: aarch64-apple-darwin
             asset_suffix: arm64
             rust_targets: aarch64-apple-darwin
-          - name: macOS universal
-            target: universal-apple-darwin
-            asset_suffix: universal
-            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - name: macOS x86_64
+            target: x86_64-apple-darwin
+            asset_suffix: x86_64
+            rust_targets: x86_64-apple-darwin
 
     steps:
       - name: Checkout
@@ -104,7 +104,7 @@ jobs:
       - name: Build app and dmg
         run: |
           set -euo pipefail
-          make dmg \
+          make dmg-one \
             TARGET=${{ matrix.target }} \
             DMG_PATH=dist/Moeka-macos-${{ matrix.asset_suffix }}.dmg \
             VOLUME_NAME=Moeka-${{ matrix.asset_suffix }}
@@ -211,6 +211,8 @@ jobs:
   publish:
     name: Publish release
     runs-on: ubuntu-latest
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     needs:
       - release_meta
       - build
@@ -263,12 +265,18 @@ jobs:
           repo="MoekaProject/community"
           assets=(
             dist/Moeka-macos-arm64.dmg
-            dist/Moeka-macos-universal.dmg
+            dist/Moeka-macos-x86_64.dmg
             dist/Moeka-linux-arm64.zip
             dist/Moeka-linux-x86_64.zip
             dist/Moeka-windows-arm64.zip
             dist/Moeka-windows-x86_64.zip
           )
+          for asset in "${assets[@]}"; do
+            if [[ ! -f "${asset}" ]]; then
+              echo "::error title=Missing release asset::${asset} was not downloaded"
+              exit 1
+            fi
+          done
 
           run_release_command() {
             local output
@@ -303,3 +311,39 @@ jobs:
             --repo "${repo}" \
             --clobber \
             "${assets[@]}"
+
+      - name: Checkout source for Homebrew template
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release_meta.outputs.tag }}
+          path: source
+      - name: Update Homebrew tap
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_TAG: ${{ needs.release_meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          arm_sha="$(sha256sum dist/Moeka-macos-arm64.dmg | awk '{print $1}')"
+          intel_sha="$(sha256sum dist/Moeka-macos-x86_64.dmg | awk '{print $1}')"
+
+          gh repo clone MoekaProject/homebrew-moeka tap
+          mkdir -p tap/Casks
+          cp source/packaging/homebrew/moeka.rb tap/Casks/moeka.rb
+          VERSION="${version}" ARM_SHA="${arm_sha}" INTEL_SHA="${intel_sha}" ruby -pi -e '
+            sub(/^  version .*/, "  version \"#{ENV.fetch("VERSION")}\"")
+            sub(/^  sha256 arm:.*/, "  sha256 arm:   \"#{ENV.fetch("ARM_SHA")}\",")
+            sub(/^         intel:.*/, "         intel: \"#{ENV.fetch("INTEL_SHA")}\"")
+          ' tap/Casks/moeka.rb
+
+          cd tap
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Casks/moeka.rb
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Update Moeka to ${version}"
+          git push

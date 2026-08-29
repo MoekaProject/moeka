@@ -818,6 +818,7 @@ impl EditorView {
             .iter()
             .position(|workspace| workspace == path);
         self.workspaces.retain(|workspace| workspace != path);
+        crate::platform::security_scope::stop_access(path);
         if self.workspaces.is_empty() {
             self.sidebar_root = PathBuf::new();
             self.sidebar_visible = false;

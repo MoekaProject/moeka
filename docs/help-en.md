@@ -1,11 +1,11 @@
 ---
-category: Getting Started
-description: Learn how to use Moeka
+category: Welcome
+description: An introduction to using Moeka
 ---
 # Moeka
-Moeka is an elegant, fluid, local-first **Markdown editing app**. It is simple to start with, yet capable enough for serious writing. You can use it on macOS and Windows, with Linux coming later. This short guide helps you build your own knowledge base more quickly.
+Moeka is an elegant, fluid, fully local **Markdown editing app**. It is delightfully simple to use while remaining capable of knowledge management and dense content layout. Moeka is available on macOS, Windows, and Linux ([get it now](https://moeka.app/)). We hope this focused editor helps everyone build a personal knowledge base quickly; read on for a brief introduction.
 
-Moeka uses `Markdown` as its text format. Markdown is ideal for writers because it stays readable without getting in the way of drafting. You can preview supported syntax from the context menu, use the listed [shortcuts](#table-interaction), or type `/` on an empty line to open the format menu and search for the format you need.
+Moeka uses `Markdown` as its text format. Markdown is ideal for writers because it stays readable without getting in the way of drafting. You can preview supported syntax from the context menu, use the listed [shortcuts](#table-support), or type `/` on an empty line to open the format menu and search for the format you need.
 
 > A Markdown-formatted document should be publishable as plain text, without looking like it has been marked up with tags or formatting instructions. Its syntax is made entirely of punctuation characters, carefully chosen so they look like what they mean. Asterisks around a word actually look like emphasis, and list markers look like lists. -- John Gruber
 
@@ -28,72 +28,53 @@ Moeka uses `Markdown` as its text format. Markdown is ideal for writers because 
   - [ ] Try pressing `Tab` or `Shift + Tab` on this line.
 - [ ] Add more completed items later.
 ***
-### Table Interaction
-| Feature                                 | Shortcut       |
-| --------------------------------------- | -------------- |
-| `Command / Ctrl + B`                    | Bold           |
-| `Command / Ctrl + I`                    | Italic         |
-| `Command / Ctrl + U`                    | Underline      |
-| `Command / Ctrl + Shift + X`            | Strikethrough  |
-| `Command / Ctrl + E`                    | Inline code    |
-| `Command / Ctrl + Option / Alt + C`     | Code block     |
-| `Command / Ctrl + Option / Alt + Q`     | Quote          |
-| `Command / Ctrl + Option / Alt + U`     | Unordered list |
-| `Command / Ctrl + Option / Alt + O`     | Ordered list   |
-| `Command / Ctrl + Option / Alt + Enter` | Todo           |
-| `Command / Ctrl + K`                    | Link           |
-| `Command / Ctrl + Option / Alt + T`     | Table          |
-| `Command / Ctrl + 0`                    | Paragraph      |
-| `/ image`                               | Image          |
-
-| --------------------- | --------- |
-| --------------------- | --------- |
-| `[[`                  | Wiki link |
-| `/ image`             | Image     |
+### Table Support
+| Feature                      | Shortcut                                       |
+| ---------------------------- | ---------------------------------------------- |
+| `Command / Ctrl + B`         | Bold                                           |
+| `Command / Ctrl + I`         | Italic                                         |
+| `Command / Ctrl + U`         | Underline                                      |
+| `Command / Ctrl + Shift + X` | Strikethrough                                  |
+| `Command / Ctrl + E`         | Inline code                                    |
+| More syntax                  | Use the `/` command or context formatting menu |
 ## Code Block Syntax
 ```rust
 fn greet(name: &str) {
   println!("hello, {name}");
 }
 ```
-
 ### LaTeX Math
-Enter a simple display formula to see a block preview in the document.
-
+Wrap syntax in `$...$` for an inline formula such as $E = mc^2$, or place `$$` on lines of their own for a block formula:
 $$
-E = mc^2
+\operatorname*{arg\,min}_{\theta \in \mathbb{R}^n}
+\left[
+  \frac{1}{m}\sum_{i=1}^{m}
+  \left\lVert f_\theta(x_i)-y_i \right\rVert_2^2
+  + \lambda \left\lVert \theta \right\rVert_2^2
+\right]
 $$
-
 ### Mermaid Diagram Example
-Use a simple diagram to see how chart previews work.
-
 ```mermaid
 mindmap
-  root((mindmap))
-    Origins
-      Long history
-      ::icon(fa fa-book)
-      Popularisation
-        British popular psychology <br/>author Tony Buzan
-    Research
-      On effectiveness<br/>and features
-      On Automatic creation
-        Uses
-            Creative techniques
-            Strategic planning
-            Argument mapping
-    Tools
-      Pen and paper
+  root((Moeka))
+    Writing
+      Markdown
+      Bidirectional links
+      Tables and tasks
+    Visualization
       Mermaid
+        Flows and sequences
+        Data charts
+      LaTeX
+    Local first
+      Workspaces
+      Version history
+      Attachment management
+    Output
+      PDF
+      Images
+      Plain text
 ```
-
-```mermaid
-pie title Pets adopted by volunteers
-    "Dogs" : 386
-    "Cats" : 85
-    "Rats" : 15
-```
-
 ## Inline Syntax
 - Use **bold** or *italic* text for emphasis.
 - Use ++underline++ for phrases that need attention; `~U~` is rendered as subscript, not underline.
@@ -107,17 +88,11 @@ pie title Pets adopted by volunteers
 > NOTE, IMPORTANT, WARNING, CAUTION, and other callout types are supported.
 ## Link Syntax
 - Use an [internal link](#moeka) to jump to a heading in the current file.
-- Use [[My Design Style.md]] wiki links to connect files.
+- Use [[Design Style Reference.md]] wiki links to connect files.
 - Use an [external link](https://google.com) to open any web address.
 - Use footnote syntax[^note] to jump to a reference line.
-- Use a [file link](Feature Plan.md) to jump to a file or heading.
+- Use a [file link](<Design Style Reference.md>) to jump to a file or heading.
 - Hold `Command / Ctrl` and click any of the above links to open them.
-## Local Attachments
-- Pasting an image or file, or dropping one from Finder into a Markdown document, copies it to the attachment location selected in Settings. Dropping a file from Moeka's sidebar inserts a link without copying the file.
-- Attachment locations can be the document folder, a workspace folder, or a subfolder beside the current document. Custom folders must be relative paths inside the workspace.
-- Newly inserted attachments use document-relative paths and standard Markdown links, such as `![](../assets/image.png)`.
-- Existing Markdown links and WikiLinks such as `![[assets/image.png]]` are both parsed and displayed.
-- Existing links are not updated automatically after files or folders are moved or renamed.
 ## Extended Inline Syntax
 - Subscript example: H~2~O. Superscript example: E=mc^2^. English text also works: Foo~zoo~ or Bar^baz^.
 - ==Highlight== is supported for stronger emphasis.

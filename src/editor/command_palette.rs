@@ -122,6 +122,7 @@ impl EditorView {
         let query = self.command_palette_query.trim().to_lowercase();
         COMMAND_SPECS
             .iter()
+            .filter(|spec| spec.id.is_available())
             .filter(|spec| !spec.markdown_only || self.active_tab_is_markdown())
             .filter(|spec| {
                 if query.is_empty() {

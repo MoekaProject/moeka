@@ -1,11 +1,11 @@
 ---
-category: Primeros pasos
-description: Aprende a usar Moeka
+category: Bienvenido
+description: Introducción al uso de Moeka
 ---
 # Moeka
-Moeka es una **aplicación de edición Markdown** elegante, fluida y local primero. Es fácil de empezar a usar, pero también sirve para quienes escriben mucho. Puedes usarla en macOS y Windows; Linux llegará más adelante. Esta guía te ayuda a crear tu base de conocimiento con rapidez.
+Moeka es una **aplicación de edición Markdown** elegante, fluida y totalmente local. Es muy fácil de usar y, a la vez, capaz de gestionar conocimiento y componer contenido denso. Moeka ya está disponible en macOS, Windows y Linux ([descárgala ahora](https://moeka.app/)). Esperamos que este editor sencillo permita a cualquiera crear rápidamente su propia base de conocimiento; esta guía te ayudará a empezar.
 
-Moeka usa `Markdown` como formato de texto. Markdown es ideal para escribir porque mantiene buena legibilidad sin interrumpir la creación. Puedes previsualizar la sintaxis admitida desde el menú contextual, usar los [atajos](#interacción-con-tablas) o escribir `/` en una línea vacía para abrir el menú de formato.
+Moeka usa `Markdown` como formato de texto. Markdown es ideal para escribir porque mantiene buena legibilidad sin interrumpir la creación. Puedes previsualizar la sintaxis admitida desde el menú contextual, usar los [atajos](#compatibilidad-con-tablas) o escribir `/` en una línea vacía para abrir el menú de formato.
 
 > Un documento Markdown debería poder publicarse como texto plano, sin estilos de formato. Su sintaxis está formada solo por signos de puntuación elegidos para parecerse a lo que significan: los asteriscos parecen énfasis y los marcadores de lista parecen listas. -- John Gruber
 
@@ -28,72 +28,53 @@ Moeka usa `Markdown` como formato de texto. Markdown es ideal para escribir porq
   - [ ] Prueba `Tab` o `Shift + Tab` en esta línea.
 - [ ] Agrega más elementos completados después.
 ***
-### Interacción con tablas
-| Función                                 | Atajo            |
-| --------------------------------------- | ---------------- |
-| `Command / Ctrl + B`                    | Negrita          |
-| `Command / Ctrl + I`                    | Cursiva          |
-| `Command / Ctrl + U`                    | Subrayar         |
-| `Command / Ctrl + Shift + X`            | Tachado          |
-| `Command / Ctrl + E`                    | Código en línea  |
-| `Command / Ctrl + Option / Alt + C`     | Bloque de código |
-| `Command / Ctrl + Option / Alt + Q`     | Cita             |
-| `Command / Ctrl + Option / Alt + U`     | Lista sin orden  |
-| `Command / Ctrl + Option / Alt + O`     | Lista ordenada   |
-| `Command / Ctrl + Option / Alt + Enter` | Tarea            |
-| `Command / Ctrl + K`                    | Enlace           |
-| `Command / Ctrl + Option / Alt + T`     | Tabla            |
-| `Command / Ctrl + 0`                    | Párrafo          |
-| `/ image`                               | Imagen           |
-
-| --------------------- | ----------- |
-| --------------------- | ----------- |
-| `[[`                  | Enlace wiki |
-| `/ image`             | Imagen      |
+### Compatibilidad con tablas
+| Función                      | Atajo                                                   |
+| ---------------------------- | ------------------------------------------------------- |
+| `Command / Ctrl + B`         | Negrita                                                 |
+| `Command / Ctrl + I`         | Cursiva                                                 |
+| `Command / Ctrl + U`         | Subrayado                                               |
+| `Command / Ctrl + Shift + X` | Tachado                                                 |
+| `Command / Ctrl + E`         | Código en línea                                         |
+| Más sintaxis                 | Consulta el comando `/` o el menú contextual de formato |
 ## Sintaxis de bloques de código
 ```rust
 fn greet(name: &str) {
   println!("hello, {name}");
 }
 ```
-
 ### Fórmulas LaTeX
-Escribe una fórmula de bloque sencilla para ver una vista previa en el documento.
-
+Encierra la sintaxis entre `$...$` para escribir una fórmula en línea, como $E = mc^2$, o coloca cada `$$` en una línea independiente para escribir una fórmula de bloque:
 $$
-E = mc^2
+\operatorname*{arg\,min}_{\theta \in \mathbb{R}^n}
+\left[
+  \frac{1}{m}\sum_{i=1}^{m}
+  \left\lVert f_\theta(x_i)-y_i \right\rVert_2^2
+  + \lambda \left\lVert \theta \right\rVert_2^2
+\right]
 $$
-
 ### Ejemplo de diagrama Mermaid
-Usa un diagrama simple para observar la vista previa.
-
 ```mermaid
 mindmap
-  root((mindmap))
-    Origins
-      Long history
-      ::icon(fa fa-book)
-      Popularisation
-        British popular psychology <br/>author Tony Buzan
-    Research
-      On effectiveness<br/>and features
-      On Automatic creation
-        Uses
-            Creative techniques
-            Strategic planning
-            Argument mapping
-    Tools
-      Pen and paper
+  root((Moeka))
+    Escritura
+      Markdown
+      Enlaces bidireccionales
+      Tablas y tareas
+    Visualización
       Mermaid
+        Flujos y secuencias
+        Gráficos de datos
+      LaTeX
+    Prioridad local
+      Espacios de trabajo
+      Historial de versiones
+      Gestión de archivos adjuntos
+    Salida
+      PDF
+      Imágenes
+      Texto plano
 ```
-
-```mermaid
-pie title Pets adopted by volunteers
-    "Dogs" : 386
-    "Cats" : 85
-    "Rats" : 15
-```
-
 ## Sintaxis en línea
 - Usa **negrita** o *italic* para enfatizar.
 - Usa ++subrayado++ para marcar frases importantes; `~U~` se renderiza como subíndice, no como subrayado.
@@ -107,10 +88,10 @@ pie title Pets adopted by volunteers
 > También se admiten NOTE, IMPORTANT, WARNING, CAUTION y otros tipos.
 ## Sintaxis de enlaces
 - Usa un [enlace interno](#moeka) para saltar a un título del archivo actual.
-- Usa enlaces wiki como [[My Design Style.md]] para conectar archivos.
+- Usa enlaces wiki como [[Referencia de estilo de diseño.md]] para conectar archivos.
 - Usa un [enlace externo](https://google.com) para abrir cualquier dirección web.
 - Usa notas al pie[^note] para saltar a una referencia.
-- Usa un [enlace de archivo](Feature Plan.md) para abrir un archivo o título.
+- Usa un [enlace de archivo](<Referencia de estilo de diseño.md>) para abrir un archivo o título.
 - Mantén `Command / Ctrl` y haz clic para abrir estos enlaces.
 ## Sintaxis en línea extendida
 - Subíndice: H~2~O. Superíndice: E=mc^2^. También funciona Foo~zoo~ o Bar^baz^.

@@ -8,6 +8,10 @@ use gpui::{
 
 use super::*;
 
+/// Documents larger than this keep no text in the reopen list; they are read
+/// back from disk. Smaller ones stay resident so reopening is instant.
+const RECENTLY_CLOSED_RESIDENT_TEXT_LIMIT: usize = 256 * 1024;
+
 #[derive(Clone, Copy)]
 enum TabDropTarget<'a> {
     Before(&'a str),
@@ -98,6 +102,19 @@ impl EditorView {
         } else {
             self.clear_line_display_info();
         }
+    }
+
+    /// Document images are decoded at full resolution and cached by path for
+    /// the whole session, so a handful of photos is hundreds of megabytes.
+    /// With no tab left in the window nothing can display them; the visible
+    /// image pass reloads whatever the next document needs.
+    fn release_document_image_cache(&mut self) {
+        let generated_keys = std::mem::take(&mut self.generated_preview_keys);
+        self.image_cache.retain(|key, _| {
+            key.starts_with(file_list::FILE_LIST_IMAGE_CACHE_PREFIX) || generated_keys.contains(key)
+        });
+        self.image_cache.shrink_to_fit();
+        self.generated_preview_keys = generated_keys;
     }
 
     pub(super) fn ensure_settings_tab_first(&mut self) {
@@ -354,6 +371,14 @@ impl EditorView {
     }
 
     fn restore_closed_tab(&mut self, closed_tab: OpenTab, cx: &mut Context<Self>) {
+        // A large saved document was closed without keeping its text; read it
+        // back from disk instead of restoring an empty buffer.
+        if closed_tab.snapshot.text.is_empty()
+            && let Some(path) = closed_tab.path.as_ref()
+        {
+            self.open_path_in_permanent_tab(path.clone(), true, cx);
+            return;
+        }
         let tab = OpenTab {
             id: self.next_tab_identity(),
             title: closed_tab.title,
@@ -637,6 +662,16 @@ impl EditorView {
         tab.kind == TabKind::Editor && tab.path.is_some() && !tab.is_preview
     }
 
+    /// Whether a closed tab's text can be dropped because reopening it will
+    /// read the file back from disk. Unsaved or vanished documents only exist
+    /// in memory, so those keep their snapshot.
+    fn closed_tab_can_reload_from_disk(tab: &OpenTab) -> bool {
+        !tab.is_dirty
+            && !tab.is_deleted
+            && tab.snapshot.text.len() > RECENTLY_CLOSED_RESIDENT_TEXT_LIMIT
+            && tab.path.as_ref().is_some_and(|path| path.is_file())
+    }
+
     pub(crate) fn persist_active_tab_state(&mut self) {
         self.commit_history_transaction();
         if let Some(index) = self.active_tab_index() {
@@ -675,32 +710,42 @@ impl EditorView {
         if index >= self.tabs.len() {
             return;
         }
-        let tab = self.tabs[index].clone();
-        let switching_tabs = self.active_tab_id.as_deref() != Some(tab.id.as_str());
+        // Only the metadata is copied out: cloning the whole `OpenTab` here
+        // duplicated the document text and the undo history on every tab
+        // switch, which is hundreds of megabytes on a large file.
+        let tab_id = self.tabs[index].id.clone();
+        let tab_kind = self.tabs[index].kind;
+        let tab_file_kind = self.tabs[index].file_kind.clone();
+        let tab_path = self.tabs[index].path.clone();
+        let tab_left_aligned = self.tabs[index].editor_left_aligned;
+        let switching_tabs = self.active_tab_id.as_deref() != Some(tab_id.as_str());
         if switching_tabs {
             self.stash_active_tab_generated_preview_cache();
         }
         self.invalidate_active_file_panel_caches();
-        self.active_tab_id = Some(tab.id.clone());
+        self.active_tab_id = Some(tab_id.clone());
         self.active_tab_index_cache.set(Some(index));
-        self.active_file_kind_cache = tab.file_kind.clone();
-        self.current_file_path = tab.path.clone();
-        self.editor_left_aligned = tab.editor_left_aligned;
+        self.active_file_kind_cache = tab_file_kind.clone();
+        self.current_file_path = tab_path.clone();
+        self.editor_left_aligned = tab_left_aligned;
         if switching_tabs {
-            self.restore_generated_preview_cache_for_tab(&tab.id);
+            self.restore_generated_preview_cache_for_tab(&tab_id);
         }
-        if tab.kind.is_terminal() {
+        if tab_kind.is_terminal() {
             self.hide_right_panels_for_terminal(cx);
-            self.pending_terminal_focus = Some(tab.id.clone());
+            self.pending_terminal_focus = Some(tab_id.clone());
         }
-        if matches!(tab.kind, TabKind::Editor | TabKind::Diff) {
-            if tab
-                .file_kind
+        if matches!(tab_kind, TabKind::Editor | TabKind::Diff) {
+            if tab_file_kind
                 .as_ref()
                 .is_some_and(FileKind::supports_text_buffer)
             {
-                self.restore_tab_snapshot_state(&tab.snapshot);
-                self.restore_layout_cache_for_tab(&tab.id);
+                // Borrow the snapshot out of the tab instead of cloning it, then
+                // hand it straight back.
+                let snapshot = std::mem::take(&mut self.tabs[index].snapshot);
+                self.restore_tab_snapshot_state(&snapshot);
+                self.tabs[index].snapshot = snapshot;
+                self.restore_layout_cache_for_tab(&tab_id);
             } else {
                 self.buffer = Buffer::from_text("");
                 self.cursor.offset = 0;
@@ -715,8 +760,8 @@ impl EditorView {
             self.toolbar_hidden_by_scroll = self.scroll_offset > 0.5;
             self.toolbar_corner_hovered = false;
             self.sync_toolbar_opacity(cx);
-            if tab.file_kind.as_ref().is_some_and(FileKind::is_image)
-                && let Some(path) = tab.path.as_ref()
+            if tab_file_kind.as_ref().is_some_and(FileKind::is_image)
+                && let Some(path) = tab_path.as_ref()
             {
                 self.queue_image_load(path.to_string_lossy().into_owned(), cx);
             }
@@ -724,7 +769,7 @@ impl EditorView {
             self.pause_blinking(cx);
             self.request_editor_focus(cx);
         }
-        if let Some(path) = tab.path.clone() {
+        if let Some(path) = tab_path {
             let suppress_sidebar_sync = self
                 .suppress_next_sidebar_sync_path
                 .as_ref()
@@ -769,11 +814,21 @@ impl EditorView {
         };
         let was_active = self.active_tab_id.as_deref() == Some(tab_id);
         // Save to recently closed (keep up to 20)
-        let removed = self.tabs.remove(index);
+        let mut removed = self.tabs.remove(index);
+        self.code_block_display_overrides.remove(&removed.id);
+        self.non_markdown_horizontal_scroll_states
+            .remove(&removed.id);
         if removed.kind.is_terminal() {
             self.stop_terminal_tab(&removed.id);
         }
         if Self::should_track_in_recently_closed(&removed) {
+            if Self::closed_tab_can_reload_from_disk(&removed) {
+                // Reopening a saved file reads it back from disk anyway, so
+                // parking its text and undo history here would keep the whole
+                // document resident for the next twenty closes.
+                removed.snapshot.text = String::new();
+                removed.history = history_store::TabHistory::default();
+            }
             self.recently_closed_tabs.push(removed.clone());
             if self.recently_closed_tabs.len() > 20 {
                 self.recently_closed_tabs.remove(0);
@@ -789,6 +844,12 @@ impl EditorView {
             self.active_tab_index_cache.set(None);
             self.active_file_kind_cache = None;
             self.pending_close_tab_ids.clear();
+            self.release_document_state();
+            // With a split still open the other pane keeps rendering, so only
+            // the single-pane window can drop the shared image cache.
+            if self.panes.len() <= 1 {
+                self.release_document_image_cache();
+            }
             // Closing the last tab of a split pane collapses the pane.
             let pane_id = self.current_pane_id();
             self.remove_pane_if_empty(pane_id, cx);
@@ -2513,19 +2574,21 @@ impl EditorView {
                     ))
                 },
             )
-            .child(self.render_tab_bar_action_button(
-                "tab-bar-terminal-toggle",
-                MENU_TERMINAL_SVG_PATH,
-                self.has_terminal_tabs(),
-                true,
-                None,
-                crate::i18n::terminal_label(self.ui_language),
-                Some(crate::editor::shortcut::hint(
-                    crate::platform::keys::TOGGLE_TERMINAL_PANEL,
-                )),
-                cx,
-                |this, cx| this.toggle_terminal_panel(cx),
-            ))
+            .when(crate::platform::capabilities::CHILD_PROCESSES, |this| {
+                this.child(self.render_tab_bar_action_button(
+                    "tab-bar-terminal-toggle",
+                    MENU_TERMINAL_SVG_PATH,
+                    self.has_terminal_tabs(),
+                    true,
+                    None,
+                    crate::i18n::terminal_label(self.ui_language),
+                    Some(crate::editor::shortcut::hint(
+                        crate::platform::keys::TOGGLE_TERMINAL_PANEL,
+                    )),
+                    cx,
+                    |this, cx| this.toggle_terminal_panel(cx),
+                ))
+            })
             .child(self.render_tab_bar_action_button(
                 "tab-bar-info-toggle",
                 INFO_PANEL_SVG_PATH,
@@ -2537,19 +2600,21 @@ impl EditorView {
                 cx,
                 |this, cx| this.toggle_info_panel(cx),
             ))
-            .child(self.render_tab_bar_action_button(
-                "tab-bar-git-toggle",
-                GIT_HISTORY_SVG_PATH,
-                self.is_utility_panel_active(RightUtilityPanel::GitHistory),
-                true,
-                None,
-                self.t(crate::i18n::TextKey::GitPanelTitle),
-                Some(crate::editor::shortcut::hint(
-                    crate::platform::keys::TOGGLE_GIT_HISTORY,
-                )),
-                cx,
-                |this, cx| this.toggle_git_history_panel(cx),
-            ))
+            .when(crate::platform::capabilities::CHILD_PROCESSES, |this| {
+                this.child(self.render_tab_bar_action_button(
+                    "tab-bar-git-toggle",
+                    GIT_HISTORY_SVG_PATH,
+                    self.is_utility_panel_active(RightUtilityPanel::GitHistory),
+                    true,
+                    None,
+                    self.t(crate::i18n::TextKey::GitPanelTitle),
+                    Some(crate::editor::shortcut::hint(
+                        crate::platform::keys::TOGGLE_GIT_HISTORY,
+                    )),
+                    cx,
+                    |this, cx| this.toggle_git_history_panel(cx),
+                ))
+            })
             .into_any_element()
     }
 
@@ -2923,4 +2988,65 @@ fn first_markdown_content_line_end(text: &str) -> Option<usize> {
         offset += line.len();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn closed_editor_tab(text: &str, path: Option<PathBuf>) -> OpenTab {
+        OpenTab {
+            id: "tab-1".to_string(),
+            title: "sample".to_string(),
+            kind: TabKind::Editor,
+            path,
+            file_kind: None,
+            editor_left_aligned: false,
+            snapshot: EditorSnapshot {
+                text: text.to_string(),
+                ..Default::default()
+            },
+            image_view: ImageViewState::default(),
+            whiteboard: None,
+            git_diff: None,
+            inline_diff: None,
+            is_preview: false,
+            is_dirty: false,
+            is_deleted: false,
+            is_pinned: false,
+            recovery: config_store::TabRecoveryState::default(),
+            history: history_store::TabHistory::default(),
+        }
+    }
+
+    #[test]
+    fn a_large_saved_document_is_dropped_from_the_reopen_list() {
+        let text = "x".repeat(RECENTLY_CLOSED_RESIDENT_TEXT_LIMIT + 1);
+        let tab = closed_editor_tab(&text, Some(PathBuf::from("Cargo.toml")));
+
+        assert!(EditorView::closed_tab_can_reload_from_disk(&tab));
+    }
+
+    #[test]
+    fn documents_that_disk_cannot_restore_keep_their_text() {
+        let text = "x".repeat(RECENTLY_CLOSED_RESIDENT_TEXT_LIMIT + 1);
+        let path = Some(PathBuf::from("Cargo.toml"));
+
+        let small = closed_editor_tab("short", path.clone());
+        assert!(!EditorView::closed_tab_can_reload_from_disk(&small));
+
+        let mut dirty = closed_editor_tab(&text, path.clone());
+        dirty.is_dirty = true;
+        assert!(!EditorView::closed_tab_can_reload_from_disk(&dirty));
+
+        let mut deleted = closed_editor_tab(&text, path);
+        deleted.is_deleted = true;
+        assert!(!EditorView::closed_tab_can_reload_from_disk(&deleted));
+
+        let untitled = closed_editor_tab(&text, None);
+        assert!(!EditorView::closed_tab_can_reload_from_disk(&untitled));
+
+        let missing = closed_editor_tab(&text, Some(PathBuf::from("no-such-file.md")));
+        assert!(!EditorView::closed_tab_can_reload_from_disk(&missing));
+    }
 }

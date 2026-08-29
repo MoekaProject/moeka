@@ -18,7 +18,7 @@ use super::{
     APP_VERSION, ChatAgentCli, DOC_SVG_PATH, EditorView, FILE_INFO_SECTION_INFO_SVG_PATH,
     FLOWER_SVG_PATH, GIT_SYNC_SVG_PATH, MOUNTAIN_SVG_PATH, MermaidTheme, SITE_SVG_PATH,
     SearchMenuConfig, SearchMenuRow, THEME_AUTO_MINI_SVG_PATH, THEME_DARK_MINI_SVG_PATH,
-    THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape, attachments, tooltip,
+    THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape, attachments, helpers, tooltip,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -187,7 +187,9 @@ impl EditorView {
                                     .items_center()
                                     .justify_end()
                                     .gap(px(self.scaled(sps.settings_header_actions_gap_px)))
-                                    .child(self.render_settings_update_button(cx))
+                                    .when(crate::platform::capabilities::SELF_UPDATE, |this| {
+                                        this.child(self.render_settings_update_button(cx))
+                                    })
                                     .child(self.render_settings_config_button(cx))
                                     .child(self.render_settings_help_button(cx))
                                     .child(self.render_settings_site_button(cx)),
@@ -196,7 +198,9 @@ impl EditorView {
                     .child(self.render_theme_section(cx))
                     .child(self.render_font_section(window, cx))
                     .child(self.render_format_section(cx))
-                    .child(self.render_terminal_settings_section(cx))
+                    .when(crate::platform::capabilities::CHILD_PROCESSES, |this| {
+                        this.child(self.render_terminal_settings_section(cx))
+                    })
                     .child(self.render_attachment_settings_section(cx)),
             )
             .into_any_element()
@@ -567,6 +571,9 @@ impl EditorView {
                 ),
                 |this| this.child(self.render_attachment_folder_row()),
             )
+            .when(location == "external_folder", |this| {
+                this.child(self.render_external_attachment_folder_row(cx))
+            })
             .into_any_element()
     }
 
@@ -610,6 +617,70 @@ impl EditorView {
             attachment_settings_label(self.ui_language, "folder"),
             control,
         )
+    }
+
+    fn render_external_attachment_folder_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let settings = &self.styles.settings_panel;
+        let path = if self.app_settings.attachment_external_folder.is_empty() {
+            attachment_settings_label(self.ui_language, "choose_external_folder").to_string()
+        } else {
+            self.app_settings.attachment_external_folder.clone()
+        };
+        let control = div()
+            .id("settings-external-attachment-folder")
+            .w_full()
+            .h(px(self.scaled(settings.settings_input_height_px)))
+            .px(px(self.scaled(8.0)))
+            .flex()
+            .items_center()
+            .border(px(settings.settings_option_button_border_width_px))
+            .border_color(settings.settings_option_button_border_color)
+            .rounded(px(self.scaled(settings.settings_input_radius_px)))
+            .bg(settings.settings_option_button_bg)
+            .text_color(settings.settings_option_button_text_color)
+            .cursor(CursorStyle::Arrow)
+            .hover({
+                let hover = settings.settings_option_button_hover_bg;
+                move |style| style.bg(hover)
+            })
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .truncate()
+                    .whitespace_nowrap()
+                    .child(path),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.pick_external_attachment_folder(cx)),
+            )
+            .into_any_element();
+        self.render_attachment_settings_row(
+            attachment_settings_label(self.ui_language, "external_folder_path"),
+            control,
+        )
+    }
+
+    fn pick_external_attachment_folder(&mut self, cx: &mut Context<Self>) {
+        let title =
+            attachment_settings_label(self.ui_language, "choose_external_folder").to_string();
+        cx.spawn(async move |this, cx| {
+            let path = cx
+                .background_executor()
+                .spawn(async move { helpers::pick_folder_blocking(&title) })
+                .await;
+            let Some(path) = path else {
+                return;
+            };
+            let bookmark = crate::platform::security_scope::bookmark_for(&path).unwrap_or_default();
+            let _ = this.update(cx, |this, cx| {
+                this.app_settings.attachment_external_folder = path.to_string_lossy().into_owned();
+                this.app_settings.attachment_external_folder_bookmark = bookmark;
+                this.finalize_settings_change(cx);
+            });
+        })
+        .detach();
     }
 
     fn ensure_attachment_folder_editor(&mut self, cx: &mut Context<Self>) {
@@ -2421,20 +2492,26 @@ impl EditorView {
                 terminal_settings_label(self.ui_language, "search_commands").to_string(),
             ),
             FontRole::AttachmentLocation => (
-                ["current_file", "workspace_folder", "current_file_subfolder"]
-                    .into_iter()
-                    .map(|value| {
-                        let label = attachment_settings_label(self.ui_language, value).to_string();
-                        PickerOption {
-                            value: value.to_string(),
-                            search_text: label.to_lowercase(),
-                            label,
-                            group: None,
-                            preview_font: None,
-                            icon_path: None,
-                        }
-                    })
-                    .collect(),
+                [
+                    "current_file",
+                    "workspace_root",
+                    "workspace_folder",
+                    "current_file_subfolder",
+                    "external_folder",
+                ]
+                .into_iter()
+                .map(|value| {
+                    let label = attachment_settings_label(self.ui_language, value).to_string();
+                    PickerOption {
+                        value: value.to_string(),
+                        search_text: label.to_lowercase(),
+                        label,
+                        group: None,
+                        preview_font: None,
+                        icon_path: None,
+                    }
+                })
+                .collect(),
                 attachment_settings_label(self.ui_language, "search").to_string(),
             ),
             FontRole::InterfaceLanguage => (

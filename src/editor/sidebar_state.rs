@@ -108,6 +108,7 @@ mod tests {
 
 fn sidebar_git_repo_root_for_path(sidebar_root: &Path) -> Option<PathBuf> {
     let output = crate::platform::process::headless_command("git")
+        .ok()?
         .arg("-C")
         .arg(sidebar_root)
         .args(["rev-parse", "--show-toplevel"])
@@ -148,14 +149,14 @@ fn collect_sidebar_git_statuses_for_root(
     }
 
     let mut statuses = HashMap::new();
-    if let Ok(output) = crate::platform::process::headless_command("git")
-        .arg("-c")
-        .arg("core.quotepath=false")
-        .arg("-C")
-        .arg(&repo_root)
-        .args(&args)
-        .output()
-        && output.status.success()
+    if let Ok(output) = crate::platform::process::headless_command("git").and_then(|mut git| {
+        git.arg("-c")
+            .arg("core.quotepath=false")
+            .arg("-C")
+            .arg(&repo_root)
+            .args(&args)
+            .output()
+    }) && output.status.success()
     {
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let Some((relative_path, status)) = EditorView::parse_sidebar_git_status_line(line)

@@ -1227,7 +1227,8 @@ impl EditorView {
         // Typing ``` only opens the fence; Enter is what completes it, so the
         // caret lands on an empty body line between the two markers.
         if self.cursor.offset == line_end
-            && let Some(closer) = markdown::unclosed_code_fence_marker(self.buffer.text(), cursor_line)
+            && let Some(closer) =
+                markdown::unclosed_code_fence_marker(self.buffer.text(), cursor_line)
         {
             let continuation = format!("\n\n{closer}");
             let insert_range = self.cursor.selection_range();
@@ -2201,7 +2202,13 @@ impl EditorView {
         if self.sidebar_edit.is_some() {
             return;
         }
-        let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
+        self.select_logical_line_at_offset(self.cursor.offset, cx);
+    }
+
+    pub(crate) fn select_logical_line_at_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let (line, _) = self
+            .buffer
+            .offset_to_line_col(offset.min(self.buffer.len()));
         let start = self.buffer.line_start(line);
         let end = self.buffer.line_end(line);
         let select_end = if end < self.buffer.len() {

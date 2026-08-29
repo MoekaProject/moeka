@@ -96,6 +96,19 @@ impl CommandSpec {
 }
 
 impl CommandId {
+    /// Whether this build can run the command at all.
+    ///
+    /// The terminal and git commands need child processes, which the App Store
+    /// sandbox denies; hide them rather than offer a button that always fails.
+    pub(crate) fn is_available(self) -> bool {
+        match self {
+            Self::ToggleTerminal | Self::OpenTerminalWindow | Self::ToggleGitHistory => {
+                crate::platform::capabilities::CHILD_PROCESSES
+            }
+            _ => true,
+        }
+    }
+
     pub(crate) fn action(self) -> Box<dyn Action> {
         match self {
             Self::NewDocument => Box::new(NewDocument),
@@ -476,6 +489,7 @@ pub(crate) fn app_menus(language: UiLanguage) -> Vec<gpui::Menu> {
             os_action: None,
         }
     };
+    let optional_command_item = |id: CommandId| id.is_available().then(|| command_item(id));
 
     vec![
         Menu {
@@ -544,19 +558,22 @@ pub(crate) fn app_menus(language: UiLanguage) -> Vec<gpui::Menu> {
         },
         Menu {
             name: t(TextKey::MenuView).into(),
-            items: vec![
-                command_item(CommandId::ToggleSidebar),
-                command_item(CommandId::ToggleOutline),
-                command_item(CommandId::ToggleTerminal),
-                command_item(CommandId::ToggleInfo),
-                command_item(CommandId::ToggleGitHistory),
-                MenuItem::separator(),
-                command_item(CommandId::ZoomIn),
-                command_item(CommandId::ZoomOut),
-                command_item(CommandId::ZoomReset),
-                MenuItem::separator(),
-                command_item(CommandId::ToggleTheme),
-            ],
+            items: [
+                Some(command_item(CommandId::ToggleSidebar)),
+                Some(command_item(CommandId::ToggleOutline)),
+                optional_command_item(CommandId::ToggleTerminal),
+                Some(command_item(CommandId::ToggleInfo)),
+                optional_command_item(CommandId::ToggleGitHistory),
+                Some(MenuItem::separator()),
+                Some(command_item(CommandId::ZoomIn)),
+                Some(command_item(CommandId::ZoomOut)),
+                Some(command_item(CommandId::ZoomReset)),
+                Some(MenuItem::separator()),
+                Some(command_item(CommandId::ToggleTheme)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
         },
         // GPUI registers a menu named exactly "Window" as NSApplication's
         // windows menu. AppKit then keeps every open window in this menu and
@@ -569,6 +586,10 @@ pub(crate) fn app_menus(language: UiLanguage) -> Vec<gpui::Menu> {
 }
 
 pub(crate) fn dock_menu(language: UiLanguage) -> Vec<gpui::MenuItem> {
+    if !CommandId::OpenTerminalWindow.is_available() {
+        return Vec::new();
+    }
+
     vec![gpui::MenuItem::action(
         crate::i18n::open_terminal_window_label(language),
         crate::actions::OpenTerminalWindow,
@@ -1210,7 +1231,14 @@ mod command_tests {
                 continue;
             };
             for spec in COMMAND_SPECS {
-                if spec.category != "Format" {
+                if !matches!(
+                    spec.id,
+                    CommandId::Bold
+                        | CommandId::Italic
+                        | CommandId::Underline
+                        | CommandId::Strikethrough
+                        | CommandId::InlineCode
+                ) {
                     continue;
                 }
                 let Some(display) = spec.shortcut else {
@@ -1395,9 +1423,13 @@ mod native_menu_tests {
         assert!(menus.iter().any(|menu| menu.name.as_ref() == "Window"));
 
         let dock_items = dock_menu(UiLanguage::ChineseSimplified);
-        assert!(matches!(
-            dock_items.as_slice(),
-            [gpui::MenuItem::Action { name, .. }] if name.as_ref() == "打开终端"
-        ));
+        if crate::platform::capabilities::CHILD_PROCESSES {
+            assert!(matches!(
+                dock_items.as_slice(),
+                [gpui::MenuItem::Action { name, .. }] if name.as_ref() == "打开终端"
+            ));
+        } else {
+            assert!(dock_items.is_empty());
+        }
     }
 }

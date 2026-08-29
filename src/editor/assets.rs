@@ -85,6 +85,9 @@ pub(crate) const FMT_CODE_SVG: &str = "assets/icons/format/code.svg";
 pub(crate) const FMT_QUOTE_SVG: &str = "assets/icons/format/quote.svg";
 pub(crate) const FMT_LIST_SVG: &str = "assets/icons/format/list.svg";
 pub(crate) const FMT_ORDER_LIST_SVG: &str = "assets/icons/format/order-list.svg";
+pub(crate) const CODE_BLOCK_LINE_NUMBERS_SVG_PATH: &str =
+    "assets/icons/format/code-block-line-numbers.svg";
+pub(crate) const CODE_BLOCK_WRAP_SVG_PATH: &str = "assets/icons/align-left-mini.svg";
 pub(crate) const FMT_TODO_SVG: &str = "assets/icons/format/todo.svg";
 pub(crate) const FMT_LINK_SVG: &str = "assets/icons/format/link.svg";
 pub(crate) const FMT_SPLIT_SVG: &str = "assets/icons/format/split.svg";

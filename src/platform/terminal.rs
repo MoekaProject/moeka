@@ -90,6 +90,10 @@ pub(crate) fn extra_path_candidates() -> Vec<PathBuf> {
 /// directories, so the login shell is asked for the real one. Windows has no
 /// equivalent step: processes already inherit the full user `PATH`.
 pub(crate) fn login_shell_path() -> Option<OsString> {
+    if !super::capabilities::CHILD_PROCESSES {
+        return None;
+    }
+
     #[cfg(unix)]
     {
         let output = std::process::Command::new(default_shell_program())

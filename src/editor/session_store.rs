@@ -17,6 +17,7 @@ pub(crate) fn persist_session(editor: &EditorView) {
     } else {
         Some(editor.sidebar_root.clone())
     };
+    persist_workspace_bookmarks(&mut config.workspaces);
     let leaf_ids = editor.pane_layout.leaf_ids();
     let focused_pane_leaf = leaf_ids.iter().position(|id| *id == editor.focused_pane_id);
     let session = SessionConfig {
@@ -39,6 +40,47 @@ pub(crate) fn persist_session(editor: &EditorView) {
         config.sessions = session;
     }
     config_store::save_sessions(&config);
+}
+
+/// Mints a bookmark for every root that lacks one and forgets closed roots.
+///
+/// Running at save time covers every way a root can be added — the folder
+/// picker, drag and drop, and command-line arguments — because the app
+/// necessarily still has access to the folder it just opened.
+fn persist_workspace_bookmarks(workspaces: &mut config_store::WorkspaceConfig) {
+    workspaces
+        .bookmarks
+        .retain(|root, _| workspaces.roots.contains(root));
+    for root in &workspaces.roots {
+        if !workspaces.bookmarks.contains_key(root)
+            && let Some(bookmark) = crate::platform::security_scope::bookmark_for(root)
+        {
+            workspaces.bookmarks.insert(root.clone(), bookmark);
+        }
+    }
+}
+
+/// Reopens the security scope for each saved root.
+///
+/// Returns the roots whose folder moved since the bookmark was taken, mapped
+/// to where they live now.
+fn reopen_workspace_bookmarks(
+    workspaces: &config_store::WorkspaceConfig,
+) -> HashMap<PathBuf, PathBuf> {
+    let mut relocated = HashMap::new();
+    for root in &workspaces.roots {
+        let Some(bookmark) = workspaces.bookmarks.get(root) else {
+            continue;
+        };
+        match crate::platform::security_scope::start_access(bookmark) {
+            Some(resolved) if resolved != *root => {
+                relocated.insert(root.clone(), resolved);
+            }
+            Some(_) => {}
+            None => log_error!("lost access to workspace {}", root.display()),
+        }
+    }
+    relocated
 }
 
 fn is_default_welcome_session(editor: &EditorView) -> bool {
@@ -114,8 +156,15 @@ fn pane_layout_to_record(editor: &EditorView, layout: &PaneLayout) -> PaneLayout
 pub(crate) fn restore_session(editor: &mut EditorView) {
     let config = config_store::load_sessions();
     prefetch_session_files(&config.sessions);
-    editor.workspaces = config.workspaces.roots.clone();
+    let relocated = reopen_workspace_bookmarks(&config.workspaces);
+    editor.workspaces = config
+        .workspaces
+        .roots
+        .iter()
+        .map(|root| relocated.get(root).unwrap_or(root).clone())
+        .collect();
     if let Some(active_root) = config.workspaces.active_root {
+        let active_root = relocated.get(&active_root).unwrap_or(&active_root).clone();
         editor.sidebar_root = active_root.clone();
         editor.sidebar_visible = true;
         editor.expanded_dirs.clear();

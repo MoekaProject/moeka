@@ -237,6 +237,24 @@ impl EditorView {
         }
         self.last_mouse_down_target = None;
 
+        if event.button == MouseButton::Left {
+            if let Some(&(_, start_line, action)) = self
+                .code_block_display_action_areas
+                .iter()
+                .find(|(bounds, _, _)| bounds.contains(&event.position))
+            {
+                self.toggle_code_block_display_action(start_line, action, cx);
+                cx.stop_propagation();
+                return;
+            }
+            if self.start_code_block_horizontal_scrollbar_drag(event.position, cx) {
+                self.is_selecting = false;
+                self.selection_drag_position = None;
+                cx.stop_propagation();
+                return;
+            }
+        }
+
         if self.active_tab_supports_text_buffer() {
             window.focus(&self.focus_handle(cx));
         }
@@ -585,7 +603,13 @@ impl EditorView {
                         event.modifiers.shift,
                         event.click_count
                     ));
-                    if event.click_count >= 2 {
+                    if event.click_count >= 3 {
+                        self.clear_extra_cursors();
+                        self.clear_wrap_boundary_affinity();
+                        self.select_logical_line_at_offset(offset, cx);
+                        self.selection_drag_position = None;
+                        self.is_selecting = false;
+                    } else if event.click_count == 2 {
                         self.clear_extra_cursors();
                         self.clear_wrap_boundary_affinity();
                         self.select_word_at_offset(offset);
@@ -623,7 +647,12 @@ impl EditorView {
             self.clear_wrap_boundary_affinity();
             let offset = self.offset_for_position(event.position);
             self.last_mouse_down_target = Some((event.position, offset));
-            self.select_word_at_offset(offset);
+            if event.click_count >= 3 {
+                self.select_logical_line_at_offset(offset, cx);
+            } else {
+                self.select_word_at_offset(offset);
+            }
+            self.selection_drag_position = None;
             self.is_selecting = false;
             cx.notify();
             return;
@@ -1402,6 +1431,9 @@ impl EditorView {
             self.whiteboard_on_mouse_up(event, cx);
             return;
         }
+        if self.stop_code_block_horizontal_scrollbar_drag(event.position, cx) {
+            return;
+        }
         if self.stop_editor_scrollbar_drag(event.position, cx) {
             return;
         }
@@ -1508,6 +1540,10 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.runtime_profiler.is_some() {
+            self.runtime_profile_mouse_move_events =
+                self.runtime_profile_mouse_move_events.wrapping_add(1);
+        }
         if self.active_tab_is_whiteboard() {
             self.whiteboard_on_mouse_move(event, window, cx);
             return;
@@ -1515,10 +1551,15 @@ impl EditorView {
         let toolbar_hover_changed = self.update_toolbar_corner_hover(event.position, cx);
         self.hovered_editor_position = Some(event.position);
         let dragging_scrollbar = self.update_editor_scrollbar_drag(event.position, cx);
+        let dragging_code_block_scrollbar =
+            self.update_code_block_horizontal_scrollbar_drag(event.position, cx);
         let scrollbar_hovered =
             dragging_scrollbar || self.editor_scrollbar_region_contains(event.position);
         self.set_editor_scrollbar_hovered(scrollbar_hovered, cx);
-        if dragging_scrollbar {
+        if self.active_tab_is_non_markdown_text() && !self.editor_wraps_to_available_width() {
+            self.sync_code_block_horizontal_scrollbar(cx);
+        }
+        if dragging_scrollbar || dragging_code_block_scrollbar {
             if toolbar_hover_changed {
                 cx.notify();
             }
@@ -1619,8 +1660,21 @@ impl EditorView {
         if hovering_code_block != self.hovering_code_block_start {
             self.hovering_code_block_start = hovering_code_block;
             self.sync_generated_preview_action_opacity(cx);
+            self.sync_code_block_horizontal_scrollbar(cx);
             cx.notify();
         }
+        let hovering_code_block_scrollbar = self
+            .code_block_horizontal_scrollbar_drag
+            .map(|drag| drag.start_line)
+            .or_else(|| {
+                self.code_block_horizontal_scrollbar_at_position(event.position)
+                    .map(|geometry| geometry.start_line)
+                    .filter(|start_line| {
+                        *start_line == super::NON_MARKDOWN_HORIZONTAL_SCROLL_TARGET
+                            || self.hovering_code_block_start == Some(*start_line)
+                    })
+            });
+        self.set_code_block_horizontal_scrollbar_hovered(hovering_code_block_scrollbar, cx);
 
         let hovering_code_block_copy = self
             .code_block_copy_areas
@@ -1629,6 +1683,16 @@ impl EditorView {
             .map(|(_, start_line)| *start_line);
         if hovering_code_block_copy != self.hovering_code_block_copy_start {
             self.hovering_code_block_copy_start = hovering_code_block_copy;
+            cx.notify();
+        }
+
+        let hovering_code_block_display_action = self
+            .code_block_display_action_areas
+            .iter()
+            .find(|(bounds, _, _)| bounds.contains(&event.position))
+            .map(|(_, start_line, action)| (*start_line, *action));
+        if hovering_code_block_display_action != self.hovering_code_block_display_action {
+            self.hovering_code_block_display_action = hovering_code_block_display_action;
             cx.notify();
         }
 
@@ -2663,6 +2727,51 @@ impl EditorView {
 
         if self.context_menu.is_some() {
             return;
+        }
+        if self.active_tab_is_non_markdown_text() && !self.editor_wraps_to_available_width() {
+            let delta = event.delta.pixel_delta(px(40.0));
+            let delta_x = f32::from(delta.x);
+            let delta_y = f32::from(delta.y);
+            let horizontal_delta = if delta_x.abs() > 0.01 {
+                -delta_x
+            } else if event.modifiers.shift {
+                -delta_y
+            } else {
+                0.0
+            };
+            if horizontal_delta.abs() > 0.01
+                && self.scroll_code_block_horizontal(
+                    super::NON_MARKDOWN_HORIZONTAL_SCROLL_TARGET,
+                    horizontal_delta,
+                )
+            {
+                cx.notify();
+                return;
+            }
+        }
+        if let Some(start_line) = self
+            .code_block_hover_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&event.position))
+            .map(|(_, start_line)| *start_line)
+            .filter(|start_line| !self.code_block_word_wrap_enabled(*start_line))
+        {
+            let delta = event.delta.pixel_delta(px(40.0));
+            let delta_x = f32::from(delta.x);
+            let delta_y = f32::from(delta.y);
+            let horizontal_delta = if delta_x.abs() > 0.01 {
+                -delta_x
+            } else if event.modifiers.shift {
+                -delta_y
+            } else {
+                0.0
+            };
+            if horizontal_delta.abs() > 0.01
+                && self.scroll_code_block_horizontal(start_line, horizontal_delta)
+            {
+                cx.notify();
+                return;
+            }
         }
         let delta_y: f32 = event
             .delta

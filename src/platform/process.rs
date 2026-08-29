@@ -1,10 +1,21 @@
 //! Spawning helper processes.
 
 use std::ffi::OsStr;
+use std::io;
 use std::process::Command;
 
 /// A command that does not flash a console window on platforms that have one.
-pub(crate) fn headless_command(program: impl AsRef<OsStr>) -> Command {
+///
+/// Returns an error on builds whose host forbids child processes, so callers
+/// fail the same way they would when the program is missing.
+pub(crate) fn headless_command(program: impl AsRef<OsStr>) -> io::Result<Command> {
+    if !super::capabilities::CHILD_PROCESSES {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "this build cannot run helper programs",
+        ));
+    }
+
     #[allow(unused_mut)]
     let mut command = Command::new(program);
 
@@ -16,5 +27,5 @@ pub(crate) fn headless_command(program: impl AsRef<OsStr>) -> Command {
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    command
+    Ok(command)
 }

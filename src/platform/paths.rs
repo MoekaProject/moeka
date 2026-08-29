@@ -1,6 +1,24 @@
 //! Well-known filesystem locations and path conventions.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+
+const FILE_URL_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'[')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 pub(crate) fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf())
@@ -81,6 +99,22 @@ pub(crate) fn is_file_url(value: &str) -> bool {
     value
         .get(..7)
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file://"))
+}
+
+pub(crate) fn path_to_file_url(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    let url = if let Some(unc) = normalized.strip_prefix("//") {
+        format!("file://{unc}")
+    } else {
+        format!("file:///{normalized}")
+    };
+    #[cfg(not(windows))]
+    let url = format!("file://{normalized}");
+    Some(utf8_percent_encode(&url, FILE_URL_ENCODE_SET).to_string())
 }
 
 /// Directories searched for bundled assets, in priority order.
@@ -192,6 +226,16 @@ mod tests {
             path_from_file_url(&file_url("note.md").replacen("file", "FILE", 1)),
             Some(native_path("note.md"))
         );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn encodes_absolute_paths_as_file_urls() {
+        let path = Path::new("/tmp/示例 image#1.png");
+        let url = path_to_file_url(path).unwrap();
+
+        assert_eq!(url, "file:///tmp/%E7%A4%BA%E4%BE%8B%20image%231.png");
+        assert_eq!(path_from_file_url(&url), Some(path.to_path_buf()));
     }
 
     #[test]

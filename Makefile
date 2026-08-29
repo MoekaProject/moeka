@@ -70,7 +70,24 @@ LINUX_BUNDLED_LIBS := \
 	libxkbcommon.so.0 \
 	libxkbcommon-x11.so.0
 
-.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check windows windows-one windows-arm64 windows-x86_64 windows-icon linux linux-one linux-arm64 linux-x86_64
+# Mac App Store channel. Universal, sandboxed, and built with `--features mas`,
+# which drops the terminal, git and self-update capabilities.
+MAS_TARGETS := aarch64-apple-darwin x86_64-apple-darwin
+MAS_BUILD_DIR := target/macos/mas
+MAS_APP_DIR := $(MAS_BUILD_DIR)/$(APP_DISPLAY_NAME).app
+MAS_CONTENTS_DIR := $(MAS_APP_DIR)/Contents
+MAS_ENTITLEMENTS := packaging/macos/mas.entitlements
+MAS_PROVISION_PROFILE ?= packaging/macos/mas.provisionprofile
+MAS_PKG_PATH := $(DIST_DIR)/$(APP_DISPLAY_NAME)-mas.pkg
+MAS_CATEGORY ?= public.app-category.productivity
+APPLE_DISTRIBUTION ?= $(shell security find-identity -v 2>/dev/null | sed -nE 's/.*"(Apple Distribution:[^"]+)".*/\1/p' | head -1)
+MAS_INSTALLER_IDENTITY ?= $(shell security find-identity -v 2>/dev/null | sed -nE 's/.*"(3rd Party Mac Developer Installer:[^"]+)".*/\1/p' | head -1)
+# Private frameworks the App Store rejects on sight, whether or not they run.
+# `_CGS[A-Z]` matches the private WindowServer family without catching the
+# public `CGShieldingWindowLevel` that cocoa references.
+MAS_FORBIDDEN_SYMBOLS := _CGS[A-Z]|_AXUIElement|_AXIsProcessTrusted
+
+.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check check-targets windows windows-one windows-arm64 windows-x86_64 windows-icon linux linux-one linux-arm64 linux-x86_64 mas mas-app clean-mas
 
 dmg: $(ICON_FILE)
 	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -110,7 +127,7 @@ windows-one:
 	@mkdir -p "$(DIST_DIR)"
 	@chmod +x $(XWIN_SHIMS)/*
 	PATH="$(CURDIR)/$(XWIN_SHIMS):$$PATH" \
-		cargo xwin build --release --target "$(WINDOWS_TARGET)"
+		CARGO_INCREMENTAL=0 cargo xwin build --release --target "$(WINDOWS_TARGET)"
 	@set -euo pipefail; \
 	zip_path="$(CURDIR)/$(DIST_DIR)/$(APP_DISPLAY_NAME)-windows-$(WINDOWS_SUFFIX).zip"; \
 	stage="$$(mktemp -d)"; \
@@ -270,6 +287,30 @@ publish-check:
 		echo "Run: make notary-setup APPLE_ID=your-apple-id@example.com"; \
 		exit 1; \
 	}
+	@$(MAKE) check-targets
+
+# Compile-checks the cross targets before anything is pushed or built. Catches
+# cfg-gated breakage (a macOS-only import used by shared code) in a couple of
+# minutes instead of halfway through a release.
+check-targets:
+	@case "$(HOST_TARGET)" in \
+		*-apple-darwin) ;; \
+		*) echo "check-targets only runs on macOS hosts; skipping."; exit 0 ;; \
+	esac; \
+	set -euo pipefail; \
+	rustup target add $(WINDOWS_TARGETS) $(LINUX_TARGETS) >/dev/null; \
+	chmod +x $(XWIN_SHIMS)/*; \
+	for target in $(WINDOWS_TARGETS); do \
+		echo "==> checking $$target"; \
+		PATH="$(CURDIR)/$(XWIN_SHIMS):$$PATH" CARGO_INCREMENTAL=0 \
+			cargo xwin check --release --target "$$target"; \
+	done; \
+	for target in $(LINUX_TARGETS); do \
+		echo "==> checking $$target"; \
+		CARGO_INCREMENTAL=0 cargo-zigbuild check --release \
+			--target "$$target.$(LINUX_GLIBC_VERSION)"; \
+	done; \
+	echo "All cross targets compile."
 
 notary-setup:
 	@test -n "$(APPLE_ID)" || { echo "Usage: make notary-setup APPLE_ID=your-apple-id@example.com"; exit 1; }
@@ -389,7 +430,75 @@ $(APP_DIR): build-release $(INFO_PLIST_TEMPLATE) $(ICON_FILE)
 
 build-release:
 	@if [[ "$(TARGET)" != "$(HOST_TARGET)" ]]; then rustup target add "$(TARGET)"; fi
-	@cargo build --release $(CARGO_TARGET_ARG)
+	@CARGO_INCREMENTAL=0 cargo build --release $(CARGO_TARGET_ARG)
+
+# Unsigned universal App Store bundle. Signing is a separate step so the guard
+# below fails the build before any certificate is involved.
+mas-app: $(ICON_FILE) $(INFO_PLIST_TEMPLATE) $(MAS_ENTITLEMENTS)
+	@rustup target add $(MAS_TARGETS)
+	@for target in $(MAS_TARGETS); do \
+		CARGO_INCREMENTAL=0 cargo build --release --features mas --target "$$target" || exit 1; \
+	done
+	@set -euo pipefail; \
+	for target in $(MAS_TARGETS); do \
+		binary="target/$$target/$(PROFILE)/$(APP_NAME)"; \
+		if nm -u "$$binary" | grep -qE '$(MAS_FORBIDDEN_SYMBOLS)'; then \
+			echo "error: $$binary references a private Apple API:" >&2; \
+			nm -u "$$binary" | grep -E '$(MAS_FORBIDDEN_SYMBOLS)' >&2; \
+			exit 1; \
+		fi; \
+	done
+	@rm -rf "$(MAS_APP_DIR)"
+	@mkdir -p "$(MAS_CONTENTS_DIR)/MacOS" "$(MAS_CONTENTS_DIR)/Resources"
+	@lipo -create -output "$(MAS_CONTENTS_DIR)/MacOS/$(APP_NAME)" \
+		$(foreach target,$(MAS_TARGETS),"target/$(target)/$(PROFILE)/$(APP_NAME)")
+	@chmod +x "$(MAS_CONTENTS_DIR)/MacOS/$(APP_NAME)"
+	@rsync -a --exclude '.DS_Store' assets "$(MAS_CONTENTS_DIR)/Resources/"
+	@rsync -a --exclude '.DS_Store' docs "$(MAS_CONTENTS_DIR)/Resources/"
+	@cp -R packaging/macos/*.lproj "$(MAS_CONTENTS_DIR)/Resources/"
+	@cp "$(ICON_FILE)" "$(MAS_CONTENTS_DIR)/Resources/AppIcon.icns"
+	@sed \
+		-e 's|__APP_EXECUTABLE__|$(APP_NAME)|g' \
+		-e 's|__APP_NAME__|$(APP_DISPLAY_NAME)|g' \
+		-e 's|__BUNDLE_IDENTIFIER__|$(BUNDLE_ID)|g' \
+		-e 's|__APP_VERSION__|$(VERSION)|g' \
+		-e 's|__APP_BUILD_VERSION__|$(BUILD_VERSION)|g' \
+		"$(INFO_PLIST_TEMPLATE)" > "$(MAS_CONTENTS_DIR)/Info.plist"
+	@plutil -insert CFBundleIconFile -string AppIcon.icns "$(MAS_CONTENTS_DIR)/Info.plist"
+	@plutil -insert LSApplicationCategoryType -string "$(MAS_CATEGORY)" "$(MAS_CONTENTS_DIR)/Info.plist"
+	@plutil -insert ITSAppUsesNonExemptEncryption -bool false "$(MAS_CONTENTS_DIR)/Info.plist"
+	@$(LSREGISTER) -u "$(MAS_APP_DIR)" >/dev/null 2>&1 || true
+	@echo "Created $(MAS_APP_DIR)"
+
+# Signs the bundle for distribution and wraps it in the installer package that
+# Transporter uploads. Notarization does not apply to this channel.
+mas: mas-app
+	@set -euo pipefail; \
+	if [[ -z "$(APPLE_DISTRIBUTION)" ]]; then \
+		echo "error: no 'Apple Distribution' identity in the keychain" >&2; exit 1; \
+	fi; \
+	if [[ -z "$(MAS_INSTALLER_IDENTITY)" ]]; then \
+		echo "error: no '3rd Party Mac Developer Installer' identity in the keychain" >&2; exit 1; \
+	fi; \
+	if [[ ! -f "$(MAS_PROVISION_PROFILE)" ]]; then \
+		echo "error: missing $(MAS_PROVISION_PROFILE) (Mac App Store provisioning profile)" >&2; \
+		exit 1; \
+	fi; \
+	cp "$(MAS_PROVISION_PROFILE)" "$(MAS_CONTENTS_DIR)/embedded.provisionprofile"; \
+	codesign --force --timestamp --options runtime \
+		--sign "$(APPLE_DISTRIBUTION)" \
+		--entitlements "$(MAS_ENTITLEMENTS)" \
+		"$(MAS_APP_DIR)"; \
+	codesign --verify --strict --verbose=2 "$(MAS_APP_DIR)"; \
+	mkdir -p "$(DIST_DIR)"; \
+	rm -f "$(MAS_PKG_PATH)"; \
+	productbuild --component "$(MAS_APP_DIR)" /Applications \
+		--sign "$(MAS_INSTALLER_IDENTITY)" "$(MAS_PKG_PATH)"; \
+	echo "Created $(MAS_PKG_PATH)"; \
+	echo "Upload with: xcrun altool --upload-app -f $(MAS_PKG_PATH) -t macos"
+
+clean-mas:
+	@rm -rf "$(MAS_BUILD_DIR)" "$(MAS_PKG_PATH)"
 
 clean-dmg:
 	@rm -f "$(DMG_PATH)"

@@ -1574,146 +1574,123 @@ impl EditorView {
             })
             .child(top_spacer)
             .child(
-                        div()
-                            .id("sidebar-tree")
-                            .flex_1()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.sidebar_scroll_handle)
-                            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                                this.pending_sidebar_scroll_top.set(None);
-                                this.pending_sidebar_scroll_anchor = None;
-                                this.pending_sidebar_reveal_path = None;
-                                this.reveal_panel_scrollbar(PanelScrollbarKind::Sidebar, cx);
-                            }))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.focused_sidebar_path = None;
-                                    this.clear_sidebar_drag_state(cx);
-                                    cx.notify();
-                                }),
-                            )
-                            .on_mouse_down(MouseButton::Right, {
-                                let root = self.sidebar_root.clone();
-                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                    window.prevent_default();
-                                    cx.stop_propagation();
-                                    this.open_sidebar_context_menu(
-                                        root.clone(),
-                                        true,
-                                        event.position,
-                                        cx,
-                                    );
-                                })
-                            })
-                            .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)
-                            .drag_over::<ExternalPaths>(move |style, _, _, _| style)
-                            .on_drag_move({
-                                let root = self.sidebar_root.clone();
-                                cx.listener(
-                                    move |this,
-                                          event: &DragMoveEvent<DraggedSidebarItems>,
-                                          _,
-                                          cx| {
-                                        if event.bounds.contains(&event.event.position) {
-                                            this.update_sidebar_drag_autoscroll(
-                                                event.event.position,
-                                                cx,
-                                            );
-
-                                            if this.sidebar_drag_child_handled_same_event(
-                                                event.event.position,
-                                                &root,
-                                            ) {
-                                                return;
-                                            }
-
-                                            let dragged = event.drag(cx);
-                                            let valid_move = Self::sidebar_drop_would_move(
-                                                &dragged.paths,
-                                                &root,
-                                            );
-                                            if !valid_move {
-                                                this.clear_sidebar_drag_hover(cx);
-                                                return;
-                                            }
-                                            if this.sidebar_drag_has_child_target(&root) {
-                                                return;
-                                            }
-                                            this.update_sidebar_drag_expand_hover_dir(None, cx);
-                                            this.update_sidebar_drag_target(Some(root.clone()), cx);
-                                        }
-                                    },
-                                )
-                            })
-                            .on_drag_move({
-                                let root = self.sidebar_root.clone();
-                                cx.listener(
-                                    move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                                        if event.bounds.contains(&event.event.position) {
-                                            this.update_sidebar_drag_autoscroll(
-                                                event.event.position,
-                                                cx,
-                                            );
-
-                                            if this.sidebar_drag_child_handled_same_event(
-                                                event.event.position,
-                                                &root,
-                                            ) {
-                                                return;
-                                            }
-
-                                            let dragged = event.drag(cx);
-                                            let valid_copy = Self::sidebar_drop_would_copy(
-                                                dragged.paths(),
-                                                &root,
-                                            );
-                                            if !valid_copy {
-                                                this.clear_sidebar_drag_hover(cx);
-                                                return;
-                                            }
-                                            if this.sidebar_drag_has_child_target(&root) {
-                                                return;
-                                            }
-                                            this.update_sidebar_drag_expand_hover_dir(None, cx);
-                                            this.update_sidebar_drag_target(Some(root.clone()), cx);
-                                        }
-                                    },
-                                )
-                            })
-                            .on_drop({
-                                let root = self.sidebar_root.clone();
-                                cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
-                                    let paths = dragged.paths.clone();
-                                    this.clear_sidebar_drag_state(cx);
-                                    this.move_sidebar_items(paths, root.clone(), cx);
-                                })
-                            })
-                            .on_drop({
-                                let root = self.sidebar_root.clone();
-                                cx.listener(move |this, dragged: &ExternalPaths, _, cx| {
-                                    let paths = dragged.paths().to_vec();
-                                    this.clear_sidebar_drag_state(cx);
-                                    this.copy_external_paths_into_dir(&paths, root.clone(), cx);
-                                })
-                            })
-                            .children(tree_items),
-            )
-            .when(
-                sticky_headers_visible,
-                |this: gpui::Stateful<gpui::Div>| {
-                    this.child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top(px(self.tab_bar_height()))
-                            .w_full()
-                            .bg(ss.sidebar_bg)
-                            .child(self.render_starred_sidebar_section(&starred_files, cx))
-                            .child(self.render_sidebar_header(cx)),
+                div()
+                    .id("sidebar-tree")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.sidebar_scroll_handle)
+                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                        this.pending_sidebar_scroll_top.set(None);
+                        this.pending_sidebar_scroll_anchor = None;
+                        this.pending_sidebar_reveal_path = None;
+                        this.reveal_panel_scrollbar(PanelScrollbarKind::Sidebar, cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.focused_sidebar_path = None;
+                            this.clear_sidebar_drag_state(cx);
+                            cx.notify();
+                        }),
                     )
-                },
+                    .on_mouse_down(MouseButton::Right, {
+                        let root = self.sidebar_root.clone();
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.open_sidebar_context_menu(root.clone(), true, event.position, cx);
+                        })
+                    })
+                    .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)
+                    .drag_over::<ExternalPaths>(move |style, _, _, _| style)
+                    .on_drag_move({
+                        let root = self.sidebar_root.clone();
+                        cx.listener(
+                            move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
+                                if event.bounds.contains(&event.event.position) {
+                                    this.update_sidebar_drag_autoscroll(event.event.position, cx);
+
+                                    if this.sidebar_drag_child_handled_same_event(
+                                        event.event.position,
+                                        &root,
+                                    ) {
+                                        return;
+                                    }
+
+                                    let dragged = event.drag(cx);
+                                    let valid_move =
+                                        Self::sidebar_drop_would_move(&dragged.paths, &root);
+                                    if !valid_move {
+                                        this.clear_sidebar_drag_hover(cx);
+                                        return;
+                                    }
+                                    if this.sidebar_drag_has_child_target(&root) {
+                                        return;
+                                    }
+                                    this.update_sidebar_drag_expand_hover_dir(None, cx);
+                                    this.update_sidebar_drag_target(Some(root.clone()), cx);
+                                }
+                            },
+                        )
+                    })
+                    .on_drag_move({
+                        let root = self.sidebar_root.clone();
+                        cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                            if event.bounds.contains(&event.event.position) {
+                                this.update_sidebar_drag_autoscroll(event.event.position, cx);
+
+                                if this.sidebar_drag_child_handled_same_event(
+                                    event.event.position,
+                                    &root,
+                                ) {
+                                    return;
+                                }
+
+                                let dragged = event.drag(cx);
+                                let valid_copy =
+                                    Self::sidebar_drop_would_copy(dragged.paths(), &root);
+                                if !valid_copy {
+                                    this.clear_sidebar_drag_hover(cx);
+                                    return;
+                                }
+                                if this.sidebar_drag_has_child_target(&root) {
+                                    return;
+                                }
+                                this.update_sidebar_drag_expand_hover_dir(None, cx);
+                                this.update_sidebar_drag_target(Some(root.clone()), cx);
+                            }
+                        })
+                    })
+                    .on_drop({
+                        let root = self.sidebar_root.clone();
+                        cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
+                            let paths = dragged.paths.clone();
+                            this.clear_sidebar_drag_state(cx);
+                            this.move_sidebar_items(paths, root.clone(), cx);
+                        })
+                    })
+                    .on_drop({
+                        let root = self.sidebar_root.clone();
+                        cx.listener(move |this, dragged: &ExternalPaths, _, cx| {
+                            let paths = dragged.paths().to_vec();
+                            this.clear_sidebar_drag_state(cx);
+                            this.copy_external_paths_into_dir(&paths, root.clone(), cx);
+                        })
+                    })
+                    .children(tree_items),
             )
+            .when(sticky_headers_visible, |this: gpui::Stateful<gpui::Div>| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(self.tab_bar_height()))
+                        .w_full()
+                        .bg(ss.sidebar_bg)
+                        .child(self.render_starred_sidebar_section(&starred_files, cx))
+                        .child(self.render_sidebar_header(cx)),
+                )
+            })
             .when(show_workspace_bar, |this: gpui::Stateful<gpui::Div>| {
                 this.child(self.render_workspace_bar(cx))
             })

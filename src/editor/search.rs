@@ -10,6 +10,69 @@ pub(crate) const SEARCH_WHOLE_WORD_ICON_SVG_PATH: &str = "assets/icons/search/wh
 pub(crate) const SEARCH_REGEX_ICON_SVG_PATH: &str = "assets/icons/search/regex.svg";
 pub(crate) const SEARCH_CLOSE_ICON_SVG_PATH: &str = "assets/icons/filetree/close.svg";
 
+/// Buffers at or below this size are scanned in one go; the streaming path only
+/// pays off once a full scan stops fitting in a frame.
+const SEARCH_SYNC_SCAN_LIMIT: usize = 256 * 1024;
+/// Bytes consumed per slice before the scan yields back to the run loop.
+const SEARCH_SCAN_SLICE_BYTES: usize = 512 * 1024;
+/// How far a regex match is allowed to reach past the slice it started in.
+const SEARCH_SCAN_REGEX_OVERLAP_BYTES: usize = 64 * 1024;
+
+enum SearchScanStep {
+    Continue(usize),
+    Done,
+    Cancelled,
+}
+
+/// Rounds `offset` up to the next line start so slices never split a line.
+/// Keeping slices line-aligned is also what makes whole-word matching correct at
+/// a slice's leading edge: the byte before it is always a newline.
+fn next_search_slice_boundary(text: &str, offset: usize) -> usize {
+    if offset >= text.len() {
+        return text.len();
+    }
+    // The requested offset is a raw byte count and can land inside a multi-byte
+    // character, so walk forward to the next boundary before slicing.
+    let mut offset = offset;
+    while offset < text.len() && !text.is_char_boundary(offset) {
+        offset += 1;
+    }
+    if offset >= text.len() {
+        return text.len();
+    }
+    match text[offset..].find('\n') {
+        Some(position) => offset + position + 1,
+        None => text.len(),
+    }
+}
+
+/// Matches that begin inside `[start, slice_end)`, reading up to `overlap` bytes
+/// past the boundary so a match straddling it is still found whole.
+#[allow(clippy::too_many_arguments)]
+fn search_slice_matches(
+    text: &str,
+    start: usize,
+    slice_end: usize,
+    overlap: usize,
+    query: &str,
+    case_sensitive: bool,
+    whole_word: bool,
+    use_regex: bool,
+) -> Vec<Range<usize>> {
+    let overlap_end = next_search_slice_boundary(text, slice_end.saturating_add(overlap));
+    find_search_matches(
+        &text[start..overlap_end],
+        query,
+        case_sensitive,
+        whole_word,
+        use_regex,
+    )
+    .into_iter()
+    .map(|range| start + range.start..start + range.end)
+    .take_while(|range| range.start < slice_end)
+    .collect()
+}
+
 impl EditorView {
     pub(crate) fn with_search_tooltip(
         &self,
@@ -225,6 +288,9 @@ impl EditorView {
 
     pub(crate) fn dismiss_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_visible = false;
+        self.search_scan_epoch = self.search_scan_epoch.wrapping_add(1);
+        self.search_scan_task = None;
+        self.search_scan_complete = true;
         self.search_matches.clear();
         self.search_current_index = None;
         if let Some(tab_id) = self.active_terminal_tab_id() {
@@ -241,6 +307,161 @@ impl EditorView {
             self.run_terminal_search(&tab_id, cx);
             return;
         }
+
+        // Any in-flight scan belongs to the previous query.
+        self.search_scan_epoch = self.search_scan_epoch.wrapping_add(1);
+        self.search_scan_task = None;
+        self.search_matches.clear();
+        self.search_current_index = None;
+        self.search_scan_complete = true;
+        self.search_scan_buffer_len = self.buffer.len();
+
+        if self.search_query.is_empty() {
+            cx.notify();
+            return;
+        }
+
+        if self.buffer.len() <= SEARCH_SYNC_SCAN_LIMIT {
+            self.search_matches = find_search_matches(
+                self.buffer.text(),
+                &self.search_query,
+                self.search_case_sensitive,
+                self.search_whole_word,
+                self.search_use_regex,
+            );
+            self.adopt_new_search_matches(0, cx);
+            cx.notify();
+            return;
+        }
+
+        // Large buffers are scanned in slices so typing stays responsive; the
+        // counter fills in as slices land.
+        self.search_scan_complete = false;
+        let epoch = self.search_scan_epoch;
+        self.search_scan_task = Some(cx.spawn(async move |this, cx| {
+            let mut scan_start = 0usize;
+            loop {
+                let step = this
+                    .update(cx, |this, cx| {
+                        if this.search_scan_epoch != epoch {
+                            return SearchScanStep::Cancelled;
+                        }
+                        this.scan_search_slice(scan_start, cx)
+                    })
+                    .unwrap_or(SearchScanStep::Cancelled);
+                match step {
+                    SearchScanStep::Continue(next) => scan_start = next,
+                    SearchScanStep::Done | SearchScanStep::Cancelled => break,
+                }
+                // Hand the run loop a frame before taking the next slice.
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1))
+                    .await;
+            }
+        }));
+        cx.notify();
+    }
+
+    /// Scans one slice starting at `start`, appending whatever it finds.
+    fn scan_search_slice(&mut self, start: usize, cx: &mut Context<Self>) -> SearchScanStep {
+        if self.buffer.len() != self.search_scan_buffer_len {
+            // The document changed underneath the scan; the offsets collected so
+            // far no longer describe it.
+            self.search_scan_complete = true;
+            cx.notify();
+            return SearchScanStep::Cancelled;
+        }
+
+        let text = self.buffer.text();
+        if start >= text.len() {
+            return self.finish_search_scan(cx);
+        }
+
+        let text_len = text.len();
+        let slice_end = next_search_slice_boundary(text, start + SEARCH_SCAN_SLICE_BYTES);
+        let found = search_slice_matches(
+            text,
+            start,
+            slice_end,
+            self.search_scan_overlap_bytes(),
+            &self.search_query,
+            self.search_case_sensitive,
+            self.search_whole_word,
+            self.search_use_regex,
+        );
+
+        let previous_len = self.search_matches.len();
+        self.search_matches.extend(found);
+        self.adopt_new_search_matches(previous_len, cx);
+
+        if slice_end >= text_len {
+            self.finish_search_scan(cx)
+        } else {
+            cx.notify();
+            SearchScanStep::Continue(slice_end)
+        }
+    }
+
+    fn finish_search_scan(&mut self, cx: &mut Context<Self>) -> SearchScanStep {
+        self.search_scan_complete = true;
+        if self.search_current_index.is_none() && !self.search_matches.is_empty() {
+            self.search_current_index = Some(0);
+            self.reveal_current_search_match(cx);
+        }
+        cx.notify();
+        SearchScanStep::Done
+    }
+
+    /// Selects the first match at or after the caret as soon as it shows up, so
+    /// navigation works before the whole document has been scanned.
+    fn adopt_new_search_matches(&mut self, previous_len: usize, cx: &mut Context<Self>) {
+        if self.search_current_index.is_some() {
+            return;
+        }
+        let cursor_offset = self.cursor.offset;
+        let Some(offset) = self.search_matches[previous_len..]
+            .iter()
+            .position(|range| range.start >= cursor_offset)
+        else {
+            return;
+        };
+        self.search_current_index = Some(previous_len + offset);
+        self.reveal_current_search_match(cx);
+    }
+
+    fn reveal_current_search_match(&mut self, cx: &mut Context<Self>) {
+        if !(self.embedded_editor && self.embedded_read_only) {
+            return;
+        }
+        let Some(index) = self.search_current_index else {
+            return;
+        };
+        let Some(range) = self.search_matches.get(index) else {
+            return;
+        };
+        self.cursor.offset = range.start;
+        self.cursor.anchor = range.start;
+        self.center_cursor_in_view_immediately(cx);
+    }
+
+    /// Longest distance a match can reach past the slice it starts in.
+    fn search_scan_overlap_bytes(&self) -> usize {
+        if self.search_use_regex {
+            // A pattern can match arbitrarily far; this covers realistic ones.
+            SEARCH_SCAN_REGEX_OVERLAP_BYTES
+        } else {
+            self.search_query.len().saturating_sub(1)
+        }
+    }
+
+    /// Blocks on the remainder of a streaming scan; replace needs every match.
+    pub(crate) fn ensure_search_scan_complete(&mut self, cx: &mut Context<Self>) {
+        if self.search_scan_complete {
+            return;
+        }
+        self.search_scan_epoch = self.search_scan_epoch.wrapping_add(1);
+        self.search_scan_task = None;
+        let current_index = self.search_current_index;
         self.search_matches = find_search_matches(
             self.buffer.text(),
             &self.search_query,
@@ -248,25 +469,13 @@ impl EditorView {
             self.search_whole_word,
             self.search_use_regex,
         );
-        self.search_current_index = None;
-
-        if !self.search_matches.is_empty() {
-            let cursor_offset = self.cursor.offset;
-            self.search_current_index = Some(
-                self.search_matches
-                    .iter()
-                    .position(|range| range.start >= cursor_offset)
-                    .unwrap_or(0),
-            );
-            if self.embedded_editor && self.embedded_read_only {
-                let index = self.search_current_index.unwrap_or(0);
-                let range_start = self.search_matches[index].start;
-                self.cursor.offset = range_start;
-                self.cursor.anchor = range_start;
-                self.center_cursor_in_view_immediately(cx);
-            }
+        self.search_scan_complete = true;
+        self.search_scan_buffer_len = self.buffer.len();
+        self.search_current_index =
+            current_index.filter(|index| *index < self.search_matches.len());
+        if self.search_current_index.is_none() && !self.search_matches.is_empty() {
+            self.search_current_index = Some(0);
         }
-
         cx.notify();
     }
 
@@ -275,7 +484,10 @@ impl EditorView {
             self.terminal_search_navigate(&tab_id, forward, cx);
             return;
         }
-        let reran_search = if self.search_matches.is_empty() && !self.search_query.is_empty() {
+        let reran_search = if self.search_matches.is_empty()
+            && !self.search_query.is_empty()
+            && self.search_scan_complete
+        {
             self.run_search(cx);
             true
         } else {
@@ -327,6 +539,7 @@ impl EditorView {
         if self.active_tab_is_read_only() {
             return;
         }
+        self.ensure_search_scan_complete(cx);
         let Some(index) = self.search_current_index else {
             return;
         };
@@ -363,6 +576,7 @@ impl EditorView {
         if self.active_tab_is_read_only() {
             return;
         }
+        self.ensure_search_scan_complete(cx);
         if self.search_matches.is_empty() {
             return;
         }
@@ -429,12 +643,17 @@ impl EditorView {
             self.search_matches.len()
         };
         let current_idx = self.search_current_index;
+        // A trailing ellipsis marks a total that is still climbing.
+        let scanning = !self.search_scan_complete;
         let counter_text = if match_count > 0 {
             format!(
-                "{} / {}",
+                "{} / {}{}",
                 current_idx.map(|index| index + 1).unwrap_or(0),
-                match_count
+                match_count,
+                if scanning { "…" } else { "" }
             )
+        } else if scanning {
+            "0 / 0…".to_string()
         } else if !self.search_query.is_empty() {
             self.t(crate::i18n::TextKey::SearchNoResults).to_string()
         } else {
@@ -839,20 +1058,27 @@ pub(crate) fn find_search_matches(
         return matches;
     }
 
-    let (haystack, byte_map) = if case_sensitive {
-        (text.to_string(), None)
+    // Only a fold that can change byte lengths needs a map back to the original
+    // offsets; the other two cases stay 1:1 and skip an allocation per byte.
+    let (haystack, byte_map): (std::borrow::Cow<'_, str>, Option<Vec<usize>>) = if case_sensitive {
+        (std::borrow::Cow::Borrowed(text), None)
+    } else if text.is_ascii() && query.is_ascii() {
+        (std::borrow::Cow::Owned(text.to_ascii_lowercase()), None)
     } else {
         let (folded, map) = fold_with_original_byte_map(text);
-        (folded, Some(map))
+        (std::borrow::Cow::Owned(folded), Some(map))
     };
     let needle = if case_sensitive {
-        query.to_string()
+        std::borrow::Cow::Borrowed(query)
+    } else if query.is_ascii() {
+        std::borrow::Cow::Owned(query.to_ascii_lowercase())
     } else {
-        query.to_lowercase()
+        std::borrow::Cow::Owned(query.to_lowercase())
     };
+    let needle = needle.as_ref();
 
     let mut start = 0;
-    while let Some(position) = haystack[start..].find(&needle) {
+    while let Some(position) = haystack[start..].find(needle) {
         let folded_match_start = start + position;
         let folded_match_end = folded_match_start + needle.len();
         let (match_start, match_end) = if let Some(byte_map) = &byte_map {
@@ -919,7 +1145,41 @@ fn is_word_char(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::find_search_matches;
+    use super::{find_search_matches, next_search_slice_boundary, search_slice_matches};
+
+    /// Walks `text` the way the streaming scan does, so the result has to match
+    /// a single full-document scan.
+    fn streamed_matches(
+        text: &str,
+        query: &str,
+        slice_bytes: usize,
+        case_sensitive: bool,
+        whole_word: bool,
+        use_regex: bool,
+    ) -> Vec<std::ops::Range<usize>> {
+        let overlap = if use_regex {
+            64
+        } else {
+            query.len().saturating_sub(1)
+        };
+        let mut collected = Vec::new();
+        let mut start = 0usize;
+        while start < text.len() {
+            let slice_end = next_search_slice_boundary(text, start + slice_bytes);
+            collected.extend(search_slice_matches(
+                text,
+                start,
+                slice_end,
+                overlap,
+                query,
+                case_sensitive,
+                whole_word,
+                use_regex,
+            ));
+            start = slice_end;
+        }
+        collected
+    }
 
     #[test]
     fn case_insensitive_whole_word_search_keeps_original_utf8_boundaries() {
@@ -929,5 +1189,79 @@ mod tests {
 
         assert_eq!(matches, vec![18..21]);
         assert_eq!(&text[matches[0].clone()], "FOO");
+    }
+
+    #[test]
+    fn ascii_and_unicode_folding_agree_on_match_offsets() {
+        // The ASCII fast path skips the byte map, so it has to report the same
+        // offsets as the general fold that a non-ASCII character forces.
+        let expected = vec![0..3, 4..7, 8..11];
+        assert_eq!(
+            find_search_matches("Foo foo FOO", "foo", false, false, false),
+            expected
+        );
+        assert_eq!(
+            find_search_matches("Foo foo FOO 选", "foo", false, false, false),
+            expected
+        );
+
+        // The Kelvin sign is three bytes and folds to a one-byte `k`, which is
+        // exactly what the byte map has to translate back.
+        let kelvin = "\u{212A} foo";
+        let matches = find_search_matches(kelvin, "k", false, false, false);
+        assert_eq!(matches, vec![0..3]);
+        assert_eq!(&kelvin[matches[0].clone()], "\u{212A}");
+    }
+
+    #[test]
+    fn slice_boundaries_land_on_line_starts() {
+        let text = "one\ntwo\nthree";
+        assert_eq!(next_search_slice_boundary(text, 0), 4);
+        assert_eq!(next_search_slice_boundary(text, 4), 8);
+        // Past the last newline the remainder is one final slice.
+        assert_eq!(next_search_slice_boundary(text, 9), text.len());
+        assert_eq!(next_search_slice_boundary(text, 999), text.len());
+    }
+
+    #[test]
+    fn streaming_a_document_finds_exactly_what_one_pass_finds() {
+        let mut text = String::new();
+        for line in 0..400 {
+            text.push_str(&format!("line {line} needle and more words here\n"));
+        }
+        // A match sitting right where slices get cut must not be lost or doubled.
+        for slice_bytes in [1, 7, 32, 64, 100, 4096] {
+            assert_eq!(
+                streamed_matches(&text, "needle", slice_bytes, true, false, false),
+                find_search_matches(&text, "needle", false, false, false),
+                "slice_bytes={slice_bytes}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_preserves_case_insensitive_and_whole_word_results() {
+        let text = "Needle\nneedles NEEDLE\n选 needle 选\nNEEDLES\n".repeat(40);
+
+        for slice_bytes in [1, 9, 40, 256] {
+            assert_eq!(
+                streamed_matches(&text, "needle", slice_bytes, false, true, false),
+                find_search_matches(&text, "needle", false, true, false),
+                "slice_bytes={slice_bytes}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_preserves_regex_results() {
+        let text = "alpha 12 beta\ngamma 345 delta\n".repeat(60);
+
+        for slice_bytes in [1, 13, 64, 512] {
+            assert_eq!(
+                streamed_matches(&text, r"\d+", slice_bytes, true, false, true),
+                find_search_matches(&text, r"\d+", true, false, true),
+                "slice_bytes={slice_bytes}"
+            );
+        }
     }
 }

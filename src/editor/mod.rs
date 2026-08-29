@@ -403,6 +403,70 @@ pub(crate) struct EditorScrollbarDragState {
     pub max_scroll: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CodeBlockHorizontalScrollbarGeometry {
+    pub start_line: usize,
+    pub track_bounds: Bounds<Pixels>,
+    pub thumb_bounds: Bounds<Pixels>,
+    pub track_travel: f32,
+    pub max_scroll: f32,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CodeBlockHorizontalScrollbarOverlayGeometry {
+    pub track_left: f32,
+    pub track_top: f32,
+    pub track_width: f32,
+    pub track_height: f32,
+    pub thumb_left: f32,
+    pub thumb_width: f32,
+    pub thumb_height: f32,
+    pub opacity: f32,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CodeBlockHorizontalScrollbarDragState {
+    pub start_line: usize,
+    pub start_position_x: f32,
+    pub start_thumb_left: f32,
+    pub track_travel: f32,
+    pub max_scroll: f32,
+}
+
+fn code_block_horizontal_scrollbar_target_opacity(
+    active_line: Option<usize>,
+    hovered_line: Option<usize>,
+    dragging: bool,
+    normal_opacity: f32,
+    hover_opacity: f32,
+) -> f32 {
+    let Some(active_line) = active_line else {
+        return 0.0;
+    };
+    if hovered_line == Some(active_line) || dragging {
+        hover_opacity
+    } else {
+        normal_opacity
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn code_block_horizontal_scrollbar_follows_editor_hover_targets() {
+    assert_eq!(
+        code_block_horizontal_scrollbar_target_opacity(None, None, false, 0.2, 0.3),
+        0.0
+    );
+    assert_eq!(
+        code_block_horizontal_scrollbar_target_opacity(Some(4), None, false, 0.2, 0.3),
+        0.2
+    );
+    assert_eq!(
+        code_block_horizontal_scrollbar_target_opacity(Some(4), Some(4), false, 0.2, 0.3),
+        0.3
+    );
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarSortMode {
     CreatedDesc,
@@ -717,6 +781,7 @@ pub(crate) struct LineDisplayInfo {
     pub extra_height: f32,
     pub indent_px: f32,
     pub content_x: f32,
+    pub horizontal_clip_right_x: Option<f32>,
     pub selection_padding_left_px: f32,
 }
 
@@ -1606,6 +1671,28 @@ pub(crate) struct LineGeometryCacheState {
 
 // ── EditorView ──────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct CodeBlockDisplayOverride {
+    pub(crate) line_numbers: Option<bool>,
+    pub(crate) word_wrap: Option<bool>,
+    pub(crate) horizontal_offset: f32,
+    pub(crate) max_horizontal_offset: f32,
+}
+
+const NON_MARKDOWN_HORIZONTAL_SCROLL_TARGET: usize = usize::MAX;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct EditorHorizontalScrollState {
+    pub(crate) offset: f32,
+    pub(crate) max_offset: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodeBlockDisplayAction {
+    LineNumbers,
+    WordWrap,
+}
+
 pub struct EditorView {
     pub buffer: Buffer,
     pub cursor: Cursor,
@@ -1715,8 +1802,25 @@ pub struct EditorView {
     pub(crate) generated_preview_actions_opacity_task: Option<Task<()>>,
     pub(crate) code_block_hover_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     pub(crate) code_block_copy_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
+    pub(crate) code_block_display_action_areas:
+        Vec<(gpui::Bounds<Pixels>, usize, CodeBlockDisplayAction)>,
     pub(crate) hovering_code_block_start: Option<usize>,
     pub(crate) hovering_code_block_copy_start: Option<usize>,
+    pub(crate) hovering_code_block_display_action: Option<(usize, CodeBlockDisplayAction)>,
+    pub(crate) code_block_horizontal_scrollbars: Vec<CodeBlockHorizontalScrollbarGeometry>,
+    pub(crate) code_block_horizontal_scrollbar_hovered: Option<usize>,
+    pub(crate) code_block_horizontal_scrollbar_visible_line: Option<usize>,
+    pub(crate) code_block_horizontal_scrollbar_opacity: f32,
+    pub(crate) code_block_horizontal_scrollbar_opacity_target: f32,
+    pub(crate) code_block_horizontal_scrollbar_opacity_epoch: usize,
+    pub(crate) code_block_horizontal_scrollbar_opacity_task: Option<Task<()>>,
+    pub(crate) code_block_horizontal_scrollbar_thickness: f32,
+    pub(crate) code_block_horizontal_scrollbar_thickness_target: f32,
+    pub(crate) code_block_horizontal_scrollbar_thickness_epoch: usize,
+    pub(crate) code_block_horizontal_scrollbar_thickness_task: Option<Task<()>>,
+    pub(crate) code_block_horizontal_scrollbar_drag: Option<CodeBlockHorizontalScrollbarDragState>,
+    pub(crate) pending_code_block_horizontal_scrollbar_drag_position: Option<Point<Pixels>>,
+    pub(crate) code_block_horizontal_scrollbar_drag_task: Option<Task<()>>,
     pub(crate) copied_code_block_start: Option<usize>,
     pub(crate) code_block_copy_feedback_epoch: usize,
     /// Table cell click areas: (bounds, table_start_line, visual_row, col)
@@ -2113,6 +2217,12 @@ pub struct EditorView {
     pub(crate) search_use_regex: bool,
     pub(crate) search_matches: Vec<std::ops::Range<usize>>,
     pub(crate) search_current_index: Option<usize>,
+    /// False while a large buffer is still being scanned in slices, which is
+    /// what makes the match counter climb instead of blocking on the full scan.
+    pub(crate) search_scan_complete: bool,
+    pub(crate) search_scan_epoch: u64,
+    pub(crate) search_scan_buffer_len: usize,
+    pub(crate) search_scan_task: Option<Task<()>>,
     pub(crate) search_query_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) search_replace_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) pending_editor_focus: bool,
@@ -2194,6 +2304,9 @@ pub struct EditorView {
     pub(crate) pending_terminal_inputs: HashMap<String, Vec<u8>>,
     pub(crate) chat_terminal_cell_width_px: f32,
     pub(crate) chat_terminal_cell_height_px: f32,
+    pub(crate) code_block_display_overrides:
+        HashMap<String, HashMap<usize, CodeBlockDisplayOverride>>,
+    pub(crate) non_markdown_horizontal_scroll_states: HashMap<String, EditorHorizontalScrollState>,
 
     // Settings panel state
     pub(crate) settings_scroll_handle: ScrollHandle,
@@ -2230,6 +2343,8 @@ pub struct EditorView {
     pub(crate) ui_language: UiLanguage,
     pub(crate) app_settings: AppSettings,
     pub(crate) runtime_profiler: Option<profiler::RuntimeProfiler>,
+    pub(crate) runtime_profile_mouse_move_events: u64,
+    pub(crate) runtime_profile_render_frames: u64,
 }
 
 impl Drop for EditorView {
@@ -2443,8 +2558,24 @@ impl EditorView {
             generated_preview_actions_opacity_task: None,
             code_block_hover_areas: Vec::new(),
             code_block_copy_areas: Vec::new(),
+            code_block_display_action_areas: Vec::new(),
             hovering_code_block_start: None,
             hovering_code_block_copy_start: None,
+            hovering_code_block_display_action: None,
+            code_block_horizontal_scrollbars: Vec::new(),
+            code_block_horizontal_scrollbar_hovered: None,
+            code_block_horizontal_scrollbar_visible_line: None,
+            code_block_horizontal_scrollbar_opacity: 0.0,
+            code_block_horizontal_scrollbar_opacity_target: 0.0,
+            code_block_horizontal_scrollbar_opacity_epoch: 0,
+            code_block_horizontal_scrollbar_opacity_task: None,
+            code_block_horizontal_scrollbar_thickness: init_scrollbar_width,
+            code_block_horizontal_scrollbar_thickness_target: init_scrollbar_width,
+            code_block_horizontal_scrollbar_thickness_epoch: 0,
+            code_block_horizontal_scrollbar_thickness_task: None,
+            code_block_horizontal_scrollbar_drag: None,
+            pending_code_block_horizontal_scrollbar_drag_position: None,
+            code_block_horizontal_scrollbar_drag_task: None,
             copied_code_block_start: None,
             code_block_copy_feedback_epoch: 0,
             table_click_areas: Vec::new(),
@@ -2773,6 +2904,10 @@ impl EditorView {
             search_use_regex: false,
             search_matches: Vec::new(),
             search_current_index: None,
+            search_scan_complete: true,
+            search_scan_epoch: 0,
+            search_scan_buffer_len: 0,
+            search_scan_task: None,
             search_query_editor: None,
             search_replace_editor: None,
             pending_editor_focus: false,
@@ -2841,6 +2976,8 @@ impl EditorView {
             pending_terminal_inputs: HashMap::new(),
             chat_terminal_cell_width_px: 0.0,
             chat_terminal_cell_height_px: 0.0,
+            code_block_display_overrides: HashMap::new(),
+            non_markdown_horizontal_scroll_states: HashMap::new(),
 
             // Settings panel state
             settings_scroll_handle: ScrollHandle::new(),
@@ -2868,6 +3005,8 @@ impl EditorView {
             ui_language,
             app_settings,
             runtime_profiler,
+            runtime_profile_mouse_move_events: 0,
+            runtime_profile_render_frames: 0,
         };
         this.last_content_left = this.padding_left();
         this.last_text_width =
@@ -3104,11 +3243,7 @@ impl EditorView {
     }
 
     fn desired_editor_scrollbar_width(&self) -> f32 {
-        if self.editor_scrollbar_hovered || self.editor_scrollbar_drag.is_some() {
-            self.styles.editor.editor_scrollbar_hover_width_px
-        } else {
-            self.styles.editor.editor_scrollbar_width_px
-        }
+        self.styles.editor.editor_scrollbar_width_px
     }
 
     pub(crate) fn editor_scrollbar_region_contains(&self, position: Point<Pixels>) -> bool {
@@ -3492,6 +3627,395 @@ impl EditorView {
         self.sync_editor_scrollbar_width(cx);
         cx.notify();
         true
+    }
+
+    fn code_block_horizontal_scrollbar_active_line(&self) -> Option<usize> {
+        self.code_block_horizontal_scrollbar_drag
+            .map(|drag| drag.start_line)
+            .or_else(|| {
+                (self.active_tab_is_non_markdown_text()
+                    && !self.editor_wraps_to_available_width()
+                    && self.hovered_editor_position.is_some()
+                    && self
+                        .code_block_horizontal_scrollbars
+                        .iter()
+                        .any(|geometry| {
+                            geometry.start_line == NON_MARKDOWN_HORIZONTAL_SCROLL_TARGET
+                        }))
+                .then_some(NON_MARKDOWN_HORIZONTAL_SCROLL_TARGET)
+            })
+            .or_else(|| {
+                self.hovering_code_block_start.filter(|start_line| {
+                    self.code_block_horizontal_scrollbars
+                        .iter()
+                        .any(|geometry| geometry.start_line == *start_line)
+                })
+            })
+    }
+
+    fn desired_code_block_horizontal_scrollbar_opacity(&self) -> f32 {
+        code_block_horizontal_scrollbar_target_opacity(
+            self.code_block_horizontal_scrollbar_active_line(),
+            self.code_block_horizontal_scrollbar_hovered,
+            self.code_block_horizontal_scrollbar_drag.is_some(),
+            self.styles.editor.editor_scrollbar_opacity,
+            self.styles.editor.editor_scrollbar_hover_opacity,
+        )
+    }
+
+    fn desired_code_block_horizontal_scrollbar_thickness(&self) -> f32 {
+        self.styles.editor.editor_scrollbar_width_px
+    }
+
+    pub(crate) fn sync_code_block_horizontal_scrollbar(&mut self, cx: &mut Context<Self>) {
+        if let Some(active_line) = self.code_block_horizontal_scrollbar_active_line() {
+            self.code_block_horizontal_scrollbar_visible_line = Some(active_line);
+        }
+        self.sync_code_block_horizontal_scrollbar_opacity(cx);
+        self.sync_code_block_horizontal_scrollbar_thickness(cx);
+    }
+
+    fn sync_code_block_horizontal_scrollbar_opacity(&mut self, cx: &mut Context<Self>) {
+        let target = self.desired_code_block_horizontal_scrollbar_opacity();
+        if (self.code_block_horizontal_scrollbar_opacity_target - target).abs() > 0.001 {
+            self.code_block_horizontal_scrollbar_opacity_target = target;
+        } else if self.code_block_horizontal_scrollbar_opacity_task.is_some()
+            || (self.code_block_horizontal_scrollbar_opacity - target).abs() <= 0.01
+        {
+            return;
+        }
+
+        self.code_block_horizontal_scrollbar_opacity_epoch = self
+            .code_block_horizontal_scrollbar_opacity_epoch
+            .wrapping_add(1);
+        let epoch = self.code_block_horizontal_scrollbar_opacity_epoch;
+        let frame_ms = self
+            .styles
+            .editor
+            .editor_scrollbar_animation_frame_ms
+            .max(1);
+        let duration_ms = self.styles.editor.editor_scrollbar_fade_animation_ms.max(1);
+        let step = (frame_ms as f32 / duration_ms as f32).clamp(0.08, 1.0);
+        let pane_id = self.current_pane_id();
+        self.code_block_horizontal_scrollbar_opacity_task =
+            Some(cx.spawn(async move |this, cx| {
+                loop {
+                    let done = this
+                        .update(cx, |this, cx| {
+                            this.with_pane_if_alive(pane_id, |this| {
+                                if this.code_block_horizontal_scrollbar_opacity_epoch != epoch {
+                                    return true;
+                                }
+                                let diff = this.code_block_horizontal_scrollbar_opacity_target
+                                    - this.code_block_horizontal_scrollbar_opacity;
+                                if diff.abs() <= 0.01 {
+                                    this.code_block_horizontal_scrollbar_opacity =
+                                        this.code_block_horizontal_scrollbar_opacity_target;
+                                    if this.code_block_horizontal_scrollbar_opacity <= 0.01 {
+                                        this.code_block_horizontal_scrollbar_visible_line = None;
+                                    }
+                                    this.code_block_horizontal_scrollbar_opacity_task = None;
+                                    cx.notify();
+                                    return true;
+                                }
+                                this.code_block_horizontal_scrollbar_opacity += diff * step;
+                                cx.notify();
+                                false
+                            })
+                            .unwrap_or(true)
+                        })
+                        .unwrap_or(true);
+                    if done {
+                        return;
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(frame_ms))
+                        .await;
+                }
+            }));
+    }
+
+    fn sync_code_block_horizontal_scrollbar_thickness(&mut self, cx: &mut Context<Self>) {
+        let target = self.desired_code_block_horizontal_scrollbar_thickness();
+        if (self.code_block_horizontal_scrollbar_thickness_target - target).abs() > 0.001 {
+            self.code_block_horizontal_scrollbar_thickness_target = target;
+        } else if self
+            .code_block_horizontal_scrollbar_thickness_task
+            .is_some()
+            || (self.code_block_horizontal_scrollbar_thickness - target).abs() <= 0.01
+        {
+            return;
+        }
+
+        self.code_block_horizontal_scrollbar_thickness_epoch = self
+            .code_block_horizontal_scrollbar_thickness_epoch
+            .wrapping_add(1);
+        let epoch = self.code_block_horizontal_scrollbar_thickness_epoch;
+        let frame_ms = self
+            .styles
+            .editor
+            .editor_scrollbar_animation_frame_ms
+            .max(1);
+        let duration_ms = self
+            .styles
+            .editor
+            .editor_scrollbar_width_animation_ms
+            .max(1);
+        let step = (frame_ms as f32 / duration_ms as f32).clamp(0.08, 1.0);
+        let pane_id = self.current_pane_id();
+        self.code_block_horizontal_scrollbar_thickness_task =
+            Some(cx.spawn(async move |this, cx| {
+                loop {
+                    let done = this
+                        .update(cx, |this, cx| {
+                            this.with_pane_if_alive(pane_id, |this| {
+                                if this.code_block_horizontal_scrollbar_thickness_epoch != epoch {
+                                    return true;
+                                }
+                                let diff = this.code_block_horizontal_scrollbar_thickness_target
+                                    - this.code_block_horizontal_scrollbar_thickness;
+                                if diff.abs() <= 0.01 {
+                                    this.code_block_horizontal_scrollbar_thickness =
+                                        this.code_block_horizontal_scrollbar_thickness_target;
+                                    this.code_block_horizontal_scrollbar_thickness_task = None;
+                                    cx.notify();
+                                    return true;
+                                }
+                                this.code_block_horizontal_scrollbar_thickness += diff * step;
+                                cx.notify();
+                                false
+                            })
+                            .unwrap_or(true)
+                        })
+                        .unwrap_or(true);
+                    if done {
+                        return;
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(frame_ms))
+                        .await;
+                }
+            }));
+    }
+
+    fn code_block_horizontal_scrollbar_at_position(
+        &self,
+        position: Point<Pixels>,
+    ) -> Option<CodeBlockHorizontalScrollbarGeometry> {
+        self.code_block_horizontal_scrollbars
+            .iter()
+            .find(|geometry| geometry.track_bounds.contains(&position))
+            .copied()
+    }
+
+    pub(crate) fn code_block_horizontal_scrollbar_overlay_geometry(
+        &self,
+    ) -> Option<CodeBlockHorizontalScrollbarOverlayGeometry> {
+        let active_line = self
+            .code_block_horizontal_scrollbar_drag
+            .map(|drag| drag.start_line)
+            .or_else(|| {
+                let position = self.hovered_editor_position?;
+                if self.active_tab_is_non_markdown_text()
+                    && !self.editor_wraps_to_available_width()
+                    && self
+                        .code_block_horizontal_scrollbars
+                        .iter()
+                        .any(|geometry| {
+                            geometry.start_line == NON_MARKDOWN_HORIZONTAL_SCROLL_TARGET
+                        })
+                {
+                    return Some(NON_MARKDOWN_HORIZONTAL_SCROLL_TARGET);
+                }
+                self.code_block_hover_areas
+                    .iter()
+                    .find(|(bounds, _)| bounds.contains(&position))
+                    .map(|(_, start_line)| *start_line)
+            })
+            .or_else(|| {
+                (self.code_block_horizontal_scrollbar_opacity > 0.01)
+                    .then_some(self.code_block_horizontal_scrollbar_visible_line)
+                    .flatten()
+            })?;
+        let geometry = self
+            .code_block_horizontal_scrollbars
+            .iter()
+            .find(|geometry| geometry.start_line == active_line)?;
+        let origin_x = f32::from(self.content_origin.x);
+        let origin_y = f32::from(self.content_origin.y);
+        let track_left = f32::from(geometry.track_bounds.origin.x) - origin_x;
+        let track_top = f32::from(geometry.track_bounds.origin.y) - origin_y;
+        let track_height = f32::from(geometry.track_bounds.size.height);
+        let thumb_left =
+            f32::from(geometry.thumb_bounds.origin.x) - f32::from(geometry.track_bounds.origin.x);
+        let thumb_height = self
+            .scaled(
+                self.code_block_horizontal_scrollbar_thickness
+                    .max(self.styles.editor.editor_scrollbar_width_px),
+            )
+            .min(track_height);
+        Some(CodeBlockHorizontalScrollbarOverlayGeometry {
+            track_left,
+            track_top,
+            track_width: f32::from(geometry.track_bounds.size.width),
+            track_height,
+            thumb_left,
+            thumb_width: f32::from(geometry.thumb_bounds.size.width),
+            thumb_height,
+            opacity: self.code_block_horizontal_scrollbar_opacity.clamp(0.0, 1.0),
+        })
+    }
+
+    pub(crate) fn set_code_block_horizontal_scrollbar_hovered(
+        &mut self,
+        hovered: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.code_block_horizontal_scrollbar_hovered == hovered {
+            return;
+        }
+        self.code_block_horizontal_scrollbar_hovered = hovered;
+        self.sync_code_block_horizontal_scrollbar(cx);
+    }
+
+    pub(crate) fn start_code_block_horizontal_scrollbar_drag(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(geometry) = self
+            .code_block_horizontal_scrollbars
+            .iter()
+            .find(|geometry| geometry.thumb_bounds.contains(&position))
+            .copied()
+        else {
+            return false;
+        };
+        self.code_block_horizontal_scrollbar_drag = Some(CodeBlockHorizontalScrollbarDragState {
+            start_line: geometry.start_line,
+            start_position_x: f32::from(position.x),
+            start_thumb_left: f32::from(geometry.thumb_bounds.origin.x)
+                - f32::from(geometry.track_bounds.origin.x),
+            track_travel: geometry.track_travel,
+            max_scroll: geometry.max_scroll,
+        });
+        self.code_block_horizontal_scrollbar_hovered = Some(geometry.start_line);
+        self.code_block_horizontal_scrollbar_visible_line = Some(geometry.start_line);
+        self.sync_code_block_horizontal_scrollbar(cx);
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn update_code_block_horizontal_scrollbar_drag(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.code_block_horizontal_scrollbar_drag.is_none() {
+            return false;
+        }
+        self.pending_code_block_horizontal_scrollbar_drag_position = Some(position);
+        if self.code_block_horizontal_scrollbar_drag_task.is_none() {
+            self.apply_code_block_horizontal_scrollbar_drag_position(position, cx);
+            self.pending_code_block_horizontal_scrollbar_drag_position = None;
+            let pane_id = self.current_pane_id();
+            self.code_block_horizontal_scrollbar_drag_task =
+                Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(16))
+                            .await;
+                        let keep_running = this
+                            .update(cx, |this, cx| {
+                                this.with_pane_if_alive(pane_id, |this| {
+                                    if this.code_block_horizontal_scrollbar_drag.is_none() {
+                                        this.pending_code_block_horizontal_scrollbar_drag_position =
+                                            None;
+                                        this.code_block_horizontal_scrollbar_drag_task = None;
+                                        return false;
+                                    }
+                                    if let Some(position) = this
+                                        .pending_code_block_horizontal_scrollbar_drag_position
+                                        .take()
+                                    {
+                                        this.apply_code_block_horizontal_scrollbar_drag_position(
+                                            position, cx,
+                                        );
+                                    }
+                                    true
+                                })
+                                .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+                        if !keep_running {
+                            return;
+                        }
+                    }
+                }));
+        }
+        true
+    }
+
+    fn apply_code_block_horizontal_scrollbar_drag_position(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.code_block_horizontal_scrollbar_drag else {
+            return;
+        };
+        let delta_x = f32::from(position.x) - drag.start_position_x;
+        let thumb_left = (drag.start_thumb_left + delta_x).clamp(0.0, drag.track_travel);
+        let offset = if drag.track_travel <= 0.0 {
+            0.0
+        } else {
+            thumb_left / drag.track_travel * drag.max_scroll
+        };
+        if self.set_code_block_horizontal_offset(drag.start_line, offset) {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn stop_code_block_horizontal_scrollbar_drag(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.code_block_horizontal_scrollbar_drag.is_some() {
+            self.apply_code_block_horizontal_scrollbar_drag_position(position, cx);
+        }
+        self.pending_code_block_horizontal_scrollbar_drag_position = None;
+        self.code_block_horizontal_scrollbar_drag_task = None;
+        if self.code_block_horizontal_scrollbar_drag.take().is_none() {
+            return false;
+        }
+        self.hovering_code_block_start = self
+            .code_block_hover_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&position))
+            .map(|(_, start_line)| *start_line);
+        self.code_block_horizontal_scrollbar_hovered = self
+            .code_block_horizontal_scrollbar_at_position(position)
+            .map(|geometry| geometry.start_line);
+        self.sync_code_block_horizontal_scrollbar(cx);
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn clear_code_block_horizontal_scrollbar_hover(&mut self, cx: &mut Context<Self>) {
+        if self.code_block_horizontal_scrollbar_drag.is_some() {
+            return;
+        }
+        let changed = self.hovering_code_block_start.take().is_some()
+            || self
+                .code_block_horizontal_scrollbar_hovered
+                .take()
+                .is_some();
+        if changed {
+            self.sync_generated_preview_action_opacity(cx);
+            self.sync_code_block_horizontal_scrollbar(cx);
+            cx.notify();
+        }
     }
 
     pub(crate) fn sidebar_target_width(&self) -> f32 {
@@ -4902,19 +5426,13 @@ impl EditorView {
             return Ok(ClipboardPasteOutcome::NotHandled);
         }
 
-        let Some(target_dir) = self
-            .current_file_path
-            .as_deref()
-            .map(|current_file| {
-                self.app_settings
-                    .attachment_policy()
-                    .target_directory(&self.sidebar_root, current_file)
-            })
-            .transpose()?
-        else {
+        let Some(current_file) = self.current_file_path.as_deref() else {
             self.show_save_before_import_dialog(cx);
             return Ok(ClipboardPasteOutcome::Consumed);
         };
+        let policy_access = self.app_settings.attachment_policy_access();
+        let policy = policy_access.policy();
+        let target_dir = policy.target_directory(&self.sidebar_root, current_file)?;
         std::fs::create_dir_all(&target_dir)?;
 
         let mut imported = Vec::new();
@@ -4946,7 +5464,8 @@ impl EditorView {
             Ok(ClipboardPasteOutcome::Consumed)
         } else {
             Ok(ClipboardPasteOutcome::Insert(
-                self.references_for_imported_paths(&imported)?.join("\n"),
+                self.references_for_imported_paths(&imported, policy)?
+                    .join("\n"),
             ))
         }
     }
@@ -4954,11 +5473,11 @@ impl EditorView {
     fn references_for_imported_paths(
         &self,
         imported: &[(PathBuf, bool)],
+        policy: &AttachmentPolicy,
     ) -> anyhow::Result<Vec<String>> {
         let current_file = self.current_file_path.as_deref().ok_or_else(|| {
             anyhow::anyhow!("save the current document before importing attachments")
         })?;
-        let policy = self.app_settings.attachment_policy();
         let index = attachments::WorkspaceLinkIndex::build(&self.sidebar_root);
         imported
             .iter()
@@ -4993,7 +5512,8 @@ impl EditorView {
             return;
         };
         let result = (|| -> anyhow::Result<String> {
-            let policy = self.app_settings.attachment_policy();
+            let policy_access = self.app_settings.attachment_policy_access();
+            let policy = policy_access.policy();
             let target_dir = policy.target_directory(&self.sidebar_root, current_file)?;
             std::fs::create_dir_all(&target_dir)?;
             let mut imported = Vec::new();
@@ -5010,7 +5530,9 @@ impl EditorView {
                 std::fs::copy(source_path, &target_path)?;
                 imported.push((target_path, is_image_path(source_path)));
             }
-            Ok(self.references_for_imported_paths(&imported)?.join("\n"))
+            Ok(self
+                .references_for_imported_paths(&imported, policy)?
+                .join("\n"))
         })();
         match result {
             Ok(insertion) if !insertion.is_empty() => self.insert_pasted_text(&insertion, cx),
@@ -5670,6 +6192,9 @@ impl EditorView {
             .cloned()
             .unwrap_or(FileKind::Markdown);
         let pending_line_display_transfer = self.pending_line_display_transfer.take();
+        if let Some(transfer) = pending_line_display_transfer.as_ref() {
+            self.shift_active_code_block_display_overrides(transfer);
+        }
         if self.uses_sparse_line_geometry()
             && let Some(transfer) = pending_line_display_transfer.as_ref()
         {
@@ -5818,9 +6343,233 @@ impl EditorView {
             self.set_line_display_info(preserved_line_display_info);
         }
         self.refresh_generated_block_previews();
+        self.retain_valid_active_code_block_display_overrides();
         self.layout_dirty = true;
         self.invalidate_info_panel_cache();
         self.mark_inline_diff_dirty(false);
+    }
+
+    fn shift_active_code_block_display_overrides(&mut self, transfer: &PendingLineDisplayTransfer) {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return;
+        };
+        let Some(overrides) = self.code_block_display_overrides.get_mut(&tab_id) else {
+            return;
+        };
+        let mut shifted = HashMap::with_capacity(overrides.len());
+        for (line, mut state) in std::mem::take(overrides) {
+            let line = shift_line_after_transfer(
+                line,
+                transfer.start_line,
+                transfer.old_end_line_exclusive,
+                transfer.new_end_line_exclusive,
+            );
+            state.horizontal_offset = 0.0;
+            state.max_horizontal_offset = 0.0;
+            shifted.insert(line, state);
+        }
+        *overrides = shifted;
+    }
+
+    fn retain_valid_active_code_block_display_overrides(&mut self) {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return;
+        };
+        let decorations = &self.decorations;
+        let is_code = |line: usize| {
+            matches!(
+                decorations
+                    .get(line)
+                    .map(|decoration| &decoration.block_type),
+                Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
+            )
+        };
+        if let Some(overrides) = self.code_block_display_overrides.get_mut(&tab_id) {
+            overrides.retain(|line, _| is_code(*line) && (*line == 0 || !is_code(*line - 1)));
+        }
+    }
+
+    pub(crate) fn code_block_display_override(
+        &self,
+        start_line: usize,
+    ) -> CodeBlockDisplayOverride {
+        self.active_tab_id
+            .as_ref()
+            .and_then(|tab_id| self.code_block_display_overrides.get(tab_id))
+            .and_then(|overrides| overrides.get(&start_line))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn non_markdown_horizontal_scroll_state(&self) -> EditorHorizontalScrollState {
+        self.active_tab_id
+            .as_ref()
+            .and_then(|tab_id| self.non_markdown_horizontal_scroll_states.get(tab_id))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn horizontal_scroll_offset_for_line(&self, line: usize) -> f32 {
+        if self.active_tab_is_non_markdown_text() && !self.editor_wraps_to_available_width() {
+            return self.non_markdown_horizontal_scroll_state().offset;
+        }
+        self.code_block_group_start(line)
+            .map(|start_line| {
+                self.code_block_display_override(start_line)
+                    .horizontal_offset
+            })
+            .unwrap_or(0.0)
+    }
+
+    pub(crate) fn apply_non_markdown_horizontal_extent(&mut self, max_offset: f32) -> bool {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return false;
+        };
+        let state = self
+            .non_markdown_horizontal_scroll_states
+            .entry(tab_id)
+            .or_default();
+        let max_offset = state.max_offset.max(max_offset.max(0.0));
+        let offset = state.offset.clamp(0.0, max_offset);
+        let changed =
+            (state.max_offset - max_offset).abs() > 0.5 || (state.offset - offset).abs() > 0.5;
+        state.max_offset = max_offset;
+        state.offset = offset;
+        changed
+    }
+
+    pub(crate) fn code_block_group_start(&self, line: usize) -> Option<usize> {
+        let is_code = |line: usize| {
+            matches!(
+                self.decorations
+                    .get(line)
+                    .map(|decoration| &decoration.block_type),
+                Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
+            )
+        };
+        if !is_code(line) {
+            return None;
+        }
+        let mut start = line;
+        while start > 0 && is_code(start - 1) {
+            start -= 1;
+        }
+        Some(start)
+    }
+
+    pub(crate) fn code_block_line_numbers_enabled(&self, start_line: usize) -> bool {
+        self.code_block_display_override(start_line)
+            .line_numbers
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn code_block_word_wrap_enabled(&self, start_line: usize) -> bool {
+        self.code_block_display_override(start_line)
+            .word_wrap
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn apply_code_block_horizontal_extents(
+        &mut self,
+        extents: &HashMap<usize, f32>,
+    ) -> bool {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return false;
+        };
+        let overrides = self.code_block_display_overrides.entry(tab_id).or_default();
+        let mut changed = false;
+        for (start_line, max_offset) in extents {
+            let state = overrides.entry(*start_line).or_default();
+            let max_offset = state.max_horizontal_offset.max(max_offset.max(0.0));
+            let horizontal_offset = state.horizontal_offset.clamp(0.0, max_offset);
+            changed |= (state.max_horizontal_offset - max_offset).abs() > 0.5
+                || (state.horizontal_offset - horizontal_offset).abs() > 0.5;
+            state.max_horizontal_offset = max_offset;
+            state.horizontal_offset = horizontal_offset;
+        }
+        changed
+    }
+
+    pub(crate) fn scroll_code_block_horizontal(&mut self, start_line: usize, delta: f32) -> bool {
+        let current = if start_line == NON_MARKDOWN_HORIZONTAL_SCROLL_TARGET {
+            self.non_markdown_horizontal_scroll_state().offset
+        } else {
+            self.code_block_display_override(start_line)
+                .horizontal_offset
+        };
+        self.set_code_block_horizontal_offset(start_line, current + delta)
+    }
+
+    fn set_code_block_horizontal_offset(&mut self, start_line: usize, offset: f32) -> bool {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return false;
+        };
+        if start_line == NON_MARKDOWN_HORIZONTAL_SCROLL_TARGET {
+            let state = self
+                .non_markdown_horizontal_scroll_states
+                .entry(tab_id)
+                .or_default();
+            let next = offset.clamp(0.0, state.max_offset);
+            if (next - state.offset).abs() <= 0.01 {
+                return false;
+            }
+            state.offset = next;
+            return true;
+        }
+        let state = self
+            .code_block_display_overrides
+            .entry(tab_id)
+            .or_default()
+            .entry(start_line)
+            .or_default();
+        let next = offset.clamp(0.0, state.max_horizontal_offset);
+        if (next - state.horizontal_offset).abs() <= 0.01 {
+            return false;
+        }
+        state.horizontal_offset = next;
+        true
+    }
+
+    pub(crate) fn toggle_code_block_display_action(
+        &mut self,
+        start_line: usize,
+        action: CodeBlockDisplayAction,
+        cx: &mut Context<Self>,
+    ) {
+        let line_numbers = self.code_block_line_numbers_enabled(start_line);
+        let word_wrap = self.code_block_word_wrap_enabled(start_line);
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return;
+        };
+        let state = self
+            .code_block_display_overrides
+            .entry(tab_id)
+            .or_default()
+            .entry(start_line)
+            .or_default();
+        match action {
+            CodeBlockDisplayAction::LineNumbers => {
+                state.line_numbers = Some(!line_numbers);
+                state.horizontal_offset = 0.0;
+                state.max_horizontal_offset = 0.0;
+            }
+            CodeBlockDisplayAction::WordWrap => {
+                state.word_wrap = Some(!word_wrap);
+                state.horizontal_offset = 0.0;
+                state.max_horizontal_offset = 0.0;
+            }
+        }
+        let preserved_scroll_offset = self.scroll_offset;
+        self.pending_scroll_to_cursor = false;
+        self.pending_center_cursor_in_view = false;
+        self.pending_center_cursor_in_view_immediately = false;
+        self.pending_preview_reveal = Some(PendingPreviewReveal {
+            scroll_offset: preserved_scroll_offset,
+        });
+        self.clear_all_tab_layout_caches();
+        self.layout_dirty = true;
+        self.sync_code_block_horizontal_scrollbar(cx);
+        cx.notify();
     }
 
     fn refresh_generated_block_previews(&mut self) {
@@ -5858,15 +6607,24 @@ impl EditorView {
         let (visible_start, visible_end) = self.generated_preview_priority_line_range();
         let visible_start = visible_start.min(self.decorations.len().saturating_sub(1));
         let visible_end = visible_end.min(self.decorations.len().saturating_sub(1));
-        let needs_visible_preview =
-            self.decorations[visible_start..=visible_end]
-                .iter()
-                .any(|decoration| {
-                    let Some(preview) = decoration.block_preview.as_ref() else {
-                        return false;
-                    };
+        let needs_visible_preview = self.decorations[visible_start..=visible_end]
+            .iter()
+            .enumerate()
+            .any(|(relative_line, decoration)| {
+                let block_missing = decoration.block_preview.as_ref().is_some_and(|preview| {
                     preview.is_anchor && !self.image_cache.contains_key(&preview.cache_key)
                 });
+                let line = visible_start + relative_line;
+                let line_content = self.buffer.line_content(line);
+                let inline_missing = decoration.inline_math_spans.iter().any(|range| {
+                    line_content.get(range.clone()).is_some_and(|source| {
+                        !self
+                            .image_cache
+                            .contains_key(&helpers::inline_math_cache_key(source))
+                    })
+                });
+                block_missing || inline_missing
+            });
         if needs_visible_preview {
             self.refresh_generated_block_previews();
             cx.notify();
@@ -5901,14 +6659,25 @@ impl EditorView {
         }
 
         let mut preview_entries = Vec::new();
-        for decoration in &self.decorations {
-            let Some(preview) = decoration.block_preview.as_ref() else {
-                continue;
-            };
-            if !preview.is_anchor || preview.source_text.is_empty() {
-                continue;
+        let mut inline_math_entries = Vec::new();
+        for (line, decoration) in self.decorations.iter().enumerate() {
+            for range in &decoration.inline_math_spans {
+                if let Some(source) = self.buffer.line_content(line).get(range.clone())
+                    && !source.trim().is_empty()
+                {
+                    inline_math_entries.push((
+                        line,
+                        helpers::inline_math_cache_key(source),
+                        source.to_string(),
+                    ));
+                }
             }
-            preview_entries.push(preview.clone());
+            if let Some(preview) = decoration.block_preview.as_ref()
+                && preview.is_anchor
+                && !preview.source_text.is_empty()
+            {
+                preview_entries.push(preview.clone());
+            }
         }
         if let Some(inline_diff) = self.active_inline_diff() {
             for hunk in &inline_diff.hunks {
@@ -5926,6 +6695,7 @@ impl EditorView {
         let next_generated_keys = preview_entries
             .iter()
             .map(|preview| preview.cache_key.clone())
+            .chain(inline_math_entries.iter().map(|(_, key, _)| key.clone()))
             .collect::<HashSet<_>>();
 
         // Freeze the chart/formula currently being edited in code view. Its cache
@@ -6022,6 +6792,50 @@ impl EditorView {
             self.image_cache.insert(preview.cache_key.clone(), image);
             self.generated_preview_overlay_cache
                 .remove(&preview.cache_key);
+            rendered_count += 1;
+        }
+
+        inline_math_entries.sort_by_key(|(line, _, _)| line.abs_diff(self.cursor_line()));
+        for (line, cache_key, source_text) in inline_math_entries {
+            if line < priority_start || line > priority_end {
+                continue;
+            }
+            let has_cached_image = self.image_cache.contains_key(&cache_key);
+            if !force
+                && has_cached_image
+                && self.generated_preview_svg_cache.contains_key(&cache_key)
+            {
+                continue;
+            }
+            if rendered_count >= GENERATED_PREVIEW_RENDER_BUDGET {
+                break;
+            }
+            let svg = helpers::build_generated_block_preview_svg(
+                markdown::BlockPreviewKind::Math,
+                &source_text,
+                &self.theme,
+                helpers::GeneratedPreviewFontFamilies {
+                    monospace: self.styles.editor.editor_monospace_font_family,
+                    body_cjk: self.styles.editor.editor_body_cjk_font_family,
+                    mermaid_theme: self.app_settings.mermaid_theme(),
+                },
+            );
+            let svg_unchanged = self
+                .generated_preview_svg_cache
+                .get(&cache_key)
+                .is_some_and(|cached| cached.as_ref() == svg.as_str());
+            if force && has_cached_image && svg_unchanged {
+                continue;
+            }
+            self.generated_preview_svg_cache
+                .insert(cache_key.clone(), Arc::<str>::from(svg.clone()));
+            let image = helpers::load_generated_preview_image_from_svg(
+                &svg,
+                markdown::BlockPreviewKind::Math,
+            )
+            .ok()
+            .map(Arc::new);
+            self.image_cache.insert(cache_key, image);
             rendered_count += 1;
         }
 
@@ -6145,7 +6959,27 @@ impl EditorView {
             })
             .collect::<Vec<_>>();
 
+        for (line, decoration) in self.decorations.iter().enumerate() {
+            for range in &decoration.inline_math_spans {
+                let Some(source) = self.buffer.line_content(line).get(range.clone()) else {
+                    continue;
+                };
+                let cache_key = helpers::inline_math_cache_key(source);
+                if self.image_cache.contains_key(&cache_key)
+                    || self.generated_preview_svg_cache.contains_key(&cache_key)
+                {
+                    ranked_keys.push((
+                        !(line >= priority_start && line <= priority_end),
+                        line.abs_diff(cursor_line),
+                        cache_key,
+                    ));
+                }
+            }
+        }
+
         ranked_keys.sort();
+        let mut seen_keys = HashSet::new();
+        ranked_keys.retain(|(_, _, cache_key)| seen_keys.insert(cache_key.clone()));
         let mut keep_keys = HashSet::new();
         let mut kept_bytes = 0usize;
         for (_, _, cache_key) in ranked_keys.into_iter().take(GENERATED_PREVIEW_CACHE_RETAIN) {
@@ -9653,9 +10487,34 @@ impl EditorView {
     }
 
     fn clear_line_display_info(&mut self) {
-        self.line_display_info.clear();
+        self.line_display_info = LineDisplayCache::new();
         self.reset_sparse_line_geometry();
         self.invalidate_line_geometry_cache();
+    }
+
+    /// Drop every per-document structure the view still owns once its last
+    /// text tab closes. Reassignment matters here: `clear()` keeps the backing
+    /// allocation, which is what leaves a multi-hundred-megabyte document
+    /// resident even though nothing is open.
+    pub(crate) fn release_document_state(&mut self) {
+        self.buffer = Buffer::from_text("");
+        self.cursor.offset = 0;
+        self.cursor.anchor = 0;
+        self.extra_cursors = Vec::new();
+        self.marked_range = None;
+        self.set_decorations(vec![LineDecoration::default()]);
+        self.line_display_info = LineDisplayCache::new();
+        self.visible_line_geometry = Vec::new();
+        *self.line_geometry_cache.borrow_mut() = LineGeometryCacheState::default();
+        self.invalidate_line_geometry_cache();
+        self.invalidate_indent_guide_step_cache();
+        self.search_scan_task = None;
+        self.search_matches = Vec::new();
+        self.search_current_index = None;
+        self.search_scan_complete = true;
+        self.search_scan_buffer_len = 0;
+        self.kill_ring = None;
+        self.layout_dirty = true;
     }
 
     fn invalidate_line_display_info_for_line(&mut self, line: usize) {

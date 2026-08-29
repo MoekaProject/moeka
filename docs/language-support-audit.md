@@ -1,0 +1,619 @@
+# GitHub Linguist syntax coverage audit
+
+Baseline: `github-linguist/linguist@e0c78d62c42abae6122235d8e68a7aa43eef89da`. Registry: `two-face::syntax::extra_newlines()` with the pure-Rust fancy-regex backend.
+
+A language is counted as supported when its normalized Linguist name/alias or one of its extensions matches the syntax registry. This is a conservative static audit: shared extensions can produce false positives, while fence aliases maintained by Moeka can produce false negatives. Runtime lookup tests remain authoritative.
+
+| Type        | Supported | Total | Coverage |
+| ----------- | --------: | ----: | -------: |
+| programming |       157 |   560 |    28.0% |
+| markup      |        21 |    71 |    29.6% |
+| data        |        52 |   184 |    28.3% |
+| prose       |        10 |    18 |    55.6% |
+
+## Not matched
+
+### programming (403)
+
+- 1C Enterprise
+- 4D
+- ABAP
+- ABAP CDS
+- AIDL
+- AL
+- ALGOL
+- AMPL
+- ANTLR
+- APL
+- ASL
+- ASP.NET
+- ATS
+- Agda
+- Aiken
+- Aleo
+- Alloy
+- Alpine Abuild
+- Answer Set Programming
+- Apollo Guidance Computer
+- Arc
+- AspectJ
+- Asymptote
+- Augeas
+- AutoHotkey
+- AutoIt
+- B
+- B (Formal Method)
+- B4X
+- BAML
+- BASIC
+- BQN
+- Ballerina
+- Beef
+- Befunge
+- Berry
+- BibTeX Style
+- Bicep
+- Bison
+- BlitzBasic
+- BlitzMax
+- Bluespec
+- Bluespec BH
+- Boo
+- Boogie
+- Brainfuck
+- BrighterScript
+- Brightscript
+- C2hs Haskell
+- C3
+- CAP CDS
+- CLIPS
+- CQL
+- CUE
+- CWeb
+- Cadence
+- Cairo
+- Cairo Zero
+- CameLIGO
+- Cangjie
+- Cap'n Proto
+- Carbon
+- CartoCSS
+- Ceylon
+- Chapel
+- Charity
+- ChucK
+- Circom
+- Cirru
+- Clarion
+- Clarity
+- Clean
+- Click
+- Clue
+- CodeQL
+- Common Workflow Language
+- Csound
+- Csound Document
+- Csound Score
+- Cuda
+- Curry
+- Cycript
+- Cypher
+- DIGITAL Command Language
+- DM
+- Dafny
+- Daslang
+- DataWeave
+- DenizenScript
+- Dhall
+- Dogescript
+- Dune
+- Dylan
+- E
+- ECL
+- ECLiPSe
+- EQ
+- Earthly
+- EdgeQL
+- Eiffel
+- Elvish
+- Elvish Transcript
+- EmberScript
+- FIRRTL
+- FLUX
+- Factor
+- Fancy
+- Fantom
+- Faust
+- Fennel
+- Flix
+- Fluent
+- FreeBASIC
+- FreeMarker
+- Frege
+- Futhark
+- G-code
+- GAML
+- GAMS
+- GDB
+- GDShader
+- Game Maker Language
+- Genero 4gl
+- Genshi
+- Gherkin
+- Gleam
+- Glimmer JS
+- Glimmer TS
+- Glyph
+- Gno
+- Golo
+- Grace
+- Grammatical Framework
+- Groovy Server Pages
+- HIP
+- HLSL
+- Harbour
+- Hare
+- Haxe
+- HiveQL
+- HolyC
+- Hurl
+- Hy
+- HyPhy
+- IDL
+- IGOR Pro
+- IL Assembly
+- ISPC
+- ImHex Pattern Language
+- ImageJ Macro
+- Imba
+- Inform 7
+- Ink
+- Inno Setup
+- Io
+- Ioke
+- Isabelle
+- Isabelle ROOT
+- J
+- JASS
+- JCL
+- JFlex
+- Jac
+- Jai
+- Janet
+- Jasmin
+- Java Template Engine
+- JetBrains MPS
+- Jison
+- Jison Lex
+- Jolie
+- Julia REPL
+- Just
+- KCL
+- KFramework
+- KRL
+- Kaitai Struct
+- KakouneScript
+- KerboScript
+- Koka
+- LFE
+- LOLCODE
+- LSL
+- LabVIEW
+- Lambdapi
+- Langium
+- Lasso
+- Leo
+- LigoLANG
+- LilyPond
+- Linear Programming
+- Linker Script
+- Liquidsoap
+- Literate Agda
+- Literate CoffeeScript
+- LiveCode Script
+- Lobster
+- Logos
+- Logtalk
+- LookML
+- Luau
+- M4
+- M4Sugar
+- MAXScript
+- MLIR
+- MQL4
+- MQL5
+- Macaulay2
+- Mako
+- Mathematical Programming System
+- Max
+- MeTTa
+- Meson
+- Metal
+- MiniD
+- MiniScript
+- MiniZinc
+- Mint
+- Mirah
+- Modelica
+- Modula-2
+- Modula-3
+- Module Management System
+- Mojo
+- Monkey
+- Monkey C
+- Moocode
+- MoonBit
+- MoonScript
+- Motoko
+- Move
+- Myghty
+- NCL
+- NMODL
+- NWScript
+- Nasal
+- Nearley
+- Nemerle
+- NetLinx
+- NetLinx+ERB
+- NetLogo
+- Nextflow
+- Nickel
+- Nit
+- Noir
+- Nu
+- NumPy
+- Nushell
+- OMNeT++ NED
+- Oberon
+- Objective-J
+- Omgrofl
+- Opa
+- Opal
+- OpenQASM
+- OpenRC runscript
+- OpenSCAD
+- OverPy
+- OverpassQL
+- Ox
+- Oxygene
+- Oz
+- P4
+- PDDL
+- PEG.js
+- Pact
+- Pan
+- Papyrus
+- Parrot
+- Parrot Assembly
+- Parrot Internal Representation
+- Pep8
+- PigLatin
+- Pike
+- Pkl
+- PogoScript
+- Polar
+- Pony
+- Portugol
+- Power Query
+- PowerBuilder
+- PowerShell
+- Praat
+- Processing
+- Procfile
+- Promela
+- Propeller Spin
+- PureBasic
+- Pyret
+- Python console
+- Q#
+- QMake
+- Qt Script
+- Quake
+- QuakeC
+- QuickBASIC
+- Quint
+- RAScript
+- REALbasic
+- REXX
+- RPC
+- RPGLE
+- Ragel
+- Rascal
+- ReScript
+- ReasonLIGO
+- Red
+- Redcode
+- Redscript
+- Rhai
+- Ring
+- Roc
+- Rouge
+- RouterOS Script
+- SAS
+- SIP
+- SMT
+- SQF
+- SWIG
+- Sage
+- Sail
+- Salt
+- Scenic
+- Scilab
+- Self
+- ShaderLab
+- ShellSession
+- Shen
+- Sieve
+- Singularity
+- Slang
+- Slash
+- Slice
+- SmPL
+- Smali
+- Smarty
+- Smithy
+- Squirrel
+- Stan
+- Stata
+- SurrealQL
+- Sway
+- TI Program
+- TL-Verilog
+- TLA
+- TXL
+- Tact
+- Talon
+- Tape
+- Tcsh
+- Teal
+- Thrift
+- Toit
+- Tolk
+- TypeSpec
+- Unified Parallel C
+- Unix Assembly
+- Uno
+- UnrealScript
+- Untyped Plutus Core
+- UrWeb
+- VBScript
+- VCL
+- Vala
+- Verse
+- Visual Basic .NET
+- Volt
+- WDL
+- WebAssembly
+- WebIDL
+- Whiley
+- Witcher Script
+- Wollok
+- Wren
+- X10
+- XC
+- XProc
+- XQuery
+- XS
+- Xmake
+- Xojo
+- Xonsh
+- Xtend
+- YARA
+- Yacc
+- Yul
+- ZAP
+- Zeek
+- ZenScript
+- Zephir
+- Zimpl
+- eC
+- hoon
+- mIRC Script
+- mcfunction
+- mupad
+- nesC
+- ooc
+- q
+- sed
+- ucode
+- wisp
+- xBase
+
+### markup (50)
+
+- API Blueprint
+- Antlers
+- Astro
+- BBCode
+- Bikeshed
+- Blade
+- Blueprint
+- Bru
+- Closure Templates
+- Cooklang
+- D2
+- EJS
+- Edge
+- Genero per
+- Go Template
+- HTML+ECR
+- HTML+Razor
+- Handlebars
+- Kit
+- Latte
+- Liquid
+- MDX
+- MTML
+- Marko
+- Mask
+- Mermaid
+- Mustache
+- Nunjucks
+- Pic
+- PostCSS
+- PostScript
+- Pug
+- RAML
+- RUNOFF
+- Rich Text Format
+- Riot
+- SRecode Template
+- Scaml
+- Slint
+- StringTemplate
+- SugarSS
+- Tea
+- Terraform Template
+- Velocity Template Language
+- Vento
+- Vim Snippet
+- YASnippet
+- kvlang
+- mdsvex
+- templ
+
+### data (132)
+
+- 2-Dimensional Array
+- ABNF
+- ASN.1
+- Adobe Font Metrics
+- Altium Designer
+- Ant Build System
+- Avro IDL
+- BIRD2
+- Browserslist
+- BuildStream
+- C-ObjDump
+- CIL
+- CODEOWNERS
+- COLLADA
+- Caddyfile
+- Checksums
+- Cloud Firestore Security Rules
+- CoNLL-U
+- Cpp-ObjDump
+- Cue Sheet
+- Cylc
+- D-ObjDump
+- DNS Zone
+- Darcs Patch
+- Debian Package Control File
+- DirectX 3D File
+- EBNF
+- Eagle
+- Easybuild
+- Ecere Projects
+- Edje Data Collection
+- FIGlet Font
+- FlatBuffers
+- GEDCOM
+- GN
+- Gemfile.lock
+- Git Revision List
+- Glyph Bitmap Distribution Format
+- Go Workspace
+- Godot Resource
+- Gradle Kotlin DSL
+- Graph Modeling Language
+- GtkRC
+- HOCON
+- HXML
+- Hosts File
+- IRC log
+- JAR Manifest
+- JSON5
+- JSONLD
+- Jest Snapshot
+- KDL
+- KiCad Layout
+- KiCad Legacy Layout
+- KiCad Schematic
+- Kickstart
+- Kusto
+- LTspice Symbol
+- Lark
+- Linux Kernel Module
+- M3U
+- Maven POM
+- Microsoft Developer Studio Project
+- Microsoft Visual Studio Solution
+- MiniZinc Data
+- NEON
+- NL
+- NPM Config
+- ObjDump
+- OpenAPI Specification v2
+- OpenAPI Specification v3
+- OpenStep Property List
+- OpenType Feature File
+- Option List
+- Pickle
+- Pip Requirements
+- PlantUML
+- Prisma
+- Proguard
+- Pure Data
+- Python traceback
+- Quartus Simulation IP
+- RBS
+- RON
+- RPM Spec
+- Raw token data
+- Readline Config
+- Record Jar
+- Redirect Rules
+- Robots Exclusion Rules
+- SELinux Policy
+- SPARQL
+- STAR
+- STL
+- STON
+- ShellCheck Config
+- Simple File Verification
+- Soong
+- SpiceDB Schema
+- Spline Font Database
+- SubRip Text
+- Survex data
+- TMDL
+- TSPLIB data
+- TextGrid
+- TextMate Properties
+- Tor Config
+- Turtle
+- Type Language
+- Unity3D Asset
+- Valve Data Format
+- Vespa Schema Definition
+- Wavefront Material
+- Wavefront Object
+- Web Ontology Language
+- WebAssembly Interface Type
+- WebVTT
+- Wget Config
+- Win32 Message File
+- World of Warcraft Addon Data
+- X BitMap
+- X Font Directory Index
+- XCompose
+- XML Property List
+- XPages
+- YANG
+- Zmodel
+- cURL Config
+- dircolors
+- iCalendar
+- nanorc
+- vCard
+
+### prose (8)
+
+- Creole
+- Gemini
+- Gettext Catalog
+- Muse
+- RDoc
+- RMarkdown
+- Sweave
+- Texinfo

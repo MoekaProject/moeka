@@ -1656,10 +1656,39 @@ fn assign_fenced_math_block_previews(
     let mut line = 0;
     while line < line_count {
         let opener = get_line_content(text, line_starts, line, line_count);
-        if opener.trim() != "$$" || decorations[line].block_type != BlockType::Normal {
+        let trimmed_opener = opener.trim();
+        if decorations[line].block_type != BlockType::Normal {
             line += 1;
             continue;
         }
+
+        if trimmed_opener.starts_with("\\[")
+            && trimmed_opener.ends_with("\\]")
+            && trimmed_opener.len() > 4
+        {
+            let start_col = opener.find("\\[").unwrap_or(0);
+            let end_col = opener.rfind("\\]").unwrap_or(start_col) + 2;
+            let source_text = opener[start_col + 2..end_col - 2].trim();
+            assign_block_preview(
+                decorations,
+                (line_starts[line] + start_col)..(line_starts[line] + end_col),
+                line,
+                line,
+                BlockPreviewKind::Math,
+                source_text.to_string(),
+            );
+            line += 1;
+            continue;
+        }
+
+        let (open_marker, close_marker) = match trimmed_opener {
+            "$$" => ("$$", "$$"),
+            "\\[" => ("\\[", "\\]"),
+            _ => {
+                line += 1;
+                continue;
+            }
+        };
         if decorations[line]
             .block_preview
             .as_ref()
@@ -1672,7 +1701,9 @@ fn assign_fenced_math_block_previews(
         let mut close_line = line + 1;
         while close_line < line_count {
             let closer = get_line_content(text, line_starts, close_line, line_count);
-            if closer.trim() == "$$" && decorations[close_line].block_type == BlockType::Normal {
+            if closer.trim() == close_marker
+                && decorations[close_line].block_type == BlockType::Normal
+            {
                 break;
             }
             close_line += 1;
@@ -1699,11 +1730,11 @@ fn assign_fenced_math_block_previews(
             } else {
                 String::new()
             };
-            let start_col = opener.find("$$").unwrap_or(0);
+            let start_col = opener.find(open_marker).unwrap_or(0);
             let end_col = get_line_content(text, line_starts, close_line, line_count)
-                .rfind("$$")
+                .rfind(close_marker)
                 .unwrap_or(0)
-                + 2;
+                + close_marker.len();
             let source_range = (line_starts[line] + start_col)..(line_starts[close_line] + end_col);
             assign_block_preview(
                 decorations,
@@ -4109,6 +4140,19 @@ mod tests {
     }
 
     #[test]
+    fn multiple_inline_math_spans_preserve_cjk_neighbors() {
+        let text = "前 $E=mc^2$ 后 $\\frac{a}{b}$";
+        let decoration = &parse_decorations(text)[0];
+
+        assert_eq!(decoration.inline_math_spans, vec![5..11, 18..29]);
+        assert_eq!(&text[decoration.inline_math_spans[0].clone()], "E=mc^2");
+        assert_eq!(
+            &text[decoration.inline_math_spans[1].clone()],
+            r"\frac{a}{b}"
+        );
+    }
+
+    #[test]
     fn parse_decorations_preserves_inline_link_target() {
         let text = "跳到 [标题](#标题1)";
         let decorations = parse_decorations(text);
@@ -4670,11 +4714,7 @@ mod tests {
     fn unordered_marker_owns_the_line_when_an_ordered_list_starts_on_it() {
         for source in ["- 1.", "- 1. item", "* 2) nested", "  - 3. deep"] {
             let decoration = &parse_decorations(source)[0];
-            assert_eq!(
-                decoration.block_type,
-                BlockType::UnorderedList,
-                "{source}"
-            );
+            assert_eq!(decoration.block_type, BlockType::UnorderedList, "{source}");
             let leading_ws = source.len() - source.trim_start_matches(' ').len();
             assert_eq!(
                 decoration
@@ -4998,6 +5038,47 @@ mod tests {
     }
 
     #[test]
+    fn inference_rule_inside_dollar_fence_becomes_math_preview() {
+        let text = "$$\n\\frac{t_1\\in T}{\\texttt{succ }t_1\\in T}\n$$\n";
+        let decorations = parse_decorations(text);
+        let preview = decorations
+            .iter()
+            .filter_map(|decoration| decoration.block_preview.as_ref())
+            .find(|preview| preview.is_anchor)
+            .expect("math preview");
+
+        assert_eq!(preview.kind, BlockPreviewKind::Math);
+        assert_eq!(
+            preview.source_text,
+            r"\frac{t_1\in T}{\texttt{succ }t_1\in T}"
+        );
+    }
+
+    #[test]
+    fn latex_display_brackets_become_math_previews() {
+        for text in ["\\[\\frac{a}{b}\\]\n", "\\[\n\\frac{a}{b}\n\\]\n"] {
+            let decorations = parse_decorations(text);
+            let preview = decorations
+                .iter()
+                .filter_map(|decoration| decoration.block_preview.as_ref())
+                .find(|preview| preview.is_anchor)
+                .expect("math preview");
+            assert_eq!(preview.kind, BlockPreviewKind::Math);
+            assert_eq!(preview.source_text, r"\frac{a}{b}");
+        }
+    }
+
+    #[test]
+    fn plain_square_brackets_do_not_become_math_preview() {
+        let decorations = parse_decorations(r"[ \frac{a}{b} ]");
+        assert!(
+            decorations
+                .iter()
+                .all(|decoration| decoration.block_preview.is_none())
+        );
+    }
+
+    #[test]
     fn parse_decorations_treats_display_math_as_code_block_group() {
         let text = "$$\n\\frac{a}{b} \\to c\n$$\n";
         let decorations = parse_decorations(text);
@@ -5043,8 +5124,11 @@ mod tests {
         assert!(
             math_previews
                 .iter()
-                .any(|preview| { preview.source_text.contains("E = mc^2") })
+                .any(|preview| preview.source_text.contains(r"arg\,min"))
         );
+        assert!(text.lines().zip(&decorations).any(|(line, decoration)| {
+            line.contains("E = mc^2") && !decoration.inline_math_spans.is_empty()
+        }));
     }
 }
 

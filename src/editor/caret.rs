@@ -19,12 +19,15 @@ pub(crate) struct CaretPaint {
 pub(crate) struct CaretGeometrySnapshot {
     pub(crate) cursor_offset: usize,
     pub(crate) scroll_offset: f32,
+    pub(crate) horizontal_offset: f32,
     pub(crate) paints: Vec<CaretPaint>,
 }
 
 impl CaretGeometrySnapshot {
-    fn matches(&self, cursor_offset: usize, scroll_offset: f32) -> bool {
-        self.cursor_offset == cursor_offset && (self.scroll_offset - scroll_offset).abs() <= 0.5
+    fn matches(&self, cursor_offset: usize, scroll_offset: f32, horizontal_offset: f32) -> bool {
+        self.cursor_offset == cursor_offset
+            && (self.scroll_offset - scroll_offset).abs() <= 0.5
+            && (self.horizontal_offset - horizontal_offset).abs() <= 0.5
     }
 }
 
@@ -222,11 +225,13 @@ mod tests {
         let snapshot = CaretGeometrySnapshot {
             cursor_offset: 42,
             scroll_offset: 120.0,
+            horizontal_offset: 24.0,
             paints: Vec::new(),
         };
-        assert!(snapshot.matches(42, 120.4));
-        assert!(!snapshot.matches(43, 120.0));
-        assert!(!snapshot.matches(42, 120.6));
+        assert!(snapshot.matches(42, 120.4, 24.4));
+        assert!(!snapshot.matches(43, 120.0, 24.0));
+        assert!(!snapshot.matches(42, 120.6, 24.0));
+        assert!(!snapshot.matches(42, 120.0, 24.6));
     }
 }
 
@@ -239,7 +244,13 @@ impl Render for CaretOverlayView {
             move |_, _, cx| {
                 let snapshot = geometry.borrow().clone();
                 let editor = editor.read(cx);
-                if snapshot.matches(editor.cursor.offset, editor.scroll_offset) {
+                let cursor_line = editor.buffer.offset_to_line_col(editor.cursor.offset).0;
+                let horizontal_offset = editor.horizontal_scroll_offset_for_line(cursor_line);
+                if snapshot.matches(
+                    editor.cursor.offset,
+                    editor.scroll_offset,
+                    horizontal_offset,
+                ) {
                     snapshot.paints
                 } else {
                     Vec::new()

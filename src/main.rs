@@ -362,6 +362,11 @@ fn restore_window(handle: AnyWindowHandle, cx: &mut App) {
 }
 
 fn open_terminal_window(cx: &mut App) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        platform::capabilities::CHILD_PROCESSES,
+        "this build cannot run a terminal"
+    );
+
     let options = editor_window_options(cx);
     cx.open_window(options, |window, cx| {
         configure_editor_window(window, false);

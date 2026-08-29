@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
@@ -89,6 +89,8 @@ fn terminal_process_title(cwd: &std::path::Path, process_name: &str, argv: &[Str
 pub(crate) struct ChatTerminalSession {
     pub(crate) status: ChatTerminalStatus,
     pub(crate) snapshot: ChatTerminalSnapshot,
+    snapshot_generation: u64,
+    working_directory: Option<PathBuf>,
     dynamic_title: Option<String>,
     runtime: Option<ChatTerminalRuntime>,
     receiver: Option<mpsc::Receiver<ChatTerminalEvent>>,
@@ -122,6 +124,9 @@ pub(crate) struct TerminalTabState {
     /// Compiled regex pattern of the active search, kept so matches can be
     /// recomputed when new terminal output arrives.
     search_pattern: Option<String>,
+    path_links: Vec<TerminalPathLink>,
+    hovered_path_link: Option<TerminalPathLink>,
+    path_links_generation: u64,
 }
 
 impl TerminalTabState {
@@ -141,6 +146,9 @@ impl TerminalTabState {
             last_mouse_cell: None,
             search_matches: Vec::new(),
             search_pattern: None,
+            path_links: Vec::new(),
+            hovered_path_link: None,
+            path_links_generation: 0,
         }
     }
 
@@ -153,6 +161,7 @@ impl TerminalTabState {
         self.mouse_middle_pressed = false;
         self.mouse_right_pressed = false;
         self.last_mouse_cell = None;
+        self.hovered_path_link = None;
     }
 }
 
@@ -267,6 +276,192 @@ pub(crate) struct ChatTerminalSelection {
 struct ChatTerminalRow {
     source_line: i32,
     cells: Vec<Cell>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TerminalPathLink {
+    row: usize,
+    columns: Range<usize>,
+    path: PathBuf,
+    line: Option<usize>,
+    column: Option<usize>,
+}
+
+fn terminal_row_text_and_columns(
+    row: &ChatTerminalRow,
+) -> (String, Vec<(Range<usize>, Range<usize>)>) {
+    let mut text = String::new();
+    let mut columns = Vec::new();
+    for (column, cell) in row.cells.iter().enumerate() {
+        if is_chat_terminal_spacer_cell(cell) {
+            continue;
+        }
+        let cell_text = if cell.c == ' ' && cell.zerowidth().is_none() {
+            " ".to_string()
+        } else {
+            normalize_cell_char(cell)
+        };
+        let start = text.len();
+        text.push_str(&cell_text);
+        let width = if cell.flags.contains(Flags::WIDE_CHAR) {
+            2
+        } else {
+            1
+        };
+        columns.push((start..text.len(), column..column + width));
+    }
+    (text, columns)
+}
+
+fn terminal_path_candidate_spans(text: &str) -> Vec<Range<usize>> {
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let Some((offset, character)) = text[cursor..]
+            .char_indices()
+            .find(|(_, ch)| !ch.is_whitespace())
+        else {
+            break;
+        };
+        let start = cursor + offset;
+        if matches!(character, '\'' | '"') {
+            let content_start = start + character.len_utf8();
+            let mut escaped = false;
+            let closing_quote = text[content_start..].char_indices().find(|(_, ch)| {
+                if escaped {
+                    escaped = false;
+                    return false;
+                }
+                if *ch == '\\' {
+                    escaped = true;
+                    return false;
+                }
+                *ch == character
+            });
+            if let Some((end_offset, _)) = closing_quote {
+                spans.push(content_start..content_start + end_offset);
+                cursor = content_start + end_offset + character.len_utf8();
+                continue;
+            }
+        }
+
+        let end = text[start..]
+            .char_indices()
+            .find_map(|(offset, ch)| ch.is_whitespace().then_some(start + offset))
+            .unwrap_or(text.len());
+        let token = &text[start..end];
+        let trimmed = token.trim_matches(|character: char| {
+            matches!(
+                character,
+                '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';' | '!' | '?'
+            )
+        });
+        if !trimmed.is_empty() {
+            let trim_start = trimmed.as_ptr() as usize - token.as_ptr() as usize;
+            spans.push(start + trim_start..start + trim_start + trimmed.len());
+        }
+        cursor = end.max(start + character.len_utf8());
+    }
+    spans
+}
+
+fn split_terminal_path_location(candidate: &str) -> (&str, Option<usize>, Option<usize>) {
+    let mut path = candidate.trim_end_matches('.');
+    let mut numbers = Vec::new();
+    for _ in 0..2 {
+        let Some((prefix, suffix)) = path.rsplit_once(':') else {
+            break;
+        };
+        let Ok(value) = suffix.parse::<usize>() else {
+            break;
+        };
+        if value == 0 {
+            break;
+        }
+        numbers.push(value);
+        path = prefix;
+    }
+    match numbers.as_slice() {
+        [line] => (path, Some(*line), None),
+        [column, line] => (path, Some(*line), Some(*column)),
+        _ => (path, None, None),
+    }
+}
+
+fn resolve_terminal_markdown_path(
+    candidate: &str,
+    cwd: &Path,
+) -> Option<(PathBuf, Option<usize>, Option<usize>)> {
+    let (path_text, line, column) = split_terminal_path_location(candidate);
+    let unescaped = path_text.replace("\\\"", "\"").replace("\\'", "'");
+    let path = crate::platform::paths::expand_tilde(&unescaped)?;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    if !path.is_file() || !super::is_markdown_file(&path) {
+        return None;
+    }
+    Some((std::fs::canonicalize(&path).unwrap_or(path), line, column))
+}
+
+fn terminal_columns_for_byte_range(
+    columns: &[(Range<usize>, Range<usize>)],
+    bytes: Range<usize>,
+) -> Option<Range<usize>> {
+    let start = columns
+        .iter()
+        .find(|(text, _)| text.end > bytes.start)?
+        .1
+        .start;
+    let end = columns
+        .iter()
+        .rev()
+        .find(|(text, _)| text.start < bytes.end)?
+        .1
+        .end;
+    Some(start..end)
+}
+
+fn detect_terminal_markdown_links(
+    snapshot: &ChatTerminalSnapshot,
+    cwd: &Path,
+) -> Vec<TerminalPathLink> {
+    let mut links = Vec::new();
+    for (row_index, row) in EditorView::chat_terminal_rows(snapshot).iter().enumerate() {
+        let (text, columns) = terminal_row_text_and_columns(row);
+        for span in terminal_path_candidate_spans(&text) {
+            let candidate = &text[span.clone()];
+            let Some((path, line, column)) = resolve_terminal_markdown_path(candidate, cwd) else {
+                continue;
+            };
+            let Some(columns) = terminal_columns_for_byte_range(&columns, span) else {
+                continue;
+            };
+            links.push(TerminalPathLink {
+                row: row_index,
+                columns,
+                path,
+                line,
+                column,
+            });
+        }
+    }
+    links
+}
+
+fn terminal_link_offset(buffer: &crate::buffer::Buffer, line: usize, column: usize) -> usize {
+    let line_index = line
+        .saturating_sub(1)
+        .min(buffer.line_count().saturating_sub(1));
+    let content = buffer.line_content(line_index);
+    let byte_column = content
+        .char_indices()
+        .nth(column.saturating_sub(1))
+        .map(|(offset, _)| offset)
+        .unwrap_or(content.len());
+    buffer.line_col_to_offset(line_index, byte_column)
 }
 
 #[derive(Clone, Debug)]
@@ -401,6 +596,7 @@ struct ChatTerminalSurfaceElement {
     focused: bool,
     search_matches: Vec<TermSearchMatch>,
     current_search_match: Option<usize>,
+    hovered_path_link: Option<TerminalPathLink>,
     default_fg: Hsla,
     default_bg: Hsla,
     cursor_color: Hsla,
@@ -755,7 +951,10 @@ impl Element for ChatTerminalSurfaceElement {
                         | Flags::UNDERCURL
                         | Flags::DOTTED_UNDERLINE
                         | Flags::DASHED_UNDERLINE,
-                );
+                ) || self
+                    .hovered_path_link
+                    .as_ref()
+                    .is_some_and(|link| link.row == row_index && link.columns.contains(&col_index));
                 let run = GpuiTextRun {
                     len: text.len(),
                     font,
@@ -1106,6 +1305,8 @@ impl ChatTerminalSession {
         Self {
             status: ChatTerminalStatus::Unavailable(message.into()),
             snapshot: ChatTerminalSnapshot::default(),
+            snapshot_generation: 0,
+            working_directory: None,
             dynamic_title: None,
             runtime: None,
             receiver: None,
@@ -1122,6 +1323,11 @@ impl ChatTerminalSession {
         custom_command_line: Option<&str>,
         cursor_shape: TerminalCursorShape,
     ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            crate::platform::capabilities::CHILD_PROCESSES,
+            "this build cannot run a terminal"
+        );
+
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: CHAT_PANEL_DEFAULT_ROWS,
@@ -1192,6 +1398,8 @@ impl ChatTerminalSession {
         let mut session = Self {
             status: ChatTerminalStatus::Launching,
             snapshot: ChatTerminalSnapshot::default(),
+            snapshot_generation: 0,
+            working_directory: Some(cwd),
             dynamic_title: Some(initial_title),
             runtime: Some(ChatTerminalRuntime {
                 master: pair.master,
@@ -1279,6 +1487,10 @@ impl ChatTerminalSession {
         );
         let process = runtime.process_system.process(pid)?;
         let cwd = process.cwd()?;
+        if self.working_directory.as_deref() != Some(cwd) {
+            self.working_directory = Some(cwd.to_path_buf());
+            self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
+        }
         let process_name = process.name().to_string_lossy();
         let argv = process
             .cmd()
@@ -1576,6 +1788,7 @@ impl ChatTerminalSession {
             display_offset,
             history_size,
         };
+        self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
     }
 
     fn stop(&mut self) {
@@ -2013,6 +2226,7 @@ fn keystroke_to_terminal_bytes(keystroke: &gpui::Keystroke, mode: TermMode) -> O
     let mut bytes = match key {
         "enter" | "return" => vec![b'\r'],
         "backspace" => vec![0x7f],
+        "space" if !modifiers.control => vec![b' '],
         "tab" => {
             if modifiers.shift {
                 b"\x1b[Z".to_vec()
@@ -2265,6 +2479,58 @@ impl EditorView {
         rows
     }
 
+    fn refresh_terminal_path_links(&mut self, tab_id: &str) {
+        let Some((generation, cwd, snapshot)) = self.terminal_session(tab_id).and_then(|session| {
+            Some((
+                session.snapshot_generation,
+                session.working_directory.clone()?,
+                session.snapshot.clone(),
+            ))
+        }) else {
+            return;
+        };
+        if self
+            .terminal_tab_state(tab_id)
+            .is_some_and(|state| state.path_links_generation == generation)
+        {
+            return;
+        }
+
+        let links = detect_terminal_markdown_links(&snapshot, &cwd);
+        if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+            state.hovered_path_link = state
+                .hovered_path_link
+                .take()
+                .filter(|hovered| links.contains(hovered));
+            state.path_links = links;
+            state.path_links_generation = generation;
+        }
+    }
+
+    fn chat_terminal_path_link_at_cell(
+        &self,
+        tab_id: &str,
+        row: usize,
+        column: usize,
+    ) -> Option<TerminalPathLink> {
+        self.terminal_tab_state(tab_id)?
+            .path_links
+            .iter()
+            .find(|link| link.row == row && link.columns.contains(&column))
+            .cloned()
+    }
+
+    fn open_terminal_path_link(&mut self, link: TerminalPathLink, cx: &mut Context<Self>) {
+        self.open_path_in_permanent_tab(link.path, true, cx);
+        let Some(line) = link.line else {
+            return;
+        };
+        let offset = terminal_link_offset(&self.buffer, line, link.column.unwrap_or(1));
+        self.clear_extra_cursors();
+        self.cursor.move_to(offset, &self.buffer);
+        self.reveal_line_in_current_buffer(line.saturating_sub(1), cx);
+    }
+
     fn chat_terminal_cursor_display_row(snapshot: &ChatTerminalSnapshot) -> Option<usize> {
         Self::chat_terminal_rows(snapshot)
             .iter()
@@ -2514,6 +2780,10 @@ impl EditorView {
     /// terminal tab exists, otherwise closes every terminal tab (collapsing
     /// panes that become empty).
     pub(crate) fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
+        if !crate::platform::capabilities::CHILD_PROCESSES {
+            return;
+        }
+
         let terminal_ids: Vec<String> = self
             .all_tabs()
             .filter(|tab| tab.kind.is_terminal())
@@ -3679,6 +3949,22 @@ impl EditorView {
             cx.notify();
             return;
         }
+        if event.click_count == 1
+            && !event.modifiers.shift
+            && !event.modifiers.alt
+            && !event.modifiers.control
+            && !event.modifiers.platform
+            && let Some((row, column)) =
+                self.chat_terminal_cell_from_position(tab_id, event.position)
+            && let Some(link) = self.chat_terminal_path_link_at_cell(tab_id, row, column)
+        {
+            if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+                state.selection = None;
+                state.selecting = false;
+            }
+            self.open_terminal_path_link(link, cx);
+            return;
+        }
         if let Some((row, col)) = self.chat_terminal_cell_from_position(tab_id, event.position) {
             let col = self
                 .chat_terminal_normalized_col(tab_id, row, col)
@@ -3759,6 +4045,18 @@ impl EditorView {
             event.modifiers.control,
         ) {
             return;
+        }
+        let hovered_path_link = self
+            .chat_terminal_cell_from_position(tab_id, event.position)
+            .and_then(|(row, column)| self.chat_terminal_path_link_at_cell(tab_id, row, column));
+        let hover_changed = self
+            .terminal_tab_state(tab_id)
+            .is_some_and(|state| state.hovered_path_link != hovered_path_link);
+        if hover_changed {
+            if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+                state.hovered_path_link = hovered_path_link;
+            }
+            cx.notify();
         }
         if !self
             .terminal_tab_state(tab_id)
@@ -3951,6 +4249,7 @@ impl EditorView {
             self.terminal_write_user_input(&tab_id, &bytes);
         }
         self.resize_chat_terminal(&tab_id);
+        self.refresh_terminal_path_links(&tab_id);
 
         let ups = &self.styles.utility_panel;
         let (body_font_size, cell_width, cell_height) = self.chat_terminal_metrics();
@@ -3994,6 +4293,7 @@ impl EditorView {
         let search_matches = state
             .map(|state| state.search_matches.clone())
             .unwrap_or_default();
+        let hovered_path_link = state.and_then(|state| state.hovered_path_link.clone());
         let current_search_match = if search_matches.is_empty() {
             None
         } else {
@@ -4244,7 +4544,11 @@ impl EditorView {
                 }
             }),
         )
-        .cursor(CursorStyle::IBeam)
+        .cursor(if hovered_path_link.is_some() {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::IBeam
+        })
         .h_full()
         .w_full()
         .bg(default_bg)
@@ -4282,6 +4586,7 @@ impl EditorView {
                             focused: is_focused,
                             search_matches,
                             current_search_match,
+                            hovered_path_link,
                             default_fg,
                             default_bg,
                             cursor_color,
@@ -4538,6 +4843,113 @@ mod tests {
         }
     }
 
+    fn snapshot_with_line(text: &str) -> ChatTerminalSnapshot {
+        let cells = text
+            .chars()
+            .enumerate()
+            .map(|(column, character)| indexed_cell(0, column, character))
+            .collect::<Vec<_>>();
+        snapshot_with_cells(1, text.chars().count() as u16, cells, 0)
+    }
+
+    #[test]
+    fn terminal_markdown_links_resolve_relative_and_quoted_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let docs = directory.path().join("docs");
+        std::fs::create_dir(&docs).unwrap();
+        let note = docs.join("note.md");
+        let spaced = docs.join("a b.mdx");
+        std::fs::write(&note, "# Note").unwrap();
+        std::fs::write(&spaced, "# Spaced").unwrap();
+
+        let line = "open docs/note.md:12:3 and \"docs/a b.mdx\" but missing.md";
+        let candidates = terminal_path_candidate_spans(line)
+            .into_iter()
+            .map(|span| &line[span])
+            .collect::<Vec<_>>();
+        assert!(
+            candidates.contains(&"docs/a b.mdx"),
+            "candidates: {candidates:?}"
+        );
+        assert!(resolve_terminal_markdown_path("docs/a b.mdx", directory.path()).is_some());
+        let snapshot = snapshot_with_line(line);
+        let rows = EditorView::chat_terminal_rows(&snapshot);
+        let (rebuilt, _) = terminal_row_text_and_columns(&rows[0]);
+        assert_eq!(rebuilt, line);
+        let links = detect_terminal_markdown_links(&snapshot, directory.path());
+
+        assert_eq!(links.len(), 2, "detected links: {links:?}");
+        assert_eq!(links[0].path, note.canonicalize().unwrap());
+        assert_eq!((links[0].line, links[0].column), (Some(12), Some(3)));
+        assert_eq!(links[1].path, spaced.canonicalize().unwrap());
+        assert_eq!((links[1].line, links[1].column), (None, None));
+    }
+
+    #[test]
+    fn terminal_markdown_links_allow_escaped_quotes_inside_quotes() {
+        let directory = tempfile::tempdir().unwrap();
+        let note = directory.path().join("a\"b.md");
+        std::fs::write(&note, "# Note").unwrap();
+        let line = r#"open "a\"b.md""#;
+        let snapshot = snapshot_with_line(line);
+
+        let links = detect_terminal_markdown_links(&snapshot, directory.path());
+
+        assert_eq!(links.len(), 1, "detected links: {links:?}");
+        assert_eq!(links[0].path, note.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn terminal_markdown_link_columns_account_for_wide_characters() {
+        let directory = tempfile::tempdir().unwrap();
+        let note = directory.path().join("note.md");
+        std::fs::write(&note, "# Note").unwrap();
+
+        let mut wide = Cell::default();
+        wide.c = '你';
+        wide.flags.insert(Flags::WIDE_CHAR);
+        let mut spacer = Cell::default();
+        spacer.flags.insert(Flags::WIDE_CHAR_SPACER);
+        let mut cells = vec![wide, spacer, Cell::default()];
+        cells.extend("note.md".chars().map(|character| {
+            let mut cell = Cell::default();
+            cell.c = character;
+            cell
+        }));
+        let snapshot = ChatTerminalSnapshot {
+            rows: 1,
+            cols: cells.len() as u16,
+            cells: cells
+                .into_iter()
+                .enumerate()
+                .map(|(column, cell)| ChatIndexedCell {
+                    point: AlacPoint::new(Line(0), Column(column)),
+                    cell,
+                })
+                .collect(),
+            cursor: RenderableCursor {
+                shape: AlacCursorShape::Block,
+                point: AlacPoint::new(Line(0), Column(0)),
+            },
+            display_offset: 0,
+            history_size: 0,
+        };
+
+        let links = detect_terminal_markdown_links(&snapshot, directory.path());
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].columns, 3..10);
+    }
+
+    #[test]
+    fn terminal_link_location_uses_one_based_unicode_columns() {
+        let buffer = crate::buffer::Buffer::from_text("first\n你好 world\nlast");
+
+        let offset = terminal_link_offset(&buffer, 2, 3);
+        assert_eq!(&buffer.text()[offset..], " world\nlast");
+        assert_eq!(terminal_link_offset(&buffer, 99, 99), buffer.len());
+    }
+
     #[test]
     fn chat_terminal_rows_preserve_negative_scrollback_lines() {
         let snapshot = snapshot_with_cells(
@@ -4727,6 +5139,62 @@ mod tests {
             keystroke_to_terminal_bytes(&keystroke("ctrl--"), TermMode::NONE),
             Some(vec![0x1f])
         );
+    }
+
+    #[test]
+    fn space_does_not_depend_on_key_char() {
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("space"), TermMode::NONE),
+            Some(vec![b' '])
+        );
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("shift-space"), TermMode::NONE),
+            Some(vec![b' '])
+        );
+        assert_eq!(
+            keystroke_to_terminal_bytes(&keystroke("ctrl-space"), TermMode::NONE),
+            Some(vec![0x00])
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_cmd_receives_space_bytes_through_conpty() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 8,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open ConPTY");
+        let mut command = CommandBuilder::new("cmd.exe");
+        command.arg("/Q");
+        command.arg("/D");
+        configure_chat_terminal_environment(&mut command);
+        let mut child = pair.slave.spawn_command(command).expect("spawn cmd.exe");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("clone PTY reader");
+        let mut writer = pair.master.take_writer().expect("take PTY writer");
+        let reader_thread = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            reader.read_to_end(&mut output).expect("read cmd output");
+            output
+        });
+
+        let space = keystroke_to_terminal_bytes(&keystroke("space"), TermMode::NONE).unwrap();
+        let mut input = b"echo".to_vec();
+        input.extend_from_slice(&space);
+        input.extend_from_slice(b"MOEKA_SPACE_OK\rexit\r");
+        writer.write_all(&input).expect("write cmd input");
+        writer.flush().expect("flush cmd input");
+        child.wait().expect("wait for cmd.exe");
+        drop(writer);
+        drop(pair.master);
+
+        let output = reader_thread.join().expect("join PTY reader");
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("MOEKA_SPACE_OK"), "cmd output: {output:?}");
     }
 
     #[test]

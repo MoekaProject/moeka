@@ -391,8 +391,24 @@ pane_state! {
     (generated_preview_actions_opacity_task, Option<Task<()>>, None),
     (code_block_hover_areas, Vec<(gpui::Bounds<Pixels>, usize)>, Vec::new()),
     (code_block_copy_areas, Vec<(gpui::Bounds<Pixels>, usize)>, Vec::new()),
+    (code_block_display_action_areas, Vec<(gpui::Bounds<Pixels>, usize, CodeBlockDisplayAction)>, Vec::new()),
     (hovering_code_block_start, Option<usize>, None),
     (hovering_code_block_copy_start, Option<usize>, None),
+    (hovering_code_block_display_action, Option<(usize, CodeBlockDisplayAction)>, None),
+    (code_block_horizontal_scrollbars, Vec<CodeBlockHorizontalScrollbarGeometry>, Vec::new()),
+    (code_block_horizontal_scrollbar_hovered, Option<usize>, None),
+    (code_block_horizontal_scrollbar_visible_line, Option<usize>, None),
+    (code_block_horizontal_scrollbar_opacity, f32, 0.0),
+    (code_block_horizontal_scrollbar_opacity_target, f32, 0.0),
+    (code_block_horizontal_scrollbar_opacity_epoch, usize, 0),
+    (code_block_horizontal_scrollbar_opacity_task, Option<Task<()>>, None),
+    (code_block_horizontal_scrollbar_thickness, f32, 0.0),
+    (code_block_horizontal_scrollbar_thickness_target, f32, 0.0),
+    (code_block_horizontal_scrollbar_thickness_epoch, usize, 0),
+    (code_block_horizontal_scrollbar_thickness_task, Option<Task<()>>, None),
+    (code_block_horizontal_scrollbar_drag, Option<CodeBlockHorizontalScrollbarDragState>, None),
+    (pending_code_block_horizontal_scrollbar_drag_position, Option<Point<Pixels>>, None),
+    (code_block_horizontal_scrollbar_drag_task, Option<Task<()>>, None),
     (copied_code_block_start, Option<usize>, None),
     (code_block_copy_feedback_epoch, usize, 0),
     (table_click_areas, Vec<(gpui::Bounds<Pixels>, usize, usize, usize)>, Vec::new()),
@@ -885,6 +901,10 @@ impl EditorView {
         pane.state.editor_scrollbar_opacity_target = pane.state.editor_scrollbar_opacity;
         pane.state.editor_scrollbar_width = self.styles.editor.editor_scrollbar_width_px;
         pane.state.editor_scrollbar_width_target = pane.state.editor_scrollbar_width;
+        pane.state.code_block_horizontal_scrollbar_thickness =
+            self.styles.editor.editor_scrollbar_width_px;
+        pane.state.code_block_horizontal_scrollbar_thickness_target =
+            pane.state.code_block_horizontal_scrollbar_thickness;
         pane.state.tabs.push(taken.tab);
         if let Some(cache) = taken.generated_preview_cache {
             pane.state

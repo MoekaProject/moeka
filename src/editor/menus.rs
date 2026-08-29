@@ -1248,6 +1248,10 @@ impl EditorView {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
+        if !crate::platform::capabilities::CHILD_PROCESSES {
+            return;
+        }
+
         if self
             .context_menu
             .as_ref()

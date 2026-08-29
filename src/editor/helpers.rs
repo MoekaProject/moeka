@@ -1818,7 +1818,7 @@ fn task_prefix_is_folded(
 
 pub(crate) fn syntax_set() -> &'static SyntaxSet {
     static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
-    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+    SYNTAX_SET.get_or_init(two_face::syntax::extra_newlines)
 }
 
 fn push_syntax_candidate(candidates: &mut Vec<String>, candidate: impl Into<String>) {
@@ -2281,12 +2281,71 @@ mod tests {
 
     use super::{
         AnchoredPopupVertical, GeneratedPreviewFontFamilies, anchored_popup_placement,
-        build_display_text, build_generated_block_preview_svg, build_table_display_text,
-        build_text_runs_for_display, compute_display_prefix_bytes, compute_generated_preview_size,
-        effective_wrap_width_for_letter_spacing, load_generated_preview_image_from_svg,
-        prefix_is_folded, table_cell_content_offset, table_cell_decoration, task_prefix_is_folded,
-        wrap_segment_byte_ranges,
+        apply_search_match_text_styles, build_display_text, build_generated_block_preview_svg,
+        build_table_display_text, build_text_runs_for_display, compute_display_prefix_bytes,
+        compute_generated_preview_size, effective_wrap_width_for_letter_spacing,
+        load_generated_preview_image_from_svg, prefix_is_folded, table_cell_content_offset,
+        table_cell_decoration, task_prefix_is_folded, wrap_segment_byte_ranges,
     };
+
+    #[test]
+    fn search_highlight_only_considers_matches_that_touch_the_line() {
+        fn plain_run(len: usize) -> TextRun {
+            TextRun {
+                len,
+                font: font("Helvetica"),
+                color: gpui::hsla(0.0, 0.0, 0.0, 1.0),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }
+        }
+
+        let display_text = "abcdef";
+        let display_to_buffer: Vec<usize> = (0..display_text.len()).collect();
+        let inactive = gpui::hsla(0.5, 1.0, 0.5, 1.0);
+        let active = gpui::hsla(0.1, 1.0, 0.5, 1.0);
+
+        // The line covers buffer offsets 100..106; the surrounding matches must
+        // not colour it, and the active index still refers to the global list.
+        let matches: Vec<Range<usize>> = vec![0..3, 50..55, 102..104, 500..504, 900..903];
+        let mut runs = vec![plain_run(display_text.len())];
+        apply_search_match_text_styles(
+            &mut runs,
+            display_text,
+            &display_to_buffer,
+            100,
+            &matches,
+            Some(2),
+            inactive,
+            active,
+        );
+
+        let colors: Vec<_> = runs.iter().map(|run| (run.len, run.color)).collect();
+        assert_eq!(
+            colors,
+            vec![
+                (2, gpui::hsla(0.0, 0.0, 0.0, 1.0)),
+                (2, active),
+                (2, gpui::hsla(0.0, 0.0, 0.0, 1.0)),
+            ]
+        );
+
+        // A line with no overlapping match keeps its runs untouched.
+        let mut untouched = vec![plain_run(display_text.len())];
+        apply_search_match_text_styles(
+            &mut untouched,
+            display_text,
+            &display_to_buffer,
+            200,
+            &matches,
+            Some(2),
+            inactive,
+            active,
+        );
+        assert_eq!(untouched.len(), 1);
+        assert_eq!(untouched[0].color, gpui::hsla(0.0, 0.0, 0.0, 1.0));
+    }
 
     #[test]
     fn table_cell_alignment_offsets_content_within_available_width() {
@@ -2997,6 +3056,52 @@ mod tests {
     }
 
     #[test]
+    fn inline_math_placeholder_expands_when_cursor_touches_formula() {
+        let source = "$E=mc^2$";
+        let mut decoration = markdown::parse_decorations(source).remove(0);
+        decoration
+            .display_replacements
+            .push(markdown::DisplayReplacement {
+                source_range: 1..7,
+                display_text: "[math]".to_string(),
+                trigger_range: 0..8,
+            });
+
+        let display = |active_ranges: &[Range<usize>]| {
+            build_display_text(
+                source,
+                &decoration,
+                active_ranges,
+                false,
+                None,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1.0,
+                1.0,
+                1.0,
+            )
+            .0
+        };
+
+        assert_eq!(display(&[]), "[math]");
+        for cursor in [0, 3, 7] {
+            assert_eq!(display(&[cursor..cursor]), source);
+        }
+        assert_eq!(display(&[8..8]), "[math]");
+    }
+
+    #[test]
+    fn folded_inline_math_has_no_inline_code_background() {
+        let theme = Theme::one_dark();
+        let (_, runs) = folded_display_and_runs("energy $E=mc^2$", &theme);
+
+        assert!(runs.iter().all(|run| run.background_color.is_none()));
+    }
+
+    #[test]
     fn generated_complex_math_block_preview_renders_svg() {
         let theme = Theme::one_dark();
         let svg = build_generated_block_preview_svg(
@@ -3012,6 +3117,34 @@ mod tests {
 
         assert!(svg.contains("<svg"));
         assert!(!svg.contains("LaTeX preview failed"));
+    }
+
+    #[test]
+    fn generated_inference_rule_math_preview_renders_svg() {
+        let theme = Theme::one_dark();
+        let svg = build_generated_block_preview_svg(
+            markdown::BlockPreviewKind::Math,
+            r"\frac{t_1\in T}{\texttt{succ }t_1\in T}",
+            &theme,
+            generated_preview_fonts(),
+        );
+
+        assert!(svg.contains("<svg"));
+        assert!(!svg.contains("LaTeX preview failed"), "{svg}");
+    }
+
+    #[test]
+    fn generated_math_preview_supports_basic_text_macro() {
+        let theme = Theme::one_dark();
+        let svg = build_generated_block_preview_svg(
+            markdown::BlockPreviewKind::Math,
+            r"x \in T \text{ when } x > 0",
+            &theme,
+            generated_preview_fonts(),
+        );
+
+        assert!(svg.contains("<svg"));
+        assert!(!svg.contains("LaTeX preview failed"), "{svg}");
     }
 
     #[test]
@@ -3092,6 +3225,7 @@ mod tests {
 
         assert!(svg.contains("<svg"));
         assert!(!svg.contains("LaTeX preview failed"));
+        assert!(svg.contains("background-color:transparent"));
         assert!(
             !svg.to_lowercase()
                 .contains("<rect width=\"100%\" height=\"100%\" fill=")
@@ -3655,21 +3789,21 @@ mod tests {
     #[test]
     fn nested_code_and_math_keep_semantic_style_priority() {
         let theme = Theme::one_dark();
-        for (line, expected) in [("**==`code`==**", "code"), ("**==$x$==**", "x")] {
-            let (display_text, runs) = folded_display_and_runs(line, &theme);
-            let offset = display_text.find(expected).expect("nested content");
-            let run = run_at_byte(&runs, offset);
+        let (display_text, runs) = folded_display_and_runs("**==`code`==**", &theme);
+        let code = run_at_byte(&runs, display_text.find("code").expect("nested code"));
+        assert_eq!(display_text, "code");
+        assert_eq!(code.color, theme.inline_code);
+        assert_eq!(code.background_color, Some(theme.inline_code_bg));
+        assert_eq!(code.font.family.as_ref(), "Test Mono");
+        assert_eq!(code.font.weight, FontWeight::BOLD);
 
-            assert_eq!(display_text, expected);
-            assert_eq!(run.color, theme.inline_code, "color: {line}");
-            assert_eq!(
-                run.background_color,
-                Some(theme.inline_code_bg),
-                "background: {line}"
-            );
-            assert_eq!(run.font.family.as_ref(), "Test Mono", "font: {line}");
-            assert_eq!(run.font.weight, FontWeight::BOLD, "weight: {line}");
-        }
+        let (display_text, runs) = folded_display_and_runs("**==$x$==**", &theme);
+        let math = run_at_byte(&runs, display_text.find('x').expect("nested math"));
+        assert_eq!(display_text, "x");
+        assert_eq!(math.color, theme.bold);
+        assert_eq!(math.background_color, Some(theme.highlight_bg));
+        assert_eq!(math.font.family.as_ref(), ".SystemUIFont");
+        assert_eq!(math.font.weight, FontWeight::BOLD);
     }
 
     #[test]
@@ -4375,6 +4509,35 @@ pub(crate) fn find_syntax_for_path(path: &Path) -> Option<&'static SyntaxReferen
         .and_then(find_syntax_for_language)
 }
 
+#[cfg(test)]
+mod syntax_registry_tests {
+    use super::*;
+
+    #[test]
+    fn extended_registry_covers_common_modern_languages() {
+        for language in [
+            "typescript",
+            "tsx",
+            "vue",
+            "svelte",
+            "dockerfile",
+            "toml",
+            "kotlin",
+            "swift",
+            "zig",
+            "wgsl",
+            "terraform",
+            "nix",
+            "solidity",
+        ] {
+            assert!(
+                find_syntax_for_language(language).is_some(),
+                "missing syntax for {language}"
+            );
+        }
+    }
+}
+
 fn code_palette_syntect_color(rgb: u32) -> SyntectColor {
     SyntectColor {
         r: ((rgb >> 16) & 0xFF) as u8,
@@ -5059,6 +5222,10 @@ fn generated_mathjax_renderer() -> &'static Mutex<MathJax> {
     MATHJAX.get_or_init(|| Mutex::new(MathJax::new()))
 }
 
+pub(crate) fn inline_math_cache_key(source_text: &str) -> String {
+    format!("__generated_preview__:inline-math:{source_text}")
+}
+
 pub(crate) fn build_generated_block_preview_svg(
     kind: BlockPreviewKind,
     source_text: &str,
@@ -5111,6 +5278,11 @@ fn normalize_math_preview_source(source_text: &str) -> String {
         ("\\mathbb{Z}", "\\mathbf{Z}"),
         ("\\mathbb{Q}", "\\mathbf{Q}"),
         ("\\mathbb{C}", "\\mathbf{C}"),
+        ("\\texttt{", "\\mathrm{"),
+        ("\\textbf{", "\\mathbf{"),
+        ("\\textit{", "\\mathit{"),
+        ("\\textrm{", "\\mathrm{"),
+        ("\\textsf{", "\\mathsf{"),
         ("\\ell", "L"),
         ("\\lVert", "\\Vert"),
         ("\\rVert", "\\Vert"),
@@ -5301,7 +5473,7 @@ fn apply_math_preview_theme(svg: &str, theme: &Theme) -> String {
     let mut themed = append_svg_root_style(
         svg,
         &format!(
-            "color:{text_color};text-rendering:geometricPrecision;shape-rendering:geometricPrecision;stroke-linecap:round;stroke-linejoin:round;"
+            "background-color:transparent;color:{text_color};text-rendering:geometricPrecision;shape-rendering:geometricPrecision;stroke-linecap:round;stroke-linejoin:round;"
         ),
     );
 
@@ -5875,7 +6047,6 @@ pub(crate) fn build_text_runs_for_display_with_language(
         .iter()
         .filter(|span| span.kind == InlineKind::InlineCode)
         .map(|span| &span.range)
-        .chain(decoration.inline_math_spans.iter())
     {
         // Opaque semantic spans own color, background, and font after all
         // presentation layers; orthogonal weight/style/decoration still stack.
@@ -6183,6 +6354,20 @@ pub(crate) fn build_text_runs_for_display_with_language(
     runs
 }
 
+/// Narrows sorted, non-overlapping matches to the ones covering `[start, end)`.
+/// The returned index is where the slice begins, so callers can still line it up
+/// with an active-match index.
+pub(crate) fn matches_overlapping_range(
+    matches: &[std::ops::Range<usize>],
+    start: usize,
+    end: usize,
+) -> (usize, &[std::ops::Range<usize>]) {
+    let first = matches.partition_point(|range| range.end <= start);
+    let rest = &matches[first..];
+    let len = rest.partition_point(|range| range.start < end);
+    (first, &rest[..len])
+}
+
 pub(crate) fn apply_search_match_text_styles(
     runs: &mut Vec<TextRun>,
     display_text: &str,
@@ -6197,9 +6382,27 @@ pub(crate) fn apply_search_match_text_styles(
         return;
     }
 
+    // Matches are sorted and non-overlapping, so a line only has to look at the
+    // slice that actually covers it. Scanning all of them here made every frame
+    // O(visible lines * total matches).
+    let Some(line_span_end) = display_to_buffer
+        .iter()
+        .take(display_text.len())
+        .copied()
+        .max()
+    else {
+        return;
+    };
+    let line_end_offset = line_start_offset + line_span_end + 1;
+    let (first, visible) =
+        matches_overlapping_range(search_matches, line_start_offset, line_end_offset);
+    if visible.is_empty() {
+        return;
+    }
+
     let mut byte_colors: Vec<Option<Hsla>> = vec![None; display_text.len()];
-    for (match_idx, search_match) in search_matches.iter().enumerate() {
-        let color = if active_match_index == Some(match_idx) {
+    for (offset, search_match) in visible.iter().enumerate() {
+        let color = if active_match_index == Some(first + offset) {
             active_color
         } else {
             inactive_color

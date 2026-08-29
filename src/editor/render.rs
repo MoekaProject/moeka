@@ -458,6 +458,9 @@ impl EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.runtime_profiler.is_some() {
+            self.runtime_profile_render_frames = self.runtime_profile_render_frames.wrapping_add(1);
+        }
         self.initialize_large_document_frame_bench_if_needed();
         self.schedule_large_markdown_outline_index(cx);
         self.begin_large_document_frame_bench_prepaint();
@@ -558,6 +561,7 @@ impl Render for EditorView {
             || self.workspace_search_resizing
             || self.utility_panel_resizing
             || self.pane_resize_drag.is_some();
+        let pointer_dragging = resizing || self.code_block_horizontal_scrollbar_drag.is_some();
         let show_empty_workspace = self.panes.len() == 1 && self.tabs.is_empty();
         let ws = &self.styles.window;
         #[cfg(target_os = "linux")]
@@ -1221,7 +1225,7 @@ impl Render for EditorView {
                         )
                     }),
             )
-            .when(resizing, |this| {
+            .when(pointer_dragging, |this| {
                 let indicator_line = if self.sidebar_resizing {
                     let iw =
                         self.scaled(self.styles.sidebar.sidebar_resize_active_indicator_width_px);
@@ -1256,7 +1260,8 @@ impl Render for EditorView {
                     let iw =
                         self.scaled(self.styles.sidebar.sidebar_resize_active_indicator_width_px);
                     let ic = self.styles.sidebar.sidebar_resize_active_indicator_color;
-                    let x = self.sidebar_width() + self.file_list_width()
+                    let x = self.sidebar_width()
+                        + self.file_list_width()
                         + self.workspace_search_panel_width()
                         - iw;
                     Some(
@@ -1299,7 +1304,9 @@ impl Render for EditorView {
                 } else {
                     None
                 };
-                let resize_cursor = if self.pane_resize_drag.is_some() {
+                let resize_cursor = if self.code_block_horizontal_scrollbar_drag.is_some() {
+                    CursorStyle::Arrow
+                } else if self.pane_resize_drag.is_some() {
                     match self.pane_resize_drag.as_ref().map(|drag| drag.axis) {
                         Some(SplitAxis::Vertical) => CursorStyle::ResizeUpDown,
                         _ => CursorStyle::ResizeLeftRight,
@@ -1318,7 +1325,12 @@ impl Render for EditorView {
                         .cursor(resize_cursor)
                         .children(indicator_line)
                         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                            if this.pane_resize_drag.is_some() {
+                            if this.code_block_horizontal_scrollbar_drag.is_some() {
+                                this.update_code_block_horizontal_scrollbar_drag(
+                                    event.position,
+                                    cx,
+                                );
+                            } else if this.pane_resize_drag.is_some() {
                                 this.update_pane_resize_drag(event.position);
                                 cx.notify();
                             } else if this.sidebar_resizing {
@@ -1392,12 +1404,20 @@ impl Render for EditorView {
                         }))
                         .on_mouse_up(
                             MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
+                            cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                                this.stop_code_block_horizontal_scrollbar_drag(event.position, cx);
                                 this.sidebar_resizing = false;
                                 this.utility_panel_resizing = false;
                                 this.pane_resize_drag = None;
                                 this.finish_workspace_search_resize(cx);
                                 this.finish_file_list_resize(cx);
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                                this.stop_code_block_horizontal_scrollbar_drag(event.position, cx);
                                 cx.notify();
                             }),
                         )

@@ -253,6 +253,8 @@ impl RuntimeProfiler {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct RuntimeProfileDiagnostics {
+    pub(crate) mouse_move_events: u64,
+    pub(crate) render_frames: u64,
     pub(crate) active_tab_id: Option<String>,
     pub(crate) buffer_bytes: usize,
     pub(crate) buffer_lines: usize,

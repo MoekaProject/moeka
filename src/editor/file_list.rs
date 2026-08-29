@@ -291,8 +291,16 @@ fn clean_image_target(target: &str) -> Option<String> {
     (!target.is_empty()).then(|| target.to_string())
 }
 
+/// Marks the `image_cache` entries owned by the file list, so purging the
+/// document images leaves the thumbnails alone.
+pub(crate) const FILE_LIST_IMAGE_CACHE_PREFIX: &str = "file-list:";
+
 fn file_list_image_cache_key(markdown_path: &Path, image_path: &str) -> String {
-    format!("file-list:{}\u{0}{}", markdown_path.display(), image_path)
+    format!(
+        "{FILE_LIST_IMAGE_CACHE_PREFIX}{}\u{0}{}",
+        markdown_path.display(),
+        image_path
+    )
 }
 
 fn square_crop_render_image(image: RenderImage) -> RenderImage {

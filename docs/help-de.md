@@ -1,11 +1,11 @@
 ---
-category: Einstieg
-description: Moeka verwenden
+category: Willkommen
+description: Einführung in die Verwendung von Moeka
 ---
 # Moeka
-Moeka ist eine elegante, flüssige, lokal orientierte **Markdown-Editor-App**. Sie ist einfach zu bedienen und zugleich stark genug für anspruchsvolles Schreiben. Sie läuft auf macOS und Windows; Linux folgt später. Diese Anleitung hilft dir, schneller eine eigene Wissensbasis aufzubauen.
+Moeka ist eine elegante, flüssige und vollständig lokale **Markdown-Editor-App**. Sie ist angenehm einfach zu bedienen und zugleich für Wissensmanagement und dichte Inhaltsgestaltung gerüstet. Moeka ist jetzt für macOS, Windows und Linux verfügbar ([jetzt herunterladen](https://moeka.app/)). Wir hoffen, dass dieser schlanke Editor allen hilft, schnell eine eigene Wissensbasis aufzubauen; diese Anleitung zeigt dir den Einstieg.
 
-Moeka verwendet `Markdown` als Textformat. Markdown eignet sich gut für Autorinnen und Autoren, weil es lesbar bleibt und den Schreibfluss nicht stört. Unterstützte Syntax kannst du im Kontextmenü ansehen, über [Kurzbefehle](#tabelleninteraktion) anwenden oder auf einer leeren Zeile `/` eingeben, um das Formatmenü zu öffnen.
+Moeka verwendet `Markdown` als Textformat. Markdown eignet sich gut für Autorinnen und Autoren, weil es lesbar bleibt und den Schreibfluss nicht stört. Unterstützte Syntax kannst du im Kontextmenü ansehen, über [Kurzbefehle](#tabellenunterstützung) anwenden oder auf einer leeren Zeile `/` eingeben, um das Formatmenü zu öffnen.
 
 > Ein Markdown-Dokument sollte als reiner Text veröffentlicht werden können, ohne Formatierungsstile. Seine Syntax besteht vollständig aus Satzzeichen, die so gewählt sind, dass sie wie ihre Bedeutung aussehen: Sternchen wirken wie Hervorhebung, Listenmarker wie Listen. -- John Gruber
 
@@ -28,72 +28,53 @@ Moeka verwendet `Markdown` als Textformat. Markdown eignet sich gut für Autorin
   - [ ] Drücke in dieser Zeile `Tab` oder `Shift + Tab`.
 - [ ] Füge später weitere erledigte Einträge hinzu.
 ***
-### Tabelleninteraktion
-| Funktion                                | Kurzbefehl        |
-| --------------------------------------- | ----------------- |
-| `Command / Ctrl + B`                    | Fett              |
-| `Command / Ctrl + I`                    | Kursiv            |
-| `Command / Ctrl + U`                    | Unterstreichen    |
-| `Command / Ctrl + Shift + X`            | Durchgestrichen   |
-| `Command / Ctrl + E`                    | Inline-Code       |
-| `Command / Ctrl + Option / Alt + C`     | Codeblock         |
-| `Command / Ctrl + Option / Alt + Q`     | Zitat             |
-| `Command / Ctrl + Option / Alt + U`     | Ungeordnete Liste |
-| `Command / Ctrl + Option / Alt + O`     | Geordnete Liste   |
-| `Command / Ctrl + Option / Alt + Enter` | Aufgabe           |
-| `Command / Ctrl + K`                    | Link              |
-| `Command / Ctrl + Option / Alt + T`     | Tabelle           |
-| `Command / Ctrl + 0`                    | Absatz            |
-| `/ image`                               | Bild              |
-
-| --------------------- | --------- |
-| --------------------- | --------- |
-| `[[`                  | Wiki-Link |
-| `/ image`             | Bild      |
+### Tabellenunterstützung
+| Funktion                     | Kurzbefehl                                       |
+| ---------------------------- | ------------------------------------------------ |
+| `Command / Ctrl + B`         | Fett                                             |
+| `Command / Ctrl + I`         | Kursiv                                           |
+| `Command / Ctrl + U`         | Unterstrichen                                    |
+| `Command / Ctrl + Shift + X` | Durchgestrichen                                  |
+| `Command / Ctrl + E`         | Inline-Code                                      |
+| Weitere Syntax               | Siehe `/`-Befehl oder Formatmenü per Rechtsklick |
 ## Codeblock-Syntax
 ```rust
 fn greet(name: &str) {
   println!("hello, {name}");
 }
 ```
-
 ### LaTeX-Formeln
-Gib eine einfache Anzeigeformel ein, um eine Blockvorschau im Dokument zu sehen.
-
+Umschließe eine Formel mit `$...$`, um sie wie $E = mc^2$ in einer Zeile darzustellen, oder setze `$$` jeweils allein in eine Zeile, um eine Blockformel zu schreiben:
 $$
-E = mc^2
+\operatorname*{arg\,min}_{\theta \in \mathbb{R}^n}
+\left[
+  \frac{1}{m}\sum_{i=1}^{m}
+  \left\lVert f_\theta(x_i)-y_i \right\rVert_2^2
+  + \lambda \left\lVert \theta \right\rVert_2^2
+\right]
 $$
-
 ### Mermaid-Diagrammbeispiel
-Nutze ein einfaches Diagramm, um die Vorschau zu testen.
-
 ```mermaid
 mindmap
-  root((mindmap))
-    Origins
-      Long history
-      ::icon(fa fa-book)
-      Popularisation
-        British popular psychology <br/>author Tony Buzan
-    Research
-      On effectiveness<br/>and features
-      On Automatic creation
-        Uses
-            Creative techniques
-            Strategic planning
-            Argument mapping
-    Tools
-      Pen and paper
+  root((Moeka))
+    Schreiben
+      Markdown
+      Bidirektionale Links
+      Tabellen und Aufgaben
+    Visualisierung
       Mermaid
+        Abläufe und Sequenzen
+        Datendiagramme
+      LaTeX
+    Lokal zuerst
+      Arbeitsbereiche
+      Versionsverlauf
+      Anlagenverwaltung
+    Ausgabe
+      PDF
+      Bilder
+      Klartext
 ```
-
-```mermaid
-pie title Pets adopted by volunteers
-    "Dogs" : 386
-    "Cats" : 85
-    "Rats" : 15
-```
-
 ## Inline-Syntax
 - Verwende **Fett** oder *italic* kursiv für Hervorhebung.
 - Verwende ++Unterstreichung++ für wichtige Phrasen; `~U~` wird als Tiefstellung gerendert, nicht als Unterstreichung.
@@ -107,10 +88,10 @@ pie title Pets adopted by volunteers
 > NOTE, IMPORTANT, WARNING, CAUTION und weitere Typen werden unterstützt.
 ## Link-Syntax
 - Nutze einen [internen Link](#moeka), um zu einer Überschrift in der aktuellen Datei zu springen.
-- Nutze Wiki-Links wie [[My Design Style.md]], um Dateien zu verbinden.
+- Nutze Wiki-Links wie [[Referenz zum Designstil.md]], um Dateien zu verbinden.
 - Nutze einen [externen Link](https://google.com), um eine Webadresse zu öffnen.
 - Nutze Fußnoten[^note], um zu einer Referenzzeile zu springen.
-- Nutze einen [Dateilink](Feature Plan.md), um eine Datei oder Überschrift zu öffnen.
+- Nutze einen [Dateilink](<Referenz zum Designstil.md>), um eine Datei oder Überschrift zu öffnen.
 - Halte `Command / Ctrl` gedrückt und klicke auf diese Links, um sie zu öffnen.
 ## Erweiterte Inline-Syntax
 - Tiefstellung: H~2~O. Hochstellung: E=mc^2^. Auch Foo~zoo~ oder Bar^baz^ funktionieren.

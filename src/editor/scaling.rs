@@ -649,6 +649,80 @@ impl EditorView {
         let (cursor_visual_row, cursor_visual_x) = self
             .cursor_visual_position(self.cursor.offset)
             .unwrap_or((0, 0.0));
+        if let Some(start_line) = self
+            .code_block_group_start(cursor_line)
+            .filter(|start_line| !self.code_block_word_wrap_enabled(*start_line))
+        {
+            let state = self.code_block_display_override(start_line);
+            let base_content_x = self
+                .line_display_info
+                .get(cursor_line)
+                .and_then(|info| info.as_ref())
+                .map(|info| info.content_x + state.horizontal_offset)
+                .unwrap_or(self.last_content_left);
+            let viewport_right = self
+                .line_display_info
+                .get(cursor_line)
+                .and_then(|info| info.as_ref())
+                .and_then(|info| info.horizontal_clip_right_x)
+                .unwrap_or(self.last_content_left + self.last_text_width);
+            let margin = self.scaled(12.0);
+            let cursor_width = self.styles.cursor.cursor_width_px.max(1.0);
+            let cursor_screen_x = base_content_x + cursor_visual_x - state.horizontal_offset;
+            let desired_offset = if cursor_screen_x < base_content_x + margin {
+                (cursor_visual_x - margin).max(0.0)
+            } else if cursor_screen_x + cursor_width > viewport_right - margin {
+                (cursor_visual_x + cursor_width - (viewport_right - base_content_x) + margin)
+                    .clamp(0.0, state.max_horizontal_offset)
+            } else {
+                state.horizontal_offset
+            };
+            if (desired_offset - state.horizontal_offset).abs() > 0.5 {
+                if let Some(tab_id) = self.active_tab_id.as_ref()
+                    && let Some(state) = self
+                        .code_block_display_overrides
+                        .get_mut(tab_id)
+                        .and_then(|overrides| overrides.get_mut(&start_line))
+                {
+                    state.horizontal_offset = desired_offset;
+                }
+                self.layout_dirty = true;
+            }
+        } else if self.active_tab_is_non_markdown_text() && !self.editor_wraps_to_available_width()
+        {
+            let state = self.non_markdown_horizontal_scroll_state();
+            let base_content_x = self
+                .line_display_info
+                .get(cursor_line)
+                .and_then(|info| info.as_ref())
+                .map(|info| info.content_x + state.offset)
+                .unwrap_or(self.last_content_left);
+            let viewport_right = self
+                .line_display_info
+                .get(cursor_line)
+                .and_then(|info| info.as_ref())
+                .and_then(|info| info.horizontal_clip_right_x)
+                .unwrap_or(self.last_content_left + self.last_text_width);
+            let margin = self.scaled(12.0);
+            let cursor_width = self.styles.cursor.cursor_width_px.max(1.0);
+            let cursor_screen_x = base_content_x + cursor_visual_x - state.offset;
+            let desired_offset = if cursor_screen_x < base_content_x + margin {
+                (cursor_visual_x - margin).max(0.0)
+            } else if cursor_screen_x + cursor_width > viewport_right - margin {
+                (cursor_visual_x + cursor_width - (viewport_right - base_content_x) + margin)
+                    .clamp(0.0, state.max_offset)
+            } else {
+                state.offset
+            };
+            if (desired_offset - state.offset).abs() > 0.5
+                && self.set_code_block_horizontal_offset(
+                    super::NON_MARKDOWN_HORIZONTAL_SCROLL_TARGET,
+                    desired_offset,
+                )
+            {
+                self.layout_dirty = true;
+            }
+        }
         let cursor_y = self.text_y_offset_for_line(cursor_line)
             + cursor_visual_row as f32
                 * self
@@ -1005,6 +1079,11 @@ impl EditorView {
 
     pub(crate) fn toggle_editor_alignment(&mut self, cx: &mut Context<Self>) {
         self.editor_left_aligned = !self.editor_left_aligned;
+        if !self.editor_left_aligned
+            && let Some(tab_id) = self.active_tab_id.as_ref()
+        {
+            self.non_markdown_horizontal_scroll_states.remove(tab_id);
+        }
         self.layout_dirty = true;
         if let Some(index) = self.active_tab_index() {
             self.tabs[index].editor_left_aligned = self.editor_left_aligned;
@@ -1022,6 +1101,9 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_git_history_panel(&mut self, cx: &mut Context<Self>) {
+        if !crate::platform::capabilities::CHILD_PROCESSES {
+            return;
+        }
         self.toggle_utility_panel(RightUtilityPanel::GitHistory, cx);
     }
 

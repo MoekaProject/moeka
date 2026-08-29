@@ -1,11 +1,11 @@
 ---
-category: Premiers pas
-description: Découvrir l'utilisation de Moeka
+category: Bienvenue
+description: Guide d'utilisation de Moeka
 ---
 # Moeka
-Moeka est une application de **rédaction Markdown** élégante, fluide et locale d'abord. Elle est simple à prendre en main, tout en restant assez puissante pour les écrivains intensifs. Elle fonctionne sur macOS et Windows, avec Linux prévu plus tard. Ce guide vous aide à créer rapidement votre base de connaissances.
+Moeka est une application de **rédaction Markdown** élégante, fluide et entièrement locale. Très simple à utiliser, elle répond aussi aux besoins de gestion des connaissances et de mise en page dense. Moeka est désormais disponible sur macOS, Windows et Linux ([la télécharger](https://moeka.app/)). Nous espérons que cet éditeur épuré permettra à chacun de construire rapidement sa propre base de connaissances ; ce guide vous en présente l'essentiel.
 
-Moeka utilise `Markdown` comme format de texte. Markdown convient très bien à l'écriture, car il reste lisible sans interrompre le flux de création. Vous pouvez prévisualiser les syntaxes prises en charge depuis le menu contextuel, utiliser les [raccourcis](#interaction-avec-les-tableaux), ou saisir `/` sur une ligne vide pour ouvrir le menu de mise en forme.
+Moeka utilise `Markdown` comme format de texte. Markdown convient très bien à l'écriture, car il reste lisible sans interrompre le flux de création. Vous pouvez prévisualiser les syntaxes prises en charge depuis le menu contextuel, utiliser les [raccourcis](#prise-en-charge-des-tableaux), ou saisir `/` sur une ligne vide pour ouvrir le menu de mise en forme.
 
 > Un document Markdown devrait pouvoir être publié comme texte brut, sans styles de mise en forme. Sa syntaxe est entièrement composée de ponctuation, choisie pour ressembler à ce qu'elle signifie : les astérisques ressemblent à de l'emphase, et les marqueurs de liste ressemblent à des listes. -- John Gruber
 
@@ -28,72 +28,53 @@ Moeka utilise `Markdown` comme format de texte. Markdown convient très bien à 
   - [ ] Essayez `Tab` ou `Shift + Tab` sur cette ligne.
 - [ ] Ajoutez d'autres éléments terminés plus tard.
 ***
-### Interaction avec les tableaux
-| Fonction                                | Raccourci          |
-| --------------------------------------- | ------------------ |
-| `Command / Ctrl + B`                    | Gras               |
-| `Command / Ctrl + I`                    | Italique           |
-| `Command / Ctrl + U`                    | Souligner          |
-| `Command / Ctrl + Shift + X`            | Barré              |
-| `Command / Ctrl + E`                    | Code en ligne      |
-| `Command / Ctrl + Option / Alt + C`     | Bloc de code       |
-| `Command / Ctrl + Option / Alt + Q`     | Citation           |
-| `Command / Ctrl + Option / Alt + U`     | Liste non ordonnée |
-| `Command / Ctrl + Option / Alt + O`     | Liste ordonnée     |
-| `Command / Ctrl + Option / Alt + Enter` | Tâche              |
-| `Command / Ctrl + K`                    | Lien               |
-| `Command / Ctrl + Option / Alt + T`     | Tableau            |
-| `Command / Ctrl + 0`                    | Paragraphe         |
-| `/ image`                               | Image              |
-
-| --------------------- | --------- |
-| --------------------- | --------- |
-| `[[`                  | Lien wiki |
-| `/ image`             | Image     |
+### Prise en charge des tableaux
+| Fonction                     | Raccourci                                                   |
+| ---------------------------- | ----------------------------------------------------------- |
+| `Command / Ctrl + B`         | Gras                                                        |
+| `Command / Ctrl + I`         | Italique                                                    |
+| `Command / Ctrl + U`         | Souligné                                                    |
+| `Command / Ctrl + Shift + X` | Barré                                                       |
+| `Command / Ctrl + E`         | Code en ligne                                               |
+| Autres syntaxes              | Voir la commande `/` ou le menu contextuel de mise en forme |
 ## Syntaxe des blocs de code
 ```rust
 fn greet(name: &str) {
   println!("hello, {name}");
 }
 ```
-
 ### Formules LaTeX
-Saisissez une formule affichée simple pour voir un aperçu en bloc dans le document.
-
+Entourez une formule de `$...$` pour l'afficher en ligne, comme $E = mc^2$, ou placez les délimiteurs `$$` seuls sur leurs lignes pour une formule en bloc :
 $$
-E = mc^2
+\operatorname*{arg\,min}_{\theta \in \mathbb{R}^n}
+\left[
+  \frac{1}{m}\sum_{i=1}^{m}
+  \left\lVert f_\theta(x_i)-y_i \right\rVert_2^2
+  + \lambda \left\lVert \theta \right\rVert_2^2
+\right]
 $$
-
 ### Exemple de diagramme Mermaid
-Utilisez un diagramme simple pour observer l'aperçu des graphiques.
-
 ```mermaid
 mindmap
-  root((mindmap))
-    Origins
-      Long history
-      ::icon(fa fa-book)
-      Popularisation
-        British popular psychology <br/>author Tony Buzan
-    Research
-      On effectiveness<br/>and features
-      On Automatic creation
-        Uses
-            Creative techniques
-            Strategic planning
-            Argument mapping
-    Tools
-      Pen and paper
+  root((Moeka))
+    Écriture
+      Markdown
+      Liens bidirectionnels
+      Tableaux et tâches
+    Visualisation
       Mermaid
+        Flux et séquences
+        Graphiques de données
+      LaTeX
+    Priorité au local
+      Espaces de travail
+      Historique des versions
+      Gestion des pièces jointes
+    Export
+      PDF
+      Images
+      Texte brut
 ```
-
-```mermaid
-pie title Pets adopted by volunteers
-    "Dogs" : 386
-    "Cats" : 85
-    "Rats" : 15
-```
-
 ## Syntaxe en ligne
 - Utilisez le **gras** ou l'*italique* pour l'emphase.
 - Utilisez ++souligné++ pour attirer l'attention ; `~U~` devient un indice, pas un soulignement.
@@ -107,10 +88,10 @@ pie title Pets adopted by volunteers
 > Les types NOTE, IMPORTANT, WARNING, CAUTION et d'autres sont pris en charge.
 ## Syntaxe des liens
 - Utilisez un [lien interne](#moeka) pour atteindre un titre du fichier courant.
-- Utilisez les liens wiki [[My Design Style.md]] pour relier des fichiers.
+- Utilisez les liens wiki [[Référence du style de conception.md]] pour relier des fichiers.
 - Utilisez un [lien externe](https://google.com) pour ouvrir une adresse web.
 - Utilisez la syntaxe de note de bas de page[^note] pour aller à une référence.
-- Utilisez un [lien de fichier](Feature Plan.md) pour ouvrir un fichier ou un titre.
+- Utilisez un [lien de fichier](<Référence du style de conception.md>) pour ouvrir un fichier ou un titre.
 - Maintenez `Command / Ctrl` et cliquez sur ces liens pour les ouvrir.
 ## Syntaxe en ligne étendue
 - Exemple d'indice : H~2~O. Exemple d'exposant : E=mc^2^. Le texte anglais fonctionne aussi : Foo~zoo~ ou Bar^baz^.

@@ -993,11 +993,19 @@ pub(crate) fn update_check_failed_message(language: UiLanguage) -> &'static str 
         UiLanguage::ChineseTraditional => "無法連線到更新服務，請稍後再試。",
         UiLanguage::Japanese => "更新サービスに接続できません。後でもう一度お試しください。",
         UiLanguage::Korean => "업데이트 서비스에 연결할 수 없습니다. 나중에 다시 시도하세요.",
-        UiLanguage::French => "Impossible de contacter le service de mise à jour. Réessayez plus tard.",
+        UiLanguage::French => {
+            "Impossible de contacter le service de mise à jour. Réessayez plus tard."
+        }
         UiLanguage::German => "Update-Dienst nicht erreichbar. Bitte später erneut versuchen.",
-        UiLanguage::Spanish => "No se pudo contactar con el servicio de actualización. Inténtalo más tarde.",
-        UiLanguage::Portuguese => "Não foi possível contatar o serviço de atualização. Tente mais tarde.",
-        UiLanguage::Russian => "Не удалось связаться со службой обновлений. Повторите попытку позже.",
+        UiLanguage::Spanish => {
+            "No se pudo contactar con el servicio de actualización. Inténtalo más tarde."
+        }
+        UiLanguage::Portuguese => {
+            "Não foi possível contatar o serviço de atualização. Tente mais tarde."
+        }
+        UiLanguage::Russian => {
+            "Не удалось связаться со службой обновлений. Повторите попытку позже."
+        }
         UiLanguage::Arabic => "تعذر الاتصال بخدمة التحديث. حاول مرة أخرى لاحقًا.",
         UiLanguage::Hindi => "अपडेट सेवा से संपर्क नहीं हो सका। बाद में पुनः प्रयास करें।",
         UiLanguage::English => "Could not reach the update service. Please try again later.",
@@ -2158,7 +2166,12 @@ pub(crate) fn attachment_settings_label(language: UiLanguage, key: &str) -> &'st
             "workspace_root" => "工作区根目录",
             "workspace_folder" => "工作区指定目录",
             "current_file_subfolder" => "当前目录子文件夹",
+            "external_folder" => "外部绝对目录",
             "folder" => "附件目录",
+            "external_folder_path" => "外部目录",
+            "choose_external_folder" => "选择外部附件目录",
+            "code_block_line_numbers" => "代码块行号",
+            "code_block_word_wrap" => "代码块自动换行",
             "syntax" => "链接语法",
             "markdown" => "Markdown",
             "wikilink" => "WikiLink",
@@ -2177,7 +2190,12 @@ pub(crate) fn attachment_settings_label(language: UiLanguage, key: &str) -> &'st
             "workspace_root" => "工作區根目錄",
             "workspace_folder" => "工作區指定目錄",
             "current_file_subfolder" => "目前目錄子資料夾",
+            "external_folder" => "外部絕對目錄",
             "folder" => "附件目錄",
+            "external_folder_path" => "外部目錄",
+            "choose_external_folder" => "選擇外部附件目錄",
+            "code_block_line_numbers" => "程式碼區塊行號",
+            "code_block_word_wrap" => "程式碼區塊自動換行",
             "syntax" => "連結語法",
             "markdown" => "Markdown",
             "wikilink" => "WikiLink",
@@ -2196,7 +2214,12 @@ pub(crate) fn attachment_settings_label(language: UiLanguage, key: &str) -> &'st
             "workspace_root" => "Workspace Root",
             "workspace_folder" => "Workspace Folder",
             "current_file_subfolder" => "Document Subfolder",
+            "external_folder" => "External Absolute Folder",
             "folder" => "Attachment Folder",
+            "external_folder_path" => "External Folder",
+            "choose_external_folder" => "Choose External Attachment Folder",
+            "code_block_line_numbers" => "Code Block Line Numbers",
+            "code_block_word_wrap" => "Code Block Word Wrap",
             "syntax" => "Link Syntax",
             "markdown" => "Markdown",
             "wikilink" => "WikiLink",

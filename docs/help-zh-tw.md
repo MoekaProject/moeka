@@ -1,11 +1,11 @@
 ---
-category: 入門教學
-description: 介紹小語文稿的使用
+category: 歡迎使用
+description: 小語文稿使用指南
 ---
 # 小語文稿
-小語文稿是一個優雅、流暢、本地優先的 **Markdown 編輯應用**。它很容易上手，也能滿足重度寫作者的需求。你可以在 macOS 和 Windows 上使用它，Linux 版本稍後推出。閱讀下面的指南，可以更快建立自己的知識庫。
+小語文稿是一個優雅、流暢、完全本地的 **Markdown 編輯應用**。它簡單易用，也足以勝任知識管理與高密度內容排版。小語文稿現已支援 macOS、Windows 與 Linux（[立即取得](https://moeka.app/)）。我們希望這款簡潔的編輯器能協助每個人快速建立自己的知識庫；閱讀以下指南即可開始。
 
-小語文稿使用 `Markdown` 作為文字編輯格式。它適合文字工作者，能在維持良好可讀性的同時不打斷創作。支援的語法可以透過右鍵選單預覽，也可以用標示的[快捷鍵](#表格互動)快速變更格式。你也可以在空行輸入 `/` 開啟格式選單，輸入關鍵字快速選擇要插入的格式。
+小語文稿使用 `Markdown` 作為文字編輯格式。它適合文字工作者，能在維持良好可讀性的同時不打斷創作。支援的語法可以透過右鍵選單預覽，也可以用標示的[快捷鍵](#表格支援)快速變更格式。你也可以在空行輸入 `/` 開啟格式選單，輸入關鍵字快速選擇要插入的格式。
 
 > Markdown 格式的文件應該能以純文字發布，不帶格式化樣式。它的語法完全由標點符號組成，這些符號經過仔細挑選，讓它們本身就像字面上的意思，例如星號看起來像強調，列表標記看起來像列表。-- John Gruber
 
@@ -28,72 +28,53 @@ description: 介紹小語文稿的使用
   - [ ] 試試在此行按下 `Tab` 或 `Shift + Tab`。
 - [ ] 追加記錄一些已完成事項。
 ***
-### 表格互動
-| 功能                                    | 快捷鍵     |
-| --------------------------------------- | ---------- |
-| `Command / Ctrl + B`                    | 粗體       |
-| `Command / Ctrl + I`                    | 斜體       |
-| `Command / Ctrl + U`                    | 底線       |
-| `Command / Ctrl + Shift + X`            | 刪除線     |
-| `Command / Ctrl + E`                    | 行內程式碼 |
-| `Command / Ctrl + Option / Alt + C`     | 程式碼區塊 |
-| `Command / Ctrl + Option / Alt + Q`     | 引用       |
-| `Command / Ctrl + Option / Alt + U`     | 無序列表   |
-| `Command / Ctrl + Option / Alt + O`     | 有序列表   |
-| `Command / Ctrl + Option / Alt + Enter` | 待辦事項   |
-| `Command / Ctrl + K`                    | 連結       |
-| `Command / Ctrl + Option / Alt + T`     | 表格       |
-| `Command / Ctrl + 0`                    | 正文       |
-| `/ image`                               | 圖片       |
-
-| --------------------- | -------- |
-| --------------------- | -------- |
-| `[[`                  | 雙向連結 |
-| `/ image`             | 圖片     |
+### 表格支援
+| 功能                         | 快捷鍵                        |
+| ---------------------------- | ----------------------------- |
+| `Command / Ctrl + B`         | 粗體                          |
+| `Command / Ctrl + I`         | 斜體                          |
+| `Command / Ctrl + U`         | 底線                          |
+| `Command / Ctrl + Shift + X` | 刪除線                        |
+| `Command / Ctrl + E`         | 行內程式碼                    |
+| 更多語法支援                 | 可參考 `/` 指令或右鍵格式選單 |
 ## 程式碼區塊語法
 ```rust
 fn greet(name: &str) {
   println!("hello, {name}");
 }
 ```
-
 ### LaTeX 數學公式
-輸入一個簡單的區塊公式，即可在文稿中看到預覽效果。
-
+使用 `$...$` 包住語法來書寫行內公式，例如 $E = mc^2$；或將 `$$` 各自放在獨立一行來書寫區塊公式：
 $$
-E = mc^2
+\operatorname*{arg\,min}_{\theta \in \mathbb{R}^n}
+\left[
+  \frac{1}{m}\sum_{i=1}^{m}
+  \left\lVert f_\theta(x_i)-y_i \right\rVert_2^2
+  + \lambda \left\lVert \theta \right\rVert_2^2
+\right]
 $$
-
 ### Mermaid 圖表示例
-用一個最簡單的流程圖觀察圖表預覽效果。
-
 ```mermaid
 mindmap
-  root((mindmap))
-    Origins
-      Long history
-      ::icon(fa fa-book)
-      Popularisation
-        British popular psychology <br/>author Tony Buzan
-    Research
-      On effectiveness<br/>and features
-      On Automatic creation
-        Uses
-            Creative techniques
-            Strategic planning
-            Argument mapping
-    Tools
-      Pen and paper
+  root((小語文稿))
+    寫作
+      Markdown
+      雙向連結
+      表格與任務
+    視覺化
       Mermaid
+        流程與時序
+        資料圖表
+      LaTeX
+    本地優先
+      工作區
+      版本歷史
+      附件管理
+    輸出
+      PDF
+      圖片
+      純文字
 ```
-
-```mermaid
-pie title Pets adopted by volunteers
-    "Dogs" : 386
-    "Cats" : 85
-    "Rats" : 15
-```
-
 ## 行內語法
 - 可以使用**粗體**或帶有 *italic* 的斜體語法表示強調。
 - 也可以使用++底線++標記需要注意的短語；`~U~` 會作為下標，而不是底線。
@@ -107,10 +88,10 @@ pie title Pets adopted by volunteers
 > 也可以使用 NOTE、IMPORTANT、WARNING、CAUTION 等不同類型。
 ## 連結語法
 - 可以使用[內部連結](#小語文稿)，跳到目前檔案中的標題行。
-- 透過 [[我的設計風格.md]] 雙向連結語法在檔案間互相引用。
+- 透過 [[設計風格參考.md]] 雙向連結語法在檔案間互相引用。
 - 或使用[外部連結](https://google.com)，跳到任意外部網址。
 - 還可以使用腳註語法[^note]跳到腳註行作為引用。
-- 另外可使用[檔案連結](功能規劃.md)跳到指定檔案或標題。
+- 另外可使用[檔案連結](設計風格參考.md)跳到指定檔案或標題。
 - 以上所有語法，都可以按住 `Command / Ctrl` 鍵並點擊跳轉。
 ## 行內擴充語法
 - 下標示例：H~2~O，上標示例：E=mc^2^，也可以使用英文：Foo~zoo~ 或 Bar^baz^。

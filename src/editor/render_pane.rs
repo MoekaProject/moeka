@@ -584,6 +584,7 @@ impl EditorView {
                                 if this.editor_scrollbar_drag.is_none() {
                                     this.set_editor_scrollbar_hovered(false, cx);
                                 }
+                                this.clear_code_block_horizontal_scrollbar_hover(cx);
                                 let toolbar_changed = if this.toolbar_corner_hovered {
                                     this.toolbar_corner_hovered = false;
                                     this.sync_toolbar_opacity(cx);
@@ -688,6 +689,48 @@ impl EditorView {
                             },
                         )
                     })
+                    .when_some(
+                        self.code_block_horizontal_scrollbar_overlay_geometry(),
+                        |this, geometry| {
+                            let radius =
+                                self.scaled(self.styles.editor.editor_scrollbar_radius_px);
+                            let mut color = self.styles.editor.editor_scrollbar_thumb_color;
+                            color.a *= geometry.opacity;
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .left(px(geometry.track_left))
+                                    .top(px(geometry.track_top))
+                                    .w(px(geometry.track_width))
+                                    .h(px(geometry.track_height))
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left(px(geometry.thumb_left))
+                                            .top(px(
+                                                geometry.track_height - geometry.thumb_height,
+                                            ))
+                                            .w(px(geometry.thumb_width))
+                                            .h(px(geometry.thumb_height))
+                                            .cursor(CursorStyle::Arrow)
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(
+                                                    |this, event: &MouseDownEvent, _, cx| {
+                                                        cx.stop_propagation();
+                                                        this.start_code_block_horizontal_scrollbar_drag(
+                                                            event.position,
+                                                            cx,
+                                                        );
+                                                    },
+                                                ),
+                                            )
+                                            .rounded(px(radius))
+                                            .bg(color),
+                                    ),
+                            )
+                        },
+                    )
                     .when_some(
                         self.editor_scrollbar_thumb_geometry(),
                         |this, (thumb_top, thumb_height)| {

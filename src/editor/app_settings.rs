@@ -235,6 +235,10 @@ pub(crate) struct AppSettings {
     pub attachment_location: String,
     #[serde(default = "default_attachment_folder")]
     pub attachment_folder: String,
+    #[serde(default)]
+    pub attachment_external_folder: String,
+    #[serde(default)]
+    pub attachment_external_folder_bookmark: String,
     #[serde(default = "default_terminal_cursor_shape")]
     pub terminal_cursor_shape: String,
     #[serde(default = "default_terminal_copy_on_select")]
@@ -434,6 +438,8 @@ impl Default for AppSettings {
             auto_save: false,
             attachment_location: default_attachment_location(),
             attachment_folder: default_attachment_folder(),
+            attachment_external_folder: String::new(),
+            attachment_external_folder_bookmark: String::new(),
             terminal_cursor_shape: default_terminal_cursor_shape(),
             terminal_copy_on_select: default_terminal_copy_on_select(),
             terminal_launch_command: default_terminal_launch_command(),
@@ -476,10 +482,16 @@ impl AppSettings {
         super::AttachmentPolicy::from_settings(
             &self.attachment_location,
             &self.attachment_folder,
+            &self.attachment_external_folder,
             "markdown",
             "relative",
             false,
         )
+    }
+
+    pub(crate) fn attachment_policy_access(&self) -> super::attachments::AttachmentPolicyAccess {
+        self.attachment_policy()
+            .access(&self.attachment_external_folder_bookmark)
     }
 
     pub(crate) fn load() -> Self {

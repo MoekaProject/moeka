@@ -1,11 +1,11 @@
 ---
-category: 入門ガイド
-description: Moeka の使い方
+category: ようこそ
+description: Moeka の使い方を紹介します
 ---
 # Moeka
-Moeka は、上品でなめらかなローカルファーストの **Markdown 編集アプリ**です。使い始めは簡単ですが、長く書く人の要求にも応えられます。macOS と Windows で利用でき、Linux は後日対応予定です。このガイドで、自分の知識ベースをすばやく作り始められます。
+Moeka は、洗練された、なめらかで完全にローカルな **Markdown 編集アプリ**です。驚くほど簡単に使えながら、知識管理や高密度なコンテンツの組版にも応えます。macOS、Windows、Linux のすべてで利用できます（[今すぐ入手](https://moeka.app/)）。このシンプルなエディタで、誰もが自分の知識ベースをすばやく築けることを願っています。以下のガイドから始めましょう。
 
-Moeka は `Markdown` をテキスト形式として使います。Markdown は読みやすさを保ちながら執筆の邪魔をしないため、文章を書く人に向いています。対応している構文はコンテキストメニューで確認でき、[ショートカット](#テーブル操作)でもすばやく書式を変更できます。空行で `/` を入力すると書式メニューが開き、キーワードで挿入したい形式を選べます。
+Moeka は `Markdown` をテキスト形式として使います。Markdown は読みやすさを保ちながら執筆の邪魔をしないため、文章を書く人に向いています。対応している構文はコンテキストメニューで確認でき、[ショートカット](#テーブル対応)でもすばやく書式を変更できます。空行で `/` を入力すると書式メニューが開き、キーワードで挿入したい形式を選べます。
 
 > Markdown 形式の文書は、装飾されたスタイルなしにプレーンテキストとして公開できるべきです。構文は句読点だけで構成され、それぞれが意味に見えるよう慎重に選ばれています。たとえばアスタリスクは強調に見え、リスト記号はリストに見えます。-- John Gruber
 
@@ -28,72 +28,53 @@ Moeka は `Markdown` をテキスト形式として使います。Markdown は�
   - [ ] この行で `Tab` または `Shift + Tab` を押してみてください。
 - [ ] 完了した項目をあとで追加できます。
 ***
-### テーブル操作
-| 機能                                    | ショートカット   |
-| --------------------------------------- | ---------------- |
-| `Command / Ctrl + B`                    | 太字             |
-| `Command / Ctrl + I`                    | 斜体             |
-| `Command / Ctrl + U`                    | 下線             |
-| `Command / Ctrl + Shift + X`            | 取り消し線       |
-| `Command / Ctrl + E`                    | インラインコード |
-| `Command / Ctrl + Option / Alt + C`     | コードブロック   |
-| `Command / Ctrl + Option / Alt + Q`     | 引用             |
-| `Command / Ctrl + Option / Alt + U`     | 箇条書き         |
-| `Command / Ctrl + Option / Alt + O`     | 番号付きリスト   |
-| `Command / Ctrl + Option / Alt + Enter` | Todo             |
-| `Command / Ctrl + K`                    | リンク           |
-| `Command / Ctrl + Option / Alt + T`     | 表               |
-| `Command / Ctrl + 0`                    | 本文             |
-| `/ image`                               | 画像             |
-
-| --------------------- | ----------- |
-| --------------------- | ----------- |
-| `[[`                  | Wiki リンク |
-| `/ image`             | 画像        |
+### テーブル対応
+| 機能                         | ショートカット                                   |
+| ---------------------------- | ------------------------------------------------ |
+| `Command / Ctrl + B`         | 太字                                             |
+| `Command / Ctrl + I`         | 斜体                                             |
+| `Command / Ctrl + U`         | 下線                                             |
+| `Command / Ctrl + Shift + X` | 取り消し線                                       |
+| `Command / Ctrl + E`         | インラインコード                                 |
+| その他の構文                 | `/` コマンドまたは右クリックの書式メニューを参照 |
 ## コードブロック構文
 ```rust
 fn greet(name: &str) {
   println!("hello, {name}");
 }
 ```
-
 ### LaTeX 数式
-簡単な表示数式を入力すると、文書内にブロックプレビューが表示されます。
-
+`$...$` で囲むと $E = mc^2$ のようなインライン数式を、`$$` をそれぞれ独立した行に置くとブロック数式を記述できます：
 $$
-E = mc^2
+\operatorname*{arg\,min}_{\theta \in \mathbb{R}^n}
+\left[
+  \frac{1}{m}\sum_{i=1}^{m}
+  \left\lVert f_\theta(x_i)-y_i \right\rVert_2^2
+  + \lambda \left\lVert \theta \right\rVert_2^2
+\right]
 $$
-
 ### Mermaid 図の例
-シンプルな図で、チャートプレビューの動作を確認できます。
-
 ```mermaid
 mindmap
-  root((mindmap))
-    Origins
-      Long history
-      ::icon(fa fa-book)
-      Popularisation
-        British popular psychology <br/>author Tony Buzan
-    Research
-      On effectiveness<br/>and features
-      On Automatic creation
-        Uses
-            Creative techniques
-            Strategic planning
-            Argument mapping
-    Tools
-      Pen and paper
+  root((Moeka))
+    執筆
+      Markdown
+      双方向リンク
+      テーブルとタスク
+    可視化
       Mermaid
+        フローとシーケンス
+        データチャート
+      LaTeX
+    ローカルファースト
+      ワークスペース
+      バージョン履歴
+      添付ファイル管理
+    出力
+      PDF
+      画像
+      プレーンテキスト
 ```
-
-```mermaid
-pie title Pets adopted by volunteers
-    "Dogs" : 386
-    "Cats" : 85
-    "Rats" : 15
-```
-
 ## インライン構文
 - **太字** や *italic* の斜体で強調できます。
 - ++下線++ で注意したい語句を示せます。`~U~` は下線ではなく下付き文字になります。
@@ -107,10 +88,10 @@ pie title Pets adopted by volunteers
 > NOTE、IMPORTANT、WARNING、CAUTION などの種類も使えます。
 ## リンク構文
 - [内部リンク](#moeka) で現在のファイル内の見出しへ移動できます。
-- [[My Design Style.md]] の Wiki リンクでファイル同士をつなげられます。
+- [[デザインスタイル参考.md]] の Wiki リンクでファイル同士をつなげられます。
 - [外部リンク](https://google.com) で任意の Web ページを開けます。
 - 脚注構文[^note]で参照行へ移動できます。
-- [ファイルリンク](Feature Plan.md) で指定したファイルや見出しへ移動できます。
+- [ファイルリンク](デザインスタイル参考.md) で指定したファイルや見出しへ移動できます。
 - これらのリンクは `Command / Ctrl` キーを押しながらクリックすると開けます。
 ## 拡張インライン構文
 - 下付き文字の例：H~2~O。上付き文字の例：E=mc^2^。英語の Foo~zoo~ や Bar^baz^ も使えます。

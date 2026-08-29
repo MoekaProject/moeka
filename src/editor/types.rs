@@ -8,7 +8,7 @@ use crate::markdown::LineDecoration;
 use super::whiteboard::WhiteboardTabState;
 use super::{config_store, history_store};
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct EditorSnapshot {
     pub text: String,
     pub cursor_offset: usize,

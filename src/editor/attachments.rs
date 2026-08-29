@@ -33,6 +33,7 @@ pub(crate) enum AttachmentLocation {
     WorkspaceRoot,
     WorkspaceFolder,
     CurrentFileSubfolder,
+    ExternalFolder,
 }
 
 impl AttachmentLocation {
@@ -41,6 +42,7 @@ impl AttachmentLocation {
             "workspace_root" => Self::WorkspaceRoot,
             "workspace_folder" => Self::WorkspaceFolder,
             "current_file_subfolder" => Self::CurrentFileSubfolder,
+            "external_folder" => Self::ExternalFolder,
             _ => Self::CurrentFile,
         }
     }
@@ -66,6 +68,7 @@ pub(crate) enum AttachmentPathStyle {
     Relative,
     WorkspaceAbsolute,
     Shortest,
+    FileUrl,
 }
 
 impl AttachmentPathStyle {
@@ -73,6 +76,7 @@ impl AttachmentPathStyle {
         match value {
             "workspace_absolute" => Self::WorkspaceAbsolute,
             "shortest" => Self::Shortest,
+            "file_url" => Self::FileUrl,
             _ => Self::Relative,
         }
     }
@@ -87,20 +91,62 @@ pub(crate) struct AttachmentPolicy {
     pub automatically_update_links: bool,
 }
 
+pub(crate) struct AttachmentPolicyAccess {
+    policy: AttachmentPolicy,
+    scoped_path: Option<PathBuf>,
+}
+
+impl AttachmentPolicyAccess {
+    pub(crate) fn policy(&self) -> &AttachmentPolicy {
+        &self.policy
+    }
+}
+
+impl Drop for AttachmentPolicyAccess {
+    fn drop(&mut self) {
+        if let Some(path) = self.scoped_path.as_deref() {
+            crate::platform::security_scope::stop_access(path);
+        }
+    }
+}
+
 impl AttachmentPolicy {
     pub(crate) fn from_settings(
         location: &str,
         folder: &str,
+        external_folder: &str,
         link_syntax: &str,
         path_style: &str,
         automatically_update_links: bool,
     ) -> Self {
+        let location = AttachmentLocation::from_setting(location);
         Self {
-            location: AttachmentLocation::from_setting(location),
-            folder: folder.to_string(),
+            location,
+            folder: if location == AttachmentLocation::ExternalFolder {
+                external_folder.to_string()
+            } else {
+                folder.to_string()
+            },
             link_syntax: AttachmentLinkSyntax::from_setting(link_syntax),
-            path_style: AttachmentPathStyle::from_setting(path_style),
+            path_style: if location == AttachmentLocation::ExternalFolder {
+                AttachmentPathStyle::FileUrl
+            } else {
+                AttachmentPathStyle::from_setting(path_style)
+            },
             automatically_update_links,
+        }
+    }
+
+    pub(crate) fn access(mut self, bookmark: &str) -> AttachmentPolicyAccess {
+        let scoped_path = (self.location == AttachmentLocation::ExternalFolder)
+            .then(|| crate::platform::security_scope::start_access(bookmark))
+            .flatten();
+        if let Some(path) = scoped_path.as_ref() {
+            self.folder = path.to_string_lossy().into_owned();
+        }
+        AttachmentPolicyAccess {
+            policy: self,
+            scoped_path,
         }
     }
 
@@ -109,7 +155,9 @@ impl AttachmentPolicy {
         workspace_root: &Path,
         current_file: &Path,
     ) -> Result<PathBuf> {
-        if self.path_style != AttachmentPathStyle::Relative {
+        if self.location != AttachmentLocation::ExternalFolder
+            && self.path_style != AttachmentPathStyle::Relative
+        {
             ensure_file_in_workspace(workspace_root, current_file)?;
         }
         let current_dir = current_file
@@ -129,8 +177,22 @@ impl AttachmentPolicy {
                 ensure_file_in_workspace(workspace_root, current_file)?;
                 current_dir.join(validate_relative_folder(&self.folder)?)
             }
+            AttachmentLocation::ExternalFolder => {
+                let target = PathBuf::from(&self.folder);
+                if !target.is_absolute() {
+                    bail!("external attachment directory must be an absolute path");
+                }
+                if !target.is_dir() {
+                    bail!("external attachment directory is unavailable");
+                }
+                target
+            }
         };
-        if self.location != AttachmentLocation::CurrentFile && !target.starts_with(workspace_root) {
+        if !matches!(
+            self.location,
+            AttachmentLocation::CurrentFile | AttachmentLocation::ExternalFolder
+        ) && !target.starts_with(workspace_root)
+        {
             bail!("attachment directory must stay inside the workspace");
         }
         Ok(target)
@@ -195,6 +257,10 @@ impl AttachmentPolicy {
                         .map(Path::to_path_buf)
                 })
                 .ok_or_else(|| anyhow!("attachment is outside the workspace"))?,
+            AttachmentPathStyle::FileUrl => {
+                return crate::platform::paths::path_to_file_url(target_file)
+                    .ok_or_else(|| anyhow!("attachment path is not absolute"));
+            }
         };
         let mut target = path_to_slashes(&target);
         if self.link_syntax == AttachmentLinkSyntax::WikiLink
@@ -585,12 +651,12 @@ mod tests {
     use super::*;
 
     fn policy(location: &str, syntax: &str, style: &str) -> AttachmentPolicy {
-        AttachmentPolicy::from_settings(location, "assets/images", syntax, style, true)
+        AttachmentPolicy::from_settings(location, "assets/images", "", syntax, style, true)
     }
 
     #[test]
     fn attachment_policy_defaults_match_existing_behavior() {
-        let policy = AttachmentPolicy::from_settings("", "", "", "", true);
+        let policy = AttachmentPolicy::from_settings("", "", "", "", "", true);
 
         assert_eq!(policy.location, AttachmentLocation::CurrentFile);
         assert_eq!(policy.link_syntax, AttachmentLinkSyntax::Markdown);
@@ -604,6 +670,7 @@ mod tests {
         let policy = AttachmentPolicy::from_settings(
             "workspace_folder",
             "../outside",
+            "",
             "markdown",
             "relative",
             true,
@@ -620,6 +687,59 @@ mod tests {
         let policy = policy("current_file", "markdown", "workspace_absolute");
 
         assert!(policy.target_directory(workspace.path(), &note).is_err());
+    }
+
+    #[test]
+    fn external_attachment_directory_uses_file_url_references() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let documents = tempfile::tempdir().expect("documents");
+        let external = tempfile::tempdir().expect("external");
+        let note = documents.path().join("note.md");
+        let image = external.path().join("示例 image.png");
+        std::fs::write(&image, b"image").expect("image");
+        let policy = AttachmentPolicy::from_settings(
+            "external_folder",
+            "attachments",
+            external.path().to_str().unwrap(),
+            "markdown",
+            "relative",
+            true,
+        );
+
+        assert_eq!(
+            policy.target_directory(workspace.path(), &note).unwrap(),
+            external.path()
+        );
+        assert_eq!(
+            policy
+                .reference_for(workspace.path(), &note, &image, true, None)
+                .unwrap(),
+            format!(
+                "![]({})",
+                crate::platform::paths::path_to_file_url(&image).unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn external_attachment_directory_must_already_exist() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let missing = workspace.path().join("missing");
+        let policy = AttachmentPolicy::from_settings(
+            "external_folder",
+            "attachments",
+            missing.to_str().unwrap(),
+            "markdown",
+            "relative",
+            true,
+        );
+
+        assert!(
+            policy
+                .target_directory(workspace.path(), &workspace.path().join("note.md"))
+                .is_err()
+        );
+        assert!(!missing.exists());
     }
 
     #[test]

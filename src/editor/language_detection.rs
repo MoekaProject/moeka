@@ -264,8 +264,8 @@ pub(crate) fn classify_pasted_text_kind(text: &str) -> Option<FileKind> {
     }
 
     pasted_text_shebang_language(text)
-        .or_else(|| pasted_text_first_line_language(text))
         .or_else(|| pasted_text_structured_language(text))
+        .or_else(|| pasted_text_first_line_language(text))
         .or_else(|| pasted_text_common_code_language(text))
         .or(Some(FileKind::Markdown))
 }

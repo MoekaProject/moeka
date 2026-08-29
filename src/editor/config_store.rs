@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,10 @@ pub(crate) struct WorkspaceConfig {
     pub roots: Vec<PathBuf>,
     #[serde(default)]
     pub active_root: Option<PathBuf>,
+    /// Base64 security-scoped bookmarks keyed by root, so the sandboxed build
+    /// can reopen folders the user granted access to in an earlier launch.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bookmarks: BTreeMap<PathBuf, String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
@@ -263,6 +268,8 @@ mod tests {
             auto_save: false,
             attachment_location: "current_file".to_string(),
             attachment_folder: "attachments".to_string(),
+            attachment_external_folder: String::new(),
+            attachment_external_folder_bookmark: String::new(),
             terminal_cursor_shape: "bar".to_string(),
             terminal_copy_on_select: false,
             terminal_launch_command: "github_copilot".to_string(),
@@ -310,6 +317,7 @@ mod tests {
             workspaces: WorkspaceConfig {
                 roots: vec![PathBuf::from("/tmp/project")],
                 active_root: Some(PathBuf::from("/tmp/project")),
+                bookmarks: BTreeMap::from([(PathBuf::from("/tmp/project"), "Ym9va".to_string())]),
             },
             ..SessionsFile::default()
         };

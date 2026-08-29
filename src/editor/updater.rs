@@ -89,7 +89,7 @@ impl EditorView {
     /// Checks on launch and then once a day, so a release published while the
     /// app stays open is still picked up.
     pub(crate) fn start_update_polling(&mut self, cx: &mut Context<Self>) {
-        if self.update_poll_task.is_some() {
+        if !crate::platform::capabilities::SELF_UPDATE || self.update_poll_task.is_some() {
             return;
         }
 
@@ -108,7 +108,10 @@ impl EditorView {
     }
 
     pub(crate) fn start_update_check(&mut self, cx: &mut Context<Self>) {
-        if self.update_task.is_some() || self.update_state.is_ready() {
+        if !crate::platform::capabilities::SELF_UPDATE
+            || self.update_task.is_some()
+            || self.update_state.is_ready()
+        {
             return;
         }
 
@@ -422,6 +425,7 @@ try {
     fs::write(&script_path, script).map_err(|error| error.to_string())?;
 
     crate::platform::process::headless_command("powershell.exe")
+        .map_err(|error| error.to_string())?
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-ExecutionPolicy")
