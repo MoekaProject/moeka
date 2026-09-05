@@ -5,12 +5,14 @@ use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent,
     MouseMoveEvent, SharedString, Window, div, prelude::*, px, svg,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::*;
 
 /// Documents larger than this keep no text in the reopen list; they are read
 /// back from disk. Smaller ones stay resident so reopening is instant.
 const RECENTLY_CLOSED_RESIDENT_TEXT_LIMIT: usize = 256 * 1024;
+const TAB_TITLE_MAX_DISPLAY_UNITS: usize = 18;
 
 #[derive(Clone, Copy)]
 enum TabDropTarget<'a> {
@@ -271,7 +273,10 @@ impl EditorView {
     fn editor_tab_index_for_path(&self, path: &Path) -> Option<usize> {
         self.tabs.iter().position(|tab| {
             tab.kind == TabKind::Editor
-                && tab.path.as_ref().is_some_and(|tab_path| tab_path == path)
+                && tab
+                    .path
+                    .as_ref()
+                    .is_some_and(|tab_path| crate::platform::paths::same_file_path(tab_path, path))
         })
     }
 
@@ -721,6 +726,7 @@ impl EditorView {
         let switching_tabs = self.active_tab_id.as_deref() != Some(tab_id.as_str());
         if switching_tabs {
             self.stash_active_tab_generated_preview_cache();
+            self.reading_mode = reading_mode_after_tab_activation(self.reading_mode, true);
         }
         self.invalidate_active_file_panel_caches();
         self.active_tab_id = Some(tab_id.clone());
@@ -1301,7 +1307,19 @@ impl EditorView {
         } else {
             ts.tab_item_text_color
         };
-        let (base, suffix) = split_file_name_for_display(&tab.title);
+        let display_title = tab
+            .path
+            .as_ref()
+            .map(|path| {
+                shortest_unique_path_suffix(
+                    path,
+                    self.all_tabs()
+                        .filter_map(|candidate| candidate.path.as_deref()),
+                )
+            })
+            .unwrap_or_else(|| tab.title.clone());
+        let (display_title_start, display_title_end) =
+            middle_ellipsize_parts(&display_title, TAB_TITLE_MAX_DISPLAY_UNITS);
         let tooltip_text = tab
             .path
             .as_ref()
@@ -1329,17 +1347,38 @@ impl EditorView {
             } else {
                 FontWeight::NORMAL
             })
-            .when(is_deleted, |this| this.line_through())
-            .child(div().whitespace_nowrap().child(base.to_string()))
-            .when_some(suffix.filter(|_| tab.path.is_some()), |this, suffix| {
-                this.child(
+            .when(is_deleted, |this| this.line_through());
+        let label = if let Some(display_title_end) = display_title_end {
+            label
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(display_title_start),
+                )
+                .child(div().flex_none().whitespace_nowrap().child("..."))
+                .child(
                     div()
                         .flex_none()
                         .whitespace_nowrap()
-                        .opacity(ts.tab_item_suffix_opacity)
-                        .child(suffix.to_string()),
+                        .child(display_title_end),
                 )
-            });
+        } else {
+            let (base, suffix) = split_file_name_for_display(&display_title_start);
+            label
+                .child(div().whitespace_nowrap().child(base.to_string()))
+                .when_some(suffix.filter(|_| tab.path.is_some()), |this, suffix| {
+                    this.child(
+                        div()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .opacity(ts.tab_item_suffix_opacity)
+                            .child(suffix.to_string()),
+                    )
+                })
+        };
         tooltip::with_tooltip(
             label,
             cx.entity().clone(),
@@ -2540,6 +2579,19 @@ impl EditorView {
                     ))
                 },
             )
+            .when(self.active_tab_supports_text_buffer(), |this| {
+                this.child(self.render_tab_bar_action_button(
+                    "tab-bar-reading-mode-toggle",
+                    DOC_SVG_PATH,
+                    self.reading_mode,
+                    true,
+                    None,
+                    self.t(crate::i18n::TextKey::ToolbarReadingModeTooltip),
+                    None,
+                    cx,
+                    |this, cx| this.toggle_reading_mode(cx),
+                ))
+            })
             .when(self.app_settings.simple_mode, |this| {
                 this.child(self.render_tab_bar_action_button(
                     "tab-bar-theme-toggle",
@@ -2959,6 +3011,92 @@ impl EditorView {
     }
 }
 
+fn shortest_unique_path_suffix<'a>(
+    path: &Path,
+    open_paths: impl Iterator<Item = &'a Path>,
+) -> String {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let conflicts = open_paths
+        .filter(|candidate| *candidate != path && candidate.file_name() == path.file_name())
+        .collect::<Vec<_>>();
+    if conflicts.is_empty() {
+        return file_name;
+    }
+
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for depth in 2..=components.len() {
+        let suffix = components[components.len() - depth..].join("/");
+        let unique = conflicts.iter().all(|candidate| {
+            let candidate_components = candidate
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(value) => {
+                        Some(value.to_string_lossy().into_owned())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            candidate_components.len() < depth
+                || candidate_components[candidate_components.len() - depth..].join("/") != suffix
+        });
+        if unique {
+            return suffix;
+        }
+    }
+
+    path.display().to_string()
+}
+
+fn middle_ellipsize_parts(text: &str, max_display_units: usize) -> (String, Option<String>) {
+    let graphemes = UnicodeSegmentation::graphemes(text, true).collect::<Vec<_>>();
+    let display_units = graphemes
+        .iter()
+        .map(|grapheme| usize::from(!grapheme.is_ascii()) + 1)
+        .collect::<Vec<_>>();
+    if display_units.iter().sum::<usize>() <= max_display_units || max_display_units < 4 {
+        return (text.to_string(), None);
+    }
+
+    let visible_units = max_display_units - 3;
+    let suffix_budget = (visible_units * 2).div_ceil(3);
+    let prefix_budget = visible_units - suffix_budget;
+    let prefix_len = display_units
+        .iter()
+        .scan(0usize, |used, width| {
+            *used += width;
+            Some(*used <= prefix_budget)
+        })
+        .take_while(|fits| *fits)
+        .count();
+    let suffix_len = display_units
+        .iter()
+        .rev()
+        .scan(0usize, |used, width| {
+            *used += width;
+            Some(*used <= suffix_budget)
+        })
+        .take_while(|fits| *fits)
+        .count();
+    let suffix_start = graphemes.len() - suffix_len;
+    (
+        graphemes[..prefix_len].concat(),
+        Some(graphemes[suffix_start..].concat()),
+    )
+}
+
+fn reading_mode_after_tab_activation(reading_mode: bool, switching_tabs: bool) -> bool {
+    reading_mode && !switching_tabs
+}
+
 /// Returns the byte offset of the end of the first Markdown content line,
 /// skipping YAML front matter when present.
 fn first_markdown_content_line_end(text: &str) -> Option<usize> {
@@ -3017,6 +3155,51 @@ mod tests {
             recovery: config_store::TabRecoveryState::default(),
             history: history_store::TabHistory::default(),
         }
+    }
+
+    #[test]
+    fn duplicate_tab_names_use_the_shortest_unique_parent_suffix() {
+        let paths = [
+            PathBuf::from("/workspace/alpha/notes/readme.md"),
+            PathBuf::from("/workspace/beta/notes/readme.md"),
+            PathBuf::from("/workspace/unique.md"),
+        ];
+
+        assert_eq!(
+            shortest_unique_path_suffix(&paths[0], paths.iter().map(PathBuf::as_path)),
+            "alpha/notes/readme.md",
+        );
+        assert_eq!(
+            shortest_unique_path_suffix(&paths[1], paths.iter().map(PathBuf::as_path)),
+            "beta/notes/readme.md",
+        );
+        assert_eq!(
+            shortest_unique_path_suffix(&paths[2], paths.iter().map(PathBuf::as_path)),
+            "unique.md",
+        );
+    }
+
+    #[test]
+    fn long_tab_titles_keep_their_beginning_and_end() {
+        assert_eq!(
+            middle_ellipsize_parts("short.md", 12),
+            ("short.md".to_string(), None),
+        );
+        assert_eq!(
+            middle_ellipsize_parts("abcdefghijklmnop.md", 12),
+            ("abc".to_string(), Some("nop.md".to_string())),
+        );
+        assert_eq!(
+            middle_ellipsize_parts("中文组合字符标题.md", 12),
+            ("中".to_string(), Some("题.md".to_string())),
+        );
+    }
+
+    #[test]
+    fn reading_mode_closes_only_when_switching_to_another_tab() {
+        assert!(!reading_mode_after_tab_activation(true, true));
+        assert!(reading_mode_after_tab_activation(true, false));
+        assert!(!reading_mode_after_tab_activation(false, true));
     }
 
     #[test]

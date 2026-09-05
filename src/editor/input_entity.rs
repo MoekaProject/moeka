@@ -158,7 +158,16 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_supports_text_buffer() || self.active_tab_is_read_only() {
+        let replaces_text = range_utf16.as_ref().is_some_and(|range| !range.is_empty())
+            || self
+                .marked_range
+                .as_ref()
+                .is_some_and(|range| !range.is_empty());
+        if !new_text.is_empty() || replaces_text {
+            if !self.begin_content_edit(cx) {
+                return;
+            }
+        } else if self.active_tab_is_read_only() {
             return;
         }
         self.last_scroll_cursor_visual_x = None;
@@ -388,7 +397,16 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_supports_text_buffer() || self.active_tab_is_read_only() {
+        let replaces_text = range_utf16.as_ref().is_some_and(|range| !range.is_empty())
+            || self
+                .marked_range
+                .as_ref()
+                .is_some_and(|range| !range.is_empty());
+        if !new_text.is_empty() || replaces_text {
+            if !self.begin_content_edit(cx) {
+                return;
+            }
+        } else if self.active_tab_is_read_only() {
             return;
         }
         self.last_scroll_cursor_visual_x = None;

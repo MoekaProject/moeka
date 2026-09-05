@@ -1349,10 +1349,12 @@ impl EditorView {
         action: FormatMenuAction,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_read_only() {
-            if action == FormatMenuAction::Copy {
-                self.copy_selection_to_clipboard(cx);
-            }
+        if action == FormatMenuAction::Copy {
+            self.copy_selection_to_clipboard(cx);
+            self.close_context_menu(cx);
+            return;
+        }
+        if !self.begin_content_edit(cx) {
             self.close_context_menu(cx);
             return;
         }
@@ -2047,6 +2049,7 @@ impl EditorView {
         shortcut: Option<SharedString>,
         is_selected: bool,
         is_active: bool,
+        is_enabled: bool,
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
@@ -2056,6 +2059,7 @@ impl EditorView {
             shortcut,
             is_selected,
             is_active,
+            is_enabled,
             FormatMenuHoverBehavior::None,
             cx,
             handler,
@@ -2069,6 +2073,7 @@ impl EditorView {
         shortcut: Option<SharedString>,
         is_selected: bool,
         is_active: bool,
+        is_enabled: bool,
         hover_behavior: FormatMenuHoverBehavior,
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
@@ -2111,7 +2116,7 @@ impl EditorView {
             .justify_between()
             .text_size(px(self.scaled(ms.menu_item_font_size_px)))
             .text_color(text_color)
-            .hover(move |s| s.bg(hover_bg))
+            .opacity(if is_enabled { 1.0 } else { 0.45 })
             .cursor(CursorStyle::Arrow)
             .child(
                 div()
@@ -2150,8 +2155,9 @@ impl EditorView {
                     )
                 }
             })
+            .when(is_enabled, |this| this.hover(move |s| s.bg(hover_bg)))
             .when(
-                !matches!(hover_behavior, FormatMenuHoverBehavior::None),
+                is_enabled && !matches!(hover_behavior, FormatMenuHoverBehavior::None),
                 |this| {
                     this.on_mouse_move(cx.listener(
                         move |this, event: &MouseMoveEvent, _window, cx| match hover_behavior {
@@ -2170,15 +2176,17 @@ impl EditorView {
                     ))
                 },
             )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
-                    handler(this, window, cx);
-                }),
-            )
+            .when(is_enabled, |this| {
+                this.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.suppress_editor_mouse_up_for_current_menu_event(cx);
+                        handler(this, window, cx);
+                    }),
+                )
+            })
             .into_any_element()
     }
 
@@ -2191,6 +2199,8 @@ impl EditorView {
     ) -> AnyElement {
         let ms = &self.styles.context_menu;
         let wss = &self.styles.workspace_switcher;
+        let is_enabled = matches!(submenu_kind, ContextMenuKind::Export { .. })
+            || !self.active_tab_is_read_only();
         let is_open = self.context_submenu.as_ref() == Some(&submenu_kind);
         let icon_size = self.scaled(ms.menu_format_icon_size_px);
         // Export lives in the sidebar-style menus, the rest in the format menu;
@@ -2231,7 +2241,7 @@ impl EditorView {
             .justify_between()
             .text_size(px(self.scaled(ms.menu_item_font_size_px)))
             .text_color(text_color)
-            .hover(move |style| style.bg(hover_bg))
+            .opacity(if is_enabled { 1.0 } else { 0.45 })
             .cursor(CursorStyle::Arrow)
             .child(
                 div()
@@ -2263,29 +2273,34 @@ impl EditorView {
                     .size(px(arrow_size))
                     .text_color(ms.menu_shortcut_text_color),
             )
-            .on_mouse_move({
-                let submenu_kind = submenu_kind.clone();
-                cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
-                    this.context_submenu_aim = Some(ContextSubmenuAim {
-                        origin: event.position,
-                    });
-                    this.context_submenu_hovered = false;
-                    if this.context_submenu.as_ref() != Some(&submenu_kind) {
+            .when(is_enabled, |this| {
+                this.hover(move |style| style.bg(hover_bg))
+            })
+            .when(is_enabled, |this| {
+                this.on_mouse_move({
+                    let submenu_kind = submenu_kind.clone();
+                    cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                        this.context_submenu_aim = Some(ContextSubmenuAim {
+                            origin: event.position,
+                        });
+                        this.context_submenu_hovered = false;
+                        if this.context_submenu.as_ref() != Some(&submenu_kind) {
+                            this.context_submenu = Some(submenu_kind.clone());
+                            cx.notify();
+                        }
+                    })
+                })
+                .on_mouse_down(MouseButton::Left, {
+                    let submenu_kind = submenu_kind.clone();
+                    cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.context_submenu_aim = Some(ContextSubmenuAim {
+                            origin: event.position,
+                        });
+                        this.context_submenu_hovered = false;
                         this.context_submenu = Some(submenu_kind.clone());
                         cx.notify();
-                    }
-                })
-            })
-            .on_mouse_down(MouseButton::Left, {
-                let submenu_kind = submenu_kind.clone();
-                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    cx.stop_propagation();
-                    this.context_submenu_aim = Some(ContextSubmenuAim {
-                        origin: event.position,
-                    });
-                    this.context_submenu_hovered = false;
-                    this.context_submenu = Some(submenu_kind.clone());
-                    cx.notify();
+                    })
                 })
             })
             .into_any_element();
@@ -3004,6 +3019,7 @@ impl EditorView {
                     None,
                     false,
                     is_active,
+                    !self.active_tab_is_read_only(),
                     cx,
                     move |this, _, cx| {
                         this.execute_format_menu_action(action, cx);
@@ -3029,6 +3045,7 @@ impl EditorView {
                 None,
                 false,
                 false,
+                !self.active_tab_is_read_only(),
                 cx,
                 move |this, _, cx| {
                     this.execute_format_menu_action(action, cx);
@@ -3046,6 +3063,7 @@ impl EditorView {
                 None,
                 false,
                 false,
+                true,
                 cx,
                 move |this, _, cx| {
                     this.copy_markdown_image_to_clipboard(image_source.clone(), cx);
@@ -3063,6 +3081,7 @@ impl EditorView {
                     None,
                     false,
                     false,
+                    true,
                     cx,
                     move |this, _, cx| {
                         this.close_context_menu(cx);
@@ -3080,6 +3099,7 @@ impl EditorView {
                     None,
                     false,
                     false,
+                    true,
                     cx,
                     move |this, _, cx| {
                         this.context_menu = None;
@@ -3294,6 +3314,7 @@ impl EditorView {
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
         let fts = &self.styles.format_toolbar;
+        let is_enabled = !self.active_tab_is_read_only();
         let group_name = SharedString::from(format!("format-toolbar-{label}"));
         let hover_color = fts.format_toolbar_icon_hover_color;
         let icon_color = if is_active {
@@ -3314,21 +3335,26 @@ impl EditorView {
             .items_center()
             .justify_center()
             .cursor(CursorStyle::Arrow)
+            .opacity(if is_enabled { 1.0 } else { 0.4 })
             .child(
                 svg()
                     .path(icon)
                     .size(px(icon_size))
                     .text_color(icon_color)
-                    .group_hover(group_name, move |style| style.text_color(hover_color)),
+                    .when(is_enabled, |this| {
+                        this.group_hover(group_name, move |style| style.text_color(hover_color))
+                    }),
             )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    on_click(this, cx);
-                }),
-            );
+            .when(is_enabled, |this| {
+                this.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        on_click(this, cx);
+                    }),
+                )
+            });
 
         tooltip::with_tooltip(button, cx.entity().clone(), label, shortcut)
     }
@@ -3403,12 +3429,18 @@ impl EditorView {
                     FormatMenuAction::Paste,
                 ),
             ] {
+                let can_start_edit = self.active_tab_can_start_content_edit();
+                let is_enabled = action == FormatMenuAction::Copy
+                    || matches!(action, FormatMenuAction::Cut | FormatMenuAction::Paste)
+                        && can_start_edit
+                    || !self.active_tab_is_read_only();
                 items.push(self.render_format_context_menu_item_with_hover_behavior(
                     &label,
                     None,
                     shortcut,
                     false,
                     false,
+                    is_enabled,
                     FormatMenuHoverBehavior::ClearSubmenu,
                     cx,
                     move |this, _, cx| {
@@ -3426,6 +3458,7 @@ impl EditorView {
                     None,
                     false,
                     false,
+                    true,
                     FormatMenuHoverBehavior::ClearSubmenu,
                     cx,
                     move |this, _, cx| {
@@ -3442,6 +3475,7 @@ impl EditorView {
                     None,
                     false,
                     false,
+                    true,
                     FormatMenuHoverBehavior::ClearSubmenu,
                     cx,
                     move |this, _, cx| {
@@ -3466,6 +3500,7 @@ impl EditorView {
                 None,
                 false,
                 false,
+                true,
                 FormatMenuHoverBehavior::ClearSubmenu,
                 cx,
                 move |this, _, cx| {
@@ -3479,6 +3514,7 @@ impl EditorView {
                 None,
                 false,
                 false,
+                !self.active_tab_is_read_only(),
                 FormatMenuHoverBehavior::ClearSubmenu,
                 cx,
                 move |this, _, cx| {
@@ -3542,6 +3578,7 @@ impl EditorView {
                     shortcut,
                     false,
                     is_active,
+                    !self.active_tab_is_read_only(),
                     FormatMenuHoverBehavior::ClearSubmenu,
                     cx,
                     move |this, _, cx| {
@@ -3573,6 +3610,7 @@ impl EditorView {
                     shortcut,
                     false,
                     is_active,
+                    !self.active_tab_is_read_only(),
                     FormatMenuHoverBehavior::ClearSubmenu,
                     cx,
                     move |this, _, cx| {
@@ -3601,6 +3639,7 @@ impl EditorView {
                 slash_item.shortcut,
                 is_selected,
                 is_active,
+                !self.active_tab_is_read_only(),
                 cx,
                 move |this, _, cx| {
                     this.execute_format_menu_action(action, cx);
@@ -3657,6 +3696,7 @@ impl EditorView {
                 shortcut,
                 false,
                 is_active,
+                !self.active_tab_is_read_only(),
                 cx,
                 move |this, _, cx| {
                     this.execute_format_menu_action(action, cx);
@@ -3693,6 +3733,7 @@ impl EditorView {
                 shortcut,
                 false,
                 is_active,
+                !self.active_tab_is_read_only(),
                 cx,
                 move |this, _, cx| {
                     this.execute_format_menu_action(action, cx);
@@ -3747,6 +3788,7 @@ impl EditorView {
                 shortcut,
                 false,
                 is_active,
+                !self.active_tab_is_read_only(),
                 cx,
                 move |this, _, cx| {
                     this.execute_format_menu_action(action, cx);
@@ -5017,6 +5059,29 @@ impl EditorView {
                 self.append_tab_pane_context_menu_items(&mut items, tab_id, cx);
                 if let Some(tab) = self.tabs.iter().find(|t| t.id == *tab_id) {
                     if let Some(path) = &tab.path {
+                        let starred_path = Self::normalize_sidebar_path(path);
+                        let is_starred = self.app_settings.is_starred_file(&starred_path);
+                        items.push(self.render_context_menu_separator());
+                        items.push(self.render_context_menu_item(
+                            if is_starred {
+                                self.t(crate::i18n::TextKey::Unstar)
+                            } else {
+                                self.t(crate::i18n::TextKey::Star)
+                            },
+                            false,
+                            cx,
+                            move |this, _, cx| {
+                                if is_starred {
+                                    this.app_settings.remove_starred_file(&starred_path);
+                                } else {
+                                    this.app_settings.add_starred_file(starred_path.clone());
+                                    this.sidebar_starred_collapsed = false;
+                                }
+                                this.app_settings.save();
+                                this.close_context_menu(cx);
+                                cx.notify();
+                            },
+                        ));
                         if is_markdown_file(path) {
                             items.push(self.render_context_menu_separator());
                             items.push(self.render_format_submenu_trigger_item(

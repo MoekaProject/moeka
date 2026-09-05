@@ -493,7 +493,7 @@ impl EditorView {
     /// with the corresponding base lines. The edit goes through the normal
     /// checkpoint/reparse path so it is undoable and refreshes the diff.
     pub(crate) fn revert_inline_diff_hunk(&mut self, hunk_index: usize, cx: &mut Context<Self>) {
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         let Some(tab_index) = self.active_tab_index() else {

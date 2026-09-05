@@ -93,6 +93,9 @@ impl EditorView {
             self.whiteboard_undo(cx);
             return;
         }
+        if !self.begin_content_edit(cx) {
+            return;
+        }
         if !self.apply_history_transaction(true, cx) {
             self.apply_history_snapshot(cx, |history, current| history.take_undo(current));
         }
@@ -203,6 +206,9 @@ impl EditorView {
     pub(crate) fn on_redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
         if self.active_tab_is_whiteboard() {
             self.whiteboard_redo(cx);
+            return;
+        }
+        if !self.begin_content_edit(cx) {
             return;
         }
         if !self.apply_history_transaction(false, cx) {
@@ -342,7 +348,7 @@ impl EditorView {
             self.whiteboard_delete_selected(cx);
             return;
         }
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -540,6 +546,9 @@ impl EditorView {
             self.sidebar_delete_focused(cx);
             return;
         }
+        if !self.begin_content_edit(cx) {
+            return;
+        }
         if let Some((table_start_line, is_column, index)) = self.selected_handle.take() {
             if is_column && self.block_is_front_matter(table_start_line) {
                 self.pause_blinking(cx);
@@ -551,9 +560,6 @@ impl EditorView {
                 self.table_delete_row(table_start_line, index, cx);
             }
             self.pause_blinking(cx);
-            return;
-        }
-        if self.active_tab_is_read_only() {
             return;
         }
         self.checkpoint();
@@ -1020,7 +1026,7 @@ impl EditorView {
             }
             return;
         }
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         if self.wiki_link_start.is_some() {
@@ -1258,7 +1264,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1269,7 +1275,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         if self.table_move_to_adjacent_cell(true, cx) {
@@ -1305,7 +1311,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_back_tab(&mut self, _: &BackTab, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         if self.table_move_to_adjacent_cell(false, cx) {
@@ -1358,7 +1364,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_read_only() || self.active_tab_is_whiteboard() {
+        if self.active_tab_is_whiteboard() || !self.begin_content_edit(cx) {
             return;
         }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
@@ -1508,7 +1514,7 @@ impl EditorView {
     }
 
     fn delete_to_line_boundary_impl(&mut self, to_start: bool, kill: bool, cx: &mut Context<Self>) {
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1589,7 +1595,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_yank(&mut self, _: &Yank, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_read_only() || self.active_tab_is_whiteboard() {
+        if self.active_tab_is_whiteboard() || !self.begin_content_edit(cx) {
             return;
         }
         let Some(text) = self.kill_ring.clone() else {
@@ -1603,7 +1609,7 @@ impl EditorView {
 
     /// Inserts a line break after the cursor without moving it (emacs ctrl-o).
     pub(crate) fn on_open_line(&mut self, _: &OpenLine, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_read_only() || self.active_tab_is_whiteboard() {
+        if self.active_tab_is_whiteboard() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1628,7 +1634,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_read_only() || self.active_tab_is_whiteboard() {
+        if self.active_tab_is_whiteboard() || !self.begin_content_edit(cx) {
             return;
         }
         self.clear_extra_cursors();
@@ -1690,7 +1696,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1714,7 +1720,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1740,7 +1746,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1754,7 +1760,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1768,7 +1774,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1782,7 +1788,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1796,7 +1802,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1810,7 +1816,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1824,7 +1830,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1838,7 +1844,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1852,7 +1858,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1866,7 +1872,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1880,7 +1886,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1907,7 +1913,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1921,7 +1927,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1935,7 +1941,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1948,7 +1954,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1961,7 +1967,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1974,7 +1980,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1987,7 +1993,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2000,7 +2006,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2014,7 +2020,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
             return;
         }
         if let Some(level) = self
@@ -2230,7 +2236,7 @@ impl EditorView {
         if self.sidebar_edit.is_some() {
             return;
         }
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2254,7 +2260,7 @@ impl EditorView {
         if self.sidebar_edit.is_some() {
             return;
         }
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2278,7 +2284,7 @@ impl EditorView {
         if self.sidebar_edit.is_some() {
             return;
         }
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2296,7 +2302,7 @@ impl EditorView {
     }
 
     fn copy_selected_lines(&mut self, upward: bool, cx: &mut Context<Self>) {
-        if self.sidebar_edit.is_some() || self.active_tab_is_read_only() {
+        if self.sidebar_edit.is_some() || !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2356,7 +2362,7 @@ impl EditorView {
         if self.sidebar_edit.is_some() {
             return;
         }
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2395,7 +2401,7 @@ impl EditorView {
         if self.sidebar_edit.is_some() {
             return;
         }
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
@@ -2433,7 +2439,7 @@ impl EditorView {
         if self.sidebar_edit.is_some() {
             return;
         }
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);

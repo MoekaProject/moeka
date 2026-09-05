@@ -1337,6 +1337,22 @@ pub(crate) fn effective_wrap_width_for_letter_spacing(
     }
 }
 
+pub(crate) fn effective_monospace_wrap_width_for_letter_spacing(
+    width: f32,
+    character_advance: f32,
+    letter_spacing: f32,
+) -> f32 {
+    if letter_spacing > 0.0 && character_advance > 0.0 {
+        width * character_advance / (character_advance + letter_spacing)
+    } else {
+        width
+    }
+}
+
+pub(crate) fn code_block_soft_wrap_width(viewport_width: f32, character_advance: f32) -> f32 {
+    (viewport_width - character_advance.max(1.0)).max(1.0)
+}
+
 pub(crate) fn build_highlight_bounds(
     display_text: &str,
     runs: &[TextRun],
@@ -2283,9 +2299,10 @@ mod tests {
         AnchoredPopupVertical, GeneratedPreviewFontFamilies, anchored_popup_placement,
         apply_search_match_text_styles, build_display_text, build_generated_block_preview_svg,
         build_table_display_text, build_text_runs_for_display, compute_display_prefix_bytes,
-        compute_generated_preview_size, effective_wrap_width_for_letter_spacing,
-        load_generated_preview_image_from_svg, prefix_is_folded, table_cell_content_offset,
-        table_cell_decoration, task_prefix_is_folded, wrap_segment_byte_ranges,
+        compute_generated_preview_size, effective_monospace_wrap_width_for_letter_spacing,
+        effective_wrap_width_for_letter_spacing, load_generated_preview_image_from_svg,
+        prefix_is_folded, table_cell_content_offset, table_cell_decoration, task_prefix_is_folded,
+        wrap_segment_byte_ranges,
     };
 
     #[test]
@@ -2378,6 +2395,17 @@ mod tests {
         assert_eq!(
             effective_wrap_width_for_letter_spacing(150.0, 15.0, 0.0),
             150.0
+        );
+    }
+
+    #[test]
+    fn letter_spaced_code_wrap_uses_the_measured_character_advance() {
+        let width = effective_monospace_wrap_width_for_letter_spacing(460.0, 8.0, 1.0);
+        assert!((width - 408.8889).abs() < 0.001);
+        assert!(width < effective_wrap_width_for_letter_spacing(460.0, 14.0, 1.0));
+        assert_eq!(
+            effective_monospace_wrap_width_for_letter_spacing(460.0, 8.0, 0.0),
+            460.0,
         );
     }
 
@@ -2545,6 +2573,14 @@ mod tests {
     }
 
     fn folded_display_and_runs(line: &str, theme: &Theme) -> (String, Vec<TextRun>) {
+        folded_display_and_runs_with_body_cjk(line, theme, ".SystemUIFont")
+    }
+
+    fn folded_display_and_runs_with_body_cjk(
+        line: &str,
+        theme: &Theme,
+        body_cjk: &'static str,
+    ) -> (String, Vec<TextRun>) {
         let decoration = markdown::parse_decorations(line)
             .into_iter()
             .next()
@@ -2574,7 +2610,7 @@ mod tests {
             false,
             prefix_collapsed,
             &font(".SystemUIFont"),
-            &font(".SystemUIFont"),
+            &font(body_cjk),
             &font("Test Mono"),
             &font(".SystemUIFont"),
             &font(".SystemUIFont"),
@@ -2594,6 +2630,28 @@ mod tests {
             false,
         );
         (display_text, runs)
+    }
+
+    #[test]
+    fn mixed_latin_cjk_text_keeps_script_specific_font_runs() {
+        let theme = Theme::one_dark();
+        let (display_text, runs) =
+            folded_display_and_runs_with_body_cjk("only english中", &theme, "Test CJK");
+
+        assert_eq!(
+            run_at_byte(&runs, display_text.find('o').unwrap())
+                .font
+                .family
+                .as_ref(),
+            ".SystemUIFont",
+        );
+        assert_eq!(
+            run_at_byte(&runs, display_text.find('中').unwrap())
+                .font
+                .family
+                .as_ref(),
+            "Test CJK",
+        );
     }
 
     fn run_at_byte(runs: &[TextRun], byte_offset: usize) -> &TextRun {
@@ -5866,36 +5924,20 @@ pub(crate) fn build_text_runs_for_display_with_language(
         // font broke monospaced alignment for mixed-script code.
         assign_font_roles(0..buf_len, FontRole::Monospace, FontRole::Monospace);
     } else {
-        let has_latin_text = line_content
-            .chars()
-            .any(|ch| !ch.is_whitespace() && prefers_latin_text_font(ch));
-        let has_non_latin_text = line_content
-            .chars()
-            .any(|ch| !ch.is_whitespace() && !prefers_latin_text_font(ch));
-
-        if has_latin_text && has_non_latin_text {
-            let role = if is_heading {
+        for (start, ch) in line_content.char_indices() {
+            let role = if prefers_latin_text_font(ch) {
+                if is_heading {
+                    FontRole::HeadingLatin
+                } else {
+                    FontRole::BodyLatin
+                }
+            } else if is_heading {
                 FontRole::HeadingCjk
             } else {
                 FontRole::BodyCjk
             };
-            assign_font_roles(0..buf_len, role, role);
-        } else {
-            for (start, ch) in line_content.char_indices() {
-                let role = if prefers_latin_text_font(ch) {
-                    if is_heading {
-                        FontRole::HeadingLatin
-                    } else {
-                        FontRole::BodyLatin
-                    }
-                } else if is_heading {
-                    FontRole::HeadingCjk
-                } else {
-                    FontRole::BodyCjk
-                };
-                let end = start + ch.len_utf8();
-                assign_font_roles(start..end.min(buf_len), role, role);
-            }
+            let end = start + ch.len_utf8();
+            assign_font_roles(start..end.min(buf_len), role, role);
         }
     }
 

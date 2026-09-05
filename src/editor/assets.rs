@@ -10,6 +10,7 @@ pub(crate) const BACK_SVG_PATH: &str = "assets/icons/back.svg";
 pub(crate) const FOLD_SVG_PATH: &str = "assets/icons/fold.svg";
 pub(crate) const FOLD_EXPANDED_SVG_PATH: &str = "assets/icons/fold-expanded.svg";
 pub(crate) const OPEN_SVG_PATH: &str = "assets/icons/open.svg";
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const LOGO_SVG_PATH: &str = "assets/icons/logo.svg";
 pub(crate) const ROOT_SVG_PATH: &str = "assets/icons/filetree/all.svg";
 pub(crate) const FILETREE_SEARCH_SVG_PATH: &str = "assets/icons/filetree/search.svg";

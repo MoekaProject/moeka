@@ -2849,16 +2849,14 @@ impl EditorView {
     }
 
     pub(crate) fn add_path_to_chat(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        let Some(relative_path) = self.relative_path_for_path(path) else {
-            return;
-        };
-        self.add_reference_to_terminal(format!("@{relative_path} "), cx);
+        let reference_path = self.chat_reference_path(path);
+        self.add_reference_to_terminal(format!("@{reference_path} "), cx);
     }
 
     pub(crate) fn add_paths_to_chat(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         let references = paths
             .iter()
-            .filter_map(|path| self.relative_path_for_path(path))
+            .map(|path| self.chat_reference_path(path))
             .map(|path| format!("@{path} "))
             .collect::<String>();
         if !references.is_empty() {
@@ -2872,18 +2870,20 @@ impl EditorView {
         range: Range<usize>,
         cx: &mut Context<Self>,
     ) {
-        let Some(relative_path) = self.relative_path_for_path(path) else {
-            return;
-        };
+        let reference_path = self.chat_reference_path(path);
         let (start_line, start_col) = Self::chat_reference_position(&self.buffer, range.start);
         let reference = if range.is_empty() {
-            format!("@{relative_path} L{start_line}:C{start_col} ")
+            format!("@{reference_path} L{start_line}:C{start_col} ")
         } else {
             let (end_line, end_col) =
                 Self::chat_reference_position(&self.buffer, range.end.saturating_sub(1));
-            format!("@{relative_path} L{start_line}:C{start_col}-L{end_line}:C{end_col} ")
+            format!("@{reference_path} L{start_line}:C{start_col}-L{end_line}:C{end_col} ")
         };
         self.add_reference_to_terminal(reference, cx);
+    }
+
+    fn chat_reference_path(&self, path: &std::path::Path) -> String {
+        chat_reference_path(path, self.workspace_root_for_path(path).as_deref())
     }
 
     fn chat_reference_position(buffer: &crate::buffer::Buffer, offset: usize) -> (usize, usize) {
@@ -4704,6 +4704,29 @@ impl EditorView {
     }
 }
 
+fn chat_reference_path(path: &std::path::Path, workspace_root: Option<&std::path::Path>) -> String {
+    if let Some(root) = workspace_root
+        && let Ok(relative) = path.strip_prefix(root)
+    {
+        return if relative.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            relative.to_string_lossy().into_owned()
+        };
+    }
+
+    let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|current| current.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    });
+    absolute.to_string_lossy().into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5023,6 +5046,22 @@ mod tests {
         assert_eq!(
             EditorView::chat_reference_position(&buffer, inside_li),
             (2, 2)
+        );
+    }
+
+    #[test]
+    fn chat_references_use_absolute_paths_outside_the_workspace() {
+        let workspace = std::path::Path::new("/workspace");
+        assert_eq!(
+            chat_reference_path(
+                std::path::Path::new("/workspace/docs/note.md"),
+                Some(workspace),
+            ),
+            "docs/note.md",
+        );
+        assert_eq!(
+            chat_reference_path(std::path::Path::new("/external/note.md"), None),
+            "/external/note.md",
         );
     }
 

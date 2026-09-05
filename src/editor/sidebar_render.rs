@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, ExternalPaths, FontWeight, MouseButton,
-    MouseDownEvent, SharedString, Transformation, div, img, prelude::*, px, radians, svg,
+    MouseDownEvent, SharedString, Transformation, div, prelude::*, px, radians, svg,
 };
 
 use super::*;
@@ -531,6 +531,12 @@ impl EditorView {
         let click_path = path.clone();
         let context_menu_path = path.clone();
         let close_hover_bg = ss.sidebar_item_hover_bg;
+        let name_label = tooltip::with_tooltip(
+            self.render_sidebar_name_label(&name, label_color),
+            cx.entity().clone(),
+            normalized_path.display().to_string(),
+            None::<&'static str>,
+        );
 
         div()
             .id(SharedString::from(format!(
@@ -575,7 +581,7 @@ impl EditorView {
                             .child(div().w(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))),
                     )
                     .child(self.render_sidebar_edit_indicator(&name, false, icon_color))
-                    .child(self.render_sidebar_name_label(&name, label_color))
+                    .child(name_label)
                     .child(
                         div()
                             .id(SharedString::from(format!(
@@ -1164,11 +1170,7 @@ impl EditorView {
                 self.schedule_sidebar_directory_load(self.sidebar_root.clone(), cx);
             }
         }
-        let starred_files = if has_root {
-            self.visible_starred_sidebar_files()
-        } else {
-            Vec::new()
-        };
+        let starred_files = self.visible_starred_sidebar_files();
         let show_workspace_bar = true;
         let items = if has_root {
             Some(self.sidebar_items())
@@ -1503,32 +1505,15 @@ impl EditorView {
             }
         }
 
-        if !self.app_settings.simple_mode {
-            tree_items.insert(
-                0,
-                div()
-                    .w_full()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .py(px(self.scaled(ss.sidebar_logo_padding_y_px)))
-                    .child(
-                        img(helpers::asset_image_source(LOGO_SVG_PATH))
-                            .w(px(self.scaled(ss.sidebar_logo_size_px)))
-                            .h(px(self.scaled(ss.sidebar_logo_size_px))),
-                    )
-                    .into_any_element(),
-            );
-        }
-
-        if has_root {
-            let header_index = usize::from(!self.app_settings.simple_mode);
+        if has_root || !starred_files.is_empty() {
+            let header_index = 0;
             tree_items.insert(
                 header_index,
                 self.render_starred_sidebar_section(&starred_files, cx),
             );
-            tree_items.insert(header_index + 1, header);
+            if has_root {
+                tree_items.insert(header_index + 1, header);
+            }
         }
 
         tree_items.push(
@@ -1539,13 +1524,8 @@ impl EditorView {
                 .into_any_element(),
         );
 
-        let logo_area_height = if self.app_settings.simple_mode {
-            0.0
-        } else {
-            self.scaled(ss.sidebar_logo_size_px + 2.0 * ss.sidebar_logo_padding_y_px)
-        };
         let scroll_y = -f32::from(self.sidebar_scroll_handle.offset().y);
-        let sticky_headers_visible = has_root && scroll_y >= logo_area_height;
+        let sticky_headers_visible = has_root && scroll_y >= 0.0;
         let sidebar_scrollbar = self.render_scrollbar_for_handle(
             PanelScrollbarKind::Sidebar,
             &self.sidebar_scroll_handle,

@@ -687,6 +687,7 @@ impl EditorView {
         self.panes[new_index].state = state;
 
         self.focused_pane_id = pane_id;
+        self.reading_mode = false;
 
         // Cancel animations that were driving the previous pane's root fields.
         self.scroll_anim_epoch = self.scroll_anim_epoch.wrapping_add(1);
@@ -772,7 +773,10 @@ impl EditorView {
     pub(crate) fn pane_id_for_editor_path(&self, path: &std::path::Path) -> Option<PaneId> {
         let matches_path = |tab: &OpenTab| {
             tab.kind == TabKind::Editor
-                && tab.path.as_ref().is_some_and(|tab_path| tab_path == path)
+                && tab
+                    .path
+                    .as_ref()
+                    .is_some_and(|tab_path| crate::platform::paths::same_file_path(tab_path, path))
         };
         if self.tabs.iter().any(matches_path) {
             return Some(self.current_pane_id());

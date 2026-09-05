@@ -272,6 +272,18 @@ fn outline_heading(buffer: &Buffer, line: usize, state_after_line: u16) -> Optio
     let level = setext_level?;
     let text_line = line.checked_sub(1)?;
     let text = structural_line_content(buffer.line_content(text_line))?.trim();
+    let previous_is_list_item = text
+        .as_bytes()
+        .first()
+        .is_some_and(|marker| matches!(marker, b'-' | b'*' | b'+'))
+        && text
+            .as_bytes()
+            .get(1)
+            .is_some_and(|separator| matches!(separator, b' ' | b'\t'))
+        || crate::markdown::ordered_list_prefix_len(text) > 0;
+    if previous_is_list_item {
+        return None;
+    }
     (!text.is_empty()).then(|| OutlineHeading {
         line: text_line,
         level,
@@ -430,6 +442,13 @@ mod tests {
             headings,
             vec![(0, 1, "ATX"), (2, 2, "Quoted"), (4, 2, "Setext")]
         );
+    }
+
+    #[test]
+    fn nested_list_thematic_break_is_not_an_outline_heading() {
+        let buffer = Buffer::from_text("- parent\n  - child\n  ---\n");
+        let index = MarkdownOutlineIndex::rebuild(&buffer);
+        assert!(index.headings.is_empty());
     }
 
     #[test]

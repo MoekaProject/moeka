@@ -130,6 +130,7 @@ impl EditorView {
         div()
             .id("settings-panel")
             .flex_1()
+            .min_h(px(0.0))
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.settings_scroll_handle)

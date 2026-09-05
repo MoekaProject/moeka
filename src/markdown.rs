@@ -268,10 +268,17 @@ fn unordered_list_prefix_len(content: &str) -> usize {
 }
 
 fn empty_unordered_list_item_prefix_len(content: &str) -> Option<(usize, usize)> {
-    let leading_ws = content.len() - content.trim_start_matches([' ', '\t']).len();
-    let trimmed = &content[leading_ws..];
-    let prefix_len = unordered_list_prefix_len(trimmed);
-    (prefix_len > 0 && trimmed[prefix_len..].is_empty()).then_some((leading_ws, prefix_len))
+    let (marker_start, prefix_len) = physical_unordered_list_prefix(content)?;
+    (content[marker_start + prefix_len..].is_empty()).then_some((marker_start, prefix_len))
+}
+
+fn physical_unordered_list_prefix(content: &str) -> Option<(usize, usize)> {
+    let quote_len = blockquote_prefix_len(content);
+    let body = &content[quote_len..];
+    let indent = body.len() - body.trim_start_matches([' ', '\t']).len();
+    let marker_start = quote_len + indent;
+    let prefix_len = unordered_list_prefix_len(&content[marker_start..]);
+    (prefix_len > 0).then_some((marker_start, prefix_len))
 }
 
 /// A `-` marker with nothing but whitespace after it, as typed while starting a
@@ -1476,16 +1483,16 @@ fn parse_decorations_with_options(
         }
     }
 
-    // CommonMark treats an indented `- ` as a Setext underline. In an editor,
-    // a trailing space on a single marker signals an in-progress nested list:
-    // `- A\n  - `. Recover that narrow physical-line pattern after all parser
-    // events, without changing ordinary `Title\n-` / `Title\n---` headings.
+    // CommonMark can treat an indented `- ` as a Setext underline. In an editor,
+    // a trailing space on a single marker signals an in-progress nested list.
+    // Recover that physical-line pattern at any nesting depth (and inside a
+    // blockquote) without changing ordinary `Title\n-` / `Title\n---` headings.
     for line in 0..decorations.len().saturating_sub(1) {
         let content = get_line_content(text, &line_starts, line, decoration_count);
-        let first_prefix_len = unordered_list_prefix_len(content);
-        if first_prefix_len == 0 {
+        let Some((first_marker_start, first_prefix_len)) = physical_unordered_list_prefix(content)
+        else {
             continue;
-        }
+        };
         let next_line = line + 1;
         let next_content = get_line_content(text, &line_starts, next_line, decorations.len());
         let Some((next_leading_ws, next_prefix_len)) =
@@ -1498,11 +1505,11 @@ fn parse_decorations_with_options(
         if !decorations[line]
             .syntax_ranges
             .iter()
-            .any(|range| range.range == (0..first_prefix_len))
+            .any(|range| range.range == (first_marker_start..first_marker_start + first_prefix_len))
         {
             decorations[line].syntax_ranges.push(SyntaxRange {
-                range: 0..first_prefix_len,
-                trigger_range: 0..first_prefix_len,
+                range: first_marker_start..first_marker_start + first_prefix_len,
+                trigger_range: first_marker_start..first_marker_start + first_prefix_len,
             });
         }
         decorations[next_line].block_type = BlockType::UnorderedList;
@@ -2550,6 +2557,27 @@ fn is_code_fence_closer(content: &str, marker: char, open_run: usize) -> bool {
     let rest = &content[leading..];
     let run = rest.chars().take_while(|ch| *ch == marker).count();
     run >= open_run && rest[run..].trim().is_empty()
+}
+
+pub(crate) fn fenced_code_block_line_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut open: Option<(usize, char, usize)> = None;
+    for (line, content) in text.lines().enumerate() {
+        match open {
+            Some((start, marker, run)) => {
+                if is_code_fence_closer(content, marker, run) {
+                    ranges.push(start..line + 1);
+                    open = None;
+                }
+            }
+            None => {
+                if let Some((marker, run)) = code_fence_opener(content) {
+                    open = Some((line, marker, run));
+                }
+            }
+        }
+    }
+    ranges
 }
 
 /// Byte range of the marker run of a fence that is never closed.
@@ -4497,6 +4525,50 @@ mod tests {
         assert_eq!(decorations[1].block_type, BlockType::UnorderedList);
         assert_eq!(decorations[0].syntax_ranges[0].range, 0..2);
         assert_eq!(decorations[1].syntax_ranges[0].range, 2..4);
+    }
+
+    #[test]
+    fn incomplete_third_level_unordered_item_does_not_promote_parent_to_heading() {
+        let decorations = parse_decorations("- A\n  - B\n    - \n");
+
+        assert_eq!(decorations[0].block_type, BlockType::UnorderedList);
+        assert_eq!(decorations[1].block_type, BlockType::UnorderedList);
+        assert_eq!(decorations[2].block_type, BlockType::UnorderedList);
+        assert_eq!(decorations[1].syntax_ranges[0].range, 2..4);
+        assert_eq!(decorations[2].syntax_ranges[0].range, 4..6);
+    }
+
+    #[test]
+    fn all_unordered_markers_render_immediately_at_nested_levels() {
+        for marker in ["-", "*", "+"] {
+            let text = format!("- A\n  - B\n    {marker} \n");
+            let decorations = parse_decorations(&text);
+            assert_eq!(
+                decorations[2].block_type,
+                BlockType::UnorderedList,
+                "marker {marker}"
+            );
+            assert!(
+                decorations[2]
+                    .syntax_ranges
+                    .iter()
+                    .any(|range| range.range == (4..6))
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_nested_unordered_item_inside_quote_stays_a_list() {
+        let decorations = parse_decorations("> - A\n>   - \n");
+
+        assert_eq!(decorations[0].block_type, BlockType::UnorderedList);
+        assert_eq!(decorations[1].block_type, BlockType::UnorderedList);
+        assert!(
+            decorations[1]
+                .syntax_ranges
+                .iter()
+                .any(|range| range.range == (4..6))
+        );
     }
 
     #[test]

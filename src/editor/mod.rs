@@ -847,12 +847,14 @@ impl LargeDocumentFrameBench {
 #[derive(Clone, Default)]
 pub(crate) struct LazyMarkdownDecorations {
     parsed_chunks: Vec<bool>,
+    fenced_code_spans: Option<Vec<Range<usize>>>,
 }
 
 impl LazyMarkdownDecorations {
     fn new(line_count: usize) -> Self {
         Self {
             parsed_chunks: vec![false; line_count.div_ceil(LARGE_MARKDOWN_CHUNK_LINES)],
+            fenced_code_spans: None,
         }
     }
 
@@ -880,6 +882,7 @@ impl LazyMarkdownDecorations {
     fn resize_after_structural_edit(&mut self, line_count: usize, start_line: usize) {
         let chunk_count = line_count.div_ceil(LARGE_MARKDOWN_CHUNK_LINES);
         self.parsed_chunks.resize(chunk_count, false);
+        self.fenced_code_spans = None;
         let first_invalid = start_line / LARGE_MARKDOWN_CHUNK_LINES;
         for parsed in self.parsed_chunks.iter_mut().skip(first_invalid) {
             *parsed = false;
@@ -913,6 +916,9 @@ pub(crate) fn parse_lazy_markdown_range(
     let first_chunk = start / LARGE_MARKDOWN_CHUNK_LINES;
     let last_chunk = (end - 1) / LARGE_MARKDOWN_CHUNK_LINES;
     let mut changed = false;
+    if lazy.fenced_code_spans.is_none() {
+        lazy.fenced_code_spans = Some(markdown::fenced_code_block_line_ranges(buffer.text()));
+    }
 
     for chunk in first_chunk..=last_chunk {
         if lazy.is_parsed(chunk) {
@@ -939,6 +945,15 @@ pub(crate) fn parse_lazy_markdown_range(
             parse_end += 1;
             scanned += 1;
         }
+        if let Some(fenced_code_spans) = lazy.fenced_code_spans.as_ref() {
+            for span in fenced_code_spans
+                .iter()
+                .filter(|span| span.start < core_end && span.end > core_start)
+            {
+                parse_start = parse_start.min(span.start);
+                parse_end = parse_end.max(span.end);
+            }
+        }
 
         let byte_start = buffer.line_start(parse_start);
         let byte_end = if parse_end < line_count {
@@ -963,6 +978,10 @@ pub(crate) fn parse_lazy_markdown_range(
     }
 
     changed
+}
+
+fn should_use_lazy_markdown_reparse(line_count: usize, force_full_reparse: bool) -> bool {
+    line_count >= LARGE_MARKDOWN_MIN_LINES && !force_full_reparse
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1412,6 +1431,7 @@ pub(crate) struct PendingLineDisplayTransfer {
     dirty_start_line: usize,
     dirty_end_line_exclusive: usize,
     markdown_plain_decoration_transfer: bool,
+    force_full_markdown_reparse: bool,
     /// Net change in buffer byte length caused by the edit
     /// (`inserted_text.len() - replaced_range.len()`). Used to shift the
     /// absolute byte offsets stored in suffix `block_preview` ranges when
@@ -1976,6 +1996,7 @@ pub struct EditorView {
     pub(crate) menu_selected_index: usize,
     pub(crate) sidebar_visible: bool,
     pub(crate) editor_left_aligned: bool,
+    pub(crate) reading_mode: bool,
     pub(crate) indent_settings: IndentSettings,
     pub(crate) tab_drag_candidate_id: Option<String>,
     pub(crate) tab_drag_press_position: Option<gpui::Point<gpui::Pixels>>,
@@ -2711,6 +2732,7 @@ impl EditorView {
             wiki_link_search_task: None,
             sidebar_visible: false,
             editor_left_aligned: false,
+            reading_mode: false,
             indent_settings: IndentSettings::default(),
             tab_drag_candidate_id: None,
             tab_drag_press_position: None,
@@ -5198,7 +5220,7 @@ impl EditorView {
                 self.delete_paths_to_trash(&paths, cx);
             }
             DialogAction::InstallUpdate { update } => {
-                self.install_update(update);
+                self.install_update(update, cx);
             }
             DialogAction::GitDiscardEntries { tracked, untracked } => {
                 self.run_git_operation(GitOperation::DiscardPaths { tracked, untracked }, cx);
@@ -5498,13 +5520,17 @@ impl EditorView {
         paths: &[PathBuf],
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_read_only() || !self.active_tab_is_markdown() {
+        if !self.active_tab_is_markdown() {
             self.open_external_paths_in_tabs(paths, cx);
             return;
         }
         let (markdown_paths, attachment_paths) = split_external_paths(paths);
         if attachment_paths.is_empty() {
             self.open_external_paths_in_tabs(&markdown_paths, cx);
+            return;
+        }
+        if !self.begin_content_edit(cx) {
+            self.open_external_paths_in_tabs(paths, cx);
             return;
         }
         let Some(current_file) = self.current_file_path.as_deref() else {
@@ -5972,6 +5998,7 @@ impl EditorView {
 
         let confirm_label = SharedString::from(dialog.confirm_label.clone());
         let cancel_label = SharedString::from(dialog.cancel_label.clone());
+        let has_cancel = !dialog.cancel_label.is_empty();
         let save_label = dialog
             .save_label
             .as_ref()
@@ -6045,25 +6072,27 @@ impl EditorView {
                             .flex()
                             .justify_end()
                             .gap(px(self.scaled(ds.dialog_btn_gap_px)))
-                            .child(
-                                div()
-                                    .id("dialog-cancel")
-                                    .h(px(self.scaled(ds.dialog_btn_height_px)))
-                                    .px(px(self.scaled(ds.dialog_btn_padding_x_px)))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .bg(secondary_bg)
-                                    .text_color(secondary_text)
-                                    .text_size(px(self.scaled(ds.dialog_btn_font_size_px)))
-                                    .rounded(px(ds.dialog_btn_radius_px))
-                                    .cursor(CursorStyle::Arrow)
-                                    .hover(move |s| s.opacity(btn_hover_opacity))
-                                    .child(cancel_label)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.dismiss_dialog(cx);
-                                    })),
-                            )
+                            .when(has_cancel, |this| {
+                                this.child(
+                                    div()
+                                        .id("dialog-cancel")
+                                        .h(px(self.scaled(ds.dialog_btn_height_px)))
+                                        .px(px(self.scaled(ds.dialog_btn_padding_x_px)))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(secondary_bg)
+                                        .text_color(secondary_text)
+                                        .text_size(px(self.scaled(ds.dialog_btn_font_size_px)))
+                                        .rounded(px(ds.dialog_btn_radius_px))
+                                        .cursor(CursorStyle::Arrow)
+                                        .hover(move |s| s.opacity(btn_hover_opacity))
+                                        .child(cancel_label)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.dismiss_dialog(cx);
+                                        })),
+                                )
+                            })
                             .child(
                                 div()
                                     .id("dialog-confirm")
@@ -6267,7 +6296,15 @@ impl EditorView {
                 _ => false,
             };
             if !incremental_applied {
-                if file_kind.is_markdown() && self.buffer.line_count() >= LARGE_MARKDOWN_MIN_LINES {
+                let force_full_markdown_reparse = pending_line_display_transfer
+                    .as_ref()
+                    .is_some_and(|transfer| transfer.force_full_markdown_reparse);
+                if file_kind.is_markdown()
+                    && should_use_lazy_markdown_reparse(
+                        self.buffer.line_count(),
+                        force_full_markdown_reparse,
+                    )
+                {
                     let cursor_line = self.cursor_line();
                     let parse_range = pending_line_display_transfer
                         .as_ref()
@@ -6303,6 +6340,19 @@ impl EditorView {
                         self.buffer.text(),
                         &file_kind,
                     ));
+                    if file_kind.is_markdown()
+                        && self.buffer.line_count() >= LARGE_MARKDOWN_MIN_LINES
+                    {
+                        self.lazy_markdown_decorations = Some(LazyMarkdownDecorations {
+                            parsed_chunks: vec![
+                                true;
+                                self.buffer
+                                    .line_count()
+                                    .div_ceil(LARGE_MARKDOWN_CHUNK_LINES)
+                            ],
+                            fenced_code_spans: None,
+                        });
+                    }
                 }
             }
         }
@@ -7198,7 +7248,33 @@ impl EditorView {
     }
 
     pub(crate) fn active_tab_is_read_only(&self) -> bool {
-        self.embedded_read_only || self.active_tab_is_diff()
+        editor_is_read_only(
+            self.embedded_read_only,
+            self.reading_mode,
+            self.active_tab_is_diff(),
+        )
+    }
+
+    pub(crate) fn active_tab_can_start_content_edit(&self) -> bool {
+        editor_can_start_content_edit(
+            self.embedded_read_only,
+            self.active_tab_is_diff(),
+            self.active_tab_supports_text_buffer(),
+        )
+    }
+
+    pub(crate) fn begin_content_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.active_tab_can_start_content_edit() {
+            return false;
+        }
+        if self.reading_mode {
+            self.toggle_reading_mode(cx);
+        }
+        true
+    }
+
+    pub(crate) fn markdown_syntax_expansion_allowed(&self) -> bool {
+        markdown_syntax_expansion_allowed(self.embedded_read_only, self.reading_mode)
     }
 
     pub(crate) fn active_image_view_state(&self) -> Option<ImageViewState> {
@@ -7297,6 +7373,9 @@ impl EditorView {
     /// (i.e. the one shown in code/edit mode), or None when the cursor is not
     /// editing any preview.
     pub(crate) fn focused_code_mode_preview_key(&self) -> Option<String> {
+        if !self.markdown_syntax_expansion_allowed() {
+            return None;
+        }
         let cursor_line = self.buffer.offset_to_line_col(self.cursor.offset).0;
         let preview = self.decorations.get(cursor_line)?.block_preview.as_ref()?;
         if (preview.start_line..=preview.end_line).contains(&cursor_line)
@@ -8425,7 +8504,7 @@ impl EditorView {
     /// copied as plain text.
     /// Formats the selection, or asks before rewriting the whole document.
     pub(crate) fn format_markdown_selection_or_prompt(&mut self, cx: &mut Context<Self>) {
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         let selection = self.cursor.selection_range();
@@ -8605,7 +8684,7 @@ impl EditorView {
     }
 
     pub(crate) fn cut_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         if self
@@ -8727,7 +8806,7 @@ impl EditorView {
     }
 
     pub(crate) fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         let Some(item) = cx.read_from_clipboard() else {
@@ -9266,6 +9345,9 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_checkbox(&mut self, line: usize) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
         let line_content = self.buffer.line_content(line).to_string();
         let line_start = self.buffer.line_start(line);
         if let Some(pos) = line_content.find("[ ]") {
@@ -9658,7 +9740,7 @@ impl EditorView {
         paths: &[PathBuf],
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || paths.is_empty() {
+        if !self.active_tab_is_markdown() || paths.is_empty() || !self.begin_content_edit(cx) {
             return;
         }
 
@@ -10993,19 +11075,22 @@ impl EditorView {
                 start_line,
                 old_end_line_exclusive,
             );
-        let dirty_range = if file_kind.is_markdown() {
-            let Some(dirty_range) = self.markdown_line_display_transfer_dirty_range(
+        let (dirty_range, force_full_markdown_reparse) = if file_kind.is_markdown() {
+            match self.markdown_line_display_transfer_dirty_range(
                 replaced_range,
                 inserted_text,
                 start_line,
                 old_end_line_exclusive,
                 new_end_line_exclusive,
-            ) else {
-                return;
-            };
-            dirty_range
+            ) {
+                Some(dirty_range) => (dirty_range, false),
+                None => (
+                    0..self.buffer.line_count().max(new_end_line_exclusive),
+                    true,
+                ),
+            }
         } else {
-            start_line..new_end_line_exclusive
+            (start_line..new_end_line_exclusive, false)
         };
 
         self.pending_line_display_transfer = Some(PendingLineDisplayTransfer {
@@ -11016,6 +11101,7 @@ impl EditorView {
             dirty_start_line: dirty_range.start,
             dirty_end_line_exclusive: dirty_range.end,
             markdown_plain_decoration_transfer,
+            force_full_markdown_reparse,
             byte_delta: inserted_text.len() as isize
                 - (replaced_range.end.saturating_sub(replaced_range.start)) as isize,
         });
@@ -11396,6 +11482,22 @@ impl EditorView {
     }
 }
 
+fn editor_is_read_only(embedded_read_only: bool, reading_mode: bool, active_diff: bool) -> bool {
+    embedded_read_only || reading_mode || active_diff
+}
+
+fn editor_can_start_content_edit(
+    embedded_read_only: bool,
+    active_diff: bool,
+    supports_text_buffer: bool,
+) -> bool {
+    !embedded_read_only && !active_diff && supports_text_buffer
+}
+
+fn markdown_syntax_expansion_allowed(embedded_read_only: bool, reading_mode: bool) -> bool {
+    !embedded_read_only && !reading_mode
+}
+
 fn edit_may_change_leading_indent(
     buffer: &Buffer,
     replaced_range: &Range<usize>,
@@ -11538,18 +11640,37 @@ mod tests {
     use super::{
         EditorView, SparseLineGeometry, classify_file_kind_for_bytes,
         compute_incremental_markdown_decorations, edit_may_change_leading_indent,
-        generated_preview_intersects_range, heading_matches_anchor,
-        line_display_transfer_line_bounds, normalize_ordered_list_numbers_in_buffer,
-        resolve_markdown_target_path, split_external_paths, split_markdown_target,
-        text_tab_is_dirty, unique_import_path,
+        editor_can_start_content_edit, editor_is_read_only, generated_preview_intersects_range,
+        heading_matches_anchor, line_display_transfer_line_bounds,
+        markdown_syntax_expansion_allowed, new_lazy_markdown_decorations,
+        normalize_ordered_list_numbers_in_buffer, parse_lazy_markdown_range,
+        resolve_markdown_target_path, should_use_lazy_markdown_reparse, split_external_paths,
+        split_markdown_target, text_tab_is_dirty, unique_import_path,
     };
     use crate::buffer::Buffer;
-    use crate::markdown::parse_decorations;
+    use crate::markdown::{BlockType, parse_decorations};
 
     #[test]
     fn cursor_blink_switches_only_between_opacity_endpoints() {
         assert_eq!(EditorView::next_cursor_blink_opacity(1.0, 0.0, 1.0), 0.0);
         assert_eq!(EditorView::next_cursor_blink_opacity(0.0, 0.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn reading_mode_is_read_only_and_keeps_markdown_syntax_folded() {
+        assert!(editor_is_read_only(false, true, false));
+        assert!(!markdown_syntax_expansion_allowed(false, true));
+
+        assert!(editor_is_read_only(true, false, false));
+        assert!(!markdown_syntax_expansion_allowed(true, false));
+
+        assert!(editor_is_read_only(false, false, true));
+        assert!(markdown_syntax_expansion_allowed(false, false));
+
+        assert!(editor_can_start_content_edit(false, false, true));
+        assert!(!editor_can_start_content_edit(true, false, true));
+        assert!(!editor_can_start_content_edit(false, true, true));
+        assert!(!editor_can_start_content_edit(false, false, false));
     }
 
     #[test]
@@ -11842,6 +11963,49 @@ mod tests {
             "intro\n\n- one\n- two\n- three\n\nend\n",
             "intro\n\n- one\n- two two\n- three\n\nend\n",
         ));
+    }
+
+    #[test]
+    fn incremental_markdown_matches_full_when_third_level_list_space_is_typed() {
+        assert!(assert_incremental_matches_full(
+            "- A\n  - B\n    -\n",
+            "- A\n  - B\n    - \n",
+        ));
+    }
+
+    #[test]
+    fn global_markdown_edits_bypass_lazy_chunk_parsing() {
+        assert!(should_use_lazy_markdown_reparse(
+            super::LARGE_MARKDOWN_MIN_LINES,
+            false,
+        ));
+        assert!(!should_use_lazy_markdown_reparse(
+            super::LARGE_MARKDOWN_MIN_LINES,
+            true,
+        ));
+    }
+
+    #[test]
+    fn lazy_markdown_keeps_context_for_long_fenced_code_blocks() {
+        let mut lines = vec!["```markdown".to_string()];
+        for line in 1..2_301 {
+            lines.push(match line {
+                767 => String::new(),
+                800 => "# not a heading".to_string(),
+                _ => "plain code".to_string(),
+            });
+        }
+        lines.push("```".to_string());
+        let buffer = Buffer::from_text(&lines.join("\n"));
+        let (mut decorations, mut lazy) = new_lazy_markdown_decorations(buffer.line_count());
+
+        assert!(parse_lazy_markdown_range(
+            &buffer,
+            &mut decorations,
+            &mut lazy,
+            800..801,
+        ));
+        assert_eq!(decorations[800].block_type, BlockType::CodeBlock);
     }
 
     #[test]

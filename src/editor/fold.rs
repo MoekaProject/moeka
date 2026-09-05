@@ -439,6 +439,9 @@ impl EditorView {
     }
 
     pub(crate) fn pick_image_for_line(&self, line: usize, cx: &mut Context<Self>) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
         cx.spawn(async move |this, cx| {
             let maybe_path = cx
                 .background_executor()
@@ -460,6 +463,9 @@ impl EditorView {
         new_path: &PathBuf,
         cx: &mut Context<Self>,
     ) {
+        if self.active_tab_is_read_only() {
+            return;
+        }
         let line_content = self.buffer.line_content(line).to_string();
         let line_start = self.buffer.line_start(line);
         if let Some(bracket_pos) = line_content.find("](") {

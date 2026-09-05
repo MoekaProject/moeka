@@ -143,7 +143,7 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_line_comment(&mut self, cx: &mut Context<Self>) {
-        if self.active_tab_is_read_only() || !self.active_tab_supports_text_buffer() {
+        if !self.begin_content_edit(cx) {
             return;
         }
 
@@ -260,7 +260,7 @@ impl EditorView {
     }
 
     pub(crate) fn join_lines(&mut self, cx: &mut Context<Self>) {
-        if self.active_tab_is_read_only() || !self.active_tab_supports_text_buffer() {
+        if !self.begin_content_edit(cx) {
             return;
         }
 

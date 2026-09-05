@@ -536,7 +536,7 @@ impl EditorView {
     }
 
     pub(crate) fn replace_current_match(&mut self, cx: &mut Context<Self>) {
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         self.ensure_search_scan_complete(cx);
@@ -573,7 +573,7 @@ impl EditorView {
     }
 
     pub(crate) fn replace_all_matches(&mut self, cx: &mut Context<Self>) {
-        if self.active_tab_is_read_only() {
+        if !self.begin_content_edit(cx) {
             return;
         }
         self.ensure_search_scan_complete(cx);

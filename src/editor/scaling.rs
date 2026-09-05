@@ -1092,6 +1092,18 @@ impl EditorView {
         cx.notify();
     }
 
+    pub(crate) fn toggle_reading_mode(&mut self, cx: &mut Context<Self>) {
+        self.reading_mode = !self.reading_mode;
+        if self.reading_mode {
+            self.selected_handle = None;
+            self.table_drag = None;
+            self.code_mode_preview_key = None;
+        }
+        self.layout_dirty = true;
+        self.close_context_menu_immediately(cx);
+        cx.notify();
+    }
+
     pub(crate) fn toggle_outline_visibility(&mut self, cx: &mut Context<Self>) {
         self.toggle_outline_panel(cx);
     }

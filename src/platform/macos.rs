@@ -41,6 +41,33 @@ pub(crate) fn file_url(path: &Path) -> *mut Object {
     unsafe { msg_send![class!(NSURL), fileURLWithPath: nsstring(text)] }
 }
 
+fn volume_resource_bool(path: &Path, key_name: &str) -> Option<bool> {
+    let url = file_url(path);
+    if url.is_null() {
+        return None;
+    }
+
+    unsafe {
+        let key = nsstring(key_name);
+        let mut value: *mut Object = std::ptr::null_mut();
+        let mut error: *mut Object = std::ptr::null_mut();
+        let resolved: bool = msg_send![url,
+            getResourceValue: &mut value
+            forKey: key
+            error: &mut error
+        ];
+        if !resolved || value.is_null() {
+            return None;
+        }
+        Some(msg_send![value, boolValue])
+    }
+}
+
+pub(crate) fn path_is_on_network_volume(path: &Path) -> bool {
+    volume_resource_bool(path, "NSURLVolumeIsLocalKey") == Some(false)
+        && volume_resource_bool(path, "NSURLVolumeIsRemovableKey") != Some(true)
+}
+
 pub(crate) fn path_from_url(url: *mut Object) -> Option<PathBuf> {
     if url.is_null() {
         return None;

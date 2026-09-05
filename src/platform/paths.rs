@@ -2,6 +2,28 @@
 
 use std::path::{Path, PathBuf};
 
+pub(crate) fn same_file_path(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        fn identity(path: &Path) -> String {
+            let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            let normalized = path.to_string_lossy().replace('/', "\\");
+            normalized
+                .strip_prefix(r"\\?\UNC\")
+                .map(|path| format!(r"\\{}", path))
+                .or_else(|| normalized.strip_prefix(r"\\?\").map(str::to_string))
+                .unwrap_or(normalized)
+                .to_lowercase()
+        }
+        identity(left) == identity(right)
+    }
+
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 const FILE_URL_ENCODE_SET: &AsciiSet = &CONTROLS

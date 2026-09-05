@@ -1708,7 +1708,8 @@ fn build_pdf_document_with_printpdf(title: &str, markdown: &str) -> anyhow::Resu
     let font_size_pt = 11.0;
     let max_units = 60usize;
 
-    let lines = wrap_text_for_pdf(markdown, max_units);
+    let rendered_text = rendered_plain_text_for_export(markdown);
+    let lines = wrap_text_for_pdf(&rendered_text, max_units);
     let mut page = first_page;
     let mut layer = first_layer;
     let mut y = page_height_mm - margin_y_mm;
@@ -1739,6 +1740,53 @@ fn build_pdf_document_with_printpdf(title: &str, markdown: &str) -> anyhow::Resu
     }
 
     Ok(bytes)
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn rendered_plain_text_for_export(markdown: &str) -> String {
+    let mut out = String::with_capacity(markdown.len());
+    for event in Parser::new_ext(markdown, Options::all()) {
+        match event {
+            Event::Text(text) | Event::Code(text) => out.push_str(&text),
+            Event::InlineMath(math) => out.push_str(&math),
+            Event::DisplayMath(math) => {
+                push_export_newlines(&mut out, 1);
+                out.push_str(&math);
+                push_export_newlines(&mut out, 2);
+            }
+            Event::SoftBreak | Event::HardBreak => push_export_newlines(&mut out, 1),
+            Event::Rule => {
+                push_export_newlines(&mut out, 1);
+                out.push_str("--------------------");
+                push_export_newlines(&mut out, 2);
+            }
+            Event::TaskListMarker(checked) => {
+                out.push_str(if checked { "[x] " } else { "[ ] " });
+            }
+            Event::FootnoteReference(label) => out.push_str(&label),
+            Event::End(
+                TagEnd::Paragraph
+                | TagEnd::Heading(_)
+                | TagEnd::CodeBlock
+                | TagEnd::BlockQuote(_)
+                | TagEnd::FootnoteDefinition,
+            ) => push_export_newlines(&mut out, 2),
+            Event::End(TagEnd::Item | TagEnd::TableRow) => push_export_newlines(&mut out, 1),
+            Event::End(TagEnd::TableCell) => out.push('\t'),
+            Event::End(TagEnd::List(_) | TagEnd::Table | TagEnd::TableHead) => {
+                push_export_newlines(&mut out, 2)
+            }
+            Event::Start(Tag::CodeBlock(_)) => push_export_newlines(&mut out, 1),
+            Event::Html(_) | Event::InlineHtml(_) | Event::Start(_) | Event::End(_) => {}
+        }
+    }
+    out.trim().to_string()
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn push_export_newlines(out: &mut String, count: usize) {
+    let existing = out.chars().rev().take_while(|ch| *ch == '\n').count();
+    out.extend(std::iter::repeat_n('\n', count.saturating_sub(existing)));
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -3981,10 +4029,30 @@ mod tests {
         GitDiffRow, GitDiffRowKind, InfoPanelReferenceTarget, InfoPanelShareAction,
         build_git_diff_rows, build_git_diff_snapshot_text, build_html_document,
         external_reference_host, fallback_reference_label, path_reference_name, reference_scheme,
-        should_defer_info_panel_expensive_work, visible_git_diff_rows,
+        rendered_plain_text_for_export, should_defer_info_panel_expensive_work,
+        visible_git_diff_rows,
     };
     use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
     use std::path::PathBuf;
+
+    #[test]
+    fn pdf_plain_text_projection_removes_markdown_source_markers() {
+        let rendered = rendered_plain_text_for_export(
+            "# Heading\n\nThis is **bold** and [linked](https://example.com).\n\n- item\n\n![diagram](chart.png)\n\n```rust\nlet answer = 42;\n```\n\n$$x + y$$\n",
+        );
+
+        assert!(rendered.contains("Heading"));
+        assert!(rendered.contains("This is bold and linked."));
+        assert!(rendered.contains("item"));
+        assert!(rendered.contains("diagram"));
+        assert!(rendered.contains("let answer = 42;"));
+        assert!(rendered.contains("x + y"));
+        assert!(!rendered.contains('#'));
+        assert!(!rendered.contains("**"));
+        assert!(!rendered.contains("```"));
+        assert!(!rendered.contains("https://example.com"));
+        assert!(!rendered.contains("chart.png"));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

@@ -2289,7 +2289,7 @@ impl Styles {
                 gutter_fold_folded_color: theme.text_bright,
                 gutter_fold_hover_color: theme.text_secondary,
                 gutter_heading_color: theme.gutter_heading,
-                gutter_heading_opacity: 0.20,
+                gutter_heading_opacity: 1.0,
                 gutter_heading_h1_icon_size_px: 22.0,
                 gutter_heading_h2_icon_size_px: 20.0,
                 gutter_heading_h3_icon_size_px: 18.0,

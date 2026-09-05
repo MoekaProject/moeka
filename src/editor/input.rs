@@ -295,7 +295,9 @@ impl EditorView {
                         self.copy_code_block_group_to_clipboard(line_idx, cx);
                     }
                     GeneratedPreviewAction::Code => {
-                        self.toggle_generated_preview_code_view(line_idx);
+                        if !self.active_tab_is_read_only() {
+                            self.toggle_generated_preview_code_view(line_idx);
+                        }
                     }
                 }
                 self.clear_wrap_boundary_affinity();
@@ -388,7 +390,7 @@ impl EditorView {
                 .copied()
                 && let Some(cache_key) = self.generated_preview_cache_key_for_line(line_idx)
             {
-                if event.click_count >= 2 {
+                if event.click_count >= 2 && !self.active_tab_is_read_only() {
                     self.toggle_generated_preview_code_view(line_idx);
                     self.clear_wrap_boundary_affinity();
                     self.is_selecting = false;
@@ -512,10 +514,11 @@ impl EditorView {
             return;
         }
 
-        if let Some(&(_, table_start, col)) = self
-            .table_col_handle_areas
-            .iter()
-            .find(|(bounds, _, _)| bounds.contains(&event.position))
+        if !self.active_tab_is_read_only()
+            && let Some(&(_, table_start, col)) = self
+                .table_col_handle_areas
+                .iter()
+                .find(|(bounds, _, _)| bounds.contains(&event.position))
         {
             self.selected_handle = Some((table_start, true, col));
             self.marked_range = None;
@@ -532,10 +535,11 @@ impl EditorView {
             return;
         }
 
-        if let Some(&(_, table_start, visual_row)) = self
-            .table_row_handle_areas
-            .iter()
-            .find(|(bounds, _, _)| bounds.contains(&event.position))
+        if !self.active_tab_is_read_only()
+            && let Some(&(_, table_start, visual_row)) = self
+                .table_row_handle_areas
+                .iter()
+                .find(|(bounds, _, _)| bounds.contains(&event.position))
         {
             self.selected_handle = Some((table_start, false, visual_row));
             self.marked_range = None;
@@ -767,6 +771,9 @@ impl EditorView {
     /// moves out of the block so the chart/formula renders again; otherwise it
     /// moves into the source to start editing.
     fn toggle_generated_preview_code_view(&mut self, line_idx: usize) -> bool {
+        if self.active_tab_is_read_only() {
+            return false;
+        }
         let Some(preview) = self
             .decorations
             .get(line_idx)
@@ -1030,6 +1037,9 @@ impl EditorView {
     /// Like `focused_code_mode_preview_key`, but evaluated at an arbitrary
     /// offset (used before the cursor has actually moved on click).
     fn focused_code_mode_preview_key_at(&self, offset: usize) -> Option<String> {
+        if !self.markdown_syntax_expansion_allowed() {
+            return None;
+        }
         let line = self
             .buffer
             .offset_to_line_col(offset.min(self.buffer.len()))
@@ -1549,7 +1559,15 @@ impl EditorView {
             return;
         }
         let toolbar_hover_changed = self.update_toolbar_corner_hover(event.position, cx);
-        self.hovered_editor_position = Some(event.position);
+        let track_precise_hover_position = event.modifiers.secondary()
+            || (self.active_tab_is_non_markdown_text() && !self.editor_wraps_to_available_width())
+            || !self.code_block_hover_areas.is_empty()
+            || self.preview_overlay.is_some();
+        if track_precise_hover_position {
+            self.hovered_editor_position = Some(event.position);
+        } else {
+            self.hovered_editor_position = None;
+        }
         let dragging_scrollbar = self.update_editor_scrollbar_drag(event.position, cx);
         let dragging_code_block_scrollbar =
             self.update_code_block_horizontal_scrollbar_drag(event.position, cx);
@@ -1646,6 +1664,29 @@ impl EditorView {
         }
 
         if self.context_menu.is_some() {
+            if toolbar_hover_changed {
+                cx.notify();
+            }
+            return;
+        }
+
+        let has_interactive_hover_targets = !self.code_block_hover_areas.is_empty()
+            || !self.code_block_copy_areas.is_empty()
+            || !self.code_block_display_action_areas.is_empty()
+            || !self.checkbox_areas.is_empty()
+            || !self.image_click_areas.is_empty()
+            || !self.generated_preview_click_areas.is_empty()
+            || !self.generated_preview_action_areas.is_empty()
+            || !self.generated_preview_zoom_areas.is_empty()
+            || !self.image_edit_areas.is_empty()
+            || !self.gutter_fold_areas.is_empty()
+            || !self.inline_diff_gutter_areas.is_empty()
+            || !self.inline_diff_hunk_areas.is_empty()
+            || !self.inline_diff_revert_areas.is_empty()
+            || !self.table_click_areas.is_empty()
+            || !self.table_col_handle_areas.is_empty()
+            || !self.table_row_handle_areas.is_empty();
+        if !has_interactive_hover_targets && !self.is_selecting && !self.command_held {
             if toolbar_hover_changed {
                 cx.notify();
             }
@@ -1953,11 +1994,20 @@ impl EditorView {
         let cursor_offsets = std::iter::once(self.cursor.offset)
             .chain(self.extra_cursors.iter().map(|cursor| cursor.offset))
             .collect::<Vec<_>>();
+        let syntax_expansion_allowed = self.markdown_syntax_expansion_allowed();
         let cell_active_ranges = helpers::active_table_cell_ranges(
             line_start,
             &cell_range,
-            &cursor_offsets,
-            self.marked_range.as_ref(),
+            if syntax_expansion_allowed {
+                &cursor_offsets
+            } else {
+                &[]
+            },
+            if syntax_expansion_allowed {
+                self.marked_range.as_ref()
+            } else {
+                None
+            },
         );
         let cell_decoration = helpers::table_cell_decoration(dec, &cell_content, &cell_range);
         let (folded_raw, d2b_raw, b2d_raw, _) = helpers::build_display_text(
@@ -2508,14 +2558,26 @@ impl EditorView {
             decoration.block_type,
             BlockType::CodeBlock | BlockType::CodeBlockFence
         ) {
-            (text_width
-                - self.scaled(self.styles.code_block.code_block_text_padding_left_px)
-                - self.scaled(self.styles.code_block.code_block_wrap_right_padding_px))
-            .max(self.scaled(80.0))
+            helpers::code_block_soft_wrap_width(
+                (text_width
+                    - self.scaled(self.styles.code_block.code_block_text_padding_left_px)
+                    - self.scaled(self.styles.code_block.code_block_wrap_right_padding_px))
+                .max(self.scaled(80.0)),
+                base_char_width,
+            )
         } else {
             wrap_width
         };
-        let effective_wrap_width = if letter_spacing > 0.0 {
+        let effective_wrap_width = if matches!(
+            decoration.block_type,
+            BlockType::CodeBlock | BlockType::CodeBlockFence
+        ) {
+            helpers::effective_monospace_wrap_width_for_letter_spacing(
+                base_wrap_width,
+                base_char_width,
+                letter_spacing,
+            )
+        } else if letter_spacing > 0.0 {
             base_wrap_width * font_size / (font_size + letter_spacing)
         } else {
             base_wrap_width

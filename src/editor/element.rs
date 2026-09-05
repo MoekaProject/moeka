@@ -58,6 +58,38 @@ fn hide_front_matter_separator(
             .is_some_and(|table_info| table_info.is_front_matter && table_info.is_separator)
 }
 
+fn front_matter_is_active(
+    decorations: &[crate::markdown::LineDecoration],
+    cursor_line: usize,
+    syntax_expansion_allowed: bool,
+) -> bool {
+    syntax_expansion_allowed
+        && decorations
+            .get(cursor_line)
+            .and_then(|decoration| decoration.table_info.as_ref())
+            .is_some_and(|table_info| table_info.is_front_matter)
+}
+
+fn generated_preview_action_is_visible(action: GeneratedPreviewAction, read_only: bool) -> bool {
+    action != GeneratedPreviewAction::Code || !read_only
+}
+
+fn generated_preview_code_mode_active(
+    preview: &crate::markdown::BlockPreview,
+    cursor_line: usize,
+    cursor_offset: usize,
+    selection_ranges: &[Range<usize>],
+    syntax_expansion_allowed: bool,
+) -> bool {
+    syntax_expansion_allowed
+        && ((preview.start_line..=preview.end_line).contains(&cursor_line)
+            && preview.source_range.start <= cursor_offset
+            && cursor_offset <= preview.source_range.end
+            || selection_ranges.iter().any(|range| {
+                range.start < preview.source_range.end && range.end > preview.source_range.start
+            }))
+}
+
 fn uses_table_cell_selection(
     block_type: &BlockType,
     decoration: &crate::markdown::LineDecoration,
@@ -100,6 +132,57 @@ fn front_matter_separators_hide_only_while_group_is_inactive() {
     assert!(hide_front_matter_separator(&decorations[2], false));
     assert!(!hide_front_matter_separator(&decorations[0], true));
     assert!(!hide_front_matter_separator(&decorations[1], false));
+}
+
+#[cfg(test)]
+#[test]
+fn reading_mode_keeps_front_matter_separators_folded() {
+    let decorations = crate::markdown::parse_decorations("---\ntitle: Moeka\n---");
+    assert!(front_matter_is_active(&decorations, 1, true));
+    assert!(!front_matter_is_active(&decorations, 1, false));
+}
+
+#[cfg(test)]
+#[test]
+fn read_only_generated_previews_hide_code_action() {
+    assert!(!generated_preview_action_is_visible(
+        GeneratedPreviewAction::Code,
+        true,
+    ));
+    assert!(generated_preview_action_is_visible(
+        GeneratedPreviewAction::Copy,
+        true,
+    ));
+    assert!(generated_preview_action_is_visible(
+        GeneratedPreviewAction::Code,
+        false,
+    ));
+}
+
+#[cfg(test)]
+#[test]
+fn reading_mode_selection_does_not_activate_preview_code_mode() {
+    let decorations = crate::markdown::parse_decorations("```mermaid\ngraph TD\nA-->B\n```\n");
+    let preview = decorations
+        .iter()
+        .find_map(|decoration| decoration.block_preview.as_ref())
+        .expect("generated preview");
+    let selection = [preview.source_range.clone()];
+
+    assert!(generated_preview_code_mode_active(
+        preview,
+        preview.start_line,
+        preview.source_range.start,
+        &selection,
+        true,
+    ));
+    assert!(!generated_preview_code_mode_active(
+        preview,
+        preview.start_line,
+        preview.source_range.start,
+        &selection,
+        false,
+    ));
 }
 
 #[cfg(test)]
@@ -295,6 +378,14 @@ fn code_block_text_viewport_keeps_right_padding_with_or_without_line_numbers() {
     assert_eq!(right_with_numbers, 580.0);
     assert_eq!(width_without_numbers, 460.0);
     assert_eq!(width_with_numbers, 428.0);
+    assert_eq!(
+        helpers::code_block_soft_wrap_width(width_without_numbers, 8.0),
+        452.0
+    );
+    assert_eq!(
+        helpers::code_block_soft_wrap_width(width_with_numbers, 8.0),
+        420.0
+    );
     assert_eq!(code_block_text_clip_right(600.0, 580.0, true), 600.0);
     assert_eq!(code_block_text_clip_right(600.0, 580.0, false), 580.0);
 }
@@ -729,7 +820,7 @@ fn push_task_checkbox_paint(
         ));
     }
 
-    if let Some(line_idx) = hit_line_idx {
+    if let Some(line_idx) = hit_line_idx.filter(|_| !editor.active_tab_is_read_only()) {
         let hit_padding = editor.scaled(2.0);
         let hit_bounds = Bounds::new(
             point(px(checkbox_x - hit_padding), px(line_top)),
@@ -2281,6 +2372,17 @@ impl Element for EditorElement {
         for ec in &editor.extra_cursors {
             all_cursor_offsets.push(ec.offset);
         }
+        let syntax_expansion_allowed = editor.markdown_syntax_expansion_allowed();
+        let syntax_cursor_offsets: &[usize] = if syntax_expansion_allowed {
+            &all_cursor_offsets
+        } else {
+            &[]
+        };
+        let syntax_marked_range = if syntax_expansion_allowed {
+            editor.marked_range.as_ref()
+        } else {
+            None
+        };
         let any_selection = all_sel_ranges.iter().any(|r| r.start != r.end);
         let mut active_line_numbers: HashSet<usize> = HashSet::new();
         for &offset in &all_cursor_offsets {
@@ -2387,10 +2489,8 @@ impl Element for EditorElement {
                     }
                 }
             }
-            let front_matter_active = decorations
-                .get(cursor_line)
-                .and_then(|decoration| decoration.table_info.as_ref())
-                .is_some_and(|table_info| table_info.is_front_matter);
+            let front_matter_active =
+                front_matter_is_active(&decorations, cursor_line, syntax_expansion_allowed);
             if !front_matter_active {
                 if let Some(front_matter) = decorations
                     .first()
@@ -2615,7 +2715,8 @@ impl Element for EditorElement {
             Some((start, end))
         };
 
-        let active_code_fence_group = if cursor_line < line_count
+        let active_code_fence_group = if syntax_expansion_allowed
+            && cursor_line < line_count
             && matches!(
                 decorations.get(cursor_line).map(|d| &d.block_type),
                 Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
@@ -2624,8 +2725,9 @@ impl Element for EditorElement {
         } else {
             None
         };
-        let active_front_matter_group = decorations
-            .get(cursor_line)
+        let active_front_matter_group = syntax_expansion_allowed
+            .then(|| decorations.get(cursor_line))
+            .flatten()
             .and_then(|decoration| decoration.table_info.as_ref())
             .filter(|table_info| table_info.is_front_matter)
             .map(|table_info| {
@@ -2932,12 +3034,6 @@ impl Element for EditorElement {
                     }
                 }
             }
-            // Transcript editors remain selectable, but should keep Markdown
-            // markers folded while a selection changes so wrapping and height
-            // do not shift underneath the pointer.
-            if editor.embedded_read_only {
-                active_ranges.clear();
-            }
             for marked in editor.marked_ranges() {
                 if heading_content_start.is_some() && ime_active_on_line {
                     continue;
@@ -2961,7 +3057,13 @@ impl Element for EditorElement {
                 }
                 active_ranges.push(start..end);
             }
-            if !editor.embedded_read_only
+            // Read-only views remain selectable, but should keep Markdown
+            // markers folded while a selection changes so wrapping and height
+            // do not shift underneath the pointer.
+            if !syntax_expansion_allowed {
+                active_ranges.clear();
+            }
+            if syntax_expansion_allowed
                 && (!editor.is_selecting || !editor.selection_drag_has_moved)
                 && active_ranges.is_empty()
                 && !editor.suppress_fold_for_empty_selection_drag
@@ -3717,7 +3819,9 @@ impl Element for EditorElement {
                 })
             };
 
-            let block_preview_active = if active_tab_is_diff {
+            let block_preview_active = if !syntax_expansion_allowed {
+                false
+            } else if active_tab_is_diff {
                 decoration.block_preview.is_some()
             } else {
                 decoration.block_preview.as_ref().is_some_and(|preview| {
@@ -3725,8 +3829,8 @@ impl Element for EditorElement {
                         || selection_intersects_preview_source(preview)
                 })
             };
-            let block_preview_code_mode =
-                decoration.block_preview.as_ref().is_some_and(|preview| {
+            let block_preview_code_mode = syntax_expansion_allowed
+                && decoration.block_preview.as_ref().is_some_and(|preview| {
                     cursor_in_preview_source(preview)
                         || selection_intersects_preview_source(preview)
                 });
@@ -4067,9 +4171,9 @@ impl Element for EditorElement {
                     quote_padding_right + code_block_right_padding,
                 );
             let base_wrap_width = if block_preview_code_mode {
-                code_block_viewport_width.max(1.0)
+                helpers::code_block_soft_wrap_width(code_block_viewport_width, base_char_width)
             } else if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
-                code_block_viewport_width.max(1.0)
+                helpers::code_block_soft_wrap_width(code_block_viewport_width, base_char_width)
             } else if is_quote_line {
                 (text_width
                     - quote_horizontal_padding
@@ -4087,7 +4191,13 @@ impl Element for EditorElement {
                 base_wrap_width
             };
 
-            let effective_wrap_width = if letter_spacing > 0.0 {
+            let effective_wrap_width = if code_block_group.is_some() {
+                helpers::effective_monospace_wrap_width_for_letter_spacing(
+                    effective_wrap_width,
+                    base_char_width,
+                    letter_spacing,
+                )
+            } else if letter_spacing > 0.0 {
                 effective_wrap_width * font_size / (font_size + letter_spacing)
             } else {
                 effective_wrap_width
@@ -4177,7 +4287,8 @@ impl Element for EditorElement {
             let image_corner_radius = px(editor.scaled(image_styles.image_border_radius_px));
             let image_border_width = px(editor.scaled(image_styles.image_active_border_width_px));
 
-            let image_active = decoration.image_path.is_some()
+            let image_active = syntax_expansion_allowed
+                && decoration.image_path.is_some()
                 && helpers::is_image_syntax_active(
                     &decoration,
                     line_content,
@@ -4286,8 +4397,8 @@ impl Element for EditorElement {
                                     editor.styles.editor.editor_list_marker_text_color,
                                     editor.styles.editor.editor_list_marker_font_weight,
                                     editor.styles.editor.editor_heading_marker_text_color,
-                                    &all_cursor_offsets,
-                                    editor.marked_range.as_ref(),
+                                    syntax_cursor_offsets,
+                                    syntax_marked_range,
                                 )
                             })
                             .clone();
@@ -4734,8 +4845,8 @@ impl Element for EditorElement {
                                     editor.styles.editor.editor_list_marker_text_color,
                                     editor.styles.editor.editor_list_marker_font_weight,
                                     editor.styles.editor.editor_heading_marker_text_color,
-                                    &all_cursor_offsets,
-                                    editor.marked_range.as_ref(),
+                                    syntax_cursor_offsets,
+                                    syntax_marked_range,
                                 )
                             })
                             .clone();
@@ -4866,8 +4977,8 @@ impl Element for EditorElement {
                                     let cell_active_ranges = helpers::active_table_cell_ranges(
                                         buffer.line_start(source_line),
                                         &cell_layout.cell_range,
-                                        &all_cursor_offsets,
-                                        editor.marked_range.as_ref(),
+                                        syntax_cursor_offsets,
+                                        syntax_marked_range,
                                     );
                                     let mut cell_decoration = helpers::table_cell_decoration(
                                         &decorations[source_line],
@@ -5285,11 +5396,13 @@ impl Element for EditorElement {
                                 point(px(table_left - handle_w), px(row_y)),
                                 size(px(handle_w), px(row_h)),
                             );
-                            table_row_handle_areas_local.push((
-                                handle_bounds,
-                                ti.table_start_line,
-                                vi,
-                            ));
+                            if !editor.active_tab_is_read_only() {
+                                table_row_handle_areas_local.push((
+                                    handle_bounds,
+                                    ti.table_start_line,
+                                    vi,
+                                ));
+                            }
                         }
 
                         // Column handle areas (above header, hover-only)
@@ -5307,11 +5420,13 @@ impl Element for EditorElement {
                                     point(px(table_left + hx), px(table_top - handle_h)),
                                     size(px(cell_w), px(handle_h)),
                                 );
-                                table_col_handle_areas_local.push((
-                                    handle_bounds,
-                                    ti.table_start_line,
-                                    ci,
-                                ));
+                                if !editor.active_tab_is_read_only() {
+                                    table_col_handle_areas_local.push((
+                                        handle_bounds,
+                                        ti.table_start_line,
+                                        ci,
+                                    ));
+                                }
                                 hx += cell_w;
                             }
                         }
@@ -5531,7 +5646,9 @@ impl Element for EditorElement {
             }
 
             // HR line: `***` renders dashed, `---`/`___` render solid.
-            if *block_type == BlockType::HorizontalRule && !is_cursor_line {
+            if *block_type == BlockType::HorizontalRule
+                && (!is_cursor_line || !syntax_expansion_allowed)
+            {
                 let hr_y = text_line_top + text_line_height / 2.0;
                 let is_dashed = line_content.trim_start().starts_with('*');
                 hr_lines.push((
@@ -5982,7 +6099,7 @@ impl Element for EditorElement {
             }
 
             // Image URL-edit icon
-            if image_active {
+            if image_active && !editor.active_tab_is_read_only() {
                 let ie_size = editor.scaled(13.0);
                 // Follow the syntax to its true end, including the wrapped row
                 // it lands on, so folding/expanding never strands the icon.
@@ -7547,13 +7664,13 @@ impl Element for EditorElement {
                 .and_then(|decoration| decoration.block_preview.as_ref())
                 .filter(|preview| preview.is_anchor);
             if let Some(preview) = preview_anchor {
-                let code_mode = (preview.start_line..=preview.end_line).contains(&cursor_line)
-                    && preview.source_range.start <= cursor.offset
-                    && cursor.offset <= preview.source_range.end
-                    || all_sel_ranges.iter().any(|range| {
-                        range.start < preview.source_range.end
-                            && range.end > preview.source_range.start
-                    });
+                let code_mode = generated_preview_code_mode_active(
+                    preview,
+                    cursor_line,
+                    cursor.offset,
+                    &all_sel_ranges,
+                    syntax_expansion_allowed,
+                );
                 if code_mode && let Some(Some(img_data)) = image_cache.get(&preview.cache_key) {
                     let img_size = img_data.size(0);
                     let img_w = img_size.width.0 as f32;
@@ -7752,7 +7869,12 @@ impl Element for EditorElement {
                         FMT_INLINE_CODE_SVG,
                         "CODE".to_string(),
                     ),
-                ];
+                ]
+                .into_iter()
+                .filter(|(action, _, _)| {
+                    generated_preview_action_is_visible(*action, editor.active_tab_is_read_only())
+                })
+                .collect::<Vec<_>>();
                 let action_group_width = actions.len() as f32 * action_button_size
                     + actions.len().saturating_sub(1) as f32 * preview_button_gap;
                 let action_group_x = (action_anchor_left + action_anchor_width
@@ -7813,7 +7935,9 @@ impl Element for EditorElement {
                             crate::i18n::preview_action_label(editor.ui_language, "zoom_out")
                         }
                         GeneratedPreviewAction::Copy => editor.t(crate::i18n::TextKey::Copy),
-                        GeneratedPreviewAction::Code => editor.t(crate::i18n::TextKey::InlineCode),
+                        GeneratedPreviewAction::Code => {
+                            crate::i18n::preview_action_label(editor.ui_language, "edit_code")
+                        }
                     };
                     generated_preview_tooltips.push((
                         hitbox.clone(),
