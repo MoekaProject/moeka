@@ -1,0 +1,4 @@
+# Minimal user settings; omitted options use application defaults.
+# This is a documentation example, not an automatically loaded repository config.
+version: 1
+settings: {}

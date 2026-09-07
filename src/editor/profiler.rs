@@ -23,14 +23,14 @@ const PROFILE_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeProfilePaths {
     pub(crate) json: PathBuf,
-    pub(crate) flamegraph: Option<PathBuf>,
+    pub(crate) folded_stacks: Option<PathBuf>,
 }
 
 impl RuntimeProfilePaths {
     pub(crate) fn message(&self) -> String {
         let mut message = format!("JSON timeline:\n{}", self.json.display());
-        if let Some(path) = &self.flamegraph {
-            message.push_str(&format!("\n\nCPU flamegraph:\n{}", path.display()));
+        if let Some(path) = &self.folded_stacks {
+            message.push_str(&format!("\n\nCPU folded stacks:\n{}", path.display()));
         }
         message
     }
@@ -175,11 +175,11 @@ impl RuntimeProfiler {
             .output_dir
             .join(format!("runtime-profile-{file_suffix}.json"));
         self.write_timeline_json(&json_path, reason, diagnostics)?;
-        let flamegraph = self.write_cpu_flamegraph(&file_suffix)?;
+        let folded_stacks = self.write_cpu_folded_stacks(&file_suffix)?;
 
         Ok(RuntimeProfilePaths {
             json: json_path,
-            flamegraph,
+            folded_stacks,
         })
     }
 
@@ -225,30 +225,81 @@ impl RuntimeProfiler {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn write_cpu_flamegraph(&self, file_suffix: &str) -> Result<Option<PathBuf>> {
+    fn write_cpu_folded_stacks(&self, file_suffix: &str) -> Result<Option<PathBuf>> {
         let Some(cpu_guard) = &self.cpu_guard else {
             return Ok(None);
         };
 
         let path = self
             .output_dir
-            .join(format!("cpu-flamegraph-{file_suffix}.svg"));
+            .join(format!("cpu-stacks-{file_suffix}.folded"));
         let report = cpu_guard
             .report()
             .build()
             .context("failed to build CPU profile report")?;
-        let file = File::create(&path)
-            .with_context(|| format!("failed to create CPU flamegraph {}", path.display()))?;
-        report
-            .flamegraph(file)
-            .with_context(|| format!("failed to write CPU flamegraph {}", path.display()))?;
+        fs::write(&path, serialize_folded_stacks(&report.data))
+            .with_context(|| format!("failed to write CPU folded stacks {}", path.display()))?;
         Ok(Some(path))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    fn write_cpu_flamegraph(&self, _file_suffix: &str) -> Result<Option<PathBuf>> {
+    fn write_cpu_folded_stacks(&self, _file_suffix: &str) -> Result<Option<PathBuf>> {
         Ok(None)
     }
+}
+
+/// Serialize pprof's public report data without a bundled flamegraph renderer.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn serialize_folded_stacks(data: &std::collections::HashMap<pprof::Frames, isize>) -> String {
+    // Frames can differ by timestamp or thread ID but have the same visible stack.
+    // Merge their counts and sort for deterministic output, independent of HashMap order.
+    let mut stacks = std::collections::BTreeMap::<String, u128>::new();
+    for (frames, &count) in data {
+        if count <= 0 {
+            continue;
+        }
+        let mut stack = folded_stack_label(&frames.thread_name_or_id());
+        // pprof stores both physical frames and inline symbols leaf-first.
+        for frame in frames.frames.iter().rev() {
+            for symbol in frame.iter().rev() {
+                stack.push(';');
+                stack.push_str(&folded_stack_label(&symbol.name()));
+            }
+        }
+        *stacks.entry(stack).or_default() += count as u128;
+    }
+
+    let mut output = String::new();
+    for (stack, count) in stacks {
+        output.push_str(&stack);
+        output.push(' ');
+        output.push_str(&count.to_string());
+        output.push('\n');
+    }
+    output
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn folded_stack_label(label: &str) -> String {
+    let mut output = String::new();
+    for ch in label.chars() {
+        // Folded stacks have no standard quoting. Percent-encode separators and
+        // whitespace/control characters (including newlines), plus '%' to avoid
+        // collisions with literal escape sequences. Other Unicode is preserved.
+        if ch == ';' || ch == '%' || ch.is_whitespace() || ch.is_control() {
+            let mut bytes = [0; 4];
+            for byte in ch.encode_utf8(&mut bytes).bytes() {
+                output.push_str(&format!("%{byte:02X}"));
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    // Keep empty symbols visible rather than emitting an empty stack component.
+    if output.is_empty() {
+        output.push_str("[unknown]");
+    }
+    output
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -554,7 +605,7 @@ fn start_cpu_profiler(enabled: bool, _frequency_hz: i32) -> (CpuProfilerStatus, 
     if enabled {
         (
             CpuProfilerStatus::Unavailable {
-                error: "CPU flamegraph profiling is only supported on Linux and macOS".to_string(),
+                error: "CPU stack sampling is only supported on Linux and macOS".to_string(),
             },
             (),
         )
@@ -637,5 +688,126 @@ fn signed_delta(end: u64, start: u64) -> i64 {
         i64::try_from(end - start).unwrap_or(i64::MAX)
     } else {
         -i64::try_from(start - end).unwrap_or(i64::MAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_paths_message_describes_folded_stacks() {
+        let mut paths = RuntimeProfilePaths {
+            json: PathBuf::from("timeline.json"),
+            folded_stacks: None,
+        };
+        assert_eq!(paths.message(), "JSON timeline:\ntimeline.json");
+        paths.folded_stacks = Some(PathBuf::from("cpu-stacks.folded"));
+        assert_eq!(
+            paths.message(),
+            "JSON timeline:\ntimeline.json\n\nCPU folded stacks:\ncpu-stacks.folded"
+        );
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn cpu_sampling_remains_unsupported() {
+        let (status, ()) = start_cpu_profiler(true, DEFAULT_CPU_FREQUENCY_HZ);
+        assert!(matches!(status, CpuProfilerStatus::Unavailable { .. }));
+        let (status, ()) = start_cpu_profiler(false, DEFAULT_CPU_FREQUENCY_HZ);
+        assert!(matches!(status, CpuProfilerStatus::Disabled));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    mod folded {
+        use super::*;
+        use std::collections::HashMap;
+
+        fn symbol(name: &str) -> pprof::Symbol {
+            pprof::Symbol {
+                name: Some(name.as_bytes().to_vec()),
+                addr: None,
+                lineno: None,
+                filename: None,
+            }
+        }
+
+        fn frames(thread_name: &str, thread_id: u64, names: &[&[&str]]) -> pprof::Frames {
+            pprof::Frames {
+                frames: names
+                    .iter()
+                    .map(|frame| frame.iter().map(|name| symbol(name)).collect())
+                    .collect(),
+                thread_name: thread_name.to_string(),
+                thread_id,
+                sample_timestamp: UNIX_EPOCH,
+            }
+        }
+
+        #[test]
+        fn preserves_counts_and_reverses_frames_and_inline_symbols() {
+            let data = HashMap::from([(
+                frames("main", 1, &[&["_ZN3foo3barE"], &["inlined", "root"]]),
+                7,
+            )]);
+            assert_eq!(
+                serialize_folded_stacks(&data),
+                "main;root;inlined;foo::bar 7\n"
+            );
+        }
+
+        #[test]
+        fn sanitizes_labels_without_xml_escaping_or_newline_injection() {
+            let data = HashMap::from([(
+                frames("worker;\r\n%", 1, &[&["λ::<T>& [u8; 4]\t\0\u{2028}"]]),
+                3,
+            )]);
+            assert_eq!(
+                serialize_folded_stacks(&data),
+                "worker%3B%0D%0A%25;λ::<T>&%20[u8%3B%204]%09%00%E2%80%A8 3\n"
+            );
+            assert_eq!(folded_stack_label("%3B"), "%253B");
+            assert_eq!(folded_stack_label("a\u{85}\u{2029}b"), "a%C2%85%E2%80%A9b");
+        }
+
+        #[test]
+        fn sorts_and_sums_identical_displayed_stacks_without_isize_overflow() {
+            let entries = [
+                (frames("z", 1, &[&["leaf"]]), 2),
+                (frames("a", 2, &[&["leaf"]]), isize::MAX),
+                (frames("a", 3, &[&["leaf"]]), isize::MAX),
+            ];
+            let data = HashMap::from(entries.clone());
+            let reversed = entries.into_iter().rev().collect();
+            let expected = format!("a;leaf {}\nz;leaf 2\n", 2 * isize::MAX as u128);
+            assert_eq!(serialize_folded_stacks(&data), expected);
+            assert_eq!(serialize_folded_stacks(&reversed), expected);
+        }
+
+        #[test]
+        fn handles_unnamed_threads_empty_stacks_and_unknown_symbols() {
+            let mut unknown = frames("worker", 1, &[&[""]]);
+            unknown.frames[0].push(pprof::Symbol {
+                name: None,
+                addr: None,
+                lineno: None,
+                filename: None,
+            });
+            let data = HashMap::from([(frames("", 42, &[]), 2), (unknown, 3)]);
+            assert_eq!(
+                serialize_folded_stacks(&data),
+                "42 2\nworker;Unknown;[unknown] 3\n"
+            );
+        }
+
+        #[test]
+        fn empty_or_nonpositive_reports_produce_no_lines() {
+            assert_eq!(serialize_folded_stacks(&HashMap::new()), "");
+            let data = HashMap::from([
+                (frames("zero", 1, &[&["leaf"]]), 0),
+                (frames("negative", 2, &[&["leaf"]]), -1),
+            ]);
+            assert_eq!(serialize_folded_stacks(&data), "");
+        }
     }
 }

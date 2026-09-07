@@ -55,6 +55,7 @@ mod sidebar_ui;
 mod status_bar;
 mod tabs;
 mod temp_store;
+mod text_layout;
 mod theme_debugger;
 mod tooltip;
 mod types;

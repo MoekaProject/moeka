@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+- name: Bug reports, feature requests, and usage questions
+  url: https://github.com/MoekaProject/community/issues
+  about: User issues are tracked in MoekaProject/community. Do not post vulnerability details there.
+- name: Security reporting instructions
+  url: https://github.com/MoekaProject/moeka/blob/main/SECURITY.md
+  about: Follow the private reporting instructions; never disclose vulnerabilities in public issues.
+- name: Downloads and release notes
+  url: https://github.com/MoekaProject/community/releases
+  about: Download published Moeka builds from the community repository.

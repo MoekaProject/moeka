@@ -1479,7 +1479,7 @@ impl EditorView {
             if index > 0 {
                 breadcrumb = breadcrumb.child(
                     svg()
-                        .path("assets/icons/right.svg")
+                        .path("assets/icons/navigation/right.svg")
                         .size(px(separator_size))
                         .flex_none()
                         .text_color(es.editor_path_bar_separator_color),
@@ -1672,19 +1672,19 @@ impl EditorView {
                                     },
                                 )
                                 .child(diff_button(
-                                    "assets/icons/expand.svg",
+                                    "assets/icons/navigation/expand.svg",
                                     toggle_label,
                                     true,
                                     Self::toggle_git_diff_show_only_changes,
                                 ))
                                 .child(diff_button(
-                                    "assets/icons/arrow-up-circle.svg",
+                                    "assets/icons/navigation/arrow-up-circle.svg",
                                     previous_label,
                                     self.can_navigate_previous_git_diff_row(),
                                     Self::navigate_previous_git_diff_row,
                                 ))
                                 .child(diff_button(
-                                    "assets/icons/arrow-down-circle.svg",
+                                    "assets/icons/navigation/arrow-down-circle.svg",
                                     next_label,
                                     self.can_navigate_next_git_diff_row(),
                                     Self::navigate_next_git_diff_row,
@@ -1713,7 +1713,7 @@ impl EditorView {
                                 )
                                 .child(
                                     svg()
-                                        .path("assets/icons/right.svg")
+                                        .path("assets/icons/navigation/right.svg")
                                         .size(px(separator_size))
                                         .flex_none()
                                         .text_color(es.editor_path_bar_separator_color),
@@ -2046,7 +2046,7 @@ impl EditorView {
                         .when(tab_kind == TabKind::Settings, |this| {
                             this.child(
                                 svg()
-                                    .path("assets/icons/setting.svg")
+                                    .path("assets/icons/appearance/setting.svg")
                                     .size(px(self.scaled(ts.tab_item_icon_size_px)))
                                     .text_color(ts.tab_item_icon_color)
                                     .opacity(if is_active {
@@ -2861,7 +2861,7 @@ impl EditorView {
                 .cursor(CursorStyle::Arrow)
                 .child(
                     svg()
-                        .path("assets/icons/file-tree-toggle.svg")
+                        .path("assets/icons/workspace/file-tree-toggle.svg")
                         .size(px(self.scaled(ts.tab_item_icon_size_px)))
                         .text_color(ts.tab_history_btn_icon_color)
                         .group_hover("tab-history-button", move |style| {
@@ -2895,13 +2895,13 @@ impl EditorView {
             .when(!self.sidebar_visible, |this| this.child(sidebar_button))
             .child(history_button(
                 "tab-bar-history-back",
-                "assets/icons/arrow-left.svg",
+                "assets/icons/navigation/arrow-left.svg",
                 can_nav_back,
                 Self::navigate_tab_history_back,
             ))
             .child(history_button(
                 "tab-bar-history-forward",
-                "assets/icons/arrow-right.svg",
+                "assets/icons/navigation/arrow-right.svg",
                 can_nav_forward,
                 Self::navigate_tab_history_forward,
             ))

@@ -4,6 +4,12 @@
 name = "moeka"
 version = "0.1.12"
 edition = "2024"
+description = "A local-first Markdown editor with live rendering, workspaces, and native desktop tools"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/MoekaProject/moeka"
+homepage = "https://moeka.app"
+readme = "README.md"
+publish = false
 
 [[bin]]
 name = "moeka"
@@ -61,7 +67,7 @@ usvg = { version = "0.45.1", default-features = false, features = [
 tantivy = "0.26.1"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
-pprof = { version = "0.15", features = ["flamegraph"] }
+pprof = "0.15"
 
 # macOS reaches the desktop through NSWorkspace instead, so that the App Store
 # build never spawns an `open` child process.

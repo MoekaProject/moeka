@@ -87,7 +87,7 @@ MAS_INSTALLER_IDENTITY ?= $(shell security find-identity -v 2>/dev/null | sed -n
 # public `CGShieldingWindowLevel` that cocoa references.
 MAS_FORBIDDEN_SYMBOLS := _CGS[A-Z]|_AXUIElement|_AXIsProcessTrusted
 
-.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check check-targets windows windows-one windows-arm64 windows-x86_64 windows-icon linux linux-one linux-arm64 linux-x86_64 mas mas-app clean-mas
+.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check publish-tools-check test-publish-release check-targets windows windows-one windows-arm64 windows-x86_64 windows-icon linux linux-one linux-arm64 linux-x86_64 mas mas-app clean-mas
 
 dmg: $(ICON_FILE)
 	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -127,13 +127,15 @@ windows-one:
 	@mkdir -p "$(DIST_DIR)"
 	@chmod +x $(XWIN_SHIMS)/*
 	PATH="$(CURDIR)/$(XWIN_SHIMS):$$PATH" \
-		CARGO_INCREMENTAL=0 cargo xwin build --release --target "$(WINDOWS_TARGET)"
+		CARGO_INCREMENTAL=0 cargo xwin build --release --locked --target "$(WINDOWS_TARGET)"
 	@set -euo pipefail; \
 	zip_path="$(CURDIR)/$(DIST_DIR)/$(APP_DISPLAY_NAME)-windows-$(WINDOWS_SUFFIX).zip"; \
 	stage="$$(mktemp -d)"; \
 	cp "target/$(WINDOWS_TARGET)/release/$(APP_NAME).exe" "$$stage/$(APP_DISPLAY_NAME).exe"; \
+	cp LICENSE THIRD_PARTY_NOTICES.md "$$stage/"; \
+	if [[ -d licenses ]]; then cp -R licenses "$$stage/licenses"; fi; \
 	rm -f "$$zip_path"; \
-	(cd "$$stage" && zip -q "$$zip_path" "$(APP_DISPLAY_NAME).exe"); \
+	(cd "$$stage" && zip -qr "$$zip_path" .); \
 	rm -rf "$$stage"
 
 # Regenerates packaging/windows/moeka.ico from the app-icon master. Needs
@@ -173,7 +175,7 @@ linux-one:
 	@set -euo pipefail; \
 	case "$(HOST_TARGET)" in \
 		"$(LINUX_TARGET)") \
-			CARGO_INCREMENTAL=0 cargo build --release --target "$(LINUX_TARGET)"; \
+			CARGO_INCREMENTAL=0 cargo build --release --locked --target "$(LINUX_TARGET)"; \
 			library_dir="$$(dirname "$$(ldconfig -p | awk '/libxkbcommon-x11\.so\.0 / { print $$NF; exit }')")"; \
 			;; \
 		*-apple-darwin) \
@@ -184,7 +186,7 @@ linux-one:
 			python3 "$(LINUX_SYSROOT_SCRIPT)" "$(LINUX_SUFFIX)" "$$sysroot"; \
 			library_dir="$$sysroot/usr/lib/$(LINUX_TRIPLET)"; \
 			RUSTFLAGS="$${RUSTFLAGS:+$$RUSTFLAGS }-L native=$$library_dir" \
-				CARGO_INCREMENTAL=0 cargo zigbuild --release \
+				CARGO_INCREMENTAL=0 cargo zigbuild --release --locked \
 				--target "$(LINUX_TARGET).$(LINUX_GLIBC_VERSION)"; \
 			;; \
 		*) \
@@ -220,6 +222,8 @@ linux-one:
 	chmod +x "$$package/uninstall.sh"; \
 	cp "$(LINUX_README)" "$$package/README.txt"; \
 	cp "$(LINUX_ICON_SOURCE)" "$$package/app.moeka.moeka.png"; \
+	cp LICENSE THIRD_PARTY_NOTICES.md "$$package/"; \
+	if [[ -d licenses ]]; then cp -R licenses "$$package/licenses"; fi; \
 	archive="$(CURDIR)/$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-$(LINUX_SUFFIX).zip"; \
 	rm -f "$$archive"; \
 	(cd "$$stage" && zip -qr "$$archive" "$$(basename "$$package")"); \
@@ -227,49 +231,17 @@ linux-one:
 	echo "Created $$archive"
 
 publish: publish-check
-	@git push --force-with-lease origin HEAD:main
-	@$(MAKE) tag TAG="$(TAG)"
-	@$(MAKE) signed-release
-	@$(MAKE) windows
-	@$(MAKE) linux
-	@set -euo pipefail; \
-	assets=(); \
-	for suffix in $(DIST_SUFFIXES); do \
-		asset="$(DIST_DIR)/$(APP_DISPLAY_NAME)-macos-$$suffix.dmg"; \
-		[[ -f "$$asset" ]] || { echo "Missing $$asset"; exit 1; }; \
-		assets+=("$$asset"); \
-	done; \
-	for asset in $(ZIP_PATHS) $(WINDOWS_ZIP_PATHS) $(LINUX_ARCHIVES); do \
-		[[ -f "$$asset" ]] || { echo "Missing $$asset"; exit 1; }; \
-		assets+=("$$asset"); \
-	done; \
-	notes="$$(git for-each-ref "refs/tags/$(TAG)" --format='%(contents)')"; \
-	[[ -n "$$notes" ]] || notes="Release $(TAG)"; \
-	if gh release view "$(TAG)" --repo "$(RELEASE_REPO)" >/dev/null 2>&1; then \
-		gh release delete "$(TAG)" --repo "$(RELEASE_REPO)" --cleanup-tag --yes; \
-	fi; \
-	gh release create "$(TAG)" \
-		--repo "$(RELEASE_REPO)" \
-		--title "$(TAG)" \
-		--notes "$$notes" \
-		--latest; \
-	gh release upload "$(TAG)" --repo "$(RELEASE_REPO)" --clobber "$${assets[@]}"
+	@bash scripts/publish-release.sh publish "$(TAG)" "$(RELEASE_REPO)"
 
 publish-check:
-	@if [[ ! "$(TAG)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
-		echo "Usage: make publish vX.Y.Z"; \
-		exit 1; \
-	fi
-	@if [[ "$(TAG)" != "v$(VERSION)" ]]; then \
-		echo "Tag/version mismatch: TAG=$(TAG), Cargo.toml version=$(VERSION)."; \
-		echo "Please bump Cargo.toml version or publish with matching tag."; \
-		exit 1; \
-	fi
-	@if [[ -n "$$(git status --porcelain)" ]]; then \
-		echo "Working tree is dirty; commit or stash before publishing $(TAG)."; \
-		exit 1; \
-	fi
-	@command -v gh >/dev/null || { echo "gh CLI is required: brew install gh && gh auth login"; exit 1; }
+	@bash scripts/publish-release.sh check "$(TAG)" "$(RELEASE_REPO)"
+
+test-publish-release:
+	@bash scripts/test-publish-release.sh
+
+# Only the publishing helper calls this, after the read-only safety checks.
+# Resuming a draft reuses dist instead of rebuilding signed artifacts.
+publish-tools-check:
 	@for tool in zig cargo-zigbuild python3 ar zstd patchelf; do \
 		command -v "$$tool" >/dev/null || { echo "$$tool is required for Linux cross-compilation"; exit 1; }; \
 	done
@@ -303,12 +275,12 @@ check-targets:
 	for target in $(WINDOWS_TARGETS); do \
 		echo "==> checking $$target"; \
 		PATH="$(CURDIR)/$(XWIN_SHIMS):$$PATH" CARGO_INCREMENTAL=0 \
-			cargo xwin check --release --target "$$target"; \
+			cargo xwin check --release --locked --target "$$target"; \
 	done; \
 	for target in $(LINUX_TARGETS); do \
 		echo "==> checking $$target"; \
 		CARGO_INCREMENTAL=0 cargo-zigbuild check --release \
-			--target "$$target.$(LINUX_GLIBC_VERSION)"; \
+			--locked --target "$$target.$(LINUX_GLIBC_VERSION)"; \
 	done; \
 	echo "All cross targets compile."
 
@@ -319,14 +291,10 @@ notary-setup:
 		--apple-id "$(APPLE_ID)" \
 		--team-id "$(TEAM_ID)"
 
+# Tag creation is part of the guarded publish transaction, never a force update.
 tag:
-	@if [[ ! "$(TAG)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
-		echo "Usage: make tag vX.Y.Z"; \
-		exit 1; \
-	fi
-	@git tag --delete "$(TAG)" >/dev/null 2>&1 || true
-	@git tag "$(TAG)"
-	@git push -f origin "$(TAG)"
+	@echo "Standalone tagging is disabled; use make publish vX.Y.Z after review." >&2
+	@exit 1
 
 v%:
 	@:
@@ -411,6 +379,8 @@ $(APP_DIR): build-release $(INFO_PLIST_TEMPLATE) $(ICON_FILE)
 		--exclude '.DS_Store' \
 		docs "$(RESOURCES_DIR)/"
 	@cp -R packaging/macos/*.lproj "$(RESOURCES_DIR)/"
+	@cp LICENSE THIRD_PARTY_NOTICES.md "$(RESOURCES_DIR)/"
+	@if [[ -d licenses ]]; then cp -R licenses "$(RESOURCES_DIR)/licenses"; fi
 	@sed \
 		-e 's|__APP_EXECUTABLE__|$(APP_NAME)|g' \
 		-e 's|__APP_NAME__|$(APP_DISPLAY_NAME)|g' \
@@ -430,14 +400,14 @@ $(APP_DIR): build-release $(INFO_PLIST_TEMPLATE) $(ICON_FILE)
 
 build-release:
 	@if [[ "$(TARGET)" != "$(HOST_TARGET)" ]]; then rustup target add "$(TARGET)"; fi
-	@CARGO_INCREMENTAL=0 cargo build --release $(CARGO_TARGET_ARG)
+	@CARGO_INCREMENTAL=0 cargo build --release --locked $(CARGO_TARGET_ARG)
 
 # Unsigned universal App Store bundle. Signing is a separate step so the guard
 # below fails the build before any certificate is involved.
 mas-app: $(ICON_FILE) $(INFO_PLIST_TEMPLATE) $(MAS_ENTITLEMENTS)
 	@rustup target add $(MAS_TARGETS)
 	@for target in $(MAS_TARGETS); do \
-		CARGO_INCREMENTAL=0 cargo build --release --features mas --target "$$target" || exit 1; \
+		CARGO_INCREMENTAL=0 cargo build --release --locked --features mas --target "$$target" || exit 1; \
 	done
 	@set -euo pipefail; \
 	for target in $(MAS_TARGETS); do \
@@ -456,6 +426,8 @@ mas-app: $(ICON_FILE) $(INFO_PLIST_TEMPLATE) $(MAS_ENTITLEMENTS)
 	@rsync -a --exclude '.DS_Store' assets "$(MAS_CONTENTS_DIR)/Resources/"
 	@rsync -a --exclude '.DS_Store' docs "$(MAS_CONTENTS_DIR)/Resources/"
 	@cp -R packaging/macos/*.lproj "$(MAS_CONTENTS_DIR)/Resources/"
+	@cp LICENSE THIRD_PARTY_NOTICES.md "$(MAS_CONTENTS_DIR)/Resources/"
+	@if [[ -d licenses ]]; then cp -R licenses "$(MAS_CONTENTS_DIR)/Resources/licenses"; fi
 	@cp "$(ICON_FILE)" "$(MAS_CONTENTS_DIR)/Resources/AppIcon.icns"
 	@sed \
 		-e 's|__APP_EXECUTABLE__|$(APP_NAME)|g' \

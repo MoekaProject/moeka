@@ -2269,7 +2269,7 @@ impl EditorView {
             )
             .child(
                 svg()
-                    .path("assets/icons/right.svg")
+                    .path("assets/icons/navigation/right.svg")
                     .size(px(arrow_size))
                     .text_color(ms.menu_shortcut_text_color),
             )
@@ -5372,7 +5372,7 @@ impl EditorView {
                 ));
                 items.push(self.render_context_menu_item_with_icon(
                     self.t(crate::i18n::TextKey::AppSettingsMenu),
-                    "assets/icons/setting.svg",
+                    "assets/icons/appearance/setting.svg",
                     false,
                     cx,
                     move |this, _, cx| {

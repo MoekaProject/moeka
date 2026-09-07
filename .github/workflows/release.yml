@@ -1,125 +1,55 @@
-name: Release
+name: Unsigned release candidates (no publishing)
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "Release tag, for example v0.1.0"
-        required: true
-        type: string
-      release_notes:
-        description: "Release notes. If empty, the workflow uses the tag message when available."
-        required: false
-        type: string
 
+# The selected dispatch ref is built, never tagged, signed, or published.
+# No release/PAT/notary secrets and no Homebrew writes belong in this workflow.
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: candidate-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release_meta:
-    name: Release metadata
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.meta.outputs.tag }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Prepare release notes
-        id: meta
-        env:
-          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
-          RELEASE_NOTES_INPUT: ${{ inputs.release_notes }}
-        run: |
-          set -euo pipefail
-          release_tag="${GITHUB_REF_NAME}"
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            release_tag="${RELEASE_TAG_INPUT}"
-          fi
-          if [[ -z "${release_tag}" ]]; then
-            echo "release tag is required" >&2
-            exit 1
-          fi
-
-          echo "tag=${release_tag}" >> "${GITHUB_OUTPUT}"
-
-          if [[ -n "${RELEASE_NOTES_INPUT}" ]]; then
-            printf '%s\n' "${RELEASE_NOTES_INPUT}" > release-notes.md
-          else
-            git fetch --force --tags
-            if git rev-parse -q --verify "refs/tags/${release_tag}" >/dev/null; then
-              git for-each-ref "refs/tags/${release_tag}" --format='%(contents)' > release-notes.md
-            fi
-            if [[ ! -s release-notes.md ]]; then
-              printf 'Release %s\n' "${release_tag}" > release-notes.md
-            fi
-          fi
-
-      - name: Upload release notes
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-notes
-          path: release-notes.md
-          if-no-files-found: error
-
   build:
-    name: Build ${{ matrix.name }}
+    name: Unsigned macOS ${{ matrix.arch }}
     runs-on: macos-14
-    needs: release_meta
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: macOS arm64
+          - arch: arm64
             target: aarch64-apple-darwin
-            asset_suffix: arm64
-            rust_targets: aarch64-apple-darwin
-          - name: macOS x86_64
+          - arch: x86_64
             target: x86_64-apple-darwin
-            asset_suffix: x86_64
-            rust_targets: x86_64-apple-darwin
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
-          ref: ${{ needs.release_meta.outputs.tag }}
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          targets: ${{ matrix.rust_targets }}
-
-      - name: Cache Cargo build
-        uses: Swatinem/rust-cache@v2
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: release-${{ matrix.target }}
-
-      - name: Build app and dmg
+          key: candidate-${{ matrix.target }}
+      - name: Build unsigned app and DMG
         run: |
-          set -euo pipefail
           make dmg-one \
             TARGET=${{ matrix.target }} \
-            DMG_PATH=dist/Moeka-macos-${{ matrix.asset_suffix }}.dmg \
-            VOLUME_NAME=Moeka-${{ matrix.asset_suffix }}
-
-      - name: Upload release assets
-        uses: actions/upload-artifact@v4
+            DMG_PATH=dist/Moeka-macos-${{ matrix.arch }}.dmg \
+            VOLUME_NAME=Moeka-${{ matrix.arch }}-candidate
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-assets-${{ matrix.asset_suffix }}
-          path: dist/Moeka-macos-${{ matrix.asset_suffix }}.dmg
+          name: unsigned-candidate-macos-${{ matrix.arch }}-${{ github.sha }}
+          path: dist/Moeka-macos-${{ matrix.arch }}.dmg
           if-no-files-found: error
+          retention-days: 14
 
   build_linux:
-    name: Build Linux ${{ matrix.arch }}
+    name: Unsigned Linux ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    needs: release_meta
     strategy:
       fail-fast: false
       matrix:
@@ -131,17 +61,12 @@ jobs:
             target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
-          ref: ${{ needs.release_meta.outputs.tag }}
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
-
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update
@@ -150,26 +75,21 @@ jobs:
             libvulkan-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev \
             libxcb-shm0-dev libxcb-xfixes0-dev libxcb-xkb-dev libxcb1-dev \
             libxkbcommon-dev libxkbcommon-x11-dev patchelf pkg-config
-
-      - name: Cache Cargo build
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: release-linux-${{ matrix.arch }}
-
+          key: candidate-linux-${{ matrix.arch }}
       - name: Build package
         run: CARGO_INCREMENTAL=0 make linux-${{ matrix.arch }}
-
-      - name: Upload release asset
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-assets-linux-${{ matrix.arch }}
+          name: unsigned-candidate-linux-${{ matrix.arch }}-${{ github.sha }}
           path: dist/Moeka-linux-${{ matrix.arch }}.zip
           if-no-files-found: error
+          retention-days: 14
 
   build_windows:
-    name: Build Windows ${{ matrix.arch }}
+    name: Unsigned Windows ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    needs: release_meta
     strategy:
       fail-fast: false
       matrix:
@@ -179,171 +99,26 @@ jobs:
           - arch: arm64
             runner: windows-11-arm
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
-          ref: ${{ needs.release_meta.outputs.tag }}
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo build
-        uses: Swatinem/rust-cache@v2
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: release-windows-${{ matrix.arch }}
-
+          key: candidate-windows-${{ matrix.arch }}
       - name: Build package
         shell: pwsh
         run: |
-          cargo build --release
+          cargo build --release --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
           Copy-Item target/release/moeka.exe dist/windows/Moeka.exe
-          Compress-Archive -Path dist/windows/Moeka.exe -DestinationPath dist/Moeka-windows-${{ matrix.arch }}.zip -Force
-
-      - name: Upload release asset
-        uses: actions/upload-artifact@v4
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md dist/windows/
+          if (Test-Path licenses) { Copy-Item -Recurse licenses dist/windows/ }
+          Compress-Archive -Path dist/windows/* -DestinationPath dist/Moeka-windows-${{ matrix.arch }}.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-assets-windows-${{ matrix.arch }}
+          name: unsigned-candidate-windows-${{ matrix.arch }}-${{ github.sha }}
           path: dist/Moeka-windows-${{ matrix.arch }}.zip
           if-no-files-found: error
-
-  publish:
-    name: Publish release
-    runs-on: ubuntu-latest
-    env:
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-    needs:
-      - release_meta
-      - build
-      - build_linux
-      - build_windows
-    steps:
-      - name: Download release notes
-        uses: actions/download-artifact@v4
-        with:
-          name: release-notes
-          path: release
-
-      - name: Download release assets
-        uses: actions/download-artifact@v4
-        with:
-          pattern: release-assets-*
-          path: dist
-          merge-multiple: true
-
-      - name: Validate release token
-        env:
-          GH_TOKEN: ${{ secrets.MOEKA_PUBLIC_RELEASE_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${GH_TOKEN}" ]]; then
-            echo "::error title=Missing MOEKA_PUBLIC_RELEASE_TOKEN::Create a repository secret named MOEKA_PUBLIC_RELEASE_TOKEN with contents:write access to MoekaProject/community."
-            exit 1
-          fi
-
-          token_login="$(gh api user --jq '.login')"
-          echo "Using release token identity: ${token_login}"
-
-          if ! can_push="$(gh api repos/MoekaProject/community --jq '.permissions.push // false')"; then
-            echo "::error title=Invalid MOEKA_PUBLIC_RELEASE_TOKEN::The token cannot access MoekaProject/community. Make sure the token is authorized for the organization and selected repository."
-            exit 1
-          fi
-          echo "Token push permission on MoekaProject/community: ${can_push}"
-
-          if [[ "${can_push}" != "true" ]]; then
-            echo "::error title=Insufficient MOEKA_PUBLIC_RELEASE_TOKEN permissions::The token can access MoekaProject/community but does not have write access. Grant Contents: Read and write."
-            exit 1
-          fi
-
-      - name: Recreate release
-        env:
-          GH_TOKEN: ${{ secrets.MOEKA_PUBLIC_RELEASE_TOKEN }}
-          RELEASE_TAG: ${{ needs.release_meta.outputs.tag }}
-        run: |
-          set -euo pipefail
-          repo="MoekaProject/community"
-          assets=(
-            dist/Moeka-macos-arm64.dmg
-            dist/Moeka-macos-x86_64.dmg
-            dist/Moeka-linux-arm64.zip
-            dist/Moeka-linux-x86_64.zip
-            dist/Moeka-windows-arm64.zip
-            dist/Moeka-windows-x86_64.zip
-          )
-          for asset in "${assets[@]}"; do
-            if [[ ! -f "${asset}" ]]; then
-              echo "::error title=Missing release asset::${asset} was not downloaded"
-              exit 1
-            fi
-          done
-
-          run_release_command() {
-            local output
-            if output="$($@ 2>&1)"; then
-              if [[ -n "${output}" ]]; then
-                printf '%s\n' "${output}"
-              fi
-              return 0
-            fi
-
-            printf '%s\n' "${output}" >&2
-            if grep -q "Resource not accessible by personal access token" <<<"${output}"; then
-              echo "::error title=Release token cannot create releases::MOEKA_PUBLIC_RELEASE_TOKEN can be read by this workflow, but GitHub rejected release writes to ${repo}. Use a fine-grained PAT owned by an account with write/admin access to ${repo}, select Repository access: ${repo}, grant Contents: Read and write, and authorize SSO if the organization requires it."
-            fi
-            return 1
-          }
-
-          if gh release view "${RELEASE_TAG}" --repo "${repo}" >/dev/null 2>&1; then
-            run_release_command gh release delete "${RELEASE_TAG}" \
-              --repo "${repo}" \
-              --cleanup-tag \
-              --yes
-          fi
-
-          run_release_command gh release create "${RELEASE_TAG}" \
-            --repo "${repo}" \
-            --title "${RELEASE_TAG}" \
-            --notes-file release/release-notes.md \
-            --latest
-
-          run_release_command gh release upload "${RELEASE_TAG}" \
-            --repo "${repo}" \
-            --clobber \
-            "${assets[@]}"
-
-      - name: Checkout source for Homebrew template
-        if: env.HOMEBREW_TAP_TOKEN != ''
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.release_meta.outputs.tag }}
-          path: source
-      - name: Update Homebrew tap
-        if: env.HOMEBREW_TAP_TOKEN != ''
-        env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          RELEASE_TAG: ${{ needs.release_meta.outputs.tag }}
-        run: |
-          set -euo pipefail
-          version="${RELEASE_TAG#v}"
-          arm_sha="$(sha256sum dist/Moeka-macos-arm64.dmg | awk '{print $1}')"
-          intel_sha="$(sha256sum dist/Moeka-macos-x86_64.dmg | awk '{print $1}')"
-
-          gh repo clone MoekaProject/homebrew-moeka tap
-          mkdir -p tap/Casks
-          cp source/packaging/homebrew/moeka.rb tap/Casks/moeka.rb
-          VERSION="${version}" ARM_SHA="${arm_sha}" INTEL_SHA="${intel_sha}" ruby -pi -e '
-            sub(/^  version .*/, "  version \"#{ENV.fetch("VERSION")}\"")
-            sub(/^  sha256 arm:.*/, "  sha256 arm:   \"#{ENV.fetch("ARM_SHA")}\",")
-            sub(/^         intel:.*/, "         intel: \"#{ENV.fetch("INTEL_SHA")}\"")
-          ' tap/Casks/moeka.rb
-
-          cd tap
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add Casks/moeka.rb
-          if git diff --cached --quiet; then
-            exit 0
-          fi
-          git commit -m "Update Moeka to ${version}"
-          git push
+          retention-days: 14

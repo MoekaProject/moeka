@@ -26,6 +26,10 @@ use crate::markdown::{
 };
 use crate::theme::{CodeSyntaxPalette, Theme};
 
+pub(crate) use super::text_layout::{
+    code_block_soft_wrap_width, effective_monospace_wrap_width_for_letter_spacing,
+    effective_wrap_width_for_letter_spacing, table_cell_content_offset,
+};
 use super::*;
 
 const CODE_HIGHLIGHT_CACHE_MAX_ENTRIES: usize = 8192;
@@ -1310,47 +1314,6 @@ pub(crate) fn compute_table_layout(
         is_header: is_header_vec,
         is_front_matter,
     }
-}
-
-pub(crate) fn table_cell_content_offset(
-    alignment: crate::markdown::TableAlign,
-    inner_width: f32,
-    text_width: f32,
-) -> f32 {
-    let available = (inner_width - text_width).max(0.0);
-    match alignment {
-        crate::markdown::TableAlign::Left => 0.0,
-        crate::markdown::TableAlign::Center => available * 0.5,
-        crate::markdown::TableAlign::Right => available,
-    }
-}
-
-pub(crate) fn effective_wrap_width_for_letter_spacing(
-    width: f32,
-    font_size: f32,
-    letter_spacing: f32,
-) -> f32 {
-    if letter_spacing > 0.0 {
-        width * font_size / (font_size + letter_spacing)
-    } else {
-        width
-    }
-}
-
-pub(crate) fn effective_monospace_wrap_width_for_letter_spacing(
-    width: f32,
-    character_advance: f32,
-    letter_spacing: f32,
-) -> f32 {
-    if letter_spacing > 0.0 && character_advance > 0.0 {
-        width * character_advance / (character_advance + letter_spacing)
-    } else {
-        width
-    }
-}
-
-pub(crate) fn code_block_soft_wrap_width(viewport_width: f32, character_advance: f32) -> f32 {
-    (viewport_width - character_advance.max(1.0)).max(1.0)
 }
 
 pub(crate) fn build_highlight_bounds(

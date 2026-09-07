@@ -1,0 +1,7 @@
+# An empty, portable session. Never commit real workspace/recovery/history paths.
+version: 1
+workspaces:
+  roots: []
+  active_root: null
+sessions:
+  tabs: []

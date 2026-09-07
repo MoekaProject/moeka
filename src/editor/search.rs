@@ -854,7 +854,7 @@ impl EditorView {
                         .hover(move |style| style.bg(nav_hover_bg))
                         .child(
                             svg()
-                                .path("assets/icons/arrow-up.svg")
+                                .path("assets/icons/navigation/arrow-up.svg")
                                 .size(px(nav_btn_icon_size))
                                 .text_color(nav_icon_color),
                         )
@@ -884,7 +884,7 @@ impl EditorView {
                         .hover(move |style| style.bg(nav_hover_bg))
                         .child(
                             svg()
-                                .path("assets/icons/arrow-down.svg")
+                                .path("assets/icons/navigation/arrow-down.svg")
                                 .size(px(nav_btn_icon_size))
                                 .text_color(nav_icon_color),
                         )

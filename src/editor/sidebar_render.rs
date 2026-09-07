@@ -1209,7 +1209,7 @@ impl EditorView {
                         .gap(px(self.scaled(ss.sidebar_top_button_gap_px)))
                         .child(self.render_sidebar_top_button(
                             "sidebar-top-filetree",
-                            "assets/icons/filetree.svg",
+                            "assets/icons/workspace/filetree.svg",
                             !self.workspace_search_visible,
                             crate::i18n::sidebar_action_label(self.ui_language, "files"),
                             None,
@@ -1225,7 +1225,7 @@ impl EditorView {
                         ))
                         .child(self.render_sidebar_top_button(
                             "sidebar-top-search",
-                            "assets/icons/search.svg",
+                            "assets/icons/navigation/search.svg",
                             self.workspace_search_visible,
                             crate::i18n::sidebar_action_label(self.ui_language, "search"),
                             Some(crate::editor::shortcut::hint("secondary-shift-f")),
@@ -1256,7 +1256,7 @@ impl EditorView {
                             .pl(px(self.window_controls_leading_inset()))
                             .child(self.render_sidebar_top_button(
                                 "sidebar-top-file-tree-toggle",
-                                "assets/icons/file-tree-toggle.svg",
+                                "assets/icons/workspace/file-tree-toggle.svg",
                                 self.sidebar_visible,
                                 sidebar_tooltip,
                                 Some(crate::editor::shortcut::hint("secondary-shift-s")),
@@ -1276,7 +1276,7 @@ impl EditorView {
                             .pr(px(self.scaled(ss.sidebar_top_button_padding_right_px)))
                             .child(self.render_sidebar_top_button(
                                 "sidebar-top-file-list-toggle",
-                                "assets/icons/file-list-toggle.svg",
+                                "assets/icons/workspace/file-list-toggle.svg",
                                 self.file_list_visible,
                                 crate::i18n::sidebar_action_label(self.ui_language, "file_list"),
                                 None,
