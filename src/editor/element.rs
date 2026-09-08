@@ -521,6 +521,7 @@ fn paint_code_block_button(button: &CodeBlockCopyButtonPaint, window: &mut Windo
 
 struct PrepaintLine {
     wrapped: WrappedLine,
+    /// Baseline-adjusted paint origin, never used for caret/IME/hit geometry.
     origin: Point<Pixels>,
     line_height: Pixels,
     clip_bounds: Option<Bounds<Pixels>>,
@@ -528,6 +529,29 @@ struct PrepaintLine {
     segments: Option<Vec<(WrappedLine, Point<Pixels>)>>,
     /// True if this line is a table row rendered via per-cell block mode.
     is_table_block: bool,
+}
+
+/// Text viewport clipping is horizontal within the editor's vertical viewport.
+/// A row-height mask would cut off tall fallback glyphs after baseline alignment.
+/// Selection/background masks remain tied to their original logical row boxes.
+fn horizontal_text_clip_bounds(
+    mut clip_bounds: Bounds<Pixels>,
+    viewport_bounds: Bounds<Pixels>,
+) -> Bounds<Pixels> {
+    clip_bounds.origin.y = viewport_bounds.origin.y;
+    clip_bounds.size.height = viewport_bounds.size.height;
+    clip_bounds
+}
+
+#[cfg(test)]
+#[test]
+fn text_clip_preserves_horizontal_scroll_limits_without_clipping_to_a_row() {
+    let row_clip = Bounds::new(point(px(40.0), px(100.0)), size(px(200.0), px(20.0)));
+    let viewport = Bounds::new(point(px(10.0), px(30.0)), size(px(400.0), px(300.0)));
+    assert_eq!(
+        horizontal_text_clip_bounds(row_clip, viewport),
+        Bounds::new(point(px(40.0), px(30.0)), size(px(200.0), px(300.0))),
+    );
 }
 
 fn diff_line_background(editor: &EditorView, line_idx: usize) -> Option<Hsla> {
@@ -2174,6 +2198,9 @@ impl Element for EditorElement {
         let cursor = &editor.cursor;
         let decorations = &editor.decorations;
         let scroll_offset = editor.scroll_offset;
+        // Capture the state that actually produces these quads, before any
+        // end-of-prepaint scroll reconciliation can change the live state.
+        let selection_toolbar_key = editor.selection_toolbar_snapshot_key();
         let caret_cursor_offset = cursor.offset;
         let cursor_line = editor.cursor_line();
 
@@ -2218,6 +2245,7 @@ impl Element for EditorElement {
         let gutter_icon_column_left = editor.gutter_icon_column_left(editor_left);
         let gutter_icon_column_width = editor.gutter_icon_column_width();
 
+        let mut text_baseline_cache = Vec::new();
         let mut lines = Vec::new();
         let mut indent_guide_quads = Vec::new();
         let mut clipped_code_block_decorations = Vec::new();
@@ -3782,12 +3810,32 @@ impl Element for EditorElement {
 
                 lines.push(PrepaintLine {
                     wrapped: cached.wrapped_line.clone(),
-                    origin,
+                    origin: helpers::baseline_aligned_text_origin(
+                        &cached.wrapped_line,
+                        origin,
+                        px(line_height),
+                        helpers::stable_text_baseline(
+                            &helpers::line_baseline_font(
+                                &decoration,
+                                true,
+                                &body_font,
+                                &heading_font,
+                                &monospace_font,
+                            ),
+                            px(font_size),
+                            px(line_height),
+                            &mut text_baseline_cache,
+                            window,
+                        ),
+                    ),
                     line_height: px(line_height),
                     clip_bounds: non_markdown_nowrap.then(|| {
-                        Bounds::new(
-                            point(px(non_markdown_content_left), px(text_line_top)),
-                            size(px(text_width), px(text_line_height)),
+                        horizontal_text_clip_bounds(
+                            Bounds::new(
+                                point(px(non_markdown_content_left), px(text_line_top)),
+                                size(px(text_width), px(text_line_height)),
+                            ),
+                            bounds,
                         )
                     }),
                     segments: None,
@@ -4569,6 +4617,19 @@ impl Element for EditorElement {
                 continue;
             }
 
+            let reference_baseline = helpers::stable_text_baseline(
+                &helpers::line_baseline_font(
+                    render_decoration,
+                    editor.active_tab_is_non_markdown_text(),
+                    &body_font,
+                    &heading_font,
+                    &monospace_font,
+                ),
+                px(font_size),
+                px(line_height),
+                &mut text_baseline_cache,
+                window,
+            );
             let segments = if !wrapped.wrap_boundaries().is_empty() && indent_px > 0.0 {
                 let byte_indices = helpers::wrap_boundary_byte_indices(wrapped, &display_text);
                 let mut shaped_segments: Vec<(WrappedLine, Point<Pixels>)> = Vec::new();
@@ -4605,7 +4666,13 @@ impl Element for EditorElement {
                                 content_x + indent_px
                             };
                             let seg_y = text_line_top + seg_idx as f32 * line_height;
-                            shaped_segments.push((seg_wrapped, point(px(seg_x), px(seg_y))));
+                            let paint_origin = helpers::baseline_aligned_text_origin(
+                                &seg_wrapped,
+                                point(px(seg_x), px(seg_y)),
+                                px(line_height),
+                                reference_baseline,
+                            );
+                            shaped_segments.push((seg_wrapped, paint_origin));
                         }
                     }
                 }
@@ -5368,9 +5435,29 @@ impl Element for EditorElement {
                                                 &mut image_previews,
                                             );
 
+                                            let cell_baseline = helpers::stable_text_baseline(
+                                                &helpers::line_baseline_font(
+                                                    &decorations[source_line],
+                                                    false,
+                                                    &body_font,
+                                                    &heading_font,
+                                                    &monospace_font,
+                                                ),
+                                                px(font_size),
+                                                px(line_height),
+                                                &mut text_baseline_cache,
+                                                window,
+                                            );
+                                            let paint_origin =
+                                                helpers::baseline_aligned_text_origin(
+                                                    &shaped,
+                                                    point(px(cell_x), px(cell_text_y)),
+                                                    px(line_height),
+                                                    cell_baseline,
+                                                );
                                             table_cell_texts.push((
                                                 shaped,
-                                                point(px(cell_x), px(cell_text_y)),
+                                                paint_origin,
                                                 px(line_height),
                                             ));
                                         }
@@ -6633,11 +6720,26 @@ impl Element for EditorElement {
                                     window,
                                 );
                             }
-                            phantom_text_lines.push((
-                                wrapped,
+                            let row_baseline = helpers::stable_text_baseline(
+                                &helpers::line_baseline_font(
+                                    r_decoration,
+                                    false,
+                                    &body_font,
+                                    &heading_font,
+                                    &monospace_font,
+                                ),
+                                px(r_font_size),
+                                px(r_line_height),
+                                &mut text_baseline_cache,
+                                window,
+                            );
+                            let paint_origin = helpers::baseline_aligned_text_origin(
+                                &wrapped,
                                 point(px(row_content_x), px(row_top)),
                                 px(r_line_height),
-                            ));
+                                row_baseline,
+                            );
+                            phantom_text_lines.push((wrapped, paint_origin, px(r_line_height)));
                             row_top += row_height;
                         }
                         row_top - band_top
@@ -7410,9 +7512,14 @@ impl Element for EditorElement {
 
             lines.push(PrepaintLine {
                 wrapped: wrapped.clone(),
-                origin,
+                origin: helpers::baseline_aligned_text_origin(
+                    wrapped,
+                    origin,
+                    px(line_height),
+                    reference_baseline,
+                ),
                 line_height: px(line_height),
-                clip_bounds: text_clip_bounds,
+                clip_bounds: text_clip_bounds.map(|clip| horizontal_text_clip_bounds(clip, bounds)),
                 segments,
                 is_table_block: is_table_block_line,
             });
@@ -8964,6 +9071,30 @@ impl Element for EditorElement {
             link_underlines,
             inline_overlays,
         };
+
+        self.editor.update(cx, |editor, _| {
+            // Only real text selection paint participates: never search,
+            // inline diff, phantom-row highlights, or caret approximations.
+            let geometry = selection_toolbar_key.and_then(|key| {
+                selection_toolbar::SelectionToolbarGeometry::from_quads(
+                    key,
+                    bounds,
+                    window.content_mask().bounds,
+                    prepaint_state.horizontal_editor_clip_bounds,
+                    &prepaint_state.selection_quads,
+                    &prepaint_state.clipped_code_block_selections,
+                )
+            });
+            if let Some(geometry) = geometry {
+                editor
+                    .selection_toolbar_geometry
+                    .insert(self.pane_id, geometry);
+            } else {
+                editor.selection_toolbar_geometry.remove(&self.pane_id);
+            }
+            // No notify: the deferred toolbar reads this snapshot later in
+            // this same prepaint pass.
+        });
 
         // Only the focused pane publishes caret geometry to its lightweight overlay.
         if self.editor.read(cx).focused_pane_id != self.pane_id {

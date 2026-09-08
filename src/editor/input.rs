@@ -2711,6 +2711,10 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let delta = event.delta.pixel_delta(px(40.0));
+        if delta.x != px(0.0) || delta.y != px(0.0) {
+            self.hide_selection_toolbar_for_scroll(cx);
+        }
         if self.outline_rail_clicked_active_line.is_some() {
             self.outline_rail_clicked_active_line = None;
         }

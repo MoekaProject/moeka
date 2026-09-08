@@ -1325,8 +1325,10 @@ impl Styles {
         self.editor.editor_match_border_width_px = border_width;
 
         self.format_toolbar.format_toolbar_border_width_px = border_width;
-        self.format_toolbar.format_toolbar_border_color = chrome.border_primary;
-        self.format_toolbar.format_toolbar_separator_color = chrome.border_primary;
+        if editor.bg_primary.l < 0.5 {
+            self.format_toolbar.format_toolbar_border_color = chrome.border_primary;
+            self.format_toolbar.format_toolbar_separator_color = chrome.border_primary;
+        }
 
         self.sidebar.sidebar_edit_input_border_width_px = border_width;
         self.sidebar.sidebar_empty_btn_border_width_px = border_width;
@@ -1438,14 +1440,12 @@ impl Styles {
         self.text_input.text_input_cursor_color = chrome.cursor;
         self.text_input.text_input_selection_color = chrome.selection;
         self.text_input.text_input_menu_border_width_px = border_width;
-        self.text_input.text_input_menu_text_color = chrome.text_primary;
         self.search.search_match_border_width_px = border_width;
     }
 
     /// `theme` drives editor content colors and follows the user's light/dark
-    /// selection. `ui_theme` is the dark chrome palette (the user's selected
-    /// dark theme) used for the window border, menus, and sidebar surfaces so
-    /// those surfaces stay dark even when the editor content uses a light theme.
+    /// selection. `ui_theme` drives window and sidebar chrome. Menus share the
+    /// floating format toolbar palette, including its dark fallback in light mode.
     pub fn from_theme(theme: &Theme, ui_theme: &Theme) -> Self {
         Self::from_theme_with_options(theme, ui_theme, true)
     }
@@ -1473,6 +1473,14 @@ impl Styles {
         let editor_heading_base_font_size_px = 15.0;
 
         let is_light = theme.bg_primary.l >= 0.5;
+        // Floating selection controls stay dark even over a light document.
+        let dark_format_toolbar_theme = Theme::ayu_dark();
+        let format_toolbar_theme = if is_light {
+            &dark_format_toolbar_theme
+        } else {
+            theme
+        };
+        let menu_theme = format_toolbar_theme;
         let sidebar_theme = if sidebar_always_dark { ui_theme } else { theme };
         let is_light_monochrome = is_light && theme.heading == theme.text_primary;
         let light_monochrome_heading_color = if is_light_monochrome {
@@ -1491,7 +1499,6 @@ impl Styles {
             theme.checkbox_checked
         };
         let text_input_theme = if is_light { theme } else { ui_theme };
-        let text_input_shadow = !is_light;
         let settings_theme = if is_light { theme } else { ui_theme };
         let utility_panel_theme = theme;
         let settings_active_bg = if is_light {
@@ -2009,18 +2016,21 @@ impl Styles {
                 format_toolbar_optical_left_inset_px: 5.0,
                 format_toolbar_gap_px: 1.0,
                 format_toolbar_group_gap_px: 2.0,
-                format_toolbar_bg: theme.bg_primary,
+                format_toolbar_bg: format_toolbar_theme.bg_primary,
                 format_toolbar_border_width_px: 1.0,
-                format_toolbar_border_color: theme.border_secondary,
+                format_toolbar_border_color: format_toolbar_theme.border_secondary,
                 format_toolbar_btn_size_px: 22.0,
                 format_toolbar_icon_size_px: 13.0,
-                format_toolbar_icon_color: with_alpha(theme.text_secondary, 0.72),
-                format_toolbar_icon_hover_color: theme.text_bright,
-                format_toolbar_icon_active_color: theme.text_bright,
+                format_toolbar_icon_color: with_alpha(format_toolbar_theme.text_secondary, 1.0),
+                format_toolbar_icon_hover_color: format_toolbar_theme.text_bright,
+                format_toolbar_icon_active_color: format_toolbar_theme.text_bright,
                 format_toolbar_separator_width_px: 1.0,
                 format_toolbar_separator_height_px: 14.0,
                 format_toolbar_separator_margin_x_px: 5.0,
-                format_toolbar_separator_color: with_alpha(theme.text_secondary, 0.38),
+                format_toolbar_separator_color: with_alpha(
+                    format_toolbar_theme.text_secondary,
+                    0.38,
+                ),
             },
             whiteboard: WhiteboardStyles {
                 whiteboard_swatch_size_px: 28.0,
@@ -2321,11 +2331,11 @@ impl Styles {
                 ime_underline_color: theme.text_primary,
             },
             context_menu: ContextMenuStyles {
-                menu_bg: ui_theme.bg_elevated,
+                menu_bg: menu_theme.bg_primary,
                 menu_border_width_px: 1.0,
-                menu_border_color: ui_theme.border_primary,
+                menu_border_color: menu_theme.border_secondary,
                 menu_radius_px: 8.0,
-                menu_shadow: ui_theme.bg_primary.l < 0.5,
+                menu_shadow: menu_theme.bg_primary.l < 0.5,
                 menu_padding_y_px: 6.0,
                 menu_submenu_gap_px: 2.0,
                 menu_max_height_margin_px: 0.0,
@@ -2333,31 +2343,31 @@ impl Styles {
                 menu_item_height_px: 24.0,
                 menu_item_padding_x_px: 10.0,
                 menu_item_font_size_px: ui_font_size_sm_px,
-                menu_item_text_color: with_alpha(ui_theme.text_bright, 0.84),
-                menu_item_primary_text_color: with_alpha(ui_theme.text_bright, 0.96),
-                menu_item_danger_text_color: with_alpha(ui_theme.text_danger, 0.84),
-                menu_item_hover_bg: ui_theme.bg_hover,
-                menu_item_selected_bg: ui_theme.bg_hover,
+                menu_item_text_color: with_alpha(menu_theme.text_bright, 0.84),
+                menu_item_primary_text_color: with_alpha(menu_theme.text_bright, 0.96),
+                menu_item_danger_text_color: with_alpha(menu_theme.text_danger, 0.84),
+                menu_item_hover_bg: menu_theme.bg_hover,
+                menu_item_selected_bg: menu_theme.bg_hover,
                 menu_shortcut_font_size_px: ui_font_size_sm_px - 0.5,
                 menu_shortcut_font_family: if cfg!(target_os = "macos") {
                     "BlinkMacSystemFont"
                 } else {
                     crate::platform::fonts::SYSTEM_UI
                 },
-                menu_shortcut_text_color: with_alpha(ui_theme.text_secondary, 0.78),
+                menu_shortcut_text_color: with_alpha(menu_theme.text_secondary, 0.78),
                 menu_shortcut_gap_px: 3.0,
                 menu_shortcut_key_min_width_px: 14.0,
                 menu_shortcut_key_height_px: 16.0,
                 menu_shortcut_key_padding_x_px: 4.0,
                 menu_shortcut_key_radius_px: 4.0,
-                menu_shortcut_key_bg: with_alpha(ui_theme.bg_hover, 0.95),
+                menu_shortcut_key_bg: with_alpha(menu_theme.bg_hover, 0.95),
                 menu_format_icon_size_px: 13.0,
                 menu_format_icon_gap_px: 6.0,
-                menu_format_icon_color: with_alpha(ui_theme.text_secondary, 0.8),
-                menu_format_active_text_color: with_alpha(ui_theme.text_primary, 0.92),
+                menu_format_icon_color: with_alpha(menu_theme.text_secondary, 0.8),
+                menu_format_active_text_color: with_alpha(menu_theme.text_primary, 0.92),
                 menu_separator_height_px: 1.0,
                 menu_separator_margin_y_px: 0.0,
-                menu_separator_color: ui_theme.border_primary,
+                menu_separator_color: menu_theme.border_secondary,
                 menu_sidebar_width_px: 180.0,
                 menu_format_width_px: 210.0,
                 menu_export_width_px: 148.0,
@@ -2418,14 +2428,14 @@ impl Styles {
                 ws_bar_hover_bg: sidebar_theme.bg_hover,
                 ws_menu_width_px: 220.0,
                 ws_menu_item_check_size_px: 12.0,
-                ws_menu_item_check_color: ui_theme.text_secondary,
+                ws_menu_item_check_color: menu_theme.text_secondary,
                 ws_menu_item_action_icon_size_px: 14.0,
-                ws_menu_item_action_icon_color: ui_theme.text_secondary,
+                ws_menu_item_action_icon_color: menu_theme.text_secondary,
                 ws_menu_item_action_icon_gap_px: 10.0,
                 ws_menu_item_close_size_px: 14.0,
-                ws_menu_item_close_color: ui_theme.text_secondary,
-                ws_menu_item_close_hover_color: ui_theme.text_primary,
-                ws_menu_item_close_hover_bg: ui_theme.bg_hover,
+                ws_menu_item_close_color: menu_theme.text_secondary,
+                ws_menu_item_close_hover_color: menu_theme.text_primary,
+                ws_menu_item_close_hover_bg: menu_theme.bg_hover,
             },
             text_input: TextInputStyles {
                 text_input_height_px: 24.0,
@@ -2448,19 +2458,19 @@ impl Styles {
                 text_input_selection_color: text_input_theme.selection,
                 text_input_center: false,
                 text_input_right: false,
-                text_input_menu_bg: text_input_theme.bg_elevated,
-                text_input_menu_text_color: text_input_theme.text_primary,
+                text_input_menu_bg: menu_theme.bg_primary,
+                text_input_menu_text_color: menu_theme.text_primary,
                 text_input_menu_font_size_px: ui_font_size_sm_px,
                 text_input_menu_border_width_px: 1.0,
-                text_input_menu_border_color: text_input_theme.border_primary,
+                text_input_menu_border_color: menu_theme.border_secondary,
                 text_input_menu_radius_px: 8.0,
                 text_input_menu_padding_y_px: 6.0,
                 text_input_menu_item_height_px: 24.0,
                 text_input_menu_item_padding_x_px: 10.0,
-                text_input_menu_hover_bg: text_input_theme.bg_hover,
-                text_input_menu_separator_color: text_input_theme.border_primary,
+                text_input_menu_hover_bg: menu_theme.bg_hover,
+                text_input_menu_separator_color: menu_theme.border_secondary,
                 text_input_menu_width_px: 160.0,
-                text_input_menu_shadow: text_input_shadow,
+                text_input_menu_shadow: menu_theme.bg_primary.l < 0.5,
             },
             search: SearchStyles {
                 search_bar_width_px: 312.0,
@@ -2575,14 +2585,14 @@ impl Styles {
                 quick_open_panel_width_px: 640.0,
                 quick_open_panel_top_offset_px: 48.0,
                 quick_open_panel_radius_px: 8.0,
-                quick_open_panel_border_color: ui_theme.border_primary,
-                quick_open_panel_bg: ui_theme.bg_elevated,
+                quick_open_panel_border_color: menu_theme.border_secondary,
+                quick_open_panel_bg: menu_theme.bg_primary,
                 quick_open_input_padding_x_px: 8.0,
                 quick_open_input_padding_y_px: 6.0,
                 quick_open_input_text_padding_left_px: 2.0,
                 quick_open_input_bg: gpui::transparent_black(),
                 quick_open_input_focus_bg: gpui::transparent_black(),
-                quick_open_input_text_color: ui_theme.text_primary,
+                quick_open_input_text_color: menu_theme.text_primary,
                 quick_open_input_cursor_height_ratio: 0.64,
                 quick_open_input_cursor_height_adjust_px: 2.0,
                 quick_open_results_max_height_px: 360.0,
@@ -2591,18 +2601,18 @@ impl Styles {
                 quick_open_result_gap_y_px: 2.0,
                 quick_open_result_name_font_size_px: ui_font_size_sm_px,
                 quick_open_result_path_font_size_px: ui_font_size_xs_px - 1.0,
-                quick_open_result_hover_bg: ui_theme.bg_hover,
-                quick_open_result_selected_bg: ui_theme.bg_selected,
-                quick_open_result_text_color: with_alpha(ui_theme.text_bright, 0.96),
-                quick_open_result_secondary_text_color: with_alpha(ui_theme.text_secondary, 0.68),
+                quick_open_result_hover_bg: menu_theme.bg_hover,
+                quick_open_result_selected_bg: menu_theme.bg_selected,
+                quick_open_result_text_color: with_alpha(menu_theme.text_bright, 0.96),
+                quick_open_result_secondary_text_color: with_alpha(menu_theme.text_secondary, 0.68),
                 quick_open_result_shortcut_bg: with_alpha(
-                    ui_theme.bg_code,
+                    menu_theme.bg_code,
                     if is_light { 0.12 } else { 0.28 },
                 ),
-                quick_open_result_match_text_color: ui_theme.text_bright,
+                quick_open_result_match_text_color: menu_theme.text_bright,
                 quick_open_empty_height_px: 48.0,
                 quick_open_empty_font_size_px: ui_font_size_xs_px,
-                quick_open_empty_text_color: ui_theme.text_secondary,
+                quick_open_empty_text_color: menu_theme.text_secondary,
             },
             settings_panel: SettingsPanelStyles {
                 settings_title_version_gap_px: 10.0,

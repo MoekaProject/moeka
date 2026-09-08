@@ -58,14 +58,204 @@ struct SlashMenuItem {
     action: FormatMenuAction,
 }
 
+#[derive(Default)]
+pub(crate) struct SelectionToolbarMenuHover {
+    regions: HashMap<&'static str, gpui::Hitbox>,
+    close_task: Option<Task<()>>,
+}
+
+struct SelectionToolbarHoverRegion {
+    child: AnyElement,
+    editor: gpui::Entity<EditorView>,
+    region: &'static str,
+    menu_kind: Option<ContextMenuKind>,
+}
+
+impl IntoElement for SelectionToolbarHoverRegion {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl gpui::Element for SelectionToolbarHoverRegion {
+    type RequestLayoutState = ();
+    type PrepaintState = gpui::Hitbox;
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> (gpui::LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> gpui::Hitbox {
+        self.child.prepaint(window, cx);
+        window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        hitbox: &mut gpui::Hitbox,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) {
+        self.child.paint(window, cx);
+        let editor = self.editor.clone();
+        let region = self.region;
+        let menu_kind = self.menu_kind.clone();
+        let hitbox = hitbox.clone();
+        window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+            if phase != gpui::DispatchPhase::Capture {
+                return;
+            }
+            let hovered = hitbox.is_hovered(window) && !cx.has_active_drag();
+            editor.update(cx, |this, cx| {
+                if hovered {
+                    if let Some(kind) = &menu_kind {
+                        this.open_selection_toolbar_menu(kind.clone(), Some(bounds), cx);
+                    }
+                }
+                this.update_selection_toolbar_menu_hover(region, hovered, &hitbox, window, cx);
+            });
+        });
+    }
+}
+
+#[derive(Clone, PartialEq)]
 enum FormatToolbarEntry {
     Separator,
     HeadingMenu,
+    MoreMenu,
     Action {
         action: FormatMenuAction,
         icon: &'static str,
         shortcut: Option<SharedString>,
     },
+}
+
+impl FormatToolbarEntry {
+    fn menu_kind(&self) -> Option<ContextMenuKind> {
+        match self {
+            Self::HeadingMenu => Some(ContextMenuKind::FormatHeading),
+            Self::MoreMenu => Some(ContextMenuKind::FormatMore),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FormatToolbarMetrics {
+    button: f32,
+    separator: f32,
+    gap: f32,
+    padding: f32,
+    border: f32,
+}
+
+impl FormatToolbarMetrics {
+    fn width(self, entries: &[FormatToolbarEntry]) -> f32 {
+        let content: f32 = entries
+            .iter()
+            .map(|entry| match entry {
+                FormatToolbarEntry::Separator => self.separator,
+                _ => self.button,
+            })
+            .sum();
+        // Include separator margins, inter-entry gaps and both full borders.
+        content
+            + entries.len().saturating_sub(1) as f32 * self.gap
+            + 2.0 * (self.padding + self.border)
+    }
+}
+
+fn format_toolbar_layout(
+    available_width: f32,
+    metrics: FormatToolbarMetrics,
+) -> (Vec<FormatToolbarEntry>, f32) {
+    use FormatToolbarEntry::{HeadingMenu, MoreMenu, Separator};
+
+    let hint = crate::editor::shortcut::hint;
+    let action = |action, icon, shortcut| FormatToolbarEntry::Action {
+        action,
+        icon,
+        shortcut: Some(shortcut),
+    };
+    let mut entries = vec![
+        HeadingMenu,
+        Separator,
+        action(FormatMenuAction::Bold, FMT_BOLD_SVG, hint("secondary-b")),
+        action(
+            FormatMenuAction::Italic,
+            FMT_ITALIC_SVG,
+            hint("secondary-i"),
+        ),
+        action(
+            FormatMenuAction::Strikethrough,
+            FMT_STRIKETHROUGH_SVG,
+            hint("secondary-shift-x"),
+        ),
+        action(
+            FormatMenuAction::Underline,
+            FMT_UNDERLINE_SVG,
+            hint("secondary-u"),
+        ),
+        action(
+            FormatMenuAction::InlineCode,
+            FMT_INLINE_CODE_SVG,
+            hint("secondary-e"),
+        ),
+        action(
+            FormatMenuAction::Todo,
+            FMT_TODO_SVG,
+            hint("secondary-alt-enter"),
+        ),
+        action(FormatMenuAction::Link, FMT_LINK_SVG, hint("secondary-k")),
+        Separator,
+        MoreMenu,
+    ];
+    if metrics.width(&entries) > available_width {
+        entries.retain(|entry| {
+            !matches!(
+                entry,
+                FormatToolbarEntry::Action {
+                    action: FormatMenuAction::Underline | FormatMenuAction::Strikethrough,
+                    ..
+                }
+            )
+        });
+    }
+    if metrics.width(&entries) > available_width {
+        entries = vec![MoreMenu];
+    }
+    // Do not clamp the natural width: the geometry owner must reject even a
+    // single More button if it cannot fit, rather than painting clipped controls.
+    let width = metrics.width(&entries);
+    (entries, width)
 }
 
 fn aligned_submenu_top(
@@ -160,6 +350,8 @@ impl EditorView {
         clear_sidebar_edit: bool,
         cx: &mut Context<Self>,
     ) {
+        self.selection_toolbar_menu_hover = SelectionToolbarMenuHover::default();
+        self.clear_selection_toolbar_menu_owner();
         self.context_menu = Some(menu);
         self.context_submenu = None;
         self.context_submenu_aim = None;
@@ -231,6 +423,8 @@ impl EditorView {
     }
 
     fn finish_close_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.selection_toolbar_menu_hover = SelectionToolbarMenuHover::default();
+        self.clear_selection_toolbar_menu_owner();
         let had_menu = self.context_menu.take().is_some();
         let had_submenu = self.context_submenu.take().is_some();
         let had_submenu_aim = self.context_submenu_aim.take().is_some();
@@ -1272,6 +1466,7 @@ impl EditorView {
     }
 
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.selection_toolbar_menu_hover = SelectionToolbarMenuHover::default();
         if self.context_menu_pane_target.take().is_some() {
             cx.notify();
         }
@@ -1345,6 +1540,18 @@ impl EditorView {
     }
 
     pub(crate) fn execute_format_menu_action(
+        &mut self,
+        action: FormatMenuAction,
+        cx: &mut Context<Self>,
+    ) {
+        let retain_popup = self.selection_toolbar_format_session();
+        self.execute_format_menu_action_inner(action, cx);
+        if retain_popup {
+            self.retain_selection_toolbar_after_format();
+        }
+    }
+
+    fn execute_format_menu_action_inner(
         &mut self,
         action: FormatMenuAction,
         cx: &mut Context<Self>,
@@ -3113,164 +3320,97 @@ impl EditorView {
         items
     }
 
-    /// Mirrors the format context menu, flattening its "more formats" submenu
-    /// and keeping the same grouping separators.
-    fn format_toolbar_entries(&self) -> Vec<FormatToolbarEntry> {
-        let entry = |action, icon, shortcut: Option<SharedString>| FormatToolbarEntry::Action {
-            action,
-            icon,
-            shortcut,
-        };
-        let hint = crate::editor::shortcut::hint;
-
-        vec![
-            FormatToolbarEntry::HeadingMenu,
-            FormatToolbarEntry::Separator,
-            entry(
-                FormatMenuAction::Bold,
-                FMT_BOLD_SVG,
-                Some(hint("secondary-b")),
-            ),
-            entry(
-                FormatMenuAction::Italic,
-                FMT_ITALIC_SVG,
-                Some(hint("secondary-i")),
-            ),
-            entry(
-                FormatMenuAction::Strikethrough,
-                FMT_STRIKETHROUGH_SVG,
-                Some(hint("secondary-shift-x")),
-            ),
-            entry(
-                FormatMenuAction::Underline,
-                FMT_UNDERLINE_SVG,
-                Some(hint("secondary-u")),
-            ),
-            entry(
-                FormatMenuAction::InlineCode,
-                FMT_INLINE_CODE_SVG,
-                Some(hint("secondary-e")),
-            ),
-            FormatToolbarEntry::Separator,
-            entry(
-                FormatMenuAction::Todo,
-                FMT_TODO_SVG,
-                Some(hint("secondary-alt-enter")),
-            ),
-            entry(
-                FormatMenuAction::Link,
-                FMT_LINK_SVG,
-                Some(hint("secondary-k")),
-            ),
-            FormatToolbarEntry::Separator,
-            entry(
-                FormatMenuAction::CodeBlock,
-                FMT_CODE_SVG,
-                Some(hint("secondary-alt-c")),
-            ),
-            entry(
-                FormatMenuAction::HorizontalRule,
-                FMT_SPLIT_SVG,
-                Some("---".into()),
-            ),
-            entry(
-                FormatMenuAction::Quote,
-                FMT_QUOTE_SVG,
-                Some(hint("secondary-alt-q")),
-            ),
-            entry(
-                FormatMenuAction::UnorderedList,
-                FMT_LIST_SVG,
-                Some(hint("secondary-alt-u")),
-            ),
-            entry(
-                FormatMenuAction::OrderedList,
-                FMT_ORDER_LIST_SVG,
-                Some(hint("secondary-alt-o")),
-            ),
-            FormatToolbarEntry::Separator,
-            entry(
-                FormatMenuAction::WikiLink,
-                FMT_WIKI_LINK_SVG,
-                Some("[[".into()),
-            ),
-            entry(FormatMenuAction::Image, FMT_IMAGE_SVG, None),
-            entry(FormatMenuAction::Table, FMT_TABLE_SVG, Some("2×2".into())),
-            FormatToolbarEntry::Separator,
-            entry(
-                FormatMenuAction::Superscript,
-                FMT_SUPERSCRIPT_SVG,
-                Some("^text^".into()),
-            ),
-            entry(
-                FormatMenuAction::Subscript,
-                FMT_SUBSCRIPT_SVG,
-                Some("~text~".into()),
-            ),
-            entry(
-                FormatMenuAction::Footnote,
-                FMT_FOOTNOTE_SVG,
-                Some("[^note]".into()),
-            ),
-            entry(
-                FormatMenuAction::CalloutTip,
-                FMT_CALLOUT_TIP_SVG,
-                Some("> [!TIP]".into()),
-            ),
-            entry(
-                FormatMenuAction::Highlight,
-                FMT_HIGHLIGHT_SVG,
-                Some("==text==".into()),
-            ),
-        ]
-    }
-
     pub(crate) fn render_format_toolbar(
         &self,
         pane_width: f32,
+        opacity: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let interactive = self
+            .selection_toolbar_animation
+            .as_ref()
+            .is_some_and(|state| state.visible);
         let fts = &self.styles.format_toolbar;
         let active_actions = self.active_format_actions();
-        // Start where the markdown text starts, mirroring the editor's own
-        // centred content column.
-        let content_left = if self.editor_uses_expanded_layout() {
-            self.padding_left()
-        } else {
-            let editor_width = pane_width.min(self.max_editor_width());
-            ((pane_width - editor_width) / 2.0).max(0.0) + self.padding_left()
+        let metrics = FormatToolbarMetrics {
+            button: self.scaled(fts.format_toolbar_btn_size_px),
+            separator: self.scaled(
+                fts.format_toolbar_separator_width_px
+                    + 2.0 * fts.format_toolbar_separator_margin_x_px,
+            ),
+            gap: self.scaled(fts.format_toolbar_gap_px),
+            padding: self.scaled(fts.format_toolbar_padding_x_px),
+            border: self.scaled(fts.format_toolbar_border_width_px),
         };
-        let content_left =
-            (content_left - self.scaled(fts.format_toolbar_optical_left_inset_px)).max(0.0);
+        let available_width = if pane_width.is_finite() {
+            pane_width.max(0.0)
+        } else {
+            0.0
+        };
+        let (entries, natural_width) = format_toolbar_layout(available_width, metrics);
 
         let mut bar = div()
             .id("format-toolbar")
-            .w_full()
+            .w(px(natural_width))
+            // min_w wins when even More cannot fit: the owner measures and
+            // rejects the whole bar instead of showing clipped controls.
+            .min_w(px(natural_width))
+            .max_w(px(available_width))
             .flex_none()
-            .h(px(self.scaled(fts.format_toolbar_height_px)))
+            .h(px(self
+                .scaled(fts.format_toolbar_height_px)
+                .max(metrics.button + 2.0 * metrics.border)))
             .flex()
             .items_center()
-            .pl(px(content_left))
-            .pr(px(self.scaled(fts.format_toolbar_padding_x_px)))
-            .gap(px(self.scaled(fts.format_toolbar_gap_px)))
-            .overflow_hidden()
+            .px(px(metrics.padding))
+            .gap(px(metrics.gap))
+            .opacity(opacity)
+            .when(interactive, |this| this.occlude())
             .bg(fts.format_toolbar_bg)
-            .border_b(px(self.scaled(fts.format_toolbar_border_width_px)))
+            .border(px(metrics.border))
             .border_color(fts.format_toolbar_border_color)
+            .rounded(px(self.scaled(self.styles.context_menu.menu_radius_px)))
+            .when(self.theme_kind.is_dark(), |this| this.shadow_sm())
+            .when(!self.theme_kind.is_dark(), |this| {
+                this.shadow(vec![gpui::BoxShadow {
+                    color: gpui::hsla(0.0, 0.0, 0.0, 0.06),
+                    offset: gpui::point(px(0.0), px(self.scaled(1.0))),
+                    blur_radius: px(self.scaled(3.0)),
+                    spread_radius: px(0.0),
+                }])
+            })
             .cursor(CursorStyle::Arrow)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, window, cx| {
+            .when(interactive, |this| {
+                this.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_down(MouseButton::Right, |_, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
-                }),
-            );
+                })
+                .on_mouse_down(MouseButton::Middle, |_, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                })
+                .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_up(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .on_mouse_up(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                .on_mouse_move(|_, _, cx| cx.stop_propagation())
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            });
 
-        for entry in self.format_toolbar_entries() {
+        for entry in entries {
             bar = match entry {
                 FormatToolbarEntry::Separator => bar.child(self.render_format_toolbar_separator()),
                 FormatToolbarEntry::HeadingMenu => {
                     bar.child(self.render_format_toolbar_heading_button(cx))
+                }
+                FormatToolbarEntry::MoreMenu => {
+                    bar.child(self.render_format_toolbar_more_button(cx))
                 }
                 FormatToolbarEntry::Action {
                     action,
@@ -3280,7 +3420,7 @@ impl EditorView {
                     let is_active = active_actions.contains(&action);
                     bar.child(self.render_format_toolbar_button(
                         self.format_action_label(action),
-                        icon,
+                        Some(icon),
                         shortcut,
                         is_active,
                         cx,
@@ -3307,13 +3447,17 @@ impl EditorView {
     fn render_format_toolbar_button(
         &self,
         label: String,
-        icon: &'static str,
+        icon: Option<&'static str>,
         shortcut: Option<SharedString>,
         is_active: bool,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
         let fts = &self.styles.format_toolbar;
+        let interactive = self
+            .selection_toolbar_animation
+            .as_ref()
+            .is_some_and(|state| state.visible);
         let is_enabled = !self.active_tab_is_read_only();
         let group_name = SharedString::from(format!("format-toolbar-{label}"));
         let hover_color = fts.format_toolbar_icon_hover_color;
@@ -3336,61 +3480,220 @@ impl EditorView {
             .justify_center()
             .cursor(CursorStyle::Arrow)
             .opacity(if is_enabled { 1.0 } else { 0.4 })
-            .child(
-                svg()
-                    .path(icon)
-                    .size(px(icon_size))
-                    .text_color(icon_color)
-                    .when(is_enabled, |this| {
-                        this.group_hover(group_name, move |style| style.text_color(hover_color))
-                    }),
-            )
-            .when(is_enabled, |this| {
+            .when_some(icon, |this, icon| {
+                this.child(
+                    svg()
+                        .path(icon)
+                        .size(px(icon_size))
+                        .text_color(icon_color)
+                        .when(is_enabled, |this| {
+                            this.group_hover(group_name.clone(), move |style| {
+                                style.text_color(hover_color)
+                            })
+                        }),
+                )
+            })
+            .when(icon.is_none(), |this| {
+                // Geometric dots avoid a font-dependent ellipsis width and
+                // require no new asset for the More button.
+                this.child(
+                    div()
+                        .flex()
+                        .gap(px(self.scaled(2.0)))
+                        .children((0..3).map(|_| {
+                            div()
+                                .size(px(self.scaled(2.0)))
+                                .flex_none()
+                                .rounded_full()
+                                .bg(icon_color)
+                                .when(is_enabled, |this| {
+                                    this.group_hover(group_name.clone(), move |style| {
+                                        style.bg(hover_color)
+                                    })
+                                })
+                        })),
+                )
+            })
+            .when(interactive, |this| {
                 this.on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
                         window.prevent_default();
                         cx.stop_propagation();
-                        on_click(this, cx);
+                        if is_enabled
+                            && !this.active_tab_is_read_only()
+                            && this
+                                .selection_toolbar_animation
+                                .as_ref()
+                                .is_some_and(|state| state.visible)
+                        {
+                            on_click(this, cx);
+                        }
                     }),
                 )
             });
 
-        tooltip::with_tooltip(button, cx.entity().clone(), label, shortcut)
+        if !interactive {
+            return button.into_any_element();
+        }
+
+        tooltip::with_tooltip_above(button, cx.entity().clone(), label, shortcut)
+    }
+
+    fn selection_toolbar_owns_hover_menu(&self) -> bool {
+        self.selection_toolbar_format_session()
+            && self.context_menu.as_ref().is_some_and(|menu| {
+                matches!(
+                    menu.kind,
+                    ContextMenuKind::FormatHeading | ContextMenuKind::FormatMore
+                )
+            })
+    }
+
+    fn open_selection_toolbar_menu(
+        &mut self,
+        kind: ContextMenuKind,
+        bounds: Option<Bounds<Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab_is_read_only() || !self.selection_toolbar_format_session() {
+            return;
+        }
+        self.selection_toolbar_menu_hover.close_task = None;
+        if self
+            .context_menu
+            .as_ref()
+            .is_some_and(|menu| menu.kind == kind)
+        {
+            return;
+        }
+        let position = bounds
+            .map(|bounds| Point::new(bounds.left(), bounds.bottom()))
+            .unwrap_or_else(|| self.cursor_screen_position());
+        self.open_context_menu(ContextMenu { position, kind }, true, cx);
+        self.mark_selection_toolbar_menu();
+    }
+
+    fn update_selection_toolbar_menu_hover(
+        &mut self,
+        region: &'static str,
+        hovered: bool,
+        hitbox: &gpui::Hitbox,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.selection_toolbar_owns_hover_menu() {
+            return;
+        }
+        let state = &mut self.selection_toolbar_menu_hover;
+        // Hitbox IDs are frame-local: removed or resized-away triggers cannot
+        // leave a stale hovered region keeping the menu open indefinitely.
+        state.regions.retain(|_, hitbox| hitbox.is_hovered(window));
+        if hovered {
+            state.regions.insert(region, hitbox.clone());
+        } else {
+            state.regions.remove(region);
+        }
+        if !state.regions.is_empty() {
+            state.close_task = None;
+            return;
+        }
+        if state.close_task.is_some() {
+            return;
+        }
+        // Keep the menu alive while crossing the gap between trigger and panel.
+        // Reopening any menu drops this task, so it cannot dismiss a newer menu.
+        state.close_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(200))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.selection_toolbar_owns_hover_menu()
+                    && this.selection_toolbar_menu_hover.regions.is_empty()
+                {
+                    this.close_context_menu_immediately(cx);
+                }
+            });
+        }));
     }
 
     fn render_format_toolbar_heading_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let trigger_bounds = self.format_toolbar_heading_bounds.clone();
         let button = self.render_format_toolbar_button(
             self.t(crate::i18n::TextKey::Heading).to_string(),
-            HEADING_1_SVG_PATH,
+            Some(HEADING_1_SVG_PATH),
             None,
             self.current_heading_action().is_some(),
             cx,
             move |this, cx| {
-                let position = this
-                    .format_toolbar_heading_bounds
-                    .get()
-                    .map(|bounds| Point::new(bounds.origin.x, bounds.origin.y + bounds.size.height))
-                    .unwrap_or_else(|| this.cursor_screen_position());
-                this.open_context_menu(
-                    ContextMenu {
-                        position,
-                        kind: ContextMenuKind::FormatHeading,
-                    },
-                    true,
+                this.open_selection_toolbar_menu(
+                    FormatToolbarEntry::HeadingMenu.menu_kind().unwrap(),
+                    this.format_toolbar_heading_bounds.get(),
                     cx,
                 );
             },
         );
 
-        div()
-            .flex_none()
-            .on_children_prepainted(move |bounds: Vec<Bounds<Pixels>>, _, _| {
-                trigger_bounds.set(bounds.first().copied());
-            })
-            .child(button)
-            .into_any_element()
+        if !self
+            .selection_toolbar_animation
+            .as_ref()
+            .is_some_and(|state| state.visible)
+        {
+            return button;
+        }
+        SelectionToolbarHoverRegion {
+            child: div()
+                .flex_none()
+                .on_children_prepainted(move |bounds: Vec<Bounds<Pixels>>, _, _| {
+                    trigger_bounds.set(bounds.first().copied());
+                })
+                .child(button)
+                .into_any_element(),
+            editor: cx.entity().clone(),
+            region: "heading-trigger",
+            menu_kind: Some(ContextMenuKind::FormatHeading),
+        }
+        .into_any_element()
+    }
+
+    fn render_format_toolbar_more_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let trigger_bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+        let click_bounds = trigger_bounds.clone();
+        let button = self.render_format_toolbar_button(
+            self.more_formats_menu_label().to_string(),
+            None,
+            None,
+            false,
+            cx,
+            move |this, cx| {
+                this.open_selection_toolbar_menu(
+                    FormatToolbarEntry::MoreMenu.menu_kind().unwrap(),
+                    click_bounds.get(),
+                    cx,
+                );
+            },
+        );
+
+        if !self
+            .selection_toolbar_animation
+            .as_ref()
+            .is_some_and(|state| state.visible)
+        {
+            return button;
+        }
+        SelectionToolbarHoverRegion {
+            child: div()
+                .flex_none()
+                .on_children_prepainted(move |bounds: Vec<Bounds<Pixels>>, _, _| {
+                    trigger_bounds.set(bounds.first().copied());
+                })
+                .child(button)
+                .into_any_element(),
+            editor: cx.entity().clone(),
+            region: "more-trigger",
+            menu_kind: Some(ContextMenuKind::FormatMore),
+        }
+        .into_any_element()
     }
 
     fn render_format_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -4354,6 +4657,16 @@ impl EditorView {
             .on_scroll_wheel(cx.listener(|_this, _event, _window, cx| {
                 cx.stop_propagation();
             }));
+
+        if self.selection_toolbar_owns_hover_menu() {
+            return SelectionToolbarHoverRegion {
+                child: menu_div.into_any_element(),
+                editor: cx.entity().clone(),
+                region: panel_id,
+                menu_kind: None,
+            }
+            .into_any_element();
+        }
 
         let menu_div = if panel_id == "context-submenu" {
             menu_div.on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
@@ -5404,13 +5717,42 @@ impl EditorView {
 
         let estimated_menu_height = self.estimated_context_menu_height(items.len());
         let anchor_height = self.context_menu_anchor_height(&menu.kind);
+        let toolbar_bounds = self
+            .selection_toolbar_owns_hover_menu()
+            .then(|| {
+                self.selection_toolbar_geometry
+                    .get(&self.focused_pane_id)
+                    .and_then(|geometry| geometry.toolbar_bounds)
+            })
+            .flatten();
         // Recompute from the live layout: filtering changes the row count and
         // the cached position can predate the frame that laid out this line.
         let anchor_position = self
             .slash_menu_position()
             .filter(|_| matches!(menu.kind, ContextMenuKind::Format))
             .unwrap_or(menu.position);
-        let layout = if matches!(menu.kind, ContextMenuKind::Workspace) {
+        let layout = if let Some(bounds) = toolbar_bounds {
+            // Inset both vertical anchor edges so upward and downward menus
+            // overlap the toolbar by the same small amount.
+            let overlap = self.scaled(2.0).min(f32::from(bounds.size.height) / 2.0);
+            let mut layout = self.context_menu_panel_layout_with_anchor(
+                Point::new(bounds.left(), bounds.bottom() - px(overlap)),
+                width,
+                estimated_menu_height,
+                f32::from(bounds.size.height) - 2.0 * overlap,
+            );
+            let (toolbar_left, _) = self.context_menu_overlay_coordinates(bounds.origin);
+            let left = if matches!(menu.kind, ContextMenuKind::FormatMore) {
+                toolbar_left + f32::from(bounds.size.width) - width
+            } else {
+                toolbar_left
+            };
+            layout.left = left.clamp(
+                layout.margin,
+                (layout.overlay_width - width - layout.margin).max(layout.margin),
+            );
+            layout
+        } else if matches!(menu.kind, ContextMenuKind::Workspace) {
             self.workspace_bar_bounds
                 .get()
                 .map(|anchor| {
@@ -5493,6 +5835,49 @@ impl EditorView {
             None
         };
 
+        let mut backdrop = Vec::new();
+        if let Some(bounds) = toolbar_bounds {
+            let (left, top) = self.context_menu_overlay_coordinates(bounds.origin);
+            let right = left + f32::from(bounds.size.width);
+            let bottom = top + f32::from(bounds.size.height);
+            for (x, y, w, h) in [
+                (0.0, 0.0, layout.overlay_width, top),
+                (
+                    0.0,
+                    bottom,
+                    layout.overlay_width,
+                    layout.overlay_height - bottom,
+                ),
+                (0.0, top, left, bottom - top),
+                (right, top, layout.overlay_width - right, bottom - top),
+            ] {
+                backdrop.push(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y))
+                        .w(px(w.max(0.0)))
+                        .h(px(h.max(0.0)))
+                        .occlude()
+                        .on_scroll_wheel(cx.listener(
+                            |this, event: &gpui::ScrollWheelEvent, window, cx| {
+                                let over_editor = this
+                                    .selection_toolbar_geometry
+                                    .get(&this.focused_pane_id)
+                                    .is_some_and(|geometry| {
+                                        geometry.viewport.contains(&event.position)
+                                    });
+                                if over_editor {
+                                    this.on_scroll(event, window, cx);
+                                }
+                                cx.stop_propagation();
+                            },
+                        ))
+                        .into_any_element(),
+                );
+            }
+        }
+
         div()
             .id("context-menu-anchor")
             .absolute()
@@ -5500,10 +5885,15 @@ impl EditorView {
             .top(px(0.0))
             .w_full()
             .h_full()
-            .occlude()
+            .when(toolbar_bounds.is_none(), |this| this.occlude())
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
+                cx.listener(move |this, _, window, cx| {
+                    if toolbar_bounds
+                        .is_some_and(|bounds| bounds.contains(&window.mouse_position()))
+                    {
+                        return;
+                    }
                     window.prevent_default();
                     cx.stop_propagation();
                     this.close_context_menu(cx);
@@ -5530,9 +5920,129 @@ impl EditorView {
                     cx.stop_propagation();
                 }),
             )
+            .children(backdrop)
             .child(main_menu)
             .when_some(submenu, |this, submenu| this.child(submenu))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod format_toolbar_layout_tests {
+    use super::*;
+
+    fn metrics(scale: f32) -> FormatToolbarMetrics {
+        FormatToolbarMetrics {
+            button: 22.0 * scale,
+            separator: 11.0 * scale,
+            gap: scale,
+            padding: 8.0 * scale,
+            border: scale,
+        }
+    }
+
+    fn actions(entries: &[FormatToolbarEntry]) -> Vec<FormatMenuAction> {
+        entries
+            .iter()
+            .filter_map(|entry| match entry {
+                FormatToolbarEntry::Action { action, .. } => Some(*action),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn format_toolbar_wide_and_compact_groups_keep_primary_actions_in_order() {
+        let (wide, width) = format_toolbar_layout(248.0, metrics(1.0));
+        assert_eq!(width, 248.0); // 9 buttons, 2 separators, 10 gaps, padding + borders
+        assert!(matches!(
+            wide.first(),
+            Some(FormatToolbarEntry::HeadingMenu)
+        ));
+        assert!(matches!(wide.get(1), Some(FormatToolbarEntry::Separator)));
+        assert!(matches!(wide.get(9), Some(FormatToolbarEntry::Separator)));
+        assert!(matches!(wide.last(), Some(FormatToolbarEntry::MoreMenu)));
+        assert!(
+            actions(&wide)
+                == vec![
+                    FormatMenuAction::Bold,
+                    FormatMenuAction::Italic,
+                    FormatMenuAction::Strikethrough,
+                    FormatMenuAction::Underline,
+                    FormatMenuAction::InlineCode,
+                    FormatMenuAction::Todo,
+                    FormatMenuAction::Link,
+                ]
+        );
+
+        let (compact, width) = format_toolbar_layout(247.0, metrics(1.0));
+        assert_eq!(width, 202.0);
+        assert!(matches!(
+            compact.first(),
+            Some(FormatToolbarEntry::HeadingMenu)
+        ));
+        assert!(matches!(
+            compact.get(7),
+            Some(FormatToolbarEntry::Separator)
+        ));
+        assert!(
+            actions(&compact)
+                == vec![
+                    FormatMenuAction::Bold,
+                    FormatMenuAction::Italic,
+                    FormatMenuAction::InlineCode,
+                    FormatMenuAction::Todo,
+                    FormatMenuAction::Link,
+                ]
+        );
+    }
+
+    #[test]
+    fn format_toolbar_width_fits_at_scaled_breakpoints_without_clamping_controls() {
+        for scale in [0.75, 1.0, 1.25, 1.5, 2.0] {
+            let metrics = metrics(scale);
+            for limit in [40.0, 201.0, 202.0, 247.0, 248.0, 1200.0] {
+                let available = limit * scale;
+                let (entries, width) = format_toolbar_layout(available, metrics);
+                assert_eq!(width, metrics.width(&entries));
+                assert!(width <= available);
+            }
+            let (entries, width) = format_toolbar_layout(39.0 * scale, metrics);
+            assert!(entries == vec![FormatToolbarEntry::MoreMenu]);
+            assert_eq!(width, 40.0 * scale);
+            assert!(width > 39.0 * scale); // owner must hide, never truncate
+        }
+    }
+
+    #[test]
+    fn format_toolbar_more_opens_the_corresponding_submenu() {
+        // Match the More Formats entry in the format context menu directly.
+        for limit in [0.0, 40.0, 201.0, 202.0, 248.0, 1200.0] {
+            let (entries, _) = format_toolbar_layout(limit, metrics(1.0));
+            assert!(matches!(
+                entries.last().and_then(FormatToolbarEntry::menu_kind),
+                Some(ContextMenuKind::FormatMore)
+            ));
+            if entries.len() > 1 {
+                assert!(matches!(
+                    entries.first().and_then(FormatToolbarEntry::menu_kind),
+                    Some(ContextMenuKind::FormatHeading)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn format_toolbar_compaction_preserves_action_icons_and_tooltip_shortcuts() {
+        let (wide, _) = format_toolbar_layout(248.0, metrics(1.0));
+        let (compact, _) = format_toolbar_layout(202.0, metrics(1.0));
+        for entry in &compact {
+            assert!(wide.contains(entry));
+            if let FormatToolbarEntry::Action { icon, shortcut, .. } = entry {
+                assert!(!icon.is_empty());
+                assert!(shortcut.is_some());
+            }
+        }
     }
 }
 

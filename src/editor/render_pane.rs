@@ -88,9 +88,20 @@ impl EditorView {
             .get(&pane_id)
             .expect("caret overlay view inserted")
             .clone();
-        let cached =
-            gpui::AnyView::from(content).cached(gpui::StyleRefinement::default().size_full());
-        (cached, overlay)
+        let content = gpui::AnyView::from(content);
+        // A selection toolbar must consume this frame's final text quads, not
+        // a replayed content view's geometry. Keep ordinary caret-only frames
+        // cached, but prepaint selected Markdown content before its overlay.
+        let content = if self.app_settings.format_toolbar_visible
+            && pane_id == self.focused_pane_id
+            && self.active_tab_is_markdown()
+            && self.cursor.has_selection()
+        {
+            content
+        } else {
+            content.cached(gpui::StyleRefinement::default().size_full())
+        };
+        (content, overlay)
     }
 
     fn caret_animation_config(&self) -> super::caret::CaretAnimationConfig {
@@ -538,12 +549,6 @@ impl EditorView {
             .when(self.active_tab_is_diff(), |this| {
                 this.child(self.render_active_tab_path_bar(cx))
             })
-            .when(
-                is_focused_pane
-                    && self.app_settings.format_toolbar_visible
-                    && self.active_tab_is_markdown(),
-                |this| this.child(self.render_format_toolbar(editor_pane_width, cx)),
-            )
             .child(
                 div()
                     .id("editor-pane-content")
@@ -658,6 +663,18 @@ impl EditorView {
                     })
                     .when_some(editor_pane_views.map(|(_, overlay)| overlay), |this, overlay| {
                         this.child(overlay)
+                    })
+                    .when(renders_document, |this| {
+                        // Priority zero: above document content, below later
+                        // deferred menus. The element explicitly clips to the
+                        // editor viewport because deferred draws lose ancestor masks.
+                        this.child(
+                            deferred(selection_toolbar::SelectionToolbarElement {
+                                editor: cx.entity().clone(),
+                                pane_id,
+                            })
+                            .with_priority(0),
+                        )
                     })
                     .when(self.active_tab_is_whiteboard(), |this| {
                         this.child(self.render_whiteboard_toolbar(cx)).when_some(

@@ -28,6 +28,23 @@ pub(crate) fn with_tooltip(
         editor,
         title: title.into(),
         shortcut: shortcut.map(Into::into),
+        prefer_above: false,
+    }
+    .into_any_element()
+}
+
+pub(crate) fn with_tooltip_above(
+    child: impl IntoElement,
+    editor: Entity<EditorView>,
+    title: impl Into<SharedString>,
+    shortcut: Option<impl Into<SharedString>>,
+) -> AnyElement {
+    TooltipTrigger {
+        child: child.into_any_element(),
+        editor,
+        title: title.into(),
+        shortcut: shortcut.map(Into::into),
+        prefer_above: true,
     }
     .into_any_element()
 }
@@ -45,6 +62,26 @@ pub(crate) fn request_tooltip_for_hitbox(
     title: impl Into<SharedString>,
     shortcut: Option<impl Into<SharedString>>,
 ) {
+    request_positioned_tooltip(
+        window,
+        cx,
+        editor,
+        bounds,
+        title.into(),
+        shortcut.map(Into::into),
+        false,
+    );
+}
+
+fn request_positioned_tooltip(
+    window: &mut Window,
+    cx: &mut App,
+    editor: Entity<EditorView>,
+    bounds: Bounds<Pixels>,
+    title: SharedString,
+    shortcut: Option<SharedString>,
+    prefer_above: bool,
+) {
     if editor.read(cx).global_tooltips_suppressed() {
         return;
     }
@@ -53,8 +90,6 @@ pub(crate) fn request_tooltip_for_hitbox(
         return;
     }
 
-    let title = title.into();
-    let shortcut = shortcut.map(Into::into);
     let (tooltip_width, _) = tooltip_size(
         editor.read(cx),
         &title,
@@ -71,6 +106,7 @@ pub(crate) fn request_tooltip_for_hitbox(
         bounds,
         &title,
         shortcut.as_ref().map(|shortcut| shortcut.as_ref()),
+        prefer_above,
     );
     let visible_bounds = bounds;
     let visible_editor = editor.clone();
@@ -111,6 +147,7 @@ struct TooltipTrigger {
     editor: Entity<EditorView>,
     title: SharedString,
     shortcut: Option<SharedString>,
+    prefer_above: bool,
 }
 
 impl IntoElement for TooltipTrigger {
@@ -154,13 +191,14 @@ impl Element for TooltipTrigger {
     ) -> Self::PrepaintState {
         self.child.prepaint(window, cx);
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        request_tooltip_for_hitbox(
+        request_positioned_tooltip(
             window,
             cx,
             self.editor.clone(),
             bounds,
             self.title.clone(),
             self.shortcut.clone(),
+            self.prefer_above,
         );
         hitbox
     }
@@ -294,6 +332,7 @@ fn tooltip_deployment_point(
     anchor: Bounds<Pixels>,
     title: &str,
     shortcut: Option<&str>,
+    prefer_above: bool,
 ) -> gpui::Point<Pixels> {
     let styles = &editor.styles.tooltip;
     let (width, height) = tooltip_size(editor, title, shortcut);
@@ -303,7 +342,7 @@ fn tooltip_deployment_point(
     let viewport_height = editor
         .last_window_height
         .max(height + viewport_padding * 2.0);
-    position_tooltip(
+    let mut position = position_tooltip(
         anchor,
         width,
         height,
@@ -311,7 +350,12 @@ fn tooltip_deployment_point(
         viewport_height,
         viewport_padding,
         offset,
-    )
+    );
+    let above = f32::from(anchor.top()) - offset - height;
+    if prefer_above && above >= viewport_padding {
+        position.y = px(above);
+    }
+    position
 }
 
 fn position_tooltip(

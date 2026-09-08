@@ -908,6 +908,12 @@ fn main() {
         #[cfg(windows)]
         if let Some(receiver) = forwarded_open_paths {
             let editor = view.clone();
+            let editor_window = cx.windows().into_iter().find(|handle| {
+                handle
+                    .downcast::<EditorView>()
+                    .and_then(|handle| handle.entity(cx).ok())
+                    .is_some_and(|entity| entity == editor)
+            });
             cx.spawn(async move |cx| {
                 loop {
                     cx.background_executor()
@@ -918,7 +924,12 @@ fn main() {
                             Ok(paths) => {
                                 let _ = cx.update(|cx| {
                                     open_launch_paths(&editor, paths, cx);
-                                    cx.activate(true);
+                                    if let Some(handle) = editor_window {
+                                        let _ = handle.update(cx, |_, window, _| {
+                                            // GPUI restores minimized Windows windows here.
+                                            window.activate_window();
+                                        });
+                                    }
                                 });
                             }
                             Err(std::sync::mpsc::TryRecvError::Empty) => break,

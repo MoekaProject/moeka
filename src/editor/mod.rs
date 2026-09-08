@@ -42,6 +42,7 @@ mod scrollbar;
 mod search;
 mod search_index;
 mod search_menu;
+mod selection_toolbar;
 mod session_store;
 pub(crate) mod settings_panel;
 mod shortcut;
@@ -1895,6 +1896,11 @@ pub struct EditorView {
     pub(crate) pane_bounds: HashMap<PaneId, Bounds<Pixels>>,
     pub(crate) pane_editor_content_views: HashMap<PaneId, gpui::Entity<caret::EditorContentView>>,
     pub(crate) pane_caret_overlay_views: HashMap<PaneId, gpui::Entity<caret::CaretOverlayView>>,
+    /// Root-owned pane-indexed snapshots, deliberately not part of pane_state!.
+    pub(crate) selection_toolbar_geometry:
+        HashMap<PaneId, selection_toolbar::SelectionToolbarGeometry>,
+    pub(crate) selection_toolbar_dismissed:
+        Option<(PaneId, selection_toolbar::SelectionToolbarSelectionKey)>,
     /// While a tab drag hovers a pane's content area: the hovered pane and the
     /// split direction (None = merge into that pane).
     pub(crate) tab_drag_split_target: Option<(PaneId, Option<SplitDirection>)>,
@@ -1925,6 +1931,9 @@ pub struct EditorView {
     /// Anchors the heading popup to the format toolbar button; kept separate
     /// from the menu trigger bounds, which `open_context_menu` clears.
     pub(crate) format_toolbar_heading_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    pub(crate) selection_toolbar_popup: Option<selection_toolbar::SelectionToolbarPopup>,
+    pub(crate) selection_toolbar_animation: Option<selection_toolbar::SelectionToolbarAnimation>,
+    pub(crate) selection_toolbar_menu_hover: menus::SelectionToolbarMenuHover,
     pub(crate) export_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) context_menu_opacity: f32,
     pub(crate) context_menu_opacity_target: f32,
@@ -2633,6 +2642,11 @@ impl EditorView {
             pane_bounds: HashMap::new(),
             pane_editor_content_views: HashMap::new(),
             pane_caret_overlay_views: HashMap::new(),
+            selection_toolbar_geometry: HashMap::new(),
+            selection_toolbar_dismissed: None,
+            selection_toolbar_popup: None,
+            selection_toolbar_animation: None,
+            selection_toolbar_menu_hover: menus::SelectionToolbarMenuHover::default(),
             tab_drag_split_target: None,
             context_menu_pane_target: None,
             pane_resize_drag: None,
@@ -3614,6 +3628,8 @@ impl EditorView {
             return;
         };
 
+        self.hide_selection_toolbar_for_scroll(cx);
+
         let delta_y = f32::from(position.y) - drag.start_position_y;
         let thumb_top = (drag.start_thumb_top + delta_y).clamp(0.0, drag.track_travel);
         self.scroll_offset = if drag.track_travel <= 0.0 {
@@ -3995,6 +4011,7 @@ impl EditorView {
             thumb_left / drag.track_travel * drag.max_scroll
         };
         if self.set_code_block_horizontal_offset(drag.start_line, offset) {
+            self.hide_selection_toolbar_for_scroll(cx);
             cx.notify();
         }
     }
@@ -9975,6 +9992,9 @@ impl EditorView {
             if lws > indent {
                 continue;
             }
+            if self.ordered_list_prefix_info(line).is_none() {
+                break;
+            }
             let trimmed = &lc[lws..];
             let plen = markdown::ordered_list_prefix_len(trimmed);
             if plen < 2 {
@@ -10000,6 +10020,13 @@ impl EditorView {
         line: usize,
     ) -> Option<(Range<usize>, usize, u32)> {
         if line >= self.buffer.line_count() {
+            return None;
+        }
+        if !self
+            .decorations
+            .get(line)
+            .is_some_and(|decoration| matches!(decoration.block_type, BlockType::OrderedList))
+        {
             return None;
         }
 
@@ -10091,6 +10118,9 @@ impl EditorView {
             if lws > indent {
                 continue;
             }
+            if self.ordered_list_prefix_info(line).is_none() {
+                break;
+            }
             let trimmed = &lc[lws..];
             let plen = markdown::ordered_list_prefix_len(trimmed);
             if plen < 2 {
@@ -10175,7 +10205,7 @@ impl EditorView {
         let starting_number = self
             .previous_ordered_list_number_before(target_line, indent)
             .map(|prev_number| prev_number + 1)
-            .unwrap_or(1);
+            .unwrap_or(current_number);
 
         self.renumber_ordered_list_block_from(target_line, starting_number, indent);
     }
@@ -10189,6 +10219,7 @@ fn normalize_ordered_list_numbers_in_buffer(buffer: &mut Buffer) -> Option<(usiz
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     let mut number_stack: Vec<(usize, u32)> = Vec::new();
     let mut changed_line_range: Option<(usize, usize)> = None;
+    let decorations = markdown::parse_decorations(buffer.text());
 
     for line in 0..buffer.line_count() {
         let line_content = buffer.line_content(line);
@@ -10207,7 +10238,10 @@ fn normalize_ordered_list_numbers_in_buffer(buffer: &mut Buffer) -> Option<(usiz
 
         let trimmed = &line_content[leading_ws..];
         let prefix_len = markdown::ordered_list_prefix_len(trimmed);
-        let current_number = if prefix_len >= 2 {
+        let is_list = decorations
+            .get(line)
+            .is_some_and(|decoration| matches!(decoration.block_type, BlockType::OrderedList));
+        let current_number = if is_list && prefix_len >= 2 {
             trimmed[..prefix_len - 2].parse::<u32>().ok()
         } else {
             None
@@ -10226,16 +10260,16 @@ fn normalize_ordered_list_numbers_in_buffer(buffer: &mut Buffer) -> Option<(usiz
         let expected_number = match number_stack.last_mut() {
             Some((indent, next_number)) if *indent == leading_ws => {
                 let expected = *next_number;
-                *next_number += 1;
+                *next_number = next_number.saturating_add(1);
                 expected
             }
             Some((indent, _)) if *indent < leading_ws => {
-                number_stack.push((leading_ws, 2));
-                1
+                number_stack.push((leading_ws, current_number.saturating_add(1)));
+                current_number
             }
             _ => {
-                number_stack.push((leading_ws, 2));
-                1
+                number_stack.push((leading_ws, current_number.saturating_add(1)));
+                current_number
             }
         };
 
@@ -12175,5 +12209,39 @@ mod tests {
         normalize_ordered_list_numbers_in_buffer(&mut buffer);
 
         assert_eq!(buffer.text(), "1. one\n   - child\n2. four\n");
+    }
+
+    #[test]
+    fn normalize_ordered_lists_preserves_start_after_fence() {
+        let text = "1. x\n```\n```\n2. x\n3. x\n45";
+        let mut buffer = Buffer::from_text(text);
+        assert!(normalize_ordered_list_numbers_in_buffer(&mut buffer).is_none());
+        assert_eq!(buffer.text(), text);
+    }
+
+    #[test]
+    fn normalize_ordered_lists_continues_from_explicit_start() {
+        let mut buffer = Buffer::from_text("1. x\n```\n```\n2. x\n4. x\n");
+        normalize_ordered_list_numbers_in_buffer(&mut buffer);
+        assert_eq!(buffer.text(), "1. x\n```\n```\n2. x\n3. x\n");
+    }
+
+    #[test]
+    fn normalize_ordered_lists_does_not_rewrite_code_contents() {
+        let text =
+            "1. x\n```\n7. example\n9. example\n```\n\nparagraph\n\n    7. code\n    9. code\n";
+        let mut buffer = Buffer::from_text(text);
+        normalize_ordered_list_numbers_in_buffer(&mut buffer);
+        assert_eq!(buffer.text(), text);
+    }
+
+    #[test]
+    fn normalize_ordered_lists_preserves_nested_explicit_start() {
+        let mut buffer = Buffer::from_text("3. outer\n\n   5. child\n   9. child\n7. outer\n");
+        normalize_ordered_list_numbers_in_buffer(&mut buffer);
+        assert_eq!(
+            buffer.text(),
+            "3. outer\n\n   5. child\n   6. child\n7. outer\n"
+        );
     }
 }

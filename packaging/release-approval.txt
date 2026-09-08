@@ -1,0 +1,6 @@
+GPL-3.0-or-later distribution review: approved
+
+Reviewer: imeoer
+Date: 2026-09-08
+Scope: v0.1.13 dependency, asset, license, notice, source, history, and distribution review.
+Evidence: LICENSE, THIRD_PARTY_NOTICES.md, Cargo.lock, vendored sources, packaged assets, build scripts, and docs/open-source-readiness.md reviewed for the v0.1.13 release.

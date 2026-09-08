@@ -11,10 +11,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING, PIPE_ACCESS_INBOUND, ReadFile, WriteFile,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-    PIPE_WAIT, WaitNamedPipeW,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId,
+    PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
 };
 use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
 const MUTEX_NAME: &str = "Local\\MoekaMarkdownEditorSingleInstance";
 const PIPE_NAME: &str = r"\\.\pipe\MoekaMarkdownEditorOpenPaths";
@@ -87,6 +88,13 @@ fn forward_paths(paths: &[PathBuf]) -> bool {
         );
         if pipe == INVALID_HANDLE_VALUE {
             return false;
+        }
+        // Explorer starts this process with foreground permission. Transfer it
+        // to the existing instance before delivering the open request; granting
+        // only the connected server PID avoids authorizing unrelated processes.
+        let mut primary_pid = 0;
+        if GetNamedPipeServerProcessId(pipe, &mut primary_pid) != 0 && primary_pid != 0 {
+            AllowSetForegroundWindow(primary_pid);
         }
         let length = (payload.len() as u32).to_le_bytes();
         let ok = write_all(pipe, &length) && write_all(pipe, &payload);

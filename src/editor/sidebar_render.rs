@@ -8,6 +8,8 @@ use gpui::{
 
 use super::*;
 
+const FILETREE_FILE_SVG_PATH: &str = "assets/icons/filetree/file.svg";
+
 impl EditorView {
     fn sidebar_git_status_marker(
         status: Option<SidebarGitStatus>,
@@ -126,17 +128,14 @@ impl EditorView {
                 .into_any_element();
         }
 
-        if !file_kind_has_indicator_for_name(name) {
-            return svg()
-                .path(MARKDOWN_SVG_PATH)
-                .size(px(self.scaled(ss.sidebar_item_icon_size_px + 4.0)))
-                .text_color(color)
-                .into_any_element();
-        }
-
         svg()
-            .path(MARKDOWN_SVG_PATH)
+            .path(if file_kind_has_indicator_for_name(name) {
+                MARKDOWN_SVG_PATH
+            } else {
+                FILETREE_FILE_SVG_PATH
+            })
             .size(px(self.scaled(ss.sidebar_item_icon_size_px + 4.0)))
+            .flex_none()
             .text_color(color)
             .into_any_element()
     }
@@ -911,16 +910,16 @@ impl EditorView {
                 .font_weight(FontWeight::EXTRA_BOLD)
                 .child(label)
                 .into_any_element()
-        } else if !file_kind_has_indicator(&item.path) {
-            div()
-                .w(px(self.scaled(ss.sidebar_item_icon_size_px)))
-                .h(px(self.scaled(ss.sidebar_item_icon_size_px)))
-                .flex_none()
-                .into_any_element()
         } else {
+            // Keep generic and Markdown icons in the same non-shrinking column.
             svg()
-                .path(MARKDOWN_SVG_PATH)
+                .path(if file_kind_has_indicator(&item.path) {
+                    MARKDOWN_SVG_PATH
+                } else {
+                    FILETREE_FILE_SVG_PATH
+                })
                 .size(px(self.scaled(ss.sidebar_item_icon_size_px + 4.0)))
+                .flex_none()
                 .text_color(icon_color)
                 .into_any_element()
         };

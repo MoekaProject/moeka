@@ -2269,6 +2269,59 @@ mod tests {
     };
 
     #[test]
+    fn baseline_font_tracks_block_role_not_inline_content() {
+        let body = font("Test Body");
+        let heading = font("Test Heading");
+        let mono = font("Test Mono");
+        for (block_type, expected) in [
+            (markdown::BlockType::Normal, body.clone()),
+            (markdown::BlockType::UnorderedList, body.clone()),
+            (markdown::BlockType::Heading(2), heading.clone().bold()),
+            (markdown::BlockType::CodeBlock, mono.clone()),
+            (markdown::BlockType::CodeBlockFence, mono.clone()),
+        ] {
+            let mut decoration = markdown::LineDecoration::default();
+            decoration.block_type = block_type;
+            assert_eq!(
+                super::line_baseline_font(&decoration, false, &body, &heading, &mono),
+                expected,
+            );
+            assert_eq!(
+                super::line_baseline_font(&decoration, true, &body, &heading, &mono),
+                mono,
+            );
+        }
+        for text in ["English", "English中", "**English中**", "`code` English中"] {
+            let decorations = markdown::parse_decorations(text);
+            assert_eq!(
+                super::line_baseline_font(&decorations[0], false, &body, &heading, &mono),
+                body,
+            );
+        }
+    }
+
+    #[test]
+    fn baseline_font_distinguishes_table_headers_and_front_matter() {
+        let body = font("Test Body");
+        let heading = font("Test Heading");
+        let mono = font("Test Mono");
+        let table = markdown::parse_decorations("| Key | Value |\n| --- | --- |\n| A | 中 |");
+        assert_eq!(
+            super::line_baseline_font(&table[0], false, &body, &heading, &mono),
+            body.clone().bold(),
+        );
+        assert_eq!(
+            super::line_baseline_font(&table[2], false, &body, &heading, &mono),
+            body,
+        );
+        let front_matter = markdown::parse_decorations("---\ntitle: 中\n---");
+        assert_eq!(
+            super::line_baseline_font(&front_matter[1], false, &body, &heading, &mono),
+            mono,
+        );
+    }
+
+    #[test]
     fn search_highlight_only_considers_matches_that_touch_the_line() {
         fn plain_run(len: usize) -> TextRun {
             TextRun {
@@ -5679,6 +5732,107 @@ pub(crate) fn buffer_to_display_offset(buffer_to_display: &[usize], buf_offset: 
     } else {
         0
     }
+}
+
+/// Select a content-independent baseline font using the same block roles as
+/// `build_text_runs_for_display_with_language`, not the first visible text run.
+pub(crate) fn line_baseline_font(
+    decoration: &LineDecoration,
+    force_monospace: bool,
+    body_font: &Font,
+    heading_font: &Font,
+    monospace_font: &Font,
+) -> Font {
+    let is_front_matter = decoration
+        .table_info
+        .as_ref()
+        .is_some_and(|table| table.is_front_matter);
+    let is_code = force_monospace
+        || is_front_matter
+        || matches!(
+            decoration.block_type,
+            BlockType::CodeBlock | BlockType::CodeBlockFence
+        );
+    let is_heading = matches!(decoration.block_type, BlockType::Heading(_));
+    let is_header = decoration
+        .table_info
+        .as_ref()
+        .is_some_and(|table| table.is_header && !table.is_front_matter);
+    let mut font = if is_code {
+        monospace_font.clone()
+    } else if is_heading {
+        heading_font.clone()
+    } else {
+        body_font.clone()
+    };
+    font.weight = if !is_code && (is_heading || is_header) {
+        FontWeight::BOLD
+    } else {
+        FontWeight::NORMAL
+    };
+    font.style = FontStyle::Normal;
+    font
+}
+
+/// Shape a fixed Latin probe through the same platform backend as the content.
+/// Raw FontMetrics descent is signed, unlike LineLayout descent, and Windows
+/// also includes line-gap handling in shaping; do not mix those metric sources.
+/// Cache the baseline by font, size, and line height within a single prepaint pass.
+pub(crate) fn stable_text_baseline(
+    font: &Font,
+    font_size: Pixels,
+    line_height: Pixels,
+    cache: &mut Vec<(Font, Pixels, Pixels, Pixels)>,
+    window: &Window,
+) -> Pixels {
+    if let Some((_, _, _, baseline)) =
+        cache
+            .iter()
+            .find(|(cached_font, cached_font_size, cached_line_height, _)| {
+                cached_font == font
+                    && *cached_font_size == font_size
+                    && *cached_line_height == line_height
+            })
+    {
+        return *baseline;
+    }
+
+    let reference = window.text_system().shape_line(
+        "M".into(),
+        font_size,
+        &[TextRun {
+            len: 1,
+            font: font.clone(),
+            color: gpui::transparent_black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    );
+    let baseline = (line_height - reference.ascent - reference.descent) / 2.0 + reference.ascent;
+    cache.push((font.clone(), font_size, line_height, baseline));
+    baseline
+}
+
+/// Keep the original layout (including fallback glyphs and their metrics) and
+/// row geometry intact. Only GPUI's paint origin needs baseline compensation.
+pub(crate) fn baseline_aligned_text_origin(
+    wrapped: &WrappedLine,
+    origin: gpui::Point<Pixels>,
+    line_height: Pixels,
+    reference_baseline: Pixels,
+) -> gpui::Point<Pixels> {
+    origin
+        + point(
+            px(0.0),
+            px(super::text_layout::text_baseline_paint_offset(
+                f32::from(line_height),
+                f32::from(reference_baseline),
+                f32::from(wrapped.ascent()),
+                f32::from(wrapped.descent()),
+            )),
+        )
 }
 
 /// Build styled TextRuns for the display text.

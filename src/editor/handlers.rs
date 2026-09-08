@@ -155,6 +155,10 @@ impl EditorView {
             self.close_context_menu(cx);
             return;
         }
+        if self.dismiss_selection_toolbar(window, cx) {
+            cx.notify();
+            return;
+        }
         if self.clear_phantom_selection() {
             cx.notify();
             return;
@@ -497,20 +501,17 @@ impl EditorView {
         self.cursor.backspace(&mut self.buffer);
         self.reparse();
         if should_normalize_ordered_lists
-            && let Some((start_line, end_line)) = selection_line_span
+            && let Some((start_line, _)) = selection_line_span
             && (touched_ordered_prefix.is_some() || removes_line_break)
         {
-            let _ = (start_line, end_line);
-            if self.normalize_all_ordered_lists() {
-                self.reparse();
-            }
+            self.normalize_ordered_list_near_line(start_line, false);
+            self.reparse();
         } else if should_normalize_ordered_lists && let Some(line) = touched_ordered_prefix {
             self.normalize_ordered_list_near_line(line, true);
             self.reparse();
         } else if should_normalize_ordered_lists && removes_line_break {
-            if self.normalize_all_ordered_lists() {
-                self.reparse();
-            }
+            self.normalize_ordered_list_near_line(self.cursor_line(), false);
+            self.reparse();
         }
         if !cursor_had_inline_headroom
             || (!removes_line_break
@@ -623,20 +624,17 @@ impl EditorView {
         self.cursor.delete(&mut self.buffer);
         self.reparse();
         if should_normalize_ordered_lists
-            && let Some((start_line, end_line)) = selection_line_span
+            && let Some((start_line, _)) = selection_line_span
             && (touched_ordered_prefix.is_some() || removes_line_break)
         {
-            let _ = (start_line, end_line);
-            if self.normalize_all_ordered_lists() {
-                self.reparse();
-            }
+            self.normalize_ordered_list_near_line(start_line, false);
+            self.reparse();
         } else if should_normalize_ordered_lists && let Some(line) = touched_ordered_prefix {
             self.normalize_ordered_list_near_line(line, true);
             self.reparse();
         } else if should_normalize_ordered_lists && removes_line_break {
-            if self.normalize_all_ordered_lists() {
-                self.reparse();
-            }
+            self.normalize_ordered_list_near_line(self.cursor_line(), false);
+            self.reparse();
         }
         if !cursor_had_inline_headroom
             || (!removes_line_break
@@ -1194,6 +1192,7 @@ impl EditorView {
                         let insert_range = self.cursor.selection_range();
                         self.queue_non_markdown_line_display_transfer(&insert_range, &continuation);
                         self.cursor.insert(&mut self.buffer, &continuation);
+                        self.reparse();
                         self.renumber_ordered_list_after(cursor_line + 2, number + 2, leading_ws);
                         self.reparse();
                     }
