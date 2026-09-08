@@ -211,7 +211,7 @@ version = "0.2.2"
 package = "gpui_refineable"
 
 [dependencies.resvg]
-version = "0.45.0"
+version = "0.48.1"
 features = [
     "text",
     "system-fonts",
